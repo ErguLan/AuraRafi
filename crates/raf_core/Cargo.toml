@@ -1,0 +1,18 @@
+[package]
+name = "raf_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Core engine: ECS, scene graph, command bus, events, and settings for AuraRafi"
+
+[dependencies]
+hecs = { workspace = true }
+glam = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+ron = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+fluent = { workspace = true }
+fluent-bundle = { workspace = true }
+chrono = { workspace = true }

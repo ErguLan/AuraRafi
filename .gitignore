@@ -1,0 +1,21 @@
+# Build output
+/target/
+/target_gnu/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.vs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Rust
+**/*.rs.bk
+
+# User config
+*.user

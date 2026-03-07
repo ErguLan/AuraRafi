@@ -1,0 +1,13 @@
+[package]
+name = "raf_electronics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Electronic design subsystem (schematics, PCB) for AuraRafi"
+
+[dependencies]
+raf_core = { workspace = true }
+glam = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }

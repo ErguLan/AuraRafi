@@ -1,0 +1,15 @@
+[package]
+name = "raf_render"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "2D/3D rendering engine via wgpu for AuraRafi"
+
+[dependencies]
+raf_core = { workspace = true }
+wgpu = { workspace = true }
+winit = { workspace = true }
+glam = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+image = { workspace = true }

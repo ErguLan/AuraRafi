@@ -1,0 +1,78 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/raf_core",
+    "crates/raf_render",
+    "crates/raf_editor",
+    "crates/raf_assets",
+    "crates/raf_electronics",
+    "crates/raf_nodes",
+    "crates/raf_ai",
+    "crates/raf_net",
+    "editor",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/AuraRafi/AuraRafi"
+
+[workspace.dependencies]
+# ECS
+hecs = "0.10"
+
+# Rendering
+wgpu = "23"
+winit = "0.30"
+
+# Math
+glam = { version = "0.29", features = ["serde"] }
+
+# UI
+egui = "0.30"
+eframe = { version = "0.30", default-features = false, features = ["default_fonts", "wgpu"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+ron = "0.8"
+
+# Internationalization
+fluent = "0.16"
+fluent-bundle = "0.15"
+
+# Async / Parallelism
+rayon = "1"
+tokio = { version = "1", features = ["rt", "macros"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+
+# File watching
+notify = "7"
+
+# Asset loading
+image = "0.25"
+gltf = "1"
+
+# Utilities
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Internal crates
+raf_core = { path = "crates/raf_core" }
+raf_render = { path = "crates/raf_render" }
+raf_editor = { path = "crates/raf_editor" }
+raf_assets = { path = "crates/raf_assets" }
+raf_electronics = { path = "crates/raf_electronics" }
+raf_nodes = { path = "crates/raf_nodes" }
+raf_ai = { path = "crates/raf_ai" }
+raf_net = { path = "crates/raf_net" }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true

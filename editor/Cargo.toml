@@ -1,0 +1,21 @@
+[package]
+name = "aura_rafi_editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AuraRafi Editor - Main executable"
+
+[dependencies]
+raf_core = { workspace = true }
+raf_render = { workspace = true }
+raf_editor = { workspace = true }
+raf_assets = { workspace = true }
+raf_electronics = { workspace = true }
+raf_nodes = { workspace = true }
+raf_ai = { workspace = true }
+raf_net = { workspace = true }
+eframe = { workspace = true }
+egui = { workspace = true }
+image = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

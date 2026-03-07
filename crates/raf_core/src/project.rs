@@ -1,0 +1,153 @@
+//! Project management - create, load, save AuraRafi projects.
+//!
+//! A project is a directory containing:
+//! - `project.ron` (metadata)
+//! - `assets/` (imported assets)
+//! - `scenes/` (scene files)
+//! - `scripts/` (user scripts, if any)
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
+use uuid::Uuid;
+
+/// Type of project: Game or Electronics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ProjectType {
+    Game,
+    Electronics,
+}
+
+impl ProjectType {
+    pub fn display_name(&self) -> &str {
+        match self {
+            Self::Game => "Game Project",
+            Self::Electronics => "Electronics Project",
+        }
+    }
+}
+
+/// Metadata for a single AuraRafi project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Project {
+    /// Unique project identifier.
+    pub id: Uuid,
+    /// Human-readable project name.
+    pub name: String,
+    /// Project type (game or electronics).
+    pub project_type: ProjectType,
+    /// Absolute path to the project root directory.
+    pub path: PathBuf,
+    /// Date created.
+    pub created_at: DateTime<Utc>,
+    /// Date last modified.
+    pub modified_at: DateTime<Utc>,
+    /// Engine version used to create this project.
+    pub engine_version: String,
+}
+
+impl Project {
+    /// Project metadata file name.
+    pub const META_FILE: &'static str = "project.ron";
+
+    /// Create a new project on disk. Creates the directory structure and
+    /// writes the metadata file.
+    pub fn create(
+        name: &str,
+        project_type: ProjectType,
+        parent_dir: &Path,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let project_dir = parent_dir.join(name);
+        std::fs::create_dir_all(&project_dir)?;
+        std::fs::create_dir_all(project_dir.join("assets"))?;
+        std::fs::create_dir_all(project_dir.join("scenes"))?;
+        std::fs::create_dir_all(project_dir.join("scripts"))?;
+
+        let now = Utc::now();
+        let project = Self {
+            id: Uuid::new_v4(),
+            name: name.to_string(),
+            project_type,
+            path: project_dir.clone(),
+            created_at: now,
+            modified_at: now,
+            engine_version: env!("CARGO_PKG_VERSION").to_string(),
+        };
+
+        project.save()?;
+        Ok(project)
+    }
+
+    /// Save the project metadata to its directory.
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+        let meta_path = self.path.join(Self::META_FILE);
+        let pretty = ron::ser::PrettyConfig::default();
+        let data = ron::ser::to_string_pretty(self, pretty)?;
+        std::fs::write(meta_path, data)?;
+        Ok(())
+    }
+
+    /// Load a project from a directory.
+    pub fn load(project_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let meta_path = project_dir.join(Self::META_FILE);
+        let data = std::fs::read_to_string(meta_path)?;
+        let project: Self = ron::from_str(&data)?;
+        Ok(project)
+    }
+}
+
+/// Registry of recent projects for the Project Hub.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RecentProjects {
+    pub projects: Vec<RecentProjectEntry>,
+}
+
+/// A lightweight entry for the recent projects list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecentProjectEntry {
+    pub name: String,
+    pub path: PathBuf,
+    pub project_type: ProjectType,
+    pub last_opened: DateTime<Utc>,
+}
+
+impl RecentProjects {
+    pub const FILE_NAME: &'static str = "recent_projects.ron";
+
+    /// Add or update a project in the recent list.
+    pub fn add(&mut self, project: &Project) {
+        // Remove existing entry with same path if present.
+        self.projects.retain(|p| p.path != project.path);
+
+        self.projects.insert(
+            0,
+            RecentProjectEntry {
+                name: project.name.clone(),
+                path: project.path.clone(),
+                project_type: project.project_type,
+                last_opened: Utc::now(),
+            },
+        );
+
+        // Keep at most 20 recent projects.
+        self.projects.truncate(20);
+    }
+
+    /// Save to disk.
+    pub fn save(&self, dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let path = dir.join(Self::FILE_NAME);
+        let pretty = ron::ser::PrettyConfig::default();
+        let data = ron::ser::to_string_pretty(self, pretty)?;
+        std::fs::write(path, data)?;
+        Ok(())
+    }
+
+    /// Load from disk. Returns empty if file doesn't exist.
+    pub fn load(dir: &Path) -> Self {
+        let path = dir.join(Self::FILE_NAME);
+        match std::fs::read_to_string(&path) {
+            Ok(data) => ron::from_str(&data).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
+}

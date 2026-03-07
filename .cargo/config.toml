@@ -1,0 +1,4 @@
+# Use GNU toolchain - avoids needing Visual Studio Build Tools
+[build]
+target = "x86_64-pc-windows-gnu"
+target-dir = "target_gnu"

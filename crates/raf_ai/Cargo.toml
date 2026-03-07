@@ -1,0 +1,14 @@
+[package]
+name = "raf_ai"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "AI agent interface and tool registry for AuraRafi"
+
+[dependencies]
+raf_core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }

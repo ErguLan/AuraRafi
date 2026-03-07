@@ -1,0 +1,16 @@
+[package]
+name = "raf_assets"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Asset importing and management for AuraRafi"
+
+[dependencies]
+raf_core = { workspace = true }
+image = { workspace = true }
+gltf = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+notify = { workspace = true }
+uuid = { workspace = true }
+glam = { workspace = true }
