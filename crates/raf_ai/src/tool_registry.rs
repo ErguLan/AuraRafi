@@ -199,6 +199,149 @@ impl ToolRegistry {
         });
 
         registry.register(ToolDefinition {
+            name: "add_wire".to_string(),
+            category: "electronics".to_string(),
+            description: "Connect two points on the schematic with a wire".to_string(),
+            parameters: vec![
+                ToolParameter {
+                    name: "start".to_string(),
+                    param_type: "vec2".to_string(),
+                    description: "Start position on schematic grid".to_string(),
+                    required: true,
+                    enum_values: None,
+                },
+                ToolParameter {
+                    name: "end".to_string(),
+                    param_type: "vec2".to_string(),
+                    description: "End position on schematic grid".to_string(),
+                    required: true,
+                    enum_values: None,
+                },
+                ToolParameter {
+                    name: "net_name".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Net label for the wire".to_string(),
+                    required: false,
+                    enum_values: None,
+                },
+            ],
+            returns: "Wire ID".to_string(),
+        });
+
+        registry.register(ToolDefinition {
+            name: "remove_component".to_string(),
+            category: "electronics".to_string(),
+            description: "Remove an electronic component by its designator".to_string(),
+            parameters: vec![
+                ToolParameter {
+                    name: "designator".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Component designator (e.g. R1, C2)".to_string(),
+                    required: true,
+                    enum_values: None,
+                },
+            ],
+            returns: "Success boolean".to_string(),
+        });
+
+        registry.register(ToolDefinition {
+            name: "set_component_value".to_string(),
+            category: "electronics".to_string(),
+            description: "Change the value of an electronic component".to_string(),
+            parameters: vec![
+                ToolParameter {
+                    name: "designator".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Component designator".to_string(),
+                    required: true,
+                    enum_values: None,
+                },
+                ToolParameter {
+                    name: "value".to_string(),
+                    param_type: "string".to_string(),
+                    description: "New value (e.g. 10k, 100nF)".to_string(),
+                    required: true,
+                    enum_values: None,
+                },
+            ],
+            returns: "Success boolean".to_string(),
+        });
+
+        registry.register(ToolDefinition {
+            name: "rotate_component".to_string(),
+            category: "electronics".to_string(),
+            description: "Rotate an electronic component by 90 degrees".to_string(),
+            parameters: vec![
+                ToolParameter {
+                    name: "designator".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Component designator".to_string(),
+                    required: true,
+                    enum_values: None,
+                },
+            ],
+            returns: "New rotation angle".to_string(),
+        });
+
+        registry.register(ToolDefinition {
+            name: "run_simulation".to_string(),
+            category: "electronics".to_string(),
+            description: "Run DC simulation on the current schematic".to_string(),
+            parameters: vec![],
+            returns: "Simulation results with node voltages and branch currents".to_string(),
+        });
+
+        registry.register(ToolDefinition {
+            name: "get_simulation_results".to_string(),
+            category: "electronics".to_string(),
+            description: "Get the results of the last DC simulation".to_string(),
+            parameters: vec![],
+            returns: "Node voltages and component currents".to_string(),
+        });
+
+        registry.register(ToolDefinition {
+            name: "run_drc".to_string(),
+            category: "electronics".to_string(),
+            description: "Run Design Rule Check on the schematic".to_string(),
+            parameters: vec![],
+            returns: "DRC report with errors, warnings, and info".to_string(),
+        });
+
+        registry.register(ToolDefinition {
+            name: "export_schematic".to_string(),
+            category: "electronics".to_string(),
+            description: "Export schematic in the specified format".to_string(),
+            parameters: vec![
+                ToolParameter {
+                    name: "format".to_string(),
+                    param_type: "string".to_string(),
+                    description: "Export format".to_string(),
+                    required: true,
+                    enum_values: Some(vec![
+                        "netlist".into(), "bom_csv".into(), "svg".into(),
+                    ]),
+                },
+            ],
+            returns: "Exported content string".to_string(),
+        });
+
+        registry.register(ToolDefinition {
+            name: "generate_bom".to_string(),
+            category: "electronics".to_string(),
+            description: "Generate Bill of Materials in CSV format".to_string(),
+            parameters: vec![],
+            returns: "BOM CSV content".to_string(),
+        });
+
+        registry.register(ToolDefinition {
+            name: "get_netlist".to_string(),
+            category: "electronics".to_string(),
+            description: "Generate and return the netlist of the current schematic".to_string(),
+            parameters: vec![],
+            returns: "Netlist with nets and component connections".to_string(),
+        });
+
+        registry.register(ToolDefinition {
             name: "export_project".to_string(),
             category: "project".to_string(),
             description: "Export the project".to_string(),
@@ -209,7 +352,7 @@ impl ToolRegistry {
                     description: "Export format".to_string(),
                     required: true,
                     enum_values: Some(vec![
-                        "gerber".into(), "bom".into(), "executable".into(),
+                        "netlist".into(), "bom".into(), "svg".into(), "executable".into(),
                     ]),
                 },
             ],

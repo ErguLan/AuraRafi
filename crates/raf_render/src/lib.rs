@@ -4,7 +4,9 @@
 //! Supports adaptive quality levels from "potato" (level 0) to high-end (level 3).
 
 pub mod camera;
+pub mod mesh;
 pub mod pipeline;
+pub mod projection;
 pub mod renderer;
 
 pub use camera::{Camera, CameraMode};

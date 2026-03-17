@@ -74,12 +74,17 @@ The central viewport shows your game scene:
 The schematic editor for circuit design:
 
 - **Place Component**: Select from the library sidebar, click on canvas
-- **Draw Wire**: Click "Draw Wire" button, click two points
-- **Select**: Click on a component
-- **Delete**: Select and press Delete
-- **Pan**: Middle-mouse drag or right-mouse drag
+- **Draw Wire**: Click "Draw Wire" button or use context menu, click two points
+- **Select**: Click on a component or wire
+- **Move Component**: Click and drag a selected component
+- **Rotate**: Select component, press R or use right-click menu
+- **Duplicate**: Select component, press Ctrl+D or use right-click menu
+- **Edit Value**: Right-click a component and select "Edit Value"
+- **Delete**: Select and press Delete, or use right-click menu
+- **Right-click Menu**: Context-sensitive options for component/wire/canvas
+- **Pan**: Middle-mouse drag or right-mouse drag (when not on component)
 - **Zoom**: Scroll wheel
-- **Electrical Test**: Click the button to check connectivity
+- **Electrical Test**: Click the button to run DRC checks
 
 ### Hierarchy Panel (Left)
 
@@ -124,16 +129,18 @@ The visual scripting system allows logic creation without code:
 
 Access settings from the menu bar or Project Hub:
 
+- **Simple Mode**: Toggle to hide advanced parameters (ideal for beginners)
 - **Theme**: Dark, Light, or System
 - **Font Size**: 10-24px
 - **UI Scale**: 0.5x-2.0x
-- **Language**: English or Spanish
+- **Language**: English or Spanish (all UI text translates)
+- **Target Platform**: Desktop, Mobile, Web (WASM), Cloud/Streaming, Console
 - **Render Quality**: Potato (0) to High (3)
 - **FPS Limit**: 15-240
 - **VSync**: On/Off
-- **Grid**: Visibility, snap, size
-- **Auto-save**: Interval in seconds
-- **Units**: Metric or Imperial
+- **Grid**: Visibility, snap, size (hidden in Simple Mode)
+- **Auto-save**: Interval in seconds (hidden in Simple Mode)
+- **Units**: Metric or Imperial (hidden in Simple Mode)
 
 Settings are saved to your system config directory.
 
@@ -156,12 +163,14 @@ MyProject/
 | Q | Select tool |
 | W | Move tool |
 | E | Rotate tool |
-| R | Scale tool |
-| Delete | Remove selected entity/node |
-| Escape | Cancel current operation |
+| R | Scale tool / Rotate component (schematic) |
+| Delete | Remove selected entity/node/component/wire |
+| Ctrl+D | Duplicate selected component (schematic) |
+| Escape | Cancel current operation / Close overlay |
 | Middle-drag | Pan viewport |
 | Scroll | Zoom viewport |
 | Double-click | Reset viewport |
+| Right-click | Context menu (schematic) |
 
 ## Next Steps
 

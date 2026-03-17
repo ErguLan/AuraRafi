@@ -149,6 +149,14 @@ impl SceneGraph {
             .enumerate()
             .map(|(i, n)| (SceneNodeId(i), n))
     }
+
+    /// Add a root node with a specific primitive and return its id.
+    pub fn add_root_with_primitive(&mut self, name: &str, primitive: Primitive) -> SceneNodeId {
+        let id = SceneNodeId(self.nodes.len());
+        self.nodes.push(SceneNode::with_primitive(name, primitive));
+        self.roots.push(id);
+        id
+    }
 }
 
 impl Default for SceneGraph {

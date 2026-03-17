@@ -39,6 +39,12 @@ impl ComponentLibrary {
                     description: "Light-emitting diode".to_string(),
                     create: ElectronicComponent::led,
                 },
+                ComponentTemplate {
+                    name: "Magnet".to_string(),
+                    category: "Magnet".to_string(),
+                    description: "Electromagnetic component".to_string(),
+                    create: || ElectronicComponent::magnet("0.5T"),
+                },
             ],
         }
     }

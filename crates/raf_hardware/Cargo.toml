@@ -1,14 +1,12 @@
 [package]
-name = "raf_electronics"
+name = "raf_hardware"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Electronic design subsystem (schematics, PCB) for AuraRafi"
+description = "Hardware integration layer: serial ports, sensors, actuators, and ML/robot interfaces for AuraRafi"
 
 [dependencies]
 raf_core = { workspace = true }
-glam = { workspace = true }
 serde = { workspace = true }
-uuid = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
-ron = { workspace = true }

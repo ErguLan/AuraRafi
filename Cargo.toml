@@ -9,6 +9,7 @@ members = [
     "crates/raf_nodes",
     "crates/raf_ai",
     "crates/raf_net",
+    "crates/raf_hardware",
     "editor",
 ]
 
@@ -70,6 +71,7 @@ raf_electronics = { path = "crates/raf_electronics" }
 raf_nodes = { path = "crates/raf_nodes" }
 raf_ai = { path = "crates/raf_ai" }
 raf_net = { path = "crates/raf_net" }
+raf_hardware = { path = "crates/raf_hardware" }
 
 [profile.release]
 opt-level = 3

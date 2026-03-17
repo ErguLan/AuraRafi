@@ -83,6 +83,55 @@ impl Default for RenderQuality {
 }
 
 // ---------------------------------------------------------------------------
+// Target platform
+// ---------------------------------------------------------------------------
+
+/// Target platform for build/export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TargetPlatform {
+    /// Standard desktop (Windows, macOS, Linux).
+    Desktop,
+    /// Mobile devices (Android, iOS) - responsive layout, touch input.
+    Mobile,
+    /// WebAssembly (browser) - shareable, universal access.
+    Web,
+    /// Cloud/streaming server (headless rendering, low latency input).
+    Cloud,
+    /// Console (Xbox, PlayStation, Switch) - future, requires SDK.
+    Console,
+}
+
+impl Default for TargetPlatform {
+    fn default() -> Self {
+        Self::Desktop
+    }
+}
+
+impl TargetPlatform {
+    /// Human-readable display name.
+    pub fn display_name(&self) -> &str {
+        match self {
+            Self::Desktop => "Desktop",
+            Self::Mobile => "Mobile",
+            Self::Web => "Web (WASM)",
+            Self::Cloud => "Cloud/Streaming",
+            Self::Console => "Console",
+        }
+    }
+
+    /// All supported platforms.
+    pub fn all() -> &'static [TargetPlatform] {
+        &[
+            TargetPlatform::Desktop,
+            TargetPlatform::Mobile,
+            TargetPlatform::Web,
+            TargetPlatform::Cloud,
+            TargetPlatform::Console,
+        ]
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Engine settings
 // ---------------------------------------------------------------------------
 
@@ -110,6 +159,22 @@ pub struct EngineSettings {
     pub auto_save_interval_seconds: u32,
     pub units_metric: bool,
 
+    // -- Simple Mode --
+    /// When true, hides advanced parameters (parasitics, timing,
+    /// advanced simulation). Shows only basic controls for beginners.
+    pub simple_mode: bool,
+
+    // -- Platform --
+    /// Target build platform. Affects layout, input handling,
+    /// and export options.
+    pub target_platform: TargetPlatform,
+
+    /// Headless mode: no window, for cloud/server rendering.
+    pub headless: bool,
+
+    /// Responsive layout: adapts UI to small screens (mobile/tablet).
+    pub responsive_layout: bool,
+
     // -- Window state (persisted) --
     pub window_width: u32,
     pub window_height: u32,
@@ -132,6 +197,10 @@ impl Default for EngineSettings {
             grid_size: 1.0,
             auto_save_interval_seconds: 120,
             units_metric: true,
+            simple_mode: false,
+            target_platform: TargetPlatform::Desktop,
+            headless: false,
+            responsive_layout: false,
             window_width: 1280,
             window_height: 720,
             window_maximized: false,

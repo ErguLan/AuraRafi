@@ -9,6 +9,7 @@
 use eframe::egui;
 use raf_core::config::{EngineSettings, Language, Theme};
 use raf_core::project::{Project, ProjectType, RecentProjects};
+use raf_core::scene::graph::Primitive;
 use raf_core::scene::SceneGraph;
 
 use crate::panels::ai_chat::AiChatPanel;
@@ -841,22 +842,44 @@ impl AuraRafiApp {
                 ui.add_space(8.0);
                 ui.separator();
 
+                let is_es = self.settings.language == Language::Spanish;
+                let add_label = if is_es { "+ Agregar" } else { "+ Add" };
                 let add_btn = egui::Button::new(
-                    egui::RichText::new("+ Add Entity").color(egui::Color32::WHITE),
+                    egui::RichText::new(add_label).color(egui::Color32::WHITE),
                 )
                 .fill(app_theme::ACCENT);
 
                 if ui.add_sized([ui.available_width(), 28.0], add_btn).clicked() {
-                    let id = self.scene.add_root(&format!(
-                        "Entity {}",
-                        self.scene.len() + 1
-                    ));
-                    self.hierarchy.selected_node = Some(id);
-                    self.console.log(
-                        LogLevel::Info,
-                        &format!("Added entity: Entity {}", self.scene.len()),
-                    );
+                    ui.memory_mut(|m| m.toggle_popup(egui::Id::new("add_entity_popup")));
                 }
+
+                egui::popup_below_widget(
+                    ui,
+                    egui::Id::new("add_entity_popup"),
+                    &ui.make_persistent_id("add_entity_popup_resp"),
+                    egui::PopupCloseBehavior::CloseOnClickOutside,
+                    |ui| {
+                        let primitives = [
+                            Primitive::Cube,
+                            Primitive::Sphere,
+                            Primitive::Plane,
+                            Primitive::Cylinder,
+                        ];
+                        for prim in primitives {
+                            let label = if is_es { prim.label_es() } else { prim.label() };
+                            if ui.button(label).clicked() {
+                                let name = format!("{} {}", prim.label(), self.scene.len() + 1);
+                                let id = self.scene.add_root_with_primitive(&name, prim);
+                                self.hierarchy.selected_node = Some(id);
+                                self.viewport.selected = Some(id);
+                                self.console.log(
+                                    LogLevel::Info,
+                                    &format!("Added: {}", name),
+                                );
+                            }
+                        }
+                    },
+                );
             });
 
         // Right panel: Properties.
@@ -874,10 +897,15 @@ impl AuraRafiApp {
             match self.viewport_mode {
                 ViewportMode::Scene => {
                     self.viewport.grid_visible = self.settings.grid_visible;
-                    self.viewport
-                        .show(ui, self.settings.theme != Theme::Light);
+                    self.viewport.show(
+                        ui,
+                        &self.scene,
+                        self.settings.theme != Theme::Light,
+                        self.settings.language,
+                    );
                 }
                 ViewportMode::Schematic => {
+                    self.schematic_view.is_es = self.settings.language == Language::Spanish;
                     self.schematic_view.show(ui);
                 }
             }

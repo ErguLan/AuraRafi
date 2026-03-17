@@ -60,38 +60,59 @@ impl Schematic {
         id
     }
 
-    /// Run a basic electrical connectivity check.
-    /// Returns a list of warnings/errors as strings.
+    /// Remove a wire by index.
+    pub fn remove_wire(&mut self, index: usize) -> bool {
+        if index < self.wires.len() {
+            self.wires.remove(index);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Duplicate a component at the given index, offset slightly.
+    pub fn duplicate_component(&mut self, index: usize) -> Option<Uuid> {
+        if let Some(src) = self.components.get(index).cloned() {
+            let mut dup = src;
+            dup.id = Uuid::new_v4();
+            // Offset so it does not overlap.
+            dup.position += Vec2::new(40.0, 20.0);
+            // Re-assign designator.
+            let prefix = dup.designator.chars().take_while(|c| c.is_alphabetic()).collect::<String>();
+            let count = self.components.iter().filter(|c| c.designator.starts_with(&prefix)).count();
+            dup.designator = format!("{}{}", prefix, count + 1);
+            // Give pins new IDs.
+            for pin in &mut dup.pins {
+                pin.id = Uuid::new_v4();
+            }
+            let id = dup.id;
+            self.components.push(dup);
+            Some(id)
+        } else {
+            None
+        }
+    }
+
+    /// Run a full electrical / design rule check.
+    /// Returns a list of warnings/errors as strings (backwards compatible).
     pub fn electrical_test(&self) -> Vec<String> {
-        let mut issues = Vec::new();
+        let report = crate::drc::run_drc(self);
+        report.to_string_list()
+    }
 
-        // Check for unconnected pins.
-        for comp in &self.components {
-            for pin in &comp.pins {
-                if pin.net.is_empty() {
-                    issues.push(format!(
-                        "Unconnected pin: {} pin {} ({})",
-                        comp.designator, pin.name, comp.value
-                    ));
-                }
-            }
-        }
+    /// Run a full DRC and return the structured report.
+    pub fn run_drc(&self) -> crate::drc::DrcReport {
+        crate::drc::run_drc(self)
+    }
 
-        // Check for floating wires (wire with no components on either end).
-        for wire in &self.wires {
-            if wire.net.is_empty() {
-                issues.push(format!(
-                    "Unnamed net on wire from ({:.1},{:.1}) to ({:.1},{:.1})",
-                    wire.start.x, wire.start.y, wire.end.x, wire.end.y
-                ));
-            }
-        }
+    /// Generate a netlist from this schematic.
+    pub fn netlist(&self) -> crate::netlist::Netlist {
+        crate::netlist::Netlist::from_schematic(self)
+    }
 
-        if issues.is_empty() {
-            issues.push("Electrical test passed - no issues found.".to_string());
-        }
-
-        issues
+    /// Run DC simulation on this schematic.
+    pub fn simulate_dc(&self) -> crate::simulation::SimulationResults {
+        crate::simulation::simulate_dc(self)
     }
 }
 

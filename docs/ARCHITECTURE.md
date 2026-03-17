@@ -6,7 +6,7 @@ This document describes the high-level architecture of the AuraRafi engine.
 
 AuraRafi is a modular, open-source engine written in Rust, designed for both
 video game development and electronic hardware design. The engine is structured
-as a Cargo workspace with 8 independent crates plus a main editor binary.
+as a Cargo workspace with 9 independent crates plus a main editor binary.
 
 ## Workspace Layout
 
@@ -18,10 +18,11 @@ AuraRafi/
     raf_render/       Rendering abstraction via wgpu
     raf_editor/       Visual editor UI built on egui/eframe
     raf_assets/       Asset importing, browsing, and management
-    raf_electronics/  Electronic design: schematics, PCBs, component library
-    raf_nodes/        Visual scripting (no-code) node system
+    raf_electronics/  Electronic design: schematics, PCBs, simulation, DRC, export
+    raf_nodes/        Visual scripting (no-code) node system + executor
     raf_ai/           AI agent interface and tool registry
     raf_net/          Networking protocol stubs for future multiplayer
+    raf_hardware/     Hardware integration: serial, sensors, actuators, robot, ML
   docs/               Documentation
 ```
 
@@ -37,6 +38,7 @@ editor (binary)
   -> raf_nodes
   -> raf_ai
   -> raf_net
+  -> raf_hardware
 
 raf_editor -> raf_core, raf_render, raf_assets, raf_electronics, raf_nodes, raf_ai, raf_net
 raf_render -> raf_core
@@ -45,6 +47,7 @@ raf_electronics -> raf_core
 raf_nodes -> raf_core
 raf_ai -> raf_core
 raf_net -> raf_core
+raf_hardware -> raf_core
 ```
 
 All crates depend on `raf_core`, which provides the foundational types.
@@ -90,9 +93,13 @@ Lightweight pub/sub system with type-erased events:
 
 ### Configuration
 
-- `EngineSettings`: Theme, language, render quality, editor prefs
+- `EngineSettings`: Theme, language, render quality, editor prefs, simple mode, target platform
 - Persisted to disk as RON (Rusty Object Notation)
 - `RenderQuality` presets: Potato (0), Low (1), Medium (2), High (3)
+- `TargetPlatform`: Desktop, Mobile, Web (WASM), Cloud/Streaming, Console
+- `simple_mode`: Hides advanced parameters for beginners
+- `headless`: Server/cloud mode without window (structural)
+- `responsive_layout`: Adapts UI to small screens (structural)
 - Language support: English, Spanish
 
 ### Project Management
@@ -146,7 +153,7 @@ Visual editor built on `egui`/`eframe`:
 - **Asset Browser**: Search, filter by type, grid display
 - **Node Editor**: Visual scripting canvas with bezier connections
 - **Schematic View**: Electronics component placement and wiring
-- **Settings**: Theme, language, quality, editor preferences
+- **Settings**: Theme, language, quality, editor prefs, Simple Mode toggle, target platform selector
 - **AI Chat**: Chat interface structure (not yet functional)
 
 ## Assets (raf_assets)
@@ -158,12 +165,18 @@ Visual editor built on `egui`/`eframe`:
 
 ## Electronics (raf_electronics)
 
-- `ElectronicComponent`: Parts with designator, value, pins, footprint
+- `ElectronicComponent`: Parts with designator, value, pins, footprint, SimModel
+- `SimModel`: Resistor (ohms), Capacitor (farads), LED (forward voltage), Magnet (tesla + polarity), Wire
 - `Pin`: Named connection point with direction (Input/Output/Bidirectional/Power/Ground)
-- `Schematic`: Components + wires with net names
-- `ComponentLibrary`: Built-in parts (Resistor, Capacitor, LED)
-- Auto-designator assignment (R1, R2, C1, etc.)
-- Basic electrical connectivity test
+- `Schematic`: Components + wires with net names, remove/duplicate helpers
+- `ComponentLibrary`: Built-in parts (Resistor, Capacitor, LED, Magnet)
+- `Netlist`: Union-find algorithm builds nets from wire endpoints and pin positions (rotation-aware)
+- Auto-designator assignment (R1, R2, C1, MAG1, etc.)
+- `DrcReport`: 6 rules - floating pins, missing values, isolated components, unnamed nets, short circuit, LED without resistor
+- DC simulation engine: Modified Nodal Analysis, Gaussian elimination with partial pivoting, node voltages, branch currents, power dissipation
+- Export: SVG vector image (styled, rotation-aware), BOM CSV (grouped with quantities), text netlist
+- Gerber export structure for JLCPCB/PCBWay (manufacturer-specific layers defined, placeholder until PCB 3D layout)
+- Circuit sharing: RON serialization for shareable compact strings
 
 ## Visual Scripting (raf_nodes)
 
@@ -172,7 +185,10 @@ Visual editor built on `egui`/`eframe`:
 - `NodeGraph`: Collection of nodes and connections
 - `NodeCategory`: Event, Logic, Action, Math, Electronics, Variable
 - Built-in nodes: On Start, On Update, Print, If Branch, Add
-- Compiler stub for future graph-to-logic compilation
+- Compiler stub for graph connectivity validation
+- **Executor**: Walks flow chains in topological order, evaluates data pins, handles conditional branching (If node), 10k step safety limit
+- `NodeValue`: Runtime value type with coercion (Bool, Int, Float, String, Vec3)
+- `ExecutionOutput`: Logs, final pin values, success/error status
 
 ## AI Interface (raf_ai)
 
@@ -187,6 +203,18 @@ Visual editor built on `egui`/`eframe`:
 - `NetMessage`: Protocol messages with type, sender, payload
 - `NetMessageType`: Connect, Disconnect, StateSync, RPC, Ping, Pong
 - Status: Stub for future multiplayer implementation
+
+## Hardware Integration (raf_hardware)
+
+- `SerialPort`: Connection state machine, message inbox/outbox, JSON lines protocol
+- `SerialConfig`: Port name, baud rate, data bits, stop bits, timeout
+- `SerialMessage`: Typed messages with key/value pairs and direction
+- `SensorData`: 13 sensor types (temperature, humidity, distance, light, voltage, current, accelerometer, gyroscope, magnetic field, pressure, analog, digital, custom) with multi-axis support
+- `ActuatorCommand`: 9 actuator types (DC motor, servo, stepper, relay, LED, buzzer, PWM, digital out, custom)
+- `RobotState`: Unified sensor+actuator state snapshot with mode (Manual/Autonomous/ML/Calibration), exportable as ML training data
+- `TrainingConfig`: Parallel headless instances, JSON Lines / CSV export formats
+- `InferenceConfig`: Model path, input/output tensor shapes (structural placeholder)
+- Status: Data models and protocols defined, actual serial I/O pending (serialport crate)
 
 ## Design Principles
 

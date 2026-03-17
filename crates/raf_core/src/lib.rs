@@ -17,7 +17,7 @@ pub mod scene;
 
 /// Re-export commonly used types at the crate root.
 pub use command::{Command, CommandBus, CommandId};
-pub use config::{EngineSettings, Language, RenderQuality, Theme};
+pub use config::{EngineSettings, Language, RenderQuality, TargetPlatform, Theme};
 pub use ecs::world::GameWorld;
 pub use event::{EventBus, EventId};
 pub use project::{Project, ProjectType};

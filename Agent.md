@@ -28,9 +28,10 @@ ProyectRaf/
 │   ├── raf_render/          # Rendering (wgpu setup exists, actual rendering NOT implemented)
 │   ├── raf_assets/          # Asset pipeline (structure only)
 │   ├── raf_electronics/     # Electronic components, schematic, component library
-│   ├── raf_nodes/           # Node graph system for visual scripting
+│   ├── raf_nodes/           # Node graph system for visual scripting + executor
 │   ├── raf_ai/              # AI integration (placeholder)
-│   └── raf_net/             # Networking (placeholder)
+│   ├── raf_net/             # Networking (placeholder)
+│   └── raf_hardware/        # Hardware: serial, sensors, actuators, robot, ML
 ├── docs/                    # ARCHITECTURE.md, CONTRIBUTING.md, GETTING_STARTED.md, ROADMAP.md
 ├── .cargo/config.toml       # GNU target config (no MSVC needed)
 ├── SETUP.md                 # How to build and run from source
@@ -62,14 +63,23 @@ ProyectRaf/
 - Spanish and English UI translations (partial)
 - Custom window icon (metallic R logo)
 - Subtle Yoll branding only on loading screen
+- Simple Mode toggle (hides advanced UI)
+- Target platform selector (Desktop/Mobile/Web/Cloud/Console)
+- Magnet electronic component with field simulation
+- Node graph executor (basic interpreter)
+- Serial port communication protocol (structure)
+- Sensor/Actuator/Robot/ML data models (structure)
+- JLCPCB/PCBWay Gerber export structure (placeholder)
+- Circuit sharing via RON serialization
 
 ### What Does NOT Work Yet (Priority Order)
-1. **3D Rendering** — `raf_render` has wgpu device setup but zero actual rendering. No meshes, no shaders, no lighting, no camera. The viewport is just a 2D grid. This is the #1 priority.
-2. **Node Execution** — The node editor UI works but the graphs don't execute. Need a compiler/interpreter for the visual scripts.
-3. **Asset Pipeline** — No importing, no thumbnail generation, no hot-reload. The asset browser panel is a shell.
-4. **AI Integration** — `raf_ai` and the chat panel are placeholders. No LLM provider is connected.
-5. **Electronics Simulation** — Components can be placed and wired but there's no SPICE-like simulation engine.
-6. **Networking** — `raf_net` is empty.
+1. **3D Rendering** -- `raf_render` has wgpu device setup but zero actual rendering. No meshes, no shaders, no lighting, no camera. The viewport is just a 2D grid. This is the #1 priority.
+2. **Node Execution (partial)** -- Basic executor exists (walks flow chains, evaluates data pins, handles On Start/Print/If/Add) but does not yet run from the editor UI play button. Missing: variable nodes, loops, entity manipulation.
+3. **Asset Pipeline** -- No importing, no thumbnail generation, no hot-reload. The asset browser panel is a shell.
+4. **AI Integration** -- `raf_ai` and the chat panel are placeholders. No LLM provider is connected.
+5. **Hardware I/O** -- `raf_hardware` has data models and protocols defined but no actual serial port communication (needs `serialport` crate).
+6. **PCB 3D Layout** -- Schematic works, but no PCB board layout view. Gerber export blocked by this.
+7. **Networking** -- `raf_net` is protocol definitions only.
 
 ## Architecture Principles
 
