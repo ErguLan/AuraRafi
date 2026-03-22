@@ -826,7 +826,10 @@ impl AuraRafiApp {
                 match self.bottom_tab {
                     BottomTab::Assets => self.asset_browser.show(ui),
                     BottomTab::Console => self.console.show(ui),
-                    BottomTab::AiChat => self.ai_chat.show(ui),
+                    BottomTab::AiChat => {
+                        self.ai_chat.is_es = self.settings.language == Language::Spanish;
+                        self.ai_chat.show(ui);
+                    }
                     BottomTab::NodeEditor => self.node_editor.show(ui),
                 }
             });
@@ -849,14 +852,17 @@ impl AuraRafiApp {
                 )
                 .fill(app_theme::ACCENT);
 
-                if ui.add_sized([ui.available_width(), 28.0], add_btn).clicked() {
-                    ui.memory_mut(|m| m.toggle_popup(egui::Id::new("add_entity_popup")));
+                let response = ui.add_sized([ui.available_width(), 28.0], add_btn);
+                let popup_id = egui::Id::new("add_entity_popup");
+
+                if response.clicked() {
+                    ui.memory_mut(|m| m.toggle_popup(popup_id));
                 }
 
                 egui::popup_below_widget(
                     ui,
-                    egui::Id::new("add_entity_popup"),
-                    &ui.make_persistent_id("add_entity_popup_resp"),
+                    popup_id,
+                    &response,
                     egui::PopupCloseBehavior::CloseOnClickOutside,
                     |ui| {
                         let primitives = [

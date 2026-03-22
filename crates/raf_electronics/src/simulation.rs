@@ -161,6 +161,9 @@ pub fn simulate_dc(schematic: &Schematic) -> SimulationResults {
                     &net_to_idx,
                 );
             }
+            SimModel::Magnet { .. } => {
+                // Magnets are passive - no electrical stamp in DC.
+            }
         }
     }
 
@@ -227,6 +230,7 @@ pub fn simulate_dc(schematic: &Schematic) -> SimulationResults {
                         let i = (v0 - v1) * 1000.0;
                         (i, 0.0)
                     }
+                    SimModel::Magnet { .. } => (0.0, 0.0),
                 };
 
                 results.component_currents.insert(ci, current);

@@ -12,6 +12,92 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SceneNodeId(pub usize);
 
+/// Primitive shape for rendering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Primitive {
+    /// No visible geometry (group/empty node).
+    Empty,
+    /// Unit cube centered at origin.
+    Cube,
+    /// Unit sphere.
+    Sphere,
+    /// Flat plane on XZ.
+    Plane,
+    /// Cylinder along Y axis.
+    Cylinder,
+    /// 2D sprite (for 2D mode).
+    Sprite2D,
+}
+
+impl Default for Primitive {
+    fn default() -> Self {
+        Self::Empty
+    }
+}
+
+impl Primitive {
+    /// Display name for the UI.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Empty => "Empty",
+            Self::Cube => "Cube",
+            Self::Sphere => "Sphere",
+            Self::Plane => "Plane",
+            Self::Cylinder => "Cylinder",
+            Self::Sprite2D => "Sprite2D",
+        }
+    }
+
+    /// Display name in Spanish.
+    pub fn label_es(&self) -> &'static str {
+        match self {
+            Self::Empty => "Vac\u{00ed}o",
+            Self::Cube => "Cubo",
+            Self::Sphere => "Esfera",
+            Self::Plane => "Plano",
+            Self::Cylinder => "Cilindro",
+            Self::Sprite2D => "Sprite2D",
+        }
+    }
+}
+
+/// RGBA color for an entity (0-255 per channel).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct NodeColor {
+    pub r: u8,
+    pub g: u8,
+    pub b: u8,
+    pub a: u8,
+}
+
+impl NodeColor {
+    pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
+        Self { r, g, b, a: 255 }
+    }
+
+    pub const fn rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self { r, g, b, a }
+    }
+
+    /// Default entity colors by primitive type.
+    pub fn for_primitive(prim: Primitive) -> Self {
+        match prim {
+            Primitive::Empty => Self::rgb(120, 120, 120),
+            Primitive::Cube => Self::rgb(90, 160, 220),
+            Primitive::Sphere => Self::rgb(220, 130, 50),
+            Primitive::Plane => Self::rgb(100, 180, 100),
+            Primitive::Cylinder => Self::rgb(180, 100, 180),
+            Primitive::Sprite2D => Self::rgb(220, 200, 80),
+        }
+    }
+}
+
+impl Default for NodeColor {
+    fn default() -> Self {
+        Self::rgb(180, 180, 180)
+    }
+}
+
 /// A single node in the scene hierarchy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SceneNode {
@@ -21,10 +107,14 @@ pub struct SceneNode {
     pub name: String,
     /// Local position relative to parent.
     pub position: Vec3,
-    /// Local rotation (Euler degrees for editor display, stored as quat internally).
+    /// Local rotation (Euler degrees for editor display).
     pub rotation: Vec3,
     /// Local scale.
     pub scale: Vec3,
+    /// Visual primitive shape.
+    pub primitive: Primitive,
+    /// Display color.
+    pub color: NodeColor,
     /// Parent index, `None` for root nodes.
     pub parent: Option<SceneNodeId>,
     /// Child indices.
@@ -44,6 +134,25 @@ impl SceneNode {
             position: Vec3::ZERO,
             rotation: Vec3::ZERO,
             scale: Vec3::ONE,
+            primitive: Primitive::Empty,
+            color: NodeColor::default(),
+            parent: None,
+            children: Vec::new(),
+            visible: true,
+            entity_index: None,
+        }
+    }
+
+    /// Create a node with a specific primitive.
+    pub fn with_primitive(name: &str, primitive: Primitive) -> Self {
+        Self {
+            uuid: Uuid::new_v4(),
+            name: name.to_string(),
+            position: Vec3::ZERO,
+            rotation: Vec3::ZERO,
+            scale: Vec3::ONE,
+            primitive,
+            color: NodeColor::for_primitive(primitive),
             parent: None,
             children: Vec::new(),
             visible: true,

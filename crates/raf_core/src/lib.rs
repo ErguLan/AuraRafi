@@ -21,4 +21,4 @@ pub use config::{EngineSettings, Language, RenderQuality, TargetPlatform, Theme}
 pub use ecs::world::GameWorld;
 pub use event::{EventBus, EventId};
 pub use project::{Project, ProjectType};
-pub use scene::{SceneGraph, SceneNode, SceneNodeId};
+pub use scene::{NodeColor, Primitive, SceneGraph, SceneNode, SceneNodeId};

@@ -180,8 +180,8 @@ impl ViewportPanel {
 
             for edge in &edges {
                 let transformed = [
-                    (model * glam::Vec4::from((*edge[0].as_ref(), 1.0))).truncate(),
-                    (model * glam::Vec4::from((*edge[1].as_ref(), 1.0))).truncate(),
+                    (model * edge[0].extend(1.0)).truncate(),
+                    (model * edge[1].extend(1.0)).truncate(),
                 ];
                 if let Some(screen_edge) = projection::project_edge(
                     &[transformed[0], transformed[1]],
@@ -242,7 +242,7 @@ impl ViewportPanel {
             let mut all_visible = true;
 
             for corner in &corners {
-                let world = (*model * glam::Vec4::from((*corner.as_ref(), 1.0))).truncate();
+                let world = (*model * corner.extend(1.0)).truncate();
                 if let Some(sp) = projection::project_point(world, view_proj, vp_w, vp_h) {
                     screen_pts.push(Pos2::new(rect.left() + sp[0], rect.top() + sp[1]));
                 } else {

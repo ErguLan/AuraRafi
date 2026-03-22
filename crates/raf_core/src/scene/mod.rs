@@ -2,4 +2,4 @@
 
 pub mod graph;
 
-pub use graph::{SceneGraph, SceneNode, SceneNodeId};
+pub use graph::{NodeColor, Primitive, SceneGraph, SceneNode, SceneNodeId};

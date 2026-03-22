@@ -8,7 +8,7 @@ use crate::component::ElectronicComponent;
 use crate::schematic::{Schematic, Wire};
 use glam::Vec2;
 use uuid::Uuid;
-
+const GRID_STEP: f32 = 20.0;
 /// Tolerance for matching pin positions to wire endpoints (in grid units).
 const POSITION_TOLERANCE: f32 = 2.0;
 

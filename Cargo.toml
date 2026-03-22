@@ -62,6 +62,9 @@ gltf = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
+# HTTP (lightweight, blocking - no async runtime needed)
+ureq = { version = "2", features = ["json"] }
+
 # Internal crates
 raf_core = { path = "crates/raf_core" }
 raf_render = { path = "crates/raf_render" }
