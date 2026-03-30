@@ -110,14 +110,28 @@ Lightweight pub/sub system with type-erased events:
 
 ## Rendering (raf_render)
 
-Built on `wgpu` for cross-platform GPU access (Vulkan, Metal, DX12).
+Lightweight rendering via CPU projection + egui painter (no GPU pipeline needed):
 
 - `Renderer`: High-level renderer holding pipeline config
-- `RenderPipeline`: Quality-dependent config (shadows, AO, AA, bloom)
-- `Camera`: Perspective and orthographic modes with view/projection matrices
-- `AntiAliasing`: None, FXAA, MSAA4x
+- `RenderPipeline`: Quality-dependent config (shadows, AO, AA, bloom) for future GPU path
+- `Camera`: Perspective and orthographic modes with view/projection matrices, orbit controls
+- `mesh`: Static vertex data for primitives (edges + face quads with normals)
+  - Cube: 12 wireframe edges, 6 face quads
+  - Sphere: 3-circle wireframe, UV sphere faces (configurable stacks x slices)
+  - Plane: 5 wireframe edges, 1 face quad
+  - Cylinder: ring + vertical wireframe edges, side quads + cap fan triangles
+- `projection`: 3D-to-2D screen projection, perspective divide, face brightness shading
+- `editable`: EditableMesh with selectable vertices/faces, move/scale/extrude/delete ops, per-axis scaling, wireframe+render output
+- `gizmo`: Transform gizmo with per-axis handles (X/Y/Z), hit testing, translate/scale/rotate modes
+- `lod`: Level of Detail system, 3 distance-based levels, auto-cull, segment helpers
+- `AntiAliasing`: None, FXAA, MSAA4x (reserved for future GPU path)
 
-Quality levels control resource usage for potato-to-high-end hardware.
+All rendering runs on CPU through egui's painter. Zero GPU buffers, zero shaders, zero texture memory. Runs on any hardware.
+
+## Scene Addons (raf_core/scene)
+
+- `collider`: AABB (auto-fit from vertices, intersection test, wireframe edges), ConvexHull (directional pruning), MeshCollider (exact geometry)
+- `merge`: Combine multiple meshes into one (reduces draw calls), vertex welding (remove duplicates), source tracking for unmerge, MeshGroup for entity grouping
 
 ## Editor (raf_editor)
 
@@ -133,7 +147,7 @@ Visual editor built on `egui`/`eframe`:
 
 - **Top**: Menu bar (File, Edit, View, Project) + Build/Run button + FPS
 - **Left**: Hierarchy panel (scene tree with collapsible nodes)
-- **Right**: Properties panel (transform editor, visibility, variables)
+- **Right**: Properties panel (transform, color/material, primitive type, visibility)
 - **Center**: Viewport (scene view) or Schematic view (electronics)
 - **Bottom (tabbed)**: Console, Assets, Node Editor, AI Chat
 - **Bottom bar**: Status (project name, entity count, language, theme)
@@ -146,9 +160,9 @@ Visual editor built on `egui`/`eframe`:
 
 ### Panels
 
-- **Viewport**: 2D canvas with grid, axis lines, origin marker, tool toolbar
+- **Viewport**: 2D/3D hybrid view with filled mesh rendering, flat shading, wireframe toggle (Solid/Wire/Fill), orbit camera, grid, axis gizmo, tool toolbar
 - **Hierarchy**: Scene tree with selection and collapsible groups
-- **Properties**: Transform editing (position, rotation, scale), visibility
+- **Properties**: Transform editing, RGB color picker with 7 presets, primitive type dropdown, visibility toggle
 - **Console**: Log output with severity filters and auto-scroll
 - **Asset Browser**: Search, filter by type, grid display
 - **Node Editor**: Visual scripting canvas with bezier connections

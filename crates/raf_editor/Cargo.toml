@@ -22,3 +22,4 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 dirs-next = "2"
+ron = { workspace = true }

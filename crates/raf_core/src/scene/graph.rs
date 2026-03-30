@@ -266,6 +266,83 @@ impl SceneGraph {
         self.roots.push(id);
         id
     }
+
+    /// Soft-remove a node: hides it, clears its primitive, and detaches from
+    /// parent/root list. We keep the slot to avoid invalidating indices.
+    pub fn remove_node(&mut self, id: SceneNodeId) -> bool {
+        if id.0 >= self.nodes.len() {
+            return false;
+        }
+
+        // Remove from parent's children list.
+        if let Some(parent_id) = self.nodes[id.0].parent {
+            if parent_id.0 < self.nodes.len() {
+                self.nodes[parent_id.0].children.retain(|c| *c != id);
+            }
+        }
+
+        // Remove from roots list if it is a root.
+        self.roots.retain(|r| *r != id);
+
+        // Also remove children recursively (soft).
+        let children: Vec<SceneNodeId> = self.nodes[id.0].children.clone();
+        for child_id in children {
+            self.remove_node(child_id);
+        }
+
+        // Clear the node.
+        self.nodes[id.0].visible = false;
+        self.nodes[id.0].primitive = Primitive::Empty;
+        self.nodes[id.0].children.clear();
+        self.nodes[id.0].parent = None;
+        self.nodes[id.0].name = String::new();
+        true
+    }
+
+    /// Duplicate a node (shallow, no children) as a new root with a small
+    /// position offset. Returns the new node id.
+    pub fn duplicate_node(&mut self, id: SceneNodeId) -> Option<SceneNodeId> {
+        let node = self.nodes.get(id.0)?.clone();
+        let new_id = SceneNodeId(self.nodes.len());
+        let mut dup = SceneNode::with_primitive(
+            &format!("{} (copy)", node.name),
+            node.primitive,
+        );
+        dup.position = node.position + Vec3::new(1.0, 0.0, 0.0);
+        dup.rotation = node.rotation;
+        dup.scale = node.scale;
+        dup.color = node.color;
+        dup.visible = node.visible;
+        self.nodes.push(dup);
+        self.roots.push(new_id);
+        Some(new_id)
+    }
+
+    /// Collect all valid (visible, non-empty name) node ids.
+    pub fn all_valid_ids(&self) -> Vec<SceneNodeId> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| !n.name.is_empty() && n.visible)
+            .map(|(i, _)| SceneNodeId(i))
+            .collect()
+    }
+
+    /// Save the scene graph to a RON file.
+    pub fn save_ron(&self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        let pretty = ron::ser::PrettyConfig::default();
+        let data = ron::ser::to_string_pretty(self, pretty)?;
+        std::fs::write(path, data)?;
+        Ok(())
+    }
+
+    /// Load a scene graph from a RON file. Returns default if file missing.
+    pub fn load_ron(path: &std::path::Path) -> Self {
+        match std::fs::read_to_string(path) {
+            Ok(data) => ron::from_str(&data).unwrap_or_default(),
+            Err(_) => Self::default(),
+        }
+    }
 }
 
 impl Default for SceneGraph {

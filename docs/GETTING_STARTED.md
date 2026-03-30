@@ -62,12 +62,17 @@ When you first launch AuraRafi, you will see:
 
 ### Scene View (Game Projects)
 
-The central viewport shows your game scene:
+The central viewport shows your game scene in 2D or 3D:
 
-- **Pan**: Middle-mouse drag or right-mouse drag
+- **Orbit Camera**: Left-mouse drag (3D mode)
+- **Pan**: Middle-mouse drag
 - **Zoom**: Scroll wheel
 - **Reset View**: Double-click
 - **Tools**: Select (Q), Move (W), Rotate (E), Scale (R)
+- **Render Style**: Cycle with Z key (Solid+Wire / Wireframe / Solid Only)
+- **2D/3D Toggle**: Click buttons at top-center
+- **Change Color**: Use the color picker in the Properties panel (right side)
+- **Change Shape**: Use the primitive dropdown in Properties > Shape
 
 ### Schematic View (Electronics Projects)
 
@@ -164,9 +169,11 @@ MyProject/
 | W | Move tool |
 | E | Rotate tool |
 | R | Scale tool / Rotate component (schematic) |
+| Z | Cycle render style (Solid / Wire / Fill) |
 | Delete | Remove selected entity/node/component/wire |
 | Ctrl+D | Duplicate selected component (schematic) |
 | Escape | Cancel current operation / Close overlay |
+| Left-drag | Orbit camera (3D viewport) |
 | Middle-drag | Pan viewport |
 | Scroll | Zoom viewport |
 | Double-click | Reset viewport |

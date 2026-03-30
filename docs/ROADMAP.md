@@ -33,31 +33,46 @@ The engine foundation is in place with these working systems:
 - [x] Robot control interface structure
 - [x] ML training data export structure
 
-## v0.2.0 - Rendering (Planned)
+## v0.2.0 - Rendering (Done)
 
-The next milestone focuses on actual GPU rendering:
+Rendering implemented via CPU projection + egui painter (zero GPU pipelines, runs on any hardware):
 
-- [ ] wgpu render pass integration in editor viewport
-- [ ] WGSL vertex and fragment shaders
-- [ ] Basic mesh rendering (primitives: cube, sphere, plane, cylinder)
-- [ ] Flat shading with single directional light
-- [ ] Camera orbit controls in 3D viewport
-- [ ] Grid rendering on GPU (replacing CPU painter)
-- [ ] Wireframe mode toggle
-- [ ] Color/material assignment per entity
+- [x] Viewport rendering integration (CPU projection through view_proj matrices, no wgpu render passes needed - lighter)
+- [x] Shader-free rendering (all shading computed in Rust: face_brightness() with directional light dot product)
+- [x] Basic mesh rendering for all primitives: Cube (6 face quads), Sphere (4x6=24 quads UV sphere), Plane (1 quad), Cylinder (8 side + 16 cap quads)
+- [x] Flat shading with directional light (Vec3(0.5, 0.8, 0.3)), backface culling via 2D cross product, brightness range 0.3-1.0
+- [x] Camera orbit controls: left-drag orbit (yaw/pitch), middle-drag pan, scroll zoom, double-click reset, clamp pitch to +/-80 deg
+- [x] 3D grid rendering (projected line segments on XZ plane, 21x21 lines, major every 5 units)
+- [x] Wireframe/Solid toggle: 3 modes (Solid+Wire, Wireframe only, Solid only) via top-right buttons + Z key cycle
+- [x] Color/material per entity: RGB color picker in Properties panel, 7 quick presets (R/G/B/Y/O/P/W), primitive type dropdown
+- [x] 2D/3D mode toggle (top-center buttons, separate rendering paths)
+- [x] EditableMesh: runtime vertex/face editing (cube, sphere, plane, cylinder), move/scale/extrude/delete, per-axis scaling
+- [x] Transform gizmo data: per-axis handles (X/Y/Z) with hit testing, 3 modes (translate/scale/rotate)
+- [x] LOD system: 3 distance-based detail levels with auto-cull and segment helpers
+- [x] Collider system: AABB auto-fit, ConvexHull, MeshCollider with intersection tests and wireframe viz
+- [x] Mesh merge: combine multiple meshes into one, vertex welding, source tracking for unmerge
+- [x] Mesh groups: group entities by ID to move/transform together
 
 ## v0.3.0 - Editor Polish
 
 - [ ] Drag-and-drop asset importing
 - [ ] Asset thumbnail preview generation
 - [x] Context menus (right-click) in schematic editor (component/wire/canvas)
-- [ ] Keyboard shortcut customization
-- [ ] Multi-entity selection
+- [ ] Keyboard shortcut customization (user-configurable keybinds)
+- [ ] Multi-entity selection (Shift+Click for multiple)
 - [x] Entity duplication (Ctrl+D) in schematic editor
-- [ ] Scene serialization to RON files
-- [ ] Auto-save implementation
+- [x] Entity duplication (Ctrl+D) in scene viewport
+- [x] Entity deletion (Del key + Edit menu) in scene viewport
+- [x] Select All (Ctrl+A) in scene viewport
+- [x] Scene serialization to RON files (save/load alongside project)
+- [x] Auto-save implementation (timer-based, configurable interval)
 - [ ] Hot-reload for assets using file watcher
 - [ ] Responsive layout breakpoints (mobile-friendly editor)
+- [x] Undo/Redo (Ctrl+Z / Ctrl+Y) with scene snapshots (max 50 depth)
+- [x] Save shortcut (Ctrl+S) with scene RON persistence
+- [x] Enhanced menu bar (File/Edit/View/Project/Help with shortcut labels, translated ES/EN)
+- [x] Status bar: modified indicator (*), undo/redo depth, last action display
+- [x] Help menu with keyboard shortcuts reference
 
 ## v0.4.0 - Visual Scripting
 

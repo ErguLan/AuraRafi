@@ -1,6 +1,9 @@
 //! Hierarchy panel - scene tree view.
+//! Displays the entity tree with collapsible groups.
+//! All text translated ES/EN.
 
 use egui::Ui;
+use raf_core::config::Language;
 use raf_core::scene::{SceneGraph, SceneNodeId};
 
 /// State for the hierarchy panel.
@@ -18,12 +21,19 @@ impl Default for HierarchyPanel {
 
 impl HierarchyPanel {
     /// Draw the hierarchy panel.
-    pub fn show(&mut self, ui: &mut Ui, scene: &SceneGraph) {
-        ui.heading("Hierarchy");
+    pub fn show(&mut self, ui: &mut Ui, scene: &SceneGraph, lang: Language) {
+        let is_es = lang == Language::Spanish;
+        let title = if is_es { "Jerarquia" } else { "Hierarchy" };
+        ui.heading(title);
         ui.separator();
 
         if scene.is_empty() {
-            ui.label("No entities in scene");
+            let msg = if is_es {
+                "Sin entidades en la escena"
+            } else {
+                "No entities in scene"
+            };
+            ui.label(msg);
             return;
         }
 
@@ -39,6 +49,11 @@ impl HierarchyPanel {
             Some(n) => n,
             None => return,
         };
+
+        // Skip removed (soft-deleted) nodes.
+        if node.name.is_empty() {
+            return;
+        }
 
         let is_selected = self.selected_node == Some(id);
         let has_children = !node.children.is_empty();

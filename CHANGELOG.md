@@ -5,6 +5,53 @@ All notable changes to AuraRafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-03-29
+
+### Added
+
+- **Undo/Redo** (Ctrl+Z / Ctrl+Y): scene-snapshot based, max 50 entries, lightweight RON serialization
+- **Delete entity** (Del key + Edit menu): soft-delete with recursive child removal, undo-safe
+- **Duplicate entity** (Ctrl+D): clones selected scene node with +1.0 X offset, auto-selects copy
+- **Select All** (Ctrl+A): selects all valid (visible, non-empty) entities in scene
+- **Save shortcut** (Ctrl+S): saves project + scene to RON file alongside project directory
+- **Auto-save**: timer-based, uses configurable interval from settings (default 120s), status bar feedback
+- **Scene RON persistence**: scene graph serialized to `scene.ron`, loaded on project open if file exists
+- **Enhanced menu bar**: File (New/Save/Settings/Exit), Edit (Undo/Redo/Duplicate/Delete/SelectAll), View (Grid/Scene/Schematic), Project (info), Help (shortcuts reference + version)
+- **Status bar improvements**: modified indicator (*), undo/redo stack depth (U:N R:N), last action display, entity count
+- **Help menu**: keyboard shortcuts reference panel, engine version display
+- **SceneGraph methods**: `remove_node()` (soft-delete), `duplicate_node()`, `all_valid_ids()`, `save_ron()`, `load_ron()`
+- **Global keyboard shortcuts**: handled in editor main loop, works in all viewport modes (scene + game)
+- All new menu items, buttons, and labels translated ES/EN
+- Hierarchy panel: translated heading/empty-state, skips soft-deleted nodes
+- Settings screen: translated heading, save/cancel buttons
+- New project form: translated title for Game/Electronics types
+
+### Changed
+
+- Menu bar fully translated ES/EN (Archivo/Editar/Vista/Proyecto/Ayuda)
+- Status bar now shows entity count, theme name, and language - all translated
+- Build/Run button translated (Ejecutar/Compilar/Test Electrico)
+- Open project now loads scene from `scene.ron` if available, falls back to default scene
+- Undo/redo stacks cleared on new project load
+
+## [0.2.0] - 2026-03-25
+
+### Added
+
+- **Filled mesh rendering** for all primitives: Cube (6 face quads with backface culling), Sphere (4x6 UV sphere), Plane (1 quad), Cylinder (8 side quads + cap fans)
+- **Flat shading** with directional light (dot product brightness 0.3-1.0), per-face normals, applied via CPU (no shaders needed)
+- **Wireframe/Solid toggle**: 3 render styles (Solid+Wire, Wireframe Only, Solid Only) selectable via top-right buttons or Z key
+- **Color picker** in Properties panel: RGB color edit + 7 quick color presets (R/G/B/Y/O/P/W)
+- **Primitive type selector** in Properties panel: dropdown to change entity shape at runtime
+- **2D/3D mode toggle**: clickable buttons at top-center of viewport, separate rendering paths for each mode
+- Properties panel fully translated ES/EN (name, transform, material, shape, variables sections)
+- Render style buttons translated ES/EN (Solido/Malla/Relleno vs Solid/Wire/Fill)
+- **EditableMesh** (raf_render/editable.rs): runtime vertex/face mesh data with selection system, move/scale/extrude/delete operations, per-axis scaling, cube/sphere/plane/cylinder primitives, wireframe and render face output
+- **Transform gizmo** (raf_render/gizmo.rs): per-axis X/Y/Z handles with 2D segment hit testing, translate/scale/rotate modes, axis colors
+- **LOD system** (raf_render/lod.rs): 3 distance-based detail levels, auto-cull beyond max distance, segment/stack helpers for primitives
+- **Collider system** (raf_core/scene/collider.rs): AABB auto-fit from vertices with intersection test + wireframe viz, ConvexHull with directional pruning, MeshCollider with exact geometry, ES/EN type labels
+- **Mesh merge** (raf_core/scene/merge.rs): combine meshes into single draw call, vertex welding with distance threshold, source range tracking for unmerge, MeshGroup for entity grouping
+
 ## [0.1.1] - 2026-03-16
 
 ### Added

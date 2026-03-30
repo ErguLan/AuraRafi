@@ -175,7 +175,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "aura_rafi_editor"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "eframe",
  "egui",
@@ -2568,7 +2568,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "raf_ai"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "raf_core",
@@ -2581,7 +2581,7 @@ dependencies = [
 
 [[package]]
 name = "raf_assets"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "glam",
  "gltf",
@@ -2595,7 +2595,7 @@ dependencies = [
 
 [[package]]
 name = "raf_core"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "fluent",
@@ -2611,7 +2611,7 @@ dependencies = [
 
 [[package]]
 name = "raf_editor"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "chrono",
  "dirs-next",
@@ -2625,6 +2625,7 @@ dependencies = [
  "raf_net",
  "raf_nodes",
  "raf_render",
+ "ron",
  "serde",
  "serde_json",
  "tracing",
@@ -2633,7 +2634,7 @@ dependencies = [
 
 [[package]]
 name = "raf_electronics"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "glam",
  "raf_core",
@@ -2645,7 +2646,7 @@ dependencies = [
 
 [[package]]
 name = "raf_hardware"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raf_core",
  "serde",
@@ -2655,7 +2656,7 @@ dependencies = [
 
 [[package]]
 name = "raf_net"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "raf_core",
  "serde",
@@ -2666,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "raf_nodes"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "egui",
  "glam",
@@ -2679,7 +2680,7 @@ dependencies = [
 
 [[package]]
 name = "raf_render"
-version = "0.1.0"
+version = "0.3.0"
 dependencies = [
  "glam",
  "image",

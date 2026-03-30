@@ -93,6 +93,18 @@ pub struct AuraRafiApp {
     viewport_mode: ViewportMode,
     _show_settings: bool,
     frame_count: u64,
+
+    // v0.3.0: UX state
+    /// Whether scene has unsaved changes.
+    scene_modified: bool,
+    /// Last status message for the status bar.
+    last_action: String,
+    /// Elapsed seconds since last auto-save.
+    auto_save_elapsed: f32,
+    /// Snapshots for undo (lightweight RON of scene).
+    undo_stack: Vec<String>,
+    /// Snapshots for redo.
+    redo_stack: Vec<String>,
 }
 
 impl AuraRafiApp {
@@ -135,6 +147,11 @@ impl AuraRafiApp {
             viewport_mode: ViewportMode::Scene,
             _show_settings: false,
             frame_count: 0,
+            scene_modified: false,
+            last_action: String::new(),
+            auto_save_elapsed: 0.0,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 }
@@ -477,9 +494,14 @@ impl AuraRafiApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(50.0);
             ui.vertical_centered(|ui| {
+                let is_es = self.settings.language == Language::Spanish;
                 let title = match project_type {
-                    ProjectType::Game => "New Game Project",
-                    ProjectType::Electronics => "New Electronics Project",
+                    ProjectType::Game => {
+                        if is_es { "Nuevo Proyecto de Juego" } else { "New Game Project" }
+                    }
+                    ProjectType::Electronics => {
+                        if is_es { "Nuevo Proyecto Electronico" } else { "New Electronics Project" }
+                    }
                 };
                 ui.heading(
                     egui::RichText::new(title)
@@ -608,76 +630,96 @@ impl AuraRafiApp {
     // -----------------------------------------------------------------------
 
     fn show_editor(&mut self, ctx: &egui::Context) {
+        let is_es = self.settings.language == Language::Spanish;
+
+        // --- Global keyboard shortcuts ---
+        self.handle_global_shortcuts(ctx);
+
+        // --- Auto-save ---
+        self.handle_auto_save(ctx);
+
         // Top menu bar.
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
-                ui.menu_button("File", |ui| {
-                    if ui.button("New Project").clicked() {
+                // -- File --
+                ui.menu_button(if is_es { "Archivo" } else { "File" }, |ui| {
+                    if ui.button(if is_es { "Nuevo Proyecto" } else { "New Project" }).clicked() {
                         self.screen = AppScreen::ProjectHub;
                         ui.close_menu();
                     }
-                    if ui.button("Save").clicked() {
-                        if let Some(project) = &self.current_project {
-                            let _ = project.save();
-                            self.console.log(LogLevel::Info, "Project saved");
-                        }
+                    if ui.button(if is_es { "Guardar  (Ctrl+S)" } else { "Save  (Ctrl+S)" }).clicked() {
+                        self.do_save();
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Settings").clicked() {
+                    if ui.button(if is_es { "Configuracion" } else { "Settings" }).clicked() {
                         self.previous_screen = Some(AppScreen::Editor);
                         self.screen = AppScreen::Settings;
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Exit to Hub").clicked() {
+                    if ui.button(if is_es { "Salir al Hub" } else { "Exit to Hub" }).clicked() {
                         self.screen = AppScreen::ProjectHub;
                         ui.close_menu();
                     }
                 });
 
-                ui.menu_button("Edit", |ui| {
-                    if ui.button("Undo").clicked() {
-                        self.console.log(LogLevel::Info, "Undo (not implemented yet)");
+                // -- Edit --
+                ui.menu_button(if is_es { "Editar" } else { "Edit" }, |ui| {
+                    let undo_label = if is_es {
+                        format!("Deshacer  (Ctrl+Z)  [{}]", self.undo_stack.len())
+                    } else {
+                        format!("Undo  (Ctrl+Z)  [{}]", self.undo_stack.len())
+                    };
+                    if ui.add_enabled(!self.undo_stack.is_empty(), egui::Button::new(undo_label)).clicked() {
+                        self.do_undo();
                         ui.close_menu();
                     }
-                    if ui.button("Redo").clicked() {
-                        self.console.log(LogLevel::Info, "Redo (not implemented yet)");
+                    let redo_label = if is_es {
+                        format!("Rehacer  (Ctrl+Y)  [{}]", self.redo_stack.len())
+                    } else {
+                        format!("Redo  (Ctrl+Y)  [{}]", self.redo_stack.len())
+                    };
+                    if ui.add_enabled(!self.redo_stack.is_empty(), egui::Button::new(redo_label)).clicked() {
+                        self.do_redo();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button(if is_es { "Duplicar  (Ctrl+D)" } else { "Duplicate  (Ctrl+D)" }).clicked() {
+                        self.do_duplicate();
+                        ui.close_menu();
+                    }
+                    if ui.button(if is_es { "Eliminar  (Supr)" } else { "Delete  (Del)" }).clicked() {
+                        self.do_delete();
+                        ui.close_menu();
+                    }
+                    ui.separator();
+                    if ui.button(if is_es { "Seleccionar Todo  (Ctrl+A)" } else { "Select All  (Ctrl+A)" }).clicked() {
+                        self.do_select_all();
                         ui.close_menu();
                     }
                 });
 
-                ui.menu_button("View", |ui| {
-                    ui.checkbox(&mut self.settings.grid_visible, "Grid");
-
+                // -- View --
+                ui.menu_button(if is_es { "Vista" } else { "View" }, |ui| {
+                    let grid_label = if is_es { "Cuadricula" } else { "Grid" };
+                    ui.checkbox(&mut self.settings.grid_visible, grid_label);
                     ui.separator();
 
-                    if ui
-                        .selectable_label(
-                            self.viewport_mode == ViewportMode::Scene,
-                            "Scene View",
-                        )
-                        .clicked()
-                    {
+                    let scene_label = if is_es { "Vista de Escena" } else { "Scene View" };
+                    if ui.selectable_label(self.viewport_mode == ViewportMode::Scene, scene_label).clicked() {
                         self.viewport_mode = ViewportMode::Scene;
                         ui.close_menu();
                     }
-
-                    if ui
-                        .selectable_label(
-                            self.viewport_mode == ViewportMode::Schematic,
-                            "Schematic View",
-                        )
-                        .clicked()
-                    {
+                    let sch_label = if is_es { "Vista de Esquematico" } else { "Schematic View" };
+                    if ui.selectable_label(self.viewport_mode == ViewportMode::Schematic, sch_label).clicked() {
                         self.viewport_mode = ViewportMode::Schematic;
                         ui.close_menu();
                     }
-
-                    ui.close_menu();
                 });
 
-                ui.menu_button("Project", |ui| {
+                // -- Project --
+                ui.menu_button(if is_es { "Proyecto" } else { "Project" }, |ui| {
                     if let Some(project) = &self.current_project {
                         ui.label(
                             egui::RichText::new(&project.name)
@@ -687,13 +729,26 @@ impl AuraRafiApp {
                         ui.label(project.project_type.display_name());
                         ui.separator();
                         ui.label(
-                            egui::RichText::new(
-                                project.path.display().to_string(),
-                            )
-                            .small()
-                            .color(app_theme::DARK_TEXT_DIM),
+                            egui::RichText::new(project.path.display().to_string())
+                                .small()
+                                .color(app_theme::DARK_TEXT_DIM),
                         );
                     }
+                    ui.close_menu();
+                });
+
+                // -- Help --
+                ui.menu_button(if is_es { "Ayuda" } else { "Help" }, |ui| {
+                    ui.label(egui::RichText::new(if is_es { "Atajos de teclado" } else { "Keyboard Shortcuts" }).strong());
+                    ui.label("Ctrl+S  -  Save");
+                    ui.label("Ctrl+Z  -  Undo");
+                    ui.label("Ctrl+Y  -  Redo");
+                    ui.label("Ctrl+D  -  Duplicate");
+                    ui.label("Ctrl+A  -  Select All");
+                    ui.label("Del     -  Delete");
+                    ui.label("Q/W/E/R -  Tool Select");
+                    ui.separator();
+                    ui.label(format!("AuraRafi v{}", env!("CARGO_PKG_VERSION")));
                     ui.close_menu();
                 });
 
@@ -704,11 +759,15 @@ impl AuraRafiApp {
                         let build_text =
                             if let Some(project) = &self.current_project {
                                 match project.project_type {
-                                    ProjectType::Game => "Run Game",
-                                    ProjectType::Electronics => "Electrical Test",
+                                    ProjectType::Game => {
+                                        if is_es { "Ejecutar" } else { "Run Game" }
+                                    }
+                                    ProjectType::Electronics => {
+                                        if is_es { "Test Electrico" } else { "Electrical Test" }
+                                    }
                                 }
                             } else {
-                                "Build"
+                                if is_es { "Compilar" } else { "Build" }
                             };
 
                         let build_btn = egui::Button::new(
@@ -741,8 +800,12 @@ impl AuraRafiApp {
                         // Viewport mode indicator.
                         ui.separator();
                         let mode_text = match self.viewport_mode {
-                            ViewportMode::Scene => "Scene",
-                            ViewportMode::Schematic => "Schematic",
+                            ViewportMode::Scene => {
+                                if is_es { "Escena" } else { "Scene" }
+                            }
+                            ViewportMode::Schematic => {
+                                if is_es { "Esquematico" } else { "Schematic" }
+                            }
                         };
                         ui.label(
                             egui::RichText::new(mode_text)
@@ -760,8 +823,9 @@ impl AuraRafiApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     if let Some(project) = &self.current_project {
+                        let modified = if self.scene_modified { " (*)" } else { "" };
                         ui.label(
-                            egui::RichText::new(&project.name)
+                            egui::RichText::new(format!("{}{}", project.name, modified))
                                 .small()
                                 .color(app_theme::ACCENT),
                         );
@@ -772,25 +836,45 @@ impl AuraRafiApp {
                         );
                     }
                     ui.separator();
+                    let ent_label = if is_es {
+                        format!("Entidades: {}", self.scene.all_valid_ids().len())
+                    } else {
+                        format!("Entities: {}", self.scene.all_valid_ids().len())
+                    };
+                    ui.label(egui::RichText::new(ent_label).small());
+                    ui.separator();
+                    // Undo/redo depth.
                     ui.label(
                         egui::RichText::new(format!(
-                            "Entities: {}",
-                            self.scene.len()
+                            "U:{} R:{}",
+                            self.undo_stack.len(),
+                            self.redo_stack.len()
                         ))
-                        .small(),
+                        .small()
+                        .color(app_theme::DARK_TEXT_DIM),
                     );
+                    // Last action.
+                    if !self.last_action.is_empty() {
+                        ui.separator();
+                        ui.label(
+                            egui::RichText::new(&self.last_action)
+                                .small()
+                                .color(app_theme::DARK_TEXT_DIM),
+                        );
+                    }
                     ui.with_layout(
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
+                            let theme_name = match self.settings.theme {
+                                Theme::Dark => { if is_es { "Oscuro" } else { "Dark" } }
+                                Theme::Light => { if is_es { "Claro" } else { "Light" } }
+                                Theme::System => "System",
+                            };
                             ui.label(
                                 egui::RichText::new(format!(
                                     "{} | {}",
                                     self.settings.language.display_name(),
-                                    match self.settings.theme {
-                                        Theme::Dark => "Dark",
-                                        Theme::Light => "Light",
-                                        Theme::System => "System",
-                                    }
+                                    theme_name
                                 ))
                                 .small(),
                             );
@@ -840,12 +924,11 @@ impl AuraRafiApp {
             .default_width(200.0)
             .min_width(150.0)
             .show(ctx, |ui| {
-                self.hierarchy.show(ui, &self.scene);
+                self.hierarchy.show(ui, &self.scene, self.settings.language);
 
                 ui.add_space(8.0);
                 ui.separator();
 
-                let is_es = self.settings.language == Language::Spanish;
                 let add_label = if is_es { "+ Agregar" } else { "+ Add" };
                 let add_btn = egui::Button::new(
                     egui::RichText::new(add_label).color(egui::Color32::WHITE),
@@ -874,14 +957,18 @@ impl AuraRafiApp {
                         for prim in primitives {
                             let label = if is_es { prim.label_es() } else { prim.label() };
                             if ui.button(label).clicked() {
+                                self.push_undo_snapshot();
                                 let name = format!("{} {}", prim.label(), self.scene.len() + 1);
                                 let id = self.scene.add_root_with_primitive(&name, prim);
                                 self.hierarchy.selected_node = Some(id);
                                 self.viewport.selected = Some(id);
-                                self.console.log(
-                                    LogLevel::Info,
-                                    &format!("Added: {}", name),
-                                );
+                                let add_msg = if is_es {
+                                    format!("Agregado: {}", name)
+                                } else {
+                                    format!("Added: {}", name)
+                                };
+                                self.last_action = add_msg.clone();
+                                self.console.log(LogLevel::Info, &add_msg);
                             }
                         }
                     },
@@ -895,7 +982,7 @@ impl AuraRafiApp {
             .min_width(200.0)
             .show(ctx, |ui| {
                 self.properties
-                    .show(ui, &mut self.scene, self.hierarchy.selected_node);
+                    .show(ui, &mut self.scene, self.hierarchy.selected_node, self.settings.language);
             });
 
         // Central panel: Viewport or Schematic.
@@ -923,11 +1010,13 @@ impl AuraRafiApp {
     // -----------------------------------------------------------------------
 
     fn show_settings_screen(&mut self, ctx: &egui::Context) {
+        let is_es = self.settings.language == Language::Spanish;
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(20.0);
             ui.vertical_centered(|ui| {
+                let title = if is_es { "Configuracion" } else { "Settings" };
                 ui.heading(
-                    egui::RichText::new("Settings")
+                    egui::RichText::new(title)
                         .size(24.0)
                         .color(app_theme::ACCENT),
                 );
@@ -941,8 +1030,9 @@ impl AuraRafiApp {
             ui.separator();
             ui.add_space(8.0);
             ui.horizontal(|ui| {
+                let save_label = if is_es { "Guardar y Cerrar" } else { "Save & Close" };
                 let save_btn = egui::Button::new(
-                    egui::RichText::new("Save & Close")
+                    egui::RichText::new(save_label)
                         .color(egui::Color32::WHITE),
                 )
                 .fill(app_theme::ACCENT);
@@ -950,7 +1040,8 @@ impl AuraRafiApp {
                 if ui.add_sized([140.0, 30.0], save_btn).clicked() {
                     let config_dir = dirs_config_dir();
                     let _ = self.settings.save(&config_dir);
-                    self.console.log(LogLevel::Info, "Settings saved");
+                    let msg = if is_es { "Configuracion guardada" } else { "Settings saved" };
+                    self.console.log(LogLevel::Info, msg);
                     self.screen = self
                         .previous_screen
                         .take()
@@ -959,8 +1050,9 @@ impl AuraRafiApp {
 
                 ui.add_space(8.0);
 
+                let cancel_label = if is_es { "Cancelar" } else { "Cancel" };
                 if ui
-                    .add_sized([100.0, 30.0], egui::Button::new("Cancel"))
+                    .add_sized([100.0, 30.0], egui::Button::new(cancel_label))
                     .clicked()
                 {
                     self.screen = self
@@ -970,6 +1062,181 @@ impl AuraRafiApp {
                 }
             });
         });
+    }
+
+    // -----------------------------------------------------------------------
+    // v0.3.0: Undo/Redo (scene snapshot based, max 50)
+    // -----------------------------------------------------------------------
+
+    /// Push current scene state to undo stack.
+    fn push_undo_snapshot(&mut self) {
+        // Serialize scene to RON string (lightweight).
+        if let Ok(data) = ron::ser::to_string(&self.scene) {
+            self.undo_stack.push(data);
+            // Cap at 50 to keep memory low.
+            if self.undo_stack.len() > 50 {
+                self.undo_stack.remove(0);
+            }
+            self.redo_stack.clear();
+            self.scene_modified = true;
+        }
+    }
+
+    fn do_undo(&mut self) {
+        if let Some(snapshot) = self.undo_stack.pop() {
+            // Save current to redo.
+            if let Ok(current) = ron::ser::to_string(&self.scene) {
+                self.redo_stack.push(current);
+            }
+            // Restore.
+            if let Ok(restored) = ron::from_str::<SceneGraph>(&snapshot) {
+                self.scene = restored;
+                self.hierarchy.selected_node = None;
+                self.viewport.selected = None;
+                let is_es = self.settings.language == Language::Spanish;
+                let msg = if is_es { "Deshacer" } else { "Undo" };
+                self.last_action = msg.to_string();
+                self.console.log(LogLevel::Info, msg);
+            }
+        }
+    }
+
+    fn do_redo(&mut self) {
+        if let Some(snapshot) = self.redo_stack.pop() {
+            // Save current to undo.
+            if let Ok(current) = ron::ser::to_string(&self.scene) {
+                self.undo_stack.push(current);
+            }
+            // Restore.
+            if let Ok(restored) = ron::from_str::<SceneGraph>(&snapshot) {
+                self.scene = restored;
+                self.hierarchy.selected_node = None;
+                self.viewport.selected = None;
+                let is_es = self.settings.language == Language::Spanish;
+                let msg = if is_es { "Rehacer" } else { "Redo" };
+                self.last_action = msg.to_string();
+                self.console.log(LogLevel::Info, msg);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // v0.3.0: Scene actions
+    // -----------------------------------------------------------------------
+
+    fn do_delete(&mut self) {
+        let is_es = self.settings.language == Language::Spanish;
+        if let Some(id) = self.hierarchy.selected_node {
+            self.push_undo_snapshot();
+            let name = self.scene.get(id).map(|n| n.name.clone()).unwrap_or_default();
+            if self.scene.remove_node(id) {
+                self.hierarchy.selected_node = None;
+                self.viewport.selected = None;
+                let msg = if is_es {
+                    format!("Eliminado: {}", name)
+                } else {
+                    format!("Deleted: {}", name)
+                };
+                self.last_action = msg.clone();
+                self.console.log(LogLevel::Info, &msg);
+            }
+        }
+    }
+
+    fn do_duplicate(&mut self) {
+        let is_es = self.settings.language == Language::Spanish;
+        if let Some(id) = self.hierarchy.selected_node {
+            self.push_undo_snapshot();
+            if let Some(new_id) = self.scene.duplicate_node(id) {
+                self.hierarchy.selected_node = Some(new_id);
+                self.viewport.selected = Some(new_id);
+                let name = self.scene.get(new_id).map(|n| n.name.clone()).unwrap_or_default();
+                let msg = if is_es {
+                    format!("Duplicado: {}", name)
+                } else {
+                    format!("Duplicated: {}", name)
+                };
+                self.last_action = msg.clone();
+                self.console.log(LogLevel::Info, &msg);
+            }
+        }
+    }
+
+    fn do_select_all(&mut self) {
+        let ids = self.scene.all_valid_ids();
+        if let Some(first) = ids.first() {
+            self.hierarchy.selected_node = Some(*first);
+            self.viewport.selected = Some(*first);
+        }
+        let is_es = self.settings.language == Language::Spanish;
+        let msg = if is_es {
+            format!("{} entidades encontradas", ids.len())
+        } else {
+            format!("{} entities found", ids.len())
+        };
+        self.last_action = msg.clone();
+        self.console.log(LogLevel::Info, &msg);
+    }
+
+    fn do_save(&mut self) {
+        let is_es = self.settings.language == Language::Spanish;
+        if let Some(project) = &self.current_project {
+            let _ = project.save();
+            // Save scene alongside project.
+            let scene_path = project.path.join("scene.ron");
+            let _ = self.scene.save_ron(&scene_path);
+            self.scene_modified = false;
+            self.auto_save_elapsed = 0.0;
+            let msg = if is_es { "Proyecto guardado" } else { "Project saved" };
+            self.last_action = msg.to_string();
+            self.console.log(LogLevel::Info, msg);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // v0.3.0: Global shortcuts
+    // -----------------------------------------------------------------------
+
+    fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
+        let action: Option<u8> = ctx.input(|i| {
+            let ctrl = i.modifiers.ctrl || i.modifiers.mac_cmd;
+            if ctrl && i.key_pressed(egui::Key::Z) { return Some(1); }
+            if ctrl && i.key_pressed(egui::Key::Y) { return Some(2); }
+            if ctrl && i.key_pressed(egui::Key::D) { return Some(3); }
+            if ctrl && i.key_pressed(egui::Key::S) { return Some(4); }
+            if ctrl && i.key_pressed(egui::Key::A) { return Some(5); }
+            if i.key_pressed(egui::Key::Delete) { return Some(6); }
+            None
+        });
+        match action {
+            Some(1) => self.do_undo(),
+            Some(2) => self.do_redo(),
+            Some(3) => self.do_duplicate(),
+            Some(4) => self.do_save(),
+            Some(5) => self.do_select_all(),
+            Some(6) => self.do_delete(),
+            _ => {}
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // v0.3.0: Auto-save
+    // -----------------------------------------------------------------------
+
+    fn handle_auto_save(&mut self, ctx: &egui::Context) {
+        if !self.scene_modified {
+            return;
+        }
+        let dt = ctx.input(|i| i.predicted_dt);
+        self.auto_save_elapsed += dt;
+        let interval = self.settings.auto_save_interval_seconds as f32;
+        if interval > 0.0 && self.auto_save_elapsed >= interval {
+            self.do_save();
+            let is_es = self.settings.language == Language::Spanish;
+            let msg = if is_es { "Auto-guardado" } else { "Auto-saved" };
+            self.last_action = msg.to_string();
+            self.console.log(LogLevel::Info, msg);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1025,7 +1292,17 @@ impl AuraRafiApp {
                 self.recent_projects.add(&project);
                 let _ = self.recent_projects.save(&config_dir);
                 let ptype = project.project_type;
-                self.init_scene_for_type(ptype);
+
+                // Try to load saved scene, fall back to default.
+                let scene_path = project.path.join("scene.ron");
+                if scene_path.exists() {
+                    self.scene = SceneGraph::load_ron(&scene_path);
+                    let is_es = self.settings.language == Language::Spanish;
+                    let msg = if is_es { "Escena cargada desde archivo" } else { "Scene loaded from file" };
+                    self.console.log(LogLevel::Info, msg);
+                } else {
+                    self.init_scene_for_type(ptype);
+                }
 
                 // Switch viewport mode based on project type.
                 self.viewport_mode = match ptype {
@@ -1033,9 +1310,17 @@ impl AuraRafiApp {
                     ProjectType::Electronics => ViewportMode::Schematic,
                 };
 
+                // Clear undo/redo for new session.
+                self.undo_stack.clear();
+                self.redo_stack.clear();
+                self.scene_modified = false;
+                self.last_action.clear();
+
                 self.current_project = Some(project);
                 self.screen = AppScreen::Editor;
-                self.console.log(LogLevel::Info, "Project loaded");
+                let is_es = self.settings.language == Language::Spanish;
+                let msg = if is_es { "Proyecto cargado" } else { "Project loaded" };
+                self.console.log(LogLevel::Info, msg);
             }
             Err(e) => {
                 self.console.log(
