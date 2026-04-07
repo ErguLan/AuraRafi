@@ -9,6 +9,7 @@ pub mod export;
 pub mod library;
 pub mod netlist;
 pub mod schematic;
+pub mod schematic_graph;
 pub mod simulation;
 
 pub use component::{ElectronicComponent, PinDirection, SimModel};
@@ -21,4 +22,6 @@ pub use export::{
 pub use library::ComponentLibrary;
 pub use netlist::Netlist;
 pub use schematic::Schematic;
+pub use schematic_graph::{SchematicGraph, LegacyWarning};
 pub use simulation::{simulate_dc, SimulationResults};
+

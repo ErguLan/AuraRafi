@@ -51,6 +51,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **LOD system** (raf_render/lod.rs): 3 distance-based detail levels, auto-cull beyond max distance, segment/stack helpers for primitives
 - **Collider system** (raf_core/scene/collider.rs): AABB auto-fit from vertices with intersection test + wireframe viz, ConvexHull with directional pruning, MeshCollider with exact geometry, ES/EN type labels
 - **Mesh merge** (raf_core/scene/merge.rs): combine meshes into single draw call, vertex welding with distance threshold, source range tracking for unmerge, MeshGroup for entity grouping
+- **Render backend switch** (raf_render/backend.rs): CPU painter default (zero GPU) / GPU wgpu opt-in, BackendConfig with frame budget tracking, adaptive detail reduction, FrameRenderStats, potato preset
+- **SchematicGraph** (raf_electronics/schematic_graph.rs): independent electronics data graph, separated from game SceneGraph. Own SchematicNode, Net, selection, picking, net rebuilding, RON persistence, legacy format detection with warnings ES/EN, format version marker
+- **WorldState** (raf_core/world_state.rs): lightweight game world snapshot for AI - time, weather, biome, camera, resources, custom data
+- **AI Director** (raf_ai/director.rs): observe WorldState, emit DirectorActions (spawn/remove/weather/scale/color/sound/custom), 3 modes (Disabled/Observer/Active), zero cost when off
+- **AI Asset Gen** (raf_ai/asset_gen.rs): GeneratedMesh/Texture from prompts, AssetGenCache with eviction (50MB max), disabled by default, low-poly defaults
+- **Mesh Provider** (raf_ai/mesh_provider.rs): streaming MeshChunk with grid coords + LOD, camera-based loading/eviction, 50k vertex budget, 4 provider types
+- **Hot Reload** (raf_core/hot_reload.rs): polling-based file watcher (zero external deps), detects changed/new/deleted files, 6 categories (Scene/Schematic/Config/Script/Asset/Project), recursive dir scanner, status summaries ES/EN, mod + collaborative dev support
+- **Animation Collision** (raf_core/scene/anim_collider.rs): AnimCollider per bone (sphere check), 5 response types (Stop/BlendToContact/Slide/Recoil/Ignore), AnimCollisionConfig enabled by default, auto-generate for common bones, layer masks. Structure prepared for animation system.
+- **Render Abstraction** (raf_render/abstraction.rs): RenderBackendTrait, 4 backend tiers, 20+ RenderCapability flags, ActiveBackend selector. Separates "what to render" from "how to render" - enables CPU->wgpu->RT scaling
+- **Scene Render Data** (raf_render/scene_data.rs): GPU-ready SceneRenderData bridge (RenderMesh, RenderLight directional/point/spot/area, RenderCamera, RenderEnvironment with fog/sky/HDR, RenderOutput stats)
+- **PBR Materials** (raf_render/material.rs): metallic/roughness glTF-compatible, 6 texture slots, MaterialPhysics (friction/density/impact sounds), MaterialLibrary, factory methods
+- **Spatial Partitioning** (raf_render/spatial.rs): SpatialGrid (3D uniform grid, O(1) queries, 3 presets), Frustum (6-plane culling, sphere tests)
+- **Complement Trace** (raf_render/complements/complement_trace.rs): RT designed from day 1, 4 modes (Disabled/Software/Hardware/Hybrid), 6 toggleable features, BVH AccelerationStructure
+- **GPU Deformation** (raf_render/gpu_deform.rs): 7 deformer types (cloth/hair/vegetation/water/skeletal/blend/custom), wind/gravity/stiffness params, per-vertex GPU overhead estimates
+- **World Streaming** (raf_render/world_stream.rs): seamless open world, WorldRegion with biomes/LOD/state, potato/default/high presets, camera-based region management
 
 ## [0.1.1] - 2026-03-16
 

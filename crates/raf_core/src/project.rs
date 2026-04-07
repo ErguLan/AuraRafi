@@ -108,7 +108,18 @@ pub struct RecentProjectEntry {
     pub name: String,
     pub path: PathBuf,
     pub project_type: ProjectType,
+    #[serde(default = "default_utc_now")]
+    pub created_at: DateTime<Utc>,
+    #[serde(default = "default_utc_now")]
+    pub modified_at: DateTime<Utc>,
     pub last_opened: DateTime<Utc>,
+    /// Statistical metadata (e.g. number of nodes or components).
+    #[serde(default)]
+    pub n_elements: u32,
+}
+
+fn default_utc_now() -> DateTime<Utc> {
+    Utc::now()
 }
 
 impl RecentProjects {
@@ -125,7 +136,10 @@ impl RecentProjects {
                 name: project.name.clone(),
                 path: project.path.clone(),
                 project_type: project.project_type,
+                created_at: project.created_at,
+                modified_at: project.modified_at,
                 last_opened: Utc::now(),
+                n_elements: 0, // Placeholder
             },
         );
 

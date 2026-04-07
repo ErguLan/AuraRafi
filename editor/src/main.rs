@@ -9,14 +9,14 @@ fn main() -> eframe::Result<()> {
         .with_target(false)
         .init();
 
-    tracing::info!("AuraRafi Editor starting...");
+    tracing::info!("Proyecto Rafi Editor starting...");
 
     // Load custom icon from embedded PNG.
     let icon = load_icon();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("AuraRafi Engine")
+            .with_title("Proyecto Rafi")
             .with_inner_size([1280.0, 720.0])
             .with_min_inner_size([800.0, 500.0])
             .with_icon(icon),
@@ -24,7 +24,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "AuraRafi",
+        "Proyecto Rafi",
         options,
         Box::new(|cc| Ok(Box::new(raf_editor::AuraRafiApp::new(cc)))),
     )

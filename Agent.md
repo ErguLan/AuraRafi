@@ -88,6 +88,22 @@ ProyectRaf/
 - **v0.3.0: Scene serialization** to RON files (save/load alongside project)
 - **v0.3.0: Enhanced menus** (File/Edit/View/Project/Help, translated, shortcut labels)
 - **v0.3.0: Status bar** with modified indicator (*), undo/redo depth, last action
+- Render backend switch (CPU/GPU): CPU painter default (zero GPU), GPU wgpu opt-in, frame budget tracking, adaptive detail reduction, potato preset
+- Independent SchematicGraph for electronics: separated from game SceneGraph, own selection/picking/nets/serialization, legacy format detection with user warnings ES/EN
+- WorldState snapshot for AI: time, weather, biome, camera, resources, custom data (prepared, not connected to game loop)
+- AI Director: DirectorActions (spawn/remove/weather/scale/color/sound), Disabled/Observer/Active modes, zero cost when off
+- AI asset generation interface: GeneratedMesh, GeneratedTexture, cache with eviction, low-poly defaults (prepared, no AI model connected)
+- Mesh streaming provider: MeshChunk with grid coords + LOD, camera-based chunk loading/eviction, vertex budget (prepared, not connected)
+- **Hot Reload**: polling-based file watcher (zero dependencies), detects changed/new/deleted files, categories (Scene/Schematic/Config/Script/Asset), directory scanner, status bar summaries ES/EN. Supports hot reload, mod detection, collaborative dev via shared files. Enabled by default, auto-reload off (notifies first).
+- Animation-aware collision structure: AnimCollider per bone (sphere), 5 responses (Stop/Blend/Slide/Recoil/Ignore), auto-generate for hands/feet, enabled by DEFAULT. Requires animation system to connect (prepared, not active).
+- **Render Abstraction Layer** (prepared, zero cost):
+  - `abstraction.rs`: RenderBackendTrait (CPU/wgpu/RT backends share one interface), RenderCapability enum (20+ caps from basic meshes to hardware RT), ActiveBackend selector (CpuPainter/Wgpu/SoftwareRT/HardwareRT)
+  - `scene_data.rs`: SceneRenderData (flat GPU-ready mesh arrays, lights, camera, environment), RenderMesh (positions/normals/UVs/indices, shadow flags, instancing), RenderLight (directional/point/spot/area), RenderEnvironment (ambient, fog, sky gradient, HDR exposure)
+  - `material.rs`: PBR materials (metallic/roughness glTF-compatible), MaterialTextures (albedo/normal/MR/emissive/AO/height slots), MaterialPhysics (friction/restitution/density/destructible/impact sound), MaterialLibrary, factory methods (color/metal/glass/emissive)
+  - `spatial.rs`: SpatialGrid (uniform 3D grid, insert/query_radius/query_aabb, small/medium/large presets), Frustum (6-plane, point/sphere culling), SpatialConfig
+  - `complements/complement_trace.rs`: Complement Trace (ray tracing designed from day 1), Ray/RayHit, RayTraceConfig (4 modes: Disabled/Software/Hardware/Hybrid), RayTraceFeatures (shadows/reflections/GI/AO/refractions/caustics toggleable), BVH AccelerationStructure
+  - `gpu_deform.rs`: GPU vertex deformation (cloth/hair/vegetation/water/skeletal/blend shape), GpuDeformer (wind, gravity, stiffness, damping), factory methods, per-vertex GPU overhead estimates
+  - `world_stream.rs`: seamless open world streaming, WorldRegion (grid, biome, LOD, state machine), WorldStreamConfig (potato/default/high presets), camera-based load/unload decisions
 
 ### What Does NOT Work Yet (Priority Order)
 1. **Edit Mode UI** -- EditableMesh data exists but the viewport edit mode (Tab toggle, vertex rendering, drag handles) is not wired up yet.

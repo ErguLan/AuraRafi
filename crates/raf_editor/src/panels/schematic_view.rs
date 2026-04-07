@@ -164,15 +164,11 @@ impl SchematicViewPanel {
     // -----------------------------------------------------------------------
 
     fn draw_toolbar(&mut self, ui: &mut Ui) {
-        let is_es = self.is_es;
+        let _is_es = self.is_es;
 
         ui.horizontal(|ui| {
             // Library toggle.
-            let lib_label = if self.show_library {
-                if is_es { "Ocultar Biblioteca" } else { "Hide Library" }
-            } else {
-                if is_es { "Mostrar Biblioteca" } else { "Show Library" }
-            };
+            let lib_label = if self.show_library { "Hide Library" } else { "Show Library" };
             if ui.button(lib_label).clicked() {
                 self.show_library = !self.show_library;
             }
@@ -181,9 +177,8 @@ impl SchematicViewPanel {
 
             // Wire mode toggle.
             let wire_active = self.placement == PlacementMode::Wire;
-            let wire_label = if is_es { "Dibujar Cable" } else { "Draw Wire" };
             if ui
-                .selectable_label(wire_active, wire_label)
+                .selectable_label(wire_active, "Draw Wire")
                 .clicked()
             {
                 if wire_active {
@@ -197,12 +192,8 @@ impl SchematicViewPanel {
             ui.separator();
 
             // DRC / Electrical test button.
-            let test_label = if is_es { "DRC / Prueba Electrica" } else { "DRC / Electrical Test" };
             if ui
-                .button(
-                    egui::RichText::new(test_label)
-                        .color(Color32::WHITE),
-                )
+                .button("DRC / Electrical Test")
                 .clicked()
             {
                 self.test_results = self.schematic.electrical_test();
@@ -213,9 +204,8 @@ impl SchematicViewPanel {
 
             // Simulate button.
             if self.sim_active {
-                let stop_label = if is_es { "Detener Sim." } else { "Stop Sim." };
                 if ui
-                    .button(egui::RichText::new(stop_label).color(Color32::from_rgb(255, 100, 100)))
+                    .button(egui::RichText::new("Stop Sim.").color(Color32::from_rgb(220, 90, 90)))
                     .clicked()
                 {
                     self.sim_active = false;
@@ -223,9 +213,8 @@ impl SchematicViewPanel {
                     self.sim_phase = 0.0;
                 }
             } else {
-                let sim_label = if is_es { "Simular DC" } else { "Simulate DC" };
                 if ui
-                    .button(egui::RichText::new(sim_label).color(Color32::from_rgb(100, 220, 255)))
+                    .button("Simulate DC")
                     .clicked()
                 {
                     let results = self.schematic.simulate_dc();
@@ -237,49 +226,32 @@ impl SchematicViewPanel {
             ui.separator();
 
             // Export button.
-            let export_label = if is_es { "Exportar" } else { "Export" };
-            if ui.button(export_label).clicked() {
+            if ui.button("Export").clicked() {
                 self.show_export_menu = !self.show_export_menu;
             }
 
             ui.separator();
 
             // Info.
-            let info = if is_es {
-                format!(
-                    "Componentes: {} | Cables: {}",
-                    self.schematic.components.len(),
-                    self.schematic.wires.len()
-                )
-            } else {
-                format!(
-                    "Components: {} | Wires: {}",
-                    self.schematic.components.len(),
-                    self.schematic.wires.len()
-                )
-            };
-            ui.label(egui::RichText::new(info).small());
+            let info = format!(
+                "Components: {} | Wires: {}",
+                self.schematic.components.len(),
+                self.schematic.wires.len()
+            );
+            ui.label(egui::RichText::new(info).size(11.0).color(theme::DARK_TEXT_DIM));
 
             if self.placement != PlacementMode::None {
                 ui.separator();
                 let mode_text = match &self.placement {
                     PlacementMode::Component(idx) => {
                         if let Some(tmpl) = self.library.components.get(*idx) {
-                            if is_es {
-                                format!("Colocando: {}", tmpl.name)
-                            } else {
-                                format!("Placing: {}", tmpl.name)
-                            }
+                            format!("Placing: {}", tmpl.name)
                         } else {
-                            if is_es { "Colocando...".to_string() } else { "Placing...".to_string() }
+                            "Placing...".to_string()
                         }
                     }
                     PlacementMode::Wire => {
-                        if is_es {
-                            "Dibujando cable (click para colocar puntos)".to_string()
-                        } else {
-                            "Drawing Wire (click to place points)".to_string()
-                        }
+                        "Drawing Wire (click to place points)".to_string()
                     }
                     PlacementMode::None => String::new(),
                 };
@@ -287,8 +259,7 @@ impl SchematicViewPanel {
                     egui::RichText::new(mode_text).color(theme::ACCENT),
                 );
 
-                let cancel_label = if is_es { "Cancelar (Esc)" } else { "Cancel (Esc)" };
-                if ui.button(cancel_label).clicked() {
+                if ui.button("Cancel (Esc)").clicked() {
                     self.placement = PlacementMode::None;
                     self.wire_start = None;
                 }
@@ -301,24 +272,32 @@ impl SchematicViewPanel {
     // -----------------------------------------------------------------------
 
     fn draw_library(&mut self, ui: &mut Ui, rect: Rect) {
-        let is_es = self.is_es;
+        let _is_es = self.is_es;
         let painter = ui.painter_at(rect);
 
         // Background.
-        painter.rect_filled(rect, 0.0, Color32::from_rgb(26, 26, 34));
+        painter.rect_filled(rect, 0.0, Color32::from_rgb(24, 24, 28));
         painter.line_segment(
             [rect.right_top(), rect.right_bottom()],
-            Stroke::new(1.0, Color32::from_rgb(50, 50, 58)),
+            Stroke::new(1.0, Color32::from_rgb(45, 45, 50)),
         );
 
-        // Title.
-        let lib_title = if is_es { "Biblioteca de Componentes" } else { "Component Library" };
+        // Title - uppercase, professional style.
         painter.text(
-            Pos2::new(rect.center().x, rect.top() + 16.0),
-            egui::Align2::CENTER_CENTER,
-            lib_title,
-            egui::FontId::proportional(12.0),
-            theme::ACCENT,
+            Pos2::new(rect.left() + 12.0, rect.top() + 16.0),
+            egui::Align2::LEFT_CENTER,
+            "COMPONENT LIBRARY",
+            egui::FontId::proportional(10.0),
+            Color32::from_rgb(130, 130, 140),
+        );
+
+        // Separator line under title.
+        painter.line_segment(
+            [
+                Pos2::new(rect.left() + 8.0, rect.top() + 28.0),
+                Pos2::new(rect.right() - 8.0, rect.top() + 28.0),
+            ],
+            Stroke::new(0.5, Color32::from_rgb(45, 45, 50)),
         );
 
         let mut y = rect.top() + 36.0;
@@ -336,46 +315,46 @@ impl SchematicViewPanel {
             let resp = ui.allocate_rect(btn_rect, egui::Sense::click());
             let is_selected = self.placement == PlacementMode::Component(idx);
             let bg = if is_selected {
-                Color32::from_rgb(60, 45, 25)
+                Color32::from_rgb(50, 42, 28)
             } else if resp.hovered() {
-                Color32::from_rgb(42, 42, 50)
+                Color32::from_rgb(38, 38, 44)
             } else {
-                Color32::from_rgb(34, 34, 42)
+                Color32::from_rgb(30, 30, 36)
             };
 
             painter.rect_filled(btn_rect, 4.0, bg);
 
             if is_selected {
-                painter.rect_stroke(btn_rect, 4.0, Stroke::new(1.0, theme::ACCENT));
+                // Left accent bar instead of full border.
+                let accent_rect = Rect::from_min_size(
+                    Pos2::new(btn_rect.left(), btn_rect.top() + 4.0),
+                    Vec2::new(2.0, btn_rect.height() - 8.0),
+                );
+                painter.rect_filled(accent_rect, 1.0, theme::ACCENT);
             }
 
             painter.text(
-                Pos2::new(btn_rect.left() + 8.0, btn_rect.top() + 14.0),
+                Pos2::new(btn_rect.left() + 10.0, btn_rect.top() + 14.0),
                 egui::Align2::LEFT_CENTER,
                 &name,
-                egui::FontId::proportional(12.0),
-                Color32::from_rgb(220, 220, 230),
+                egui::FontId::proportional(11.0),
+                Color32::from_rgb(210, 210, 220),
             );
 
             painter.text(
-                Pos2::new(btn_rect.left() + 8.0, btn_rect.top() + 32.0),
+                Pos2::new(btn_rect.left() + 10.0, btn_rect.top() + 32.0),
                 egui::Align2::LEFT_CENTER,
                 &format!("{} - {}", category, desc),
                 egui::FontId::proportional(9.0),
-                Color32::from_rgb(120, 120, 130),
+                Color32::from_rgb(100, 100, 115),
             );
 
             if resp.clicked() {
                 self.placement = PlacementMode::Component(idx);
             }
 
-            // Tooltip on hover.
             if resp.hovered() {
-                let tip = if is_es {
-                    format!("Click para seleccionar y colocar {}", name)
-                } else {
-                    format!("Click to select and place {}", name)
-                };
+                let tip = format!("Click to select and place {}", name);
                 resp.on_hover_text(tip);
             }
 
@@ -506,23 +485,16 @@ impl SchematicViewPanel {
             if self.show_export_menu {
                 self.draw_export_menu(&painter, rect);
             }
-            let info_text = if is_es {
-                format!(
-                    "Zoom: {:.1}x | R: Rotar | Esc: Cancelar | Supr: Eliminar | Clic-der: Menu",
-                    self.zoom
-                )
-            } else {
-                format!(
+            let info_text = format!(
                     "Zoom: {:.1}x | R: Rotate | Esc: Cancel | Del: Remove | Right-click: Menu",
                     self.zoom
-                )
-            };
+                );
             painter.text(
                 Pos2::new(rect.left() + 10.0, rect.top() + 10.0),
                 egui::Align2::LEFT_TOP,
                 info_text,
-                egui::FontId::proportional(11.0),
-                Color32::from_rgb(100, 100, 110),
+                egui::FontId::proportional(10.0),
+                Color32::from_rgb(85, 85, 95),
             );
         } // painter dropped here
 

@@ -552,50 +552,91 @@ impl ViewportPanel {
         painter: &egui::Painter,
         rect: Rect,
         is_dark: bool,
-        lang: Language,
+        _lang: Language,
     ) {
-        let is_es = lang == Language::Spanish;
         let tools = [
-            (ViewportTool::Select, if is_es { "Sel (Q)" } else { "Sel (Q)" }),
-            (ViewportTool::Move, if is_es { "Mov (W)" } else { "Mov (W)" }),
-            (ViewportTool::Rotate, if is_es { "Rot (E)" } else { "Rot (E)" }),
-            (ViewportTool::Scale, if is_es { "Esc (R)" } else { "Scl (R)" }),
+            (ViewportTool::Select, "Sel", "Q"),
+            (ViewportTool::Move, "Mov", "W"),
+            (ViewportTool::Rotate, "Rot", "E"),
+            (ViewportTool::Scale, "Scl", "R"),
         ];
 
-        let x = rect.left() + 10.0;
-        let mut y = rect.top() + 10.0;
+        let x = rect.left() + 8.0;
+        let mut y = rect.top() + 8.0;
+        let btn_w = 52.0;
+        let btn_h = 22.0;
+        let gap = 2.0;
 
-        for (tool, label) in tools {
-            let btn_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(56.0, 20.0));
+        // Background pill for the entire toolbar group.
+        let group_rect = Rect::from_min_size(
+            Pos2::new(x - 2.0, y - 2.0),
+            Vec2::new(btn_w + 4.0, (btn_h + gap) * tools.len() as f32 + 2.0),
+        );
+        let group_bg = if is_dark {
+            Color32::from_rgba_premultiplied(20, 20, 22, 200)
+        } else {
+            Color32::from_rgba_premultiplied(235, 235, 238, 220)
+        };
+        painter.rect_filled(group_rect, 6.0, group_bg);
+        let group_border = if is_dark {
+            Color32::from_rgba_premultiplied(60, 60, 65, 100)
+        } else {
+            Color32::from_rgba_premultiplied(180, 180, 185, 100)
+        };
+        painter.rect_stroke(group_rect, 6.0, Stroke::new(0.5, group_border));
+
+        for (tool, label, key) in tools {
+            let btn_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(btn_w, btn_h));
             let is_active = self.tool == tool;
 
-            let bg = if is_active {
-                Color32::from_rgba_premultiplied(212, 119, 26, 200)
-            } else if is_dark {
-                Color32::from_rgba_premultiplied(30, 30, 30, 180)
-            } else {
-                Color32::from_rgba_premultiplied(220, 220, 220, 180)
-            };
+            // Active: subtle filled background. Inactive: transparent.
+            if is_active {
+                let active_bg = if is_dark {
+                    Color32::from_rgba_premultiplied(55, 55, 60, 200)
+                } else {
+                    Color32::from_rgba_premultiplied(200, 200, 205, 200)
+                };
+                painter.rect_filled(btn_rect, 3.0, active_bg);
+                // Left accent bar.
+                let accent_rect = Rect::from_min_size(
+                    Pos2::new(btn_rect.left(), btn_rect.top() + 3.0),
+                    Vec2::new(2.0, btn_h - 6.0),
+                );
+                painter.rect_filled(accent_rect, 1.0, Color32::from_rgb(212, 119, 26));
+            }
 
-            painter.rect_filled(btn_rect, 3.0, bg);
-
+            // Label text.
             let text_color = if is_active {
-                Color32::WHITE
+                if is_dark { Color32::from_rgb(230, 230, 235) } else { Color32::from_rgb(30, 30, 35) }
             } else if is_dark {
-                Color32::from_rgb(160, 160, 160)
+                Color32::from_rgb(130, 130, 135)
             } else {
-                Color32::from_rgb(60, 60, 60)
+                Color32::from_rgb(90, 90, 95)
             };
 
             painter.text(
-                btn_rect.center(),
-                egui::Align2::CENTER_CENTER,
+                Pos2::new(btn_rect.left() + 10.0, btn_rect.center().y),
+                egui::Align2::LEFT_CENTER,
                 label,
-                egui::FontId::proportional(9.0),
+                egui::FontId::proportional(10.0),
                 text_color,
             );
 
-            y += 24.0;
+            // Shortcut key - dimmed.
+            let key_color = if is_dark {
+                Color32::from_rgba_premultiplied(100, 100, 105, 150)
+            } else {
+                Color32::from_rgba_premultiplied(140, 140, 145, 150)
+            };
+            painter.text(
+                Pos2::new(btn_rect.right() - 8.0, btn_rect.center().y),
+                egui::Align2::RIGHT_CENTER,
+                key,
+                egui::FontId::proportional(9.0),
+                key_color,
+            );
+
+            y += btn_h + gap;
         }
     }
 
@@ -604,56 +645,87 @@ impl ViewportPanel {
         painter: &egui::Painter,
         rect: Rect,
         is_dark: bool,
-        lang: Language,
+        _lang: Language,
     ) {
-        let is_es = lang == Language::Spanish;
-        let label_2d = "2D";
-        let label_3d = "3D";
-
-        // Positioned at top-center
+        // Segmented control at top-center.
         let center_x = rect.center().x;
-        let y = rect.top() + 10.0;
+        let y = rect.top() + 8.0;
 
-        let btn_w = 36.0;
-        let btn_h = 20.0;
+        let btn_w = 34.0;
+        let btn_h = 22.0;
+        let total_w = btn_w * 2.0;
 
-        // 2D button
-        let rect_2d = Rect::from_min_size(Pos2::new(center_x - btn_w - 1.0, y), Vec2::new(btn_w, btn_h));
-        let is_2d = self.mode == ViewportMode::View2D;
-        let bg_2d = if is_2d {
-            Color32::from_rgba_premultiplied(212, 119, 26, 200)
+        // Group background.
+        let group_rect = Rect::from_min_size(
+            Pos2::new(center_x - total_w / 2.0 - 1.0, y - 1.0),
+            Vec2::new(total_w + 2.0, btn_h + 2.0),
+        );
+        let group_bg = if is_dark {
+            Color32::from_rgba_premultiplied(20, 20, 22, 200)
         } else {
-            Color32::from_rgba_premultiplied(40, 40, 40, 180)
+            Color32::from_rgba_premultiplied(235, 235, 238, 220)
         };
-        painter.rect_filled(rect_2d, 3.0, bg_2d);
-        painter.text(rect_2d.center(), egui::Align2::CENTER_CENTER, label_2d,
-            egui::FontId::proportional(10.0),
-            if is_2d { Color32::WHITE } else { Color32::from_rgb(140, 140, 140) });
-
-        // 3D button
-        let rect_3d = Rect::from_min_size(Pos2::new(center_x + 1.0, y), Vec2::new(btn_w, btn_h));
-        let is_3d = self.mode == ViewportMode::View3D;
-        let bg_3d = if is_3d {
-            Color32::from_rgba_premultiplied(212, 119, 26, 200)
+        painter.rect_filled(group_rect, 5.0, group_bg);
+        let border_color = if is_dark {
+            Color32::from_rgba_premultiplied(60, 60, 65, 100)
         } else {
-            Color32::from_rgba_premultiplied(40, 40, 40, 180)
+            Color32::from_rgba_premultiplied(180, 180, 185, 100)
         };
-        painter.rect_filled(rect_3d, 3.0, bg_3d);
-        painter.text(rect_3d.center(), egui::Align2::CENTER_CENTER, label_3d,
-            egui::FontId::proportional(10.0),
-            if is_3d { Color32::WHITE } else { Color32::from_rgb(140, 140, 140) });
+        painter.rect_stroke(group_rect, 5.0, Stroke::new(0.5, border_color));
 
-        // Label below
+        let modes = [
+            (ViewportMode::View2D, "2D"),
+            (ViewportMode::View3D, "3D"),
+        ];
+
+        for (i, (mode, label)) in modes.iter().enumerate() {
+            let bx = center_x - total_w / 2.0 + (i as f32 * btn_w);
+            let btn_rect = Rect::from_min_size(Pos2::new(bx, y), Vec2::new(btn_w, btn_h));
+            let is_active = self.mode == *mode;
+
+            if is_active {
+                let active_bg = if is_dark {
+                    Color32::from_rgba_premultiplied(55, 55, 60, 200)
+                } else {
+                    Color32::from_rgba_premultiplied(200, 200, 205, 200)
+                };
+                painter.rect_filled(btn_rect, 3.0, active_bg);
+                // Bottom accent line.
+                let accent_rect = Rect::from_min_size(
+                    Pos2::new(btn_rect.left() + 4.0, btn_rect.bottom() - 2.0),
+                    Vec2::new(btn_w - 8.0, 2.0),
+                );
+                painter.rect_filled(accent_rect, 1.0, Color32::from_rgb(212, 119, 26));
+            }
+
+            let text_color = if is_active {
+                if is_dark { Color32::from_rgb(230, 230, 235) } else { Color32::from_rgb(30, 30, 35) }
+            } else if is_dark {
+                Color32::from_rgb(110, 110, 115)
+            } else {
+                Color32::from_rgb(120, 120, 125)
+            };
+
+            painter.text(
+                btn_rect.center(),
+                egui::Align2::CENTER_CENTER,
+                label,
+                egui::FontId::proportional(10.0),
+                text_color,
+            );
+        }
+
+        // Mode label below.
         let mode_label = match self.mode {
-            ViewportMode::View2D => if is_es { "Vista 2D" } else { "2D View" },
-            ViewportMode::View3D => if is_es { "Vista 3D" } else { "3D View" },
+            ViewportMode::View2D => "2D View",
+            ViewportMode::View3D => "3D View",
         };
         painter.text(
-            Pos2::new(center_x, y + btn_h + 4.0),
+            Pos2::new(center_x, y + btn_h + 3.0),
             egui::Align2::CENTER_TOP,
             mode_label,
             egui::FontId::proportional(9.0),
-            Color32::from_rgba_premultiplied(120, 120, 120, 150),
+            Color32::from_rgba_premultiplied(100, 100, 105, 140),
         );
     }
 
@@ -663,56 +735,81 @@ impl ViewportPanel {
         painter: &egui::Painter,
         rect: Rect,
         is_dark: bool,
-        lang: Language,
+        _lang: Language,
     ) {
         if self.mode != ViewportMode::View3D {
             return;
         }
 
-        let is_es = lang == Language::Spanish;
         let styles = [
-            (RenderStyle::Solid, if is_es { "Solido" } else { "Solid" }),
-            (RenderStyle::Wireframe, if is_es { "Malla" } else { "Wire" }),
-            (RenderStyle::SolidOnly, if is_es { "Relleno" } else { "Fill" }),
+            (RenderStyle::Solid, "Solid"),
+            (RenderStyle::Wireframe, "Wire"),
+            (RenderStyle::SolidOnly, "Fill"),
         ];
 
-        let x = rect.right() - 10.0;
+        let btn_w = 48.0;
+        let btn_h = 20.0;
+        let gap = 2.0;
+        let x = rect.right() - btn_w - 10.0;
         let mut y = rect.top() + 30.0;
+
+        // Group background.
+        let group_rect = Rect::from_min_size(
+            Pos2::new(x - 2.0, y - 2.0),
+            Vec2::new(btn_w + 4.0, (btn_h + gap) * styles.len() as f32 + 2.0),
+        );
+        let group_bg = if is_dark {
+            Color32::from_rgba_premultiplied(20, 20, 22, 200)
+        } else {
+            Color32::from_rgba_premultiplied(235, 235, 238, 220)
+        };
+        painter.rect_filled(group_rect, 6.0, group_bg);
+        let border_color = if is_dark {
+            Color32::from_rgba_premultiplied(60, 60, 65, 100)
+        } else {
+            Color32::from_rgba_premultiplied(180, 180, 185, 100)
+        };
+        painter.rect_stroke(group_rect, 6.0, Stroke::new(0.5, border_color));
 
         for (style, label) in styles {
             let btn_rect = Rect::from_min_size(
-                Pos2::new(x - 50.0, y),
-                Vec2::new(50.0, 18.0),
+                Pos2::new(x, y),
+                Vec2::new(btn_w, btn_h),
             );
             let is_active = self.render_style == style;
 
-            let bg = if is_active {
-                Color32::from_rgba_premultiplied(212, 119, 26, 180)
-            } else if is_dark {
-                Color32::from_rgba_premultiplied(30, 30, 30, 150)
-            } else {
-                Color32::from_rgba_premultiplied(220, 220, 220, 150)
-            };
-
-            painter.rect_filled(btn_rect, 3.0, bg);
+            if is_active {
+                let active_bg = if is_dark {
+                    Color32::from_rgba_premultiplied(55, 55, 60, 200)
+                } else {
+                    Color32::from_rgba_premultiplied(200, 200, 205, 200)
+                };
+                painter.rect_filled(btn_rect, 3.0, active_bg);
+                // Right accent bar.
+                let accent_rect = Rect::from_min_size(
+                    Pos2::new(btn_rect.right() - 2.0, btn_rect.top() + 3.0),
+                    Vec2::new(2.0, btn_h - 6.0),
+                );
+                painter.rect_filled(accent_rect, 1.0, Color32::from_rgb(212, 119, 26));
+            }
 
             let text_color = if is_active {
-                Color32::WHITE
+                if is_dark { Color32::from_rgb(230, 230, 235) } else { Color32::from_rgb(30, 30, 35) }
             } else if is_dark {
-                Color32::from_rgb(140, 140, 140)
+                Color32::from_rgb(130, 130, 135)
             } else {
-                Color32::from_rgb(80, 80, 80)
+                Color32::from_rgb(90, 90, 95)
             };
 
             painter.text(
                 btn_rect.center(),
                 egui::Align2::CENTER_CENTER,
                 label,
-                egui::FontId::proportional(8.5),
+                egui::FontId::proportional(10.0),
                 text_color,
             );
 
-            y += 20.0;
+            y += btn_h + gap;
         }
     }
 
@@ -748,18 +845,21 @@ impl ViewportPanel {
         if self.mode == ViewportMode::View3D {
             if response.clicked() {
                 if let Some(pos) = response.interact_pointer_pos() {
-                    let x_right = rect.right() - 10.0;
+                    let btn_w = 48.0;
+                    let btn_h = 20.0;
+                    let gap = 2.0;
+                    let x = rect.right() - btn_w - 10.0;
                     let styles = [RenderStyle::Solid, RenderStyle::Wireframe, RenderStyle::SolidOnly];
                     let mut y = rect.top() + 30.0;
                     for style in styles {
                         let btn_rect = Rect::from_min_size(
-                            Pos2::new(x_right - 50.0, y),
-                            Vec2::new(50.0, 18.0),
+                            Pos2::new(x, y),
+                            Vec2::new(btn_w, btn_h),
                         );
                         if btn_rect.contains(pos) {
                             self.render_style = style;
                         }
-                        y += 20.0;
+                        y += btn_h + gap;
                     }
                 }
             }
@@ -769,15 +869,16 @@ impl ViewportPanel {
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
                 let center_x = rect.center().x;
-                let y = rect.top() + 10.0;
-                let btn_w = 36.0;
-                let btn_h = 20.0;
+                let y = rect.top() + 8.0;
+                let btn_w = 34.0;
+                let btn_h = 22.0;
+                let total_w = btn_w * 2.0;
                 let rect_2d = Rect::from_min_size(
-                    Pos2::new(center_x - btn_w - 1.0, y),
+                    Pos2::new(center_x - total_w / 2.0, y),
                     Vec2::new(btn_w, btn_h),
                 );
                 let rect_3d = Rect::from_min_size(
-                    Pos2::new(center_x + 1.0, y),
+                    Pos2::new(center_x - total_w / 2.0 + btn_w, y),
                     Vec2::new(btn_w, btn_h),
                 );
                 if rect_2d.contains(pos) {
@@ -791,15 +892,18 @@ impl ViewportPanel {
         // Click on tool buttons (top-left).
         if response.clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
-                let x = rect.left() + 10.0;
+                let x = rect.left() + 8.0;
+                let btn_w = 52.0;
+                let btn_h = 22.0;
+                let gap = 2.0;
                 let tools = [ViewportTool::Select, ViewportTool::Move, ViewportTool::Rotate, ViewportTool::Scale];
-                let mut y = rect.top() + 10.0;
+                let mut y = rect.top() + 8.0;
                 for tool in tools {
-                    let btn_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(56.0, 20.0));
+                    let btn_rect = Rect::from_min_size(Pos2::new(x, y), Vec2::new(btn_w, btn_h));
                     if btn_rect.contains(pos) {
                         self.tool = tool;
                     }
-                    y += 24.0;
+                    y += btn_h + gap;
                 }
             }
         }

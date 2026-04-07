@@ -21,19 +21,21 @@ impl Default for HierarchyPanel {
 
 impl HierarchyPanel {
     /// Draw the hierarchy panel.
-    pub fn show(&mut self, ui: &mut Ui, scene: &SceneGraph, lang: Language) {
-        let is_es = lang == Language::Spanish;
-        let title = if is_es { "Jerarquia" } else { "Hierarchy" };
-        ui.heading(title);
+    pub fn show(&mut self, ui: &mut Ui, scene: &SceneGraph, _lang: Language) {
+        // Professional uppercase header.
+        ui.label(
+            egui::RichText::new("HIERARCHY")
+                .size(10.0)
+                .color(egui::Color32::from_rgb(130, 130, 140)),
+        );
         ui.separator();
 
         if scene.is_empty() {
-            let msg = if is_es {
-                "Sin entidades en la escena"
-            } else {
-                "No entities in scene"
-            };
-            ui.label(msg);
+            ui.label(
+                egui::RichText::new("No entities in scene")
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(100, 100, 110)),
+            );
             return;
         }
 

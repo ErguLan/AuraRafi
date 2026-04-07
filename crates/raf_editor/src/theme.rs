@@ -25,60 +25,60 @@ pub const ACCENT_MUTED: Color32 = Color32::from_rgb(120, 70, 20);
 // Dark theme tokens
 // ---------------------------------------------------------------------------
 
-/// Dark theme main background - true black.
-pub const DARK_BG: Color32 = Color32::from_rgb(15, 15, 15);
+/// Dark theme main background - charcoal black.
+pub const DARK_BG: Color32 = Color32::from_rgb(11, 11, 12);
 
 /// Dark theme panel background (slightly lighter).
-pub const DARK_PANEL: Color32 = Color32::from_rgb(22, 22, 22);
+pub const DARK_PANEL: Color32 = Color32::from_rgb(17, 17, 18);
 
-/// Dark theme widget background (buttons, inputs).
-pub const DARK_WIDGET: Color32 = Color32::from_rgb(38, 38, 38);
+/// Dark theme widget background (buttons, backgrounds for cards).
+pub const DARK_WIDGET: Color32 = Color32::from_rgb(24, 24, 26);
 
 /// Dark theme widget hover.
-pub const DARK_WIDGET_HOVER: Color32 = Color32::from_rgb(52, 52, 52);
+pub const DARK_WIDGET_HOVER: Color32 = Color32::from_rgb(32, 32, 34);
 
 /// Dark theme widget active/pressed.
-pub const DARK_WIDGET_ACTIVE: Color32 = Color32::from_rgb(58, 58, 58);
+pub const DARK_WIDGET_ACTIVE: Color32 = Color32::from_rgb(38, 38, 40);
 
 /// Dark theme primary text.
-pub const DARK_TEXT: Color32 = Color32::from_rgb(220, 220, 230);
+pub const DARK_TEXT: Color32 = Color32::from_rgb(210, 210, 220);
 
 /// Dark theme dimmed/secondary text.
-pub const DARK_TEXT_DIM: Color32 = Color32::from_rgb(120, 120, 120);
+pub const DARK_TEXT_DIM: Color32 = Color32::from_rgb(100, 100, 110);
 
 /// Dark theme selection highlight.
-pub const DARK_SELECTION: Color32 = Color32::from_rgb(60, 45, 25);
+pub const DARK_SELECTION: Color32 = Color32::from_rgb(50, 40, 30);
 
 /// Dark theme border color.
-pub const DARK_BORDER: Color32 = Color32::from_rgb(50, 50, 50);
+pub const DARK_BORDER: Color32 = Color32::from_rgb(40, 40, 42);
 
 /// Dark theme separator/divider color.
-pub const DARK_SEPARATOR: Color32 = Color32::from_rgb(40, 40, 40);
+pub const DARK_SEPARATOR: Color32 = Color32::from_rgb(28, 28, 30);
 
 // ---------------------------------------------------------------------------
 // Light theme tokens
 // ---------------------------------------------------------------------------
 
-/// Light theme main background.
-pub const LIGHT_BG: Color32 = Color32::from_rgb(242, 242, 246);
+/// Light theme main background - Soft snow.
+pub const LIGHT_BG: Color32 = Color32::from_rgb(248, 249, 252);
 
-/// Light theme panel background.
-pub const LIGHT_PANEL: Color32 = Color32::from_rgb(250, 250, 252);
+/// Light theme panel background - Pure white.
+pub const LIGHT_PANEL: Color32 = Color32::from_rgb(255, 255, 255);
 
 /// Light theme widget background.
-pub const LIGHT_WIDGET: Color32 = Color32::from_rgb(228, 228, 234);
+pub const LIGHT_WIDGET: Color32 = Color32::from_rgb(238, 240, 245);
 
 /// Light theme widget hover.
-pub const LIGHT_WIDGET_HOVER: Color32 = Color32::from_rgb(215, 215, 222);
+pub const LIGHT_WIDGET_HOVER: Color32 = Color32::from_rgb(230, 233, 240);
 
 /// Light theme primary text.
-pub const LIGHT_TEXT: Color32 = Color32::from_rgb(30, 30, 40);
+pub const LIGHT_TEXT: Color32 = Color32::from_rgb(45, 47, 54);
 
 /// Light theme dimmed/secondary text.
-pub const LIGHT_TEXT_DIM: Color32 = Color32::from_rgb(110, 110, 125);
+pub const LIGHT_TEXT_DIM: Color32 = Color32::from_rgb(120, 125, 140);
 
 /// Light theme border.
-pub const LIGHT_BORDER: Color32 = Color32::from_rgb(200, 200, 210);
+pub const LIGHT_BORDER: Color32 = Color32::from_rgb(215, 220, 230);
 
 // ---------------------------------------------------------------------------
 // Status colors

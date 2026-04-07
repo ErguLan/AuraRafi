@@ -108,6 +108,42 @@ Lightweight pub/sub system with type-erased events:
 - Directory structure: `assets/`, `scenes/`, `scripts/`
 - `RecentProjects`: Tracks last 20 opened projects
 
+### Hot Reload (raf_core/hot_reload.rs)
+
+- Polling-based file watcher, zero external dependencies
+- Checks file modification timestamps every N seconds (default 2s)
+- 6 categories: Scene, Schematic, Config, Script, Asset, Project
+- `HotReloadState`: tracks watched files, polls for changes, evicts pending changes
+- `scan_directory()`: recursive scan of project folder, skips hidden/target dirs, respects max file limit
+- Detects: file modified, file created, file deleted
+- `auto_reload` off by default: notifies user before reloading (no surprises)
+- Status summaries in ES/EN for status bar display
+- Future use cases: mod support (script changes), collaborative dev (shared folder saves)
+
+### World State (for AI observation)
+
+- `WorldState`: Lightweight snapshot of game world (time, weather, biome, camera, resources, custom data)
+- Readable by any AI system (Director, mesh provider, agents)
+- Not connected to game loop yet - just the data structure prepared
+- No runtime cost when not read
+
+## AI (raf_ai)
+
+### Infrastructure (prepared, not connected)
+
+- `director`: AI Director that observes WorldState and emits DirectorActions
+  - Actions: SpawnEntity, RemoveEntity, SetWeather, SetTime, ScaleEntity, SetEntityColor, LogMessage, PlaySound, Custom
+  - Modes: Disabled (zero cost), Observer (suggestions only), Active (modifies world)
+  - Configurable: update interval, max actions per cycle, per-action permissions
+- `asset_gen`: AI-generated meshes/textures/terrain
+  - GeneratedMesh: vertex/index data from AI, ready for EditableMesh
+  - AssetGenCache: in-memory with prompt hashing, auto-eviction, 50MB max
+  - Config: disabled by default, 500 max polygons, 256px textures
+- `mesh_provider`: Streaming mesh data from AI or procedural sources
+  - MeshChunk: incremental mesh with grid coords, LOD level, memory tracking
+  - Camera-based chunk loading/eviction with vertex budget (50k max)
+  - Provider types: None, Procedural, LocalModel, CloudApi
+
 ## Rendering (raf_render)
 
 Lightweight rendering via CPU projection + egui painter (no GPU pipeline needed):
@@ -125,13 +161,63 @@ Lightweight rendering via CPU projection + egui painter (no GPU pipeline needed)
 - `gizmo`: Transform gizmo with per-axis handles (X/Y/Z), hit testing, translate/scale/rotate modes
 - `lod`: Level of Detail system, 3 distance-based levels, auto-cull, segment helpers
 - `AntiAliasing`: None, FXAA, MSAA4x (reserved for future GPU path)
+- `backend`: CPU/GPU render backend switch with adaptive frame budget tracking
+  - CPU painter: default, zero GPU memory, zero shaders. Runs on any hardware.
+  - GPU wgpu: opt-in only, for scenes with 300+ entities. Never auto-switches.
+  - `BackendConfig`: gpu_suggest_threshold, cpu_max_triangles, frame_budget_ms
+  - `FrameRenderStats`: per-frame triangle count, render time, over-budget detection
+  - `BackendConfig::potato()`: absolute minimum resource preset (2000 tris, 30fps budget)
 
-All rendering runs on CPU through egui's painter. Zero GPU buffers, zero shaders, zero texture memory. Runs on any hardware.
+### Render Abstraction Layer (prepared, zero cost when inactive)
+
+Architecture: `SceneGraph -> SceneRenderData -> RenderBackendTrait -> Backend`
+
+- `abstraction`: Core trait `RenderBackendTrait` - all backends implement this (init/render_frame/resize/shutdown)
+  - `RenderCapability`: 20+ flags from basic meshes to hardware RT. Query at runtime what the active backend supports
+  - `ActiveBackend`: 4 tiers - CpuPainter (default, potato), Wgpu (GPU), SoftwareRT (CPU ray tracing), HardwareRT (RTX)
+- `scene_data`: Bridge between SceneGraph and render backend
+  - `SceneRenderData`: complete frame package (meshes, lights, camera, environment, stats)
+  - `RenderMesh`: flat GPU-ready arrays (positions, normals, UVs, indices), shadow/instance flags
+  - `RenderLight`: directional (sun), point, spot, area. Shadow resolution per light
+  - `RenderEnvironment`: ambient, fog, sky gradient, HDR exposure
+- `material`: PBR metallic/roughness (glTF-compatible)
+  - `MaterialTextures`: 6 slots (albedo, normal, metallic-roughness, emissive, AO, height)
+  - `MaterialPhysics`: friction, restitution, density, destructibility, impact sound (9 types)
+  - Factory methods: `color()`, `metal()`, `glass()`, `emissive()`
+- `spatial`: Spatial partitioning for efficient culling
+  - `SpatialGrid`: uniform 3D grid, O(1) cell queries, presets (small 512 cells / medium 4096 / large 32768)
+  - `Frustum`: 6-plane view frustum, point and sphere containment tests
+- `complements/complement_trace`: Ray tracing designed from day 1
+  - `RayTraceConfig`: 4 modes (Disabled/Software/Hardware/Hybrid)
+  - `RayTraceFeatures`: 6 toggleable features (shadows, reflections, GI, AO, refractions, caustics)
+  - `AccelerationStructure`: BVH tree for O(log n) ray-triangle intersection
+- `gpu_deform`: GPU vertex deformation (all runs on GPU, CPU only sends params)
+  - 7 types: Cloth, Hair, Vegetation, Water, Skeletal, BlendShape, Custom
+  - `GpuDeformer`: wind, gravity, stiffness, damping, frequency, amplitude
+  - Per-vertex GPU overhead estimates per deformer type
+- `world_stream`: Seamless open world (zero loading screens)
+  - `WorldRegion`: grid position, biome (7 types), LOD level, load state machine
+  - `WorldStreamConfig` presets: potato (9 regions, 32MB), default (49 regions, 128MB), high (121 regions, 512MB)
+  - Camera-based region loading/unloading with triangle and memory budgets
 
 ## Scene Addons (raf_core/scene)
 
 - `collider`: AABB (auto-fit from vertices, intersection test, wireframe edges), ConvexHull (directional pruning), MeshCollider (exact geometry)
 - `merge`: Combine multiple meshes into one (reduces draw calls), vertex welding (remove duplicates), source tracking for unmerge, MeshGroup for entity grouping
+- `anim_collider`: Animation-aware collision (prepared, requires animation system)
+  - `AnimCollider`: sphere collider attached to bone, check_point/check_sphere tests
+  - `AnimCollisionResponse`: Stop, BlendToContact, Slide, Recoil, Ignore
+  - `AnimCollisionConfig`: enabled by default (marketing differentiator), auto-generate for hands/feet, layer masks
+  - Prevents animation clipping without manual configuration per-animation
+
+## Electronics (raf_electronics)
+
+- `schematic_graph`: **Independent** data graph for electronics, completely separated from game SceneGraph
+  - `SchematicNode`: component placement with canvas position, rotation, layer, selection
+  - `Net`: electrical connection tracking with pin references and computed voltage
+  - Own pick_component/pick_wire (click detection), selection, net rebuilding
+  - RON save/load, legacy Schematic conversion (backwards compat)
+  - Does NOT depend on raf_core::SceneGraph (prevents "Frostbite problem")
 
 ## Editor (raf_editor)
 

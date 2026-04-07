@@ -7,13 +7,17 @@
 //! - **Event**: Pub/sub event system for decoupled communication
 //! - **Config**: Engine settings (theme, language, performance)
 //! - **Project**: Project management (create, load, save)
+//! - **WorldState**: Lightweight game world snapshot for AI observation
+//! - **HotReload**: Polling-based file watcher for live project updates
 
 pub mod command;
 pub mod config;
 pub mod ecs;
 pub mod event;
+pub mod hot_reload;
 pub mod project;
 pub mod scene;
+pub mod world_state;
 
 /// Re-export commonly used types at the crate root.
 pub use command::{Command, CommandBus, CommandId};
@@ -22,3 +26,5 @@ pub use ecs::world::GameWorld;
 pub use event::{EventBus, EventId};
 pub use project::{Project, ProjectType};
 pub use scene::{NodeColor, Primitive, SceneGraph, SceneNode, SceneNodeId};
+pub use world_state::{WorldState, WorldTime, Weather};
+pub use hot_reload::{HotReloadConfig, HotReloadState, FileChange, WatchCategory};

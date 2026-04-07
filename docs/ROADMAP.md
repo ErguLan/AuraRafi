@@ -52,6 +52,8 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [x] Collider system: AABB auto-fit, ConvexHull, MeshCollider with intersection tests and wireframe viz
 - [x] Mesh merge: combine multiple meshes into one, vertex welding, source tracking for unmerge
 - [x] Mesh groups: group entities by ID to move/transform together
+- [x] Render backend switch: CPU painter (default, zero GPU) / GPU wgpu (opt-in), frame budget, adaptive detail, potato preset
+- [x] Independent SchematicGraph for electronics: separated from game SceneGraph, own data model with selection/picking/nets/serialization
 
 ## v0.3.0 - Editor Polish
 
@@ -66,7 +68,7 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [x] Select All (Ctrl+A) in scene viewport
 - [x] Scene serialization to RON files (save/load alongside project)
 - [x] Auto-save implementation (timer-based, configurable interval)
-- [ ] Hot-reload for assets using file watcher
+- [x] Hot-reload file watcher: polling-based (zero deps), detects changed/new/deleted files, 6 categories, recursive dir scan, status summaries ES/EN, mod + collaborative dev support
 - [ ] Responsive layout breakpoints (mobile-friendly editor)
 - [x] Undo/Redo (Ctrl+Z / Ctrl+Y) with scene snapshots (max 50 depth)
 - [x] Save shortcut (Ctrl+S) with scene RON persistence
@@ -117,14 +119,24 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 
 ## v0.7.0 - Advanced Rendering
 
-- [ ] PBR (Physically Based Rendering) materials
-- [ ] Point and spot lights
-- [ ] Shadow mapping
-- [ ] Ambient occlusion (SSAO)
+### Infrastructure (prepared)
+- [x] Render abstraction layer: RenderBackendTrait separates "what" from "how", 4 backend tiers (CpuPainter/Wgpu/SoftwareRT/HardwareRT), 20+ RenderCapability flags
+- [x] SceneRenderData bridge: flat GPU-ready mesh arrays, lights (directional/point/spot/area), camera, environment (ambient, fog, sky, HDR exposure)
+- [x] PBR material system: metallic/roughness (glTF-compatible), texture slots (albedo/normal/MR/emissive/AO/height), MaterialPhysics (friction/density/destructible/impact sounds), MaterialLibrary
+- [x] Spatial partitioning: SpatialGrid (uniform 3D grid, O(1) cell query, small/medium/large presets), Frustum (6-plane, point/sphere culling), SpatialConfig
+- [x] Complement Trace: ray tracing designed from day 1 (not patched), 4 modes (Disabled/Software/Hardware/Hybrid), per-feature toggles (shadows/reflections/GI/AO/refractions/caustics), BVH AccelerationStructure
+- [x] GPU vertex deformation: 7 deformer types (cloth/hair/vegetation/water/skeletal/blend shape/custom), wind/gravity/stiffness/frequency params, per-vertex GPU overhead estimates
+- [x] World streaming: seamless open world (zero loading screens), WorldRegion with biome/LOD/state machine, potato/default/high presets, camera-based region load/unload
+
+### Implementation (pending - requires wgpu integration)
+- [ ] wgpu pipeline implementation (vertex buffers, shaders WGSL, render passes)
+- [ ] PBR shader implementation (metallic/roughness + IBL)
+- [ ] Shadow mapping (directional cascades + point light cubemaps)
+- [ ] SSAO post-processing
 - [ ] Bloom post-processing
 - [ ] Anti-aliasing (FXAA, MSAA)
-- [ ] 2D sprite rendering
 - [ ] Texture loading and UV mapping
+- [ ] 2D sprite rendering
 
 ## v0.8.0 - Game Runtime
 
@@ -135,15 +147,32 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [ ] Basic collision detection
 - [ ] Simple physics (gravity, velocity)
 - [ ] Audio playback (wav, ogg)
+- [ ] Animation system (keyframe-based, bone hierarchy)
+- [x] Animation-aware collision structure (raf_core/scene/anim_collider.rs): AnimCollider per bone, 5 response types (Stop/Blend/Slide/Recoil/Ignore), auto-generate for hands/feet, enabled by DEFAULT (marketing differentiator)
+- [ ] Connect animation collision to playback (check colliders each animation step, trigger response on hit)
+- [ ] IK (Inverse Kinematics) for procedural foot placement and hand grabs
 
 ## v0.9.0 - AI Integration
 
-- [ ] LLM provider connection (API integration)
-- [ ] Tool-calling execution pipeline
-- [ ] Scene state context for AI
-- [ ] AI-assisted entity creation
-- [ ] AI-assisted debugging
+### Infrastructure (prepared)
+- [x] WorldState snapshot: time, weather, biome, camera, resources, custom data (raf_core/world_state.rs)
+- [x] AI Director: observe WorldState, emit DirectorActions (spawn/remove/weather/scale/color/sound/custom) - disabled by default, zero cost
+- [x] AI asset generation interface: GeneratedMesh, GeneratedTexture, AssetGenConfig, cache with eviction (raf_ai/asset_gen.rs)
+- [x] Mesh streaming provider: MeshChunk with grid coords + LOD, camera-based chunk loading/eviction, vertex budget (raf_ai/mesh_provider.rs)
+- [x] DirectorConfig: mode (Disabled/Observer/Active), update interval, action limits, per-action permissions
+- [x] AssetGenCache: in-memory with prompt hashing, auto-eviction, 50MB max
+
+### Integration (pending - requires engine maturity)
+- [ ] LLM provider connection (API integration with OpenClaw/OpenRouter/etc.)
+- [ ] Tool-calling execution pipeline (AI -> CommandBus)
+- [ ] AI Director connected to game loop (reads WorldState, emits actions)
+- [ ] Mesh provider connected to viewport (streams chunks into EditableMesh)
+- [ ] Asset generator UI in asset browser panel ("Generate with AI" button)
+- [ ] AI-assisted entity creation (prompt -> spawn primitive with properties)
+- [ ] AI-assisted debugging (analyze console errors, suggest fixes)
 - [ ] Chat history persistence
+- [ ] AI-generated textures applied as materials
+- [ ] Procedural terrain via mesh provider (no AI needed, algorithmic)
 
 ## v0.10.0 - Hardware & IoT
 
@@ -195,3 +224,6 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - Console SDK integration (Xbox, PlayStation, Switch)
 - Gerber direct-order to JLCPCB/PCBWay API
 - Circuit sharing via URL (WASM + base64 RON)
+- Mod support: detect external scripts via hot reload watcher, load/reload without game restart
+- Collaborative dev: multiple devs sharing project folder, hot reload detects external saves automatically
+- Accessibility: daltonism-friendly palettes, high contrast mode, UI narrator
