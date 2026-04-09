@@ -4,6 +4,7 @@
 
 use egui::Ui;
 use raf_core::config::Language;
+use raf_core::i18n::t;
 use raf_core::scene::graph::{NodeColor, Primitive, SceneGraph, SceneNodeId};
 
 /// State for the properties panel.
@@ -26,8 +27,8 @@ impl PropertiesPanel {
     ) {
         // Professional uppercase header.
         ui.label(
-            egui::RichText::new("PROPERTIES")
-                .size(10.0)
+            egui::RichText::new(t("app.properties", _lang))
+                .size(11.0).strong()
                 .color(egui::Color32::from_rgb(130, 130, 140)),
         );
         ui.separator();
@@ -37,7 +38,7 @@ impl PropertiesPanel {
             None => {
                 ui.add_space(4.0);
                 ui.label(
-                    egui::RichText::new("No entity selected")
+                    egui::RichText::new(t("app.no_entity_selected", _lang))
                         .size(11.0)
                         .color(egui::Color32::from_rgb(100, 100, 110)),
                 );
@@ -49,7 +50,7 @@ impl PropertiesPanel {
             Some(n) => n,
             None => {
                 ui.label(
-                    egui::RichText::new("Entity not found")
+                    egui::RichText::new(t("app.entity_not_found", _lang))
                         .size(11.0)
                         .color(egui::Color32::from_rgb(100, 100, 110)),
                 );
@@ -60,17 +61,17 @@ impl PropertiesPanel {
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Name
             ui.horizontal(|ui| {
-                ui.label("Name:");
+                ui.label(t("app.name", _lang));
                 ui.text_edit_singleline(&mut node.name);
             });
 
             ui.add_space(8.0);
 
             // Transform section
-            egui::CollapsingHeader::new("Transform")
+            egui::CollapsingHeader::new(t("app.transform", _lang))
                 .default_open(true)
                 .show(ui, |ui| {
-                    ui.label(egui::RichText::new("Position:").size(11.0));
+                    ui.label(egui::RichText::new(t("app.position", _lang)).size(11.0));
                     ui.horizontal(|ui| {
                         ui.label("X:");
                         ui.add(egui::DragValue::new(&mut node.position.x).speed(0.1));
@@ -80,7 +81,7 @@ impl PropertiesPanel {
                         ui.add(egui::DragValue::new(&mut node.position.z).speed(0.1));
                     });
 
-                    ui.label(egui::RichText::new("Rotation:").size(11.0));
+                    ui.label(egui::RichText::new(t("app.rotation", _lang)).size(11.0));
                     ui.horizontal(|ui| {
                         ui.label("X:");
                         ui.add(egui::DragValue::new(&mut node.rotation.x).speed(1.0));
@@ -90,7 +91,7 @@ impl PropertiesPanel {
                         ui.add(egui::DragValue::new(&mut node.rotation.z).speed(1.0));
                     });
 
-                    ui.label(egui::RichText::new("Scale:").size(11.0));
+                    ui.label(egui::RichText::new(t("app.scale", _lang)).size(11.0));
                     ui.horizontal(|ui| {
                         ui.label("X:");
                         ui.add(egui::DragValue::new(&mut node.scale.x).speed(0.05));
@@ -104,11 +105,11 @@ impl PropertiesPanel {
             ui.add_space(4.0);
 
             // Material / Color section
-            egui::CollapsingHeader::new("Material")
+            egui::CollapsingHeader::new(t("app.material", _lang))
                 .default_open(true)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Color:");
+                        ui.label(t("app.color", _lang));
 
                         // Convert NodeColor to egui color for the picker.
                         let mut rgba = [
@@ -127,7 +128,7 @@ impl PropertiesPanel {
 
                     // Quick color presets - refined small squares with border.
                     ui.horizontal(|ui| {
-                        ui.label("Presets:");
+                        ui.label(t("app.presets", _lang));
                         let color_presets = [
                             ("R", NodeColor::rgb(220, 80, 80)),
                             ("G", NodeColor::rgb(80, 200, 80)),
@@ -169,11 +170,11 @@ impl PropertiesPanel {
             ui.add_space(4.0);
 
             // Primitive type
-            egui::CollapsingHeader::new("Shape")
+            egui::CollapsingHeader::new(t("app.shape", _lang))
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label("Type:");
+                        ui.label(t("app.type", _lang));
                         egui::ComboBox::from_id_salt("primitive_select")
                             .selected_text(node.primitive.label())
                             .show_ui(ui, |ui| {
@@ -198,22 +199,26 @@ impl PropertiesPanel {
 
             // Visibility
             ui.horizontal(|ui| {
-                ui.label("Visible:");
+                ui.label(t("app.visible", _lang));
                 ui.checkbox(&mut node.visible, "");
             });
 
             ui.add_space(8.0);
 
             // Variables (placeholder)
-            egui::CollapsingHeader::new("Variables")
+            egui::CollapsingHeader::new(t("app.variables", _lang))
                 .default_open(false)
                 .show(ui, |ui| {
                     ui.label(
-                        egui::RichText::new("No custom variables defined")
+                        egui::RichText::new(t("app.no_variables", _lang))
                             .size(11.0)
                             .color(egui::Color32::from_rgb(100, 100, 110)),
                     );
                 });
         });
+
+        // Add modular "Attached Behaviors" UI below standard properties.
+        // Needs `&mut SceneGraph`, so we call it outside the previous `node` borrow.
+        crate::panels::behaviors::show_attached_behaviors(ui, scene, id, _lang);
     }
 }

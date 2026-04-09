@@ -3,6 +3,8 @@
 //! The provider dropdown lets users choose between OpenClaw (local, works now),
 //! OpenRouter, OpenAI, GenAI, Claude (pending API key support).
 
+use raf_core::Language;
+use raf_core::i18n::t;
 use egui::Ui;
 use raf_ai::chat::{ChatMessage, ChatPanel, MessageRole};
 use raf_ai::openclaw::{ConnectionStatus, OpenClawClient};
@@ -18,7 +20,7 @@ pub struct AiChatPanel {
     /// Whether a send is currently in progress (for UI feedback).
     sending: bool,
     /// Language flag for translations.
-    pub is_es: bool,
+    pub lang: Language,
 }
 
 impl Default for AiChatPanel {
@@ -36,7 +38,7 @@ impl Default for AiChatPanel {
             selected_provider: AiProvider::OpenClaw,
             openclaw: OpenClawClient::default(),
             sending: false,
-            is_es: false,
+            lang: Language::English,
         }
     }
 }
@@ -44,11 +46,11 @@ impl Default for AiChatPanel {
 impl AiChatPanel {
     /// Draw the AI chat panel.
     pub fn show(&mut self, ui: &mut Ui) {
-        let is_es = self.is_es;
+        let lang = self.lang;
 
         // Top bar: provider selector + connection status.
         ui.horizontal(|ui| {
-            ui.label(if is_es { "Proveedor:" } else { "Provider:" });
+            ui.label(t("app.provider", self.lang));
             egui::ComboBox::from_id_salt("ai_provider_select")
                 .selected_text(self.selected_provider.display_name())
                 .show_ui(ui, |ui| {
@@ -74,7 +76,7 @@ impl AiChatPanel {
 
             // Connection status for OpenClaw.
             if self.selected_provider == AiProvider::OpenClaw {
-                let status_text = if is_es {
+                let status_text = if lang == raf_core::config::Language::Spanish {
                     self.openclaw.status_text_es()
                 } else {
                     self.openclaw.status_text()
@@ -87,26 +89,16 @@ impl AiChatPanel {
                 };
                 ui.colored_label(status_color, status_text);
 
-                let connect_label = if is_es { "Conectar" } else { "Connect" };
+                let connect_label = t("app.connect", self.lang);
                 if ui.button(connect_label).clicked() {
                     let connected = self.openclaw.ping();
                     if connected {
                         self.chat.messages.push(ChatMessage::system(
-                            if is_es {
-                                "Conectado a OpenClaw en localhost:18789"
-                            } else {
-                                "Connected to OpenClaw at localhost:18789"
-                            },
+                            &t("app.connected_to_openclaw_at_localhost_18789", self.lang),
                         ));
                     } else {
                         self.chat.messages.push(ChatMessage::system(
-                            if is_es {
-                                "No se pudo conectar. Asegurate de que OpenClaw esta corriendo \
-                                 (openclaw gateway start)"
-                            } else {
-                                "Could not connect. Make sure OpenClaw is running \
-                                 (openclaw gateway start)"
-                            },
+                            &t("app.could_not_connect_make_sure_openclaw_is_running_openclaw_gateway_start", self.lang),
                         ));
                     }
                 }
@@ -114,11 +106,7 @@ impl AiChatPanel {
                 // Other providers: show "pending" message.
                 ui.colored_label(
                     theme::DARK_TEXT_DIM,
-                    if is_es {
-                        "Pendiente - configura tu API key"
-                    } else {
-                        "Pending - configure your API key"
-                    },
+                    t("app.pending_configure_your_api_key", self.lang),
                 );
             }
         });
@@ -137,7 +125,7 @@ impl AiChatPanel {
                     egui::TextEdit::singleline(&mut self.openclaw.config.token)
                         .desired_width(120.0)
                         .password(true)
-                        .hint_text(if is_es { "opcional" } else { "optional" }),
+                        .hint_text(t("app.optional", self.lang)),
                 );
             });
         }
@@ -153,11 +141,11 @@ impl AiChatPanel {
             for msg in &self.chat.messages {
                 let (prefix, color) = match msg.role {
                     MessageRole::User => (
-                        if is_es { "Tu" } else { "You" },
+                        t("app.you", self.lang),
                         theme::ACCENT,
                     ),
-                    MessageRole::Assistant => ("AI", egui::Color32::from_rgb(100, 200, 140)),
-                    MessageRole::System => ("System", theme::DARK_TEXT_DIM),
+                    MessageRole::Assistant => ("AI".to_string(), egui::Color32::from_rgb(100, 200, 140)),
+                    MessageRole::System => ("System".to_string(), theme::DARK_TEXT_DIM),
                 };
 
                 ui.horizontal_wrapped(|ui| {
@@ -173,7 +161,7 @@ impl AiChatPanel {
         // Input area.
         ui.horizontal(|ui| {
             let available_width = ui.available_width() - 80.0;
-            let hint = if is_es { "Escribe un mensaje..." } else { "Type a message..." };
+            let hint = t("app.type_a_message", self.lang);
             let response = ui.add_sized(
                 [available_width, 28.0],
                 egui::TextEdit::singleline(&mut self.chat.input_text)
@@ -189,7 +177,7 @@ impl AiChatPanel {
             };
 
             let send_enabled = can_send && !self.chat.input_text.is_empty();
-            let send_label = if is_es { "Enviar" } else { "Send" };
+            let send_label = t("app.send", self.lang);
             let send_button = ui.add_enabled(
                 send_enabled,
                 egui::Button::new(send_label),
@@ -208,7 +196,7 @@ impl AiChatPanel {
 
                 // Send to OpenClaw.
                 if self.selected_provider == AiProvider::OpenClaw {
-                    self.sending = true;
+                    // self.sending = true;
                     match self.openclaw.send_message(&input) {
                         Ok(response_text) => {
                             self.chat.messages.push(ChatMessage::assistant(&response_text));
@@ -217,7 +205,7 @@ impl AiChatPanel {
                             self.chat.messages.push(ChatMessage::system(
                                 &format!(
                                     "{}: {}",
-                                    if is_es { "Error" } else { "Error" },
+                                    t("app.error", self.lang),
                                     err
                                 ),
                             ));
@@ -235,11 +223,7 @@ impl AiChatPanel {
                         ui.layer_id(),
                         egui::Id::new("ai_tooltip"),
                         |ui| {
-                            ui.label(if is_es {
-                                "Este proveedor aun no esta implementado. Usa OpenClaw."
-                            } else {
-                                "This provider is not implemented yet. Use OpenClaw."
-                            });
+                            ui.label(t("app.this_provider_is_not_implemented_yet_use_openclaw", self.lang));
                         },
                     );
                 }

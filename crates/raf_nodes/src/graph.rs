@@ -1,4 +1,6 @@
 //! Node graph - collection of nodes and connections.
+//!
+//! SISTEMA INSPIRADO DE YOLL AU de yoll.site
 
 use crate::node::{Node, NodeId};
 use serde::{Deserialize, Serialize};

@@ -3,71 +3,73 @@
 
 use egui::Ui;
 use raf_core::config::{EngineSettings, Language, RenderQuality, TargetPlatform, Theme};
+use raf_core::i18n::t;
 
 /// Draw the settings panel.
 pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
-    let is_es = settings.language == Language::Spanish;
-
     egui::ScrollArea::vertical().show(ui, |ui| {
-        // -- Simple Mode (top, prominent) --
-        ui.group(|ui| {
+        // -- Simple Mode (top, prominent, clean) --
+        let frame = egui::Frame::none()
+            .fill(egui::Color32::from_rgb(32, 32, 36))
+            .rounding(6.0)
+            .inner_margin(16.0)
+            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 45, 50)));
+
+        frame.show(ui, |ui| {
             ui.horizontal(|ui| {
-                let label = if is_es { "Modo Simple" } else { "Simple Mode" };
-                ui.heading(label);
+                ui.label(egui::RichText::new(t("settings.simple_mode", settings.language)).size(14.0).strong());
                 ui.add_space(8.0);
                 ui.checkbox(&mut settings.simple_mode, "");
             });
-            let desc = if is_es {
-                "Oculta parametros avanzados. Ideal para principiantes."
-            } else {
-                "Hides advanced parameters. Ideal for beginners."
-            };
+            ui.add_space(4.0);
             ui.label(
-                egui::RichText::new(desc)
-                    .small()
-                    .color(egui::Color32::from_rgb(120, 120, 130)),
+                egui::RichText::new(t("settings.simple_mode_desc", settings.language))
+                    .size(11.0)
+                    .color(egui::Color32::from_rgb(140, 140, 150)),
             );
         });
 
-        ui.add_space(8.0);
+        ui.add_space(16.0);
 
         // -- Appearance --
-        let appearance_label = if is_es { "Apariencia" } else { "Appearance" };
-        egui::CollapsingHeader::new(appearance_label)
+        egui::CollapsingHeader::new(egui::RichText::new(t("settings.appearance", settings.language)).strong())
             .default_open(true)
             .show(ui, |ui| {
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let label = if is_es { "Tema:" } else { "Theme:" };
-                    ui.label(label);
-                    ui.selectable_value(&mut settings.theme, Theme::Dark, if is_es { "Oscuro" } else { "Dark" });
-                    ui.selectable_value(&mut settings.theme, Theme::Light, if is_es { "Claro" } else { "Light" });
+                    ui.label(egui::RichText::new(t("settings.theme", settings.language)).size(12.0));
+                    ui.selectable_value(&mut settings.theme, Theme::Dark, "Dark");
+                    ui.selectable_value(&mut settings.theme, Theme::Light, "Light");
                     ui.selectable_value(&mut settings.theme, Theme::System, "System");
                 });
+                
+                ui.add_space(6.0);
 
                 ui.horizontal(|ui| {
-                    let label = if is_es { "Tamano de fuente:" } else { "Font Size:" };
-                    ui.label(label);
+                    ui.label(egui::RichText::new(t("settings.font_size", settings.language)).size(12.0));
                     ui.add(
-                        egui::Slider::new(&mut settings.font_size, 10.0..=24.0).step_by(1.0),
+                        egui::Slider::new(&mut settings.font_size, 10.0..=24.0).step_by(1.0).text("px"),
                     );
                 });
 
+                ui.add_space(6.0);
+
                 ui.horizontal(|ui| {
-                    let label = if is_es { "Escala de UI:" } else { "UI Scale:" };
-                    ui.label(label);
+                    ui.label(egui::RichText::new(t("settings.ui_scale", settings.language)).size(12.0));
                     ui.add(
                         egui::Slider::new(&mut settings.ui_scale, 0.5..=2.0).step_by(0.1),
                     );
                 });
+                ui.add_space(8.0);
             });
 
         ui.add_space(4.0);
 
         // -- Language --
-        let lang_label = if is_es { "Idioma" } else { "Language" };
-        egui::CollapsingHeader::new(lang_label)
+        egui::CollapsingHeader::new(egui::RichText::new(t("settings.language", settings.language)).strong())
             .default_open(true)
             .show(ui, |ui| {
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
                     ui.selectable_value(
                         &mut settings.language,
@@ -80,18 +82,18 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                         Language::Spanish.display_name(),
                     );
                 });
+                ui.add_space(8.0);
             });
 
         ui.add_space(4.0);
 
         // -- Target Platform --
-        let platform_label = if is_es { "Plataforma Objetivo" } else { "Target Platform" };
-        egui::CollapsingHeader::new(platform_label)
+        egui::CollapsingHeader::new(egui::RichText::new(t("settings.target_platform", settings.language)).strong())
             .default_open(false)
             .show(ui, |ui| {
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let label = if is_es { "Plataforma:" } else { "Platform:" };
-                    ui.label(label);
+                    ui.label(egui::RichText::new(t("settings.platform", settings.language)).size(12.0));
                     egui::ComboBox::from_id_salt("target_platform_select")
                         .selected_text(settings.target_platform.display_name())
                         .show_ui(ui, |ui| {
@@ -104,116 +106,80 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                             }
                         });
                 });
+                
+                ui.add_space(6.0);
 
-                let responsive_label = if is_es {
-                    "Interfaz responsiva (pantallas pequenas)"
-                } else {
-                    "Responsive layout (small screens)"
-                };
-                ui.checkbox(&mut settings.responsive_layout, responsive_label);
-
-                let headless_label = if is_es {
-                    "Modo sin ventana (servidor/nube)"
-                } else {
-                    "Headless mode (server/cloud)"
-                };
-                ui.checkbox(&mut settings.headless, headless_label);
+                ui.checkbox(&mut settings.responsive_layout, t("settings.responsive_layout", settings.language));
+                ui.add_space(2.0);
+                ui.checkbox(&mut settings.headless, t("settings.headless", settings.language));
 
                 // Info about current platform.
                 if !settings.simple_mode {
+                    ui.add_space(10.0);
                     let info = match settings.target_platform {
-                        TargetPlatform::Desktop => {
-                            if is_es { "Windows, macOS, Linux. Rendering completo." }
-                            else { "Windows, macOS, Linux. Full rendering." }
-                        }
-                        TargetPlatform::Mobile => {
-                            if is_es { "Android/iOS. Interfaz adaptativa, input tactil." }
-                            else { "Android/iOS. Adaptive layout, touch input." }
-                        }
-                        TargetPlatform::Web => {
-                            if is_es { "WebAssembly. Se ejecuta en cualquier navegador." }
-                            else { "WebAssembly. Runs in any browser." }
-                        }
-                        TargetPlatform::Cloud => {
-                            if is_es { "Streaming en nube. Compatible con GamePass, GeForce NOW." }
-                            else { "Cloud streaming. Compatible with GamePass, GeForce NOW." }
-                        }
-                        TargetPlatform::Console => {
-                            if is_es { "Consolas. Requiere SDK del fabricante (futuro)." }
-                            else { "Consoles. Requires manufacturer SDK (future)." }
-                        }
+                        TargetPlatform::Desktop => t("settings.platform.desktop", settings.language),
+                        TargetPlatform::Mobile => t("settings.platform.mobile", settings.language),
+                        TargetPlatform::Web => t("settings.platform.web", settings.language),
+                        TargetPlatform::Cloud => t("settings.platform.cloud", settings.language),
+                        TargetPlatform::Console => t("settings.platform.console", settings.language),
                     };
                     ui.label(
                         egui::RichText::new(info)
-                            .small()
-                            .color(egui::Color32::from_rgb(100, 100, 110)),
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(120, 120, 130)),
                     );
                 }
+                ui.add_space(8.0);
             });
 
         ui.add_space(4.0);
 
         // -- Performance --
-        let perf_label = if is_es { "Rendimiento" } else { "Performance" };
-        egui::CollapsingHeader::new(perf_label)
+        egui::CollapsingHeader::new(egui::RichText::new(t("settings.performance", settings.language)).strong())
             .default_open(false)
             .show(ui, |ui| {
+                ui.add_space(8.0);
                 ui.horizontal(|ui| {
-                    let label = if is_es { "Calidad:" } else { "Quality:" };
-                    ui.label(label);
-                    ui.selectable_value(
-                        &mut settings.render_quality,
-                        RenderQuality::Potato,
-                        "Potato (0)",
-                    );
-                    ui.selectable_value(
-                        &mut settings.render_quality,
-                        RenderQuality::Low,
-                        if is_es { "Baja (1)" } else { "Low (1)" },
-                    );
-                    ui.selectable_value(
-                        &mut settings.render_quality,
-                        RenderQuality::Medium,
-                        if is_es { "Media (2)" } else { "Medium (2)" },
-                    );
-                    ui.selectable_value(
-                        &mut settings.render_quality,
-                        RenderQuality::High,
-                        if is_es { "Alta (3)" } else { "High (3)" },
-                    );
+                    ui.label(egui::RichText::new(t("settings.quality", settings.language)).size(12.0));
+                    ui.selectable_value(&mut settings.render_quality, RenderQuality::Potato, "Potato (0)");
+                    ui.selectable_value(&mut settings.render_quality, RenderQuality::Low, "Low (1)");
+                    ui.selectable_value(&mut settings.render_quality, RenderQuality::Medium, "Medium (2)");
+                    ui.selectable_value(&mut settings.render_quality, RenderQuality::High, "High (3)");
                 });
+                
+                ui.add_space(6.0);
 
                 ui.horizontal(|ui| {
-                    let label = if is_es { "Limite de FPS:" } else { "FPS Limit:" };
-                    ui.label(label);
-                    ui.add(egui::DragValue::new(&mut settings.fps_limit).range(15..=240));
+                    ui.label(egui::RichText::new(t("settings.fps_limit", settings.language)).size(12.0));
+                    ui.add(egui::DragValue::new(&mut settings.fps_limit).range(15..=240).suffix(" fps"));
                 });
 
-                ui.checkbox(&mut settings.vsync, "VSync");
+                ui.add_space(4.0);
+
+                ui.checkbox(&mut settings.vsync, t("settings.vsync", settings.language));
 
                 if !settings.simple_mode {
-                    let mt_label = if is_es { "Multihilo" } else { "Multithreading" };
-                    ui.checkbox(&mut settings.multithreading, mt_label);
+                    ui.add_space(2.0);
+                    ui.checkbox(&mut settings.multithreading, t("settings.multithreading", settings.language));
                 }
+                ui.add_space(8.0);
             });
 
         ui.add_space(4.0);
 
         // -- Editor --
-        let editor_label = if is_es { "Editor" } else { "Editor" };
-        egui::CollapsingHeader::new(editor_label)
+        egui::CollapsingHeader::new(egui::RichText::new(t("settings.editor", settings.language)).strong())
             .default_open(false)
             .show(ui, |ui| {
-                let grid_label = if is_es { "Mostrar Cuadricula" } else { "Show Grid" };
-                ui.checkbox(&mut settings.grid_visible, grid_label);
-
-                let snap_label = if is_es { "Ajustar a Cuadricula" } else { "Snap to Grid" };
-                ui.checkbox(&mut settings.snap_to_grid, snap_label);
+                ui.add_space(8.0);
+                ui.checkbox(&mut settings.grid_visible, t("settings.show_grid", settings.language));
+                ui.add_space(2.0);
+                ui.checkbox(&mut settings.snap_to_grid, t("settings.snap_to_grid", settings.language));
 
                 if !settings.simple_mode {
+                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        let label = if is_es { "Tamano de cuadricula:" } else { "Grid Size:" };
-                        ui.label(label);
+                        ui.label(egui::RichText::new(t("settings.grid_size", settings.language)).size(12.0));
                         ui.add(
                             egui::DragValue::new(&mut settings.grid_size)
                                 .speed(0.1)
@@ -221,37 +187,28 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                         );
                     });
 
+                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        let label = if is_es {
-                            "Auto-guardado (segundos):"
-                        } else {
-                            "Auto-save (seconds):"
-                        };
-                        ui.label(label);
+                        ui.label(egui::RichText::new(t("settings.auto_save", settings.language)).size(12.0));
                         ui.add(
                             egui::DragValue::new(&mut settings.auto_save_interval_seconds)
-                                .range(30..=600),
+                                .range(30..=600)
+                                .suffix(" s"),
                         );
                     });
 
+                    ui.add_space(6.0);
                     ui.horizontal(|ui| {
-                        let label = if is_es { "Unidades:" } else { "Units:" };
-                        ui.label(label);
-                        let metric = if is_es { "Metrico" } else { "Metric" };
-                        if ui
-                            .selectable_label(settings.units_metric, metric)
-                            .clicked()
-                        {
+                        ui.label(egui::RichText::new(t("settings.units", settings.language)).size(12.0));
+                        if ui.selectable_label(settings.units_metric, t("settings.metric", settings.language)).clicked() {
                             settings.units_metric = true;
                         }
-                        if ui
-                            .selectable_label(!settings.units_metric, "Imperial")
-                            .clicked()
-                        {
+                        if ui.selectable_label(!settings.units_metric, t("settings.imperial", settings.language)).clicked() {
                             settings.units_metric = false;
                         }
                     });
                 }
+                ui.add_space(8.0);
             });
     });
 }

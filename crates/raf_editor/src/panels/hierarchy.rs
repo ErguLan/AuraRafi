@@ -4,6 +4,7 @@
 
 use egui::Ui;
 use raf_core::config::Language;
+use raf_core::i18n::t;
 use raf_core::scene::{SceneGraph, SceneNodeId};
 
 /// State for the hierarchy panel.
@@ -24,15 +25,15 @@ impl HierarchyPanel {
     pub fn show(&mut self, ui: &mut Ui, scene: &SceneGraph, _lang: Language) {
         // Professional uppercase header.
         ui.label(
-            egui::RichText::new("HIERARCHY")
-                .size(10.0)
+            egui::RichText::new(t("app.hierarchy", _lang))
+                .size(11.0).strong()
                 .color(egui::Color32::from_rgb(130, 130, 140)),
         );
         ui.separator();
 
         if scene.is_empty() {
             ui.label(
-                egui::RichText::new("No entities in scene")
+                egui::RichText::new(t("app.no_entities", _lang))
                     .size(11.0)
                     .color(egui::Color32::from_rgb(100, 100, 110)),
             );
@@ -60,8 +61,20 @@ impl HierarchyPanel {
         let is_selected = self.selected_node == Some(id);
         let has_children = !node.children.is_empty();
 
+        // Style the text to look leaner ("extralight" feel) by making it smaller
+        // and using a slightly softer color if not selected.
+        let text_color = if is_selected {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_rgb(180, 180, 190) // Soft, lean color
+        };
+
+        let node_text = egui::RichText::new(&node.name)
+            .size(11.0)
+            .color(text_color);
+
         if has_children {
-            let header = egui::CollapsingHeader::new(&node.name)
+            let header = egui::CollapsingHeader::new(node_text)
                 .default_open(true)
                 .show(ui, |ui| {
                     for &child_id in &node.children {
@@ -72,7 +85,7 @@ impl HierarchyPanel {
                 self.selected_node = Some(id);
             }
         } else {
-            let label = ui.selectable_label(is_selected, &node.name);
+            let label = ui.selectable_label(is_selected, node_text);
             if label.clicked() {
                 self.selected_node = Some(id);
             }

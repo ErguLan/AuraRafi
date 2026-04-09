@@ -7,6 +7,8 @@
 //!
 //! Technology based on Yoll AU - yoll.site
 
+use raf_core::Language;
+use raf_core::i18n::t;
 use egui::{Color32, Pos2, Rect, Stroke, Ui, Vec2};
 use raf_electronics::component::{ElectronicComponent, PinDirection, SimModel};
 use raf_electronics::library::ComponentLibrary;
@@ -76,7 +78,7 @@ pub struct SchematicViewPanel {
     /// Inline editing state: component index and the editing buffer.
     editing_value: Option<(usize, String)>,
     /// Whether ES language is active (set externally each frame).
-    pub is_es: bool,
+    pub lang: Language,
     // --- Simulation state ---
     /// Simulation results (None = not yet run).
     sim_results: Option<SimulationResults>,
@@ -114,7 +116,7 @@ impl Default for SchematicViewPanel {
             drag_state: None,
             context_menu: None,
             editing_value: None,
-            is_es: false,
+            lang: Language::English,
             sim_results: None,
             sim_active: false,
             sim_phase: 0.0,
@@ -164,23 +166,30 @@ impl SchematicViewPanel {
     // -----------------------------------------------------------------------
 
     fn draw_toolbar(&mut self, ui: &mut Ui) {
-        let _is_es = self.is_es;
+        let _lang = self.lang;
 
         ui.horizontal(|ui| {
-            // Library toggle.
-            let lib_label = if self.show_library { "Hide Library" } else { "Show Library" };
-            if ui.button(lib_label).clicked() {
+            // Use subtle spacing
+            ui.spacing_mut().item_spacing.x = 2.0;
+
+            let active_bg = egui::Color32::from_rgb(45, 45, 52);
+            let inactive_bg = egui::Color32::TRANSPARENT;
+            let icon_color = egui::Color32::from_rgb(200, 200, 205);
+
+            // Library toggle (☰ or ▤)
+            let lib_bg = if self.show_library { active_bg } else { inactive_bg };
+            let lib_btn = egui::Button::new(egui::RichText::new("▤").size(14.0).color(icon_color))
+                .fill(lib_bg).frame(self.show_library).rounding(4.0);
+            if ui.add_sized([28.0, 28.0], lib_btn).on_hover_text("Toggle Library").clicked() {
                 self.show_library = !self.show_library;
             }
 
-            ui.separator();
-
-            // Wire mode toggle.
+            // Wire mode toggle (↘)
             let wire_active = self.placement == PlacementMode::Wire;
-            if ui
-                .selectable_label(wire_active, "Draw Wire")
-                .clicked()
-            {
+            let wire_bg = if wire_active { active_bg } else { inactive_bg };
+            let wire_btn = egui::Button::new(egui::RichText::new("↘").size(14.0).color(icon_color))
+                .fill(wire_bg).frame(wire_active).rounding(4.0);
+            if ui.add_sized([28.0, 28.0], wire_btn).on_hover_text("Draw Wire").clicked() {
                 if wire_active {
                     self.placement = PlacementMode::None;
                     self.wire_start = None;
@@ -189,81 +198,70 @@ impl SchematicViewPanel {
                 }
             }
 
-            ui.separator();
+            ui.add_space(8.0);
 
-            // DRC / Electrical test button.
-            if ui
-                .button("DRC / Electrical Test")
-                .clicked()
-            {
+            // DRC / Electrical test button (✓)
+            let drc_btn = egui::Button::new(egui::RichText::new("✓").size(14.0).color(icon_color))
+                .fill(inactive_bg).frame(false);
+            if ui.add_sized([28.0, 28.0], drc_btn).on_hover_text("Run DRC / Electrical Test").clicked() {
                 self.test_results = self.schematic.electrical_test();
                 self.show_test_results = true;
             }
 
-            ui.separator();
-
-            // Simulate button.
+            // Simulate button (▶ or ⏹)
             if self.sim_active {
-                if ui
-                    .button(egui::RichText::new("Stop Sim.").color(Color32::from_rgb(220, 90, 90)))
-                    .clicked()
-                {
+                let stop_btn = egui::Button::new(egui::RichText::new("⏹").size(14.0).color(egui::Color32::from_rgb(220, 90, 90)))
+                    .fill(inactive_bg).frame(false);
+                if ui.add_sized([28.0, 28.0], stop_btn).on_hover_text("Stop Simulation").clicked() {
                     self.sim_active = false;
                     self.sim_results = None;
                     self.sim_phase = 0.0;
                 }
             } else {
-                if ui
-                    .button("Simulate DC")
-                    .clicked()
-                {
+                let sim_btn = egui::Button::new(egui::RichText::new("▶").size(14.0).color(icon_color))
+                    .fill(inactive_bg).frame(false);
+                if ui.add_sized([28.0, 28.0], sim_btn).on_hover_text("Simulate DC").clicked() {
                     let results = self.schematic.simulate_dc();
                     self.sim_active = results.converged;
                     self.sim_results = Some(results);
                 }
             }
 
-            ui.separator();
+            ui.add_space(8.0);
 
-            // Export button.
-            if ui.button("Export").clicked() {
+            // Export button (⎘)
+            let export_btn = egui::Button::new(egui::RichText::new("⎘").size(14.0).color(icon_color))
+                .fill(inactive_bg).frame(false);
+            if ui.add_sized([28.0, 28.0], export_btn).on_hover_text("Export Schematic").clicked() {
                 self.show_export_menu = !self.show_export_menu;
             }
 
-            ui.separator();
+            // Push the rest of the text info to the right
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if self.placement != PlacementMode::None {
+                    if ui.button(egui::RichText::new("Cancel (Esc)").size(11.0)).clicked() {
+                        self.placement = PlacementMode::None;
+                        self.wire_start = None;
+                    }
 
-            // Info.
-            let info = format!(
-                "Components: {} | Wires: {}",
-                self.schematic.components.len(),
-                self.schematic.wires.len()
-            );
-            ui.label(egui::RichText::new(info).size(11.0).color(theme::DARK_TEXT_DIM));
-
-            if self.placement != PlacementMode::None {
-                ui.separator();
-                let mode_text = match &self.placement {
-                    PlacementMode::Component(idx) => {
-                        if let Some(tmpl) = self.library.components.get(*idx) {
-                            format!("Placing: {}", tmpl.name)
-                        } else {
-                            "Placing...".to_string()
+                    let mode_text = match &self.placement {
+                        PlacementMode::Component(idx) => {
+                            if let Some(tmpl) = self.library.components.get(*idx) {
+                                format!("Placing: {}", tmpl.name)
+                            } else {
+                                "Placing...".to_string()
+                            }
                         }
-                    }
-                    PlacementMode::Wire => {
-                        "Drawing Wire (click to place points)".to_string()
-                    }
-                    PlacementMode::None => String::new(),
-                };
-                ui.label(
-                    egui::RichText::new(mode_text).color(theme::ACCENT),
-                );
-
-                if ui.button("Cancel (Esc)").clicked() {
-                    self.placement = PlacementMode::None;
-                    self.wire_start = None;
+                        PlacementMode::Wire => "Drawing Wire".to_string(),
+                        PlacementMode::None => "".to_string(),
+                    };
+                    ui.label(egui::RichText::new(mode_text).size(11.0).color(theme::ACCENT));
+                    ui.add_space(8.0);
                 }
-            }
+
+                let info = format!("Components: {} | Wires: {}", self.schematic.components.len(), self.schematic.wires.len());
+                ui.label(egui::RichText::new(info).size(11.0).color(theme::DARK_TEXT_DIM));
+            });
         });
     }
 
@@ -272,7 +270,7 @@ impl SchematicViewPanel {
     // -----------------------------------------------------------------------
 
     fn draw_library(&mut self, ui: &mut Ui, rect: Rect) {
-        let _is_es = self.is_es;
+        let _lang = self.lang;
         let painter = ui.painter_at(rect);
 
         // Background.
@@ -367,7 +365,7 @@ impl SchematicViewPanel {
     // -----------------------------------------------------------------------
 
     fn draw_canvas(&mut self, ui: &mut Ui, rect: Rect) {
-        let is_es = self.is_es;
+        let _lang = self.lang;
 
         // -- Painting phase: all read-only drawing --
         {
@@ -750,7 +748,7 @@ impl SchematicViewPanel {
             None => return,
         };
 
-        let is_es = self.is_es;
+        let _lang = self.lang;
         let mut close_menu = false;
 
         let menu_id = egui::Id::new("schematic_context_menu");
@@ -769,7 +767,7 @@ impl SchematicViewPanel {
                             let idx = *idx;
 
                             // Rotate.
-                            let rotate_label = if is_es { "Rotar (R)" } else { "Rotate (R)" };
+                            let rotate_label = t("app.rotate_r", self.lang);
                             if ui.button(rotate_label).clicked() {
                                 if idx < self.schematic.components.len() {
                                     let comp = &mut self.schematic.components[idx];
@@ -779,7 +777,7 @@ impl SchematicViewPanel {
                             }
 
                             // Edit value.
-                            let edit_label = if is_es { "Editar Valor" } else { "Edit Value" };
+                            let edit_label = t("app.edit_value", self.lang);
                             if ui.button(edit_label).clicked() {
                                 if idx < self.schematic.components.len() {
                                     let val = self.schematic.components[idx].value.clone();
@@ -789,7 +787,7 @@ impl SchematicViewPanel {
                             }
 
                             // Duplicate.
-                            let dup_label = if is_es { "Duplicar (Ctrl+D)" } else { "Duplicate (Ctrl+D)" };
+                            let dup_label = t("app.duplicate_ctrl_d", self.lang);
                             if ui.button(dup_label).clicked() {
                                 if let Some(_id) = self.schematic.duplicate_component(idx) {
                                     let new_idx = self.schematic.components.len() - 1;
@@ -801,7 +799,7 @@ impl SchematicViewPanel {
                             ui.separator();
 
                             // Delete.
-                            let del_label = if is_es { "Eliminar (Supr)" } else { "Delete (Del)" };
+                            let del_label = t("app.delete_del", self.lang);
                             if ui
                                 .button(
                                     egui::RichText::new(del_label)
@@ -820,7 +818,7 @@ impl SchematicViewPanel {
                             let idx = *idx;
 
                             // Delete wire.
-                            let del_label = if is_es { "Eliminar Cable (Supr)" } else { "Delete Wire (Del)" };
+                            let del_label = t("app.delete_wire_del", self.lang);
                             if ui
                                 .button(
                                     egui::RichText::new(del_label)
@@ -835,13 +833,13 @@ impl SchematicViewPanel {
                         }
                         Selection::None => {
                             // Canvas context menu (no item under cursor).
-                            let paste_label = if is_es { "Modo Cable" } else { "Wire Mode" };
+                            let paste_label = t("app.wire_mode", self.lang);
                             if ui.button(paste_label).clicked() {
                                 self.placement = PlacementMode::Wire;
                                 close_menu = true;
                             }
 
-                            let test_label = if is_es { "Prueba Electrica" } else { "Electrical Test" };
+                            let test_label = t("app.electrical_test", self.lang);
                             if ui.button(test_label).clicked() {
                                 self.test_results = self.schematic.electrical_test();
                                 self.show_test_results = true;
@@ -867,17 +865,17 @@ impl SchematicViewPanel {
             None => return,
         };
 
-        let is_es = self.is_es;
+        let _lang = self.lang;
         let mut keep_open = true;
 
-        let win_title = if is_es { "Editar Valor" } else { "Edit Value" };
+        let win_title = t("app.edit_value", self.lang);
         egui::Window::new(win_title)
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .show(ui.ctx(), |ui| {
                 ui.horizontal(|ui| {
-                    let label = if is_es { "Valor:" } else { "Value:" };
+                    let label = t("app.value", self.lang);
                     ui.label(label);
                     let resp = ui.text_edit_singleline(&mut buf);
                     if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
@@ -888,14 +886,14 @@ impl SchematicViewPanel {
                     }
                 });
                 ui.horizontal(|ui| {
-                    let ok_label = if is_es { "Aceptar" } else { "OK" };
+                    let ok_label = t("app.ok", self.lang);
                     if ui.button(ok_label).clicked() {
                         if idx < self.schematic.components.len() {
                             self.schematic.components[idx].value = buf.clone();
                         }
                         keep_open = false;
                     }
-                    let cancel_label = if is_es { "Cancelar" } else { "Cancel" };
+                    let cancel_label = t("app.cancel", self.lang);
                     if ui.button(cancel_label).clicked() {
                         keep_open = false;
                     }
@@ -1082,7 +1080,7 @@ impl SchematicViewPanel {
     // -----------------------------------------------------------------------
 
     fn draw_test_results(&mut self, painter: &egui::Painter, canvas_rect: Rect) {
-        let is_es = self.is_es;
+        let _lang = self.lang;
         let results_w = 320.0;
         let line_h = 18.0;
         let results_h = 40.0 + self.test_results.len() as f32 * line_h;
@@ -1105,7 +1103,7 @@ impl SchematicViewPanel {
             Stroke::new(1.0, Color32::from_rgb(60, 60, 68)),
         );
 
-        let title = if is_es { "Resultados de Prueba Electrica" } else { "Electrical Test Results" };
+        let title = t("app.electrical_test_results", self.lang);
         painter.text(
             Pos2::new(results_rect.center().x, results_rect.top() + 14.0),
             egui::Align2::CENTER_CENTER,
@@ -1115,7 +1113,7 @@ impl SchematicViewPanel {
         );
 
         // Close hint.
-        let close_hint = if is_es { "[Esc] Cerrar" } else { "[Esc] Close" };
+        let close_hint = t("app.esc_close", self.lang);
         painter.text(
             Pos2::new(results_rect.right() - 8.0, results_rect.top() + 14.0),
             egui::Align2::RIGHT_CENTER,
@@ -1158,10 +1156,10 @@ impl SchematicViewPanel {
         canvas_rect: Rect,
         sim: &SimulationResults,
     ) {
-        let netlist = self.schematic.netlist();
+        let _netlist = self.schematic.netlist();
 
         // Draw animated current flow arrows on wires.
-        for (wi, wire) in self.schematic.wires.iter().enumerate() {
+        for (_wi, wire) in self.schematic.wires.iter().enumerate() {
             let start = self.world_to_screen(
                 Pos2::new(wire.start.x, wire.start.y),
                 canvas_rect,
@@ -1280,9 +1278,9 @@ impl SchematicViewPanel {
 
         // Sim status label.
         let status = if sim.converged {
-            if self.is_es { "Simulacion DC activa" } else { "DC Simulation active" }
+            if self.lang == raf_core::config::Language::Spanish { "Simulacion DC activa" } else { "DC Simulation active" }
         } else {
-            if self.is_es { "Simulacion no convergio" } else { "Simulation did not converge" }
+            if self.lang == raf_core::config::Language::Spanish { "Simulacion no convergio" } else { "Simulation did not converge" }
         };
         let status_color = if sim.converged {
             Color32::from_rgb(80, 220, 120)
@@ -1303,7 +1301,7 @@ impl SchematicViewPanel {
     // -----------------------------------------------------------------------
 
     fn draw_export_menu(&self, painter: &egui::Painter, canvas_rect: Rect) {
-        let is_es = self.is_es;
+        let _lang = self.lang;
         let menu_w = 220.0;
         let menu_h = 130.0;
         let menu_rect = Rect::from_min_size(
@@ -1325,7 +1323,7 @@ impl SchematicViewPanel {
             Stroke::new(1.0, theme::ACCENT),
         );
 
-        let title = if is_es { "Exportar Esquematico" } else { "Export Schematic" };
+        let title = t("app.export_schematic", self.lang);
         painter.text(
             Pos2::new(menu_rect.center().x, menu_rect.top() + 16.0),
             egui::Align2::CENTER_CENTER,
@@ -1334,7 +1332,7 @@ impl SchematicViewPanel {
             theme::ACCENT,
         );
 
-        let options = if is_es {
+        let options = if _lang == raf_core::config::Language::Spanish {
             vec![
                 "1. Netlist (texto)",
                 "2. BOM (CSV)",
@@ -1348,7 +1346,7 @@ impl SchematicViewPanel {
             ]
         };
 
-        let hint = if is_es { "[Esc] Cerrar | [1/2/3] Exportar" } else { "[Esc] Close | [1/2/3] Export" };
+        let hint = t("app.esc_close_1_2_3_export", self.lang);
 
         let mut y = menu_rect.top() + 38.0;
         for opt in &options {

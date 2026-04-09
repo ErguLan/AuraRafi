@@ -5,6 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use raf_core::config::Language;
+use raf_core::i18n::t;
 
 /// Definition of a callable tool (engine operation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,7 +86,7 @@ impl ToolRegistry {
         registry.register(ToolDefinition {
             name: "create_entity".to_string(),
             category: "scene".to_string(),
-            description: "Create a new entity in the scene".to_string(),
+            description: t("ai.tool.create_entity.desc", Language::English),
             parameters: vec![
                 ToolParameter {
                     name: "name".to_string(),
@@ -111,7 +113,7 @@ impl ToolRegistry {
         registry.register(ToolDefinition {
             name: "set_property".to_string(),
             category: "scene".to_string(),
-            description: "Set a property on an entity".to_string(),
+            description: t("ai.tool.set_property.desc", Language::English),
             parameters: vec![
                 ToolParameter {
                     name: "entity_id".to_string(),
@@ -144,7 +146,7 @@ impl ToolRegistry {
         registry.register(ToolDefinition {
             name: "import_asset".to_string(),
             category: "asset".to_string(),
-            description: "Import an asset file into the project".to_string(),
+            description: t("ai.tool.import_asset.desc", Language::English),
             parameters: vec![
                 ToolParameter {
                     name: "path".to_string(),
@@ -160,7 +162,7 @@ impl ToolRegistry {
         registry.register(ToolDefinition {
             name: "place_component".to_string(),
             category: "electronics".to_string(),
-            description: "Place an electronic component on the schematic".to_string(),
+            description: t("ai.tool.place_component.desc", Language::English),
             parameters: vec![
                 ToolParameter {
                     name: "component_type".to_string(),

@@ -3,7 +3,7 @@
 //! Validates a schematic against a set of electrical rules and
 //! returns a structured report with errors, warnings, and info.
 
-use crate::component::{ElectronicComponent, SimModel};
+use crate::component::SimModel;
 use crate::netlist::Netlist;
 use crate::schematic::Schematic;
 use glam::Vec2;

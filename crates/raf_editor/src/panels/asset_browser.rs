@@ -2,6 +2,8 @@
 
 use egui::Ui;
 use raf_assets::importer::AssetType;
+use raf_core::config::Language;
+use raf_core::i18n::t;
 
 /// State for the asset browser panel.
 pub struct AssetBrowserPanel {
@@ -30,21 +32,21 @@ impl Default for AssetBrowserPanel {
 
 impl AssetBrowserPanel {
     /// Draw the asset browser panel.
-    pub fn show(&mut self, ui: &mut Ui) {
+    pub fn show(&mut self, ui: &mut Ui, lang: Language) {
         ui.horizontal(|ui| {
-            ui.label("Search:");
+            ui.label(t("app.search", lang));
             ui.text_edit_singleline(&mut self.search_query);
 
-            if ui.button("All").clicked() {
+            if ui.button(t("app.all", lang)).clicked() {
                 self.selected_filter = None;
             }
-            if ui.button("Images").clicked() {
+            if ui.button(t("app.images", lang)).clicked() {
                 self.selected_filter = Some(AssetType::Image);
             }
-            if ui.button("Models").clicked() {
+            if ui.button(t("app.models", lang)).clicked() {
                 self.selected_filter = Some(AssetType::Model3D);
             }
-            if ui.button("Audio").clicked() {
+            if ui.button(t("app.audio", lang)).clicked() {
                 self.selected_filter = Some(AssetType::Audio);
             }
         });
@@ -74,7 +76,7 @@ impl AssetBrowserPanel {
                     .collect();
 
                 if filtered.is_empty() {
-                    ui.label("No assets found. Import files to get started.");
+                    ui.label(t("app.no_assets", lang));
                 } else {
                     for entry in filtered {
                         let type_label = match entry.asset_type {

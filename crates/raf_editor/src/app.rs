@@ -7,7 +7,8 @@
 //!    node editor, schematic view)
 
 use eframe::egui;
-use raf_core::config::{EngineSettings, Language, Theme};
+use raf_core::i18n::t;
+use raf_core::config::{EngineSettings, Theme};
 use raf_core::project::{Project, ProjectType, RecentProjects};
 use raf_core::scene::graph::Primitive;
 use raf_core::scene::SceneGraph;
@@ -219,11 +220,7 @@ impl AuraRafiApp {
                 );
 
                 // Tagline.
-                let tagline = if self.settings.language == Language::Spanish {
-                    "Desarrolla tu propio proyecto"
-                } else {
-                    "Develop your own project"
-                };
+                let tagline = t("app.develop_your_own_project", self.settings.language);
                 ui.painter().text(
                     egui::pos2(center.x, center.y),
                     egui::Align2::CENTER_CENTER,
@@ -261,11 +258,7 @@ impl AuraRafiApp {
 
                 // Loading text.
                 let loading_text =
-                    if self.settings.language == Language::Spanish {
-                        "Cargando..."
-                    } else {
-                        "Loading..."
-                    };
+                    t("app.loading", self.settings.language);
                 ui.painter().text(
                     egui::pos2(center.x, center.y + 68.0),
                     egui::Align2::CENTER_CENTER,
@@ -318,14 +311,14 @@ impl AuraRafiApp {
 
     /// Show the project hub (recent projects + create new).
     fn show_project_hub(&mut self, ctx: &egui::Context) {
-        let is_es = self.settings.language == Language::Spanish;
+        let _lang = self.settings.language;
         let is_dark = ctx.style().visuals.dark_mode;
         
         let bg_color = if is_dark { app_theme::DARK_BG } else { app_theme::LIGHT_BG };
         let panel_color = if is_dark { app_theme::DARK_PANEL } else { app_theme::LIGHT_PANEL };
         let text_color = if is_dark { app_theme::DARK_TEXT } else { app_theme::LIGHT_TEXT };
         let text_dim_color = if is_dark { app_theme::DARK_TEXT_DIM } else { app_theme::LIGHT_TEXT_DIM };
-        let border_color = if is_dark { app_theme::DARK_BORDER } else { app_theme::LIGHT_BORDER };
+        let _border_color = if is_dark { app_theme::DARK_BORDER } else { app_theme::LIGHT_BORDER };
 
         // --- Load Logo Texture ---
         let logo_res = self.logo_texture.get_or_insert_with(|| {
@@ -354,7 +347,7 @@ impl AuraRafiApp {
                     ui.add_space(20.0);
                     ui.image((logo_id, egui::vec2(52.0, 52.0)));
                     ui.add_space(8.0);
-                    ui.label(egui::RichText::new("Proyecto Rafi").strong().color(text_color));
+                    ui.label(egui::RichText::new("AuraRafi").strong().color(text_color));
                 });
                 
                 ui.add_space(32.0);
@@ -362,11 +355,27 @@ impl AuraRafiApp {
                 ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     
-                    let projects_label = if is_es { "Mis Proyectos" } else { "My Projects" };
-                    ui.selectable_label(true, projects_label);
+                    // Sidebar active stylings
+                    let active_bg = egui::Color32::from_rgb(45, 45, 52);
+                    let inactive_bg = egui::Color32::TRANSPARENT;
+                    
+                    // My Projects - Active
+                    let btn_projects = egui::Button::new(
+                        egui::RichText::new("My Projects").color(app_theme::ACCENT).size(13.0)
+                    ).fill(active_bg).rounding(4.0).frame(true);
+                    
+                    if ui.add_sized([ui.available_width() - 16.0, 30.0], btn_projects).clicked() {
+                        // Already here
+                    }
 
-                    let settings_label = if is_es { "Configuraci\u{00f3}n" } else { "Settings" };
-                    if ui.selectable_label(false, settings_label).clicked() {
+                    ui.add_space(4.0);
+
+                    // Settings - Inactive
+                    let btn_settings = egui::Button::new(
+                        egui::RichText::new("Settings").color(text_dim_color).size(13.0)
+                    ).fill(inactive_bg).rounding(4.0).frame(false);
+
+                    if ui.add_sized([ui.available_width() - 16.0, 30.0], btn_settings).clicked() {
                         self.previous_screen = Some(AppScreen::ProjectHub);
                         self.screen = AppScreen::Settings;
                     }
@@ -378,41 +387,41 @@ impl AuraRafiApp {
             .frame(egui::Frame::none().fill(panel_color))
             .show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(20.0);
+                ui.add_space(30.0);
                 
                 // Header (Welcome)
                 ui.label(
-                    egui::RichText::new("Proyecto Rafi")
-                        .size(24.0)
-                        .strong()
+                    egui::RichText::new("AuraRafi Project Hub")
+                        .size(22.0)
                         .color(text_color),
                 );
                 ui.label(
-                    egui::RichText::new(if is_es { "Desarrolla tu propio juego o proyecto electr\u{00f3}nico" } else { "Develop your own game or electronic project" })
+                    egui::RichText::new("Develop your own game or electronic project")
+                        .size(13.0)
                         .color(text_dim_color),
                 );
                 
-                ui.add_space(32.0);
+                ui.add_space(36.0);
 
                 // --- TOP: Create New Cards ---
                 ui.columns(2, |columns| {
                     // Game Project
                     let ui0 = &mut columns[0];
                     let game_frame = egui::Frame::none()
-                        .fill(if is_dark { app_theme::DARK_WIDGET } else { app_theme::LIGHT_WIDGET })
-                        .rounding(8.0)
-                        .inner_margin(24.0)
-                        .stroke(egui::Stroke::new(1.0, border_color));
+                        .fill(egui::Color32::from_rgb(32, 32, 36))
+                        .rounding(6.0)
+                        .inner_margin(20.0)
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 55)));
                         
                     let game_card = game_frame.show(ui0, |ui| {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
-                                ui.heading(if is_es { "Nuevo Juego" } else { "New Game" });
-                                ui.add_space(2.0);
-                                ui.label(egui::RichText::new(if is_es { "Empieza desde cero." } else { "Start from scratch." }).small().color(app_theme::DARK_TEXT_DIM));
+                                ui.label(egui::RichText::new("NEW GAME").strong().size(13.0).color(text_color));
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("Start a blank 3D project.").size(12.0).color(app_theme::DARK_TEXT_DIM));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new("+").size(24.0).color(app_theme::ACCENT));
+                                ui.label(egui::RichText::new("+").size(20.0).color(app_theme::ACCENT));
                             });
                         });
                     });
@@ -426,26 +435,26 @@ impl AuraRafiApp {
                         };
                     }
                     if resp.hovered() {
-                        ui0.painter().rect_stroke(game_card.response.rect, 8.0, egui::Stroke::new(1.0, app_theme::ACCENT));
+                        ui0.painter().rect_stroke(game_card.response.rect, 6.0, egui::Stroke::new(1.0, app_theme::ACCENT));
                     }
 
                     // Electronics Project
                     let ui1 = &mut columns[1];
                     let elec_frame = egui::Frame::none()
-                        .fill(if is_dark { app_theme::DARK_WIDGET } else { app_theme::LIGHT_WIDGET })
-                        .rounding(8.0)
-                        .inner_margin(24.0)
-                        .stroke(egui::Stroke::new(1.0, border_color));
+                        .fill(egui::Color32::from_rgb(32, 32, 36))
+                        .rounding(6.0)
+                        .inner_margin(20.0)
+                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 55)));
                         
                     let elec_card = elec_frame.show(ui1, |ui| {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
-                                ui.heading(if is_es { "Nueva Electr\u{00f3}nica" } else { "New Electronics" });
-                                ui.add_space(2.0);
-                                ui.label(egui::RichText::new(if is_es { "Diseno de PCB y simulaci\u{00f3}n." } else { "PCB design and simulation." }).small().color(app_theme::DARK_TEXT_DIM));
+                                ui.label(egui::RichText::new("NEW ELECTRONICS").strong().size(13.0).color(text_color));
+                                ui.add_space(4.0);
+                                ui.label(egui::RichText::new("PCB design and simulation.").size(12.0).color(app_theme::DARK_TEXT_DIM));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new("+").size(24.0).color(app_theme::ACCENT));
+                                ui.label(egui::RichText::new("+").size(20.0).color(app_theme::ACCENT));
                             });
                         });
                     });
@@ -459,19 +468,18 @@ impl AuraRafiApp {
                         };
                     }
                     if resp.hovered() {
-                        ui1.painter().rect_stroke(elec_card.response.rect, 8.0, egui::Stroke::new(1.0, app_theme::ACCENT));
+                        ui1.painter().rect_stroke(elec_card.response.rect, 6.0, egui::Stroke::new(1.0, app_theme::ACCENT));
                     }
                 });
 
                 ui.add_space(40.0);
                 ui.separator();
-                ui.add_space(20.0);
+                ui.add_space(24.0);
 
                 // --- BOTTOM: My Projects (List) ---
-                ui.heading(
-                    egui::RichText::new(if is_es { "MIS PROYECTOS" } else { "MY PROJECTS" })
-                        .size(16.0)
-                        .strong()
+                ui.label(
+                    egui::RichText::new("RECENT PROJECTS")
+                        .size(12.0)
                         .color(text_dim_color),
                 );
                 ui.add_space(12.0);
@@ -479,7 +487,7 @@ impl AuraRafiApp {
                 if self.recent_projects.projects.is_empty() {
                     ui.add_space(20.0);
                     ui.label(
-                        egui::RichText::new(if is_es { "No hay proyectos todav\u{00ed}a." } else { "No projects yet." })
+                        egui::RichText::new("No projects yet.")
                             .color(app_theme::DARK_TEXT_DIM),
                     );
                 } else {
@@ -489,43 +497,56 @@ impl AuraRafiApp {
 
                     for entry in &self.recent_projects.projects {
                         let frame = egui::Frame::none()
-                            .fill(if is_dark { app_theme::DARK_WIDGET } else { app_theme::LIGHT_WIDGET })
+                            .fill(egui::Color32::from_rgb(26, 26, 28))
                             .rounding(6.0)
                             .inner_margin(16.0)
-                            .stroke(egui::Stroke::new(1.0, border_color));
+                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 45)));
 
                         frame.show(ui, |ui| {
                             ui.horizontal(|ui| {
                                 // Left: Name and Basic Info
                                 ui.vertical(|ui| {
                                     ui.horizontal(|ui| {
-                                        ui.strong(&entry.name);
+                                        ui.label(egui::RichText::new(&entry.name).size(14.0).strong().color(text_color));
                                         ui.add_space(8.0);
+                                        
+                                        // Elegant Pill Badge
                                         let type_label = match entry.project_type {
-                                            ProjectType::Game => if is_es { "Juego" } else { "Game" },
-                                            ProjectType::Electronics => if is_es { "Electr\u{00f3}nica" } else { "Electronics" },
+                                            ProjectType::Game => "GAME",
+                                            ProjectType::Electronics => "ELECTRONICS",
                                         };
-                                        ui.label(egui::RichText::new(type_label).small().color(app_theme::ACCENT));
+                                        egui::Frame::none()
+                                            .fill(egui::Color32::from_rgba_unmultiplied(255, 140, 0, 30))
+                                            .rounding(4.0)
+                                            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+                                            .show(ui, |ui| {
+                                                ui.label(egui::RichText::new(type_label).size(10.0).strong().color(app_theme::ACCENT));
+                                            });
                                     });
-                                    ui.add_space(2.0);
-                                    ui.label(egui::RichText::new(format!("Created: {}", entry.created_at.format("%d/%m/%Y"))).small().color(app_theme::DARK_TEXT_DIM));
                                     
-                                    // Info Badges (Stats)
                                     ui.add_space(6.0);
+                                    
                                     ui.horizontal(|ui| {
+                                        ui.label(
+                                            egui::RichText::new(format!("Created: {}", entry.created_at.format("%d/%m/%Y")))
+                                                .size(11.0)
+                                                .color(app_theme::DARK_TEXT_DIM)
+                                        );
+                                        ui.add_space(12.0);
+                                        ui.label(
+                                            egui::RichText::new(format!("Modified: {}", entry.modified_at.format("%d/%m/%Y")))
+                                                .size(11.0)
+                                                .color(app_theme::DARK_TEXT_DIM)
+                                        );
+                                        ui.add_space(12.0);
+                                        
                                         let elem_label = match entry.project_type {
-                                            ProjectType::Game => if is_es { "nodos" } else { "nodes" },
-                                            ProjectType::Electronics => if is_es { "componentes" } else { "components" },
+                                            ProjectType::Game => "nodes",
+                                            ProjectType::Electronics => "components",
                                         };
                                         ui.label(
                                             egui::RichText::new(format!("{} {}", entry.n_elements, elem_label))
-                                                .small()
-                                                .background_color(app_theme::DARK_BG)
-                                        );
-                                        ui.add_space(8.0);
-                                        ui.label(
-                                            egui::RichText::new(format!("Modified: {}", entry.modified_at.format("%d/%m/%Y")))
-                                                .small()
+                                                .size(11.0)
                                                 .color(app_theme::DARK_TEXT_DIM)
                                         );
                                     });
@@ -533,23 +554,37 @@ impl AuraRafiApp {
                                 
                                 // Right: Actions
                                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    if ui.button(if is_es { "Abrir" } else { "Open" }).clicked() {
+                                    // Primary action
+                                    let open_btn = egui::Button::new(
+                                        egui::RichText::new("Open").size(12.0).color(egui::Color32::WHITE)
+                                    ).fill(egui::Color32::from_rgb(50, 50, 55)).rounding(4.0);
+                                    
+                                    if ui.add_sized([60.0, 24.0], open_btn).clicked() {
                                         open_path = Some(entry.path.clone());
                                     }
                                     
-                                    ui.add_space(12.0);
+                                    ui.add_space(8.0);
                                     
-                                    // Action icons (stubs for now)
-                                    if ui.button("D").on_hover_text(if is_es { "Duplicar" } else { "Duplicate" }).clicked() {
+                                    // Secondary Actions
+                                    let dup_btn = egui::Button::new(
+                                        egui::RichText::new("Clone").size(11.0).color(text_dim_color)
+                                    ).fill(egui::Color32::TRANSPARENT).frame(false);
+                                    
+                                    if ui.add(dup_btn).clicked() {
                                         duplicate_path = Some(entry.path.clone());
                                     }
-                                    if ui.button("X").on_hover_text(if is_es { "Eliminar" } else { "Delete" }).clicked() {
+                                    
+                                    let del_btn = egui::Button::new(
+                                        egui::RichText::new("Delete").size(11.0).color(egui::Color32::from_rgb(180, 80, 80))
+                                    ).fill(egui::Color32::TRANSPARENT).frame(false);
+                                    
+                                    if ui.add(del_btn).clicked() {
                                         delete_path = Some(entry.path.clone());
                                     }
                                 });
                             });
                         });
-                        ui.add_space(10.0);
+                        ui.add_space(8.0);
                     }
                     
                     if let Some(path) = open_path {
@@ -578,16 +613,17 @@ impl AuraRafiApp {
         mut path: String,
         project_type: ProjectType,
     ) {
+        let _lang = self.settings.language;
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(50.0);
             ui.vertical_centered(|ui| {
-                let is_es = self.settings.language == Language::Spanish;
+                
                 let title = match project_type {
                     ProjectType::Game => {
-                        if is_es { "Nuevo Proyecto de Juego" } else { "New Game Project" }
+                        t("app.new_game_project", self.settings.language)
                     }
                     ProjectType::Electronics => {
-                        if is_es { "Nuevo Proyecto Electronico" } else { "New Electronics Project" }
+                        t("app.new_electronics_project", self.settings.language)
                     }
                 };
                 ui.heading(
@@ -608,7 +644,7 @@ impl AuraRafiApp {
 
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("Project Name:").strong(),
+                            egui::RichText::new(t("app.project_name", _lang)).strong(),
                         );
                         ui.add_sized(
                             [300.0, 24.0],
@@ -621,7 +657,7 @@ impl AuraRafiApp {
 
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("Location:       ").strong(),
+                            egui::RichText::new(t("app.location", _lang)).strong(),
                         );
                         ui.add_sized(
                             [300.0, 24.0],
@@ -633,7 +669,7 @@ impl AuraRafiApp {
 
                     ui.horizontal(|ui| {
                         ui.label(
-                            egui::RichText::new("Type:              ").strong(),
+                            egui::RichText::new(t("app.type", _lang)).strong(),
                         );
                         ui.label(
                             egui::RichText::new(project_type.display_name())
@@ -648,7 +684,7 @@ impl AuraRafiApp {
 
                 ui.horizontal(|ui| {
                     if ui
-                        .add_sized([120.0, 30.0], egui::Button::new("Cancel"))
+                        .add_sized([120.0, 30.0], egui::Button::new(t("app.cancel", _lang)))
                         .clicked()
                     {
                         self.screen = AppScreen::ProjectHub;
@@ -659,7 +695,7 @@ impl AuraRafiApp {
 
                     let can_create = !name.is_empty() && !path.is_empty();
                     let _create_btn = egui::Button::new(
-                        egui::RichText::new("Create Project")
+                        egui::RichText::new(t("app.create_project", _lang))
                             .color(egui::Color32::WHITE),
                     )
                     .fill(if can_create {
@@ -670,7 +706,7 @@ impl AuraRafiApp {
 
                     if ui
                         .add_enabled(can_create, egui::Button::new(
-                            egui::RichText::new("Create Project")
+                            egui::RichText::new(t("app.create_project", _lang))
                                 .color(egui::Color32::WHITE)
                                 .strong(),
                         ))
@@ -717,7 +753,7 @@ impl AuraRafiApp {
     // -----------------------------------------------------------------------
 
     fn show_editor(&mut self, ctx: &egui::Context) {
-        let _is_es = self.settings.language == Language::Spanish;
+        let _lang = self.settings.language;
 
         // --- Global keyboard shortcuts ---
         self.handle_global_shortcuts(ctx);
@@ -729,72 +765,72 @@ impl AuraRafiApp {
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 // -- File --
-                ui.menu_button("File", |ui| {
-                    if ui.button("New Project").clicked() {
+                ui.menu_button(t("app.file", _lang), |ui| {
+                    if ui.button(t("app.new_project", _lang)).clicked() {
                         self.screen = AppScreen::ProjectHub;
                         ui.close_menu();
                     }
-                    if ui.button("Save  (Ctrl+S)").clicked() {
+                    if ui.button(t("app.save_menu", _lang)).clicked() {
                         self.do_save();
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Settings").clicked() {
+                    if ui.button(t("app.settings_menu", _lang)).clicked() {
                         self.previous_screen = Some(AppScreen::Editor);
                         self.screen = AppScreen::Settings;
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Exit to Hub").clicked() {
+                    if ui.button(t("app.exit_to_hub", _lang)).clicked() {
                         self.screen = AppScreen::ProjectHub;
                         ui.close_menu();
                     }
                 });
 
                 // -- Edit --
-                ui.menu_button("Edit", |ui| {
-                    let undo_label = format!("Undo  (Ctrl+Z)  [{}]", self.undo_stack.len());
+                ui.menu_button(t("app.edit_menu", _lang), |ui| {
+                    let undo_label = format!("{}  [{}]", t("app.undo_menu", _lang), self.undo_stack.len());
                     if ui.add_enabled(!self.undo_stack.is_empty(), egui::Button::new(undo_label)).clicked() {
                         self.do_undo();
                         ui.close_menu();
                     }
-                    let redo_label = format!("Redo  (Ctrl+Y)  [{}]", self.redo_stack.len());
+                    let redo_label = format!("{}  [{}]", t("app.redo_menu", _lang), self.redo_stack.len());
                     if ui.add_enabled(!self.redo_stack.is_empty(), egui::Button::new(redo_label)).clicked() {
                         self.do_redo();
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Duplicate  (Ctrl+D)").clicked() {
+                    if ui.button(t("app.duplicate_menu", _lang)).clicked() {
                         self.do_duplicate();
                         ui.close_menu();
                     }
-                    if ui.button("Delete  (Del)").clicked() {
+                    if ui.button(t("app.delete_menu", _lang)).clicked() {
                         self.do_delete();
                         ui.close_menu();
                     }
                     ui.separator();
-                    if ui.button("Select All  (Ctrl+A)").clicked() {
+                    if ui.button(t("app.select_all_menu", _lang)).clicked() {
                         self.do_select_all();
                         ui.close_menu();
                     }
                 });
 
                 // -- View --
-                ui.menu_button("View", |ui| {
-                    ui.checkbox(&mut self.settings.grid_visible, "Grid");
+                ui.menu_button(t("app.view_menu", _lang), |ui| {
+                    ui.checkbox(&mut self.settings.grid_visible, t("app.grid_menu", _lang));
                     ui.separator();
-                    if ui.selectable_label(self.viewport_mode == ViewportMode::Scene, "Scene View").clicked() {
+                    if ui.selectable_label(self.viewport_mode == ViewportMode::Scene, t("app.scene_view", _lang)).clicked() {
                         self.viewport_mode = ViewportMode::Scene;
                         ui.close_menu();
                     }
-                    if ui.selectable_label(self.viewport_mode == ViewportMode::Schematic, "Schematic View").clicked() {
+                    if ui.selectable_label(self.viewport_mode == ViewportMode::Schematic, t("app.schematic_view", _lang)).clicked() {
                         self.viewport_mode = ViewportMode::Schematic;
                         ui.close_menu();
                     }
                 });
 
                 // -- Project --
-                ui.menu_button("Project", |ui| {
+                ui.menu_button(t("app.project_menu", _lang), |ui| {
                     if let Some(project) = &self.current_project {
                         ui.label(
                             egui::RichText::new(&project.name)
@@ -813,8 +849,8 @@ impl AuraRafiApp {
                 });
 
                 // -- Help --
-                ui.menu_button("Help", |ui| {
-                    ui.label(egui::RichText::new("Keyboard Shortcuts").strong());
+                ui.menu_button(t("app.help_menu", _lang), |ui| {
+                    ui.label(egui::RichText::new(t("app.keyboard_shortcuts", _lang)).strong());
                     ui.label("Ctrl+S  -  Save");
                     ui.label("Ctrl+Z  -  Undo");
                     ui.label("Ctrl+Y  -  Redo");
@@ -834,11 +870,11 @@ impl AuraRafiApp {
                         // Build/Run button - integrated into toolbar, not a floating badge.
                         let build_text = if let Some(project) = &self.current_project {
                             match project.project_type {
-                                ProjectType::Game => "Run Game",
-                                ProjectType::Electronics => "Electrical Test",
+                                ProjectType::Game => t("app.run_game", _lang),
+                                ProjectType::Electronics => t("app.electrical_test_btn", _lang),
                             }
                         } else {
-                            "Build"
+                            t("app.build_btn", _lang).to_string()
                         };
 
                         let build_btn = egui::Button::new(
@@ -872,8 +908,8 @@ impl AuraRafiApp {
                         // Viewport mode indicator.
                         ui.separator();
                         let mode_text = match self.viewport_mode {
-                            ViewportMode::Scene => "Scene",
-                            ViewportMode::Schematic => "Schematic",
+                            ViewportMode::Scene => t("app.scene_view", _lang),
+                            ViewportMode::Schematic => t("app.schematic_view", _lang),
                         };
                         ui.label(
                             egui::RichText::new(mode_text)
@@ -906,7 +942,7 @@ impl AuraRafiApp {
                     }
                     ui.separator();
                     ui.label(
-                        egui::RichText::new(format!("Entities: {}", self.scene.all_valid_ids().len()))
+                        egui::RichText::new(format!("{} {}", t("app.entities_count", _lang), self.scene.all_valid_ids().len()))
                             .size(11.0)
                             .color(app_theme::DARK_TEXT_DIM),
                     );
@@ -963,25 +999,56 @@ impl AuraRafiApp {
                         (BottomTab::NodeEditor, "Node Editor"),
                         (BottomTab::AiChat, "AI Chat"),
                     ];
+                    
+                    let mut tab_changed = None;
                     for (tab, label) in tabs {
-                        if ui
-                            .selectable_label(self.bottom_tab == tab, label)
-                            .clicked()
-                        {
-                            self.bottom_tab = tab;
+                        let is_active = self.bottom_tab == tab;
+                        let text_color = if is_active {
+                            app_theme::ACCENT
+                        } else {
+                            egui::Color32::from_rgb(150, 150, 160)
+                        };
+                        
+                        let btn = egui::Button::new(
+                            egui::RichText::new(label).size(13.0).color(text_color),
+                        )
+                        .fill(egui::Color32::TRANSPARENT)
+                        .frame(false);
+
+                        let response = ui.add(btn);
+                        
+                        // Draw underline for the active tab
+                        if is_active {
+                            let rect = response.rect;
+                            ui.painter().line_segment(
+                                [
+                                    egui::Pos2::new(rect.left(), rect.bottom() + 3.0),
+                                    egui::Pos2::new(rect.right(), rect.bottom() + 3.0),
+                                ],
+                                egui::Stroke::new(2.0, app_theme::ACCENT),
+                            );
                         }
+
+                        if response.clicked() {
+                            tab_changed = Some(tab);
+                        }
+                        
+                        ui.add_space(16.0);
+                    }
+                    if let Some(t) = tab_changed {
+                        self.bottom_tab = t;
                     }
                 });
                 ui.separator();
 
                 match self.bottom_tab {
-                    BottomTab::Assets => self.asset_browser.show(ui),
-                    BottomTab::Console => self.console.show(ui),
+                    BottomTab::Assets => self.asset_browser.show(ui, self.settings.language),
+                    BottomTab::Console => self.console.show(ui, self.settings.language),
                     BottomTab::AiChat => {
-                        self.ai_chat.is_es = self.settings.language == Language::Spanish;
+                        self.ai_chat.lang = self.settings.language;
                         self.ai_chat.show(ui);
                     }
-                    BottomTab::NodeEditor => self.node_editor.show(ui),
+                    BottomTab::NodeEditor => self.node_editor.show(ui, self.settings.language),
                 }
             });
 
@@ -1061,7 +1128,7 @@ impl AuraRafiApp {
                     );
                 }
                 ViewportMode::Schematic => {
-                    self.schematic_view.is_es = self.settings.language == Language::Spanish;
+                    self.schematic_view.lang = self.settings.language;
                     self.schematic_view.show(ui);
                 }
             }
@@ -1073,58 +1140,85 @@ impl AuraRafiApp {
     // -----------------------------------------------------------------------
 
     fn show_settings_screen(&mut self, ctx: &egui::Context) {
-        let is_es = self.settings.language == Language::Spanish;
+        let _lang = self.settings.language;
+        let mut close = false;
+        let mut save = false;
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(20.0);
             ui.vertical_centered(|ui| {
-                let title = if is_es { "Configuracion" } else { "Settings" };
-                ui.heading(
-                    egui::RichText::new(title)
-                        .size(24.0)
-                        .color(app_theme::ACCENT),
+                ui.set_max_width(540.0); // Clean, constrained center column
+                
+                ui.add_space(32.0);
+                
+                // Professional Title (Extralight-like, subtle)
+                ui.label(
+                    egui::RichText::new(t("app.engine_settings_title", _lang))
+                        .size(16.0)
+                        .color(egui::Color32::from_rgb(140, 140, 150)),
                 );
-            });
-            ui.add_space(12.0);
-            ui.separator();
+                
+                ui.add_space(20.0);
+                ui.separator();
+                ui.add_space(16.0);
 
-            settings_panel::show_settings(ui, &mut self.settings);
+                // Need a frame for the settings panel content
+                let frame = egui::Frame::none()
+                    .fill(if ctx.style().visuals.dark_mode { app_theme::DARK_PANEL } else { app_theme::LIGHT_PANEL })
+                    .rounding(8.0)
+                    .inner_margin(24.0)
+                    .stroke(egui::Stroke::new(1.0, if ctx.style().visuals.dark_mode { app_theme::DARK_BORDER } else { app_theme::LIGHT_BORDER }));
+                
+                frame.show(ui, |ui| {
+                    settings_panel::show_settings(ui, &mut self.settings);
+                });
 
-            ui.add_space(16.0);
-            ui.separator();
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                let save_label = if is_es { "Guardar y Cerrar" } else { "Save & Close" };
-                let save_btn = egui::Button::new(
-                    egui::RichText::new(save_label)
-                        .color(egui::Color32::WHITE),
-                )
-                .fill(app_theme::ACCENT);
+                ui.add_space(24.0);
 
-                if ui.add_sized([140.0, 30.0], save_btn).clicked() {
-                    let config_dir = dirs_config_dir();
-                    let _ = self.settings.save(&config_dir);
-                    let msg = if is_es { "Configuracion guardada" } else { "Settings saved" };
-                    self.console.log(LogLevel::Info, msg);
-                    self.screen = self
-                        .previous_screen
-                        .take()
-                        .unwrap_or(AppScreen::ProjectHub);
-                }
+                // Action buttons below
+                ui.horizontal(|ui| {
+                    // Right aligned buttons
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Styled save button using accent but thinner or less aggressive
+                        let save_btn = egui::Button::new(
+                            egui::RichText::new(t("app.save_and_close", _lang))
+                                .size(13.0)
+                                .color(egui::Color32::WHITE),
+                        )
+                        .fill(app_theme::ACCENT)
+                        .rounding(4.0);
 
-                ui.add_space(8.0);
+                        if ui.add_sized([120.0, 32.0], save_btn).clicked() {
+                            save = true;
+                            close = true;
+                        }
 
-                let cancel_label = if is_es { "Cancelar" } else { "Cancel" };
-                if ui
-                    .add_sized([100.0, 30.0], egui::Button::new(cancel_label))
-                    .clicked()
-                {
-                    self.screen = self
-                        .previous_screen
-                        .take()
-                        .unwrap_or(AppScreen::ProjectHub);
-                }
+                        ui.add_space(12.0);
+
+                        let cancel_btn = egui::Button::new(
+                            egui::RichText::new(t("app.cancel", _lang))
+                                .size(13.0),
+                        )
+                        .rounding(4.0);
+
+                        if ui.add_sized([90.0, 32.0], cancel_btn).clicked() {
+                            close = true;
+                        }
+                    });
+                });
             });
         });
+
+        if close {
+            if save {
+                let config_dir = dirs_config_dir();
+                let _ = self.settings.save(&config_dir);
+                self.console.log(LogLevel::Info, "Settings saved.");
+            }
+            self.screen = self
+                .previous_screen
+                .take()
+                .unwrap_or(AppScreen::ProjectHub);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1156,10 +1250,10 @@ impl AuraRafiApp {
                 self.scene = restored;
                 self.hierarchy.selected_node = None;
                 self.viewport.selected = None;
-                let is_es = self.settings.language == Language::Spanish;
-                let msg = if is_es { "Deshacer" } else { "Undo" };
+                let _lang = self.settings.language;
+                let msg = t("app.undo", self.settings.language);
                 self.last_action = msg.to_string();
-                self.console.log(LogLevel::Info, msg);
+                self.console.log(LogLevel::Info, &msg);
             }
         }
     }
@@ -1175,10 +1269,10 @@ impl AuraRafiApp {
                 self.scene = restored;
                 self.hierarchy.selected_node = None;
                 self.viewport.selected = None;
-                let is_es = self.settings.language == Language::Spanish;
-                let msg = if is_es { "Rehacer" } else { "Redo" };
+                let _lang = self.settings.language;
+                let msg = t("app.redo", self.settings.language);
                 self.last_action = msg.to_string();
-                self.console.log(LogLevel::Info, msg);
+                self.console.log(LogLevel::Info, &msg);
             }
         }
     }
@@ -1188,18 +1282,14 @@ impl AuraRafiApp {
     // -----------------------------------------------------------------------
 
     fn do_delete(&mut self) {
-        let is_es = self.settings.language == Language::Spanish;
+        let _lang = self.settings.language;
         if let Some(id) = self.hierarchy.selected_node {
             self.push_undo_snapshot();
             let name = self.scene.get(id).map(|n| n.name.clone()).unwrap_or_default();
             if self.scene.remove_node(id) {
                 self.hierarchy.selected_node = None;
                 self.viewport.selected = None;
-                let msg = if is_es {
-                    format!("Eliminado: {}", name)
-                } else {
-                    format!("Deleted: {}", name)
-                };
+                let msg = format!("{} {}", t("app.deleted_msg", _lang), name);
                 self.last_action = msg.clone();
                 self.console.log(LogLevel::Info, &msg);
             }
@@ -1207,18 +1297,14 @@ impl AuraRafiApp {
     }
 
     fn do_duplicate(&mut self) {
-        let is_es = self.settings.language == Language::Spanish;
+        let _lang = self.settings.language;
         if let Some(id) = self.hierarchy.selected_node {
             self.push_undo_snapshot();
             if let Some(new_id) = self.scene.duplicate_node(id) {
                 self.hierarchy.selected_node = Some(new_id);
                 self.viewport.selected = Some(new_id);
                 let name = self.scene.get(new_id).map(|n| n.name.clone()).unwrap_or_default();
-                let msg = if is_es {
-                    format!("Duplicado: {}", name)
-                } else {
-                    format!("Duplicated: {}", name)
-                };
+                let msg = format!("{} {}", t("app.duplicated_msg", _lang), name);
                 self.last_action = msg.clone();
                 self.console.log(LogLevel::Info, &msg);
             }
@@ -1231,18 +1317,14 @@ impl AuraRafiApp {
             self.hierarchy.selected_node = Some(*first);
             self.viewport.selected = Some(*first);
         }
-        let is_es = self.settings.language == Language::Spanish;
-        let msg = if is_es {
-            format!("{} entidades encontradas", ids.len())
-        } else {
-            format!("{} entities found", ids.len())
-        };
+        let _lang = self.settings.language;
+        let msg = format!("{} {}", ids.len(), t("app.entities_found_msg", _lang));
         self.last_action = msg.clone();
         self.console.log(LogLevel::Info, &msg);
     }
 
     fn do_save(&mut self) {
-        let is_es = self.settings.language == Language::Spanish;
+        let _lang = self.settings.language;
         if let Some(project) = &self.current_project {
             let _ = project.save();
             // Save scene alongside project.
@@ -1250,9 +1332,9 @@ impl AuraRafiApp {
             let _ = self.scene.save_ron(&scene_path);
             self.scene_modified = false;
             self.auto_save_elapsed = 0.0;
-            let msg = if is_es { "Proyecto guardado" } else { "Project saved" };
+            let msg = t("app.project_saved", self.settings.language);
             self.last_action = msg.to_string();
-            self.console.log(LogLevel::Info, msg);
+            self.console.log(LogLevel::Info, &msg);
         }
     }
 
@@ -1295,10 +1377,10 @@ impl AuraRafiApp {
         let interval = self.settings.auto_save_interval_seconds as f32;
         if interval > 0.0 && self.auto_save_elapsed >= interval {
             self.do_save();
-            let is_es = self.settings.language == Language::Spanish;
-            let msg = if is_es { "Auto-guardado" } else { "Auto-saved" };
+            let _lang = self.settings.language;
+            let msg = t("app.auto_saved", self.settings.language);
             self.last_action = msg.to_string();
-            self.console.log(LogLevel::Info, msg);
+            self.console.log(LogLevel::Info, &msg);
         }
     }
 
@@ -1329,14 +1411,36 @@ impl AuraRafiApp {
                 ProjectType::Electronics => {
                     self.console.log(
                         LogLevel::Info,
-                        "Running electrical test...",
+                        "Running DC Simulation...",
                     );
+                    
+                    // 1. Run design checks first
                     let results = self.schematic_view.schematic.electrical_test();
                     for result in &results {
                         if result.contains("passed") {
-                            self.console.log(LogLevel::Info, result);
+                            self.console.log(LogLevel::Info, &result);
                         } else {
-                            self.console.log(LogLevel::Warning, result);
+                            self.console.log(LogLevel::Warning, &result);
+                        }
+                    }
+
+                    // 2. Run actual math simulation
+                    let sim_results = raf_electronics::simulation::simulate_dc(&self.schematic_view.schematic);
+                    if sim_results.converged {
+                        self.console.log(LogLevel::Info, "Simulation converged successfully.");
+                        for (ci, current) in sim_results.component_currents {
+                            let comp = &self.schematic_view.schematic.components[ci];
+                            let msg = format!("Component [{}]: Current = {:.5} A", comp.id, current);
+                            self.console.log(LogLevel::Info, &msg);
+                        }
+                        for (net_id, voltage) in sim_results.node_voltages {
+                            let msg = format!("Net [N{:03}]: Voltage = {:.2} V", net_id, voltage);
+                            self.console.log(LogLevel::Info, &msg);
+                        }
+                    } else {
+                        self.console.log(LogLevel::Error, "Simulation failed to converge.");
+                        for err in sim_results.messages {
+                            self.console.log(LogLevel::Error, &err);
                         }
                     }
                 }
@@ -1360,9 +1464,9 @@ impl AuraRafiApp {
                 let scene_path = project.path.join("scene.ron");
                 if scene_path.exists() {
                     self.scene = SceneGraph::load_ron(&scene_path);
-                    let is_es = self.settings.language == Language::Spanish;
-                    let msg = if is_es { "Escena cargada desde archivo" } else { "Scene loaded from file" };
-                    self.console.log(LogLevel::Info, msg);
+                    let _lang = self.settings.language;
+                    let msg = t("app.scene_loaded_from_file", self.settings.language);
+                    self.console.log(LogLevel::Info, &msg);
                 } else {
                     self.init_scene_for_type(ptype);
                 }
@@ -1381,9 +1485,9 @@ impl AuraRafiApp {
 
                 self.current_project = Some(project);
                 self.screen = AppScreen::Editor;
-                let is_es = self.settings.language == Language::Spanish;
-                let msg = if is_es { "Proyecto cargado" } else { "Project loaded" };
-                self.console.log(LogLevel::Info, msg);
+                let _lang = self.settings.language;
+                let msg = t("app.project_loaded", self.settings.language);
+                self.console.log(LogLevel::Info, &msg);
             }
             Err(e) => {
                 self.console.log(

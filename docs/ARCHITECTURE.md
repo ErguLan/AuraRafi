@@ -91,7 +91,7 @@ Lightweight pub/sub system with type-erased events:
 - Published events are drained once per frame
 - Supports any `Send + Sync` payload type
 
-### Configuration
+### Configuration & Localization (i18n)
 
 - `EngineSettings`: Theme, language, render quality, editor prefs, simple mode, target platform
 - Persisted to disk as RON (Rusty Object Notation)
@@ -100,6 +100,7 @@ Lightweight pub/sub system with type-erased events:
 - `simple_mode`: Hides advanced parameters for beginners
 - `headless`: Server/cloud mode without window (structural)
 - `responsive_layout`: Adapts UI to small screens (structural)
+- **Localization (i18n)**: UI components load strings from integrated JSON dictonaries (`en.json`, `es.json`) via `raf_core::i18n::t()`.
 - Language support: English, Spanish
 
 ### Project Management
@@ -278,14 +279,15 @@ Visual editor built on `egui`/`eframe`:
 - Gerber export structure for JLCPCB/PCBWay (manufacturer-specific layers defined, placeholder until PCB 3D layout)
 - Circuit sharing: RON serialization for shareable compact strings
 
-## Visual Scripting (raf_nodes)
+## Visual Scripting (raf_nodes & raf_editor)
 
 - `Node`: Visual script building block with pins and position
 - `NodePin`: Typed connection point (Flow, Bool, Int, Float, String, Vec3)
-- `NodeGraph`: Collection of nodes and connections
+- `NodeGraph`: Collection of nodes and connections. Multiple flows supported via `Vec<NodeGraph>`.
 - `NodeCategory`: Event, Logic, Action, Math, Electronics, Variable
-- Built-in nodes: On Start, On Update, Print, If Branch, Add
-- Compiler stub for graph connectivity validation
+- Built-in nodes: On Start, On Update, Print, If Branch, Loops (For, While), Compare (>, <, ==), Entity manipulation
+- **UI Architecture**: `NodeEditorPanel` utilizes explicit grid allocation (`ui.allocate_space`) before rendering nodes to completely bypass "Input Swallowing". Bezier connections use `Rect::contains()` upon pointer release for accurate hit detection.
+- **Undo/Redo**: Fully memory-backed history stack capable of holding up to 50 iterations (`history: Vec<(Vec<NodeGraph>, usize)>`), supporting global shortcuts (Ctrl+Z / Ctrl+Y).
 - **Executor**: Walks flow chains in topological order, evaluates data pins, handles conditional branching (If node), 10k step safety limit
 - `NodeValue`: Runtime value type with coercion (Bool, Int, Float, String, Vec3)
 - `ExecutionOutput`: Logs, final pin values, success/error status

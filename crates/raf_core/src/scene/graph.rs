@@ -123,6 +123,8 @@ pub struct SceneNode {
     pub visible: bool,
     /// Associated ECS entity handle (optional, for linking with hecs).
     pub entity_index: Option<u32>,
+    /// External script files attached to this entity (e.g. VS Code edited logic).
+    pub scripts: Vec<String>,
 }
 
 impl SceneNode {
@@ -140,6 +142,7 @@ impl SceneNode {
             children: Vec::new(),
             visible: true,
             entity_index: None,
+            scripts: Vec::new(),
         }
     }
 
@@ -157,6 +160,7 @@ impl SceneNode {
             children: Vec::new(),
             visible: true,
             entity_index: None,
+            scripts: Vec::new(),
         }
     }
 

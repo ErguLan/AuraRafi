@@ -11,6 +11,8 @@
 
 use glam::{Vec3, Vec4};
 use serde::{Deserialize, Serialize};
+use raf_core::config::Language;
+use raf_core::i18n::t;
 
 // ---------------------------------------------------------------------------
 // Material
@@ -218,31 +220,17 @@ impl Default for ImpactSoundType {
 }
 
 impl ImpactSoundType {
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self, lang: Language) -> String {
         match self {
-            Self::Generic => "Generic",
-            Self::Metal => "Metal",
-            Self::Wood => "Wood",
-            Self::Stone => "Stone",
-            Self::Glass => "Glass",
-            Self::Dirt => "Dirt",
-            Self::Water => "Water",
-            Self::Flesh => "Flesh",
-            Self::Cloth => "Cloth",
-        }
-    }
-
-    pub fn label_es(&self) -> &'static str {
-        match self {
-            Self::Generic => "Generico",
-            Self::Metal => "Metal",
-            Self::Wood => "Madera",
-            Self::Stone => "Piedra",
-            Self::Glass => "Vidrio",
-            Self::Dirt => "Tierra",
-            Self::Water => "Agua",
-            Self::Flesh => "Carne",
-            Self::Cloth => "Tela",
+            Self::Generic => t("impact.generic", lang),
+            Self::Metal => t("impact.metal", lang),
+            Self::Wood => t("impact.wood", lang),
+            Self::Stone => t("impact.stone", lang),
+            Self::Glass => t("impact.glass", lang),
+            Self::Dirt => t("impact.dirt", lang),
+            Self::Water => t("impact.water", lang),
+            Self::Flesh => t("impact.flesh", lang),
+            Self::Cloth => t("impact.cloth", lang),
         }
     }
 }

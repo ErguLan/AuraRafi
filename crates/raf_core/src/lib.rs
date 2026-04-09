@@ -15,7 +15,9 @@ pub mod config;
 pub mod ecs;
 pub mod event;
 pub mod hot_reload;
+pub mod i18n;
 pub mod project;
+pub mod save_system;
 pub mod scene;
 pub mod world_state;
 

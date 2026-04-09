@@ -6,6 +6,8 @@
 //!
 //! This executor works for both game logic and circuit logic,
 //! keeping the node system unified across project types.
+//!
+//! SISTEMA INSPIRADO DE YOLL AU de yoll.site
 
 use crate::graph::{Connection, NodeGraph};
 use crate::node::{NodeId, PinDataType, PinKind};
@@ -175,7 +177,7 @@ pub fn execute(graph: &NodeGraph, entry_node_id: NodeId) -> ExecutionOutput {
         let mut input_values: HashMap<Uuid, NodeValue> = HashMap::new();
         for pin in &node.pins {
             if pin.kind == PinKind::Input && pin.data_type != PinDataType::Flow {
-                let value = if let Some((src_node, src_pin)) = input_map.get(&pin.id) {
+                let value = if let Some((_src_node, src_pin)) = input_map.get(&pin.id) {
                     // Pull from the source node's output.
                     output
                         .values
@@ -243,8 +245,8 @@ fn execute_node(
     output: &mut ExecutionOutput,
 ) {
     match node.name.as_str() {
-        "On Start" | "On Update" => {
-            // Event nodes: just pass flow through, no logic.
+        "On Start" | "On Update" | "For Loop" | "While" => {
+            // Event/Flow nodes: just pass flow through, logic evaluated by flow walker.
         }
         "Print" => {
             // Print node: collect all input String values and log them.
@@ -257,23 +259,50 @@ fn execute_node(
             }
         }
         "If" => {
-            // If node: condition is evaluated by the flow walker.
-            // Just store input values.
             for (pin_id, value) in inputs {
                 output.values.insert(*pin_id, value.clone());
             }
         }
         "Add" => {
-            // Add node: sum input values, store result.
             let mut sum = 0.0f64;
             for value in inputs.values() {
                 sum += value.as_float();
             }
-            // Find the output pin and store the result.
             for pin in &node.pins {
                 if pin.kind == PinKind::Output && pin.data_type != PinDataType::Flow {
                     output.values.insert(pin.id, NodeValue::Float(sum));
                 }
+            }
+        }
+        "Greater Than" | "Less Than" | "Equals" | "Not Equals" => {
+            let mut a = 0.0;
+            let mut b = 0.0;
+            for pin in &node.pins {
+                if pin.name == "A" {
+                    a = inputs.get(&pin.id).map(|v| v.as_float()).unwrap_or(0.0);
+                } else if pin.name == "B" {
+                    b = inputs.get(&pin.id).map(|v| v.as_float()).unwrap_or(0.0);
+                }
+            }
+            let res = match node.name.as_str() {
+                "Greater Than" => a > b,
+                "Less Than" => a < b,
+                "Equals" => (a - b).abs() < 1e-6,
+                "Not Equals" => (a - b).abs() >= 1e-6,
+                _ => false,
+            };
+            for pin in &node.pins {
+                if pin.kind == PinKind::Output && pin.data_type == PinDataType::Bool {
+                    output.values.insert(pin.id, NodeValue::Bool(res));
+                }
+            }
+        }
+        "Spawn Entity" | "Destroy Entity" | "Set Position" => {
+            // Evaluated by the external system listener (ECS bridging).
+            // We just log that it fired for now.
+            output.logs.push(format!("Node {} executed - deferring to ECS Bridge", node.name));
+            for (pin_id, value) in inputs {
+                output.values.insert(*pin_id, value.clone());
             }
         }
         _ => {

@@ -9,6 +9,8 @@
 //! This prevents the "Halo Slipspace" problem: engine that cannot scale.
 
 use serde::{Deserialize, Serialize};
+use raf_core::config::Language;
+use raf_core::i18n::t;
 
 // ---------------------------------------------------------------------------
 // Backend enum
@@ -37,18 +39,10 @@ impl Default for RenderBackend {
 
 impl RenderBackend {
     /// Display label for the UI.
-    pub fn label(&self) -> &'static str {
+    pub fn label(&self, lang: Language) -> String {
         match self {
-            Self::CpuPainter => "CPU (Light)",
-            Self::GpuWgpu => "GPU (wgpu)",
-        }
-    }
-
-    /// Display label in Spanish.
-    pub fn label_es(&self) -> &'static str {
-        match self {
-            Self::CpuPainter => "CPU (Ligero)",
-            Self::GpuWgpu => "GPU (wgpu)",
+            Self::CpuPainter => t("render.backend.cpu", lang),
+            Self::GpuWgpu => t("render.backend.gpu", lang),
         }
     }
 

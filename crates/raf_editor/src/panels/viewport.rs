@@ -10,7 +10,7 @@ use glam::{Mat4, Vec3};
 use raf_core::config::Language;
 use raf_core::scene::graph::{NodeColor, Primitive, SceneNodeId};
 use raf_core::SceneGraph;
-use raf_render::camera::{Camera, CameraMode};
+use raf_render::camera::Camera;
 use raf_render::mesh;
 use raf_render::projection;
 

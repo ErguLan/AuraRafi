@@ -6,7 +6,6 @@
 //!
 //! Technology based on Yoll AU - yoll.site
 
-use crate::component::ElectronicComponent;
 use crate::netlist::Netlist;
 use crate::schematic::Schematic;
 use std::collections::HashMap;
@@ -445,7 +444,6 @@ pub fn load_shared_circuit(data: &str) -> Result<Schematic, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::ElectronicComponent;
     use crate::schematic::Schematic;
     use glam::Vec2;
 

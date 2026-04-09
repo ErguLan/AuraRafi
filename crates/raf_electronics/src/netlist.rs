@@ -4,11 +4,10 @@
 //! nets (groups of connected pins). This is the foundation for
 //! simulation, DRC, and export.
 
-use crate::component::ElectronicComponent;
-use crate::schematic::{Schematic, Wire};
+use crate::schematic::Schematic;
 use glam::Vec2;
 use uuid::Uuid;
-const GRID_STEP: f32 = 20.0;
+const _GRID_STEP: f32 = 20.0;
 /// Tolerance for matching pin positions to wire endpoints (in grid units).
 const POSITION_TOLERANCE: f32 = 2.0;
 
@@ -239,7 +238,6 @@ impl Netlist {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::ElectronicComponent;
     use crate::schematic::Schematic;
 
     #[test]

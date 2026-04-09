@@ -4,6 +4,7 @@
 
 pub mod ai_chat;
 pub mod asset_browser;
+pub mod behaviors;
 pub mod console;
 pub mod hierarchy;
 pub mod node_editor;

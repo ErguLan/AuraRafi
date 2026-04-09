@@ -79,15 +79,16 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 ## v0.4.0 - Visual Scripting
 
 - [x] Node graph execution engine (basic interpreter: walks flow chains, evaluates data pins, handles On Start/Print/If/Add)
-- [ ] Variable get/set nodes
-- [ ] Loop nodes (For, While)
-- [ ] Comparison nodes (>, <, ==, !=)
-- [ ] Entity manipulation nodes (Spawn, Destroy, SetPosition)
-- [ ] Input event nodes (Key Press, Mouse Click)
-- [ ] Timer/delay nodes
-- [ ] Node graph save/load
-- [ ] Serial Read / Serial Write hardware nodes
-- [ ] Sensor Input / Actuator Output nodes
+- [x] Variable get/set nodes
+- [x] Loop nodes (For, While)
+- [x] Comparison nodes (>, <, ==, !=)
+- [x] Entity manipulation nodes (Spawn, Destroy, SetPosition)
+- [x] Input event nodes (Key Press, Mouse Click)
+- [x] Timer/delay nodes
+- [x] Node graph save/load
+- [x] Serial Read / Serial Write hardware nodes
+- [x] Sensor Input / Actuator Output nodes
+- [x] **v0.4.0: Unified i18n System**: Unified JSON-based translation system (`raf_core::i18n::t`) with `en.json` and `es.json` support. Removed hardcoded conditionals from all panels.
 
 ## v0.5.0 - Electronics
 
@@ -109,14 +110,13 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [x] Inline value editing (modal window from context menu)
 - [x] Circuit sharing (RON serialization/deserialization)
 
-## v0.6.0 - Internationalization
+## v0.6.0 - Advanced Scripting & Internationalization
 
-- [ ] Fluent-based localization system
-- [ ] Complete English translation file
-- [ ] Complete Spanish translation file
-- [ ] Community translation infrastructure
-- [ ] RTL language support preparation
-
+- [ ] C++ Native Scripting API (FFI architecture using cxx/bindgen for peak performance)
+- [ ] DLL Hot-Loading (Dynamically load and swap C++ `.dll`/`.so` game files at runtime without restarting the engine)
+- [ ] Interop bridge (Exposing SceneNodes and Vectors from Rust directly to C++ without serialization overhead)
+- [x] (DONE in v0.4.0) Fluent-based localization system (Replaced by internal JSON i18n system)
+- [ ] **Verify Unified i18n System**: Finis hUnified JSON-based translation system (`raf_core::i18n::t`) with `en.json` and `es.json` support. Rwatch every file to see if there's not translations
 ## v0.7.0 - Advanced Rendering
 
 ### Infrastructure (prepared)
@@ -127,6 +127,12 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [x] Complement Trace: ray tracing designed from day 1 (not patched), 4 modes (Disabled/Software/Hardware/Hybrid), per-feature toggles (shadows/reflections/GI/AO/refractions/caustics), BVH AccelerationStructure
 - [x] GPU vertex deformation: 7 deformer types (cloth/hair/vegetation/water/skeletal/blend shape/custom), wind/gravity/stiffness/frequency params, per-vertex GPU overhead estimates
 - [x] World streaming: seamless open world (zero loading screens), WorldRegion with biome/LOD/state machine, potato/default/high presets, camera-based region load/unload
+
+PBR (Physically Based Rendering) materials
+Point and spot lights
+Shadow mapping
+
+Ambient occlusion (SSAO)
 
 ### Implementation (pending - requires wgpu integration)
 - [ ] wgpu pipeline implementation (vertex buffers, shaders WGSL, render passes)

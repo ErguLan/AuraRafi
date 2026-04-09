@@ -4,7 +4,7 @@
 //! and other modules subscribe to react without direct coupling.
 
 use serde::{Deserialize, Serialize};
-use std::any::{Any, TypeId};
+use std::any::Any;
 use std::collections::HashMap;
 use uuid::Uuid;
 

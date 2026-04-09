@@ -9,7 +9,6 @@ use crate::component::SimModel;
 use crate::netlist::Netlist;
 use crate::schematic::Schematic;
 use std::collections::HashMap;
-use uuid::Uuid;
 
 /// Results of a DC simulation.
 #[derive(Debug, Clone)]

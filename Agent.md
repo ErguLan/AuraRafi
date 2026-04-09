@@ -48,7 +48,7 @@ ProyectRaf/
 - **Serialization**: serde + ron (human-readable config files)
 - **Build target**: `x86_64-pc-windows-gnu` (no Visual Studio needed, uses MinGW)
 
-## Current State (v0.1.0)
+## Current State (v0.4.0)
 
 ### What Works
 - Full editor UI with loading screen, project hub, and main editor layout
@@ -127,7 +127,7 @@ ProyectRaf/
 - Theme colors are **public constants** in `theme.rs`, used across all panels for consistency.
 - The app has a state machine: `AppScreen` enum controls which screen is shown (Loading → ProjectHub → NewProject → Editor → Settings).
 - Panel functions follow the pattern: `fn show(&mut self, ui: &mut egui::Ui)` — they take a mutable UI reference and draw themselves.
-- Translations use inline `if is_es { "Spanish" } else { "English" }` checks. No i18n framework yet, but `fluent` crate is available.
+- Translations use a unified JSON-based i18n system (`raf_core::i18n::t()`). Dictonaries are located in `crates/raf_core/locales/`. No more hardcoded `if is_es` checks in UI code.
 
 ## Building & Running
 
