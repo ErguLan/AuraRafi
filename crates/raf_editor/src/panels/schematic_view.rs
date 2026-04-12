@@ -102,9 +102,11 @@ struct ContextMenu {
 
 impl Default for SchematicViewPanel {
     fn default() -> Self {
+        let mut library = ComponentLibrary::default_library();
+        library.load_external_assets();
         Self {
             schematic: Schematic::new("Untitled"),
-            library: ComponentLibrary::default_library(),
+            library,
             offset: Vec2::new(200.0, 150.0),
             zoom: 1.0,
             selection: Selection::None,
@@ -549,18 +551,21 @@ impl SchematicViewPanel {
                     PlacementMode::Component(idx) => {
                         let idx_val = *idx;
                         if let Some(tmpl) = self.library.components.get(idx_val) {
-                            let mut comp = (tmpl.create)();
+                            let mut comp = tmpl.instantiate();
                             comp.position = glam::Vec2::new(world.x, world.y);
                             self.schematic.add_component(comp);
                         }
                     }
                     PlacementMode::Wire => {
-                        if let Some(start) = self.wire_start.take() {
-                            self.schematic.add_wire(
-                                glam::Vec2::new(start.x, start.y),
-                                glam::Vec2::new(world.x, world.y),
-                                "",
-                            );
+                        if let Some(start) = self.wire_start {
+                            if start != world {
+                                self.schematic.add_wire(
+                                    glam::Vec2::new(start.x, start.y),
+                                    glam::Vec2::new(world.x, world.y),
+                                    "",
+                                );
+                            }
+                            self.wire_start = Some(world);
                         } else {
                             self.wire_start = Some(world);
                         }
@@ -581,6 +586,12 @@ impl SchematicViewPanel {
 
         // Right-click: open context menu (NOT pan).
         if resp.clicked_by(egui::PointerButton::Secondary) {
+            if let PlacementMode::Wire = self.placement {
+                if self.wire_start.is_some() {
+                    self.wire_start = None;
+                    return;
+                }
+            }
             if let Some(mouse) = ui.input(|i| i.pointer.hover_pos()) {
                 // Determine what was right-clicked.
                 let target = if let Some(idx) = self.hit_test_component(mouse, rect) {

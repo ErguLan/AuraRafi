@@ -49,12 +49,13 @@ enum AppScreen {
 }
 
 /// Bottom panel tab selection in the editor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum BottomTab {
     Assets,
     Console,
     AiChat,
     NodeEditor,
+    Complement(String),
 }
 
 /// Central viewport mode for the editor body.
@@ -94,6 +95,10 @@ pub struct AuraRafiApp {
     bottom_tab: BottomTab,
     viewport_mode: ViewportMode,
     _show_settings: bool,
+    
+    // Extensions
+    complement_registry: raf_core::complement::ComplementRegistry,
+    command_bus: raf_core::command::CommandBus,
     frame_count: u64,
 
     // v0.3.0: UX state
@@ -147,6 +152,10 @@ impl AuraRafiApp {
             ai_chat: AiChatPanel::default(),
             node_editor: NodeEditorPanel::default(),
             schematic_view: SchematicViewPanel::default(),
+
+            complement_registry: raf_core::complement::ComplementRegistry::new(),
+            command_bus: raf_core::command::CommandBus::new(),
+
             bottom_tab: BottomTab::Console,
             viewport_mode: ViewportMode::Scene,
             _show_settings: false,
@@ -993,12 +1002,15 @@ impl AuraRafiApp {
             .default_height(200.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let tabs = [
-                        (BottomTab::Console, "Console"),
-                        (BottomTab::Assets, "Assets"),
-                        (BottomTab::NodeEditor, "Node Editor"),
-                        (BottomTab::AiChat, "AI Chat"),
+                    let mut tabs = vec![
+                        (BottomTab::Console, "Console".to_string()),
+                        (BottomTab::Assets, "Assets".to_string()),
+                        (BottomTab::NodeEditor, "Node Editor".to_string()),
+                        (BottomTab::AiChat, "AI Chat".to_string()),
                     ];
+                    for comp in &self.complement_registry.complements {
+                        tabs.push((BottomTab::Complement(comp.id().to_string()), comp.name().to_string()));
+                    }
                     
                     let mut tab_changed = None;
                     for (tab, label) in tabs {
@@ -1041,7 +1053,7 @@ impl AuraRafiApp {
                 });
                 ui.separator();
 
-                match self.bottom_tab {
+                match &self.bottom_tab {
                     BottomTab::Assets => self.asset_browser.show(ui, self.settings.language),
                     BottomTab::Console => self.console.show(ui, self.settings.language),
                     BottomTab::AiChat => {
@@ -1049,6 +1061,15 @@ impl AuraRafiApp {
                         self.ai_chat.show(ui);
                     }
                     BottomTab::NodeEditor => self.node_editor.show(ui, self.settings.language),
+                    BottomTab::Complement(id) => {
+                        let mut context = raf_core::complement::ComplementContext {
+                            lang: self.settings.language,
+                            command_bus: &mut self.command_bus,
+                        };
+                        if let Some(comp) = self.complement_registry.complements.iter_mut().find(|c| c.id() == id) {
+                            comp.draw_ui(&mut context); // No egui UI context in EngineComplement trait for now.
+                        }
+                    }
                 }
             });
 
@@ -1537,3 +1558,4 @@ fn default_projects_dir() -> String {
         .display()
         .to_string()
 }
+include!("panels/complements.rs");

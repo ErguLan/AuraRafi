@@ -22,13 +22,11 @@ Registro de decisiones importantes y por que se tomaron.
 
 ---
 
-## ADR-003: Traducciones inline, no framework i18n
+## ADR-003: [DEPRECATED] Traducciones inline, no framework i18n
 
-**Decision**: `if is_es { "Texto ES" } else { "Text EN" }` en cada lugar.
+**Decision original**: `if is_es { "Texto ES" } else { "Text EN" }` en cada lugar.
 
-**Razon**: Agregar `fluent` o similar agrega complejidad de archivos de traduccion, hot-reload, fallbacks. Para 2 idiomas, inline es mas simple y facil de mantener.
-
-**Futuro**: Migrar a `fluent` cuando haya 3+ idiomas o contribuidores de comunidad.
+**Razon de deprecacion**: Escalo excesivamente mal en las vistas de editor. Reemplazado por ADR-007.
 
 ---
 
@@ -53,3 +51,27 @@ Registro de decisiones importantes y por que se tomaron.
 **Decision**: Todos los nodos viven en un `Vec<SceneNode>` contiguo con indices como referencias.
 
 **Razon**: Cache-friendly para iteracion. O(1) lookup. Sin allocations fragmentadas en el heap. El arbol se reconstruye via indices parent/children.
+
+---
+
+## ADR-007: Unified JSON i18n Translation System
+
+**Decision**: Implement a custom lightweight JSON i18n engine (`raf_core::i18n::t()`) embedding `en.json` and `es.json` inside the binary via `include_str!`.
+
+**Razon**: Inline translations (ADR-003) cluttered the UI rendering logic severely. A zero-dependency JSON parser embedded inside the engine provides O(1) string lookups via HashMaps with 0 compile-time build script complexitiy (avoiding Fluent overhead).
+
+---
+
+## ADR-008: 3D PCB Layout powered by Game Engine Viewport
+
+**Decision**: Electronics projects use the exact same 3D `SceneGraph` and CPU Viewport Painter used by Game projects to generate PCB layouts at runtime, instead of constructing a separate 2D PCB module.
+
+**Razon**: Prevents code duplication. A PCB is inherently a 3D construct. Mapping schematic X/Y coordinates directly into X/Z 3D primitives (Cubes for FR4/Chips, Cylinders for pads) unifies the Game and Electronics domains naturally and gives users a CAD experience instantly.
+
+---
+
+## ADR-009: Data-driven Moddable Electronic Components
+
+**Decision**: Electronic components (`SimModel`, `Pin`, `Footprint`) are serialized into `.ron` files inside an external `ElectricalAssets/` directory. The engine loads them dynamically at runtime rather than relying on Rust function pointers.
+
+**Razon**: Extensibility. Modders or hardware engineers can add new components (like sensors, ICs, or batteries) by just dragging a `.ron` file into the folder without needing to recompile the Rust engine source code.

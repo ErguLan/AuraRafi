@@ -160,6 +160,29 @@ pub fn simulate_dc(schematic: &Schematic) -> SimulationResults {
                     &net_to_idx,
                 );
             }
+            SimModel::DcSource { voltage } => {
+                // Model as a voltage source with very small internal resistance (0.01 ohms)
+                // Norton equivalent: I = V / R, parallel with R
+                let r_internal = 0.01;
+                let conductance = 1.0 / r_internal;
+                stamp_resistor(
+                    &mut g_matrix,
+                    pin_nets.get(0).copied().flatten(),
+                    pin_nets.get(1).copied().flatten(),
+                    conductance,
+                    ground_node,
+                    &net_to_idx,
+                );
+                let i_src = *voltage / r_internal;
+                stamp_current_source(
+                    &mut i_vector,
+                    pin_nets.get(0).copied().flatten(),
+                    pin_nets.get(1).copied().flatten(),
+                    i_src,
+                    ground_node,
+                    &net_to_idx,
+                );
+            }
             SimModel::Magnet { .. } => {
                 // Magnets are passive - no electrical stamp in DC.
             }
@@ -228,6 +251,12 @@ pub fn simulate_dc(schematic: &Schematic) -> SimulationResults {
                     SimModel::Wire => {
                         let i = (v0 - v1) * 1000.0;
                         (i, 0.0)
+                    }
+                    SimModel::DcSource { voltage } => {
+                        let r_internal = 0.01;
+                        let i = (*voltage - (v0 - v1)) / r_internal; // Current delivered by source
+                        let p = i * (v0 - v1); // Power delivered
+                        (i, p)
                     }
                     SimModel::Magnet { .. } => (0.0, 0.0),
                 };

@@ -36,6 +36,8 @@ pub enum SimModel {
     },
     /// Simple wire / passthrough (zero resistance).
     Wire,
+    /// DC Voltage Source (ideal battery).
+    DcSource { voltage: f64 },
 }
 
 impl Default for SimModel {
@@ -245,6 +247,59 @@ impl ElectronicComponent {
                 tesla,
                 north_up: true,
             },
+        }
+    }
+
+    /// Create a DC Source (Battery).
+    pub fn dc_source(voltage: f64) -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            designator: "V?".to_string(),
+            value: format!("{}V", voltage),
+            category: "Power".to_string(),
+            pins: vec![
+                Pin {
+                    id: Uuid::new_v4(),
+                    name: "+".to_string(),
+                    direction: PinDirection::Power,
+                    offset: Vec2::new(0.0, -1.0),
+                    net: String::new(),
+                },
+                Pin {
+                    id: Uuid::new_v4(),
+                    name: "-".to_string(),
+                    direction: PinDirection::Power,
+                    offset: Vec2::new(0.0, 1.0),
+                    net: String::new(),
+                },
+            ],
+            position: Vec2::ZERO,
+            rotation: 0.0,
+            footprint: "BAT-18650".to_string(),
+            sim_model: SimModel::DcSource { voltage },
+        }
+    }
+    
+    /// Create a Ground terminal.
+    pub fn ground() -> Self {
+        Self {
+            id: Uuid::new_v4(),
+            designator: "GND".to_string(),
+            value: "GND".to_string(),
+            category: "Power".to_string(),
+            pins: vec![
+                Pin {
+                    id: Uuid::new_v4(),
+                    name: "GND".to_string(),
+                    direction: PinDirection::Ground,
+                    offset: Vec2::new(0.0, 0.0),
+                    net: String::new(),
+                },
+            ],
+            position: Vec2::ZERO,
+            rotation: 0.0,
+            footprint: "TP-GND".to_string(),
+            sim_model: SimModel::Wire, // electrically transparent
         }
     }
 }

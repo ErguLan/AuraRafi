@@ -11,6 +11,7 @@
 //! - **HotReload**: Polling-based file watcher for live project updates
 
 pub mod command;
+pub mod complement;
 pub mod config;
 pub mod ecs;
 pub mod event;
@@ -23,6 +24,7 @@ pub mod world_state;
 
 /// Re-export commonly used types at the crate root.
 pub use command::{Command, CommandBus, CommandId};
+pub use complement::*;
 pub use config::{EngineSettings, Language, RenderQuality, TargetPlatform, Theme};
 pub use ecs::world::GameWorld;
 pub use event::{EventBus, EventId};
