@@ -104,9 +104,15 @@ ProyectRaf/
   - `complements/complement_trace.rs`: Complement Trace (ray tracing designed from day 1), Ray/RayHit, RayTraceConfig (4 modes: Disabled/Software/Hardware/Hybrid), RayTraceFeatures (shadows/reflections/GI/AO/refractions/caustics toggleable), BVH AccelerationStructure
   - `gpu_deform.rs`: GPU vertex deformation (cloth/hair/vegetation/water/skeletal/blend shape), GpuDeformer (wind, gravity, stiffness, damping), factory methods, per-vertex GPU overhead estimates
   - `world_stream.rs`: seamless open world streaming, WorldRegion (grid, biome, LOD, state machine), WorldStreamConfig (potato/default/high presets), camera-based load/unload decisions
+- **Depth-Sorted Rendering**: Painter's algorithm eliminates Z-fighting. All faces from all entities collected into a single depth-sorted list, drawn back-to-front. O(n log n) per frame. Module: `depth_sort.rs`
+- **Entity Picking**: Click to select 3D entities via screen-space projection. Bounding sphere centers projected, closest within 30px threshold wins. Module: `picking.rs`
+- **Multi-Select**: Shift+Click adds/removes from selection. Ctrl+A selects all. Click empty deselects. Selection stored as `Vec<SceneNodeId>`.
+- **Transform Gizmo Arrows**: RGB arrows (X red, Y green, Z blue) with arrowhead triangles, axis labels, displayed when Move/Rotate/Scale tool is active on selected entity. Drag arrows to move/scale along axis. Hit-testing via point-to-segment distance.
+- **Edit Mode Foundation**: Tab toggles Object/Vertex modes. Visual indicator in viewport. Foundation for vertex-level editing.
+- **Hierarchy-Viewport-Properties Sync**: Bidirectional selection sync. Clicking in hierarchy updates viewport selection and vice versa. Properties panel always reflects first selected entity.
 
 ### What Does NOT Work Yet (Priority Order)
-1. **Edit Mode UI** -- EditableMesh data exists but the viewport edit mode (Tab toggle, vertex rendering, drag handles) is not wired up yet.
+1. **Edit Mode Vertex Rendering** -- Tab toggle works but vertex dots and vertex drag handles are not yet rendered. EditableMesh data exists, needs visual feedback.
 2. **Node Execution (partial)** -- Basic executor exists but does not yet run from the editor UI play button. Missing: variable nodes, loops, entity manipulation.
 3. **Asset Pipeline** -- No importing, no thumbnail generation, no hot-reload. The asset browser panel is a shell.
 4. **AI Integration** -- `raf_ai` and the chat panel are placeholders. No LLM provider is connected.

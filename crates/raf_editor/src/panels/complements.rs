@@ -84,7 +84,12 @@ impl AuraRafiApp {
                 ui.horizontal(|ui| {
                     ui.label(RichText::new("Open-source modules loaded dynamically.").size(11.0).color(muted_gray));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_sized([100.0, 24.0], egui::Button::new(RichText::new("Load .dll").color(accent)).rounding(4.0));
+                        if ui.add_sized([100.0, 24.0], egui::Button::new(RichText::new("Load .dll").color(accent)).rounding(4.0)).clicked() {
+                            // En el futuro: Abrir File Dialog UI para elegir .dll 
+                            // let cpp_comp = raf_core::ffi::CppComplement::load_dll("mods/my_c_plugin.dll");
+                            // self.complement_registry.register(cpp_comp);
+                            tracing::info!("DLL hot-loading feature triggered. Awaiting Native Plugin path.");
+                        }
                     });
                 });
             });

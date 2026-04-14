@@ -61,6 +61,7 @@ gltf = "1"
 # Utilities
 uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
+libloading = "0.8"
 
 # HTTP (lightweight, blocking - no async runtime needed)
 ureq = { version = "2", features = ["json"] }

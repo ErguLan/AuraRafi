@@ -12,10 +12,12 @@
 // --- Core pipeline (active today) ---
 pub mod backend;
 pub mod camera;
+pub mod depth_sort;
 pub mod editable;
 pub mod gizmo;
 pub mod lod;
 pub mod mesh;
+pub mod picking;
 pub mod pipeline;
 pub mod projection;
 pub mod renderer;
@@ -34,9 +36,11 @@ pub mod world_stream;
 // --- Core re-exports ---
 pub use backend::{BackendConfig, RenderBackend, FrameRenderStats};
 pub use camera::{Camera, CameraMode};
+pub use depth_sort::{DepthSorter, SortableFace};
 pub use editable::EditableMesh;
 pub use gizmo::GizmoState;
 pub use lod::LodConfig;
+pub use picking::{pick_entity, pick_gizmo_arrow, project_gizmo_arrow, PickResult, GizmoScreenArrow, GIZMO_ARROWS, GIZMO_LINE_WIDTH};
 pub use pipeline::RenderPipeline;
 pub use renderer::Renderer;
 

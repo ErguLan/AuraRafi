@@ -27,7 +27,7 @@ impl AuraRafiApp {
             if let Ok(restored) = ron::from_str::<SceneGraph>(&snapshot) {
                 self.scene = restored;
                 self.hierarchy.selected_node = None;
-                self.viewport.selected = None;
+                self.viewport.selected.clear();
                 let _lang = self.settings.language;
                 let msg = t("app.undo", self.settings.language);
                 self.last_action = msg.to_string();
@@ -46,7 +46,7 @@ impl AuraRafiApp {
             if let Ok(restored) = ron::from_str::<SceneGraph>(&snapshot) {
                 self.scene = restored;
                 self.hierarchy.selected_node = None;
-                self.viewport.selected = None;
+                self.viewport.selected.clear();
                 let _lang = self.settings.language;
                 let msg = t("app.redo", self.settings.language);
                 self.last_action = msg.to_string();
@@ -66,7 +66,7 @@ impl AuraRafiApp {
             let name = self.scene.get(id).map(|n| n.name.clone()).unwrap_or_default();
             if self.scene.remove_node(id) {
                 self.hierarchy.selected_node = None;
-                self.viewport.selected = None;
+                self.viewport.selected.clear();
                 let msg = format!("{} {}", t("app.deleted_msg", _lang), name);
                 self.last_action = msg.clone();
                 self.console.log(LogLevel::Info, &msg);
@@ -80,7 +80,7 @@ impl AuraRafiApp {
             self.push_undo_snapshot();
             if let Some(new_id) = self.scene.duplicate_node(id) {
                 self.hierarchy.selected_node = Some(new_id);
-                self.viewport.selected = Some(new_id);
+                self.viewport.selected = vec![new_id];
                 let name = self.scene.get(new_id).map(|n| n.name.clone()).unwrap_or_default();
                 let msg = format!("{} {}", t("app.duplicated_msg", _lang), name);
                 self.last_action = msg.clone();
@@ -93,8 +93,9 @@ impl AuraRafiApp {
         let ids = self.scene.all_valid_ids();
         if let Some(first) = ids.first() {
             self.hierarchy.selected_node = Some(*first);
-            self.viewport.selected = Some(*first);
         }
+        // Multi-select: select ALL entities.
+        self.viewport.selected = ids.clone();
         let _lang = self.settings.language;
         let msg = format!("{} {}", ids.len(), t("app.entities_found_msg", _lang));
         self.last_action = msg.clone();

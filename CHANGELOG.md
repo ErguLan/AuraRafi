@@ -5,6 +5,28 @@ All notable changes to AuraRafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - Edit Mode + Rendering Upgrade
+
+### Added
+
+- **Depth-sorted rendering** (`raf_render/depth_sort.rs`): painter's algorithm sorts ALL faces from ALL entities by depth before drawing, eliminating Z-fighting and overlap artifacts. O(n log n) per frame, zero GPU.
+- **Entity picking** (`raf_render/picking.rs`): click to select 3D entities via screen-space bounding sphere projection. 30px threshold, overlay-area exclusion, closest-to-camera preference.
+- **Multi-select**: Shift+Click adds/removes entities from selection set. Ctrl+A selects all entities. Click on empty space deselects. Selection stored as `Vec<SceneNodeId>`.
+- **Transform gizmo arrows**: RGB arrows (X red, Y green, Z blue) with arrowhead triangles and axis labels. Displayed on selected entity when Move/Rotate/Scale tool is active. Drag arrows to translate position or scale along individual axes. Screen-space hit testing via point-to-segment distance.
+- **Gizmo drag interaction**: dragging gizmo arrows modifies entity properties directly on the SceneGraph. Move tool translates position, Scale tool adjusts per-axis scale. Drag speed proportional to orbit distance.
+- **Edit mode foundation**: Tab key toggles Object/Vertex modes. Visual "EDIT MODE" indicator in viewport. Foundation for future vertex-level editing.
+- **Hierarchy-viewport-properties bidirectional sync**: selecting in hierarchy panel updates viewport selection and vice versa. Properties panel always reflects the first selected entity.
+- **Enhanced info overlay**: shows edit mode (OBJ/VTX), active tool, triangle count, selection count, orbit distance.
+
+### Changed
+
+- `ViewportPanel.selected` changed from `Option<SceneNodeId>` to `Vec<SceneNodeId>` for multi-select support.
+- `ViewportPanel.show()` now accepts `&mut SceneGraph` (was `&SceneGraph`) to allow gizmo drag to modify entities directly.
+- `draw_3d()` completely rewritten: 7-phase rendering pipeline (collect -> sort -> draw faces -> wireframe -> labels -> gizmo -> edit mode indicator).
+- All `selected = None` / `selected = Some(id)` patterns migrated across `app.rs`, `shortcuts.rs`, `hierarchy.rs`.
+- `do_select_all()` now selects ALL entities (was selecting only the first).
+
+
 ## [0.3.0] - 2026-03-29
 
 ### Added

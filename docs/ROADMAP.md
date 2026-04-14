@@ -54,6 +54,10 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [x] Mesh groups: group entities by ID to move/transform together
 - [x] Render backend switch: CPU painter (default, zero GPU) / GPU wgpu (opt-in), frame budget, adaptive detail, potato preset
 - [x] Independent SchematicGraph for electronics: separated from game SceneGraph, own data model with selection/picking/nets/serialization
+- [x] Depth-sorted rendering (painter's algorithm): all faces from all entities sorted by depth before drawing -- eliminates Z-fighting/overlap artifacts, O(n log n) per frame
+- [x] Transform gizmo arrows: RGB arrows (X red, Y green, Z blue) with arrowhead triangles, axis labels, drag interaction for Move/Scale tools, screen-space hit testing
+- [x] Entity picking: click to select in 3D viewport via screen-space projection, click-on-empty deselects, overlay-area exclusion
+- [x] Edit mode (Tab toggle): Object/Vertex modes with visual indicator, foundation for vertex-level editing
 
 ## v0.3.0 - Editor Polish
 
@@ -61,7 +65,8 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [ ] Asset thumbnail preview generation
 - [x] Context menus (right-click) in schematic editor (component/wire/canvas)
 - [ ] Keyboard shortcut customization (user-configurable keybinds)
-- [ ] Multi-entity selection (Shift+Click for multiple)
+- [x] Multi-entity selection (Shift+Click for multiple, Ctrl+A selects all, click empty to deselect)
+- [x] Hierarchy-viewport-properties bidirectional sync: clicking hierarchy updates viewport selection and vice versa, properties panel always shows selected entity
 - [x] Entity duplication (Ctrl+D) in schematic editor
 - [x] Entity duplication (Ctrl+D) in scene viewport
 - [x] Entity deletion (Del key + Edit menu) in scene viewport

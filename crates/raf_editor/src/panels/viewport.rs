@@ -3,6 +3,13 @@
 //! Renders scene entities using egui painter with projection math.
 //! No GPU pipeline - just matrix math and vector drawing. Runs on anything.
 //! Ultra lightweight: zero GPU buffers, zero shaders, zero texture memory.
+//!
+//! Features:
+//! - Depth-sorted rendering (painter's algorithm, no Z-fighting)
+//! - Transform gizmo arrows (RGB X/Y/Z) with drag interaction
+//! - Entity picking (click to select in 3D)
+//! - Multi-select (Shift+Click)
+//! - Edit mode (Tab toggle for vertex editing)
 
 use egui::{Color32, Pos2, Rect, Stroke, Ui, Vec2};
 use glam::{Mat4, Vec3};
@@ -11,7 +18,9 @@ use raf_core::config::Language;
 use raf_core::scene::graph::{NodeColor, Primitive, SceneNodeId};
 use raf_core::SceneGraph;
 use raf_render::camera::Camera;
+use raf_render::depth_sort::{self, DepthSorter};
 use raf_render::mesh;
+use raf_render::picking::{self, GIZMO_ARROWS, GIZMO_LINE_WIDTH};
 use raf_render::projection;
 
 use crate::theme;
@@ -44,6 +53,30 @@ pub enum ViewportTool {
     Scale,
 }
 
+/// Edit mode (Object mode vs vertex/face editing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditMode {
+    /// Normal object mode (select, move, rotate, scale whole entities).
+    Object,
+    /// Vertex editing mode (select and move individual vertices).
+    Vertex,
+}
+
+impl Default for EditMode {
+    fn default() -> Self {
+        Self::Object
+    }
+}
+
+/// Active gizmo drag state (when user is dragging an axis arrow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GizmoDragAxis {
+    None,
+    X,
+    Y,
+    Z,
+}
+
 /// Rendering style for 3D entities.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RenderStyle {
@@ -73,12 +106,24 @@ pub struct ViewportPanel {
     pub camera: Camera,
     /// Current tool mode.
     pub tool: ViewportTool,
-    /// Selected entity (if any).
-    pub selected: Option<SceneNodeId>,
+    /// Selected entities (multi-select via Shift+Click).
+    pub selected: Vec<SceneNodeId>,
     /// Show grid.
     pub grid_visible: bool,
     /// 3D rendering style.
     pub render_style: RenderStyle,
+    /// Current edit mode.
+    pub edit_mode: EditMode,
+    /// Active gizmo drag axis.
+    pub gizmo_drag: GizmoDragAxis,
+    /// Gizmo drag start position (screen coords).
+    gizmo_drag_start: [f32; 2],
+    /// Gizmo drag entity position at start of drag.
+    gizmo_drag_origin: Vec3,
+    /// Depth sorter (reused across frames, avoids allocation).
+    depth_sorter: DepthSorter,
+    /// Rendered triangle count (for stats display).
+    pub tri_count: usize,
     /// Orbit yaw angle (radians).
     orbit_yaw: f32,
     /// Orbit pitch angle (radians).
@@ -97,9 +142,15 @@ impl Default for ViewportPanel {
             mode: ViewportMode::View3D,
             camera: Camera::default(),
             tool: ViewportTool::Select,
-            selected: None,
+            selected: Vec::new(),
             grid_visible: true,
             render_style: RenderStyle::Solid,
+            edit_mode: EditMode::Object,
+            gizmo_drag: GizmoDragAxis::None,
+            gizmo_drag_start: [0.0; 2],
+            gizmo_drag_origin: Vec3::ZERO,
+            depth_sorter: DepthSorter::new(),
+            tri_count: 0,
             orbit_yaw: std::f32::consts::FRAC_PI_4,
             orbit_pitch: 0.5,
             orbit_distance: 8.0,
@@ -114,7 +165,7 @@ impl ViewportPanel {
     pub fn show(
         &mut self,
         ui: &mut Ui,
-        scene: &SceneGraph,
+        scene: &mut SceneGraph,
         is_dark: bool,
         lang: Language,
     ) {
@@ -140,17 +191,17 @@ impl ViewportPanel {
         self.draw_render_style_toggle(&painter, rect, is_dark, lang);
         self.draw_info_overlay(&painter, rect, is_dark);
 
-        // Interaction
+        // Interaction (includes entity picking, gizmo drag, camera controls)
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-        self.handle_input(ui, &response, rect);
+        self.handle_input(ui, &response, rect, scene);
     }
 
     // -------------------------------------------------------------------
-    // 3D rendering (projected wireframes + filled faces)
+    // 3D rendering (depth-sorted faces + wireframe + gizmo)
     // -------------------------------------------------------------------
 
     fn draw_3d(
-        &self,
+        &mut self,
         painter: &egui::Painter,
         rect: Rect,
         scene: &SceneGraph,
@@ -160,45 +211,119 @@ impl ViewportPanel {
         let vp_h = rect.height();
         let view_proj = self.camera.view_projection(vp_w, vp_h);
 
-        // Draw ground grid
+        // Draw ground grid.
         self.draw_3d_grid(painter, rect, &view_proj, is_dark);
 
-        // Draw axis indicator in corner
+        // Draw axis indicator in corner.
         self.draw_axis_gizmo(painter, rect, is_dark);
 
         let light_dir = Vec3::new(0.5, 0.8, 0.3).normalize();
 
-        // Draw each visible entity
+        // -- Phase 1: Collect all faces into depth sorter --
+        self.depth_sorter.clear();
+
         for (id, node) in scene.iter() {
             if !node.visible || node.primitive == Primitive::Empty {
                 continue;
             }
 
             let model = scene.world_matrix(id);
-            let is_selected = self.selected == Some(id);
+            let is_selected = self.selected.contains(&id);
 
-            // Draw filled faces (if not wireframe-only mode).
             if self.render_style != RenderStyle::Wireframe {
-                self.draw_primitive_faces(
-                    painter, rect, &model, &view_proj, &node.color,
-                    is_selected, node.primitive, light_dir,
-                );
-            }
+                // Get face data for this primitive.
+                let faces: Vec<([Vec3; 4], Vec3)> = match node.primitive {
+                    Primitive::Cube => mesh::cube_faces(),
+                    Primitive::Sphere => mesh::sphere_faces(4, 6),
+                    Primitive::Plane => mesh::plane_faces(),
+                    Primitive::Cylinder => mesh::cylinder_faces(8),
+                    Primitive::Sprite2D => mesh::plane_faces(),
+                    Primitive::Empty => continue,
+                };
 
-            // Draw wireframe edges (if not solid-only mode).
-            if self.render_style != RenderStyle::SolidOnly {
+                for (corners, normal) in &faces {
+                    let brightness = depth_sort::face_brightness(*normal, light_dir, &model);
+
+                    let color = if is_selected {
+                        depth_sort::shade_color(
+                            theme::ACCENT.r(), theme::ACCENT.g(), theme::ACCENT.b(),
+                            160, brightness,
+                        )
+                    } else {
+                        depth_sort::shade_color(
+                            node.color.r, node.color.g, node.color.b,
+                            180, brightness,
+                        )
+                    };
+
+                    let wire = self.render_style == RenderStyle::Solid;
+                    let wc = if is_selected {
+                        [theme::ACCENT.r(), theme::ACCENT.g(), theme::ACCENT.b(), 255]
+                    } else {
+                        [node.color.r, node.color.g, node.color.b, 200]
+                    };
+
+                    self.depth_sorter.add_quad(
+                        corners, *normal, &model, &view_proj,
+                        vp_w, vp_h, color, wire, wc,
+                        if is_selected { 2.0 } else { 1.0 },
+                    );
+                }
+            }
+        }
+
+        // -- Phase 2: Sort by depth (farthest first) --
+        self.depth_sorter.sort();
+        self.tri_count = self.depth_sorter.triangle_count();
+
+        // -- Phase 3: Draw sorted faces --
+        for face in self.depth_sorter.faces() {
+            let pts: Vec<Pos2> = face.screen_points.iter()
+                .map(|p| Pos2::new(rect.left() + p[0], rect.top() + p[1]))
+                .collect();
+
+            if pts.len() >= 3 {
+                let fc = Color32::from_rgba_premultiplied(
+                    face.color[0], face.color[1], face.color[2], face.color[3],
+                );
+
+                let stroke = if face.wireframe {
+                    let wc = Color32::from_rgba_premultiplied(
+                        face.wire_color[0], face.wire_color[1],
+                        face.wire_color[2], face.wire_color[3],
+                    );
+                    Stroke::new(face.wire_width, wc)
+                } else {
+                    Stroke::NONE
+                };
+
+                painter.add(egui::Shape::convex_polygon(pts, fc, stroke));
+            }
+        }
+
+        // -- Phase 4: Wireframe-only mode edges --
+        if self.render_style == RenderStyle::Wireframe {
+            for (id, node) in scene.iter() {
+                if !node.visible || node.primitive == Primitive::Empty {
+                    continue;
+                }
+                let model = scene.world_matrix(id);
+                let is_selected = self.selected.contains(&id);
                 self.draw_primitive_wireframe(
                     painter, rect, &model, &view_proj, &node.color,
                     is_selected, node.primitive, vp_w, vp_h,
                 );
             }
+        }
 
-            // Draw entity label (3D projected)
+        // -- Phase 5: Entity labels (always on top) --
+        for (id, node) in scene.iter() {
+            if !node.visible || node.primitive == Primitive::Empty {
+                continue;
+            }
+            let is_selected = self.selected.contains(&id);
             if let Some(center_2d) = projection::project_point(
-                node.position,
-                &view_proj,
-                vp_w,
-                vp_h,
+                node.position, &view_proj, vp_w, vp_h,
             ) {
                 let lbl_pos = Pos2::new(
                     rect.left() + center_2d[0],
@@ -215,88 +340,78 @@ impl ViewportPanel {
                 }
             }
         }
+
+        // -- Phase 6: Transform gizmo arrows (on top of everything) --
+        if self.tool != ViewportTool::Select {
+            if let Some(sel_id) = self.selected.first().copied() {
+                if let Some(node) = scene.get(sel_id) {
+                    self.draw_gizmo_arrows(painter, rect, node.position, &view_proj, vp_w, vp_h);
+                }
+            }
+        }
+
+        // -- Phase 7: Edit mode indicator --
+        if self.edit_mode == EditMode::Vertex {
+            let badge_pos = Pos2::new(rect.left() + 8.0, rect.bottom() - 20.0);
+            painter.text(
+                badge_pos,
+                egui::Align2::LEFT_BOTTOM,
+                "EDIT MODE",
+                egui::FontId::proportional(10.0),
+                theme::ACCENT,
+            );
+        }
     }
 
-    /// Render filled faces for any primitive type.
-    fn draw_primitive_faces(
+    /// Draw transform gizmo arrows at entity position.
+    fn draw_gizmo_arrows(
         &self,
         painter: &egui::Painter,
         rect: Rect,
-        model: &Mat4,
+        entity_pos: Vec3,
         view_proj: &Mat4,
-        color: &NodeColor,
-        is_selected: bool,
-        primitive: Primitive,
-        light_dir: Vec3,
+        vp_w: f32,
+        vp_h: f32,
     ) {
-        // Get face data for this primitive (ultra low-poly counts).
-        let faces: Vec<([Vec3; 4], Vec3)> = match primitive {
-            Primitive::Cube => mesh::cube_faces(),
-            Primitive::Sphere => mesh::sphere_faces(4, 6), // 24 quads - very light
-            Primitive::Plane => mesh::plane_faces(),        // 1 quad
-            Primitive::Cylinder => mesh::cylinder_faces(8), // 24 quads
-            Primitive::Sprite2D => mesh::plane_faces(),
-            Primitive::Empty => return,
-        };
+        for arrow in &GIZMO_ARROWS {
+            if let Some(screen) = picking::project_gizmo_arrow(
+                entity_pos, arrow, view_proj, vp_w, vp_h,
+            ) {
+                let color = Color32::from_rgba_premultiplied(
+                    screen.color[0], screen.color[1], screen.color[2], screen.color[3],
+                );
 
-        let vp_w = rect.width();
-        let vp_h = rect.height();
+                // Check if this axis is being dragged (thicker line).
+                let is_dragging = match (self.gizmo_drag, arrow.label) {
+                    (GizmoDragAxis::X, "X") => true,
+                    (GizmoDragAxis::Y, "Y") => true,
+                    (GizmoDragAxis::Z, "Z") => true,
+                    _ => false,
+                };
+                let line_w = if is_dragging { GIZMO_LINE_WIDTH * 1.5 } else { GIZMO_LINE_WIDTH };
 
-        for (corners, normal) in &faces {
-            let brightness = projection::face_brightness(*normal, light_dir, model);
+                let start = Pos2::new(rect.left() + screen.start[0], rect.top() + screen.start[1]);
+                let end = Pos2::new(rect.left() + screen.end[0], rect.top() + screen.end[1]);
 
-            // Project all 4 corners.
-            let mut screen_pts = Vec::with_capacity(4);
-            let mut all_visible = true;
+                // Shaft.
+                painter.line_segment([start, end], Stroke::new(line_w, color));
 
-            for corner in corners {
-                let world = (*model * corner.extend(1.0)).truncate();
-                if let Some(sp) = projection::project_point(world, view_proj, vp_w, vp_h) {
-                    screen_pts.push(Pos2::new(rect.left() + sp[0], rect.top() + sp[1]));
-                } else {
-                    all_visible = false;
-                    break;
-                }
-            }
+                // Arrowhead triangle.
+                let head = vec![
+                    Pos2::new(rect.left() + screen.head_tip[0], rect.top() + screen.head_tip[1]),
+                    Pos2::new(rect.left() + screen.head_left[0], rect.top() + screen.head_left[1]),
+                    Pos2::new(rect.left() + screen.head_right[0], rect.top() + screen.head_right[1]),
+                ];
+                painter.add(egui::Shape::convex_polygon(head, color, Stroke::NONE));
 
-            if !all_visible || screen_pts.len() < 3 {
-                continue;
-            }
-
-            // Back-face culling (2D cross product).
-            let v1 = screen_pts[1] - screen_pts[0];
-            let v2 = screen_pts[2] - screen_pts[0];
-            let cross = v1.x * v2.y - v1.y * v2.x;
-            if cross < 0.0 {
-                continue;
-            }
-
-            let mesh_color = if is_selected {
-                Color32::from_rgba_premultiplied(
-                    (theme::ACCENT.r() as f32 * brightness) as u8,
-                    (theme::ACCENT.g() as f32 * brightness) as u8,
-                    (theme::ACCENT.b() as f32 * brightness) as u8,
-                    160,
-                )
-            } else {
-                Color32::from_rgba_premultiplied(
-                    (color.r as f32 * brightness) as u8,
-                    (color.g as f32 * brightness) as u8,
-                    (color.b as f32 * brightness) as u8,
-                    180,
-                )
-            };
-
-            // Draw as convex polygon (works for both tris and quads).
-            // Deduplicate consecutive identical points (degenerate quads from caps).
-            let mut pts: Vec<Pos2> = Vec::with_capacity(4);
-            for p in &screen_pts {
-                if pts.last().map(|last| (*last - *p).length() > 0.5).unwrap_or(true) {
-                    pts.push(*p);
-                }
-            }
-            if pts.len() >= 3 {
-                painter.add(egui::Shape::convex_polygon(pts, mesh_color, Stroke::NONE));
+                // Axis label at tip.
+                painter.text(
+                    Pos2::new(end.x + 6.0, end.y - 6.0),
+                    egui::Align2::LEFT_BOTTOM,
+                    arrow.label,
+                    egui::FontId::proportional(9.0),
+                    color,
+                );
             }
         }
     }
@@ -371,7 +486,7 @@ impl ViewportPanel {
                 continue;
             }
 
-            let is_selected = self.selected == Some(id);
+            let is_selected = self.selected.contains(&id);
             let screen_pos = self.world_to_screen_2d(
                 Pos2::new(node.position.x, node.position.z), // XZ plane for 2D
                 rect,
@@ -819,11 +934,23 @@ impl ViewportPanel {
                 format!("Zoom: {:.1}x", self.zoom_2d)
             }
             ViewportMode::View3D => {
+                let mode_tag = match self.edit_mode {
+                    EditMode::Object => "OBJ",
+                    EditMode::Vertex => "VTX",
+                };
+                let tool_tag = match self.tool {
+                    ViewportTool::Select => "Sel",
+                    ViewportTool::Move => "Mov",
+                    ViewportTool::Rotate => "Rot",
+                    ViewportTool::Scale => "Scl",
+                };
                 format!(
-                    "Dist: {:.1} | Y: {:.0} P: {:.0}",
+                    "{} | {} | Tris: {} | Sel: {} | D:{:.1}",
+                    mode_tag,
+                    tool_tag,
+                    self.tri_count,
+                    self.selected.len(),
                     self.orbit_distance,
-                    self.orbit_yaw.to_degrees(),
-                    self.orbit_pitch.to_degrees()
                 )
             }
         };
@@ -840,7 +967,7 @@ impl ViewportPanel {
     // Input handling
     // -------------------------------------------------------------------
 
-    fn handle_input(&mut self, ui: &mut Ui, response: &egui::Response, rect: Rect) {
+    fn handle_input(&mut self, ui: &mut Ui, response: &egui::Response, rect: Rect, scene: &mut SceneGraph) {
         // Click on render style buttons (top-right).
         if self.mode == ViewportMode::View3D {
             if response.clicked() {
@@ -908,51 +1035,178 @@ impl ViewportPanel {
             }
         }
 
-        match self.mode {
-            ViewportMode::View3D => {
-                // Left drag: orbit camera
-                if response.dragged_by(egui::PointerButton::Primary) {
-                    let delta = response.drag_delta();
-                    self.orbit_yaw += delta.x * 0.008;
-                    self.orbit_pitch = (self.orbit_pitch - delta.y * 0.008)
-                        .clamp(-1.4, 1.4);
-                }
-                // Middle drag: pan
-                if response.dragged_by(egui::PointerButton::Middle) {
-                    let delta = response.drag_delta();
-                    let right = self.camera.view_matrix().row(0).truncate();
-                    let up = self.camera.view_matrix().row(1).truncate();
-                    let pan_speed = self.orbit_distance * 0.003;
-                    self.camera.target += Vec3::new(
-                        -right.x * delta.x * pan_speed + up.x * delta.y * pan_speed,
-                        -right.y * delta.x * pan_speed + up.y * delta.y * pan_speed,
-                        -right.z * delta.x * pan_speed + up.z * delta.y * pan_speed,
-                    );
-                }
-                // Scroll: zoom
-                if ui.rect_contains_pointer(rect) {
-                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                    if scroll != 0.0 {
-                        self.orbit_distance = (self.orbit_distance - scroll * 0.02)
-                            .clamp(1.0, 50.0);
+        // --- Entity picking (click to select in 3D/2D viewport) ---
+        if self.mode == ViewportMode::View3D && response.clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                // Only pick if clicking in the viewport area (not on overlay buttons).
+                let toolbar_rect = Rect::from_min_size(
+                    Pos2::new(rect.left(), rect.top()),
+                    Vec2::new(70.0, 100.0),
+                );
+                let mode_rect = Rect::from_center_size(
+                    Pos2::new(rect.center().x, rect.top() + 19.0),
+                    Vec2::new(80.0, 30.0),
+                );
+                let style_rect = Rect::from_min_size(
+                    Pos2::new(rect.right() - 60.0, rect.top() + 28.0),
+                    Vec2::new(60.0, 80.0),
+                );
+
+                if !toolbar_rect.contains(pos) && !mode_rect.contains(pos) && !style_rect.contains(pos) {
+                    let vp_w = rect.width();
+                    let vp_h = rect.height();
+                    let view_proj = self.camera.view_projection(vp_w, vp_h);
+
+                    // First check: gizmo arrow click.
+                    let mut gizmo_clicked = false;
+                    if self.tool != ViewportTool::Select {
+                        if let Some(sel_id) = self.selected.first().copied() {
+                            if let Some(node) = scene.get(sel_id) {
+                                let click_local = [pos.x - rect.left(), pos.y - rect.top()];
+                                if let Some((axis_idx, _dist)) = picking::pick_gizmo_arrow(
+                                    click_local, node.position, &view_proj, vp_w, vp_h,
+                                ) {
+                                    self.gizmo_drag = match axis_idx {
+                                        0 => GizmoDragAxis::X,
+                                        1 => GizmoDragAxis::Y,
+                                        2 => GizmoDragAxis::Z,
+                                        _ => GizmoDragAxis::None,
+                                    };
+                                    self.gizmo_drag_start = [pos.x, pos.y];
+                                    self.gizmo_drag_origin = node.position;
+                                    gizmo_clicked = true;
+                                }
+                            }
+                        }
+                    }
+
+                    // Second check: entity picking.
+                    if !gizmo_clicked {
+                        let click_local = [pos.x - rect.left(), pos.y - rect.top()];
+                        let entities: Vec<(Vec3, f32)> = scene.iter()
+                            .filter(|(_, n)| n.visible && n.primitive != Primitive::Empty)
+                            .map(|(_, n)| (n.position, n.scale.x.max(n.scale.y).max(n.scale.z)))
+                            .collect();
+
+                        let entity_ids: Vec<SceneNodeId> = scene.iter()
+                            .filter(|(_, n)| n.visible && n.primitive != Primitive::Empty)
+                            .map(|(id, _)| id)
+                            .collect();
+
+                        if let Some(pick) = picking::pick_entity(
+                            click_local, &entities, &view_proj, vp_w, vp_h,
+                        ) {
+                            let picked_id = entity_ids[pick.entity_index];
+                            let shift = ui.input(|i| i.modifiers.shift);
+
+                            if shift {
+                                // Multi-select: toggle entity in selection.
+                                if let Some(idx) = self.selected.iter().position(|&id| id == picked_id) {
+                                    self.selected.remove(idx);
+                                } else {
+                                    self.selected.push(picked_id);
+                                }
+                            } else {
+                                // Single select: replace selection.
+                                self.selected = vec![picked_id];
+                            }
+                        } else {
+                            // Clicked on empty space: clear selection.
+                            let shift = ui.input(|i| i.modifiers.shift);
+                            if !shift {
+                                self.selected.clear();
+                            }
+                        }
                     }
                 }
-                // Update camera position from orbit
-                self.update_orbit_camera();
             }
-            ViewportMode::View2D => {
-                // Middle or right drag: pan
-                if response.dragged_by(egui::PointerButton::Middle)
-                    || response.dragged_by(egui::PointerButton::Secondary)
-                {
-                    self.offset_2d[0] += response.drag_delta().x;
-                    self.offset_2d[1] += response.drag_delta().y;
+        }
+
+        // --- Gizmo drag (move entity along axis) ---
+        if self.gizmo_drag != GizmoDragAxis::None {
+            if response.dragged_by(egui::PointerButton::Primary) {
+                let delta = response.drag_delta();
+                if let Some(sel_id) = self.selected.first().copied() {
+                    let drag_speed = self.orbit_distance * 0.005;
+                    let movement = match self.gizmo_drag {
+                        GizmoDragAxis::X => Vec3::new(delta.x * drag_speed, 0.0, 0.0),
+                        GizmoDragAxis::Y => Vec3::new(0.0, -delta.y * drag_speed, 0.0),
+                        GizmoDragAxis::Z => Vec3::new(0.0, 0.0, delta.x * drag_speed),
+                        GizmoDragAxis::None => Vec3::ZERO,
+                    };
+
+                    if self.tool == ViewportTool::Move {
+                        if let Some(node) = scene.get_mut(sel_id) {
+                            node.position += movement;
+                        }
+                    } else if self.tool == ViewportTool::Scale {
+                        if let Some(node) = scene.get_mut(sel_id) {
+                            let scale_delta = delta.x * 0.01;
+                            match self.gizmo_drag {
+                                GizmoDragAxis::X => node.scale.x = (node.scale.x + scale_delta).max(0.01),
+                                GizmoDragAxis::Y => node.scale.y = (node.scale.y - delta.y * 0.01).max(0.01),
+                                GizmoDragAxis::Z => node.scale.z = (node.scale.z + scale_delta).max(0.01),
+                                GizmoDragAxis::None => {}
+                            }
+                        }
+                    }
                 }
-                // Scroll: zoom
-                if ui.rect_contains_pointer(rect) {
-                    let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-                    if scroll != 0.0 {
-                        self.zoom_2d = (self.zoom_2d + scroll * 0.003).clamp(0.1, 10.0);
+            }
+
+            // Release drag.
+            if response.drag_stopped() || !response.dragged_by(egui::PointerButton::Primary) {
+                self.gizmo_drag = GizmoDragAxis::None;
+            }
+        }
+
+        // --- Camera controls (only when NOT dragging a gizmo) ---
+        if self.gizmo_drag == GizmoDragAxis::None {
+            match self.mode {
+                ViewportMode::View3D => {
+                    // Left drag: orbit camera
+                    if response.dragged_by(egui::PointerButton::Primary) {
+                        let delta = response.drag_delta();
+                        self.orbit_yaw += delta.x * 0.008;
+                        self.orbit_pitch = (self.orbit_pitch - delta.y * 0.008)
+                            .clamp(-1.4, 1.4);
+                    }
+                    // Middle drag: pan
+                    if response.dragged_by(egui::PointerButton::Middle) {
+                        let delta = response.drag_delta();
+                        let right = self.camera.view_matrix().row(0).truncate();
+                        let up = self.camera.view_matrix().row(1).truncate();
+                        let pan_speed = self.orbit_distance * 0.003;
+                        self.camera.target += Vec3::new(
+                            -right.x * delta.x * pan_speed + up.x * delta.y * pan_speed,
+                            -right.y * delta.x * pan_speed + up.y * delta.y * pan_speed,
+                            -right.z * delta.x * pan_speed + up.z * delta.y * pan_speed,
+                        );
+                    }
+                    // Scroll: zoom
+                    if ui.rect_contains_pointer(rect) {
+                        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                        if scroll != 0.0 {
+                            self.orbit_distance = (self.orbit_distance - scroll * 0.02)
+                                .clamp(1.0, 50.0);
+                        }
+                    }
+                    // Update camera position from orbit
+                    self.update_orbit_camera();
+                }
+                ViewportMode::View2D => {
+                    // Middle or right drag: pan
+                    if response.dragged_by(egui::PointerButton::Middle)
+                        || response.dragged_by(egui::PointerButton::Secondary)
+                    {
+                        self.offset_2d[0] += response.drag_delta().x;
+                        self.offset_2d[1] += response.drag_delta().y;
+                    }
+                    // Scroll: zoom
+                    if ui.rect_contains_pointer(rect) {
+                        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+                        if scroll != 0.0 {
+                            self.zoom_2d = (self.zoom_2d + scroll * 0.003).clamp(0.1, 10.0);
+                        }
                     }
                 }
             }
@@ -970,6 +1224,13 @@ impl ViewportPanel {
                     RenderStyle::Solid => RenderStyle::Wireframe,
                     RenderStyle::Wireframe => RenderStyle::SolidOnly,
                     RenderStyle::SolidOnly => RenderStyle::Solid,
+                };
+            }
+            // Tab: toggle edit mode
+            if i.key_pressed(egui::Key::Tab) {
+                self.edit_mode = match self.edit_mode {
+                    EditMode::Object => EditMode::Vertex,
+                    EditMode::Vertex => EditMode::Object,
                 };
             }
         });

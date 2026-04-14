@@ -168,6 +168,17 @@ Lightweight rendering via CPU projection + egui painter (no GPU pipeline needed)
   - `BackendConfig`: gpu_suggest_threshold, cpu_max_triangles, frame_budget_ms
   - `FrameRenderStats`: per-frame triangle count, render time, over-budget detection
   - `BackendConfig::potato()`: absolute minimum resource preset (2000 tris, 30fps budget)
+- `depth_sort`: Painter's algorithm for correct face rendering order
+  - `DepthSorter`: collects all faces from all entities, applies model/view_proj transforms, backface culling, perspective divide, sorts by depth (farthest first)
+  - `SortableFace`: pre-projected screen points, RGBA color, depth value, optional wireframe stroke
+  - `shade_color()`: applies brightness to base color, returns RGBA premultiplied
+  - Reused across frames (no allocation per frame). O(n log n) sort.
+- `picking`: Screen-space entity picking and transform gizmo geometry
+  - `pick_entity()`: projects entity centers, finds closest within 30px threshold
+  - `GizmoArrow`: 3 arrows (X red, Y green, Z blue) with configurable length (1.2 units) and arrowhead (15% of shaft)
+  - `project_gizmo_arrow()`: entity_pos -> screen arrow with shaft, arrowhead triangle, axis label
+  - `pick_gizmo_arrow()`: hit-test click against all 3 arrows (8px tolerance), returns axis index
+  - `point_to_segment_distance()`: helper for line hit testing (also used in wire selection)
 
 ### Render Abstraction Layer (prepared, zero cost when inactive)
 

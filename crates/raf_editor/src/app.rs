@@ -1079,7 +1079,24 @@ impl AuraRafiApp {
             .default_width(200.0)
             .min_width(150.0)
             .show(ctx, |ui| {
+                let prev_hier = self.hierarchy.selected_node;
                 self.hierarchy.show(ui, &self.scene, self.settings.language);
+
+                // Sync: hierarchy -> viewport selection.
+                if self.hierarchy.selected_node != prev_hier {
+                    if let Some(id) = self.hierarchy.selected_node {
+                        if !self.viewport.selected.contains(&id) {
+                            self.viewport.selected = vec![id];
+                        }
+                    }
+                }
+
+                // Sync: viewport -> hierarchy selection.
+                if let Some(first) = self.viewport.selected.first().copied() {
+                    if self.hierarchy.selected_node != Some(first) {
+                        self.hierarchy.selected_node = Some(first);
+                    }
+                }
 
                 ui.add_space(8.0);
                 ui.separator();
@@ -1116,7 +1133,7 @@ impl AuraRafiApp {
                                 let name = format!("{} {}", prim.label(), self.scene.len() + 1);
                                 let id = self.scene.add_root_with_primitive(&name, prim);
                                 self.hierarchy.selected_node = Some(id);
-                                self.viewport.selected = Some(id);
+                                self.viewport.selected = vec![id];
                                 let add_msg = format!("Added: {}", name);
                                 self.last_action = add_msg.clone();
                                 self.console.log(LogLevel::Info, &add_msg);
@@ -1143,7 +1160,7 @@ impl AuraRafiApp {
                     self.viewport.grid_visible = self.settings.grid_visible;
                     self.viewport.show(
                         ui,
-                        &self.scene,
+                        &mut self.scene,
                         self.settings.theme != Theme::Light,
                         self.settings.language,
                     );
@@ -1270,7 +1287,7 @@ impl AuraRafiApp {
             if let Ok(restored) = ron::from_str::<SceneGraph>(&snapshot) {
                 self.scene = restored;
                 self.hierarchy.selected_node = None;
-                self.viewport.selected = None;
+                self.viewport.selected.clear();
                 let _lang = self.settings.language;
                 let msg = t("app.undo", self.settings.language);
                 self.last_action = msg.to_string();
@@ -1289,7 +1306,7 @@ impl AuraRafiApp {
             if let Ok(restored) = ron::from_str::<SceneGraph>(&snapshot) {
                 self.scene = restored;
                 self.hierarchy.selected_node = None;
-                self.viewport.selected = None;
+                self.viewport.selected.clear();
                 let _lang = self.settings.language;
                 let msg = t("app.redo", self.settings.language);
                 self.last_action = msg.to_string();
@@ -1309,7 +1326,7 @@ impl AuraRafiApp {
             let name = self.scene.get(id).map(|n| n.name.clone()).unwrap_or_default();
             if self.scene.remove_node(id) {
                 self.hierarchy.selected_node = None;
-                self.viewport.selected = None;
+                self.viewport.selected.clear();
                 let msg = format!("{} {}", t("app.deleted_msg", _lang), name);
                 self.last_action = msg.clone();
                 self.console.log(LogLevel::Info, &msg);
@@ -1323,7 +1340,7 @@ impl AuraRafiApp {
             self.push_undo_snapshot();
             if let Some(new_id) = self.scene.duplicate_node(id) {
                 self.hierarchy.selected_node = Some(new_id);
-                self.viewport.selected = Some(new_id);
+                self.viewport.selected = vec![new_id];
                 let name = self.scene.get(new_id).map(|n| n.name.clone()).unwrap_or_default();
                 let msg = format!("{} {}", t("app.duplicated_msg", _lang), name);
                 self.last_action = msg.clone();
@@ -1336,7 +1353,7 @@ impl AuraRafiApp {
         let ids = self.scene.all_valid_ids();
         if let Some(first) = ids.first() {
             self.hierarchy.selected_node = Some(*first);
-            self.viewport.selected = Some(*first);
+            self.viewport.selected = vec![*first];
         }
         let _lang = self.settings.language;
         let msg = format!("{} {}", ids.len(), t("app.entities_found_msg", _lang));

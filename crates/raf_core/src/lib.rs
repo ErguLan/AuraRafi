@@ -15,6 +15,7 @@ pub mod complement;
 pub mod config;
 pub mod ecs;
 pub mod event;
+pub mod ffi;
 pub mod hot_reload;
 pub mod i18n;
 pub mod project;
