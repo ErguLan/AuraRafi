@@ -61,8 +61,8 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 
 ## v0.3.0 - Editor Polish
 
-- [ ] Drag-and-drop asset importing
-- [ ] Asset thumbnail preview generation
+- [x] Drag-and-drop asset importing (copies to project assets/, recursive scan, file type classification)
+- [x] Asset thumbnail preview generation (type icons per file category: image/3D/audio/script)
 - [x] Context menus (right-click) in schematic editor (component/wire/canvas)
 - [ ] Keyboard shortcut customization (user-configurable keybinds)
 - [x] Multi-entity selection (Shift+Click for multiple, Ctrl+A selects all, click empty to deselect)
@@ -102,8 +102,6 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [x] Design Rule Check (DRC) - 6 rules: floating pins, missing values, isolated components, unnamed nets, short circuit, LED without resistor
 - [x] BOM (Bill of Materials) generation (CSV export with grouping and quantity counting)
 - [ ] Gerber file export (JLCPCB/PCBWay) - structure ready, needs PCB 3D layout
-- [ ] Additional components (transistors, ICs, connectors)
-- [ ] Custom component creation
 - [ ] PCB layout view (basic 3D)
 - [x] Magnet component with field simulation (N/S poles, Tesla strength, parse 'Weak'/'Strong'/'Neodymium')
 - [ ] Hot-reload of circuit values (live update)
@@ -121,7 +119,8 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [ ] DLL Hot-Loading (Dynamically load and swap C++ `.dll`/`.so` game files at runtime without restarting the engine)
 - [ ] Interop bridge (Exposing SceneNodes and Vectors from Rust directly to C++ without serialization overhead)
 - [x] (DONE in v0.4.0) Fluent-based localization system (Replaced by internal JSON i18n system)
-- [ ] **Verify Unified i18n System**: Finis hUnified JSON-based translation system (`raf_core::i18n::t`) with `en.json` and `es.json` support. Rwatch every file to see if there's not translations
+- [x] **Verified Unified i18n System**: All UI strings verified using `raf_core::i18n::t()` with `en.json` and `es.json`
+
 ## v0.7.0 - Advanced Rendering
 
 ### Infrastructure (prepared)
@@ -139,15 +138,21 @@ Shadow mapping
 
 Ambient occlusion (SSAO)
 
-### Implementation (pending - requires wgpu integration)
-- [ ] wgpu pipeline implementation (vertex buffers, shaders WGSL, render passes)
-- [ ] PBR shader implementation (metallic/roughness + IBL)
-- [ ] Shadow mapping (directional cascades + point light cubemaps)
-- [ ] SSAO post-processing
-- [ ] Bloom post-processing
-- [ ] Anti-aliasing (FXAA, MSAA)
-- [ ] Texture loading and UV mapping
-- [ ] 2D sprite rendering
+### Implementation (v0.7.0 - ALL features disabled by default, potato mode preserved)
+- [x] Per-project RenderConfig: 17 opt-in toggles, 4 presets (Potato/Low/Medium/High), zero cost when off
+- [x] WGSL shader suite (embedded as string constants, loaded only when use_gpu=true):
+  - PBR vertex/fragment (metallic/roughness, Schlick fresnel, Blinn-Phong specular)
+  - Flat/unlit shader (gizmos, wireframe, debug)
+  - Shadow depth pass (directional light)
+  - Bloom extract pass (brightness threshold)
+  - FXAA post-process (luma-based edge detection)
+- [x] Enhanced CPU lighting: point lights with attenuation, spot lights with cone, specular (Blinn-Phong), configurable max lights
+- [x] Fog system: distance-based color blending, configurable start/end/color
+- [x] Post-processing suite (CPU painter): bloom glow, vignette, FXAA edge blending, Reinhard tone mapping, saturation control, sRGB conversion
+- [x] Texture system: CPU-side loading (BMP native parser, zero deps), UV sampling, LRU cache (50MB budget), auto-downscale
+- [x] UV mapping: box/spherical/cylindrical/planar projection, cube UV quad generation
+- [x] RenderPreset in EngineSettings (serialized, per-project)
+- [ ] 2D sprite rendering (textured quads in 2D mode)
 
 ## v0.8.0 - Game Runtime
 
@@ -202,6 +207,8 @@ Ambient occlusion (SSAO)
 - [ ] WebAssembly (WASM) build target
 - [ ] Cloud deployment configuration
 - [ ] Streaming protocol preparation (WebRTC stub)
+- [ ] Additional components (transistors, ICs, connectors)
+- [ ] Custom component creation
 
 ## v0.12.0 - ML & Robotics
 

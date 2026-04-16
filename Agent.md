@@ -106,19 +106,28 @@ ProyectRaf/
   - `world_stream.rs`: seamless open world streaming, WorldRegion (grid, biome, LOD, state machine), WorldStreamConfig (potato/default/high presets), camera-based load/unload decisions
 - **Depth-Sorted Rendering**: Painter's algorithm eliminates Z-fighting. All faces from all entities collected into a single depth-sorted list, drawn back-to-front. O(n log n) per frame. Module: `depth_sort.rs`
 - **Entity Picking**: Click to select 3D entities via screen-space projection. Bounding sphere centers projected, closest within 30px threshold wins. Module: `picking.rs`
-- **Multi-Select**: Shift+Click adds/removes from selection. Ctrl+A selects all. Click empty deselects. Selection stored as `Vec<SceneNodeId>`.
-- **Transform Gizmo Arrows**: RGB arrows (X red, Y green, Z blue) with arrowhead triangles, axis labels, displayed when Move/Rotate/Scale tool is active on selected entity. Drag arrows to move/scale along axis. Hit-testing via point-to-segment distance.
-- **Edit Mode Foundation**: Tab toggles Object/Vertex modes. Visual indicator in viewport. Foundation for vertex-level editing.
-- **Hierarchy-Viewport-Properties Sync**: Bidirectional selection sync. Clicking in hierarchy updates viewport selection and vice versa. Properties panel always reflects first selected entity.
+- **Multi-Select**: Shift+Click adds/removes from selection in BOTH viewport and hierarchy. Ctrl+A selects all. Click empty deselects. Selection stored as `Vec<SceneNodeId>`.
+- **Transform Gizmo Arrows**: RGB arrows (X red, Y green, Z blue). Drag detection uses `dragged_by()` (NOT `clicked()`). Supports Move, Rotate, and Scale tools. Hit-testing via point-to-segment distance.
+- **Edit Mode Foundation**: Tab toggles Object/Vertex modes. Visual indicator in viewport.
+- **Hierarchy-Viewport-Properties Sync**: Bidirectional selection sync using `Vec<SceneNodeId>` across all operations.
+- **Horizontal Icon Toolbar**: compact icons with key hints, orange accent dot for active tool, inline OBJ/VTX mode indicator.
+- **WASD Camera**: A/D strafe, S back, Shift+W forward, Space up, C down.
+- **v0.7.0 Render Config** (`raf_render/render_config.rs`): 17 opt-in toggles, 4 presets. ALL OFF by default (potato mode). Features: specular, point lights, fog, bloom, SSAO, FXAA, textures, PBR, shadows, reflections, raytrace.
+- **v0.7.0 Lighting** (`raf_render/lighting.rs`): point/spot lights, Blinn-Phong specular, fog, bloom factor.
+- **v0.7.0 Textures** (`raf_render/texture.rs`): CPU-side BMP loading, UV sampling, LRU cache (50MB), downscale.
+- **v0.7.0 WGSL Shaders** (`raf_render/shaders.rs`): PBR, flat, shadow, bloom, FXAA. Embedded strings, loaded only if use_gpu=true.
+- **v0.7.0 Post-Processing** (`raf_render/post_process.rs`): bloom, vignette, FXAA, tone mapping, saturation, sRGB.
+- **v0.7.0 UV Mapping** (`raf_render/uv_mapping.rs`): box/sphere/cylinder/planar projection.
+- **Asset Browser**: drag-and-drop importing, Go to Folder, Create Script, IDE dialog (Yoll IDE / VS Code), recursive scan, type icons, search/filter.
 
 ### What Does NOT Work Yet (Priority Order)
-1. **Edit Mode Vertex Rendering** -- Tab toggle works but vertex dots and vertex drag handles are not yet rendered. EditableMesh data exists, needs visual feedback.
-2. **Node Execution (partial)** -- Basic executor exists but does not yet run from the editor UI play button. Missing: variable nodes, loops, entity manipulation.
-3. **Asset Pipeline** -- No importing, no thumbnail generation, no hot-reload. The asset browser panel is a shell.
-4. **AI Integration** -- `raf_ai` and the chat panel are placeholders. No LLM provider is connected.
-4. **Hardware I/O** -- `raf_hardware` has data models and protocols defined but no actual serial port communication (needs `serialport` crate).
-5. **PCB 3D Layout** -- Schematic works, but no PCB board layout view. Gerber export blocked by this.
-6. **Networking** -- `raf_net` is protocol definitions only.
+1. **Edit Mode Vertex Rendering** -- Tab toggle works but vertex dots and vertex drag handles are not yet rendered.
+2. **GPU Pipeline Connection** -- wgpu shaders exist but are not wired to a live render pass. CPU painter remains the only active renderer.
+3. **Node Execution (partial)** -- Basic executor exists but does not yet run from the editor UI play button.
+4. **AI Integration** -- `raf_ai` and the chat panel are placeholders. No LLM provider connected.
+5. **Hardware I/O** -- `raf_hardware` has data models but no serial port communication.
+6. **PCB 3D Layout** -- Schematic works, but no PCB board layout view.
+7. **Networking** -- `raf_net` is protocol definitions only.
 
 ## Architecture Principles
 

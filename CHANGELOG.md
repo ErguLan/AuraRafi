@@ -5,6 +5,40 @@ All notable changes to AuraRafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.7.0] - 2026-04-15 - Advanced Rendering (Potato-First)
+
+### Added
+
+- **Per-project RenderConfig** (`raf_render/render_config.rs`): 17 opt-in feature toggles. 4 presets (Potato/Low/Medium/High). ALL features OFF by default. Zero cost when disabled.
+- **Enhanced CPU lighting** (`raf_render/lighting.rs`): point lights with inverse-square attenuation, spot lights with cone angle, Blinn-Phong specular highlights. Configurable max lights (default: 0 = sun only).
+- **Fog system**: distance-based linear fog with configurable color, start, and end distances.
+- **Post-processing suite** (`raf_render/post_process.rs`): bloom glow, vignette, FXAA edge blending, Reinhard tone mapping, saturation adjustment, sRGB/linear conversion.
+- **Texture system** (`raf_render/texture.rs`): CPU-side BMP loading (zero dependencies), UV sampling, LRU cache (50MB budget), auto-downscale to max_texture_size.
+- **UV mapping** (`raf_render/uv_mapping.rs`): box/spherical/cylindrical/planar projection modes, cube UV quad generation.
+- **WGSL shader suite** (`raf_render/shaders.rs`): PBR vertex/fragment (metallic/roughness, Schlick fresnel), flat/unlit, shadow depth, bloom extract, FXAA. Embedded as string constants, loaded only when use_gpu=true.
+- **RenderPreset** in EngineSettings: configurable per-project, serialized to RON.
+- **Hierarchy multi-select**: Shift+Click adds/removes entities. Primitive type icons next to names. Entity count display.
+- **Asset browser overhaul**: drag-and-drop file importing, "Go to Folder" (OS explorer), "Create Script" (.lua template), IDE recommendation dialog (Yoll IDE / VS Code), recursive folder scan, type icons, search/filter.
+- **Horizontal icon toolbar**: viewport tools as compact icon buttons with key hints and orange accent dot for active state. Edit mode indicator (OBJ/VTX) inline.
+- **WASD camera movement**: A/D strafe, S backward, Shift+W forward, Space up, C down. Speed proportional to orbit distance.
+- **Rotate gizmo**: drag gizmo arrows in Rotate tool mode applies per-axis rotation.
+
+### Fixed
+
+- **CRITICAL: Gizmo drag detection**: migrated from `clicked()` (which never fires during drag in egui) to `dragged_by()` with first-frame axis detection. Gizmo arrows are now fully functional for Move, Rotate, and Scale.
+- Toolbar click zones updated for horizontal layout.
+- Keyboard shortcuts now require viewport hover (prevents conflicts with other panels).
+- Selection sync between hierarchy/viewport uses `Vec<SceneNodeId>` consistently across ALL operations (add, delete, duplicate, undo, redo, select_all).
+
+### Architecture
+
+- `raf_render`: 6 new modules (render_config, lighting, texture, post_process, shaders, uv_mapping).
+- `raf_core/config.rs`: added `RenderPreset` enum and `render_preset` field to `EngineSettings`.
+- `ViewportPanel`: carries `RenderConfig` and `LightingEnv` (default = potato, zero overhead).
+- `HierarchyPanel`: `selected_nodes: Vec<SceneNodeId>` replaces single-select. Primitive icons per node.
+- `AssetBrowserPanel`: full rewrite with disk scanning, drag-drop, script creation, IDE dialog.
+- 24 new i18n keys in en.json and es.json.
+
 ## [Unreleased] - Edit Mode + Rendering Upgrade
 
 ### Added

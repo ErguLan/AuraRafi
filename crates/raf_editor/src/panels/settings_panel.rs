@@ -2,7 +2,7 @@
 //! simple mode, and target platform.
 
 use egui::Ui;
-use raf_core::config::{EngineSettings, Language, RenderQuality, TargetPlatform, Theme};
+use raf_core::config::{EngineSettings, Language, RenderQuality, TargetPlatform, Theme, ViewportRenderMode};
 use raf_core::i18n::t;
 
 /// Draw the settings panel.
@@ -175,6 +175,35 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                 ui.checkbox(&mut settings.grid_visible, t("settings.show_grid", settings.language));
                 ui.add_space(2.0);
                 ui.checkbox(&mut settings.snap_to_grid, t("settings.snap_to_grid", settings.language));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(t("settings.viewport_render_mode", settings.language)).size(12.0));
+                    egui::ComboBox::from_id_salt("viewport_render_mode_select")
+                        .selected_text(match settings.viewport_render_mode {
+                            ViewportRenderMode::Solid => t("settings.viewport_render_mode.solid", settings.language),
+                            ViewportRenderMode::Wireframe => t("settings.viewport_render_mode.wireframe", settings.language),
+                            ViewportRenderMode::Preview => t("settings.viewport_render_mode.preview", settings.language),
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut settings.viewport_render_mode,
+                                ViewportRenderMode::Solid,
+                                t("settings.viewport_render_mode.solid", settings.language),
+                            );
+                            ui.selectable_value(
+                                &mut settings.viewport_render_mode,
+                                ViewportRenderMode::Wireframe,
+                                t("settings.viewport_render_mode.wireframe", settings.language),
+                            );
+                            ui.selectable_value(
+                                &mut settings.viewport_render_mode,
+                                ViewportRenderMode::Preview,
+                                t("settings.viewport_render_mode.preview", settings.language),
+                            );
+                        });
+                });
+                ui.add_space(2.0);
+                ui.checkbox(&mut settings.show_viewport_labels, t("settings.show_viewport_labels", settings.language));
 
                 if !settings.simple_mode {
                     ui.add_space(6.0);
@@ -208,6 +237,14 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                         }
                     });
                 }
+                ui.add_space(8.0);
+
+                // -- Mouse --
+                ui.separator();
+                ui.add_space(4.0);
+                ui.checkbox(&mut settings.invert_mouse_x, t("settings.invert_mouse_x", settings.language));
+                ui.add_space(2.0);
+                ui.checkbox(&mut settings.invert_mouse_y, t("settings.invert_mouse_y", settings.language));
                 ui.add_space(8.0);
             });
     });

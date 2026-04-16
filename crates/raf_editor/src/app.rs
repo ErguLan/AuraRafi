@@ -731,7 +731,11 @@ impl AuraRafiApp {
                                 let config_dir = dirs_config_dir();
                                 self.recent_projects.add(&project);
                                 let _ = self.recent_projects.save(&config_dir);
-                                self.current_project = Some(project);
+                                self.current_project = Some(project.clone());
+                                // Wire assets path to browser.
+                                let assets_dir = std::path::PathBuf::from(&project.path).join("assets");
+                                self.asset_browser.project_assets_path = Some(assets_dir);
+                                self.asset_browser.scan_project_folder();
                                 self.init_scene_for_type(project_type);
                                 self.screen = AppScreen::Editor;
                             }
@@ -866,7 +870,11 @@ impl AuraRafiApp {
                     ui.label("Ctrl+D  -  Duplicate");
                     ui.label("Ctrl+A  -  Select All");
                     ui.label("Del     -  Delete");
-                    ui.label("Q/W/E/R -  Tool Select");
+                    ui.label("Q/T/E/R -  Tool Select");
+                    ui.label("W/A/S/D -  Move Camera");
+                    ui.label("RMB+Drag -  Look Around");
+                    ui.label("Wheel   -  Zoom");
+                    ui.label("MMB Drag -  Pan");
                     ui.separator();
                     ui.label(format!("Proyecto Rafi v{}", env!("CARGO_PKG_VERSION")));
                     ui.close_menu();
@@ -1079,23 +1087,19 @@ impl AuraRafiApp {
             .default_width(200.0)
             .min_width(150.0)
             .show(ctx, |ui| {
-                let prev_hier = self.hierarchy.selected_node;
+                let _prev_hier = self.hierarchy.selected_node;
+                let prev_hier_vec = self.hierarchy.selected_nodes.clone();
                 self.hierarchy.show(ui, &self.scene, self.settings.language);
 
-                // Sync: hierarchy -> viewport selection.
-                if self.hierarchy.selected_node != prev_hier {
-                    if let Some(id) = self.hierarchy.selected_node {
-                        if !self.viewport.selected.contains(&id) {
-                            self.viewport.selected = vec![id];
-                        }
-                    }
+                // Sync: hierarchy -> viewport (if hierarchy changed).
+                if self.hierarchy.selected_nodes != prev_hier_vec {
+                    self.viewport.selected = self.hierarchy.selected_nodes.clone();
                 }
 
-                // Sync: viewport -> hierarchy selection.
-                if let Some(first) = self.viewport.selected.first().copied() {
-                    if self.hierarchy.selected_node != Some(first) {
-                        self.hierarchy.selected_node = Some(first);
-                    }
+                // Sync: viewport -> hierarchy (if viewport changed externally).
+                if self.viewport.selected != self.hierarchy.selected_nodes {
+                    self.hierarchy.selected_nodes = self.viewport.selected.clone();
+                    self.hierarchy.selected_node = self.viewport.selected.first().copied();
                 }
 
                 ui.add_space(8.0);
@@ -1133,6 +1137,7 @@ impl AuraRafiApp {
                                 let name = format!("{} {}", prim.label(), self.scene.len() + 1);
                                 let id = self.scene.add_root_with_primitive(&name, prim);
                                 self.hierarchy.selected_node = Some(id);
+                                self.hierarchy.selected_nodes = vec![id];
                                 self.viewport.selected = vec![id];
                                 let add_msg = format!("Added: {}", name);
                                 self.last_action = add_msg.clone();
@@ -1158,6 +1163,14 @@ impl AuraRafiApp {
             match self.viewport_mode {
                 ViewportMode::Scene => {
                     self.viewport.grid_visible = self.settings.grid_visible;
+                    self.viewport.invert_mouse_x = self.settings.invert_mouse_x;
+                    self.viewport.invert_mouse_y = self.settings.invert_mouse_y;
+                    self.viewport.render_style = match self.settings.viewport_render_mode {
+                        raf_core::config::ViewportRenderMode::Solid => crate::panels::viewport::RenderStyle::Solid,
+                        raf_core::config::ViewportRenderMode::Wireframe => crate::panels::viewport::RenderStyle::Wireframe,
+                        raf_core::config::ViewportRenderMode::Preview => crate::panels::viewport::RenderStyle::Preview,
+                    };
+                    self.viewport.show_labels = self.settings.show_viewport_labels;
                     self.viewport.show(
                         ui,
                         &mut self.scene,
@@ -1287,6 +1300,7 @@ impl AuraRafiApp {
             if let Ok(restored) = ron::from_str::<SceneGraph>(&snapshot) {
                 self.scene = restored;
                 self.hierarchy.selected_node = None;
+                self.hierarchy.selected_nodes.clear();
                 self.viewport.selected.clear();
                 let _lang = self.settings.language;
                 let msg = t("app.undo", self.settings.language);
@@ -1306,6 +1320,7 @@ impl AuraRafiApp {
             if let Ok(restored) = ron::from_str::<SceneGraph>(&snapshot) {
                 self.scene = restored;
                 self.hierarchy.selected_node = None;
+                self.hierarchy.selected_nodes.clear();
                 self.viewport.selected.clear();
                 let _lang = self.settings.language;
                 let msg = t("app.redo", self.settings.language);
@@ -1326,6 +1341,7 @@ impl AuraRafiApp {
             let name = self.scene.get(id).map(|n| n.name.clone()).unwrap_or_default();
             if self.scene.remove_node(id) {
                 self.hierarchy.selected_node = None;
+                self.hierarchy.selected_nodes.clear();
                 self.viewport.selected.clear();
                 let msg = format!("{} {}", t("app.deleted_msg", _lang), name);
                 self.last_action = msg.clone();
@@ -1340,6 +1356,7 @@ impl AuraRafiApp {
             self.push_undo_snapshot();
             if let Some(new_id) = self.scene.duplicate_node(id) {
                 self.hierarchy.selected_node = Some(new_id);
+                self.hierarchy.selected_nodes = vec![new_id];
                 self.viewport.selected = vec![new_id];
                 let name = self.scene.get(new_id).map(|n| n.name.clone()).unwrap_or_default();
                 let msg = format!("{} {}", t("app.duplicated_msg", _lang), name);
@@ -1351,10 +1368,9 @@ impl AuraRafiApp {
 
     fn do_select_all(&mut self) {
         let ids = self.scene.all_valid_ids();
-        if let Some(first) = ids.first() {
-            self.hierarchy.selected_node = Some(*first);
-            self.viewport.selected = vec![*first];
-        }
+        self.hierarchy.selected_nodes = ids.clone();
+        self.hierarchy.selected_node = ids.first().copied();
+        self.viewport.selected = ids.clone();
         let _lang = self.settings.language;
         let msg = format!("{} {}", ids.len(), t("app.entities_found_msg", _lang));
         self.last_action = msg.clone();
@@ -1521,7 +1537,11 @@ impl AuraRafiApp {
                 self.scene_modified = false;
                 self.last_action.clear();
 
-                self.current_project = Some(project);
+                self.current_project = Some(project.clone());
+                // Wire assets path to browser.
+                let assets_dir = std::path::PathBuf::from(&project.path).join("assets");
+                self.asset_browser.project_assets_path = Some(assets_dir);
+                self.asset_browser.scan_project_folder();
                 self.screen = AppScreen::Editor;
                 let _lang = self.settings.language;
                 let msg = t("app.project_loaded", self.settings.language);

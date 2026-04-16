@@ -7,9 +7,11 @@
 //! Prepared: wgpu pipeline, PBR materials, RT, GPU deformation, world streaming.
 //! All advanced features are zero-cost when disabled (potato mode unaffected).
 //!
-//! Supports adaptive quality levels from "potato" (level 0) to high-end (level 3).
+//! v0.7.0: Added configurable render features with opt-in toggles.
+//! Default = potato mode. GPU-dependent features only activate when enabled
+//! AND the hardware supports them. Engine startup time is NOT affected.
 
-// --- Core pipeline (active today) ---
+// --- Core pipeline (active today, CPU painter) ---
 pub mod backend;
 pub mod camera;
 pub mod depth_sort;
@@ -21,6 +23,14 @@ pub mod picking;
 pub mod pipeline;
 pub mod projection;
 pub mod renderer;
+
+// --- v0.7.0: Advanced rendering (opt-in, zero-cost when disabled) ---
+pub mod render_config;
+pub mod lighting;
+pub mod texture;
+pub mod post_process;
+pub mod shaders;
+pub mod uv_mapping;
 
 // --- Render abstraction layer (prepared, connects scene to backend) ---
 pub mod abstraction;
@@ -44,6 +54,13 @@ pub use picking::{pick_entity, pick_gizmo_arrow, project_gizmo_arrow, PickResult
 pub use pipeline::RenderPipeline;
 pub use renderer::Renderer;
 
+// --- v0.7.0 re-exports ---
+pub use render_config::{RenderConfig, AntiAliasingMode};
+pub use lighting::{Light, LightingEnv, compute_lighting, apply_fog, bloom_factor};
+pub use texture::{CpuTexture, TextureCache};
+pub use post_process::{fxaa_edge_blend, apply_bloom, apply_vignette, tonemap_reinhard, adjust_saturation};
+pub use uv_mapping::{UvProjection, generate_uv_box, generate_uv_spherical, generate_uv_cylindrical, cube_uv_quads};
+
 // --- Abstraction re-exports ---
 pub use abstraction::{ActiveBackend, RenderBackendTrait, RenderCapability, RenderError};
 pub use scene_data::{SceneRenderData, RenderMesh, RenderLight, RenderCamera, RenderOutput};
@@ -54,3 +71,4 @@ pub use spatial::{SpatialGrid, SpatialConfig, Frustum};
 pub use complements::{RayTraceConfig, RayTraceMode, RayTraceFeatures, AccelerationStructure, Ray, RayHit};
 pub use gpu_deform::{GpuDeformer, GpuDeformConfig, DeformerType};
 pub use world_stream::{WorldStreamConfig, WorldStreamState, WorldRegion, BiomeType};
+

@@ -25,6 +25,27 @@ impl Default for Theme {
 }
 
 // ---------------------------------------------------------------------------
+// Viewport Render Mode
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ViewportRenderMode {
+    Solid,
+    Wireframe,
+    Preview,
+}
+
+impl Default for ViewportRenderMode {
+    fn default() -> Self {
+        Self::Solid
+    }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+// ---------------------------------------------------------------------------
 // Language
 // ---------------------------------------------------------------------------
 
@@ -175,10 +196,52 @@ pub struct EngineSettings {
     /// Responsive layout: adapts UI to small screens (mobile/tablet).
     pub responsive_layout: bool,
 
+    // -- Rendering (v0.7.0) --
+    /// Render quality preset (Potato/Low/Medium/High).
+    /// Controls which advanced features are enabled.
+    /// Default: Potato (everything off, maximum performance).
+    /// Individual feature toggles are in the project's render_config.
+    pub render_preset: RenderPreset,
+
+    // -- Input (v0.7.0) --
+    /// Invert mouse X axis for orbit camera.
+    #[serde(default)]
+    pub invert_mouse_x: bool,
+    /// Invert mouse Y axis for orbit camera.
+    #[serde(default)]
+    pub invert_mouse_y: bool,
+    /// Default viewport presentation mode.
+    #[serde(default)]
+    pub viewport_render_mode: ViewportRenderMode,
+    /// Whether entity labels are shown in the viewport.
+    #[serde(default = "default_true")]
+    pub show_viewport_labels: bool,
+
     // -- Window state (persisted) --
     pub window_width: u32,
     pub window_height: u32,
     pub window_maximized: bool,
+}
+
+/// v0.7.0: Render quality presets that map to RenderConfig defaults.
+/// These are stored in EngineSettings. The actual feature toggles
+/// live in raf_render::RenderConfig and are per-project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RenderPreset {
+    /// Everything off. Maximum compatibility. Default.
+    Potato,
+    /// Specular + fog + basic textures.
+    Low,
+    /// GPU + shadows + bloom + FXAA.
+    Medium,
+    /// Everything on (except raytracing).
+    High,
+}
+
+impl Default for RenderPreset {
+    fn default() -> Self {
+        Self::Potato
+    }
 }
 
 impl Default for EngineSettings {
@@ -201,6 +264,11 @@ impl Default for EngineSettings {
             target_platform: TargetPlatform::Desktop,
             headless: false,
             responsive_layout: false,
+            render_preset: RenderPreset::Potato,
+            invert_mouse_x: false,
+            invert_mouse_y: false,
+            viewport_render_mode: ViewportRenderMode::Solid,
+            show_viewport_labels: true,
             window_width: 1280,
             window_height: 720,
             window_maximized: false,
