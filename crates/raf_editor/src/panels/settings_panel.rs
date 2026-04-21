@@ -1,19 +1,22 @@
 //! Settings panel - theme, language, performance, editor preferences,
 //! simple mode, and target platform.
 
+use crate::theme as app_theme;
 use egui::Ui;
 use raf_core::config::{EngineSettings, Language, RenderQuality, TargetPlatform, Theme, ViewportRenderMode};
 use raf_core::i18n::t;
 
 /// Draw the settings panel.
 pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
+    let palette = app_theme::palette_for(settings.theme, settings.theme_experimental);
+
     egui::ScrollArea::vertical().show(ui, |ui| {
         // -- Simple Mode (top, prominent, clean) --
         let frame = egui::Frame::none()
-            .fill(egui::Color32::from_rgb(32, 32, 36))
+            .fill(palette.widget)
             .rounding(6.0)
             .inner_margin(16.0)
-            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(45, 45, 50)));
+            .stroke(egui::Stroke::new(1.0, palette.border));
 
         frame.show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -25,7 +28,7 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
             ui.label(
                 egui::RichText::new(t("settings.simple_mode_desc", settings.language))
                     .size(11.0)
-                    .color(egui::Color32::from_rgb(140, 140, 150)),
+                    .color(palette.text_dim),
             );
         });
 
@@ -41,6 +44,22 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                     ui.selectable_value(&mut settings.theme, Theme::Dark, "Dark");
                     ui.selectable_value(&mut settings.theme, Theme::Light, "Light");
                     ui.selectable_value(&mut settings.theme, Theme::System, "System");
+                });
+
+                ui.add_space(6.0);
+
+                ui.vertical(|ui| {
+                    ui.label(egui::RichText::new(t("settings.theme_experimental", settings.language)).size(12.0));
+                    ui.add(
+                        egui::Slider::new(&mut settings.theme_experimental, 0.0..=100.0)
+                            .step_by(1.0)
+                            .suffix("%"),
+                    );
+                    ui.label(
+                        egui::RichText::new(t("settings.theme_experimental_desc", settings.language))
+                            .size(11.0)
+                            .color(palette.text_dim),
+                    );
                 });
                 
                 ui.add_space(6.0);
@@ -126,7 +145,7 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                     ui.label(
                         egui::RichText::new(info)
                             .size(11.0)
-                            .color(egui::Color32::from_rgb(120, 120, 130)),
+                            .color(palette.text_dim),
                     );
                 }
                 ui.add_space(8.0);
@@ -204,6 +223,21 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                 });
                 ui.add_space(2.0);
                 ui.checkbox(&mut settings.show_viewport_labels, t("settings.show_viewport_labels", settings.language));
+                ui.add_space(2.0);
+                ui.checkbox(
+                    &mut settings.solid_show_surface_edges,
+                    t("settings.solid_show_surface_edges", settings.language),
+                );
+                ui.add_space(2.0);
+                ui.checkbox(
+                    &mut settings.solid_xray_mode,
+                    t("settings.solid_xray_mode", settings.language),
+                );
+                ui.add_space(2.0);
+                ui.checkbox(
+                    &mut settings.solid_face_tonality,
+                    t("settings.solid_face_tonality", settings.language),
+                );
 
                 if !settings.simple_mode {
                     ui.add_space(6.0);
@@ -245,6 +279,36 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                 ui.checkbox(&mut settings.invert_mouse_x, t("settings.invert_mouse_x", settings.language));
                 ui.add_space(2.0);
                 ui.checkbox(&mut settings.invert_mouse_y, t("settings.invert_mouse_y", settings.language));
+                ui.add_space(10.0);
+
+                ui.separator();
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(t("settings.gizmo_controls", settings.language))
+                        .size(12.0)
+                        .strong(),
+                );
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(t("settings.move_sensitivity", settings.language)).size(12.0));
+                    ui.add(egui::Slider::new(&mut settings.move_gizmo_sensitivity, 0.25..=4.0).logarithmic(true));
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(t("settings.rotate_sensitivity", settings.language)).size(12.0));
+                    ui.add(egui::Slider::new(&mut settings.rotate_gizmo_sensitivity, 0.25..=4.0).logarithmic(true));
+                });
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(t("settings.scale_sensitivity", settings.language)).size(12.0));
+                    ui.add(egui::Slider::new(&mut settings.scale_gizmo_sensitivity, 0.25..=4.0).logarithmic(true));
+                });
+                ui.add_space(4.0);
+                ui.checkbox(
+                    &mut settings.uniform_scale_by_default,
+                    t("settings.uniform_scale_by_default", settings.language),
+                );
                 ui.add_space(8.0);
             });
     });

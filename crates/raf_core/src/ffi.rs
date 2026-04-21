@@ -1,7 +1,7 @@
 use crate::complement::{EngineComplement, ComplementDomain, ComplementPresentation, ComplementContext};
 use crate::command::Command;
 use libloading::Library;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::os::raw::{c_char, c_void};
 use std::path::Path;
 

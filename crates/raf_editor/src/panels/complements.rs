@@ -2,6 +2,7 @@ use egui::{Color32, RichText, Stroke, Rounding};
 
 impl AuraRafiApp {
     /// Renderiza el manejador de extensiones y DLLs (Mods).
+    #[allow(dead_code)]
     pub(crate) fn show_complement_manager(&mut self, ctx: &egui::Context, is_open: &mut bool) {
         let mut open = *is_open;
         if !open {

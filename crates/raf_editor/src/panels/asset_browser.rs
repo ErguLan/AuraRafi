@@ -9,6 +9,15 @@ use raf_core::config::Language;
 use raf_core::i18n::t;
 use std::path::PathBuf;
 
+use crate::script_support::{asset_relative_path, is_script_file, open_script_in_external_editor};
+use crate::ui_icons::UiIconAtlas;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScriptTemplateKind {
+    Rust,
+    Cpp,
+}
+
 /// State for the asset browser panel.
 pub struct AssetBrowserPanel {
     pub search_query: String,
@@ -21,8 +30,18 @@ pub struct AssetBrowserPanel {
     show_ide_dialog: bool,
     /// Script file that triggered the IDE dialog.
     ide_dialog_file: String,
+    /// Absolute script file path for opening in an external editor.
+    ide_dialog_path: Option<PathBuf>,
     /// Status message to show temporarily.
     status_message: Option<String>,
+    /// Signals that "Add Entity" was clicked (consumed by app.rs).
+    pub add_entity_clicked: bool,
+    /// If true, show the script language picker.
+    show_script_menu: bool,
+    /// Pending directories for deferred asset scanning.
+    pending_scan_dirs: Vec<PathBuf>,
+    /// Whether a scan is currently in progress.
+    pub scan_in_progress: bool,
 }
 
 /// A display entry in the asset browser.
@@ -42,14 +61,19 @@ impl Default for AssetBrowserPanel {
             project_assets_path: None,
             show_ide_dialog: false,
             ide_dialog_file: String::new(),
+            ide_dialog_path: None,
             status_message: None,
+            add_entity_clicked: false,
+            show_script_menu: false,
+            pending_scan_dirs: Vec::new(),
+            scan_in_progress: false,
         }
     }
 }
 
 impl AssetBrowserPanel {
     /// Draw the asset browser panel.
-    pub fn show(&mut self, ui: &mut Ui, lang: Language) {
+    pub fn show(&mut self, ui: &mut Ui, lang: Language, icons: &UiIconAtlas) {
         // --- Top bar: search + filter + action buttons ---
         ui.horizontal(|ui| {
             ui.label(t("app.search", lang));
@@ -82,20 +106,35 @@ impl AssetBrowserPanel {
             ui.separator();
 
             // Action buttons.
+            if ui.button(t("app.add_entity", lang)).clicked() {
+                self.add_entity_clicked = true;
+            }
+            ui.separator();
             if ui.button(t("app.open_folder", lang)).clicked() {
                 self.open_assets_folder();
             }
             if ui.button(t("app.create_script", lang)).clicked() {
-                self.create_new_script(lang);
+                self.show_script_menu = true;
             }
             if ui.button(t("app.refresh_assets", lang)).clicked() {
                 self.scan_project_folder();
             }
         });
 
+        if self.show_script_menu {
+            self.draw_script_template_menu(ui, lang);
+        }
+
         ui.separator();
 
         // --- Status message ---
+        if self.scan_in_progress {
+            ui.label(
+                egui::RichText::new(t("app.scanning_assets", lang))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(130, 130, 145)),
+            );
+        }
         if let Some(msg) = &self.status_message.clone() {
             ui.label(
                 egui::RichText::new(msg)
@@ -151,16 +190,24 @@ impl AssetBrowserPanel {
                     });
                 } else {
                     for entry in filtered {
-                        let (type_icon, type_color) = asset_type_visual(&entry.asset_type);
+                        let type_icon = icon_for_asset(icons, &entry.asset_type);
                         let response = ui.group(|ui| {
                             ui.set_min_width(70.0);
                             ui.set_max_width(80.0);
                             ui.vertical_centered(|ui| {
-                                ui.label(
-                                    egui::RichText::new(type_icon)
-                                        .size(20.0)
-                                        .color(type_color),
-                                );
+                                if let Some(icon) = type_icon {
+                                    ui.add(
+                                        egui::Image::new(icon)
+                                            .fit_to_exact_size(egui::Vec2::new(20.0, 20.0)),
+                                    );
+                                } else {
+                                    let (fallback_icon, fallback_color) = asset_type_visual(&entry.asset_type);
+                                    ui.label(
+                                        egui::RichText::new(fallback_icon)
+                                            .size(20.0)
+                                            .color(fallback_color),
+                                    );
+                                }
                                 ui.label(
                                     egui::RichText::new(&entry.name)
                                         .size(9.0)
@@ -177,7 +224,16 @@ impl AssetBrowserPanel {
                         if response.response.double_clicked() {
                             if is_script_file(&entry.name) {
                                 self.show_ide_dialog = true;
-                                self.ide_dialog_file = entry.name.clone();
+                                self.ide_dialog_path = entry.full_path.clone();
+                                self.ide_dialog_file = entry
+                                    .full_path
+                                    .as_ref()
+                                    .and_then(|full_path| {
+                                        self.project_assets_path
+                                            .as_ref()
+                                            .map(|root| asset_relative_path(root, full_path))
+                                    })
+                                    .unwrap_or_else(|| entry.name.clone());
                             }
                         }
                     }
@@ -217,7 +273,7 @@ impl AssetBrowserPanel {
     }
 
     /// Create a new empty script file in the assets/scripts folder.
-    fn create_new_script(&mut self, lang: Language) {
+    fn create_new_script(&mut self, lang: Language, kind: ScriptTemplateKind) {
         if let Some(base) = &self.project_assets_path {
             let scripts_dir = base.join("scripts");
             let _ = std::fs::create_dir_all(&scripts_dir);
@@ -225,10 +281,10 @@ impl AssetBrowserPanel {
             // Find the next available script name.
             let mut idx = 1;
             loop {
-                let name = format!("new_script_{}.lua", idx);
+                let (extension, header) = script_template(kind);
+                let name = format!("new_script_{}.{}", idx, extension);
                 let target = scripts_dir.join(&name);
                 if !target.exists() {
-                    let header = "-- AuraRafi Script\n-- Created automatically\n\nfunction on_start()\n    -- Your code here\nend\n\nfunction on_update(dt)\n    -- Called every frame\nend\n";
                     if std::fs::write(&target, header).is_ok() {
                         self.status_message = Some(format!(
                             "{}: {}",
@@ -237,7 +293,8 @@ impl AssetBrowserPanel {
                         ));
                         // Show IDE dialog immediately.
                         self.show_ide_dialog = true;
-                        self.ide_dialog_file = name;
+                        self.ide_dialog_file = format!("scripts/{}", name);
+                        self.ide_dialog_path = Some(target.clone());
                     }
                     break;
                 }
@@ -247,6 +304,31 @@ impl AssetBrowserPanel {
             // Refresh listing.
             self.scan_project_folder();
         }
+    }
+
+    fn draw_script_template_menu(&mut self, ui: &mut Ui, lang: Language) {
+        egui::Window::new(t("app.create_script", lang))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .show(ui.ctx(), |ui| {
+                ui.label(t("app.script_language", lang));
+                ui.add_space(8.0);
+
+                if ui.button(t("app.script_language_rust", lang)).clicked() {
+                    self.create_new_script(lang, ScriptTemplateKind::Rust);
+                    self.show_script_menu = false;
+                }
+                if ui.button(t("app.script_language_cpp", lang)).clicked() {
+                    self.create_new_script(lang, ScriptTemplateKind::Cpp);
+                    self.show_script_menu = false;
+                }
+
+                ui.add_space(8.0);
+                if ui.button(t("app.cancel", lang)).clicked() {
+                    self.show_script_menu = false;
+                }
+            });
     }
 
     /// Handle files dropped onto the asset browser.
@@ -281,7 +363,52 @@ impl AssetBrowserPanel {
         self.entries.clear();
         if let Some(base) = &self.project_assets_path {
             if base.exists() {
-                scan_dir_recursive(base, &mut self.entries);
+                self.pending_scan_dirs.clear();
+                self.pending_scan_dirs.push(base.clone());
+                self.scan_in_progress = true;
+            }
+        }
+    }
+
+    /// Process a small batch of pending asset scan work.
+    pub fn process_scan_budget(&mut self, max_entries: usize) {
+        if !self.scan_in_progress {
+            return;
+        }
+
+        let mut processed = 0usize;
+
+        while processed < max_entries {
+            let Some(dir) = self.pending_scan_dirs.pop() else {
+                self.scan_in_progress = false;
+                return;
+            };
+
+            let read = match std::fs::read_dir(&dir) {
+                Ok(read) => read,
+                Err(_) => continue,
+            };
+
+            for entry in read.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    self.pending_scan_dirs.push(path);
+                    continue;
+                }
+
+                if let Some(fname) = path.file_name().and_then(|name| name.to_str()) {
+                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                    self.entries.push(AssetEntry {
+                        name: fname.to_string(),
+                        asset_type: classify_file(fname),
+                        size_display: format_size(size),
+                        full_path: Some(path),
+                    });
+                    processed += 1;
+                    if processed >= max_entries {
+                        break;
+                    }
+                }
             }
         }
     }
@@ -314,7 +441,9 @@ impl AssetBrowserPanel {
 
                     // VS Code.
                     if ui.button(t("app.ide_open_vscode", lang)).clicked() {
-                        if let Some(base) = &self.project_assets_path {
+                        if let Some(path) = &self.ide_dialog_path {
+                            let _ = open_script_in_external_editor(path);
+                        } else if let Some(base) = &self.project_assets_path {
                             let _ = std::process::Command::new("code")
                                 .arg(base.as_os_str())
                                 .spawn();
@@ -348,15 +477,29 @@ fn asset_type_visual(at: &AssetType) -> (&'static str, egui::Color32) {
     }
 }
 
-/// Check if a filename is a script (lua, py, rs, cpp, js, ts).
-fn is_script_file(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    lower.ends_with(".lua")
-        || lower.ends_with(".py")
-        || lower.ends_with(".rs")
-        || lower.ends_with(".cpp")
-        || lower.ends_with(".js")
-        || lower.ends_with(".ts")
+fn icon_for_asset<'a>(icons: &'a UiIconAtlas, asset_type: &AssetType) -> Option<&'a egui::TextureHandle> {
+    let key = match asset_type {
+        AssetType::Image => "image.png",
+        AssetType::Model3D => "model.png",
+        AssetType::Audio => "audio.png",
+        AssetType::Scene => "script.png",
+        AssetType::Unknown => return None,
+    };
+
+    icons.get(key)
+}
+
+fn script_template(kind: ScriptTemplateKind) -> (&'static str, &'static str) {
+    match kind {
+        ScriptTemplateKind::Rust => (
+            "rs",
+            "// AuraRafi Rust Script\n// Created automatically\n\npub fn on_start() {\n    // Initialize your entity or system here\n}\n\npub fn on_update(dt: f32) {\n    let _ = dt;\n    // Called every frame\n}\n",
+        ),
+        ScriptTemplateKind::Cpp => (
+            "cpp",
+            "// AuraRafi C++ Script\n// Created automatically\n\nextern \"C\" void on_start() {\n    // Initialize your entity or system here\n}\n\nextern \"C\" void on_update(float dt) {\n    (void)dt;\n    // Called every frame\n}\n",
+        ),
+    }
 }
 
 /// Classify file extension into AssetType.
@@ -392,27 +535,6 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
-/// Recursively scan a directory and add entries.
-fn scan_dir_recursive(dir: &std::path::Path, entries: &mut Vec<AssetEntry>) {
-    let read = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    for entry in read.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            scan_dir_recursive(&path, entries);
-        } else if let Some(fname) = path.file_name().and_then(|n| n.to_str()) {
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            entries.push(AssetEntry {
-                name: fname.to_string(),
-                asset_type: classify_file(fname),
-                size_display: format_size(size),
-                full_path: Some(path),
-            });
-        }
-    }
-}
 
 /// Open a URL in the default browser.
 fn open_url(url: &str) {

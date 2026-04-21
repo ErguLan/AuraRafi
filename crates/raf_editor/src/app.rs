@@ -8,21 +8,25 @@
 
 use eframe::egui;
 use raf_core::i18n::t;
-use raf_core::config::{EngineSettings, Theme};
+use raf_core::config::{EngineSettings, RenderPreset, Theme};
 use raf_core::project::{Project, ProjectType, RecentProjects};
 use raf_core::scene::graph::Primitive;
 use raf_core::scene::SceneGraph;
+use raf_render::render_config::RenderConfig;
 
+use crate::ui_icons::UiIconAtlas;
 use crate::panels::ai_chat::AiChatPanel;
-use image;
 use crate::panels::asset_browser::AssetBrowserPanel;
 use crate::panels::console::{ConsolePanel, LogLevel};
 use crate::panels::hierarchy::HierarchyPanel;
 use crate::panels::node_editor::NodeEditorPanel;
 use crate::panels::properties::PropertiesPanel;
+use crate::panels::project_settings;
+use crate::panels::schematic_panels;
 use crate::panels::schematic_view::SchematicViewPanel;
 use crate::panels::settings_panel;
 use crate::panels::viewport::ViewportPanel;
+use crate::schematic_document::{load_schematic_document, save_schematic_document};
 use crate::theme as app_theme;
 
 // ---------------------------------------------------------------------------
@@ -55,6 +59,7 @@ enum BottomTab {
     Console,
     AiChat,
     NodeEditor,
+    ProjectSettings,
     Complement(String),
 }
 
@@ -64,6 +69,40 @@ enum ViewportMode {
     Scene,
     Schematic,
 }
+
+const EDITOR_UI_ICONS: &[&str] = &[
+    "3-dots vertical.png",
+    "ai_chat.png",
+    "assets.png",
+    "audio.png",
+    "console.png",
+    "cube.png",
+    "cylinder.png",
+    "empty.png",
+    "folder.png",
+    "focus.png",
+    "hidden.png",
+    "image.png",
+    "material.png",
+    "model.png",
+    "move.png",
+    "node_editor.png",
+    "object_mode.png",
+    "opacity.png",
+    "plane.png",
+    "project_settings.png",
+    "rotate.png",
+    "scene.png",
+    "script.png",
+    "select.png",
+    "shape.png",
+    "sphere.png",
+    "sprite.png",
+    "transform.png",
+    "variables.png",
+    "vertex_mode.png",
+    "visible.png",
+];
 
 // ---------------------------------------------------------------------------
 // Main app
@@ -93,6 +132,7 @@ pub struct AuraRafiApp {
 
     // Editor state
     bottom_tab: BottomTab,
+    bottom_panel_snap_height: Option<f32>,
     viewport_mode: ViewportMode,
     _show_settings: bool,
     
@@ -114,6 +154,7 @@ pub struct AuraRafiApp {
     redo_stack: Vec<String>,
     /// Project logo texture.
     logo_texture: Option<egui::TextureHandle>,
+    ui_icons: UiIconAtlas,
 }
 
 impl AuraRafiApp {
@@ -125,7 +166,7 @@ impl AuraRafiApp {
         let recent_projects = RecentProjects::load(&config_dir);
 
         // Apply initial theme.
-        app_theme::apply_theme(&cc.egui_ctx, settings.theme);
+        app_theme::apply_theme(&cc.egui_ctx, settings.theme, settings.theme_experimental);
 
         // Set font size.
         let mut style = (*cc.egui_ctx.style()).clone();
@@ -157,6 +198,7 @@ impl AuraRafiApp {
             command_bus: raf_core::command::CommandBus::new(),
 
             bottom_tab: BottomTab::Console,
+            bottom_panel_snap_height: None,
             viewport_mode: ViewportMode::Scene,
             _show_settings: false,
             frame_count: 0,
@@ -166,6 +208,7 @@ impl AuraRafiApp {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             logo_texture: None,
+            ui_icons: UiIconAtlas::default(),
         }
     }
 }
@@ -175,7 +218,7 @@ impl eframe::App for AuraRafiApp {
         self.frame_count += 1;
 
         // Re-apply theme every frame (cheap, ensures consistency).
-        app_theme::apply_theme(ctx, self.settings.theme);
+        app_theme::apply_theme(ctx, self.settings.theme, self.settings.theme_experimental);
 
         match self.screen.clone() {
             AppScreen::Loading {
@@ -212,9 +255,10 @@ impl AuraRafiApp {
     fn show_loading(&mut self, ctx: &egui::Context, _progress: f32, start_time: f64) {
         let time = ctx.input(|i| i.time);
         let start = if start_time == 0.0 { time } else { start_time };
+        let palette = app_theme::palette_for(self.settings.theme, self.settings.theme_experimental);
 
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(app_theme::DARK_BG))
+            .frame(egui::Frame::default().fill(palette.bg))
             .show(ctx, |ui| {
                 let available = ui.available_rect_before_wrap();
                 let center = available.center();
@@ -235,7 +279,7 @@ impl AuraRafiApp {
                     egui::Align2::CENTER_CENTER,
                     tagline,
                     egui::FontId::proportional(16.0),
-                    app_theme::DARK_TEXT_DIM,
+                    palette.text_dim,
                 );
 
                 // Progress bar.
@@ -250,7 +294,7 @@ impl AuraRafiApp {
                 ui.painter().rect_filled(
                     bar_rect,
                     bar_height / 2.0,
-                    app_theme::DARK_WIDGET,
+                    palette.widget,
                 );
 
                 // Fill.
@@ -273,7 +317,7 @@ impl AuraRafiApp {
                     egui::Align2::CENTER_CENTER,
                     loading_text,
                     egui::FontId::proportional(12.0),
-                    app_theme::DARK_TEXT_DIM,
+                    palette.text_dim,
                 );
 
                 // --- Subtle Yoll credit at the bottom ---
@@ -282,14 +326,14 @@ impl AuraRafiApp {
                     egui::Align2::CENTER_CENTER,
                     "A project by Yoll",
                     egui::FontId::proportional(11.0),
-                    egui::Color32::from_rgb(90, 90, 100),
+                    palette.text_dim,
                 );
                 ui.painter().text(
                     egui::pos2(center.x, available.bottom() - 20.0),
                     egui::Align2::CENTER_CENTER,
                     "yoll.site",
                     egui::FontId::proportional(10.0),
-                    egui::Color32::from_rgb(70, 70, 80),
+                    palette.border,
                 );
 
                 // Version (small, corner).
@@ -298,7 +342,7 @@ impl AuraRafiApp {
                     egui::Align2::RIGHT_BOTTOM,
                     format!("v{}", env!("CARGO_PKG_VERSION")),
                     egui::FontId::proportional(9.0),
-                    egui::Color32::from_rgb(55, 55, 65),
+                    palette.separator,
                 );
 
                 // Transition after loading completes.
@@ -322,12 +366,13 @@ impl AuraRafiApp {
     fn show_project_hub(&mut self, ctx: &egui::Context) {
         let _lang = self.settings.language;
         let is_dark = ctx.style().visuals.dark_mode;
+        let palette = app_theme::palette_for_visuals(is_dark, self.settings.theme_experimental);
         
-        let bg_color = if is_dark { app_theme::DARK_BG } else { app_theme::LIGHT_BG };
-        let panel_color = if is_dark { app_theme::DARK_PANEL } else { app_theme::LIGHT_PANEL };
-        let text_color = if is_dark { app_theme::DARK_TEXT } else { app_theme::LIGHT_TEXT };
-        let text_dim_color = if is_dark { app_theme::DARK_TEXT_DIM } else { app_theme::LIGHT_TEXT_DIM };
-        let _border_color = if is_dark { app_theme::DARK_BORDER } else { app_theme::LIGHT_BORDER };
+        let bg_color = palette.bg;
+        let panel_color = palette.panel;
+        let text_color = palette.text;
+        let text_dim_color = palette.text_dim;
+        let border_color = palette.border;
 
         // --- Load Logo Texture ---
         let logo_res = self.logo_texture.get_or_insert_with(|| {
@@ -365,7 +410,7 @@ impl AuraRafiApp {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     
                     // Sidebar active stylings
-                    let active_bg = egui::Color32::from_rgb(45, 45, 52);
+                    let active_bg = palette.widget_active;
                     let inactive_bg = egui::Color32::TRANSPARENT;
                     
                     // My Projects - Active
@@ -417,17 +462,17 @@ impl AuraRafiApp {
                     // Game Project
                     let ui0 = &mut columns[0];
                     let game_frame = egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(32, 32, 36))
+                        .fill(palette.widget)
                         .rounding(6.0)
                         .inner_margin(20.0)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 55)));
+                        .stroke(egui::Stroke::new(1.0, border_color));
                         
                     let game_card = game_frame.show(ui0, |ui| {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("NEW GAME").strong().size(13.0).color(text_color));
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new("Start a blank 3D project.").size(12.0).color(app_theme::DARK_TEXT_DIM));
+                                ui.label(egui::RichText::new("Start a blank 3D project.").size(12.0).color(text_dim_color));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(egui::RichText::new("+").size(20.0).color(app_theme::ACCENT));
@@ -450,17 +495,17 @@ impl AuraRafiApp {
                     // Electronics Project
                     let ui1 = &mut columns[1];
                     let elec_frame = egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(32, 32, 36))
+                        .fill(palette.widget)
                         .rounding(6.0)
                         .inner_margin(20.0)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 55)));
+                        .stroke(egui::Stroke::new(1.0, border_color));
                         
                     let elec_card = elec_frame.show(ui1, |ui| {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("NEW ELECTRONICS").strong().size(13.0).color(text_color));
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new("PCB design and simulation.").size(12.0).color(app_theme::DARK_TEXT_DIM));
+                                ui.label(egui::RichText::new("PCB design and simulation.").size(12.0).color(text_dim_color));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(egui::RichText::new("+").size(20.0).color(app_theme::ACCENT));
@@ -497,7 +542,7 @@ impl AuraRafiApp {
                     ui.add_space(20.0);
                     ui.label(
                         egui::RichText::new("No projects yet.")
-                            .color(app_theme::DARK_TEXT_DIM),
+                            .color(text_dim_color),
                     );
                 } else {
                     let mut open_path: Option<std::path::PathBuf> = None;
@@ -506,10 +551,10 @@ impl AuraRafiApp {
 
                     for entry in &self.recent_projects.projects {
                         let frame = egui::Frame::none()
-                            .fill(egui::Color32::from_rgb(26, 26, 28))
+                            .fill(palette.widget)
                             .rounding(6.0)
                             .inner_margin(16.0)
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 45)));
+                            .stroke(egui::Stroke::new(1.0, border_color));
 
                         frame.show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -539,13 +584,13 @@ impl AuraRafiApp {
                                         ui.label(
                                             egui::RichText::new(format!("Created: {}", entry.created_at.format("%d/%m/%Y")))
                                                 .size(11.0)
-                                                .color(app_theme::DARK_TEXT_DIM)
+                                                .color(text_dim_color)
                                         );
                                         ui.add_space(12.0);
                                         ui.label(
                                             egui::RichText::new(format!("Modified: {}", entry.modified_at.format("%d/%m/%Y")))
                                                 .size(11.0)
-                                                .color(app_theme::DARK_TEXT_DIM)
+                                                .color(text_dim_color)
                                         );
                                         ui.add_space(12.0);
                                         
@@ -556,7 +601,7 @@ impl AuraRafiApp {
                                         ui.label(
                                             egui::RichText::new(format!("{} {}", entry.n_elements, elem_label))
                                                 .size(11.0)
-                                                .color(app_theme::DARK_TEXT_DIM)
+                                                .color(text_dim_color)
                                         );
                                     });
                                 });
@@ -566,7 +611,7 @@ impl AuraRafiApp {
                                     // Primary action
                                     let open_btn = egui::Button::new(
                                         egui::RichText::new("Open").size(12.0).color(egui::Color32::WHITE)
-                                    ).fill(egui::Color32::from_rgb(50, 50, 55)).rounding(4.0);
+                                    ).fill(palette.widget_active).rounding(4.0);
                                     
                                     if ui.add_sized([60.0, 24.0], open_btn).clicked() {
                                         open_path = Some(entry.path.clone());
@@ -623,6 +668,7 @@ impl AuraRafiApp {
         project_type: ProjectType,
     ) {
         let _lang = self.settings.language;
+        let palette = app_theme::palette_for_visuals(ctx.style().visuals.dark_mode, self.settings.theme_experimental);
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.add_space(50.0);
             ui.vertical_centered(|ui| {
@@ -710,7 +756,7 @@ impl AuraRafiApp {
                     .fill(if can_create {
                         app_theme::ACCENT
                     } else {
-                        app_theme::DARK_WIDGET
+                        palette.widget
                     });
 
                     if ui
@@ -767,6 +813,9 @@ impl AuraRafiApp {
 
     fn show_editor(&mut self, ctx: &egui::Context) {
         let _lang = self.settings.language;
+        let palette = app_theme::palette_for_visuals(ctx.style().visuals.dark_mode, self.settings.theme_experimental);
+        self.ui_icons.request_icons(EDITOR_UI_ICONS);
+        self.ui_icons.process_load_budget(ctx, ui_icon_budget(ctx));
 
         // --- Global keyboard shortcuts ---
         self.handle_global_shortcuts(ctx);
@@ -855,29 +904,43 @@ impl AuraRafiApp {
                         ui.label(
                             egui::RichText::new(project.path.display().to_string())
                                 .small()
-                                .color(app_theme::DARK_TEXT_DIM),
+                                .color(palette.text_dim),
                         );
+                        ui.separator();
+                        if ui.button(t("app.open_folder", _lang)).clicked() {
+                            #[cfg(target_os = "windows")]
+                            { let _ = std::process::Command::new("explorer").arg(project.path.as_os_str()).spawn(); }
+                            ui.close_menu();
+                        }
                     }
-                    ui.close_menu();
+                    if ui.button(t("app.close_project", _lang)).clicked() {
+                        self.screen = AppScreen::ProjectHub;
+                        ui.close_menu();
+                    }
                 });
 
                 // -- Help --
                 ui.menu_button(t("app.help_menu", _lang), |ui| {
                     ui.label(egui::RichText::new(t("app.keyboard_shortcuts", _lang)).strong());
-                    ui.label("Ctrl+S  -  Save");
-                    ui.label("Ctrl+Z  -  Undo");
-                    ui.label("Ctrl+Y  -  Redo");
-                    ui.label("Ctrl+D  -  Duplicate");
-                    ui.label("Ctrl+A  -  Select All");
-                    ui.label("Del     -  Delete");
-                    ui.label("Q/T/E/R -  Tool Select");
-                    ui.label("W/A/S/D -  Move Camera");
-                    ui.label("RMB+Drag -  Look Around");
-                    ui.label("Wheel   -  Zoom");
-                    ui.label("MMB Drag -  Pan");
+                    ui.label(t("app.save_menu", _lang));
+                    ui.label(t("app.undo_menu", _lang));
+                    ui.label(t("app.redo_menu", _lang));
+                    ui.label(t("app.duplicate_menu", _lang));
+                    ui.label(t("app.select_all_menu", _lang));
+                    ui.label(t("app.delete_menu", _lang));
+                    ui.label(t("app.shortcut_multi_select", _lang));
+                    ui.label(t("app.shortcut_tools", _lang));
+                    ui.label(t("app.shortcut_orbit_camera", _lang));
+                    ui.label(t("app.shortcut_alt_orbit_camera", _lang));
+                    ui.label(t("app.shortcut_pan_camera", _lang));
+                    ui.label(t("app.shortcut_zoom_camera", _lang));
+                    ui.label(t("app.shortcut_fly_camera", _lang));
+                    ui.label(t("app.shortcut_focus_selected", _lang));
+                    ui.label(t("app.shortcut_toggle_edit_mode", _lang));
+                    ui.label(t("app.shortcut_reset_view", _lang));
                     ui.separator();
                     ui.label(format!("Proyecto Rafi v{}", env!("CARGO_PKG_VERSION")));
-                    ui.close_menu();
+                    // No unconditional ui.close_menu() -- keeps menu open.
                 });
 
                 // Right side: mode indicator | FPS | Build/Run.
@@ -919,7 +982,7 @@ impl AuraRafiApp {
                         ui.label(
                             egui::RichText::new(format!("{} FPS", fps))
                                 .size(11.0)
-                                .color(app_theme::DARK_TEXT_DIM),
+                                .color(palette.text_dim),
                         );
 
                         // Viewport mode indicator.
@@ -954,14 +1017,26 @@ impl AuraRafiApp {
                         ui.label(
                             egui::RichText::new(project.project_type.display_name())
                                 .size(11.0)
-                                .color(app_theme::DARK_TEXT_DIM),
+                                .color(palette.text_dim),
                         );
                     }
                     ui.separator();
+                    let status_counts = match self.viewport_mode {
+                        ViewportMode::Scene => {
+                            format!("{} {}", t("app.entities_count", _lang), self.scene.all_valid_ids().len())
+                        }
+                        ViewportMode::Schematic => format!(
+                            "{} {} | {} {}",
+                            t("app.schematic_components", _lang),
+                            self.schematic_view.schematic.components.len(),
+                            t("app.schematic_wires", _lang),
+                            self.schematic_view.schematic.wires.len()
+                        ),
+                    };
                     ui.label(
-                        egui::RichText::new(format!("{} {}", t("app.entities_count", _lang), self.scene.all_valid_ids().len()))
+                        egui::RichText::new(status_counts)
                             .size(11.0)
-                            .color(app_theme::DARK_TEXT_DIM),
+                            .color(palette.text_dim),
                     );
                     ui.separator();
                     ui.label(
@@ -971,14 +1046,14 @@ impl AuraRafiApp {
                             self.redo_stack.len()
                         ))
                         .size(11.0)
-                        .color(app_theme::DARK_TEXT_DIM),
+                        .color(palette.text_dim),
                     );
                     if !self.last_action.is_empty() {
                         ui.separator();
                         ui.label(
                             egui::RichText::new(&self.last_action)
                                 .size(11.0)
-                                .color(app_theme::DARK_TEXT_DIM),
+                                .color(palette.text_dim),
                         );
                     }
                     ui.with_layout(
@@ -996,58 +1071,67 @@ impl AuraRafiApp {
                                     theme_name
                                 ))
                                 .size(11.0)
-                                .color(app_theme::DARK_TEXT_DIM),
+                                .color(palette.text_dim),
                             );
                         },
                     );
                 });
             });
 
-        // Bottom panel (tabbed: Assets / Console / AI Chat / Node Editor).
-        egui::TopBottomPanel::bottom("bottom_panel")
-            .resizable(true)
-            .min_height(120.0)
-            .default_height(200.0)
-            .show(ctx, |ui| {
+        let (show_hierarchy_panel, show_properties_panel, complements_enabled) = self
+            .current_project
+            .as_ref()
+            .map(|project| {
+                (
+                    project.settings.show_hierarchy_panel,
+                    project.settings.show_properties_panel,
+                    project.settings.enable_complements,
+                )
+            })
+            .unwrap_or((true, true, true));
+
+        if !complements_enabled && matches!(self.bottom_tab, BottomTab::Complement(_)) {
+            self.bottom_tab = BottomTab::ProjectSettings;
+        }
+
+        let mut bottom_panel = egui::TopBottomPanel::bottom("bottom_panel");
+        bottom_panel = if let Some(height) = self.bottom_panel_snap_height {
+            bottom_panel
+                .resizable(false)
+                .min_height(height)
+                .max_height(height)
+        } else {
+            bottom_panel
+                .resizable(true)
+                .min_height(90.0)
+                .default_height(200.0)
+        };
+
+        bottom_panel.show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let mut tabs = vec![
                         (BottomTab::Console, "Console".to_string()),
                         (BottomTab::Assets, "Assets".to_string()),
+                        (BottomTab::ProjectSettings, t("app.project_settings_tab", _lang)),
                         (BottomTab::NodeEditor, "Node Editor".to_string()),
                         (BottomTab::AiChat, "AI Chat".to_string()),
                     ];
-                    for comp in &self.complement_registry.complements {
+                    if complements_enabled {
+                        for comp in &self.complement_registry.complements {
                         tabs.push((BottomTab::Complement(comp.id().to_string()), comp.name().to_string()));
+                        }
                     }
                     
                     let mut tab_changed = None;
                     for (tab, label) in tabs {
                         let is_active = self.bottom_tab == tab;
-                        let text_color = if is_active {
-                            app_theme::ACCENT
-                        } else {
-                            egui::Color32::from_rgb(150, 150, 160)
-                        };
-                        
-                        let btn = egui::Button::new(
-                            egui::RichText::new(label).size(13.0).color(text_color),
-                        )
-                        .fill(egui::Color32::TRANSPARENT)
-                        .frame(false);
-
-                        let response = ui.add(btn);
-                        
-                        // Draw underline for the active tab
-                        if is_active {
-                            let rect = response.rect;
-                            ui.painter().line_segment(
-                                [
-                                    egui::Pos2::new(rect.left(), rect.bottom() + 3.0),
-                                    egui::Pos2::new(rect.right(), rect.bottom() + 3.0),
-                                ],
-                                egui::Stroke::new(2.0, app_theme::ACCENT),
-                            );
-                        }
+                        let response = draw_bottom_tab_button(
+                            ui,
+                            &self.ui_icons,
+                            bottom_tab_icon(&tab),
+                            &label,
+                            is_active,
+                        );
 
                         if response.clicked() {
                             tab_changed = Some(tab);
@@ -1055,6 +1139,38 @@ impl AuraRafiApp {
                         
                         ui.add_space(16.0);
                     }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        for (height, label) in [
+                            (None, "F"),
+                            (Some(340.0), "L"),
+                            (Some(220.0), "M"),
+                            (Some(110.0), "S"),
+                        ] {
+                            let is_active = self.bottom_panel_snap_height == height;
+                            let button = egui::Button::new(
+                                egui::RichText::new(label)
+                                    .size(10.0)
+                                    .color(if is_active {
+                                        egui::Color32::WHITE
+                                    } else {
+                                        egui::Color32::from_rgb(150, 150, 160)
+                                    }),
+                            )
+                            .fill(if is_active {
+                                egui::Color32::from_rgb(70, 70, 76)
+                            } else {
+                                egui::Color32::TRANSPARENT
+                            })
+                            .rounding(4.0)
+                            .min_size(egui::Vec2::new(22.0, 18.0));
+
+                            if ui.add(button).clicked() {
+                                self.bottom_panel_snap_height = height;
+                            }
+                        }
+                    });
+
                     if let Some(t) = tab_changed {
                         self.bottom_tab = t;
                     }
@@ -1062,8 +1178,73 @@ impl AuraRafiApp {
                 ui.separator();
 
                 match &self.bottom_tab {
-                    BottomTab::Assets => self.asset_browser.show(ui, self.settings.language),
+                    BottomTab::Assets => {
+                        self.asset_browser.process_scan_budget(96);
+                        self.asset_browser.show(ui, self.settings.language, &self.ui_icons);
+                        // Handle "Add Entity" from asset browser.
+                        if self.asset_browser.add_entity_clicked {
+                            self.asset_browser.add_entity_clicked = false;
+                            ui.memory_mut(|m| m.toggle_popup(egui::Id::new("add_entity_popup")));
+                        }
+                        let add_popup_id = egui::Id::new("add_entity_popup");
+                        let fake_resp = ui.make_persistent_id("add_entity_anchor");
+                        let anchor = ui.interact(ui.max_rect(), fake_resp, egui::Sense::hover());
+                        egui::popup_above_or_below_widget(
+                            ui,
+                            add_popup_id,
+                            &anchor,
+                            egui::AboveOrBelow::Above,
+                            egui::PopupCloseBehavior::CloseOnClickOutside,
+                            |ui| {
+                                ui.label(
+                                    egui::RichText::new(t("app.add_entity", self.settings.language))
+                                        .size(11.0).strong()
+                                );
+                                ui.separator();
+                                let primitives = [
+                                    Primitive::Cube,
+                                    Primitive::Sphere,
+                                    Primitive::Plane,
+                                    Primitive::Cylinder,
+                                ];
+                                for prim in primitives {
+                                    if ui.button(prim.label()).clicked() {
+                                        self.push_undo_snapshot();
+                                        let name = format!("{} {}", prim.label(), self.scene.len() + 1);
+                                        let id = self.scene.add_root_with_primitive(&name, prim);
+                                        self.hierarchy.selected_node = Some(id);
+                                        self.hierarchy.selected_nodes = vec![id];
+                                        self.viewport.selected = vec![id];
+                                        let add_msg = format!("Added: {}", name);
+                                        self.last_action = add_msg.clone();
+                                        self.console.log(LogLevel::Info, &add_msg);
+                                    }
+                                }
+                            },
+                        );
+                    }
                     BottomTab::Console => self.console.show(ui, self.settings.language),
+                    BottomTab::ProjectSettings => {
+                        let changed = if let Some(project) = self.current_project.as_mut() {
+                            project_settings::show_project_settings(ui, project, self.settings.language)
+                        } else {
+                            ui.label(
+                                egui::RichText::new(t("app.no_entity_selected", self.settings.language))
+                                    .size(11.0)
+                                    .color(palette.text_dim),
+                            );
+                            false
+                        };
+
+                        if changed {
+                            if let Some(project) = &self.current_project {
+                                let _ = project.save();
+                            }
+                            let msg = t("app.project_settings_saved", self.settings.language);
+                            self.last_action = msg.clone();
+                            self.console.log(LogLevel::Info, &msg);
+                        }
+                    }
                     BottomTab::AiChat => {
                         self.ai_chat.lang = self.settings.language;
                         self.ai_chat.show(ui);
@@ -1082,108 +1263,203 @@ impl AuraRafiApp {
             });
 
         // Left panel: Hierarchy.
-        egui::SidePanel::left("hierarchy_panel")
-            .resizable(true)
-            .default_width(200.0)
-            .min_width(150.0)
-            .show(ctx, |ui| {
-                let _prev_hier = self.hierarchy.selected_node;
-                let prev_hier_vec = self.hierarchy.selected_nodes.clone();
-                self.hierarchy.show(ui, &self.scene, self.settings.language);
+        if show_hierarchy_panel {
+            egui::SidePanel::left("hierarchy_panel")
+                .resizable(true)
+                .default_width(200.0)
+                .min_width(150.0)
+                .show(ctx, |ui| {
+                    match self.viewport_mode {
+                        ViewportMode::Scene => {
+                            let prev_hier_vec = self.hierarchy.selected_nodes.clone();
+                            self.hierarchy.show(ui, &mut self.scene, self.settings.language, &self.ui_icons);
 
-                // Sync: hierarchy -> viewport (if hierarchy changed).
-                if self.hierarchy.selected_nodes != prev_hier_vec {
-                    self.viewport.selected = self.hierarchy.selected_nodes.clone();
-                }
-
-                // Sync: viewport -> hierarchy (if viewport changed externally).
-                if self.viewport.selected != self.hierarchy.selected_nodes {
-                    self.hierarchy.selected_nodes = self.viewport.selected.clone();
-                    self.hierarchy.selected_node = self.viewport.selected.first().copied();
-                }
-
-                ui.add_space(8.0);
-                ui.separator();
-                ui.add_space(4.0);
-
-                // Subtle + Add button (not a giant orange CTA).
-                let add_btn = egui::Button::new(
-                    egui::RichText::new("+ Add").size(12.0),
-                )
-                .rounding(4.0);
-
-                let response = ui.add_sized([ui.available_width(), 26.0], add_btn);
-                let popup_id = egui::Id::new("add_entity_popup");
-
-                if response.clicked() {
-                    ui.memory_mut(|m| m.toggle_popup(popup_id));
-                }
-
-                egui::popup_below_widget(
-                    ui,
-                    popup_id,
-                    &response,
-                    egui::PopupCloseBehavior::CloseOnClickOutside,
-                    |ui| {
-                        let primitives = [
-                            Primitive::Cube,
-                            Primitive::Sphere,
-                            Primitive::Plane,
-                            Primitive::Cylinder,
-                        ];
-                        for prim in primitives {
-                            if ui.button(prim.label()).clicked() {
+                            let actions = self.hierarchy.take_actions();
+                            if let Some(del_id) = actions.delete {
                                 self.push_undo_snapshot();
-                                let name = format!("{} {}", prim.label(), self.scene.len() + 1);
-                                let id = self.scene.add_root_with_primitive(&name, prim);
-                                self.hierarchy.selected_node = Some(id);
-                                self.hierarchy.selected_nodes = vec![id];
-                                self.viewport.selected = vec![id];
-                                let add_msg = format!("Added: {}", name);
-                                self.last_action = add_msg.clone();
-                                self.console.log(LogLevel::Info, &add_msg);
+                                let name = self.scene.get(del_id).map(|n| n.name.clone()).unwrap_or_default();
+                                if self.scene.remove_node(del_id) {
+                                    self.hierarchy.selected_node = None;
+                                    self.hierarchy.selected_nodes.clear();
+                                    self.viewport.selected.clear();
+                                    let msg = format!("{} {}", t("app.deleted_msg", self.settings.language), name);
+                                    self.last_action = msg.clone();
+                                    self.console.log(LogLevel::Info, &msg);
+                                }
+                            }
+                            if let Some(dup_id) = actions.duplicate {
+                                self.push_undo_snapshot();
+                                if let Some(new_id) = self.scene.duplicate_node(dup_id) {
+                                    self.hierarchy.selected_node = Some(new_id);
+                                    self.hierarchy.selected_nodes = vec![new_id];
+                                    self.viewport.selected = vec![new_id];
+                                    let name = self.scene.get(new_id).map(|n| n.name.clone()).unwrap_or_default();
+                                    let msg = format!("{} {}", t("app.duplicated_msg", self.settings.language), name);
+                                    self.last_action = msg.clone();
+                                    self.console.log(LogLevel::Info, &msg);
+                                }
+                            }
+                            if let Some(folder_id) = actions.ungroup {
+                                self.push_undo_snapshot();
+                                let name = self.scene.get(folder_id).map(|n| n.name.clone()).unwrap_or_default();
+                                if self.scene.ungroup_node(folder_id) {
+                                    self.hierarchy.selected_node = None;
+                                    self.hierarchy.selected_nodes.clear();
+                                    self.viewport.selected.clear();
+                                    let msg = format!("{} {}", t("app.ungrouped_msg", self.settings.language), name);
+                                    self.last_action = msg.clone();
+                                    self.console.log(LogLevel::Info, &msg);
+                                }
+                            }
+                            if let Some(toggle_id) = actions.toggle_visibility {
+                                self.push_undo_snapshot();
+                                if let Some(node) = self.scene.get_mut(toggle_id) {
+                                    node.visible = !node.visible;
+                                    let msg = format!("{} {}", t("app.visibility_toggled", self.settings.language), node.name);
+                                    self.last_action = msg.clone();
+                                    self.console.log(LogLevel::Info, &msg);
+                                }
+                            }
+                            if let Some(parent) = actions.create_folder_parent {
+                                self.push_undo_snapshot();
+                                let new_id = if let Some(parent_id) = parent {
+                                    self.scene.add_child_folder(parent_id, "Folder")
+                                } else {
+                                    self.scene.add_root_folder("Folder")
+                                };
+                                self.hierarchy.selected_node = Some(new_id);
+                                self.hierarchy.selected_nodes = vec![new_id];
+                                self.viewport.selected = vec![new_id];
+                                let msg = t("app.folder_created", self.settings.language);
+                                self.last_action = msg.clone();
+                                self.console.log(LogLevel::Info, &msg);
+                            }
+                            if let Some((dragged, new_parent)) = actions.reparent {
+                                self.push_undo_snapshot();
+                                if self.scene.reparent_node(dragged, new_parent) {
+                                    self.hierarchy.selected_node = Some(dragged);
+                                    self.hierarchy.selected_nodes = vec![dragged];
+                                    self.viewport.selected = vec![dragged];
+                                    let msg = t("app.node_reparented", self.settings.language);
+                                    self.last_action = msg.clone();
+                                    self.console.log(LogLevel::Info, &msg);
+                                }
+                            }
+                            if actions.edited {
+                                self.mark_scene_modified();
+                            }
+
+                            if self.hierarchy.selected_nodes != prev_hier_vec {
+                                self.viewport.selected = self.hierarchy.selected_nodes.clone();
+                            }
+
+                            if self.viewport.selected != self.hierarchy.selected_nodes {
+                                self.hierarchy.selected_nodes = self.viewport.selected.clone();
+                                self.hierarchy.selected_node = self.viewport.selected.first().copied();
                             }
                         }
-                    },
-                );
+                        ViewportMode::Schematic => {
+                            let _ = schematic_panels::show_schematic_hierarchy(
+                                ui,
+                                &mut self.schematic_view,
+                                self.settings.language,
+                            );
+                        }
+                    }
             });
+        }
 
         // Right panel: Properties.
-        egui::SidePanel::right("properties_panel")
-            .resizable(true)
-            .default_width(280.0)
-            .min_width(200.0)
-            .show(ctx, |ui| {
-                self.properties
-                    .show(ui, &mut self.scene, self.hierarchy.selected_node, self.settings.language);
+        if show_properties_panel {
+            egui::SidePanel::right("properties_panel")
+                .resizable(true)
+                .default_width(300.0)
+                .min_width(220.0)
+                .show(ctx, |ui| {
+                    match self.viewport_mode {
+                        ViewportMode::Scene => {
+                            let properties_changed = self.properties.show(
+                                ui,
+                                &mut self.scene,
+                                self.hierarchy.selected_node,
+                                self.settings.language,
+                                &self.ui_icons,
+                                self.asset_browser.project_assets_path.as_deref(),
+                            );
+                            if properties_changed {
+                                self.mark_scene_modified();
+                            }
+                        }
+                        ViewportMode::Schematic => {
+                            if schematic_panels::show_schematic_properties(
+                                ui,
+                                &mut self.schematic_view,
+                                self.settings.language,
+                            ) {
+                                self.mark_scene_modified();
+                            }
+                        }
+                    }
             });
+        }
 
         // Central panel: Viewport or Schematic.
         egui::CentralPanel::default().show(ctx, |ui| {
             match self.viewport_mode {
                 ViewportMode::Scene => {
+                    self.viewport.frame_time_hint = ctx.input(|i| i.predicted_dt);
+                    self.viewport.render_cfg = self
+                        .current_project
+                        .as_ref()
+                        .map(|project| match project.settings.runtime_render_preset {
+                            RenderPreset::Potato => RenderConfig::potato(),
+                            RenderPreset::Low => RenderConfig::low(),
+                            RenderPreset::Medium => RenderConfig::medium(),
+                            RenderPreset::High => RenderConfig::high(),
+                        })
+                        .unwrap_or_else(RenderConfig::potato);
                     self.viewport.grid_visible = self.settings.grid_visible;
+                    self.viewport.grid_spacing = self.settings.grid_size.max(0.1);
                     self.viewport.invert_mouse_x = self.settings.invert_mouse_x;
                     self.viewport.invert_mouse_y = self.settings.invert_mouse_y;
+                    self.viewport.move_sensitivity = self.settings.move_gizmo_sensitivity.max(0.1);
+                    self.viewport.rotate_sensitivity = self.settings.rotate_gizmo_sensitivity.max(0.1);
+                    self.viewport.scale_sensitivity = self.settings.scale_gizmo_sensitivity.max(0.1);
+                    self.viewport.uniform_scale_by_default = self.settings.uniform_scale_by_default;
+                    self.viewport.solid_show_surface_edges = self.settings.solid_show_surface_edges;
+                    self.viewport.solid_xray_mode = self.settings.solid_xray_mode;
+                    self.viewport.solid_face_tonality = self.settings.solid_face_tonality;
                     self.viewport.render_style = match self.settings.viewport_render_mode {
                         raf_core::config::ViewportRenderMode::Solid => crate::panels::viewport::RenderStyle::Solid,
                         raf_core::config::ViewportRenderMode::Wireframe => crate::panels::viewport::RenderStyle::Wireframe,
                         raf_core::config::ViewportRenderMode::Preview => crate::panels::viewport::RenderStyle::Preview,
                     };
                     self.viewport.show_labels = self.settings.show_viewport_labels;
-                    self.viewport.show(
+                    let viewport_changed = self.viewport.show(
+                        ctx,
                         ui,
                         &mut self.scene,
                         self.settings.theme != Theme::Light,
                         self.settings.language,
+                        &self.ui_icons,
                     );
+                    if viewport_changed {
+                        self.mark_scene_modified();
+                    }
                 }
                 ViewportMode::Schematic => {
                     self.schematic_view.lang = self.settings.language;
-                    self.schematic_view.show(ui);
+                    if self.schematic_view.show(ui) {
+                        self.mark_scene_modified();
+                    }
                 }
             }
         });
+
+        if self.viewport_mode == ViewportMode::Scene && self.viewport.selected != self.hierarchy.selected_nodes {
+            self.hierarchy.selected_nodes = self.viewport.selected.clone();
+            self.hierarchy.selected_node = self.viewport.selected.first().copied();
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -1194,6 +1470,7 @@ impl AuraRafiApp {
         let _lang = self.settings.language;
         let mut close = false;
         let mut save = false;
+        let palette = app_theme::palette_for_visuals(ctx.style().visuals.dark_mode, self.settings.theme_experimental);
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.vertical_centered(|ui| {
@@ -1205,7 +1482,7 @@ impl AuraRafiApp {
                 ui.label(
                     egui::RichText::new(t("app.engine_settings_title", _lang))
                         .size(16.0)
-                        .color(egui::Color32::from_rgb(140, 140, 150)),
+                        .color(palette.text_dim),
                 );
                 
                 ui.add_space(20.0);
@@ -1214,10 +1491,10 @@ impl AuraRafiApp {
 
                 // Need a frame for the settings panel content
                 let frame = egui::Frame::none()
-                    .fill(if ctx.style().visuals.dark_mode { app_theme::DARK_PANEL } else { app_theme::LIGHT_PANEL })
+                    .fill(palette.panel)
                     .rounding(8.0)
                     .inner_margin(24.0)
-                    .stroke(egui::Stroke::new(1.0, if ctx.style().visuals.dark_mode { app_theme::DARK_BORDER } else { app_theme::LIGHT_BORDER }));
+                    .stroke(egui::Stroke::new(1.0, palette.border));
                 
                 frame.show(ui, |ui| {
                     settings_panel::show_settings(ui, &mut self.settings);
@@ -1336,6 +1613,15 @@ impl AuraRafiApp {
 
     fn do_delete(&mut self) {
         let _lang = self.settings.language;
+        if self.viewport_mode == ViewportMode::Schematic {
+            if self.schematic_view.delete_selection() {
+                self.mark_scene_modified();
+                let msg = t("app.delete_del", _lang);
+                self.last_action = msg.to_string();
+                self.console.log(LogLevel::Info, &msg);
+            }
+            return;
+        }
         if let Some(id) = self.hierarchy.selected_node {
             self.push_undo_snapshot();
             let name = self.scene.get(id).map(|n| n.name.clone()).unwrap_or_default();
@@ -1352,6 +1638,15 @@ impl AuraRafiApp {
 
     fn do_duplicate(&mut self) {
         let _lang = self.settings.language;
+        if self.viewport_mode == ViewportMode::Schematic {
+            if self.schematic_view.duplicate_selection() {
+                self.mark_scene_modified();
+                let msg = t("app.duplicate_menu", _lang);
+                self.last_action = msg.to_string();
+                self.console.log(LogLevel::Info, &msg);
+            }
+            return;
+        }
         if let Some(id) = self.hierarchy.selected_node {
             self.push_undo_snapshot();
             if let Some(new_id) = self.scene.duplicate_node(id) {
@@ -1367,6 +1662,20 @@ impl AuraRafiApp {
     }
 
     fn do_select_all(&mut self) {
+        if self.viewport_mode == ViewportMode::Schematic {
+            self.schematic_view.clear_selection();
+            let _lang = self.settings.language;
+            let msg = format!(
+                "{} {} | {} {}",
+                t("app.schematic_components", _lang),
+                self.schematic_view.schematic.components.len(),
+                t("app.schematic_wires", _lang),
+                self.schematic_view.schematic.wires.len()
+            );
+            self.last_action = msg.clone();
+            self.console.log(LogLevel::Info, &msg);
+            return;
+        }
         let ids = self.scene.all_valid_ids();
         self.hierarchy.selected_nodes = ids.clone();
         self.hierarchy.selected_node = ids.first().copied();
@@ -1381,9 +1690,16 @@ impl AuraRafiApp {
         let _lang = self.settings.language;
         if let Some(project) = &self.current_project {
             let _ = project.save();
-            // Save scene alongside project.
-            let scene_path = project.path.join("scene.ron");
-            let _ = self.scene.save_ron(&scene_path);
+            match project.project_type {
+                ProjectType::Game => {
+                    let scene_path = project.path.join("scene.ron");
+                    let _ = self.scene.save_ron(&scene_path);
+                }
+                ProjectType::Electronics => {
+                    let schematic_path = project.path.join("schematic.ron");
+                    let _ = save_schematic_document(&schematic_path, &self.schematic_view.schematic);
+                }
+            }
             self.scene_modified = false;
             self.auto_save_elapsed = 0.0;
             let msg = t("app.project_saved", self.settings.language);
@@ -1436,6 +1752,11 @@ impl AuraRafiApp {
             self.last_action = msg.to_string();
             self.console.log(LogLevel::Info, &msg);
         }
+    }
+
+    fn mark_scene_modified(&mut self) {
+        self.scene_modified = true;
+        self.auto_save_elapsed = 0.0;
     }
 
     // -----------------------------------------------------------------------
@@ -1514,15 +1835,32 @@ impl AuraRafiApp {
                 let _ = self.recent_projects.save(&config_dir);
                 let ptype = project.project_type;
 
-                // Try to load saved scene, fall back to default.
-                let scene_path = project.path.join("scene.ron");
-                if scene_path.exists() {
-                    self.scene = SceneGraph::load_ron(&scene_path);
-                    let _lang = self.settings.language;
-                    let msg = t("app.scene_loaded_from_file", self.settings.language);
-                    self.console.log(LogLevel::Info, &msg);
-                } else {
-                    self.init_scene_for_type(ptype);
+                self.init_scene_for_type(ptype);
+
+                match ptype {
+                    ProjectType::Game => {
+                        let scene_path = project.path.join("scene.ron");
+                        if scene_path.exists() {
+                            self.scene = SceneGraph::load_ron(&scene_path);
+                            let msg = t("app.scene_loaded_from_file", self.settings.language);
+                            self.console.log(LogLevel::Info, &msg);
+                        }
+                    }
+                    ProjectType::Electronics => {
+                        let schematic_path = project.path.join("schematic.ron");
+                        self.schematic_view.schematic = if schematic_path.exists() {
+                            if let Some(schematic) = load_schematic_document(&schematic_path) {
+                                let msg = t("app.schematic_loaded_from_file", self.settings.language);
+                                self.console.log(LogLevel::Info, &msg);
+                                schematic
+                            } else {
+                                raf_electronics::schematic::Schematic::new(&project.name)
+                            }
+                        } else {
+                            raf_electronics::schematic::Schematic::new(&project.name)
+                        };
+                        self.schematic_view.clear_selection();
+                    }
                 }
 
                 // Switch viewport mode based on project type.
@@ -1594,5 +1932,84 @@ fn default_projects_dir() -> String {
         .join("AuraRafi Projects")
         .display()
         .to_string()
+}
+
+fn bottom_tab_icon(tab: &BottomTab) -> Option<&'static str> {
+    match tab {
+        BottomTab::Assets => Some("assets.png"),
+        BottomTab::Console => Some("console.png"),
+        BottomTab::AiChat => Some("ai_chat.png"),
+        BottomTab::NodeEditor => Some("node_editor.png"),
+        BottomTab::ProjectSettings => Some("project_settings.png"),
+        BottomTab::Complement(_) => None,
+    }
+}
+
+fn draw_bottom_tab_button(
+    ui: &mut egui::Ui,
+    icons: &UiIconAtlas,
+    icon_name: Option<&'static str>,
+    label: &str,
+    is_active: bool,
+) -> egui::Response {
+    let width = (52.0 + (label.chars().count() as f32 * 7.0)).max(92.0);
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 24.0), egui::Sense::click());
+    let painter = ui.painter();
+
+    if is_active {
+        painter.rect_filled(
+            rect.expand2(egui::vec2(0.0, 1.0)),
+            6.0,
+            egui::Color32::from_rgba_premultiplied(212, 119, 26, 18),
+        );
+    } else if response.hovered() {
+        painter.rect_filled(
+            rect.expand2(egui::vec2(0.0, 1.0)),
+            6.0,
+            egui::Color32::from_rgba_premultiplied(255, 255, 255, 10),
+        );
+    }
+
+    if let Some(icon_name) = icon_name {
+        let icon_rect = egui::Rect::from_center_size(
+            egui::pos2(rect.left() + 14.0, rect.center().y),
+            egui::vec2(16.0, 16.0),
+        );
+        let _ = icons.paint(ui.painter(), icon_name, icon_rect, egui::Color32::WHITE);
+    }
+
+    let text_color = if is_active {
+        app_theme::ACCENT
+    } else {
+        egui::Color32::from_rgb(150, 150, 160)
+    };
+    painter.text(
+        egui::pos2(rect.left() + 28.0, rect.center().y),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(13.0),
+        text_color,
+    );
+
+    if is_active {
+        painter.line_segment(
+            [
+                egui::Pos2::new(rect.left() + 2.0, rect.bottom() + 3.0),
+                egui::Pos2::new(rect.right() - 2.0, rect.bottom() + 3.0),
+            ],
+            egui::Stroke::new(2.0, app_theme::ACCENT),
+        );
+    }
+
+    response
+}
+
+fn ui_icon_budget(ctx: &egui::Context) -> usize {
+    let dt = ctx.input(|i| i.predicted_dt.max(1.0 / 240.0));
+    if dt > (1.0 / 45.0) {
+        1
+    } else {
+        2
+    }
 }
 include!("panels/complements.rs");

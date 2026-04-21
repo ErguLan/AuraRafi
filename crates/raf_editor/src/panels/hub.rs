@@ -6,12 +6,13 @@ impl AuraRafiApp {
     fn show_project_hub(&mut self, ctx: &egui::Context) {
         let _lang = self.settings.language;
         let is_dark = ctx.style().visuals.dark_mode;
+        let palette = app_theme::palette_for_visuals(is_dark, self.settings.theme_experimental);
         
-        let bg_color = if is_dark { app_theme::DARK_BG } else { app_theme::LIGHT_BG };
-        let panel_color = if is_dark { app_theme::DARK_PANEL } else { app_theme::LIGHT_PANEL };
-        let text_color = if is_dark { app_theme::DARK_TEXT } else { app_theme::LIGHT_TEXT };
-        let text_dim_color = if is_dark { app_theme::DARK_TEXT_DIM } else { app_theme::LIGHT_TEXT_DIM };
-        let _border_color = if is_dark { app_theme::DARK_BORDER } else { app_theme::LIGHT_BORDER };
+        let bg_color = palette.bg;
+        let panel_color = palette.panel;
+        let text_color = palette.text;
+        let text_dim_color = palette.text_dim;
+        let border_color = palette.border;
 
         // --- Load Logo Texture ---
         let logo_res = self.logo_texture.get_or_insert_with(|| {
@@ -49,7 +50,7 @@ impl AuraRafiApp {
                     ui.spacing_mut().item_spacing.y = 4.0;
                     
                     // Sidebar active stylings
-                    let active_bg = egui::Color32::from_rgb(45, 45, 52);
+                    let active_bg = palette.widget_active;
                     let inactive_bg = egui::Color32::TRANSPARENT;
                     
                     // My Projects - Active
@@ -101,17 +102,17 @@ impl AuraRafiApp {
                     // Game Project
                     let ui0 = &mut columns[0];
                     let game_frame = egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(32, 32, 36))
+                        .fill(palette.widget)
                         .rounding(6.0)
                         .inner_margin(20.0)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 55)));
+                        .stroke(egui::Stroke::new(1.0, border_color));
                         
                     let game_card = game_frame.show(ui0, |ui| {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("NEW GAME").strong().size(13.0).color(text_color));
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new("Start a blank 3D project.").size(12.0).color(app_theme::DARK_TEXT_DIM));
+                                ui.label(egui::RichText::new("Start a blank 3D project.").size(12.0).color(text_dim_color));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(egui::RichText::new("+").size(20.0).color(app_theme::ACCENT));
@@ -134,17 +135,17 @@ impl AuraRafiApp {
                     // Electronics Project
                     let ui1 = &mut columns[1];
                     let elec_frame = egui::Frame::none()
-                        .fill(egui::Color32::from_rgb(32, 32, 36))
+                        .fill(palette.widget)
                         .rounding(6.0)
                         .inner_margin(20.0)
-                        .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(50, 50, 55)));
+                        .stroke(egui::Stroke::new(1.0, border_color));
                         
                     let elec_card = elec_frame.show(ui1, |ui| {
                         ui.horizontal(|ui| {
                             ui.vertical(|ui| {
                                 ui.label(egui::RichText::new("NEW ELECTRONICS").strong().size(13.0).color(text_color));
                                 ui.add_space(4.0);
-                                ui.label(egui::RichText::new("PCB design and simulation.").size(12.0).color(app_theme::DARK_TEXT_DIM));
+                                ui.label(egui::RichText::new("PCB design and simulation.").size(12.0).color(text_dim_color));
                             });
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 ui.label(egui::RichText::new("+").size(20.0).color(app_theme::ACCENT));
@@ -181,7 +182,7 @@ impl AuraRafiApp {
                     ui.add_space(20.0);
                     ui.label(
                         egui::RichText::new("No projects yet.")
-                            .color(app_theme::DARK_TEXT_DIM),
+                            .color(text_dim_color),
                     );
                 } else {
                     let mut open_path: Option<std::path::PathBuf> = None;
@@ -190,10 +191,10 @@ impl AuraRafiApp {
 
                     for entry in &self.recent_projects.projects {
                         let frame = egui::Frame::none()
-                            .fill(egui::Color32::from_rgb(26, 26, 28))
+                            .fill(palette.widget)
                             .rounding(6.0)
                             .inner_margin(16.0)
-                            .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(40, 40, 45)));
+                            .stroke(egui::Stroke::new(1.0, border_color));
 
                         frame.show(ui, |ui| {
                             ui.horizontal(|ui| {
@@ -223,13 +224,13 @@ impl AuraRafiApp {
                                         ui.label(
                                             egui::RichText::new(format!("Created: {}", entry.created_at.format("%d/%m/%Y")))
                                                 .size(11.0)
-                                                .color(app_theme::DARK_TEXT_DIM)
+                                                .color(text_dim_color)
                                         );
                                         ui.add_space(12.0);
                                         ui.label(
                                             egui::RichText::new(format!("Modified: {}", entry.modified_at.format("%d/%m/%Y")))
                                                 .size(11.0)
-                                                .color(app_theme::DARK_TEXT_DIM)
+                                                .color(text_dim_color)
                                         );
                                         ui.add_space(12.0);
                                         
@@ -240,7 +241,7 @@ impl AuraRafiApp {
                                         ui.label(
                                             egui::RichText::new(format!("{} {}", entry.n_elements, elem_label))
                                                 .size(11.0)
-                                                .color(app_theme::DARK_TEXT_DIM)
+                                                .color(text_dim_color)
                                         );
                                     });
                                 });
@@ -250,7 +251,7 @@ impl AuraRafiApp {
                                     // Primary action
                                     let open_btn = egui::Button::new(
                                         egui::RichText::new("Open").size(12.0).color(egui::Color32::WHITE)
-                                    ).fill(egui::Color32::from_rgb(50, 50, 55)).rounding(4.0);
+                                    ).fill(palette.widget_active).rounding(4.0);
                                     
                                     if ui.add_sized([60.0, 24.0], open_btn).clicked() {
                                         open_path = Some(entry.path.clone());
@@ -394,7 +395,7 @@ impl AuraRafiApp {
                     .fill(if can_create {
                         app_theme::ACCENT
                     } else {
-                        app_theme::DARK_WIDGET
+                        palette.widget
                     });
 
                     if ui

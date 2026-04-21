@@ -17,6 +17,8 @@ pub mod camera;
 pub mod depth_sort;
 pub mod editable;
 pub mod gizmo;
+#[path = "ApiGraphicBasic/mod.rs"]
+pub mod api_graphic_basic;
 pub mod lod;
 pub mod mesh;
 pub mod picking;
@@ -31,6 +33,9 @@ pub mod texture;
 pub mod post_process;
 pub mod shaders;
 pub mod uv_mapping;
+
+// --- v0.8.0: Software Z-buffer rasterizer (opt-in, zero-cost when disabled) ---
+pub mod software_raster;
 
 // --- Render abstraction layer (prepared, connects scene to backend) ---
 pub mod abstraction;
@@ -60,6 +65,9 @@ pub use lighting::{Light, LightingEnv, compute_lighting, apply_fog, bloom_factor
 pub use texture::{CpuTexture, TextureCache};
 pub use post_process::{fxaa_edge_blend, apply_bloom, apply_vignette, tonemap_reinhard, adjust_saturation};
 pub use uv_mapping::{UvProjection, generate_uv_box, generate_uv_spherical, generate_uv_cylindrical, cube_uv_quads};
+
+// --- v0.8.0 re-exports ---
+pub use software_raster::{SoftwareFramebuffer, RasterTriangle, rasterize_triangle, rasterize_quad, rasterize_line, rasterize_selection_outline, project_quad_for_raster, project_point_for_raster};
 
 // --- Abstraction re-exports ---
 pub use abstraction::{ActiveBackend, RenderBackendTrait, RenderCapability, RenderError};

@@ -96,6 +96,12 @@ pub fn parse_capacitance(value: &str) -> f64 {
     parse_si_value(value).unwrap_or(100.0e-9)
 }
 
+/// Parse a human-readable voltage string into volts.
+pub fn parse_voltage(value: &str) -> f64 {
+    let cleaned = value.trim().trim_end_matches(['V', 'v']);
+    cleaned.parse::<f64>().unwrap_or(5.0)
+}
+
 /// Parse a value string with SI suffix into a numeric value.
 fn parse_si_value(value: &str) -> Option<f64> {
     let s = value.trim().replace('F', "");
@@ -139,6 +145,37 @@ fn parse_si_value(value: &str) -> Option<f64> {
 }
 
 impl ElectronicComponent {
+    /// Human-readable component kind derived from its simulation model.
+    pub fn kind_label(&self) -> &'static str {
+        match self.sim_model {
+            SimModel::Resistor { .. } => "Resistor",
+            SimModel::Capacitor { .. } => "Capacitor",
+            SimModel::Led { .. } => "LED",
+            SimModel::Magnet { .. } => "Magnet",
+            SimModel::Wire => "Ground",
+            SimModel::DcSource { .. } => "Battery",
+        }
+    }
+
+    /// Keep the simulation model in sync after editing the human-readable value.
+    pub fn sync_sim_model_from_value(&mut self) {
+        match &mut self.sim_model {
+            SimModel::Resistor { ohms } => {
+                *ohms = parse_resistance(&self.value);
+            }
+            SimModel::Capacitor { farads } => {
+                *farads = parse_capacitance(&self.value);
+            }
+            SimModel::Magnet { tesla, .. } => {
+                *tesla = parse_magnet_strength(&self.value);
+            }
+            SimModel::DcSource { voltage } => {
+                *voltage = parse_voltage(&self.value);
+            }
+            SimModel::Led { .. } | SimModel::Wire => {}
+        }
+    }
+
     /// Create a basic resistor.
     pub fn resistor(value: &str) -> Self {
         let ohms = parse_resistance(value);
@@ -342,6 +379,12 @@ mod tests {
     }
 
     #[test]
+    fn parse_voltage_values() {
+        assert!((parse_voltage("9V") - 9.0).abs() < 0.0001);
+        assert!((parse_voltage("3.3") - 3.3).abs() < 0.0001);
+    }
+
+    #[test]
     fn resistor_has_sim_model() {
         let r = ElectronicComponent::resistor("10k");
         match r.sim_model {
@@ -365,6 +408,18 @@ mod tests {
         match l.sim_model {
             SimModel::Led { forward_voltage } => assert!((forward_voltage - 2.0).abs() < 0.01),
             _ => panic!("Expected Led sim model"),
+        }
+    }
+
+    #[test]
+    fn edited_value_updates_sim_model() {
+        let mut r = ElectronicComponent::resistor("10k");
+        r.value = "1k".to_string();
+        r.sync_sim_model_from_value();
+
+        match r.sim_model {
+            SimModel::Resistor { ohms } => assert!((ohms - 1_000.0).abs() < 0.1),
+            _ => panic!("Expected Resistor sim model"),
         }
     }
 }

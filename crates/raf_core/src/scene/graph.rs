@@ -125,6 +125,9 @@ pub struct SceneNode {
     pub entity_index: Option<u32>,
     /// External script files attached to this entity (e.g. VS Code edited logic).
     pub scripts: Vec<String>,
+    /// Organizational folder/group node inside the hierarchy.
+    #[serde(default)]
+    pub is_folder: bool,
 }
 
 impl SceneNode {
@@ -143,6 +146,7 @@ impl SceneNode {
             visible: true,
             entity_index: None,
             scripts: Vec::new(),
+            is_folder: false,
         }
     }
 
@@ -161,7 +165,15 @@ impl SceneNode {
             visible: true,
             entity_index: None,
             scripts: Vec::new(),
+            is_folder: false,
         }
+    }
+
+    /// Create a folder/group node. Uses Empty primitive but is semantically distinct.
+    pub fn folder(name: &str) -> Self {
+        let mut node = Self::new(name);
+        node.is_folder = true;
+        node
     }
 
     /// Compute the local-to-parent transformation matrix.
@@ -212,6 +224,24 @@ impl SceneGraph {
         child_id
     }
 
+    /// Add a root folder node.
+    pub fn add_root_folder(&mut self, name: &str) -> SceneNodeId {
+        let id = SceneNodeId(self.nodes.len());
+        self.nodes.push(SceneNode::folder(name));
+        self.roots.push(id);
+        id
+    }
+
+    /// Add a folder node under the given parent.
+    pub fn add_child_folder(&mut self, parent: SceneNodeId, name: &str) -> SceneNodeId {
+        let child_id = SceneNodeId(self.nodes.len());
+        let mut child = SceneNode::folder(name);
+        child.parent = Some(parent);
+        self.nodes.push(child);
+        self.nodes[parent.0].children.push(child_id);
+        child_id
+    }
+
     /// Get a reference to a node.
     pub fn get(&self, id: SceneNodeId) -> Option<&SceneNode> {
         self.nodes.get(id.0)
@@ -220,6 +250,23 @@ impl SceneGraph {
     /// Get a mutable reference to a node.
     pub fn get_mut(&mut self, id: SceneNodeId) -> Option<&mut SceneNode> {
         self.nodes.get_mut(id.0)
+    }
+
+    /// Check if an id points to an active node.
+    pub fn is_valid_node(&self, id: SceneNodeId) -> bool {
+        self.nodes
+            .get(id.0)
+            .map(|node| !node.name.is_empty())
+            .unwrap_or(false)
+    }
+
+    /// Find first active node by exact name.
+    pub fn find_node_by_name(&self, name: &str) -> Option<SceneNodeId> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .find(|(_, node)| !node.name.is_empty() && node.name == name)
+            .map(|(index, _)| SceneNodeId(index))
     }
 
     /// Compute the world (global) transform matrix for a node by walking
@@ -271,6 +318,37 @@ impl SceneGraph {
         id
     }
 
+    /// Reparent an existing node under a new parent or back to root.
+    pub fn reparent_node(&mut self, id: SceneNodeId, new_parent: Option<SceneNodeId>) -> bool {
+        if !self.is_valid_node(id) {
+            return false;
+        }
+
+        if let Some(parent_id) = new_parent {
+            if !self.is_valid_node(parent_id) || parent_id == id || self.is_descendant(parent_id, id) {
+                return false;
+            }
+        }
+
+        if let Some(old_parent) = self.nodes[id.0].parent {
+            self.nodes[old_parent.0].children.retain(|child| *child != id);
+        } else {
+            self.roots.retain(|root_id| *root_id != id);
+        }
+
+        self.nodes[id.0].parent = new_parent;
+
+        if let Some(parent_id) = new_parent {
+            if !self.nodes[parent_id.0].children.contains(&id) {
+                self.nodes[parent_id.0].children.push(id);
+            }
+        } else if !self.roots.contains(&id) {
+            self.roots.push(id);
+        }
+
+        true
+    }
+
     /// Soft-remove a node: hides it, clears its primitive, and detaches from
     /// parent/root list. We keep the slot to avoid invalidating indices.
     pub fn remove_node(&mut self, id: SceneNodeId) -> bool {
@@ -300,26 +378,58 @@ impl SceneGraph {
         self.nodes[id.0].children.clear();
         self.nodes[id.0].parent = None;
         self.nodes[id.0].name = String::new();
+        self.nodes[id.0].is_folder = false;
         true
     }
 
-    /// Duplicate a node (shallow, no children) as a new root with a small
-    /// position offset. Returns the new node id.
+    /// Duplicate a node and its subtree. The duplicate is created next to the
+    /// original, preserving folder/group structure and child relationships.
     pub fn duplicate_node(&mut self, id: SceneNodeId) -> Option<SceneNodeId> {
-        let node = self.nodes.get(id.0)?.clone();
-        let new_id = SceneNodeId(self.nodes.len());
-        let mut dup = SceneNode::with_primitive(
-            &format!("{} (copy)", node.name),
-            node.primitive,
-        );
-        dup.position = node.position + Vec3::new(1.0, 0.0, 0.0);
-        dup.rotation = node.rotation;
-        dup.scale = node.scale;
-        dup.color = node.color;
-        dup.visible = node.visible;
-        self.nodes.push(dup);
-        self.roots.push(new_id);
-        Some(new_id)
+        if !self.is_valid_node(id) {
+            return None;
+        }
+
+        let parent = self.nodes[id.0].parent;
+        self.duplicate_subtree_internal(id, parent, true)
+    }
+
+    /// Ungroup a folder by moving its children to its parent (or root).
+    pub fn ungroup_node(&mut self, id: SceneNodeId) -> bool {
+        if !self.is_valid_node(id) || !self.nodes[id.0].is_folder {
+            return false;
+        }
+
+        let parent = self.nodes[id.0].parent;
+        let children = self.nodes[id.0].children.clone();
+
+        for child_id in &children {
+            self.nodes[child_id.0].parent = parent;
+        }
+
+        if let Some(parent_id) = parent {
+            let insert_at = self.nodes[parent_id.0]
+                .children
+                .iter()
+                .position(|child_id| *child_id == id)
+                .unwrap_or(self.nodes[parent_id.0].children.len());
+            self.nodes[parent_id.0].children.retain(|child_id| *child_id != id);
+
+            for (offset, child_id) in children.iter().enumerate() {
+                self.nodes[parent_id.0]
+                    .children
+                    .insert(insert_at + offset, *child_id);
+            }
+        } else {
+            self.roots.retain(|root_id| *root_id != id);
+            for child_id in children {
+                if !self.roots.contains(&child_id) {
+                    self.roots.push(child_id);
+                }
+            }
+        }
+
+        self.nodes[id.0].children.clear();
+        self.remove_node(id)
     }
 
     /// Collect all valid (visible, non-empty name) node ids.
@@ -346,6 +456,48 @@ impl SceneGraph {
             Ok(data) => ron::from_str(&data).unwrap_or_default(),
             Err(_) => Self::default(),
         }
+    }
+
+    fn is_descendant(&self, candidate: SceneNodeId, ancestor: SceneNodeId) -> bool {
+        let mut current = Some(candidate);
+        while let Some(node_id) = current {
+            if node_id == ancestor {
+                return true;
+            }
+            current = self.nodes[node_id.0].parent;
+        }
+        false
+    }
+
+    fn duplicate_subtree_internal(
+        &mut self,
+        source_id: SceneNodeId,
+        parent: Option<SceneNodeId>,
+        offset_root: bool,
+    ) -> Option<SceneNodeId> {
+        let source = self.nodes.get(source_id.0)?.clone();
+        let new_id = SceneNodeId(self.nodes.len());
+        let mut copy = source.clone();
+        copy.uuid = Uuid::new_v4();
+        copy.name = format!("{} (copy)", source.name);
+        copy.parent = parent;
+        copy.children.clear();
+        if offset_root {
+            copy.position += Vec3::new(1.0, 0.0, 0.0);
+        }
+        self.nodes.push(copy);
+
+        if let Some(parent_id) = parent {
+            self.nodes[parent_id.0].children.push(new_id);
+        } else {
+            self.roots.push(new_id);
+        }
+
+        for child_id in source.children {
+            let _ = self.duplicate_subtree_internal(child_id, Some(new_id), false);
+        }
+
+        Some(new_id)
     }
 }
 

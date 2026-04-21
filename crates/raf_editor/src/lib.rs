@@ -10,6 +10,9 @@
 
 pub mod app;
 pub mod panels;
+pub mod schematic_document;
+pub mod script_support;
 pub mod theme;
+pub mod ui_icons;
 
 pub use app::AuraRafiApp;

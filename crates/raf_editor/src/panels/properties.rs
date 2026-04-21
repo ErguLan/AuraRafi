@@ -2,17 +2,25 @@
 //! Supports: name, transform, visibility, color, and primitive type.
 //! All text translated ES/EN.
 
-use egui::Ui;
+use egui::{Color32, Stroke, Ui};
+use glam::Vec3;
 use raf_core::config::Language;
 use raf_core::i18n::t;
 use raf_core::scene::graph::{NodeColor, Primitive, SceneGraph, SceneNodeId};
+use std::path::Path;
+
+use crate::ui_icons::UiIconAtlas;
 
 /// State for the properties panel.
-pub struct PropertiesPanel;
+pub struct PropertiesPanel {
+    script_bindings: crate::panels::behaviors::ScriptBindingsState,
+}
 
 impl Default for PropertiesPanel {
     fn default() -> Self {
-        Self
+        Self {
+            script_bindings: crate::panels::behaviors::ScriptBindingsState::default(),
+        }
     }
 }
 
@@ -23,14 +31,24 @@ impl PropertiesPanel {
         ui: &mut Ui,
         scene: &mut SceneGraph,
         selected: Option<SceneNodeId>,
-        _lang: Language,
-    ) {
-        // Professional uppercase header.
-        ui.label(
-            egui::RichText::new(t("app.properties", _lang))
-                .size(11.0).strong()
-                .color(egui::Color32::from_rgb(130, 130, 140)),
-        );
+        lang: Language,
+        icons: &UiIconAtlas,
+        project_assets_path: Option<&Path>,
+    ) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            if let Some(icon) = icons.get("shape.png") {
+                ui.add(
+                    egui::Image::new(icon)
+                        .fit_to_exact_size(egui::Vec2::new(16.0, 16.0)),
+                );
+            }
+            ui.label(
+                egui::RichText::new(t("app.properties", lang))
+                    .size(11.0).strong()
+                    .color(egui::Color32::from_rgb(130, 130, 140)),
+            );
+        });
         ui.separator();
 
         let id = match selected {
@@ -38,187 +56,240 @@ impl PropertiesPanel {
             None => {
                 ui.add_space(4.0);
                 ui.label(
-                    egui::RichText::new(t("app.no_entity_selected", _lang))
+                    egui::RichText::new(t("app.no_entity_selected", lang))
                         .size(11.0)
                         .color(egui::Color32::from_rgb(100, 100, 110)),
                 );
-                return;
+                return false;
             }
         };
 
-        let node = match scene.get_mut(id) {
+        let metadata = match scene.get(id) {
             Some(n) => n,
             None => {
                 ui.label(
-                    egui::RichText::new(t("app.entity_not_found", _lang))
+                    egui::RichText::new(t("app.entity_not_found", lang))
                         .size(11.0)
                         .color(egui::Color32::from_rgb(100, 100, 110)),
                 );
-                return;
+                return false;
             }
         };
 
+        let parent_name = metadata
+            .parent
+            .and_then(|parent_id| scene.get(parent_id).map(|parent| parent.name.clone()))
+            .unwrap_or_else(|| t("app.no_parent", lang));
+        let children_count = metadata.children.len();
+        let scripts_count = metadata.scripts.len();
+
         egui::ScrollArea::vertical().show(ui, |ui| {
-            // Name
-            ui.horizontal(|ui| {
-                ui.label(t("app.name", _lang));
-                ui.text_edit_singleline(&mut node.name);
+            let node = match scene.get_mut(id) {
+                Some(node) => node,
+                None => return,
+            };
+
+            inspector_card(ui, icons, "scene.png", t("app.node_info", lang), |ui| {
+                let name_response = ui.add_sized(
+                    [ui.available_width(), 28.0],
+                    egui::TextEdit::singleline(&mut node.name),
+                );
+                changed |= name_response.changed();
+
+                ui.add_space(8.0);
+                ui.horizontal_wrapped(|ui| {
+                    info_chip(ui, t("app.type", lang), node.primitive.label());
+                    info_chip(ui, t("app.parent", lang), &parent_name);
+                    info_chip(ui, t("app.children", lang), &children_count.to_string());
+                    info_chip(ui, t("app.scripts", lang), &scripts_count.to_string());
+                });
             });
 
             ui.add_space(8.0);
 
-            // Transform section
-            egui::CollapsingHeader::new(t("app.transform", _lang))
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.label(egui::RichText::new(t("app.position", _lang)).size(11.0));
-                    ui.horizontal(|ui| {
-                        ui.label("X:");
-                        ui.add(egui::DragValue::new(&mut node.position.x).speed(0.1));
-                        ui.label("Y:");
-                        ui.add(egui::DragValue::new(&mut node.position.y).speed(0.1));
-                        ui.label("Z:");
-                        ui.add(egui::DragValue::new(&mut node.position.z).speed(0.1));
-                    });
-
-                    ui.label(egui::RichText::new(t("app.rotation", _lang)).size(11.0));
-                    ui.horizontal(|ui| {
-                        ui.label("X:");
-                        ui.add(egui::DragValue::new(&mut node.rotation.x).speed(1.0));
-                        ui.label("Y:");
-                        ui.add(egui::DragValue::new(&mut node.rotation.y).speed(1.0));
-                        ui.label("Z:");
-                        ui.add(egui::DragValue::new(&mut node.rotation.z).speed(1.0));
-                    });
-
-                    ui.label(egui::RichText::new(t("app.scale", _lang)).size(11.0));
-                    ui.horizontal(|ui| {
-                        ui.label("X:");
-                        ui.add(egui::DragValue::new(&mut node.scale.x).speed(0.05));
-                        ui.label("Y:");
-                        ui.add(egui::DragValue::new(&mut node.scale.y).speed(0.05));
-                        ui.label("Z:");
-                        ui.add(egui::DragValue::new(&mut node.scale.z).speed(0.05));
-                    });
-                });
-
-            ui.add_space(4.0);
-
-            // Material / Color section
-            egui::CollapsingHeader::new(t("app.material", _lang))
-                .default_open(true)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(t("app.color", _lang));
-
-                        // Convert NodeColor to egui color for the picker.
-                        let mut rgba = [
-                            node.color.r as f32 / 255.0,
-                            node.color.g as f32 / 255.0,
-                            node.color.b as f32 / 255.0,
-                        ];
-                        if ui.color_edit_button_rgb(&mut rgba).changed() {
-                            node.color = NodeColor::rgb(
-                                (rgba[0] * 255.0) as u8,
-                                (rgba[1] * 255.0) as u8,
-                                (rgba[2] * 255.0) as u8,
-                            );
-                        }
-                    });
-
-                    // Quick color presets - refined small squares with border.
-                    ui.horizontal(|ui| {
-                        ui.label(t("app.presets", _lang));
-                        let color_presets = [
-                            ("R", NodeColor::rgb(220, 80, 80)),
-                            ("G", NodeColor::rgb(80, 200, 80)),
-                            ("B", NodeColor::rgb(80, 130, 220)),
-                            ("Y", NodeColor::rgb(220, 200, 60)),
-                            ("O", NodeColor::rgb(220, 140, 50)),
-                            ("P", NodeColor::rgb(160, 80, 200)),
-                            ("W", NodeColor::rgb(220, 220, 220)),
-                        ];
-                        for (label, preset_color) in color_presets {
-                            let btn_color = egui::Color32::from_rgb(
-                                preset_color.r,
-                                preset_color.g,
-                                preset_color.b,
-                            );
-                            let is_current = node.color.r == preset_color.r
-                                && node.color.g == preset_color.g
-                                && node.color.b == preset_color.b;
-                            let btn = egui::Button::new(
-                                egui::RichText::new(label)
-                                    .size(9.0)
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .fill(btn_color)
-                            .rounding(3.0)
-                            .stroke(if is_current {
-                                egui::Stroke::new(1.5, egui::Color32::WHITE)
-                            } else {
-                                egui::Stroke::new(0.5, egui::Color32::from_rgb(60, 60, 65))
-                            })
-                            .min_size(egui::Vec2::new(20.0, 18.0));
-                            if ui.add(btn).clicked() {
-                                node.color = preset_color;
-                            }
-                        }
-                    });
-                });
-
-            ui.add_space(4.0);
-
-            // Primitive type
-            egui::CollapsingHeader::new(t("app.shape", _lang))
-                .default_open(false)
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(t("app.type", _lang));
-                        egui::ComboBox::from_id_salt("primitive_select")
-                            .selected_text(node.primitive.label())
-                            .show_ui(ui, |ui| {
-                                let primitives = [
-                                    Primitive::Cube,
-                                    Primitive::Sphere,
-                                    Primitive::Plane,
-                                    Primitive::Cylinder,
-                                    Primitive::Sprite2D,
-                                    Primitive::Empty,
-                                ];
-                                for prim in primitives {
-                                    if ui.selectable_value(&mut node.primitive, prim, prim.label()).changed() {
-                                        node.color = NodeColor::for_primitive(prim);
-                                    }
-                                }
-                            });
-                    });
-                });
-
-            ui.add_space(4.0);
-
-            // Visibility
-            ui.horizontal(|ui| {
-                ui.label(t("app.visible", _lang));
-                ui.checkbox(&mut node.visible, "");
-            });
-
-            ui.add_space(8.0);
-
-            // Variables (placeholder)
-            egui::CollapsingHeader::new(t("app.variables", _lang))
-                .default_open(false)
-                .show(ui, |ui| {
+            inspector_card(ui, icons, "transform.png", t("app.transform", lang), |ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.label(
-                        egui::RichText::new(t("app.no_variables", _lang))
+                        egui::RichText::new(t("app.quick_actions", lang))
                             .size(11.0)
-                            .color(egui::Color32::from_rgb(100, 100, 110)),
+                            .color(Color32::from_rgb(125, 125, 135)),
                     );
+
+                    if ui.button(t("app.reset", lang)).clicked() {
+                        node.position = Vec3::ZERO;
+                        node.rotation = Vec3::ZERO;
+                        node.scale = Vec3::ONE;
+                        changed = true;
+                    }
+                    if ui.button(t("app.reset_all", lang)).clicked() {
+                        node.position = Vec3::ZERO;
+                        node.rotation = Vec3::ZERO;
+                        node.scale = Vec3::ONE;
+                        node.color = NodeColor::for_primitive(node.primitive);
+                        node.visible = true;
+                        changed = true;
+                    }
                 });
+
+                ui.add_space(8.0);
+                changed |= edit_vec3(ui, t("app.position", lang), &mut node.position, 0.1);
+                ui.add_space(6.0);
+                changed |= edit_vec3(ui, t("app.rotation", lang), &mut node.rotation, 0.5);
+                ui.add_space(6.0);
+                changed |= edit_vec3(ui, t("app.scale", lang), &mut node.scale, 0.05);
+            });
+
+            ui.add_space(4.0);
+
+            inspector_card(ui, icons, "material.png", t("app.material", lang), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(t("app.color", lang));
+
+                    let mut rgba = [
+                        node.color.r as f32 / 255.0,
+                        node.color.g as f32 / 255.0,
+                        node.color.b as f32 / 255.0,
+                    ];
+                    if ui.color_edit_button_rgb(&mut rgba).changed() {
+                        node.color.r = (rgba[0] * 255.0) as u8;
+                        node.color.g = (rgba[1] * 255.0) as u8;
+                        node.color.b = (rgba[2] * 255.0) as u8;
+                        changed = true;
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+
+            inspector_card(ui, icons, "shape.png", t("app.shape", lang), |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(t("app.type", lang));
+                    egui::ComboBox::from_id_salt("primitive_select")
+                        .selected_text(node.primitive.label())
+                        .show_ui(ui, |ui| {
+                            let primitives = [
+                                Primitive::Cube,
+                                Primitive::Sphere,
+                                Primitive::Plane,
+                                Primitive::Cylinder,
+                                Primitive::Sprite2D,
+                                Primitive::Empty,
+                            ];
+                            for prim in primitives {
+                                if ui
+                                    .selectable_value(&mut node.primitive, prim, prim.label())
+                                    .changed()
+                                {
+                                    node.color = NodeColor::for_primitive(prim);
+                                    changed = true;
+                                }
+                            }
+                        });
+                });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(t("app.visible", lang));
+                    changed |= ui.checkbox(&mut node.visible, "").changed();
+                });
+            });
+
+            ui.add_space(4.0);
+
+            inspector_card(ui, icons, "variables.png", t("app.variables", lang), |ui| {
+                ui.label(
+                    egui::RichText::new(t("app.no_variables", lang))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(100, 100, 110)),
+                );
+            });
         });
 
         // Add modular "Attached Behaviors" UI below standard properties.
         // Needs `&mut SceneGraph`, so we call it outside the previous `node` borrow.
-        crate::panels::behaviors::show_attached_behaviors(ui, scene, id, _lang);
+        changed |= crate::panels::behaviors::show_attached_behaviors(
+            ui,
+            scene,
+            id,
+            lang,
+            project_assets_path,
+            icons,
+            &mut self.script_bindings,
+        );
+
+        changed
     }
+}
+
+fn inspector_card(
+    ui: &mut Ui,
+    icons: &UiIconAtlas,
+    icon_name: &'static str,
+    title: String,
+    add_contents: impl FnOnce(&mut Ui),
+) {
+    egui::Frame::none()
+        .fill(Color32::from_rgb(22, 22, 26))
+        .rounding(8.0)
+        .inner_margin(12.0)
+        .stroke(Stroke::new(1.0, Color32::from_rgb(42, 42, 48)))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                if let Some(icon) = icons.get(icon_name) {
+                    ui.add(
+                        egui::Image::new(icon)
+                            .fit_to_exact_size(egui::Vec2::new(16.0, 16.0)),
+                    );
+                }
+                ui.label(
+                    egui::RichText::new(title)
+                        .size(12.0)
+                        .strong()
+                        .color(Color32::from_rgb(205, 205, 210)),
+                );
+            });
+            ui.add_space(8.0);
+            add_contents(ui);
+        });
+}
+
+fn info_chip(ui: &mut Ui, label: String, value: &str) {
+    egui::Frame::none()
+        .fill(Color32::from_rgb(30, 30, 35))
+        .rounding(14.0)
+        .inner_margin(egui::Margin::symmetric(8.0, 4.0))
+        .stroke(Stroke::new(1.0, Color32::from_rgb(48, 48, 56)))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(label)
+                        .size(10.0)
+                        .color(Color32::from_rgb(120, 120, 130)),
+                );
+                ui.label(
+                    egui::RichText::new(value)
+                        .size(10.0)
+                        .color(Color32::from_rgb(215, 215, 220)),
+                );
+            });
+        });
+}
+
+fn edit_vec3(ui: &mut Ui, label: String, value: &mut Vec3, speed: f64) -> bool {
+    let mut changed = false;
+    ui.label(
+        egui::RichText::new(label)
+            .size(11.0)
+            .color(Color32::from_rgb(145, 145, 155)),
+    );
+    ui.add_space(2.0);
+    ui.horizontal(|ui| {
+        ui.label("X");
+        changed |= ui.add(egui::DragValue::new(&mut value.x).speed(speed)).changed();
+        ui.label("Y");
+        changed |= ui.add(egui::DragValue::new(&mut value.y).speed(speed)).changed();
+        ui.label("Z");
+        changed |= ui.add(egui::DragValue::new(&mut value.z).speed(speed)).changed();
+    });
+    changed
 }

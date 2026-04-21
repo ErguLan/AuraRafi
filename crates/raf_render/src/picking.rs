@@ -23,6 +23,15 @@ pub struct PickResult {
     pub screen_pos: [f32; 2],
 }
 
+/// Result of a ray-based pick query.
+#[derive(Debug, Clone)]
+pub struct RayPickResult {
+    /// Entity index (matches scene graph iteration order).
+    pub entity_index: usize,
+    /// Distance along the ray to the first hit.
+    pub hit_distance: f32,
+}
+
 /// Maximum screen distance in pixels to consider a pick valid.
 pub const PICK_RADIUS: f32 = 30.0;
 
@@ -75,6 +84,39 @@ pub fn pick_entity(
     best
 }
 
+/// Find the entity closest to a cursor-derived world ray.
+pub fn pick_entity_ray(
+    click_screen: [f32; 2],
+    entities: &[(Vec3, f32)],
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<RayPickResult> {
+    let (ray_origin, ray_dir) = screen_to_world_ray(click_screen, view_proj, vp_w, vp_h)?;
+    let mut best: Option<RayPickResult> = None;
+
+    for (i, (world_pos, radius)) in entities.iter().enumerate() {
+        let expanded_radius = radius.max(0.45) * 1.15;
+        let Some(hit_distance) = intersect_ray_sphere(ray_origin, ray_dir, *world_pos, expanded_radius) else {
+            continue;
+        };
+
+        let is_better = match &best {
+            None => true,
+            Some(prev) => hit_distance < prev.hit_distance,
+        };
+
+        if is_better {
+            best = Some(RayPickResult {
+                entity_index: i,
+                hit_distance,
+            });
+        }
+    }
+
+    best
+}
+
 // ---------------------------------------------------------------------------
 // Transform gizmo arrows (geometry for rendering)
 // ---------------------------------------------------------------------------
@@ -99,6 +141,12 @@ pub const GIZMO_ARROWS: [GizmoArrow; 3] = [
 
 /// Length of gizmo arrows in world units.
 pub const GIZMO_LENGTH: f32 = 1.2;
+
+/// Radius of the rotation rings in world units.
+pub const GIZMO_ROTATION_RADIUS: f32 = 1.35;
+
+/// Segments used for projected rotation ring hit-testing.
+pub const GIZMO_ROTATION_SEGMENTS: usize = 48;
 
 /// Arrowhead size (fraction of arrow length).
 pub const GIZMO_HEAD_SIZE: f32 = 0.15;
@@ -202,6 +250,62 @@ pub fn pick_gizmo_arrow(
     best
 }
 
+/// Hit-test a rotation ring projected in screen-space.
+/// Returns axis index (0=X, 1=Y, 2=Z) and nearest distance.
+pub fn pick_gizmo_rotation_ring(
+    click: [f32; 2],
+    entity_pos: Vec3,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<(usize, f32)> {
+    let axis_planes = [
+        (Vec3::Y, Vec3::Z),
+        (Vec3::X, Vec3::Z),
+        (Vec3::X, Vec3::Y),
+    ];
+
+    let mut best: Option<(usize, f32)> = None;
+
+    for (axis_idx, (axis_a, axis_b)) in axis_planes.iter().enumerate() {
+        let mut previous: Option<[f32; 2]> = None;
+        let mut best_distance_for_ring: Option<f32> = None;
+
+        for step in 0..=GIZMO_ROTATION_SEGMENTS {
+            let angle = (step as f32 / GIZMO_ROTATION_SEGMENTS as f32) * std::f32::consts::TAU;
+            let world_point = entity_pos
+                + *axis_a * (angle.cos() * GIZMO_ROTATION_RADIUS)
+                + *axis_b * (angle.sin() * GIZMO_ROTATION_RADIUS);
+
+            if let Some(screen_point) = project_to_screen(world_point, view_proj, vp_w, vp_h) {
+                if let Some(prev) = previous {
+                    let distance = point_to_segment_distance(click, prev, screen_point);
+                    best_distance_for_ring = Some(match best_distance_for_ring {
+                        Some(current) => current.min(distance),
+                        None => distance,
+                    });
+                }
+                previous = Some(screen_point);
+            }
+        }
+
+        if let Some(distance) = best_distance_for_ring {
+            if distance <= 12.0 {
+                let is_better = match best {
+                    None => true,
+                    Some((_, best_distance)) => distance < best_distance,
+                };
+
+                if is_better {
+                    best = Some((axis_idx, distance));
+                }
+            }
+        }
+    }
+
+    best
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -217,6 +321,32 @@ fn project_to_screen(point: Vec3, view_proj: &Mat4, vp_w: f32, vp_h: f32) -> Opt
         (ndc_x + 1.0) * 0.5 * vp_w,
         (1.0 - ndc_y) * 0.5 * vp_h,
     ])
+}
+
+fn screen_to_world_ray(
+    click_screen: [f32; 2],
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<(Vec3, Vec3)> {
+    let inv_view_proj = view_proj.inverse();
+    let ndc_x = (click_screen[0] / vp_w) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (click_screen[1] / vp_h) * 2.0;
+
+    let near_clip = inv_view_proj * Vec4::new(ndc_x, ndc_y, -1.0, 1.0);
+    let far_clip = inv_view_proj * Vec4::new(ndc_x, ndc_y, 1.0, 1.0);
+    if near_clip.w.abs() <= 0.0001 || far_clip.w.abs() <= 0.0001 {
+        return None;
+    }
+
+    let near_world = near_clip.truncate() / near_clip.w;
+    let far_world = far_clip.truncate() / far_clip.w;
+    let ray_dir = (far_world - near_world).normalize_or_zero();
+    if ray_dir.length_squared() <= 0.0001 {
+        return None;
+    }
+
+    Some((near_world, ray_dir))
 }
 
 /// Distance from a point to a line segment (all in screen space).
@@ -236,6 +366,29 @@ fn point_to_segment_distance(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     let ex = p[0] - closest_x;
     let ey = p[1] - closest_y;
     (ex * ex + ey * ey).sqrt()
+}
+
+fn intersect_ray_sphere(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> Option<f32> {
+    let oc = origin - center;
+    let a = dir.dot(dir);
+    let b = 2.0 * oc.dot(dir);
+    let c = oc.dot(oc) - radius * radius;
+    let discriminant = b * b - 4.0 * a * c;
+    if discriminant < 0.0 {
+        return None;
+    }
+
+    let sqrt_disc = discriminant.sqrt();
+    let t0 = (-b - sqrt_disc) / (2.0 * a);
+    let t1 = (-b + sqrt_disc) / (2.0 * a);
+
+    if t0 >= 0.0 {
+        Some(t0)
+    } else if t1 >= 0.0 {
+        Some(t1)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -45,6 +45,18 @@ fn default_true() -> bool {
     true
 }
 
+fn default_invert_mouse_y() -> bool {
+    true
+}
+
+fn default_gizmo_sensitivity() -> f32 {
+    3.5
+}
+
+fn default_rotate_sensitivity() -> f32 {
+    3.5
+}
+
 // ---------------------------------------------------------------------------
 // Language
 // ---------------------------------------------------------------------------
@@ -161,6 +173,8 @@ impl TargetPlatform {
 pub struct EngineSettings {
     // -- Appearance --
     pub theme: Theme,
+    #[serde(default)]
+    pub theme_experimental: f32,
     pub font_size: f32,
     pub ui_scale: f32,
 
@@ -179,6 +193,17 @@ pub struct EngineSettings {
     pub grid_size: f32,
     pub auto_save_interval_seconds: u32,
     pub units_metric: bool,
+
+    // -- Solid Mode Rendering --
+    /// Show surface edge lines in solid render mode.
+    #[serde(default)]
+    pub solid_show_surface_edges: bool,
+    /// X-ray mode: see-through solid surfaces.
+    #[serde(default)]
+    pub solid_xray_mode: bool,
+    /// Face tonality: when enabled, applies directional light shading to faces.
+    #[serde(default = "default_true")]
+    pub solid_face_tonality: bool,
 
     // -- Simple Mode --
     /// When true, hides advanced parameters (parasitics, timing,
@@ -208,7 +233,7 @@ pub struct EngineSettings {
     #[serde(default)]
     pub invert_mouse_x: bool,
     /// Invert mouse Y axis for orbit camera.
-    #[serde(default)]
+    #[serde(default = "default_invert_mouse_y")]
     pub invert_mouse_y: bool,
     /// Default viewport presentation mode.
     #[serde(default)]
@@ -216,6 +241,18 @@ pub struct EngineSettings {
     /// Whether entity labels are shown in the viewport.
     #[serde(default = "default_true")]
     pub show_viewport_labels: bool,
+    /// Multiplier for move gizmo drag response.
+    #[serde(default = "default_gizmo_sensitivity")]
+    pub move_gizmo_sensitivity: f32,
+    /// Multiplier for rotate gizmo drag response.
+    #[serde(default = "default_rotate_sensitivity")]
+    pub rotate_gizmo_sensitivity: f32,
+    /// Multiplier for scale gizmo drag response.
+    #[serde(default = "default_gizmo_sensitivity")]
+    pub scale_gizmo_sensitivity: f32,
+    /// If true, scale gizmo starts in uniform mode until Shift is held.
+    #[serde(default)]
+    pub uniform_scale_by_default: bool,
 
     // -- Window state (persisted) --
     pub window_width: u32,
@@ -248,6 +285,7 @@ impl Default for EngineSettings {
     fn default() -> Self {
         Self {
             theme: Theme::Dark,
+            theme_experimental: 0.0,
             font_size: 14.0,
             ui_scale: 1.0,
             language: Language::English,
@@ -260,15 +298,22 @@ impl Default for EngineSettings {
             grid_size: 1.0,
             auto_save_interval_seconds: 120,
             units_metric: true,
+            solid_show_surface_edges: false,
+            solid_xray_mode: false,
+            solid_face_tonality: true,
             simple_mode: false,
             target_platform: TargetPlatform::Desktop,
             headless: false,
             responsive_layout: false,
             render_preset: RenderPreset::Potato,
             invert_mouse_x: false,
-            invert_mouse_y: false,
+            invert_mouse_y: true,
             viewport_render_mode: ViewportRenderMode::Solid,
             show_viewport_labels: true,
+            move_gizmo_sensitivity: 3.5,
+            rotate_gizmo_sensitivity: 3.5,
+            scale_gizmo_sensitivity: 3.5,
+            uniform_scale_by_default: false,
             window_width: 1280,
             window_height: 720,
             window_maximized: false,
@@ -293,7 +338,18 @@ impl EngineSettings {
     pub fn load(dir: &std::path::Path) -> Self {
         let path = dir.join(Self::FILE_NAME);
         match std::fs::read_to_string(&path) {
-            Ok(data) => ron::from_str(&data).unwrap_or_default(),
+            Ok(data) => {
+                let mut settings: EngineSettings = ron::from_str(&data).unwrap_or_default();
+                if (settings.move_gizmo_sensitivity - 1.0).abs() < f32::EPSILON
+                    && (settings.rotate_gizmo_sensitivity - 2.0).abs() < f32::EPSILON
+                    && (settings.scale_gizmo_sensitivity - 1.0).abs() < f32::EPSILON
+                {
+                    settings.move_gizmo_sensitivity = 3.5;
+                    settings.rotate_gizmo_sensitivity = 3.5;
+                    settings.scale_gizmo_sensitivity = 3.5;
+                }
+                settings
+            }
             Err(_) => Self::default(),
         }
     }

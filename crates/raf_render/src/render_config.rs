@@ -92,6 +92,22 @@ pub struct RenderConfig {
     /// Frame budget in milliseconds. If exceeded, auto-reduce detail.
     /// Default: 33 (30fps minimum).
     pub frame_budget_ms: f32,
+
+    // -- Depth accuracy (v0.8.0) --
+    /// Use software Z-buffer instead of painter's algorithm.
+    /// Eliminates interpenetration artifacts.
+    /// Cost: CPU rasterization per pixel. Default: false.
+    pub depth_accurate: bool,
+    /// Resolution scale for software Z-buffer (0.25 - 1.0).
+    /// 0.5 = half resolution, 4x fewer pixels. Default: 0.5.
+    pub depth_resolution_scale: f32,
+
+    // -- Selection (v0.8.0) --
+    /// Show selection outline on selected entities.
+    /// Default: true (always on, lightweight).
+    pub selection_outline: bool,
+    /// Selection outline color [R, G, B, A]. Default: orange.
+    pub selection_outline_color: [u8; 4],
 }
 
 /// Anti-aliasing modes.
@@ -134,6 +150,10 @@ impl Default for RenderConfig {
             gpu_deform_enabled: false,
             max_triangles: 10_000,
             frame_budget_ms: 33.0,
+            depth_accurate: false,
+            depth_resolution_scale: 0.5,
+            selection_outline: true,
+            selection_outline_color: [255, 160, 40, 255],
         }
     }
 }
@@ -160,6 +180,7 @@ impl RenderConfig {
             max_triangles: 20_000,
             frame_budget_ms: 33.0,
             ambient_intensity: 0.25,
+            depth_accurate: true,
             ..Default::default()
         }
     }
@@ -182,6 +203,8 @@ impl RenderConfig {
             max_triangles: 100_000,
             frame_budget_ms: 16.6,
             ambient_intensity: 0.15,
+            depth_accurate: true,
+            depth_resolution_scale: 0.75,
             ..Default::default()
         }
     }
@@ -209,6 +232,8 @@ impl RenderConfig {
             max_triangles: 500_000,
             frame_budget_ms: 16.6,
             ambient_intensity: 0.1,
+            depth_accurate: true,
+            depth_resolution_scale: 1.0,
             ..Default::default()
         }
     }
@@ -240,6 +265,7 @@ impl RenderConfig {
         if self.reflections_enabled { count += 1; }
         if self.raytrace_enabled { count += 1; }
         if self.gpu_deform_enabled { count += 1; }
+        if self.depth_accurate { count += 1; }
         count
     }
 }

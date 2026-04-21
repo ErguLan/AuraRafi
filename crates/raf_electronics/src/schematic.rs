@@ -5,6 +5,8 @@ use glam::Vec2;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+const WIRE_POINT_EPSILON: f32 = 0.001;
+
 /// A wire segment connecting two points on the schematic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wire {
@@ -58,6 +60,41 @@ impl Schematic {
         let id = wire.id;
         self.wires.push(wire);
         id
+    }
+
+    /// Add a multi-segment wire path, skipping zero-length segments.
+    pub fn add_wire_path(&mut self, points: &[Vec2], net: &str) -> usize {
+        let mut inserted = 0;
+
+        for pair in points.windows(2) {
+            let start = pair[0];
+            let end = pair[1];
+            if start.distance(end) <= WIRE_POINT_EPSILON {
+                continue;
+            }
+
+            self.add_wire(start, end, net);
+            inserted += 1;
+        }
+
+        inserted
+    }
+
+    /// Split an existing wire at a junction point so future wires can connect to it.
+    pub fn split_wire_at(&mut self, index: usize, point: Vec2) -> bool {
+        let Some(wire) = self.wires.get(index).cloned() else {
+            return false;
+        };
+
+        if point.distance(wire.start) <= WIRE_POINT_EPSILON
+            || point.distance(wire.end) <= WIRE_POINT_EPSILON
+        {
+            return false;
+        }
+
+        self.wires.remove(index);
+        self.add_wire_path(&[wire.start, point, wire.end], &wire.net);
+        true
     }
 
     /// Remove a wire by index.
@@ -128,5 +165,35 @@ mod tests {
         sch.add_component(ElectronicComponent::resistor("4.7k"));
         assert_eq!(sch.components[0].designator, "R1");
         assert_eq!(sch.components[1].designator, "R2");
+    }
+
+    #[test]
+    fn add_wire_path_skips_zero_length_segments() {
+        let mut sch = Schematic::new("Test");
+        let inserted = sch.add_wire_path(
+            &[
+                Vec2::new(0.0, 0.0),
+                Vec2::new(20.0, 0.0),
+                Vec2::new(20.0, 0.0),
+                Vec2::new(20.0, 20.0),
+            ],
+            "N001",
+        );
+
+        assert_eq!(inserted, 2);
+        assert_eq!(sch.wires.len(), 2);
+    }
+
+    #[test]
+    fn split_wire_creates_two_segments() {
+        let mut sch = Schematic::new("Test");
+        sch.add_wire(Vec2::new(0.0, 0.0), Vec2::new(40.0, 0.0), "N001");
+
+        assert!(sch.split_wire_at(0, Vec2::new(20.0, 0.0)));
+        assert_eq!(sch.wires.len(), 2);
+        assert_eq!(sch.wires[0].start, Vec2::new(0.0, 0.0));
+        assert_eq!(sch.wires[0].end, Vec2::new(20.0, 0.0));
+        assert_eq!(sch.wires[1].start, Vec2::new(20.0, 0.0));
+        assert_eq!(sch.wires[1].end, Vec2::new(40.0, 0.0));
     }
 }

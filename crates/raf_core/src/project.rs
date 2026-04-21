@@ -6,10 +6,19 @@
 //! - `scenes/` (scene files)
 //! - `scripts/` (user scripts, if any)
 
+use crate::config::RenderPreset;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_main_scene_name() -> String {
+    "MainScene".to_string()
+}
 
 /// Type of project: Game or Electronics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,6 +32,52 @@ impl ProjectType {
         match self {
             Self::Game => "Game Project",
             Self::Electronics => "Electronics Project",
+        }
+    }
+}
+
+/// Per-project settings stored inside `project.ron`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectSettings {
+    /// Show the hierarchy panel while editing this project.
+    #[serde(default = "default_true")]
+    pub show_hierarchy_panel: bool,
+    /// Show the properties panel while editing this project.
+    #[serde(default = "default_true")]
+    pub show_properties_panel: bool,
+    /// Whether complement tabs are available for this project.
+    #[serde(default = "default_true")]
+    pub enable_complements: bool,
+    /// Hard gate for GPU-heavy features. Default false for potato mode.
+    #[serde(default)]
+    pub allow_gpu_features: bool,
+    /// Runtime systems that can be toggled project-by-project.
+    #[serde(default = "default_true")]
+    pub enable_audio: bool,
+    #[serde(default = "default_true")]
+    pub enable_physics: bool,
+    #[serde(default = "default_true")]
+    pub pause_when_unfocused: bool,
+    /// Preferred runtime preset for this specific project.
+    #[serde(default)]
+    pub runtime_render_preset: RenderPreset,
+    /// Scene name to create/use by default.
+    #[serde(default = "default_main_scene_name")]
+    pub default_scene_name: String,
+}
+
+impl Default for ProjectSettings {
+    fn default() -> Self {
+        Self {
+            show_hierarchy_panel: true,
+            show_properties_panel: true,
+            enable_complements: true,
+            allow_gpu_features: false,
+            enable_audio: true,
+            enable_physics: true,
+            pause_when_unfocused: true,
+            runtime_render_preset: RenderPreset::Potato,
+            default_scene_name: default_main_scene_name(),
         }
     }
 }
@@ -44,6 +99,9 @@ pub struct Project {
     pub modified_at: DateTime<Utc>,
     /// Engine version used to create this project.
     pub engine_version: String,
+    /// Project-specific runtime/editor settings.
+    #[serde(default)]
+    pub settings: ProjectSettings,
 }
 
 impl Project {
@@ -72,6 +130,7 @@ impl Project {
             created_at: now,
             modified_at: now,
             engine_version: env!("CARGO_PKG_VERSION").to_string(),
+            settings: ProjectSettings::default(),
         };
 
         project.save()?;

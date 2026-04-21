@@ -5,6 +5,8 @@
 
 use glam::{Mat4, Vec3, Vec4};
 
+const CLIP_EPSILON: f32 = 0.001;
+
 /// Project a 3D world point to 2D screen coordinates.
 /// Returns None if the point is behind the camera.
 pub fn project_point(
@@ -16,7 +18,7 @@ pub fn project_point(
     let clip = *view_proj * Vec4::new(point.x, point.y, point.z, 1.0);
 
     // Behind camera check
-    if clip.w <= 0.001 {
+    if clip.w <= CLIP_EPSILON {
         return None;
     }
 
@@ -38,9 +40,46 @@ pub fn project_edge(
     w: f32,
     h: f32,
 ) -> Option<[[f32; 2]; 2]> {
-    let a = project_point(edge[0], view_proj, w, h)?;
-    let b = project_point(edge[1], view_proj, w, h)?;
+    let mut a_clip = *view_proj * Vec4::new(edge[0].x, edge[0].y, edge[0].z, 1.0);
+    let mut b_clip = *view_proj * Vec4::new(edge[1].x, edge[1].y, edge[1].z, 1.0);
+
+    if a_clip.w <= CLIP_EPSILON && b_clip.w <= CLIP_EPSILON {
+        return None;
+    }
+
+    if a_clip.w <= CLIP_EPSILON {
+        a_clip = clip_line_to_near(a_clip, b_clip)?;
+    }
+    if b_clip.w <= CLIP_EPSILON {
+        b_clip = clip_line_to_near(b_clip, a_clip)?;
+    }
+
+    let a = clip_to_screen(a_clip, w, h)?;
+    let b = clip_to_screen(b_clip, w, h)?;
     Some([a, b])
+}
+
+fn clip_line_to_near(behind: Vec4, front: Vec4) -> Option<Vec4> {
+    let denom = front.w - behind.w;
+    if denom.abs() <= f32::EPSILON {
+        return None;
+    }
+
+    let t = ((CLIP_EPSILON - behind.w) / denom).clamp(0.0, 1.0);
+    Some(behind + (front - behind) * t)
+}
+
+fn clip_to_screen(clip: Vec4, viewport_width: f32, viewport_height: f32) -> Option<[f32; 2]> {
+    if clip.w <= CLIP_EPSILON {
+        return None;
+    }
+
+    let ndc_x = clip.x / clip.w;
+    let ndc_y = clip.y / clip.w;
+    Some([
+        (ndc_x + 1.0) * 0.5 * viewport_width,
+        (1.0 - ndc_y) * 0.5 * viewport_height,
+    ])
 }
 
 /// Calculate basic directional light shading (dot product).
