@@ -87,6 +87,33 @@ pub fn show_project_settings(ui: &mut Ui, project: &mut Project, lang: Language)
                 .changed();
 
             ui.add_space(6.0);
+            changed |= ui
+                .checkbox(
+                    &mut project.settings.depth_accurate,
+                    t("app.depth_accurate", lang),
+                )
+                .changed();
+
+            ui.label(
+                egui::RichText::new(t("app.depth_accurate_desc", lang))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(150, 150, 158)),
+            );
+
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                ui.label(t("app.depth_resolution_scale", lang));
+                changed |= ui
+                    .add_enabled(
+                        project.settings.depth_accurate,
+                        egui::Slider::new(&mut project.settings.depth_resolution_scale, 0.35..=1.0)
+                            .step_by(0.05)
+                            .suffix("x"),
+                    )
+                    .changed();
+            });
+
+            ui.add_space(6.0);
             ui.horizontal(|ui| {
                 ui.label(t("app.render_preset", lang));
                 egui::ComboBox::from_id_salt("project_render_preset")

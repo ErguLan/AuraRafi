@@ -1490,7 +1490,7 @@ impl ViewportPanel {
                     let alt_orbit_drag = ui.input(|i| i.modifiers.alt)
                         && response.dragged_by(egui::PointerButton::Primary);
                     if response.dragged_by(egui::PointerButton::Secondary) || alt_orbit_drag {
-                        let delta = response.drag_delta();
+                        let delta = ui.input(|i| i.pointer.delta());
                         let mx = if self.invert_mouse_x { 1.0 } else { -1.0 };
                         let my = if self.invert_mouse_y { 1.0 } else { -1.0 };
                         self.orbit_yaw += delta.x * 0.008 * mx;
@@ -1499,7 +1499,7 @@ impl ViewportPanel {
                     }
                     // Middle drag: pan disabled while editing mesh inline.
                     if !edit_mode_active && response.dragged_by(egui::PointerButton::Middle) {
-                        let delta = response.drag_delta();
+                        let delta = ui.input(|i| i.pointer.delta());
                         let right = self.camera.view_matrix().row(0).truncate();
                         let up = self.camera.view_matrix().row(1).truncate();
                         let pan_speed = self.orbit_distance * 0.003;
@@ -1562,8 +1562,9 @@ impl ViewportPanel {
                     if response.dragged_by(egui::PointerButton::Middle)
                         || response.dragged_by(egui::PointerButton::Secondary)
                     {
-                        self.offset_2d[0] += response.drag_delta().x;
-                        self.offset_2d[1] += response.drag_delta().y;
+                        let delta = ui.input(|i| i.pointer.delta());
+                        self.offset_2d[0] += delta.x;
+                        self.offset_2d[1] += delta.y;
                     }
                     // Scroll: zoom
                     if is_hovered {

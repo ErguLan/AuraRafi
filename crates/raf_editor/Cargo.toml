@@ -24,3 +24,5 @@ chrono = { workspace = true }
 dirs-next = "2"
 ron = { workspace = true }
 image = { workspace = true }
+rhai = "1.19"
+rodio = { version = "0.19", default-features = false, features = ["wav", "vorbis", "flac", "mp3"] }

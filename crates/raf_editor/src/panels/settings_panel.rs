@@ -310,6 +310,20 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                     t("settings.uniform_scale_by_default", settings.language),
                 );
                 ui.add_space(8.0);
+
+                ui.separator();
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(t("settings.shortcuts_experimental", settings.language))
+                        .size(12.0)
+                        .strong(),
+                );
+                ui.add_space(4.0);
+                ui.label(
+                    egui::RichText::new(t("settings.shortcuts_experimental_desc", settings.language))
+                        .size(11.0)
+                        .color(palette.text_dim),
+                );
             });
     });
 }

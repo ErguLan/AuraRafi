@@ -25,3 +25,13 @@ Users traverse this timeline traversing the `history_pointer` index back and for
 
 ## 4. Internationalization (i18n)
 All strings rendered in the Node Editor side-panels and palette are injected using the engine's translation framework (`raf_core::i18n::t()`), rendering UI in `en.json` or `es.json` depending on active context, upholding the "Zero-If" policy.
+
+## 5. Persistence and Runtime Binding
+Node graphs are no longer editor-only state.
+
+- Game projects persist the node editor document as `nodes.ron` alongside `scene.ron`.
+- Opening a game project restores the saved graph set and active flow automatically.
+- Entering editor Play mode wires those graphs into the runtime slice: every `On Start` entry executes once on runtime boot, and every `On Update` entry executes once per editor frame.
+- Execution logs are routed into the editor console so graph behavior is visible immediately without a separate runtime window.
+
+This binding is intentionally lightweight. The executor still prioritizes cheap interpreted flow walking and basic built-in actions over a heavier compiled VM path.

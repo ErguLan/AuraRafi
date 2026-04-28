@@ -2,9 +2,9 @@
 
 This document outlines the development roadmap for AuraRafi.
 
-## Current Status: v0.1.0 (Foundation)
+## Current Status: Active development beyond the initial foundation
 
-The engine foundation is in place with these working systems:
+The engine foundation is in place and several vertical slices have already moved past pure scaffolding. This section tracks broadly available systems, while later sections separate implemented milestones from planned work.
 
 - [x] Cargo workspace with 9 modular crates (+ raf_hardware)
 - [x] ECS (Entity Component System) via hecs
@@ -32,6 +32,9 @@ The engine foundation is in place with these working systems:
 - [x] Sensor / Actuator data models
 - [x] Robot control interface structure
 - [x] ML training data export structure
+- [x] Inline tests distributed across workspace crates
+- [x] CPU-first editor rendering path with optional GPU-oriented abstraction
+- [x] Electronics dual-workspace flow: schematic + synchronized PCB 2D canvas
 
 ## v0.2.0 - Rendering (Done)
 
@@ -64,7 +67,7 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [x] Drag-and-drop asset importing (copies to project assets/, recursive scan, file type classification)
 - [x] Asset thumbnail preview generation (type icons per file category: image/3D/audio/script)
 - [x] Context menus (right-click) in schematic editor (component/wire/canvas)
-- [ ] Keyboard shortcut customization (user-configurable keybinds)
+- [ ] Keyboard shortcut customization (full user-defined rebinding still pending; experimental shortcut settings/help are present)
 - [x] Multi-entity selection (Shift+Click for multiple, Ctrl+A selects all, click empty to deselect)
 - [x] Hierarchy-viewport-properties bidirectional sync: clicking hierarchy updates viewport selection and vice versa, properties panel always shows selected entity
 - [x] Entity duplication (Ctrl+D) in schematic editor
@@ -101,8 +104,10 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [x] Automatic net naming (union-find netlist builder assigns N001, N002... or wire labels)
 - [x] Design Rule Check (DRC) - 6 rules: floating pins, missing values, isolated components, unnamed nets, short circuit, LED without resistor
 - [x] BOM (Bill of Materials) generation (CSV export with grouping and quantity counting)
-- [ ] Gerber file export (JLCPCB/PCBWay) - structure ready, needs PCB 3D layout
+- [ ] Gerber file export (JLCPCB/PCBWay) - structure ready, now staged around synced PCB layout rather than a mandatory 3D board path
 - [ ] PCB layout view (basic 3D)
+- [x] PCB layout view (2D synchronized workspace): electronics projects now include a dedicated PCB canvas with placements, airwires, trace creation, board outline drafting, and `pcb_layout.ron` persistence.
+- [ ] Final Gerber layer writer: the export path now validates the synced PCB layout document and outline status, but still needs real copper/mask/silk/drill emission.
 - [x] Magnet component with field simulation (N/S poles, Tesla strength, parse 'Weak'/'Strong'/'Neodymium')
 - [ ] Hot-reload of circuit values (live update)
 - [x] SVG vector export of schematics (rotation-aware, styled with theme colors)
@@ -132,11 +137,12 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [x] GPU vertex deformation: 7 deformer types (cloth/hair/vegetation/water/skeletal/blend shape/custom), wind/gravity/stiffness/frequency params, per-vertex GPU overhead estimates
 - [x] World streaming: seamless open world (zero loading screens), WorldRegion with biome/LOD/state machine, potato/default/high presets, camera-based region load/unload
 
-PBR (Physically Based Rendering) materials
-Point and spot lights
-Shadow mapping
+Prepared rendering goals in this phase also include:
 
-Ambient occlusion (SSAO)
+- PBR (Physically Based Rendering) materials
+- Point and spot lights
+- Shadow mapping
+- Ambient occlusion (SSAO)
 
 ### Implementation (v0.7.0 - ALL features disabled by default, potato mode preserved)
 - [x] Per-project RenderConfig: 17 opt-in toggles, 4 presets (Potato/Low/Medium/High), zero cost when off
@@ -154,17 +160,29 @@ Ambient occlusion (SSAO)
 - [x] RenderPreset in EngineSettings (serialized, per-project)
 - [ ] 2D sprite rendering (textured quads in 2D mode)
 
-## v0.8.0 - Game Runtime
+## v0.8.0 - Game Runtime (Done)
+
+The 0.8.0 target is now satisfied as an editor-integrated runtime slice focused on low-end hardware and real project wiring instead of a separate executable first.
+
+- [x] Editor-integrated Play/Stop flow for game projects
+- [x] Runtime scene cloning so simulation does not mutate the edit document
+- [x] Scene loading and runtime initialization from saved project state
+- [x] Node graph persistence as `nodes.ron`
+- [x] Runtime execution of saved node graphs through `On Start` and `On Update`
+- [x] Keyboard input snapshot for runtime scripts
+- [x] External behavior runtime with `.rhai` scripts
+- [x] Script-facing access to `self`, `parent`, entity paths, variables, movement, velocity, and audio triggers
+- [x] Basic collision detection through scene colliders
+- [x] Simple physics (gravity, damping, velocity, trigger-only bodies)
+- [x] Audio playback for entity audio sources inside Play mode
+- [x] Properties inspector support for runtime variables, audio sources, rigid bodies, and colliders
+- [x] Animation-aware collision structure (raf_core/scene/anim_collider.rs): AnimCollider per bone, 5 response types (Stop/Blend/Slide/Recoil/Ignore), auto-generate for hands/feet, enabled by DEFAULT (marketing differentiator)
+
+Follow-up work after 0.8.0:
 
 - [ ] Separate game runtime binary
-- [ ] Scene loading and initialization
-- [ ] Game loop with fixed timestep
-- [ ] Input handling system
-- [ ] Basic collision detection
-- [ ] Simple physics (gravity, velocity)
-- [ ] Audio playback (wav, ogg)
+- [ ] Fixed-timestep loop decoupled from editor frame timing
 - [ ] Animation system (keyframe-based, bone hierarchy)
-- [x] Animation-aware collision structure (raf_core/scene/anim_collider.rs): AnimCollider per bone, 5 response types (Stop/Blend/Slide/Recoil/Ignore), auto-generate for hands/feet, enabled by DEFAULT (marketing differentiator)
 - [ ] Connect animation collision to playback (check colliders each animation step, trigger response on hit)
 - [ ] IK (Inverse Kinematics) for procedural foot placement and hand grabs
 

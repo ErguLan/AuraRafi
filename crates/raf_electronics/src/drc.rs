@@ -4,6 +4,7 @@
 //! returns a structured report with errors, warnings, and info.
 
 use crate::component::SimModel;
+use crate::extensions::run_registered_drc_rules;
 use crate::netlist::Netlist;
 use crate::schematic::Schematic;
 use glam::Vec2;
@@ -103,6 +104,14 @@ pub fn run_drc(schematic: &Schematic) -> DrcReport {
 
     // Rule 6: LED without current-limiting resistor.
     check_led_without_resistor(schematic, &netlist, &mut warnings);
+
+    for issue in run_registered_drc_rules(schematic) {
+        match issue.severity {
+            DrcSeverity::Error => errors.push(issue),
+            DrcSeverity::Warning => warnings.push(issue),
+            DrcSeverity::Info => info.push(issue),
+        }
+    }
 
     DrcReport {
         errors,

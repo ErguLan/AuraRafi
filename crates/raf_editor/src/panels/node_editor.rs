@@ -13,6 +13,7 @@
 use egui::{Color32, Pos2, Rect, Stroke, Ui, Vec2, RichText};
 use raf_nodes::graph::NodeGraph;
 use raf_nodes::node::{Node, NodeCategory, NodeId, PinDataType, PinKind};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use raf_core::config::Language;
@@ -41,6 +42,21 @@ struct DragConnection {
     from_pin: Uuid,
     from_pos: Pos2,
     from_kind: PinKind,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeEditorDocument {
+    pub graphs: Vec<NodeGraph>,
+    pub active_graph_index: usize,
+}
+
+impl Default for NodeEditorDocument {
+    fn default() -> Self {
+        Self {
+            graphs: vec![NodeGraph::new("Main")],
+            active_graph_index: 0,
+        }
+    }
 }
 
 pub struct NodeEditorPanel {
@@ -86,6 +102,33 @@ impl Default for NodeEditorPanel {
 }
 
 impl NodeEditorPanel {
+    pub fn document(&self) -> NodeEditorDocument {
+        NodeEditorDocument {
+            graphs: self.graphs.clone(),
+            active_graph_index: self.active_graph_index,
+        }
+    }
+
+    pub fn load_document(&mut self, document: NodeEditorDocument) {
+        let mut graphs = document.graphs;
+        if graphs.is_empty() {
+            graphs.push(NodeGraph::new("Main"));
+        }
+
+        let active_graph_index = document
+            .active_graph_index
+            .min(graphs.len().saturating_sub(1));
+
+        self.history = vec![(graphs.clone(), active_graph_index)];
+        self.history_pointer = 0;
+        self.graphs = graphs;
+        self.active_graph_index = active_graph_index;
+        self.selected_node = None;
+        self.dragging_node = None;
+        self.drag_connection = None;
+        self.show_palette = false;
+    }
+
     fn active_graph(&self) -> &NodeGraph {
         &self.graphs[self.active_graph_index]
     }

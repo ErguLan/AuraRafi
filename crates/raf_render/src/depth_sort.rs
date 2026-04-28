@@ -31,6 +31,10 @@ pub struct SortableFace {
     pub wire_width: f32,
 }
 
+fn average_depth(depths: &[f32]) -> f32 {
+    depths.iter().copied().sum::<f32>() / depths.len() as f32
+}
+
 // ---------------------------------------------------------------------------
 // Face collector
 // ---------------------------------------------------------------------------
@@ -126,6 +130,55 @@ impl DepthSorter {
 
         if deduped.len() < 3 {
             return false;
+        }
+
+        if deduped.len() == 3 {
+            self.faces.push(SortableFace {
+                screen_points: deduped,
+                color,
+                depth: average_depth(&[
+                    total_depth / screen_pts.len() as f32,
+                    total_depth / screen_pts.len() as f32,
+                    total_depth / screen_pts.len() as f32,
+                ]),
+                wireframe,
+                wire_color,
+                wire_width,
+            });
+            return true;
+        }
+
+        if deduped.len() == 4 {
+            let tri_a_depth = average_depth(&[
+                clip_points[0].z / clip_points[0].w,
+                clip_points[1].z / clip_points[1].w,
+                clip_points[2].z / clip_points[2].w,
+            ]);
+            let tri_b_depth = average_depth(&[
+                clip_points[0].z / clip_points[0].w,
+                clip_points[2].z / clip_points[2].w,
+                clip_points[3].z / clip_points[3].w,
+            ]);
+
+            self.faces.push(SortableFace {
+                screen_points: vec![deduped[0], deduped[1], deduped[2]],
+                color,
+                depth: tri_a_depth,
+                wireframe,
+                wire_color,
+                wire_width,
+            });
+
+            self.faces.push(SortableFace {
+                screen_points: vec![deduped[0], deduped[2], deduped[3]],
+                color,
+                depth: tri_b_depth,
+                wireframe,
+                wire_color,
+                wire_width,
+            });
+
+            return true;
         }
 
         let avg_depth = total_depth / screen_pts.len() as f32;

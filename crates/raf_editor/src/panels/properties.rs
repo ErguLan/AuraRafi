@@ -6,7 +6,8 @@ use egui::{Color32, Stroke, Ui};
 use glam::Vec3;
 use raf_core::config::Language;
 use raf_core::i18n::t;
-use raf_core::scene::graph::{NodeColor, Primitive, SceneGraph, SceneNodeId};
+use raf_core::scene::graph::{NodeColor, Primitive, SceneGraph, SceneNode, SceneNodeId};
+use raf_core::scene::{Collider, ColliderType, SceneVariable, VariableValue, RigidBodyType};
 use std::path::Path;
 
 use crate::ui_icons::UiIconAtlas;
@@ -197,11 +198,19 @@ impl PropertiesPanel {
             ui.add_space(4.0);
 
             inspector_card(ui, icons, "variables.png", t("app.variables", lang), |ui| {
-                ui.label(
-                    egui::RichText::new(t("app.no_variables", lang))
-                        .size(11.0)
-                        .color(egui::Color32::from_rgb(100, 100, 110)),
-                );
+                changed |= show_variables_editor(ui, node, lang);
+            });
+
+            ui.add_space(4.0);
+
+            inspector_card(ui, icons, "audio.png", t("app.audio_source", lang), |ui| {
+                changed |= show_audio_source_editor(ui, node, lang);
+            });
+
+            ui.add_space(4.0);
+
+            inspector_card(ui, icons, "shape.png", t("app.physics", lang), |ui| {
+                changed |= show_physics_editor(ui, node, lang);
             });
         });
 
@@ -292,4 +301,253 @@ fn edit_vec3(ui: &mut Ui, label: String, value: &mut Vec3, speed: f64) -> bool {
         changed |= ui.add(egui::DragValue::new(&mut value.z).speed(speed)).changed();
     });
     changed
+}
+
+fn show_variables_editor(ui: &mut Ui, node: &mut SceneNode, lang: Language) -> bool {
+    let mut changed = false;
+    let mut remove_index = None;
+
+    if node.variables.is_empty() {
+        ui.label(
+            egui::RichText::new(t("app.no_variables", lang))
+                .size(11.0)
+                .color(egui::Color32::from_rgb(100, 100, 110)),
+        );
+    } else {
+        for (index, variable) in node.variables.iter_mut().enumerate() {
+            egui::Frame::none()
+                .fill(Color32::from_rgb(28, 28, 33))
+                .rounding(6.0)
+                .inner_margin(8.0)
+                .stroke(Stroke::new(1.0, Color32::from_rgb(44, 44, 52)))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        changed |= ui
+                            .add(
+                                egui::TextEdit::singleline(&mut variable.name)
+                                    .hint_text(t("app.variable_name", lang))
+                                    .desired_width(120.0),
+                            )
+                            .changed();
+
+                        let mut selected_kind = variable_kind(variable);
+                        egui::ComboBox::from_id_salt(format!("variable_kind_{}", index))
+                            .selected_text(selected_kind)
+                            .show_ui(ui, |ui| {
+                                for kind in ["Bool", "Number", "Text"] {
+                                    if ui.selectable_value(&mut selected_kind, kind, kind).changed() {
+                                        variable.value = match kind {
+                                            "Bool" => VariableValue::Bool(false),
+                                            "Number" => VariableValue::Number(0.0),
+                                            _ => VariableValue::Text(String::new()),
+                                        };
+                                        changed = true;
+                                    }
+                                }
+                            });
+
+                        changed |= edit_variable_value(ui, &mut variable.value);
+
+                        if ui.button(t("app.remove", lang)).clicked() {
+                            remove_index = Some(index);
+                        }
+                    });
+                });
+            ui.add_space(4.0);
+        }
+    }
+
+    if let Some(index) = remove_index {
+        node.variables.remove(index);
+        changed = true;
+    }
+
+    if ui.button(t("app.add_variable", lang)).clicked() {
+        node.variables.push(SceneVariable {
+            name: format!("var_{}", node.variables.len() + 1),
+            value: VariableValue::Number(0.0),
+        });
+        changed = true;
+    }
+
+    changed
+}
+
+fn show_audio_source_editor(ui: &mut Ui, node: &mut SceneNode, lang: Language) -> bool {
+    let mut changed = false;
+
+    changed |= ui
+        .checkbox(&mut node.audio_source.enabled, t("app.audio_enabled", lang))
+        .changed();
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(t("app.audio_clip", lang));
+        changed |= ui
+            .add(
+                egui::TextEdit::singleline(&mut node.audio_source.clip)
+                    .hint_text("audio/clip.ogg")
+                    .desired_width(180.0),
+            )
+            .changed();
+    });
+
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        changed |= ui
+            .checkbox(&mut node.audio_source.autoplay, t("app.audio_autoplay", lang))
+            .changed();
+        changed |= ui
+            .checkbox(&mut node.audio_source.looping, t("app.audio_looping", lang))
+            .changed();
+    });
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(t("app.audio_volume", lang));
+        changed |= ui
+            .add(egui::Slider::new(&mut node.audio_source.volume, 0.0..=1.0).show_value(true))
+            .changed();
+    });
+
+    changed
+}
+
+fn show_physics_editor(ui: &mut Ui, node: &mut SceneNode, lang: Language) -> bool {
+    let mut changed = false;
+
+    changed |= ui
+        .checkbox(&mut node.rigid_body.enabled, t("app.enable_rigidbody", lang))
+        .changed();
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(t("app.collider_type", lang));
+        let mut collider_type = node.collider.collider_type;
+        egui::ComboBox::from_id_salt("collider_type_select")
+            .selected_text(collider_type_label(collider_type, lang))
+            .show_ui(ui, |ui| {
+                for kind in [
+                    ColliderType::None,
+                    ColliderType::Aabb,
+                    ColliderType::ConvexHull,
+                    ColliderType::MeshCollider,
+                ] {
+                    if ui
+                        .selectable_value(&mut collider_type, kind, collider_type_label(kind, lang))
+                        .changed()
+                    {
+                        node.collider = if kind == ColliderType::None {
+                            Collider::default()
+                        } else {
+                            Collider::auto_fit(&primitive_collider_points(node.primitive), kind)
+                        };
+                        changed = true;
+                    }
+                }
+            });
+    });
+
+    ui.add_space(6.0);
+    changed |= ui
+        .checkbox(&mut node.rigid_body.is_trigger, t("app.is_trigger", lang))
+        .changed();
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(t("app.body_type", lang));
+        egui::ComboBox::from_id_salt("body_type_select")
+            .selected_text(rigid_body_type_label(node.rigid_body.body_type, lang))
+            .show_ui(ui, |ui| {
+                for body_type in [
+                    RigidBodyType::Static,
+                    RigidBodyType::Dynamic,
+                    RigidBodyType::Kinematic,
+                ] {
+                    changed |= ui
+                        .selectable_value(
+                            &mut node.rigid_body.body_type,
+                            body_type,
+                            rigid_body_type_label(body_type, lang),
+                        )
+                        .changed();
+                }
+            });
+    });
+
+    ui.add_space(6.0);
+    changed |= ui
+        .checkbox(&mut node.rigid_body.use_gravity, t("app.use_gravity", lang))
+        .changed();
+
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(t("app.physics_damping", lang));
+        changed |= ui
+            .add(egui::Slider::new(&mut node.rigid_body.damping, 0.0..=1.0).show_value(true))
+            .changed();
+    });
+
+    ui.add_space(6.0);
+    changed |= edit_vec3(ui, t("app.velocity", lang), &mut node.rigid_body.velocity, 0.05);
+
+    changed
+}
+
+fn edit_variable_value(ui: &mut Ui, value: &mut VariableValue) -> bool {
+    match value {
+        VariableValue::Bool(current) => ui.checkbox(current, "").changed(),
+        VariableValue::Number(current) => ui.add(egui::DragValue::new(current).speed(0.1)).changed(),
+        VariableValue::Text(current) => ui
+            .add(egui::TextEdit::singleline(current).desired_width(120.0))
+            .changed(),
+    }
+}
+
+fn variable_kind(variable: &SceneVariable) -> &'static str {
+    match variable.value {
+        VariableValue::Bool(_) => "Bool",
+        VariableValue::Number(_) => "Number",
+        VariableValue::Text(_) => "Text",
+    }
+}
+
+fn collider_type_label(kind: ColliderType, lang: Language) -> &'static str {
+    match lang {
+        Language::Spanish => match kind {
+            ColliderType::None => "Ninguno",
+            ColliderType::Aabb => "AABB",
+            ColliderType::ConvexHull => "Hull Convexo",
+            ColliderType::MeshCollider => "Malla",
+        },
+        _ => match kind {
+            ColliderType::None => "None",
+            ColliderType::Aabb => "AABB",
+            ColliderType::ConvexHull => "Convex Hull",
+            ColliderType::MeshCollider => "Mesh",
+        },
+    }
+}
+
+fn rigid_body_type_label(kind: RigidBodyType, lang: Language) -> &'static str {
+    match lang {
+        Language::Spanish => match kind {
+            RigidBodyType::Static => "Estatico",
+            RigidBodyType::Dynamic => "Dinamico",
+            RigidBodyType::Kinematic => "Cinematico",
+        },
+        _ => match kind {
+            RigidBodyType::Static => "Static",
+            RigidBodyType::Dynamic => "Dynamic",
+            RigidBodyType::Kinematic => "Kinematic",
+        },
+    }
+}
+
+fn primitive_collider_points(primitive: Primitive) -> Vec<Vec3> {
+    match primitive {
+        Primitive::Plane => vec![Vec3::new(-0.5, -0.05, -0.5), Vec3::new(0.5, 0.05, 0.5)],
+        Primitive::Sprite2D => vec![Vec3::new(-0.5, -0.5, -0.05), Vec3::new(0.5, 0.5, 0.05)],
+        _ => vec![Vec3::splat(-0.5), Vec3::splat(0.5)],
+    }
 }

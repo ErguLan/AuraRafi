@@ -126,3 +126,60 @@ Your C++ code **does not need to know the raw Rust memory structures**. You only
 - Delete nodes (`DestroyEntity`).
 
 Because the bridge relies on text/JSON passing to dispatch operations, you never have to worry about crashing the Rust ECS memory segment. Rust will safely validate your JSON command and execute it. 
+
+## Electronics Domain Status
+
+Native C++ plugins can already declare themselves as `Electronics Domain` using:
+
+```cpp
+__declspec(dllexport) int32_t aura_rafi_plugin_domain() {
+    return 2; // Electronics Domain
+}
+```
+
+That lets the engine classify the plugin correctly as electronics-facing logic.
+
+## What C++ Mods Can Do Right Now
+
+Today, the C++ bridge is best for:
+
+- Headless background logic
+- Submitting safe JSON commands through the command bus
+- Domain-aware plugins that should only run for Electronics or Games
+
+## What C++ Mods Cannot Register Directly Yet
+
+The new electrical extension registry for:
+
+- custom component templates
+- custom DRC/ERC rules
+
+is currently exposed in Rust/source-mod form through `raf_electronics`, not directly through the C++ ABI.
+
+So right now the practical split is:
+
+- C++ plugin: runtime logic, automation, command submission
+- Rust/source mod: component library injection and custom electrical rules
+
+## Recommended Path If You Want Electronics Mods Today
+
+### 1. If you need runtime automation only
+
+Use the current C++ DLL system and submit commands through `CApiCommandBus`.
+
+### 2. If you need new electrical parts or validation rules
+
+Use the Rust-side electrical extension hooks documented in `COMPLEMENT_DEVELOPMENT.md` and `ElectricalSystem.md`.
+
+### 3. If you need both
+
+Use a hybrid approach:
+
+- C++ for high-performance runtime behavior
+- Rust complement/source mod for library registration and DRC rule injection
+
+## Planned Direction
+
+The intended long-term direction is to keep the C++ bridge focused on safe runtime interop while higher-level domain registries expose stable extension points for systems like schematics, rules, and theory packs.
+
+That way, mods can grow without forcing direct edits into the engine core.

@@ -8,6 +8,7 @@ pub struct ComponentLibrary {
 }
 
 /// A component template in the library.
+#[derive(Debug, Clone)]
 pub struct ComponentTemplate {
     pub name: String,
     pub category: String,
@@ -32,7 +33,7 @@ impl ComponentTemplate {
 impl ComponentLibrary {
     /// Create a library with built-in basic components.
     pub fn default_library() -> Self {
-        Self {
+        let mut library = Self {
             components: vec![
                 ComponentTemplate {
                     name: "Resistor".to_string(),
@@ -71,7 +72,10 @@ impl ComponentLibrary {
                     template: ElectronicComponent::ground(),
                 },
             ],
-        }
+        };
+
+        library.load_registered_extensions();
+        library
     }
 
     /// Load external components from ElectricalAssets directory.
@@ -108,6 +112,11 @@ impl ComponentLibrary {
                 }
             }
         }
+    }
+
+    /// Merge code-registered extensions into the library.
+    pub fn load_registered_extensions(&mut self) {
+        crate::extensions::extend_library_with_registered_extensions(self);
     }
 
     /// Filter components by category.

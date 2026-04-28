@@ -8,6 +8,11 @@ AuraRafi is a modular, open-source engine written in Rust, designed for both
 video game development and electronic hardware design. The engine is structured
 as a Cargo workspace with 9 independent crates plus a main editor binary.
 
+The repository contains a mix of already-active editor workflows and systems
+that are intentionally prepared for later runtime integration. This document
+tries to distinguish those states instead of flattening everything into
+"implemented" or "placeholder".
+
 ## Workspace Layout
 
 ```
@@ -15,7 +20,7 @@ AuraRafi/
   editor/             Main binary that launches the editor
   crates/
     raf_core/         Core systems: ECS, scene graph, commands, events, config
-    raf_render/       Rendering abstraction via wgpu
+    raf_render/       CPU-first rendering, abstraction layer, optional GPU path
     raf_editor/       Visual editor UI built on egui/eframe
     raf_assets/       Asset importing, browsing, and management
     raf_electronics/  Electronic design: schematics, PCBs, simulation, DRC, export
@@ -70,9 +75,11 @@ Built on `hecs` for data-oriented, cache-friendly entity management.
 Flat-array scene graph with parent-child hierarchy.
 
 - `SceneGraph`: Contiguous `Vec<SceneNode>` for cache-friendly iteration
-- `SceneNode`: Position, rotation, scale, parent/children, entity link
+- `SceneNode`: Position, rotation, scale, parent/children, entity link, attached scripts, custom variables, audio source, collider, and rigid body state
 - World matrix computation by walking the parent chain
 - O(1) node lookup by index
+
+The scene document now carries both editor-facing transform data and lightweight runtime-facing data so Play mode can clone and simulate a project without inventing a second scene format.
 
 ### Command Bus
 
@@ -130,7 +137,7 @@ Lightweight pub/sub system with type-erased events:
 
 ## AI (raf_ai)
 
-### Infrastructure (prepared, not connected)
+### Infrastructure (prepared, not fully connected)
 
 - `director`: AI Director that observes WorldState and emits DirectorActions
   - Actions: SpawnEntity, RemoveEntity, SetWeather, SetTime, ScaleEntity, SetEntityColor, LogMessage, PlaySound, Custom
@@ -147,10 +154,10 @@ Lightweight pub/sub system with type-erased events:
 
 ## Rendering (raf_render)
 
-Lightweight rendering via CPU projection + egui painter (no GPU pipeline needed):
+Lightweight rendering via CPU projection + egui painter (active path today, no GPU pipeline required):
 
 - `Renderer`: High-level renderer holding pipeline config
-- `RenderPipeline`: Quality-dependent config (shadows, AO, AA, bloom) for future GPU path
+- `RenderPipeline`: Quality-dependent config (shadows, AO, AA, bloom) for future or optional GPU path
 - `Camera`: Perspective and orthographic modes with view/projection matrices, orbit controls
 - `mesh`: Static vertex data for primitives (edges + face quads with normals)
   - Cube: 12 wireframe edges, 6 face quads
@@ -180,7 +187,7 @@ Lightweight rendering via CPU projection + egui painter (no GPU pipeline needed)
   - `pick_gizmo_arrow()`: hit-test click against all 3 arrows (8px tolerance), returns axis index
   - `point_to_segment_distance()`: helper for line hit testing (also used in wire selection)
 
-### Render Abstraction Layer (prepared, zero cost when inactive)
+### Render Abstraction Layer (prepared, zero cost when inactive unless opted into)
 
 Architecture: `SceneGraph -> SceneRenderData -> RenderBackendTrait -> Backend`
 
@@ -289,6 +296,10 @@ Visual editor built on `egui`/`eframe`:
 - Export: SVG vector image (styled, rotation-aware), BOM CSV (grouped with quantities), text netlist
 - Gerber export structure for JLCPCB/PCBWay (manufacturer-specific layers defined, placeholder until PCB 3D layout)
 - Circuit sharing: RON serialization for shareable compact strings
+- **Schematic document split**: Electronics projects now persist their editor document as `schematic.ron`; `scene.ron` remains only for game projects.
+- **Schematic editor modularization**: The editor-side schematic workflow is split between `raf_editor/src/panels/schematic_view.rs`, `raf_editor/src/panels/schematic_view/canvas.rs`, and `raf_editor/src/panels/schematic_panels.rs` so the interaction layer no longer lives in a single large file.
+- **Render ownership for symbols**: Code-drawn schematic symbols now live in `raf_render/src/ApiGraphicBasic/schematic_symbols.rs` and are imported into the editor instead of being drawn ad-hoc inside the UI panel code.
+- **Open-source extension hooks**: `raf_electronics::extensions` now exposes a lightweight registry for source mods to inject additional `ComponentTemplate`s and custom DRC/ERC rules without patching the built-in library or hard-coded rule list.
 
 ## Visual Scripting (raf_nodes & raf_editor)
 
@@ -309,13 +320,13 @@ Visual editor built on `egui`/`eframe`:
 - `ToolDefinition`: Name, category, parameters, return type
 - `ChatPanel`: Message history, input, provider selection
 - `AiProvider`: OpenRouter, OpenAI, GenAI, Claude
-- Status: Structure prepared, AI functionality not yet implemented
+- Status: Tooling and UI scaffolding exist, but provider-backed AI functionality is not wired end-to-end yet
 
 ## Networking (raf_net)
 
 - `NetMessage`: Protocol messages with type, sender, payload
 - `NetMessageType`: Connect, Disconnect, StateSync, RPC, Ping, Pong
-- Status: Stub for future multiplayer implementation
+- Status: Protocol/data-model stage only, no gameplay networking integration yet
 
 ## Hardware Integration (raf_hardware)
 
@@ -338,3 +349,36 @@ Visual editor built on `egui`/`eframe`:
 5. **Serialization**: RON for config, JSON for commands, serde throughout
 6. **No External Runtime**: Pure Rust, no C++ dependencies
 7. **AI-Ready**: Every operation exposed as a tool for AI agent integration
+
+## Recent Schematic UX Stabilization
+
+- `raf_editor::app` now switches left/right panels by `ViewportMode`: scene projects keep hierarchy/properties, while electronics projects use schematic-specific hierarchy and property inspectors.
+- The center panel now treats the schematic editor as a first-class workspace instead of a scene-editor variant, including proper modified-state tracking after canvas interactions.
+- Electronics project load/save flow was aligned with project type: opening an electronics project restores `schematic.ron`, and saving writes the same file back through the editor document helpers.
+- Localized schematic UI labels were expanded in `raf_core/locales/en.json` and `crates/raf_core/locales/es.json` so the new hierarchy, properties, hover hints, and status summaries resolve through the same i18n layer as the rest of the editor.
+- The status bar and global actions (`delete`, `duplicate`, `select all`) now branch correctly for schematic mode instead of assuming the scene graph is always active.
+
+## Extension Direction For Electronics Mods
+
+- Game-style complements remain the top-level entry point for open-source extensions, but electronics-specific contributions no longer have to be welded into the editor or the core crate.
+- A complement or source module can now register extra electrical parts into `ComponentLibrary` and extra validation logic into the DRC pass through `raf_electronics::register_component_template(...)` and `raf_electronics::register_drc_rule(...)`.
+- This keeps the core editor stable while still allowing community additions such as custom sensors, proprietary footprints, educational rule packs, or project-specific electrical theories to be layered on top.
+- The same pattern can be reused later for math/theory packs in other crates without turning `raf_core` into a dumping ground for domain-specific plugin logic.
+
+## PCB 2D Workspace Foundation
+
+- Electronics projects now have a second first-class editor workspace besides the schematic: `PCB View`.
+- The schematic remains the logical/electrical source of truth; the PCB is a synchronized physical document stored as `pcb_layout.ron`.
+- `raf_electronics::pcb` now owns the physical board model:
+  - `footprint.rs`: built-in footprint definitions and generic fallback pad generation.
+  - `layout.rs`: `PcbLayout`, `BoardOutline`, placed components, traces, airwires, and schematic-to-PCB sync.
+- `raf_editor` now owns the PCB UX layer:
+  - `panels/pcb_view.rs` + `panels/pcb_view/canvas.rs`: 2D PCB canvas, component placement, airwire routing, outline drafting.
+  - `panels/pcb_panels.rs`: PCB hierarchy and properties side panels.
+  - `pcb_document.rs`: load/save helpers for `pcb_layout.ron`.
+- Save flow for electronics projects now persists two coordinated documents:
+  - `schematic.ron`: logical circuit and simulation source.
+  - `pcb_layout.ron`: board outline, placements, traces, and unresolved airwires.
+- `Ctrl+S` / save now synchronizes PCB from the current schematic before writing the PCB document, preserving manual placement data while refreshing nets and missing/new components.
+- PCB routing is intentionally 2D-first. The current base supports board outline validation, physical footprint geometry, trace storage, and airwire regeneration without depending on any 3D board view.
+- The Gerber layer export path is still incomplete, but the placeholder now targets the PCB layout document instead of a hypothetical future 3D-only dependency.

@@ -1,12 +1,14 @@
 //! Schematic export functionality.
 //!
 //! Exports schematics to various formats: text netlist, BOM (CSV),
-//! and SVG vector image. PCB/Gerber export is planned for a future
-//! phase when PCB layout view is implemented.
+//! and SVG vector image. PCB/Gerber export is now staged around the
+//! 2D PCB layout document, although final manufacturing output still
+//! needs a dedicated writer pass.
 //!
 //! Technology based on Yoll AU - yoll.site
 
 use crate::netlist::Netlist;
+use crate::pcb::layout::PcbLayout;
 use crate::schematic::Schematic;
 use std::collections::HashMap;
 
@@ -20,10 +22,8 @@ pub enum ExportFormat {
     /// SVG vector image of the schematic.
     Svg,
     /// Gerber files for JLCPCB manufacturing.
-    /// Requires PCB layout (3D view) - structural placeholder.
     GerberJlcpcb,
     /// Gerber files for PCBWay manufacturing.
-    /// Requires PCB layout (3D view) - structural placeholder.
     GerberPcbWay,
 }
 
@@ -48,7 +48,6 @@ pub fn export_netlist_text(schematic: &Schematic) -> ExportResult {
     out.push_str(&format!("* Nets: {}\n", netlist.nets.len()));
     out.push_str("*\n\n");
 
-    // Components section.
     out.push_str(".COMPONENTS\n");
     for comp in &schematic.components {
         out.push_str(&format!(
@@ -58,7 +57,6 @@ pub fn export_netlist_text(schematic: &Schematic) -> ExportResult {
     }
     out.push('\n');
 
-    // Nets section.
     out.push_str(".NETS\n");
     for net in &netlist.nets {
         out.push_str(&format!("  {} :\n", net.name));
@@ -88,7 +86,6 @@ pub fn export_bom_csv(schematic: &Schematic) -> ExportResult {
     let mut out = String::new();
     out.push_str("Designator,Value,Footprint,Category,Quantity\n");
 
-    // Group components by value+footprint for quantity counting.
     let mut groups: HashMap<String, (String, String, String, usize)> = HashMap::new();
 
     for comp in &schematic.components {
@@ -104,8 +101,6 @@ pub fn export_bom_csv(schematic: &Schematic) -> ExportResult {
         entry.3 += 1;
     }
 
-    // Also list individual designators.
-    // First, collect per-group designators.
     let mut group_designators: HashMap<String, Vec<String>> = HashMap::new();
     for comp in &schematic.components {
         let key = format!("{}|{}|{}", comp.value, comp.footprint, comp.category);
@@ -124,7 +119,6 @@ pub fn export_bom_csv(schematic: &Schematic) -> ExportResult {
                 .get(key)
                 .map(|d| d.join(" "))
                 .unwrap_or_default();
-            // Escape CSV values that might contain commas.
             let safe_value = if value.contains(',') {
                 format!("\"{}\"", value)
             } else {
@@ -151,7 +145,6 @@ pub fn export_svg(schematic: &Schematic) -> ExportResult {
     let comp_h = 30.0f32;
     let padding = 80.0f32;
 
-    // Calculate bounding box.
     let (min_x, min_y, max_x, max_y) = calculate_bounds(schematic, grid_step, comp_w, comp_h);
     let width = (max_x - min_x + padding * 2.0) as i32;
     let height = (max_y - min_y + padding * 2.0) as i32;
@@ -174,13 +167,11 @@ pub fn export_svg(schematic: &Schematic) -> ExportResult {
     svg.push_str("  .bg { fill: #121218; }\n");
     svg.push_str("</style>\n");
 
-    // Background.
     svg.push_str(&format!(
         "<rect class=\"bg\" width=\"{}\" height=\"{}\" />\n",
         width, height
     ));
 
-    // Draw wires.
     for wire in &schematic.wires {
         let x1 = wire.start.x + offset_x;
         let y1 = wire.start.y + offset_y;
@@ -201,32 +192,27 @@ pub fn export_svg(schematic: &Schematic) -> ExportResult {
         }
     }
 
-    // Draw components.
     for comp in &schematic.components {
         let cx = comp.position.x + offset_x;
         let cy = comp.position.y + offset_y;
         let half_w = comp_w / 2.0;
         let half_h = comp_h / 2.0;
 
-        // Body rectangle.
         svg.push_str(&format!(
             "<rect class=\"comp-body\" x=\"{:.1}\" y=\"{:.1}\" width=\"{:.1}\" height=\"{:.1}\" rx=\"3\" />\n",
             cx - half_w, cy - half_h, comp_w, comp_h
         ));
 
-        // Designator.
         svg.push_str(&format!(
             "<text class=\"desig-text\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text>\n",
             cx, cy - half_h - 4.0, escape_xml(&comp.designator)
         ));
 
-        // Value.
         svg.push_str(&format!(
             "<text class=\"comp-text\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" dominant-baseline=\"central\">{}</text>\n",
             cx, cy, escape_xml(&comp.value)
         ));
 
-        // Footprint.
         if !comp.footprint.is_empty() {
             svg.push_str(&format!(
                 "<text class=\"comp-text\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\" font-size=\"8\" fill=\"#5a5a64\">{}</text>\n",
@@ -234,7 +220,6 @@ pub fn export_svg(schematic: &Schematic) -> ExportResult {
             ));
         }
 
-        // Pins.
         let rot_rad = comp.rotation.to_radians();
         let cos_r = rot_rad.cos();
         let sin_r = rot_rad.sin();
@@ -247,15 +232,9 @@ pub fn export_svg(schematic: &Schematic) -> ExportResult {
 
             let px = cx + rot_ox;
             let py = cy + rot_oy;
-
             let pin_color = pin_direction_svg_color(pin.direction);
 
-            // Pin line from body edge.
-            let edge_x = if rot_ox < 0.0 {
-                cx - half_w
-            } else {
-                cx + half_w
-            };
+            let edge_x = if rot_ox < 0.0 { cx - half_w } else { cx + half_w };
             let edge_y = cy + rot_oy;
 
             svg.push_str(&format!(
@@ -263,7 +242,6 @@ pub fn export_svg(schematic: &Schematic) -> ExportResult {
                 edge_x, edge_y, px, py, pin_color
             ));
 
-            // Pin dot.
             svg.push_str(&format!(
                 "<circle class=\"pin\" cx=\"{:.1}\" cy=\"{:.1}\" fill=\"{}\" />\n",
                 px, py, pin_color
@@ -280,7 +258,6 @@ pub fn export_svg(schematic: &Schematic) -> ExportResult {
     }
 }
 
-/// Calculate bounding box of all components and wires.
 fn calculate_bounds(
     schematic: &Schematic,
     grid_step: f32,
@@ -314,7 +291,6 @@ fn calculate_bounds(
     }
 }
 
-/// Escape special XML characters.
 fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -322,7 +298,6 @@ fn escape_xml(s: &str) -> String {
         .replace('"', "&quot;")
 }
 
-/// SVG color string for pin directions.
 fn pin_direction_svg_color(dir: crate::component::PinDirection) -> &'static str {
     use crate::component::PinDirection;
     match dir {
@@ -335,10 +310,9 @@ fn pin_direction_svg_color(dir: crate::component::PinDirection) -> &'static str 
 }
 
 // ---------------------------------------------------------------------------
-// Gerber export (structural placeholder - needs PCB 3D view)
+// Gerber export (structural placeholder - staged around PCB 2D layout)
 // ---------------------------------------------------------------------------
 
-/// Manufacturer target for Gerber export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GerberTarget {
     Jlcpcb,
@@ -346,7 +320,6 @@ pub enum GerberTarget {
 }
 
 impl GerberTarget {
-    /// Human-readable name.
     pub fn display_name(&self) -> &str {
         match self {
             Self::Jlcpcb => "JLCPCB",
@@ -354,18 +327,17 @@ impl GerberTarget {
         }
     }
 
-    /// Required file extensions per manufacturer.
     pub fn required_layers(&self) -> &[&str] {
         match self {
             Self::Jlcpcb => &[
-                ".GTL",  // Top copper
-                ".GBL",  // Bottom copper
-                ".GTS",  // Top soldermask
-                ".GBS",  // Bottom soldermask
-                ".GTO",  // Top silkscreen
-                ".GBO",  // Bottom silkscreen
-                ".GKO",  // Board outline
-                ".DRL",  // Drill file
+                ".GTL",
+                ".GBL",
+                ".GTS",
+                ".GBS",
+                ".GTO",
+                ".GBO",
+                ".GKO",
+                ".DRL",
             ],
             Self::PcbWay => &[
                 ".GTL",
@@ -374,19 +346,24 @@ impl GerberTarget {
                 ".GBS",
                 ".GTO",
                 ".GBO",
-                ".GML",  // PCBWay uses .GML for outline
+                ".GML",
                 ".DRL",
             ],
         }
     }
 }
 
-/// Export result for Gerber (placeholder).
-///
-/// To generate actual Gerber files, the PCB 3D layout view must
-/// be implemented first. This function generates a stub file list
-/// showing what will be produced.
 pub fn export_gerber_stub(schematic: &Schematic, target: GerberTarget) -> ExportResult {
+    let mut layout = PcbLayout::new(&schematic.name);
+    let _ = layout.sync_from_schematic(schematic);
+    export_gerber_layout_stub(schematic, &layout, target)
+}
+
+pub fn export_gerber_layout_stub(
+    schematic: &Schematic,
+    layout: &PcbLayout,
+    target: GerberTarget,
+) -> ExportResult {
     let format = match target {
         GerberTarget::Jlcpcb => ExportFormat::GerberJlcpcb,
         GerberTarget::PcbWay => ExportFormat::GerberPcbWay,
@@ -399,8 +376,15 @@ pub fn export_gerber_stub(schematic: &Schematic, target: GerberTarget) -> Export
     ));
     content.push_str(&format!("* Schematic: {}\n", schematic.name));
     content.push_str(&format!("* Components: {}\n", schematic.components.len()));
+    content.push_str(&format!("* PCB Components: {}\n", layout.components.len()));
+    content.push_str(&format!("* PCB Traces: {}\n", layout.traces.len()));
+    content.push_str(&format!("* Open Airwires: {}\n", layout.airwires.len()));
+    content.push_str(&format!(
+        "* Outline Closed: {}\n",
+        if layout.outline_is_closed() { "yes" } else { "no" }
+    ));
     content.push_str("*\n");
-    content.push_str("* STATUS: PLACEHOLDER - PCB 3D layout view required\n");
+    content.push_str("* STATUS: PLACEHOLDER - final Gerber writer pending\n");
     content.push_str("*\n");
     content.push_str("* Files that will be generated:\n");
     for layer in target.required_layers() {
@@ -408,11 +392,11 @@ pub fn export_gerber_stub(schematic: &Schematic, target: GerberTarget) -> Export
     }
     content.push_str("*\n");
     content.push_str("* To complete Gerber export:\n");
-    content.push_str("*   1. Create PCB layout from schematic\n");
-    content.push_str("*   2. Place components on board\n");
-    content.push_str("*   3. Route traces\n");
-    content.push_str("*   4. Run DRC\n");
-    content.push_str("*   5. Export Gerber\n");
+    content.push_str("*   1. Sync PCB layout from schematic\n");
+    content.push_str("*   2. Ensure board outline is closed\n");
+    content.push_str("*   3. Place components on board\n");
+    content.push_str("*   4. Route traces until airwires are closed\n");
+    content.push_str("*   5. Emit real Gerber layer content\n");
 
     ExportResult {
         format,
@@ -421,21 +405,11 @@ pub fn export_gerber_stub(schematic: &Schematic, target: GerberTarget) -> Export
     }
 }
 
-// ---------------------------------------------------------------------------
-// Circuit sharing
-// ---------------------------------------------------------------------------
-
-/// Serialize a schematic to a shareable compact string.
-///
-/// The format is RON (human-readable) which can be embedded in
-/// a URL or saved as a small file. For browser/WASM targets,
-/// this string can be base64-encoded into a URL parameter.
 pub fn share_circuit(schematic: &Schematic) -> Result<String, String> {
     ron::ser::to_string(schematic)
         .map_err(|e| format!("Failed to serialize schematic: {}", e))
 }
 
-/// Deserialize a schematic from a shared string.
 pub fn load_shared_circuit(data: &str) -> Result<Schematic, String> {
     ron::from_str(data)
         .map_err(|e| format!("Failed to deserialize schematic: {}", e))
@@ -444,6 +418,7 @@ pub fn load_shared_circuit(data: &str) -> Result<Schematic, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::ElectronicComponent;
     use crate::schematic::Schematic;
     use glam::Vec2;
 

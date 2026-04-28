@@ -16,6 +16,7 @@ use crate::ui_icons::UiIconAtlas;
 enum ScriptTemplateKind {
     Rust,
     Cpp,
+    Rhai,
 }
 
 /// State for the asset browser panel.
@@ -323,6 +324,10 @@ impl AssetBrowserPanel {
                     self.create_new_script(lang, ScriptTemplateKind::Cpp);
                     self.show_script_menu = false;
                 }
+                if ui.button(t("app.script_language_rhai", lang)).clicked() {
+                    self.create_new_script(lang, ScriptTemplateKind::Rhai);
+                    self.show_script_menu = false;
+                }
 
                 ui.add_space(8.0);
                 if ui.button(t("app.cancel", lang)).clicked() {
@@ -498,6 +503,10 @@ fn script_template(kind: ScriptTemplateKind) -> (&'static str, &'static str) {
         ScriptTemplateKind::Cpp => (
             "cpp",
             "// AuraRafi C++ Script\n// Created automatically\n\nextern \"C\" void on_start() {\n    // Initialize your entity or system here\n}\n\nextern \"C\" void on_update(float dt) {\n    (void)dt;\n    // Called every frame\n}\n",
+        ),
+        ScriptTemplateKind::Rhai => (
+            "rhai",
+            "// AuraRafi Rhai Script\n// Created automatically\n\nfn on_start(ctx) {\n    print(\"Started: \" + ctx.name);\n}\n\nfn on_update(ctx) {\n    if ctx.key_down(\"SPACE\") {\n        ctx.play_audio();\n    }\n}\n\nfn on_trigger_enter(ctx, other_path) {\n    print(\"Trigger: \" + ctx.path + \" -> \" + other_path);\n}\n",
         ),
     }
 }

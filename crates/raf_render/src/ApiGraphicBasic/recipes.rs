@@ -192,4 +192,4 @@ pub fn cylinder_faces(segments: usize) -> Vec<([Vec3; 4], Vec3)> {
         faces.push(([bot_center, bot1, bot0, bot0], Vec3::NEG_Y));
     }
     faces
-}
+}

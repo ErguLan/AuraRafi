@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 pub enum ScriptLanguage {
     Rust,
     Cpp,
+    Rhai,
     Lua,
     Python,
     JavaScript,
@@ -18,6 +19,8 @@ impl ScriptLanguage {
             Self::Rust
         } else if lower.ends_with(".cpp") || lower.ends_with(".cc") || lower.ends_with(".cxx") {
             Self::Cpp
+        } else if lower.ends_with(".rhai") {
+            Self::Rhai
         } else if lower.ends_with(".lua") {
             Self::Lua
         } else if lower.ends_with(".py") {
@@ -35,6 +38,7 @@ impl ScriptLanguage {
         match self {
             Self::Rust => "Rust",
             Self::Cpp => "C++",
+            Self::Rhai => "Rhai",
             Self::Lua => "Lua",
             Self::Python => "Python",
             Self::JavaScript => "JavaScript",
@@ -44,7 +48,7 @@ impl ScriptLanguage {
     }
 
     pub fn is_engine_supported(self) -> bool {
-        matches!(self, Self::Rust | Self::Cpp)
+        matches!(self, Self::Rust | Self::Cpp | Self::Rhai)
     }
 }
 
@@ -70,6 +74,7 @@ pub struct ScriptValidation {
 pub fn is_script_file(name: &str) -> bool {
     let lower = name.to_lowercase();
     lower.ends_with(".lua")
+        || lower.ends_with(".rhai")
         || lower.ends_with(".py")
         || lower.ends_with(".rs")
         || lower.ends_with(".cpp")

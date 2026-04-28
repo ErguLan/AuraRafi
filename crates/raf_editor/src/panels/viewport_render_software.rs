@@ -4,8 +4,35 @@ impl ViewportPanel {
     pub(super) fn should_use_software_raster(&self, edit_target: Option<SceneNodeId>) -> bool {
         self.render_cfg.depth_accurate
             && edit_target.is_none()
-            && self.render_style == RenderStyle::Solid
+            && matches!(self.render_style, RenderStyle::Solid | RenderStyle::Preview)
             && !self.solid_xray_mode
+    }
+
+    fn preview_face_draw_style(
+        &self,
+        color: &NodeColor,
+        is_selected: bool,
+        brightness: f32,
+    ) -> ([u8; 4], [u8; 4], f32) {
+        let shaded = if is_selected {
+            depth_sort::shade_color(
+                theme::ACCENT.r(),
+                theme::ACCENT.g(),
+                theme::ACCENT.b(),
+                220,
+                brightness,
+            )
+        } else {
+            depth_sort::shade_color(color.r, color.g, color.b, 210, brightness)
+        };
+
+        let wire_color = if is_selected {
+            [theme::ACCENT.r(), theme::ACCENT.g(), theme::ACCENT.b(), 255]
+        } else {
+            [color.r, color.g, color.b, 220]
+        };
+
+        (shaded, wire_color, if is_selected { 2.0 } else { 1.0 })
     }
 
     pub(super) fn solid_face_draw_style(
@@ -104,7 +131,24 @@ impl ViewportPanel {
             if let Some(edit_mesh) = editable_mesh.as_ref() {
                 for (triangle, normal) in edit_mesh.render_faces() {
                     let brightness = depth_sort::face_brightness(normal, light_dir, &model);
-                    let color = self.solid_face_color(&node.color, is_selected, brightness);
+                    let (color, edge_color, edge_width, draw_edges) = match self.render_style {
+                        RenderStyle::Solid => {
+                            let (_, draw_edges, edge_color, edge_width) =
+                                self.solid_face_draw_style(&node.color, is_selected, brightness);
+                            (
+                                self.solid_face_color(&node.color, is_selected, brightness),
+                                edge_color,
+                                edge_width,
+                                draw_edges,
+                            )
+                        }
+                        RenderStyle::Preview => {
+                            let (face, edge, width) =
+                                self.preview_face_draw_style(&node.color, is_selected, brightness);
+                            (face, edge, width, true)
+                        }
+                        RenderStyle::Wireframe => continue,
+                    };
                     let corners = [triangle[0], triangle[1], triangle[2], triangle[2]];
 
                     if let Some((screen, depth)) = project_quad_for_raster(
@@ -116,13 +160,13 @@ impl ViewportPanel {
                     ) {
                         rasterize_quad(&mut framebuffer, &screen, &depth, color);
 
-                        if self.solid_show_surface_edges {
+                        if draw_edges {
                             rasterize_selection_outline(
                                 &mut framebuffer,
                                 &screen,
                                 &depth,
-                                self.solid_edge_color(is_selected),
-                                if is_selected { 2.0 } else { 1.0 },
+                                edge_color,
+                                edge_width,
                             );
                         }
 
@@ -154,7 +198,24 @@ impl ViewportPanel {
 
             for (corners, normal) in &faces {
                 let brightness = depth_sort::face_brightness(*normal, light_dir, &model);
-                let color = self.solid_face_color(&node.color, is_selected, brightness);
+                let (color, edge_color, edge_width, draw_edges) = match self.render_style {
+                    RenderStyle::Solid => {
+                        let (_, draw_edges, edge_color, edge_width) =
+                            self.solid_face_draw_style(&node.color, is_selected, brightness);
+                        (
+                            self.solid_face_color(&node.color, is_selected, brightness),
+                            edge_color,
+                            edge_width,
+                            draw_edges,
+                        )
+                    }
+                    RenderStyle::Preview => {
+                        let (face, edge, width) =
+                            self.preview_face_draw_style(&node.color, is_selected, brightness);
+                        (face, edge, width, true)
+                    }
+                    RenderStyle::Wireframe => continue,
+                };
 
                 if let Some((screen, depth)) = project_quad_for_raster(
                     corners,
@@ -165,13 +226,13 @@ impl ViewportPanel {
                 ) {
                     rasterize_quad(&mut framebuffer, &screen, &depth, color);
 
-                    if self.solid_show_surface_edges {
+                    if draw_edges {
                         rasterize_selection_outline(
                             &mut framebuffer,
                             &screen,
                             &depth,
-                            self.solid_edge_color(is_selected),
-                            if is_selected { 2.0 } else { 1.0 },
+                            edge_color,
+                            edge_width,
                         );
                     }
 

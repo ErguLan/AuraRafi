@@ -14,18 +14,26 @@ use raf_core::scene::graph::Primitive;
 use raf_core::scene::SceneGraph;
 use raf_render::render_config::RenderConfig;
 
+#[path = "panels/hub.rs"]
+mod hub;
+
 use crate::ui_icons::UiIconAtlas;
+use crate::game_runtime::{GameRuntimeState, RuntimeInputState};
 use crate::panels::ai_chat::AiChatPanel;
 use crate::panels::asset_browser::AssetBrowserPanel;
 use crate::panels::console::{ConsolePanel, LogLevel};
 use crate::panels::hierarchy::HierarchyPanel;
+use crate::panels::node_editor::NodeEditorDocument;
 use crate::panels::node_editor::NodeEditorPanel;
+use crate::panels::pcb_panels;
+use crate::panels::pcb_view::PcbViewPanel;
 use crate::panels::properties::PropertiesPanel;
 use crate::panels::project_settings;
 use crate::panels::schematic_panels;
 use crate::panels::schematic_view::SchematicViewPanel;
 use crate::panels::settings_panel;
 use crate::panels::viewport::ViewportPanel;
+use crate::pcb_document::{load_pcb_document, save_pcb_document};
 use crate::schematic_document::{load_schematic_document, save_schematic_document};
 use crate::theme as app_theme;
 
@@ -68,6 +76,21 @@ enum BottomTab {
 enum ViewportMode {
     Scene,
     Schematic,
+    Pcb,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HubProjectFilter {
+    All,
+    Game,
+    Electronics,
+}
+
+#[derive(Debug, Clone)]
+enum EditorHistorySnapshot {
+    Scene(String),
+    Schematic(String),
+    Pcb(String),
 }
 
 const EDITOR_UI_ICONS: &[&str] = &[
@@ -104,6 +127,18 @@ const EDITOR_UI_ICONS: &[&str] = &[
     "visible.png",
 ];
 
+const HUB_UI_ICONS: &[&str] = &[
+    "delete_HUB.png",
+    "duplicate_HUB.png",
+    "favorite_pin_HUB.png",
+    "open_HUB.png",
+    "project_type_HUB.png",
+    "search_filter_HUB.png",
+    "settings_HUB.png",
+    "project_game.png",
+    "project_electronics.png",
+];
+
 // ---------------------------------------------------------------------------
 // Main app
 // ---------------------------------------------------------------------------
@@ -119,6 +154,7 @@ pub struct AuraRafiApp {
     // Active project
     current_project: Option<Project>,
     scene: SceneGraph,
+    runtime: Option<GameRuntimeState>,
 
     // Editor panels
     viewport: ViewportPanel,
@@ -129,6 +165,7 @@ pub struct AuraRafiApp {
     ai_chat: AiChatPanel,
     node_editor: NodeEditorPanel,
     schematic_view: SchematicViewPanel,
+    pcb_view: PcbViewPanel,
 
     // Editor state
     bottom_tab: BottomTab,
@@ -148,13 +185,15 @@ pub struct AuraRafiApp {
     last_action: String,
     /// Elapsed seconds since last auto-save.
     auto_save_elapsed: f32,
-    /// Snapshots for undo (lightweight RON of scene).
-    undo_stack: Vec<String>,
+    /// Snapshots for undo in the active editor document.
+    undo_stack: Vec<EditorHistorySnapshot>,
     /// Snapshots for redo.
-    redo_stack: Vec<String>,
+    redo_stack: Vec<EditorHistorySnapshot>,
     /// Project logo texture.
     logo_texture: Option<egui::TextureHandle>,
     ui_icons: UiIconAtlas,
+    hub_search_query: String,
+    hub_filter: HubProjectFilter,
 }
 
 impl AuraRafiApp {
@@ -185,6 +224,7 @@ impl AuraRafiApp {
             recent_projects,
             current_project: None,
             scene: SceneGraph::new(),
+            runtime: None,
             viewport: ViewportPanel::default(),
             hierarchy: HierarchyPanel::default(),
             properties: PropertiesPanel::default(),
@@ -193,6 +233,7 @@ impl AuraRafiApp {
             ai_chat: AiChatPanel::default(),
             node_editor: NodeEditorPanel::default(),
             schematic_view: SchematicViewPanel::default(),
+            pcb_view: PcbViewPanel::default(),
 
             complement_registry: raf_core::complement::ComplementRegistry::new(),
             command_bus: raf_core::command::CommandBus::new(),
@@ -209,6 +250,8 @@ impl AuraRafiApp {
             redo_stack: Vec::new(),
             logo_texture: None,
             ui_icons: UiIconAtlas::default(),
+            hub_search_query: String::new(),
+            hub_filter: HubProjectFilter::All,
         }
     }
 }
@@ -359,304 +402,6 @@ impl AuraRafiApp {
     }
 
     // -----------------------------------------------------------------------
-    // Project Hub
-    // -----------------------------------------------------------------------
-
-    /// Show the project hub (recent projects + create new).
-    fn show_project_hub(&mut self, ctx: &egui::Context) {
-        let _lang = self.settings.language;
-        let is_dark = ctx.style().visuals.dark_mode;
-        let palette = app_theme::palette_for_visuals(is_dark, self.settings.theme_experimental);
-        
-        let bg_color = palette.bg;
-        let panel_color = palette.panel;
-        let text_color = palette.text;
-        let text_dim_color = palette.text_dim;
-        let border_color = palette.border;
-
-        // --- Load Logo Texture ---
-        let logo_res = self.logo_texture.get_or_insert_with(|| {
-            let icon_bytes = include_bytes!("../../../editor/icon.png");
-            let image = image::load_from_memory(icon_bytes).expect("Failed to load icon");
-            let rgba = image.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            ctx.load_texture(
-                "hub_logo",
-                egui::ColorImage::from_rgba_unmultiplied(
-                    [w as usize, h as usize],
-                    &rgba.to_vec(),
-                ),
-                egui::TextureOptions::default()
-            )
-        });
-        let logo_id = logo_res.id();
-
-        egui::SidePanel::left("hub_sidebar")
-            .frame(egui::Frame::none().fill(bg_color))
-            .resizable(false)
-            .default_width(200.0)
-            .show(ctx, |ui| {
-                // --- Professional Logo ---
-                ui.vertical_centered(|ui| {
-                    ui.add_space(20.0);
-                    ui.image((logo_id, egui::vec2(52.0, 52.0)));
-                    ui.add_space(8.0);
-                    ui.label(egui::RichText::new("AuraRafi").strong().color(text_color));
-                });
-                
-                ui.add_space(32.0);
-
-                ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
-                    ui.spacing_mut().item_spacing.y = 4.0;
-                    
-                    // Sidebar active stylings
-                    let active_bg = palette.widget_active;
-                    let inactive_bg = egui::Color32::TRANSPARENT;
-                    
-                    // My Projects - Active
-                    let btn_projects = egui::Button::new(
-                        egui::RichText::new("My Projects").color(app_theme::ACCENT).size(13.0)
-                    ).fill(active_bg).rounding(4.0).frame(true);
-                    
-                    if ui.add_sized([ui.available_width() - 16.0, 30.0], btn_projects).clicked() {
-                        // Already here
-                    }
-
-                    ui.add_space(4.0);
-
-                    // Settings - Inactive
-                    let btn_settings = egui::Button::new(
-                        egui::RichText::new("Settings").color(text_dim_color).size(13.0)
-                    ).fill(inactive_bg).rounding(4.0).frame(false);
-
-                    if ui.add_sized([ui.available_width() - 16.0, 30.0], btn_settings).clicked() {
-                        self.previous_screen = Some(AppScreen::ProjectHub);
-                        self.screen = AppScreen::Settings;
-                    }
-                });
-            });
-
-        // --- Main Content ---
-        egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(panel_color))
-            .show(ctx, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                ui.add_space(30.0);
-                
-                // Header (Welcome)
-                ui.label(
-                    egui::RichText::new("AuraRafi Project Hub")
-                        .size(22.0)
-                        .color(text_color),
-                );
-                ui.label(
-                    egui::RichText::new("Develop your own game or electronic project")
-                        .size(13.0)
-                        .color(text_dim_color),
-                );
-                
-                ui.add_space(36.0);
-
-                // --- TOP: Create New Cards ---
-                ui.columns(2, |columns| {
-                    // Game Project
-                    let ui0 = &mut columns[0];
-                    let game_frame = egui::Frame::none()
-                        .fill(palette.widget)
-                        .rounding(6.0)
-                        .inner_margin(20.0)
-                        .stroke(egui::Stroke::new(1.0, border_color));
-                        
-                    let game_card = game_frame.show(ui0, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new("NEW GAME").strong().size(13.0).color(text_color));
-                                ui.add_space(4.0);
-                                ui.label(egui::RichText::new("Start a blank 3D project.").size(12.0).color(text_dim_color));
-                            });
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new("+").size(20.0).color(app_theme::ACCENT));
-                            });
-                        });
-                    });
-                    
-                    let resp = ui0.interact(game_card.response.rect, ui0.id().with("game_card_click"), egui::Sense::click());
-                    if resp.clicked() {
-                        self.screen = AppScreen::NewProject {
-                            name: String::new(),
-                            path: default_projects_dir(),
-                            project_type: ProjectType::Game,
-                        };
-                    }
-                    if resp.hovered() {
-                        ui0.painter().rect_stroke(game_card.response.rect, 6.0, egui::Stroke::new(1.0, app_theme::ACCENT));
-                    }
-
-                    // Electronics Project
-                    let ui1 = &mut columns[1];
-                    let elec_frame = egui::Frame::none()
-                        .fill(palette.widget)
-                        .rounding(6.0)
-                        .inner_margin(20.0)
-                        .stroke(egui::Stroke::new(1.0, border_color));
-                        
-                    let elec_card = elec_frame.show(ui1, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.vertical(|ui| {
-                                ui.label(egui::RichText::new("NEW ELECTRONICS").strong().size(13.0).color(text_color));
-                                ui.add_space(4.0);
-                                ui.label(egui::RichText::new("PCB design and simulation.").size(12.0).color(text_dim_color));
-                            });
-                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                ui.label(egui::RichText::new("+").size(20.0).color(app_theme::ACCENT));
-                            });
-                        });
-                    });
-
-                    let resp = ui1.interact(elec_card.response.rect, ui1.id().with("elec_card_click"), egui::Sense::click());
-                    if resp.clicked() {
-                        self.screen = AppScreen::NewProject {
-                            name: String::new(),
-                            path: default_projects_dir(),
-                            project_type: ProjectType::Electronics,
-                        };
-                    }
-                    if resp.hovered() {
-                        ui1.painter().rect_stroke(elec_card.response.rect, 6.0, egui::Stroke::new(1.0, app_theme::ACCENT));
-                    }
-                });
-
-                ui.add_space(40.0);
-                ui.separator();
-                ui.add_space(24.0);
-
-                // --- BOTTOM: My Projects (List) ---
-                ui.label(
-                    egui::RichText::new("RECENT PROJECTS")
-                        .size(12.0)
-                        .color(text_dim_color),
-                );
-                ui.add_space(12.0);
-
-                if self.recent_projects.projects.is_empty() {
-                    ui.add_space(20.0);
-                    ui.label(
-                        egui::RichText::new("No projects yet.")
-                            .color(text_dim_color),
-                    );
-                } else {
-                    let mut open_path: Option<std::path::PathBuf> = None;
-                    let mut duplicate_path: Option<std::path::PathBuf> = None;
-                    let mut delete_path: Option<std::path::PathBuf> = None;
-
-                    for entry in &self.recent_projects.projects {
-                        let frame = egui::Frame::none()
-                            .fill(palette.widget)
-                            .rounding(6.0)
-                            .inner_margin(16.0)
-                            .stroke(egui::Stroke::new(1.0, border_color));
-
-                        frame.show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                // Left: Name and Basic Info
-                                ui.vertical(|ui| {
-                                    ui.horizontal(|ui| {
-                                        ui.label(egui::RichText::new(&entry.name).size(14.0).strong().color(text_color));
-                                        ui.add_space(8.0);
-                                        
-                                        // Elegant Pill Badge
-                                        let type_label = match entry.project_type {
-                                            ProjectType::Game => "GAME",
-                                            ProjectType::Electronics => "ELECTRONICS",
-                                        };
-                                        egui::Frame::none()
-                                            .fill(egui::Color32::from_rgba_unmultiplied(255, 140, 0, 30))
-                                            .rounding(4.0)
-                                            .inner_margin(egui::Margin::symmetric(6.0, 2.0))
-                                            .show(ui, |ui| {
-                                                ui.label(egui::RichText::new(type_label).size(10.0).strong().color(app_theme::ACCENT));
-                                            });
-                                    });
-                                    
-                                    ui.add_space(6.0);
-                                    
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(format!("Created: {}", entry.created_at.format("%d/%m/%Y")))
-                                                .size(11.0)
-                                                .color(text_dim_color)
-                                        );
-                                        ui.add_space(12.0);
-                                        ui.label(
-                                            egui::RichText::new(format!("Modified: {}", entry.modified_at.format("%d/%m/%Y")))
-                                                .size(11.0)
-                                                .color(text_dim_color)
-                                        );
-                                        ui.add_space(12.0);
-                                        
-                                        let elem_label = match entry.project_type {
-                                            ProjectType::Game => "nodes",
-                                            ProjectType::Electronics => "components",
-                                        };
-                                        ui.label(
-                                            egui::RichText::new(format!("{} {}", entry.n_elements, elem_label))
-                                                .size(11.0)
-                                                .color(text_dim_color)
-                                        );
-                                    });
-                                });
-                                
-                                // Right: Actions
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    // Primary action
-                                    let open_btn = egui::Button::new(
-                                        egui::RichText::new("Open").size(12.0).color(egui::Color32::WHITE)
-                                    ).fill(palette.widget_active).rounding(4.0);
-                                    
-                                    if ui.add_sized([60.0, 24.0], open_btn).clicked() {
-                                        open_path = Some(entry.path.clone());
-                                    }
-                                    
-                                    ui.add_space(8.0);
-                                    
-                                    // Secondary Actions
-                                    let dup_btn = egui::Button::new(
-                                        egui::RichText::new("Clone").size(11.0).color(text_dim_color)
-                                    ).fill(egui::Color32::TRANSPARENT).frame(false);
-                                    
-                                    if ui.add(dup_btn).clicked() {
-                                        duplicate_path = Some(entry.path.clone());
-                                    }
-                                    
-                                    let del_btn = egui::Button::new(
-                                        egui::RichText::new("Delete").size(11.0).color(egui::Color32::from_rgb(180, 80, 80))
-                                    ).fill(egui::Color32::TRANSPARENT).frame(false);
-                                    
-                                    if ui.add(del_btn).clicked() {
-                                        delete_path = Some(entry.path.clone());
-                                    }
-                                });
-                            });
-                        });
-                        ui.add_space(8.0);
-                    }
-                    
-                    if let Some(path) = open_path {
-                        self.open_project(&path);
-                    }
-                    if let Some(_path) = duplicate_path {
-                        // TODO: Implement clone logic
-                    }
-                    if let Some(path) = delete_path {
-                        self.recent_projects.projects.retain(|p| p.path != path);
-                        let _ = self.recent_projects.save(&dirs_config_dir());
-                    }
-                }
-            });
-        });
-    }
-
-    // -----------------------------------------------------------------------
     // New Project Form
     // -----------------------------------------------------------------------
 
@@ -783,6 +528,7 @@ impl AuraRafiApp {
                                 self.asset_browser.project_assets_path = Some(assets_dir);
                                 self.asset_browser.scan_project_folder();
                                 self.init_scene_for_type(project_type);
+                                self.runtime = None;
                                 self.screen = AppScreen::Editor;
                             }
                             Err(e) => {
@@ -822,6 +568,19 @@ impl AuraRafiApp {
 
         // --- Auto-save ---
         self.handle_auto_save(ctx);
+
+        if let Some(runtime) = self.runtime.as_mut() {
+            let report = runtime.update(
+                ctx.input(|input| input.predicted_dt.max(1.0 / 240.0)),
+                RuntimeInputState::from_egui(ctx),
+            );
+            for log in report.logs {
+                self.console.log(LogLevel::Info, &log);
+            }
+            for error in report.errors {
+                self.console.log(LogLevel::Error, &error);
+            }
+        }
 
         // Top menu bar.
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
@@ -881,13 +640,24 @@ impl AuraRafiApp {
                 ui.menu_button(t("app.view_menu", _lang), |ui| {
                     ui.checkbox(&mut self.settings.grid_visible, t("app.grid_menu", _lang));
                     ui.separator();
-                    if ui.selectable_label(self.viewport_mode == ViewportMode::Scene, t("app.scene_view", _lang)).clicked() {
-                        self.viewport_mode = ViewportMode::Scene;
-                        ui.close_menu();
-                    }
-                    if ui.selectable_label(self.viewport_mode == ViewportMode::Schematic, t("app.schematic_view", _lang)).clicked() {
-                        self.viewport_mode = ViewportMode::Schematic;
-                        ui.close_menu();
+                    match self.current_project.as_ref().map(|project| project.project_type) {
+                        Some(ProjectType::Electronics) => {
+                            if ui.selectable_label(self.viewport_mode == ViewportMode::Schematic, t("app.schematic_view", _lang)).clicked() {
+                                self.viewport_mode = ViewportMode::Schematic;
+                                ui.close_menu();
+                            }
+                            if ui.selectable_label(self.viewport_mode == ViewportMode::Pcb, t("app.pcb_view", _lang)).clicked() {
+                                self.sync_pcb_from_schematic();
+                                self.viewport_mode = ViewportMode::Pcb;
+                                ui.close_menu();
+                            }
+                        }
+                        _ => {
+                            if ui.selectable_label(self.viewport_mode == ViewportMode::Scene, t("app.scene_view", _lang)).clicked() {
+                                self.viewport_mode = ViewportMode::Scene;
+                                ui.close_menu();
+                            }
+                        }
                     }
                 });
 
@@ -922,6 +692,7 @@ impl AuraRafiApp {
                 // -- Help --
                 ui.menu_button(t("app.help_menu", _lang), |ui| {
                     ui.label(egui::RichText::new(t("app.keyboard_shortcuts", _lang)).strong());
+                    ui.label(t("app.shortcut_undo_redo_context", _lang));
                     ui.label(t("app.save_menu", _lang));
                     ui.label(t("app.undo_menu", _lang));
                     ui.label(t("app.redo_menu", _lang));
@@ -938,6 +709,7 @@ impl AuraRafiApp {
                     ui.label(t("app.shortcut_focus_selected", _lang));
                     ui.label(t("app.shortcut_toggle_edit_mode", _lang));
                     ui.label(t("app.shortcut_reset_view", _lang));
+                    ui.label(t("app.shortcut_customization_experimental", _lang));
                     ui.separator();
                     ui.label(format!("Proyecto Rafi v{}", env!("CARGO_PKG_VERSION")));
                     // No unconditional ui.close_menu() -- keeps menu open.
@@ -950,7 +722,13 @@ impl AuraRafiApp {
                         // Build/Run button - integrated into toolbar, not a floating badge.
                         let build_text = if let Some(project) = &self.current_project {
                             match project.project_type {
-                                ProjectType::Game => t("app.run_game", _lang),
+                                ProjectType::Game => {
+                                    if self.runtime.is_some() {
+                                        t("app.stop_game", _lang)
+                                    } else {
+                                        t("app.run_game", _lang)
+                                    }
+                                }
                                 ProjectType::Electronics => t("app.electrical_test_btn", _lang),
                             }
                         } else {
@@ -990,6 +768,7 @@ impl AuraRafiApp {
                         let mode_text = match self.viewport_mode {
                             ViewportMode::Scene => t("app.scene_view", _lang),
                             ViewportMode::Schematic => t("app.schematic_view", _lang),
+                            ViewportMode::Pcb => t("app.pcb_view", _lang),
                         };
                         ui.label(
                             egui::RichText::new(mode_text)
@@ -1031,6 +810,15 @@ impl AuraRafiApp {
                             self.schematic_view.schematic.components.len(),
                             t("app.schematic_wires", _lang),
                             self.schematic_view.schematic.wires.len()
+                        ),
+                        ViewportMode::Pcb => format!(
+                            "{} {} | {} {} | {} {}",
+                            t("app.pcb_components", _lang),
+                            self.pcb_view.layout.components.len(),
+                            t("app.pcb_traces", _lang),
+                            self.pcb_view.layout.traces.len(),
+                            t("app.pcb_airwires", _lang),
+                            self.pcb_view.layout.airwires.len()
                         ),
                     };
                     ui.label(
@@ -1271,6 +1059,15 @@ impl AuraRafiApp {
                 .show(ctx, |ui| {
                     match self.viewport_mode {
                         ViewportMode::Scene => {
+                            if self.runtime.is_some() {
+                                ui.label(
+                                    egui::RichText::new(t("app.runtime_scene_locked", self.settings.language))
+                                        .size(11.0)
+                                        .color(palette.text_dim),
+                                );
+                                return;
+                            }
+
                             let prev_hier_vec = self.hierarchy.selected_nodes.clone();
                             self.hierarchy.show(ui, &mut self.scene, self.settings.language, &self.ui_icons);
 
@@ -1365,6 +1162,13 @@ impl AuraRafiApp {
                                 self.settings.language,
                             );
                         }
+                        ViewportMode::Pcb => {
+                            let _ = pcb_panels::show_pcb_hierarchy(
+                                ui,
+                                &mut self.pcb_view,
+                                self.settings.language,
+                            );
+                        }
                     }
             });
         }
@@ -1378,6 +1182,16 @@ impl AuraRafiApp {
                 .show(ctx, |ui| {
                     match self.viewport_mode {
                         ViewportMode::Scene => {
+                            if self.runtime.is_some() {
+                                ui.label(
+                                    egui::RichText::new(t("app.runtime_scene_locked", self.settings.language))
+                                        .size(11.0)
+                                        .color(palette.text_dim),
+                                );
+                                return;
+                            }
+
+                            let before_snapshot = self.current_history_snapshot();
                             let properties_changed = self.properties.show(
                                 ui,
                                 &mut self.scene,
@@ -1387,16 +1201,27 @@ impl AuraRafiApp {
                                 self.asset_browser.project_assets_path.as_deref(),
                             );
                             if properties_changed {
-                                self.mark_scene_modified();
+                                self.record_document_change(before_snapshot);
                             }
                         }
                         ViewportMode::Schematic => {
+                            let before_snapshot = self.current_history_snapshot();
                             if schematic_panels::show_schematic_properties(
                                 ui,
                                 &mut self.schematic_view,
                                 self.settings.language,
                             ) {
-                                self.mark_scene_modified();
+                                self.record_document_change(before_snapshot);
+                            }
+                        }
+                        ViewportMode::Pcb => {
+                            let before_snapshot = self.current_history_snapshot();
+                            if pcb_panels::show_pcb_properties(
+                                ui,
+                                &mut self.pcb_view,
+                                self.settings.language,
+                            ) {
+                                self.record_document_change(before_snapshot);
                             }
                         }
                     }
@@ -1405,17 +1230,49 @@ impl AuraRafiApp {
 
         // Central panel: Viewport or Schematic.
         egui::CentralPanel::default().show(ctx, |ui| {
+            if self
+                .current_project
+                .as_ref()
+                .map(|project| project.project_type == ProjectType::Electronics)
+                .unwrap_or(false)
+            {
+                ui.horizontal(|ui| {
+                    if ui
+                        .selectable_label(self.viewport_mode == ViewportMode::Schematic, t("app.schematic_view", self.settings.language))
+                        .clicked()
+                    {
+                        self.viewport_mode = ViewportMode::Schematic;
+                    }
+                    if ui
+                        .selectable_label(self.viewport_mode == ViewportMode::Pcb, t("app.pcb_view", self.settings.language))
+                        .clicked()
+                    {
+                        self.sync_pcb_from_schematic();
+                        self.viewport_mode = ViewportMode::Pcb;
+                    }
+                });
+                ui.add_space(8.0);
+            }
+
             match self.viewport_mode {
                 ViewportMode::Scene => {
                     self.viewport.frame_time_hint = ctx.input(|i| i.predicted_dt);
                     self.viewport.render_cfg = self
                         .current_project
                         .as_ref()
-                        .map(|project| match project.settings.runtime_render_preset {
-                            RenderPreset::Potato => RenderConfig::potato(),
-                            RenderPreset::Low => RenderConfig::low(),
-                            RenderPreset::Medium => RenderConfig::medium(),
-                            RenderPreset::High => RenderConfig::high(),
+                        .map(|project| {
+                            let mut config = match project.settings.runtime_render_preset {
+                                RenderPreset::Potato => RenderConfig::potato(),
+                                RenderPreset::Low => RenderConfig::low(),
+                                RenderPreset::Medium => RenderConfig::medium(),
+                                RenderPreset::High => RenderConfig::high(),
+                            };
+                            config.depth_accurate = project.settings.depth_accurate;
+                            config.depth_resolution_scale = project
+                                .settings
+                                .depth_resolution_scale
+                                .clamp(0.35, 1.0);
+                            config
                         })
                         .unwrap_or_else(RenderConfig::potato);
                     self.viewport.grid_visible = self.settings.grid_visible;
@@ -1435,22 +1292,42 @@ impl AuraRafiApp {
                         raf_core::config::ViewportRenderMode::Preview => crate::panels::viewport::RenderStyle::Preview,
                     };
                     self.viewport.show_labels = self.settings.show_viewport_labels;
-                    let viewport_changed = self.viewport.show(
-                        ctx,
-                        ui,
-                        &mut self.scene,
-                        self.settings.theme != Theme::Light,
-                        self.settings.language,
-                        &self.ui_icons,
-                    );
-                    if viewport_changed {
-                        self.mark_scene_modified();
+                    if let Some(runtime) = self.runtime.as_mut() {
+                        let _ = self.viewport.show(
+                            ctx,
+                            ui,
+                            &mut runtime.scene,
+                            self.settings.theme != Theme::Light,
+                            self.settings.language,
+                            &self.ui_icons,
+                        );
+                    } else {
+                        let before_snapshot = self.current_history_snapshot();
+                        let viewport_changed = self.viewport.show(
+                            ctx,
+                            ui,
+                            &mut self.scene,
+                            self.settings.theme != Theme::Light,
+                            self.settings.language,
+                            &self.ui_icons,
+                        );
+                        if viewport_changed {
+                            self.record_document_change(before_snapshot);
+                        }
                     }
                 }
                 ViewportMode::Schematic => {
+                    let before_snapshot = self.current_history_snapshot();
                     self.schematic_view.lang = self.settings.language;
                     if self.schematic_view.show(ui) {
-                        self.mark_scene_modified();
+                        self.record_document_change(before_snapshot);
+                    }
+                }
+                ViewportMode::Pcb => {
+                    let before_snapshot = self.current_history_snapshot();
+                    self.pcb_view.lang = self.settings.language;
+                    if self.pcb_view.show(ui) {
+                        self.record_document_change(before_snapshot);
                     }
                 }
             }
@@ -1553,56 +1430,104 @@ impl AuraRafiApp {
     // v0.3.0: Undo/Redo (scene snapshot based, max 50)
     // -----------------------------------------------------------------------
 
-    /// Push current scene state to undo stack.
+    /// Push current document state to undo stack.
     fn push_undo_snapshot(&mut self) {
-        // Serialize scene to RON string (lightweight).
-        if let Ok(data) = ron::ser::to_string(&self.scene) {
-            self.undo_stack.push(data);
-            // Cap at 50 to keep memory low.
-            if self.undo_stack.len() > 50 {
-                self.undo_stack.remove(0);
-            }
-            self.redo_stack.clear();
-            self.scene_modified = true;
+        if let Some(snapshot) = self.current_history_snapshot() {
+            self.push_history_snapshot(snapshot);
         }
+    }
+
+    fn current_history_snapshot(&self) -> Option<EditorHistorySnapshot> {
+        match self.viewport_mode {
+            ViewportMode::Scene => ron::ser::to_string(&self.scene)
+                .ok()
+                .map(EditorHistorySnapshot::Scene),
+            ViewportMode::Schematic => ron::ser::to_string(&self.schematic_view.schematic)
+                .ok()
+                .map(EditorHistorySnapshot::Schematic),
+            ViewportMode::Pcb => ron::ser::to_string(&self.pcb_view.layout)
+                .ok()
+                .map(EditorHistorySnapshot::Pcb),
+        }
+    }
+
+    fn push_history_snapshot(&mut self, snapshot: EditorHistorySnapshot) {
+        self.undo_stack.push(snapshot);
+        if self.undo_stack.len() > 50 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+        self.mark_scene_modified();
+    }
+
+    fn record_document_change(&mut self, before_snapshot: Option<EditorHistorySnapshot>) {
+        if let Some(snapshot) = before_snapshot {
+            self.push_history_snapshot(snapshot);
+        } else {
+            self.mark_scene_modified();
+        }
+    }
+
+    fn apply_history_snapshot(&mut self, snapshot: EditorHistorySnapshot) -> bool {
+        match snapshot {
+            EditorHistorySnapshot::Scene(data) => {
+                if let Ok(restored) = ron::from_str::<SceneGraph>(&data) {
+                    self.scene = restored;
+                    self.hierarchy.selected_node = None;
+                    self.hierarchy.selected_nodes.clear();
+                    self.viewport.selected.clear();
+                    return true;
+                }
+            }
+            EditorHistorySnapshot::Schematic(data) => {
+                if let Ok(restored) = ron::from_str::<raf_electronics::schematic::Schematic>(&data) {
+                    self.schematic_view.schematic = restored;
+                    self.schematic_view.clear_selection();
+                    self.hierarchy.selected_node = None;
+                    self.hierarchy.selected_nodes.clear();
+                    self.viewport.selected.clear();
+                    return true;
+                }
+            }
+            EditorHistorySnapshot::Pcb(data) => {
+                if let Ok(restored) = ron::from_str::<raf_electronics::PcbLayout>(&data) {
+                    self.pcb_view.layout = restored;
+                    self.pcb_view.clear_selection();
+                    self.hierarchy.selected_node = None;
+                    self.hierarchy.selected_nodes.clear();
+                    self.viewport.selected.clear();
+                    return true;
+                }
+            }
+        }
+
+        false
     }
 
     fn do_undo(&mut self) {
         if let Some(snapshot) = self.undo_stack.pop() {
-            // Save current to redo.
-            if let Ok(current) = ron::ser::to_string(&self.scene) {
+            if let Some(current) = self.current_history_snapshot() {
                 self.redo_stack.push(current);
             }
-            // Restore.
-            if let Ok(restored) = ron::from_str::<SceneGraph>(&snapshot) {
-                self.scene = restored;
-                self.hierarchy.selected_node = None;
-                self.hierarchy.selected_nodes.clear();
-                self.viewport.selected.clear();
-                let _lang = self.settings.language;
+            if self.apply_history_snapshot(snapshot) {
                 let msg = t("app.undo", self.settings.language);
                 self.last_action = msg.to_string();
                 self.console.log(LogLevel::Info, &msg);
+                self.mark_scene_modified();
             }
         }
     }
 
     fn do_redo(&mut self) {
         if let Some(snapshot) = self.redo_stack.pop() {
-            // Save current to undo.
-            if let Ok(current) = ron::ser::to_string(&self.scene) {
+            if let Some(current) = self.current_history_snapshot() {
                 self.undo_stack.push(current);
             }
-            // Restore.
-            if let Ok(restored) = ron::from_str::<SceneGraph>(&snapshot) {
-                self.scene = restored;
-                self.hierarchy.selected_node = None;
-                self.hierarchy.selected_nodes.clear();
-                self.viewport.selected.clear();
-                let _lang = self.settings.language;
+            if self.apply_history_snapshot(snapshot) {
                 let msg = t("app.redo", self.settings.language);
                 self.last_action = msg.to_string();
                 self.console.log(LogLevel::Info, &msg);
+                self.mark_scene_modified();
             }
         }
     }
@@ -1612,13 +1537,37 @@ impl AuraRafiApp {
     // -----------------------------------------------------------------------
 
     fn do_delete(&mut self) {
+        if self.runtime.is_some() && self.viewport_mode == ViewportMode::Scene {
+            let msg = t("app.runtime_scene_locked", self.settings.language);
+            self.last_action = msg.clone();
+            self.console.log(LogLevel::Info, &msg);
+            return;
+        }
+
         let _lang = self.settings.language;
         if self.viewport_mode == ViewportMode::Schematic {
+            let undo_len = self.undo_stack.len();
+            self.push_undo_snapshot();
             if self.schematic_view.delete_selection() {
                 self.mark_scene_modified();
                 let msg = t("app.delete_del", _lang);
                 self.last_action = msg.to_string();
                 self.console.log(LogLevel::Info, &msg);
+            } else if self.undo_stack.len() > undo_len {
+                self.undo_stack.pop();
+            }
+            return;
+        }
+        if self.viewport_mode == ViewportMode::Pcb {
+            let undo_len = self.undo_stack.len();
+            self.push_undo_snapshot();
+            if self.pcb_view.delete_selection() {
+                self.mark_scene_modified();
+                let msg = t("app.delete_del", _lang);
+                self.last_action = msg.to_string();
+                self.console.log(LogLevel::Info, &msg);
+            } else if self.undo_stack.len() > undo_len {
+                self.undo_stack.pop();
             }
             return;
         }
@@ -1637,14 +1586,31 @@ impl AuraRafiApp {
     }
 
     fn do_duplicate(&mut self) {
+        if self.runtime.is_some() && self.viewport_mode == ViewportMode::Scene {
+            let msg = t("app.runtime_scene_locked", self.settings.language);
+            self.last_action = msg.clone();
+            self.console.log(LogLevel::Info, &msg);
+            return;
+        }
+
         let _lang = self.settings.language;
         if self.viewport_mode == ViewportMode::Schematic {
+            let undo_len = self.undo_stack.len();
+            self.push_undo_snapshot();
             if self.schematic_view.duplicate_selection() {
                 self.mark_scene_modified();
                 let msg = t("app.duplicate_menu", _lang);
                 self.last_action = msg.to_string();
                 self.console.log(LogLevel::Info, &msg);
+            } else if self.undo_stack.len() > undo_len {
+                self.undo_stack.pop();
             }
+            return;
+        }
+        if self.viewport_mode == ViewportMode::Pcb {
+            let msg = t("app.pcb_duplicate_disabled", _lang);
+            self.last_action = msg.to_string();
+            self.console.log(LogLevel::Info, &msg);
             return;
         }
         if let Some(id) = self.hierarchy.selected_node {
@@ -1662,6 +1628,13 @@ impl AuraRafiApp {
     }
 
     fn do_select_all(&mut self) {
+        if self.runtime.is_some() && self.viewport_mode == ViewportMode::Scene {
+            let msg = t("app.runtime_scene_locked", self.settings.language);
+            self.last_action = msg.clone();
+            self.console.log(LogLevel::Info, &msg);
+            return;
+        }
+
         if self.viewport_mode == ViewportMode::Schematic {
             self.schematic_view.clear_selection();
             let _lang = self.settings.language;
@@ -1671,6 +1644,22 @@ impl AuraRafiApp {
                 self.schematic_view.schematic.components.len(),
                 t("app.schematic_wires", _lang),
                 self.schematic_view.schematic.wires.len()
+            );
+            self.last_action = msg.clone();
+            self.console.log(LogLevel::Info, &msg);
+            return;
+        }
+        if self.viewport_mode == ViewportMode::Pcb {
+            self.pcb_view.clear_selection();
+            let _lang = self.settings.language;
+            let msg = format!(
+                "{} {} | {} {} | {} {}",
+                t("app.pcb_components", _lang),
+                self.pcb_view.layout.components.len(),
+                t("app.pcb_traces", _lang),
+                self.pcb_view.layout.traces.len(),
+                t("app.pcb_airwires", _lang),
+                self.pcb_view.layout.airwires.len()
             );
             self.last_action = msg.clone();
             self.console.log(LogLevel::Info, &msg);
@@ -1688,16 +1677,26 @@ impl AuraRafiApp {
 
     fn do_save(&mut self) {
         let _lang = self.settings.language;
-        if let Some(project) = &self.current_project {
+        if let Some(project) = self.current_project.clone() {
             let _ = project.save();
             match project.project_type {
                 ProjectType::Game => {
                     let scene_path = project.path.join("scene.ron");
+                    let nodes_path = project.path.join("nodes.ron");
                     let _ = self.scene.save_ron(&scene_path);
+                    if let Ok(data) = ron::ser::to_string_pretty(
+                        &self.node_editor.document(),
+                        ron::ser::PrettyConfig::default(),
+                    ) {
+                        let _ = std::fs::write(nodes_path, data);
+                    }
                 }
                 ProjectType::Electronics => {
+                    self.sync_pcb_from_schematic();
                     let schematic_path = project.path.join("schematic.ron");
+                    let pcb_path = project.path.join("pcb_layout.ron");
                     let _ = save_schematic_document(&schematic_path, &self.schematic_view.schematic);
+                    let _ = save_pcb_document(&pcb_path, &self.pcb_view.layout);
                 }
             }
             self.scene_modified = false;
@@ -1713,12 +1712,20 @@ impl AuraRafiApp {
     // -----------------------------------------------------------------------
 
     fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
+        let text_input_active = ctx.wants_keyboard_input();
+        let node_editor_owns_history = self.bottom_tab == BottomTab::NodeEditor;
         let action: Option<u8> = ctx.input(|i| {
             let ctrl = i.modifiers.ctrl || i.modifiers.mac_cmd;
-            if ctrl && i.key_pressed(egui::Key::Z) { return Some(1); }
-            if ctrl && i.key_pressed(egui::Key::Y) { return Some(2); }
-            if ctrl && i.key_pressed(egui::Key::D) { return Some(3); }
+            if ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Z) && !node_editor_owns_history {
+                return Some(2);
+            }
             if ctrl && i.key_pressed(egui::Key::S) { return Some(4); }
+            if text_input_active {
+                return None;
+            }
+            if ctrl && i.key_pressed(egui::Key::Z) && !node_editor_owns_history { return Some(1); }
+            if ctrl && i.key_pressed(egui::Key::Y) && !node_editor_owns_history { return Some(2); }
+            if ctrl && i.key_pressed(egui::Key::D) { return Some(3); }
             if ctrl && i.key_pressed(egui::Key::A) { return Some(5); }
             if i.key_pressed(egui::Key::Delete) { return Some(6); }
             None
@@ -1764,24 +1771,34 @@ impl AuraRafiApp {
     // -----------------------------------------------------------------------
 
     fn handle_build(&mut self) {
-        if let Some(project) = &self.current_project {
+        if let Some(project) = self.current_project.clone() {
             match project.project_type {
                 ProjectType::Game => {
-                    self.console.log(
-                        LogLevel::Info,
-                        "Building game project...",
+                    if self.runtime.is_some() {
+                        self.runtime = None;
+                        let msg = t("app.runtime_stopped", self.settings.language);
+                        self.last_action = msg.clone();
+                        self.console.log(LogLevel::Info, &msg);
+                        return;
+                    }
+
+                    let (runtime, report) = GameRuntimeState::start(
+                        &self.scene,
+                        &self.node_editor.document(),
+                        Some(project.path.join("assets")),
+                        &project.settings,
                     );
-                    self.console.log(
-                        LogLevel::Info,
-                        &format!(
-                            "Scene contains {} entities",
-                            self.scene.len()
-                        ),
-                    );
-                    self.console.log(
-                        LogLevel::Warning,
-                        "Game runtime not implemented yet - scene validated successfully",
-                    );
+                    for log in report.logs {
+                        self.console.log(LogLevel::Info, &log);
+                    }
+                    for error in report.errors {
+                        self.console.log(LogLevel::Error, &error);
+                    }
+
+                    self.runtime = Some(runtime);
+                    let msg = t("app.runtime_started", self.settings.language);
+                    self.last_action = msg.clone();
+                    self.console.log(LogLevel::Info, &msg);
                 }
                 ProjectType::Electronics => {
                     self.console.log(
@@ -1823,6 +1840,19 @@ impl AuraRafiApp {
         }
     }
 
+    fn sync_pcb_from_schematic(&mut self) {
+        let summary = self.pcb_view.sync_from_schematic(&self.schematic_view.schematic);
+        let msg = format!(
+            "PCB sync: +{} / ~{} / -{} / {} nets",
+            summary.added_components,
+            summary.updated_components,
+            summary.removed_components,
+            summary.nets,
+        );
+        self.last_action = msg.clone();
+        self.console.log(LogLevel::Info, &msg);
+    }
+
     // -----------------------------------------------------------------------
     // Helpers
     // -----------------------------------------------------------------------
@@ -1836,18 +1866,31 @@ impl AuraRafiApp {
                 let ptype = project.project_type;
 
                 self.init_scene_for_type(ptype);
+                self.runtime = None;
 
                 match ptype {
                     ProjectType::Game => {
                         let scene_path = project.path.join("scene.ron");
+                        let nodes_path = project.path.join("nodes.ron");
                         if scene_path.exists() {
                             self.scene = SceneGraph::load_ron(&scene_path);
                             let msg = t("app.scene_loaded_from_file", self.settings.language);
                             self.console.log(LogLevel::Info, &msg);
                         }
+                        if nodes_path.exists() {
+                            if let Ok(data) = std::fs::read_to_string(&nodes_path) {
+                                if let Ok(document) = ron::from_str::<NodeEditorDocument>(&data) {
+                                    self.node_editor.load_document(document);
+                                }
+                            }
+                        } else {
+                            self.node_editor.load_document(NodeEditorDocument::default());
+                        }
                     }
                     ProjectType::Electronics => {
+                        self.node_editor.load_document(NodeEditorDocument::default());
                         let schematic_path = project.path.join("schematic.ron");
+                        let pcb_path = project.path.join("pcb_layout.ron");
                         self.schematic_view.schematic = if schematic_path.exists() {
                             if let Some(schematic) = load_schematic_document(&schematic_path) {
                                 let msg = t("app.schematic_loaded_from_file", self.settings.language);
@@ -1859,7 +1902,20 @@ impl AuraRafiApp {
                         } else {
                             raf_electronics::schematic::Schematic::new(&project.name)
                         };
+                        self.pcb_view.layout = if pcb_path.exists() {
+                            if let Some(layout) = load_pcb_document(&pcb_path) {
+                                let msg = t("app.pcb_loaded_from_file", self.settings.language);
+                                self.console.log(LogLevel::Info, &msg);
+                                layout
+                            } else {
+                                raf_electronics::PcbLayout::new(&project.name)
+                            }
+                        } else {
+                            raf_electronics::PcbLayout::new(&project.name)
+                        };
+                        self.sync_pcb_from_schematic();
                         self.schematic_view.clear_selection();
+                        self.pcb_view.clear_selection();
                     }
                 }
 

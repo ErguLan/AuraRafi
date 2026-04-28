@@ -8,6 +8,8 @@ use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::scene::{AudioSource, Collider, RigidBody, SceneVariable, VariableValue};
+
 /// Unique identifier for a scene node (index into the graph's node vec).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SceneNodeId(pub usize);
@@ -125,6 +127,18 @@ pub struct SceneNode {
     pub entity_index: Option<u32>,
     /// External script files attached to this entity (e.g. VS Code edited logic).
     pub scripts: Vec<String>,
+    /// Script-facing custom variables for this entity.
+    #[serde(default)]
+    pub variables: Vec<SceneVariable>,
+    /// Runtime audio source settings.
+    #[serde(default)]
+    pub audio_source: AudioSource,
+    /// Collider configuration used by the runtime.
+    #[serde(default)]
+    pub collider: Collider,
+    /// Physics body state for runtime simulation.
+    #[serde(default)]
+    pub rigid_body: RigidBody,
     /// Organizational folder/group node inside the hierarchy.
     #[serde(default)]
     pub is_folder: bool,
@@ -146,6 +160,10 @@ impl SceneNode {
             visible: true,
             entity_index: None,
             scripts: Vec::new(),
+            variables: Vec::new(),
+            audio_source: AudioSource::default(),
+            collider: Collider::default(),
+            rigid_body: RigidBody::default(),
             is_folder: false,
         }
     }
@@ -165,6 +183,10 @@ impl SceneNode {
             visible: true,
             entity_index: None,
             scripts: Vec::new(),
+            variables: Vec::new(),
+            audio_source: AudioSource::default(),
+            collider: Collider::default(),
+            rigid_body: RigidBody::default(),
             is_folder: false,
         }
     }
@@ -185,6 +207,25 @@ impl SceneNode {
             self.rotation.z.to_radians(),
         );
         Mat4::from_scale_rotation_translation(self.scale, rotation_quat, self.position)
+    }
+
+    pub fn get_variable(&self, name: &str) -> Option<&VariableValue> {
+        self.variables
+            .iter()
+            .find(|variable| variable.name == name)
+            .map(|variable| &variable.value)
+    }
+
+    pub fn set_variable(&mut self, name: &str, value: VariableValue) {
+        if let Some(variable) = self.variables.iter_mut().find(|variable| variable.name == name) {
+            variable.value = value;
+            return;
+        }
+
+        self.variables.push(SceneVariable {
+            name: name.to_string(),
+            value,
+        });
     }
 }
 
@@ -267,6 +308,38 @@ impl SceneGraph {
             .enumerate()
             .find(|(_, node)| !node.name.is_empty() && node.name == name)
             .map(|(index, _)| SceneNodeId(index))
+    }
+
+    pub fn node_path(&self, id: SceneNodeId) -> Option<String> {
+        if !self.is_valid_node(id) {
+            return None;
+        }
+
+        let mut segments = Vec::new();
+        let mut current = Some(id);
+        while let Some(node_id) = current {
+            let node = self.nodes.get(node_id.0)?;
+            if node.name.is_empty() {
+                return None;
+            }
+            segments.push(node.name.clone());
+            current = node.parent;
+        }
+        segments.reverse();
+        Some(format!("/{}", segments.join("/")))
+    }
+
+    pub fn find_node_by_path(&self, path: &str) -> Option<SceneNodeId> {
+        let normalized = path.trim().trim_matches('/');
+        if normalized.is_empty() {
+            return None;
+        }
+
+        self.iter().find_map(|(id, _)| {
+            self.node_path(id)
+                .filter(|candidate| candidate.trim_matches('/') == normalized)
+                .map(|_| id)
+        })
     }
 
     /// Compute the world (global) transform matrix for a node by walking

@@ -20,6 +20,10 @@ fn default_main_scene_name() -> String {
     "MainScene".to_string()
 }
 
+fn default_depth_resolution_scale() -> f32 {
+    0.6
+}
+
 /// Type of project: Game or Electronics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProjectType {
@@ -61,6 +65,12 @@ pub struct ProjectSettings {
     /// Preferred runtime preset for this specific project.
     #[serde(default)]
     pub runtime_render_preset: RenderPreset,
+    /// Optional software depth pass for more accurate hidden-surface ordering.
+    #[serde(default)]
+    pub depth_accurate: bool,
+    /// Internal resolution scale used by the software depth pass.
+    #[serde(default = "default_depth_resolution_scale")]
+    pub depth_resolution_scale: f32,
     /// Scene name to create/use by default.
     #[serde(default = "default_main_scene_name")]
     pub default_scene_name: String,
@@ -77,6 +87,8 @@ impl Default for ProjectSettings {
             enable_physics: true,
             pause_when_unfocused: true,
             runtime_render_preset: RenderPreset::Potato,
+            depth_accurate: false,
+            depth_resolution_scale: default_depth_resolution_scale(),
             default_scene_name: default_main_scene_name(),
         }
     }

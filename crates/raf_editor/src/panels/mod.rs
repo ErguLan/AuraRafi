@@ -8,6 +8,8 @@ pub mod behaviors;
 pub mod console;
 pub mod hierarchy;
 pub mod node_editor;
+pub mod pcb_panels;
+pub mod pcb_view;
 pub mod project_settings;
 pub mod properties;
 pub mod schematic_panels;
