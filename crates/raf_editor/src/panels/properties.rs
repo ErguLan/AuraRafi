@@ -158,6 +158,20 @@ impl PropertiesPanel {
                         changed = true;
                     }
                 });
+
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(t("app.opacity", lang));
+
+                    let mut opacity = node.color.a as f32 / 255.0;
+                    if ui
+                        .add(egui::Slider::new(&mut opacity, 0.0..=1.0).show_value(true))
+                        .changed()
+                    {
+                        node.color.a = (opacity * 255.0).round().clamp(0.0, 255.0) as u8;
+                        changed = true;
+                    }
+                });
             });
 
             ui.add_space(4.0);

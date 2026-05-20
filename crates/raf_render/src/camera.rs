@@ -75,4 +75,9 @@ impl Camera {
     pub fn view_projection(&self, width: f32, height: f32) -> Mat4 {
         self.projection_matrix(width, height) * self.view_matrix()
     }
+
+    /// Camera eye position in world space.
+    pub fn eye(&self) -> Vec3 {
+        self.position
+    }
 }

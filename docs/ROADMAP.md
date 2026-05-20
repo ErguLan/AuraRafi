@@ -186,6 +186,39 @@ Follow-up work after 0.8.0:
 - [ ] Connect animation collision to playback (check colliders each animation step, trigger response on hit)
 - [ ] IK (Inverse Kinematics) for procedural foot placement and hand grabs
 
+## v0.8.5 - Viewport & Renderer Restructure (Done)
+
+Full architectural rewrite of the viewport and render pipeline. The monolithic viewport file was split into a thin editor shell plus a renderer-side bridge layer. The rendering backend was replaced with a proper Z-buffer scanline rasterizer.
+
+### Viewport Architecture
+- [x] Viewport shell refactored to ~302 line thin egui panel (`viewport.rs`)
+- [x] HUD toolbar with G/R/S/F buttons, 2D/3D toggle, OBJ/VTX mode badge, info pill, axis gizmo (`viewport_hud.rs`)
+- [x] Object mode input: gizmo drag, entity picking, shift-select, keyboard shortcuts (`viewport_interaction.rs`)
+- [x] Vertex edit mode input: click-to-select vertices, drag-to-move, Tab toggle (`viewport_interaction.rs`)
+- [x] Overlay drawing: entity labels, gizmo arrows/rotation rings/scale cubes, vertex dots/edges (`viewport_overlay.rs`)
+- [x] HUD click blocking: UI overlays consume clicks before they reach world picking
+
+### Renderer Bridge (`raf_render::bridge`)
+- [x] `ViewportBridge`: owns camera state, renderer, edit session, and transform controller — zero egui dependency
+- [x] `ViewportTransformController`: gizmo drag lifecycle (translate/rotate/scale) with screen-space axis projection
+- [x] `ViewportEditSession`: per-entity editable mesh state, vertex picking (10px), vertex dragging (world→local via inverse rotation)
+- [x] Precise entity picking: ray-sphere broad phase + ray-triangle narrow phase (replaces old screen-space distance check)
+
+### Render Pipeline (`raf_render::scene_renderer`)
+- [x] Full MVP transform pipeline: model → view → projection → perspective divide → screen coords
+- [x] 6-plane frustum culling (discard entities outside camera view before rasterizing)
+- [x] Z-buffer scanline rasterizer with per-pixel f32 depth test (replaces old painter's algorithm)
+- [x] Flat shading: `brightness = 0.3 + 0.7 × max(0, dot(normal, light))`
+- [x] Transparency support: opaques front-to-back (early Z), transparents back-to-front with src-over alpha blend
+- [x] Render modes: Solid (fill + wire on selected), Wireframe (edges only), Preview (fill + wire on all)
+- [x] RenderOptions: solid_show_surface_edges, solid_xray_mode, solid_face_tonality, selection_outline
+- [x] `geometry/` module: indexed `MeshData` with positions + normals + indices, primitive constructors
+- [x] `math/` module: `transform.rs` (project_point, screen_to_world_ray), `frustum.rs`, `ray.rs` (ray_sphere, ray_triangle)
+- [x] `render_pipeline/` module: `framebuffer.rs` (RGBA + depth, blend_pixel), `rasterizer.rs` (scanline fill + line draw)
+- [x] Camera dual-mode: Perspective (fov, orbit) and Orthographic (scale, pan) with `CameraMode` enum
+- [x] Framebuffer reuse across frames (no per-frame allocation), mesh caching per primitive type
+
+
 ## v0.9.0 - AI Integration
 
 ### Infrastructure (prepared)

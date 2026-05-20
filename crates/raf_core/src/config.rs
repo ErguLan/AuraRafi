@@ -57,6 +57,10 @@ fn default_rotate_sensitivity() -> f32 {
     3.5
 }
 
+fn default_grid_load_distance() -> f32 {
+    15.0
+}
+
 // ---------------------------------------------------------------------------
 // Language
 // ---------------------------------------------------------------------------
@@ -191,6 +195,8 @@ pub struct EngineSettings {
     pub grid_visible: bool,
     pub snap_to_grid: bool,
     pub grid_size: f32,
+    #[serde(default = "default_grid_load_distance")]
+    pub grid_load_distance: f32,
     pub auto_save_interval_seconds: u32,
     pub units_metric: bool,
 
@@ -296,6 +302,7 @@ impl Default for EngineSettings {
             grid_visible: true,
             snap_to_grid: true,
             grid_size: 1.0,
+            grid_load_distance: 15.0,
             auto_save_interval_seconds: 120,
             units_metric: true,
             solid_show_surface_edges: false,

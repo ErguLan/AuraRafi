@@ -154,38 +154,46 @@ Lightweight pub/sub system with type-erased events:
 
 ## Rendering (raf_render)
 
-Lightweight rendering via CPU projection + egui painter (active path today, no GPU pipeline required):
+CPU-first rendering engine with a modular, zero-egui-dependency architecture.
 
-- `Renderer`: High-level renderer holding pipeline config
-- `RenderPipeline`: Quality-dependent config (shadows, AO, AA, bloom) for future or optional GPU path
-- `Camera`: Perspective and orthographic modes with view/projection matrices, orbit controls
+### New Renderer Architecture (v0.9.0)
+
+The viewport was restructured into three clean layers:
+
+**Layer 1 — Editor Shell** (`raf_editor::panels::viewport`)
+- `viewport.rs`: Thin ~302 line egui panel shell. Allocates rect, delegates camera input, calls render, uploads image, dispatches overlays.
+- `viewport_hud.rs`: Toolbar (G/R/S/F buttons), 2D/3D toggle, OBJ/VTX mode badge, info pill, axis gizmo corner widget.
+- `viewport_interaction.rs`: Object mode input (gizmo drag, entity pick, shift-select), edit mode input (vertex click/drag), keyboard shortcuts (G/R/S/F/Tab).
+- `viewport_overlay.rs`: Entity labels, gizmo arrows/arrowheads/rotation rings/scale cubes, vertex edit dots/edges.
+- `viewport_grid.rs`: 2D flat grid and 3D projected grid via egui painter.
+
+**Layer 2 — Bridge** (`raf_render::bridge`)
+- `viewport_bridge.rs`: Owns camera state (orbit yaw/pitch/distance, 2D offset/zoom), `SceneRenderer`, `ViewportEditSession`, and `ViewportTransformController`. Exposes `handle_camera_input()`, `render()`, `pick_entity()`, and transform/edit drag APIs. Zero egui dependency.
+- `input_handler.rs`: Per-entity `EditableMesh` state via `ViewportEditSession`. Vertex picking (10px screen threshold), vertex dragging (world delta → inverse rotation → local space move), precise entity picking (ray-sphere broad phase + ray-triangle narrow phase), projected overlay data for egui painting.
+- `transform_controller.rs`: `ViewportTransformController` with gizmo state and drag lifecycle (translate/rotate/scale). Projects mouse delta onto active axis in screen space, scales to world units via orbit distance.
+
+**Layer 3 — Pixel Production** (`raf_render::scene_renderer`)
+- `scene_renderer.rs`: Full render pipeline orchestrator. Scene in → frustum cull → collect RenderJobs → sort (opaques front-to-back, transparents back-to-front) → per-triangle MVP transform → near-plane clip → perspective divide → flat shade → scanline rasterize with Z-buffer → wireframe overlay → pixels out.
+- `geometry/`: `MeshData` (indexed triangle mesh with positions + normals + indices), primitive constructors (cube, cylinder, sphere, plane).
+- `math/`: `transform.rs` (MVP, project_point, screen_to_world_ray), `frustum.rs` (6-plane culling), `ray.rs` (Ray struct, ray_sphere, ray_triangle).
+- `render_pipeline/`: `framebuffer.rs` (RGBA + f32 depth buffer, blend_pixel for alpha compositing), `rasterizer.rs` (scanline fill, line draw, blended variant).
+
+**Render modes**: `RenderMode::Solid` (filled, wireframe on selected), `RenderMode::Wireframe` (edges only), `RenderMode::Preview` (filled + wireframe on all). Additional per-frame options via `RenderOptions`: `solid_show_surface_edges`, `solid_xray_mode`, `solid_face_tonality`, `selection_outline`, `selection_outline_color`.
+
+**Transparency**: opaques rendered front-to-back (early Z), transparents back-to-front with `blend_pixel()` src-over alpha compositing. Two separate rasterization paths (opaque vs blended) to avoid branching on the hot path.
+
+### Legacy Modules (preserved for backward compatibility)
+
+- `camera`: Perspective and orthographic modes with view/projection matrices, `CameraMode` enum
 - `mesh`: Static vertex data for primitives (edges + face quads with normals)
-  - Cube: 12 wireframe edges, 6 face quads
-  - Sphere: 3-circle wireframe, UV sphere faces (configurable stacks x slices)
-  - Plane: 5 wireframe edges, 1 face quad
-  - Cylinder: ring + vertical wireframe edges, side quads + cap fan triangles
 - `projection`: 3D-to-2D screen projection, perspective divide, face brightness shading
 - `editable`: EditableMesh with selectable vertices/faces, move/scale/extrude/delete ops, per-axis scaling, wireframe+render output
-- `gizmo`: Transform gizmo with per-axis handles (X/Y/Z), hit testing, translate/scale/rotate modes
+- `gizmo`: Transform gizmo data model with per-axis handles (X/Y/Z), hit testing, translate/scale/rotate modes
 - `lod`: Level of Detail system, 3 distance-based levels, auto-cull, segment helpers
-- `AntiAliasing`: None, FXAA, MSAA4x (reserved for future GPU path)
-- `backend`: CPU/GPU render backend switch with adaptive frame budget tracking
-  - CPU painter: default, zero GPU memory, zero shaders. Runs on any hardware.
-  - GPU wgpu: opt-in only, for scenes with 300+ entities. Never auto-switches.
-  - `BackendConfig`: gpu_suggest_threshold, cpu_max_triangles, frame_budget_ms
-  - `FrameRenderStats`: per-frame triangle count, render time, over-budget detection
-  - `BackendConfig::potato()`: absolute minimum resource preset (2000 tris, 30fps budget)
-- `depth_sort`: Painter's algorithm for correct face rendering order
-  - `DepthSorter`: collects all faces from all entities, applies model/view_proj transforms, backface culling, perspective divide, sorts by depth (farthest first)
-  - `SortableFace`: pre-projected screen points, RGBA color, depth value, optional wireframe stroke
-  - `shade_color()`: applies brightness to base color, returns RGBA premultiplied
-  - Reused across frames (no allocation per frame). O(n log n) sort.
-- `picking`: Screen-space entity picking and transform gizmo geometry
-  - `pick_entity()`: projects entity centers, finds closest within 30px threshold
-  - `GizmoArrow`: 3 arrows (X red, Y green, Z blue) with configurable length (1.2 units) and arrowhead (15% of shaft)
-  - `project_gizmo_arrow()`: entity_pos -> screen arrow with shaft, arrowhead triangle, axis label
-  - `pick_gizmo_arrow()`: hit-test click against all 3 arrows (8px tolerance), returns axis index
-  - `point_to_segment_distance()`: helper for line hit testing (also used in wire selection)
+- `backend`: CPU/GPU render backend switch with adaptive frame budget tracking (potato preset: 2000 tris, 30fps budget)
+- `depth_sort`: Painter's algorithm for legacy rendering path (superseded by Z-buffer in new pipeline)
+- `picking`: Screen-space entity picking and transform gizmo geometry (arrows, rotation rings, arrowheads, hit testing)
+
 
 ### Render Abstraction Layer (prepared, zero cost when inactive unless opted into)
 
@@ -265,7 +273,7 @@ Visual editor built on `egui`/`eframe`:
 
 ### Panels
 
-- **Viewport**: 2D/3D hybrid view with filled mesh rendering, flat shading, wireframe toggle (Solid/Wire/Fill), orbit camera, grid, axis gizmo, tool toolbar
+- **Viewport**: Modular 2D/3D editor shell (`viewport.rs` ~302 lines) delegating to `raf_render::bridge`. Z-buffered CPU rendering with Solid/Wireframe/Preview modes. Orbit camera, 3D projected grid, entity labels, transform gizmos (G/R/S), vertex edit mode (Tab toggle), HUD toolbar with 2D/3D toggle + OBJ/VTX badge + info pill + axis gizmo. Sub-modules: `viewport_hud.rs`, `viewport_interaction.rs`, `viewport_overlay.rs`, `viewport_grid.rs`.
 - **Hierarchy**: Scene tree with selection and collapsible groups
 - **Properties**: Transform editing, RGB color picker with 7 presets, primitive type dropdown, visibility toggle
 - **Console**: Log output with severity filters and auto-scroll

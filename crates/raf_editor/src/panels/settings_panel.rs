@@ -252,6 +252,16 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
 
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(t("settings.grid_load_distance", settings.language)).size(12.0));
+                        ui.add(
+                            egui::DragValue::new(&mut settings.grid_load_distance)
+                                .speed(0.5)
+                                .range(0.0..=500.0),
+                        );
+                    });
+
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
                         ui.label(egui::RichText::new(t("settings.auto_save", settings.language)).size(12.0));
                         ui.add(
                             egui::DragValue::new(&mut settings.auto_save_interval_seconds)

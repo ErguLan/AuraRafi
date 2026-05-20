@@ -1,15 +1,23 @@
 //! # raf_render
 //!
 //! 2D/3D rendering engine for AuraRafi.
-//! Layered architecture: SceneGraph -> RenderAbstraction -> Backend.
 //!
-//! Core: CPU projection + egui painter (zero GPU, runs on any hardware).
-//! Prepared: wgpu pipeline, PBR materials, RT, GPU deformation, world streaming.
-//! All advanced features are zero-cost when disabled (potato mode unaffected).
+//! Architecture (v0.9.0+):
+//! - `geometry/`       - Indexed triangle mesh data and primitive constructors
+//! - `math/`           - Matrix transforms, ray casting, frustum culling
+//! - `render_pipeline/`- CPU scanline rasterizer with Z-buffer
+//! - `scene_renderer`  - Full scene render orchestrator (scene in, pixels out)
 //!
-//! v0.7.0: Added configurable render features with opt-in toggles.
-//! Default = potato mode. GPU-dependent features only activate when enabled
-//! AND the hardware supports them. Engine startup time is NOT affected.
+//! Legacy modules are preserved for backward compatibility with editor panels
+//! that have not yet migrated. They will be removed incrementally.
+
+// === NEW RENDERER ARCHITECTURE ===
+pub mod bridge;
+pub mod geometry;
+pub mod math;
+pub mod render_pipeline;
+pub mod scene_renderer;
+
 
 // --- Core pipeline (active today, CPU painter) ---
 pub mod backend;

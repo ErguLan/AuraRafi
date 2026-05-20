@@ -7,6 +7,8 @@
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 
+use crate::geometry::mesh_data::MeshData;
+
 // ---------------------------------------------------------------------------
 // Vertex / Face primitives
 // ---------------------------------------------------------------------------
@@ -487,6 +489,25 @@ impl EditableMesh {
             let n = face.normal(&self.vertices);
             ([a, b, c], n)
         }).collect()
+    }
+
+    /// Convert the editable mesh into the renderer's indexed triangle format.
+    pub fn to_mesh_data(&self) -> MeshData {
+        let mut mesh = MeshData::with_capacity(self.vertices.len(), self.faces.len() * 3);
+
+        for vertex in &self.vertices {
+            mesh.push_vertex(vertex.position, vertex.normal);
+        }
+
+        for face in &self.faces {
+            mesh.push_triangle(
+                face.indices[0] as u32,
+                face.indices[1] as u32,
+                face.indices[2] as u32,
+            );
+        }
+
+        mesh
     }
 }
 

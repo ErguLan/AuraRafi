@@ -182,7 +182,6 @@ impl AuraRafiApp {
                                                 t("app.hub_total_projects", lang),
                                                 &palette,
                                             );
-                                            ui.add_space(8.0);
                                             stat_chip(
                                                 ui,
                                                 &self.ui_icons,
@@ -191,7 +190,6 @@ impl AuraRafiApp {
                                                 t("app.hub_game_kind", lang),
                                                 &palette,
                                             );
-                                            ui.add_space(8.0);
                                             stat_chip(
                                                 ui,
                                                 &self.ui_icons,
@@ -942,3 +940,4 @@ fn copy_dir_recursive(source: &Path, destination: &Path) -> std::io::Result<()> 
 
     Ok(())
 }
+

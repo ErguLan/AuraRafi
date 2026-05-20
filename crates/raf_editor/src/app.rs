@@ -18,7 +18,7 @@ use raf_render::render_config::RenderConfig;
 mod hub;
 
 use crate::ui_icons::UiIconAtlas;
-use crate::game_runtime::{GameRuntimeState, RuntimeInputState};
+use crate::game_runtime::GameRuntimeState;
 use crate::panels::ai_chat::AiChatPanel;
 use crate::panels::asset_browser::AssetBrowserPanel;
 use crate::panels::console::{ConsolePanel, LogLevel};
@@ -569,19 +569,6 @@ impl AuraRafiApp {
         // --- Auto-save ---
         self.handle_auto_save(ctx);
 
-        if let Some(runtime) = self.runtime.as_mut() {
-            let report = runtime.update(
-                ctx.input(|input| input.predicted_dt.max(1.0 / 240.0)),
-                RuntimeInputState::from_egui(ctx),
-            );
-            for log in report.logs {
-                self.console.log(LogLevel::Info, &log);
-            }
-            for error in report.errors {
-                self.console.log(LogLevel::Error, &error);
-            }
-        }
-
         // Top menu bar.
         egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
@@ -722,13 +709,7 @@ impl AuraRafiApp {
                         // Build/Run button - integrated into toolbar, not a floating badge.
                         let build_text = if let Some(project) = &self.current_project {
                             match project.project_type {
-                                ProjectType::Game => {
-                                    if self.runtime.is_some() {
-                                        t("app.stop_game", _lang)
-                                    } else {
-                                        t("app.run_game", _lang)
-                                    }
-                                }
+                                ProjectType::Game => t("app.runtime_temporarily_disabled_btn", _lang),
                                 ProjectType::Electronics => t("app.electrical_test_btn", _lang),
                             }
                         } else {
@@ -750,13 +731,17 @@ impl AuraRafiApp {
                         ui.separator();
 
                         // FPS counter.
-                        let fps = ctx.input(|i| {
-                            if i.predicted_dt > 0.0 {
-                                (1.0 / i.predicted_dt) as u32
-                            } else {
-                                0
-                            }
-                        });
+                        let fps = if self.viewport_mode == ViewportMode::Scene {
+                            self.viewport.measured_fps()
+                        } else {
+                            ctx.input(|i| {
+                                if i.unstable_dt > 0.0 {
+                                    (1.0 / i.unstable_dt) as u32
+                                } else {
+                                    0
+                                }
+                            })
+                        };
                         ui.label(
                             egui::RichText::new(format!("{} FPS", fps))
                                 .size(11.0)
@@ -1256,7 +1241,7 @@ impl AuraRafiApp {
 
             match self.viewport_mode {
                 ViewportMode::Scene => {
-                    self.viewport.frame_time_hint = ctx.input(|i| i.predicted_dt);
+                    self.viewport.frame_time_hint = ctx.input(|i| i.unstable_dt.max(0.0));
                     self.viewport.render_cfg = self
                         .current_project
                         .as_ref()
@@ -1277,6 +1262,8 @@ impl AuraRafiApp {
                         .unwrap_or_else(RenderConfig::potato);
                     self.viewport.grid_visible = self.settings.grid_visible;
                     self.viewport.grid_spacing = self.settings.grid_size.max(0.1);
+                    self.viewport.grid_load_distance = self.settings.grid_load_distance.max(0.0);
+                    self.viewport.fps_limit = self.settings.fps_limit.max(15);
                     self.viewport.invert_mouse_x = self.settings.invert_mouse_x;
                     self.viewport.invert_mouse_y = self.settings.invert_mouse_y;
                     self.viewport.move_sensitivity = self.settings.move_gizmo_sensitivity.max(0.1);
@@ -1292,28 +1279,17 @@ impl AuraRafiApp {
                         raf_core::config::ViewportRenderMode::Preview => crate::panels::viewport::RenderStyle::Preview,
                     };
                     self.viewport.show_labels = self.settings.show_viewport_labels;
-                    if let Some(runtime) = self.runtime.as_mut() {
-                        let _ = self.viewport.show(
-                            ctx,
-                            ui,
-                            &mut runtime.scene,
-                            self.settings.theme != Theme::Light,
-                            self.settings.language,
-                            &self.ui_icons,
-                        );
-                    } else {
-                        let before_snapshot = self.current_history_snapshot();
-                        let viewport_changed = self.viewport.show(
-                            ctx,
-                            ui,
-                            &mut self.scene,
-                            self.settings.theme != Theme::Light,
-                            self.settings.language,
-                            &self.ui_icons,
-                        );
-                        if viewport_changed {
-                            self.record_document_change(before_snapshot);
-                        }
+                    let before_snapshot = self.current_history_snapshot();
+                    let viewport_changed = self.viewport.show(
+                        ctx,
+                        ui,
+                        &mut self.scene,
+                        self.settings.theme != Theme::Light,
+                        self.settings.language,
+                        &self.ui_icons,
+                    );
+                    if viewport_changed {
+                        self.record_document_change(before_snapshot);
                     }
                 }
                 ViewportMode::Schematic => {
@@ -1774,29 +1750,8 @@ impl AuraRafiApp {
         if let Some(project) = self.current_project.clone() {
             match project.project_type {
                 ProjectType::Game => {
-                    if self.runtime.is_some() {
-                        self.runtime = None;
-                        let msg = t("app.runtime_stopped", self.settings.language);
-                        self.last_action = msg.clone();
-                        self.console.log(LogLevel::Info, &msg);
-                        return;
-                    }
-
-                    let (runtime, report) = GameRuntimeState::start(
-                        &self.scene,
-                        &self.node_editor.document(),
-                        Some(project.path.join("assets")),
-                        &project.settings,
-                    );
-                    for log in report.logs {
-                        self.console.log(LogLevel::Info, &log);
-                    }
-                    for error in report.errors {
-                        self.console.log(LogLevel::Error, &error);
-                    }
-
-                    self.runtime = Some(runtime);
-                    let msg = t("app.runtime_started", self.settings.language);
+                    self.runtime = None;
+                    let msg = t("app.runtime_temporarily_disabled", self.settings.language);
                     self.last_action = msg.clone();
                     self.console.log(LogLevel::Info, &msg);
                 }
