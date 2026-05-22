@@ -157,7 +157,7 @@ pub enum ActiveBackend {
 
 impl Default for ActiveBackend {
     fn default() -> Self {
-        Self::CpuPainter
+        Self::Wgpu
     }
 }
 
@@ -207,9 +207,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_cpu() {
-        assert_eq!(ActiveBackend::default(), ActiveBackend::CpuPainter);
-        assert!(!ActiveBackend::CpuPainter.requires_gpu());
+    fn default_is_gpu_first() {
+        assert_eq!(ActiveBackend::default(), ActiveBackend::Wgpu);
+        assert!(ActiveBackend::default().requires_gpu());
     }
 
     #[test]

@@ -238,24 +238,27 @@ impl ViewportPanel {
         painter.rect_stroke(info_rect, 5.0, Stroke::new(0.5, hud_group_border(is_dark)));
 
         let stats = self.bridge.stats();
+        let graphics_status = self.render_runtime.status_badge();
         let info = match self.mode {
             ViewportMode::View2D => format!(
-                "{} | Zoom {:.2}x | Sel {} | R {:.1}ms | U {:.1}ms",
+                "{} | {} | Zoom {:.2}x | Sel {} | R {:.1}ms | U {:.1}ms",
                 match self.edit_mode {
                     EditMode::Object => "OBJ",
                     EditMode::Vertex => "VTX",
                 },
+                graphics_status,
                 self.bridge.zoom_2d(),
                 self.selected.len(),
                 self.render_cpu_ms(),
                 self.upload_cpu_ms(),
             ),
             ViewportMode::View3D => format!(
-                "{} | {} | E {}/{} | T {} | Sel {} | D {:.1} | Q {:.2}x | R {:.1}ms | U {:.1}ms",
+                "{} | {} | {} | E {}/{} | T {} | Sel {} | D {:.1} | Q {:.2}x | R {:.1}ms | U {:.1}ms",
                 match self.edit_mode {
                     EditMode::Object => "OBJ",
                     EditMode::Vertex => "VTX",
                 },
+                graphics_status,
                 match self.bridge.gizmo().mode {
                     GizmoMode::Translate => "Move",
                     GizmoMode::Rotate => "Rotate",

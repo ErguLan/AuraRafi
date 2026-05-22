@@ -7,7 +7,9 @@ use glam::{Mat4, Vec3};
 
 use raf_core::scene::graph::{SceneGraph, SceneNodeId};
 
+use crate::api_graphic_basic::device::SceneFrameOutput;
 use crate::bridge::input_handler::{ProjectedEditOverlay, ViewportEditSession};
+use crate::bridge::render_runtime::RenderRuntime;
 use crate::bridge::transform_controller::ViewportTransformController;
 use crate::camera::{Camera, CameraMode};
 use crate::gizmo::{GizmoAxis, GizmoMode, GizmoState};
@@ -331,6 +333,7 @@ impl ViewportBridge {
 
     pub fn render(
         &mut self,
+        render_runtime: &mut RenderRuntime,
         scene: &SceneGraph,
         vp_w: f32,
         vp_h: f32,
@@ -339,14 +342,14 @@ impl ViewportBridge {
         light_dir: Vec3,
         options: RenderOptions,
         vertex_edit_enabled: bool,
-    ) -> &[u8] {
+    ) -> SceneFrameOutput {
         let mesh_override = if vertex_edit_enabled {
             self.edit_session.mesh_override(scene, selected.first().copied())
         } else {
             None
         };
 
-        self.renderer.render(
+        let frame = self.renderer.build_frame(
             scene,
             &self.camera,
             vp_w,
@@ -356,6 +359,8 @@ impl ViewportBridge {
             light_dir,
             options,
             mesh_override.as_ref().map(|(id, mesh)| (*id, mesh)),
-        )
+        );
+        self.renderer.stats = frame.stats.clone();
+        render_runtime.render_scene_frame(&frame)
     }
 }

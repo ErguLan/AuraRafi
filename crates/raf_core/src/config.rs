@@ -120,6 +120,32 @@ impl Default for RenderQuality {
 }
 
 // ---------------------------------------------------------------------------
+// Render execution policy
+// ---------------------------------------------------------------------------
+
+/// Global render execution policy for the current machine.
+///
+/// This selects how the engine prefers to run render work in editor and
+/// runtime surfaces. Project settings may still enable heavier GPU-only
+/// features, but the base backend preference lives here so the whole app
+/// follows one consistent policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RenderExecutionPolicy {
+    /// Prefer GPU when possible and fall back to CPU automatically.
+    Auto,
+    /// Force CPU rendering for maximum compatibility.
+    CpuOnly,
+    /// Prefer GPU-backed rendering for interactive surfaces.
+    GpuPreferred,
+}
+
+impl Default for RenderExecutionPolicy {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Target platform
 // ---------------------------------------------------------------------------
 
@@ -187,6 +213,8 @@ pub struct EngineSettings {
 
     // -- Performance --
     pub render_quality: RenderQuality,
+    #[serde(default)]
+    pub render_execution_policy: RenderExecutionPolicy,
     pub fps_limit: u32,
     pub vsync: bool,
     pub multithreading: bool,
@@ -296,6 +324,7 @@ impl Default for EngineSettings {
             ui_scale: 1.0,
             language: Language::English,
             render_quality: RenderQuality::Low,
+            render_execution_policy: RenderExecutionPolicy::Auto,
             fps_limit: 60,
             vsync: true,
             multithreading: true,
@@ -371,6 +400,7 @@ mod tests {
         let s = EngineSettings::default();
         assert_eq!(s.theme, Theme::Dark);
         assert_eq!(s.language, Language::English);
+        assert_eq!(s.render_execution_policy, RenderExecutionPolicy::Auto);
         assert_eq!(s.fps_limit, 60);
     }
 

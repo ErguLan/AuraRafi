@@ -6,6 +6,7 @@ pub mod ai_chat;
 pub mod asset_browser;
 pub mod behaviors;
 pub mod console;
+pub mod gpu_canvas;
 pub mod hierarchy;
 pub mod node_editor;
 pub mod pcb_panels;

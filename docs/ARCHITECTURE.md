@@ -154,7 +154,7 @@ Lightweight pub/sub system with type-erased events:
 
 ## Rendering (raf_render)
 
-CPU-first rendering engine with a modular, zero-egui-dependency architecture.
+GPU-priority rendering engine with a modular, zero-egui-dependency architecture, and a built-in CPU software fallback via ApiGraphicBasic.
 
 ### New Renderer Architecture (v0.9.0)
 
@@ -200,8 +200,8 @@ The viewport was restructured into three clean layers:
 Architecture: `SceneGraph -> SceneRenderData -> RenderBackendTrait -> Backend`
 
 - `abstraction`: Core trait `RenderBackendTrait` - all backends implement this (init/render_frame/resize/shutdown)
-  - `RenderCapability`: 20+ flags from basic meshes to hardware RT. Query at runtime what the active backend supports
-  - `ActiveBackend`: 4 tiers - CpuPainter (default, potato), Wgpu (GPU), SoftwareRT (CPU ray tracing), HardwareRT (RTX)
+- `ActiveBackend`: 4 tiers - Wgpu (GPU, priority), CpuPainter (CPU software fallback), SoftwareRT (CPU ray tracing), HardwareRT (RTX)
+- `ApiGraphicBasic`: Unified graphics API wrapper providing simple device, command list, custom meshes, and pipeline abstractions. Runs GPU hardware rendering by default (via private wgpu context) with auto-detection fallback to CPU software rasterization on low-end potato devices. Both game views and electronics views route drawings through this API.
 - `scene_data`: Bridge between SceneGraph and render backend
   - `SceneRenderData`: complete frame package (meshes, lights, camera, environment, stats)
   - `RenderMesh`: flat GPU-ready arrays (positions, normals, UVs, indices), shadow/instance flags

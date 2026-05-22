@@ -1,8 +1,13 @@
+use eframe::egui_wgpu;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
+use glam::Vec3;
 use raf_core::i18n::t;
 use raf_electronics::component::{ElectronicComponent, Pin, PinDirection, SimModel};
 use raf_electronics::simulation::SimulationResults;
+use raf_render::api_graphic_basic::command_list::BasicCommandList;
 use raf_render::api_graphic_basic::schematic_symbols::{schematic_symbol_recipe, SchematicSymbolKind};
+use raf_render::bridge::RenderRuntime;
+use raf_render::scene_renderer::{FrameStats, SceneRenderFrame};
 
 use super::{
     COMP_BODY_H, COMP_BODY_W, ConnectionCandidate, ConnectionKind, ContextMenu,
@@ -10,26 +15,47 @@ use super::{
     SchematicViewPanel, WIRE_ENDPOINT_SNAP_DISTANCE, WIRE_HIT_DISTANCE,
     WIRE_JUNCTION_SNAP_DISTANCE,
 };
+use crate::panels::gpu_canvas::canvas_view_projection;
 use crate::theme;
 
 impl SchematicViewPanel {
-    pub(super) fn draw_canvas(&mut self, ui: &mut egui::Ui, rect: Rect) -> bool {
+    pub(super) fn draw_canvas(
+        &mut self,
+        ui: &mut egui::Ui,
+        rect: Rect,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
+    ) -> bool {
         let mut changed = false;
+        let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
+        let painter = ui.painter_at(rect);
         let hover_mouse = ui.input(|i| i.pointer.hover_pos()).filter(|mouse| rect.contains(*mouse));
         let hover_candidate = hover_mouse.map(|mouse| self.resolve_connection_candidate(mouse, rect));
         let hovered_component = hover_mouse.and_then(|mouse| self.hit_test_component(mouse, rect));
         let hovered_wire = hover_mouse.and_then(|mouse| self.hit_test_wire(mouse, rect));
+        let render_w = rect.width().max(1.0).round() as u32;
+        let render_h = rect.height().max(1.0).round() as u32;
+        let gpu_frame = self.build_gpu_canvas_frame(render_w, render_h, hovered_wire);
+        let render_output = render_runtime.render_scene_frame(&gpu_frame);
+        self.gpu_canvas
+            .present(ui.ctx(), wgpu_render_state, render_output, render_w, render_h);
+        let gpu_backdrop_ready = self.gpu_canvas.is_ready();
 
         {
-            let painter = ui.painter_at(rect);
-            painter.rect_filled(rect, 0.0, Color32::from_rgb(13, 14, 18));
+            if gpu_backdrop_ready {
+                self.gpu_canvas.paint(&painter, rect);
+            } else {
+                painter.rect_filled(rect, 0.0, Color32::from_rgb(13, 14, 18));
+            }
             painter.rect_stroke(
                 rect.shrink(0.5),
                 0.0,
                 Stroke::new(1.0, Color32::from_rgb(34, 36, 42)),
             );
 
-            self.draw_grid(&painter, rect);
+            if !gpu_backdrop_ready {
+                self.draw_grid(&painter, rect);
+            }
 
             let selected_wire = match self.selection {
                 SchematicSelection::Wire(idx) => Some(idx),
@@ -56,7 +82,9 @@ impl SchematicViewPanel {
                     (2.0 * self.zoom).max(1.5)
                 };
 
-                painter.line_segment([start, end], Stroke::new(wire_width, wire_color));
+                if !gpu_backdrop_ready {
+                    painter.line_segment([start, end], Stroke::new(wire_width, wire_color));
+                }
 
                 if is_selected || is_hovered || self.placement == PlacementMode::Wire {
                     let node_radius = (3.5 * self.zoom).max(3.0);
@@ -88,7 +116,15 @@ impl SchematicViewPanel {
                         None
                     }
                 });
-                self.draw_component(&painter, rect, comp, is_selected, is_hovered, hovered_pin);
+                self.draw_component(
+                    &painter,
+                    rect,
+                    comp,
+                    is_selected,
+                    is_hovered,
+                    hovered_pin,
+                    !gpu_backdrop_ready,
+                );
             }
 
             if let (PlacementMode::Wire, Some(start)) = (&self.placement, self.wire_start) {
@@ -165,10 +201,8 @@ impl SchematicViewPanel {
             );
         }
 
-        let resp = ui.allocate_rect(rect, egui::Sense::click_and_drag());
-
         if self.placement == PlacementMode::None {
-            if resp.drag_started_by(egui::PointerButton::Primary) {
+            if response.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(mouse) = hover_mouse {
                     if let Some(idx) = self.hit_test_component(mouse, rect) {
                         let comp_screen = self.world_to_screen(
@@ -185,7 +219,7 @@ impl SchematicViewPanel {
                 }
             }
 
-            if resp.dragged_by(egui::PointerButton::Primary) {
+            if response.dragged_by(egui::PointerButton::Primary) {
                 if let Some((idx, offset)) = self.drag_state {
                     if let Some(mouse) = hover_mouse {
                         let target_screen = Pos2::new(mouse.x - offset.x, mouse.y - offset.y);
@@ -201,12 +235,12 @@ impl SchematicViewPanel {
                 }
             }
 
-            if resp.drag_stopped_by(egui::PointerButton::Primary) {
+            if response.drag_stopped_by(egui::PointerButton::Primary) {
                 self.drag_state = None;
             }
         }
 
-        if resp.clicked() && self.drag_state.is_none() {
+        if response.clicked() && self.drag_state.is_none() {
             self.context_menu = None;
 
             if let Some(mouse) = hover_mouse {
@@ -258,7 +292,7 @@ impl SchematicViewPanel {
             }
         }
 
-        if resp.clicked_by(egui::PointerButton::Secondary) {
+        if response.clicked_by(egui::PointerButton::Secondary) {
             if let PlacementMode::Wire = self.placement {
                 if self.wire_start.is_some() {
                     self.wire_start = None;
@@ -287,12 +321,12 @@ impl SchematicViewPanel {
             }
         }
 
-        if resp.dragged_by(egui::PointerButton::Middle) {
-            self.offset += resp.drag_delta();
+        if response.dragged_by(egui::PointerButton::Middle) {
+            self.offset += response.drag_delta();
         }
 
-        if self.context_menu.is_none() && resp.dragged_by(egui::PointerButton::Secondary) {
-            self.offset += resp.drag_delta();
+        if self.context_menu.is_none() && response.dragged_by(egui::PointerButton::Secondary) {
+            self.offset += response.drag_delta();
         }
 
         if ui.rect_contains_pointer(rect) {
@@ -392,6 +426,165 @@ impl SchematicViewPanel {
         }
 
         changed
+    }
+
+    fn build_gpu_canvas_frame(
+        &self,
+        width: u32,
+        height: u32,
+        hovered_wire: Option<usize>,
+    ) -> SceneRenderFrame {
+        let mut commands = BasicCommandList::new();
+        commands.clear([13, 14, 18, 255]);
+
+        let (left, right, top, bottom) = self.visible_world_bounds(width as f32, height as f32);
+        self.record_gpu_grid(&mut commands, left, right, top, bottom);
+
+        let selected_wire = match self.selection {
+            SchematicSelection::Wire(idx) => Some(idx),
+            _ => None,
+        };
+
+        for (idx, wire) in self.schematic.wires.iter().enumerate() {
+            let color = if selected_wire == Some(idx) {
+                color32_to_rgba8(theme::ACCENT)
+            } else if hovered_wire == Some(idx) || self.placement == PlacementMode::Wire {
+                [118, 226, 134, 255]
+            } else {
+                [82, 200, 100, 255]
+            };
+
+            commands.draw_line(
+                Vec3::new(wire.start.x, wire.start.y, 0.0),
+                Vec3::new(wire.end.x, wire.end.y, 0.0),
+                color,
+                1.0,
+                true,
+                0.0,
+            );
+        }
+
+        for (idx, comp) in self.schematic.components.iter().enumerate() {
+            let color = if matches!(self.selection, SchematicSelection::Component(selected) if selected == idx) {
+                color32_to_rgba8(theme::ACCENT)
+            } else {
+                [228, 232, 240, 255]
+            };
+            self.record_component_symbol_geometry(&mut commands, comp, color);
+        }
+
+        SceneRenderFrame {
+            commands,
+            view_proj: canvas_view_projection(left, right, top, bottom),
+            light_dir: Vec3::Z,
+            width,
+            height,
+            stats: FrameStats::default(),
+        }
+    }
+
+    fn visible_world_bounds(&self, width: f32, height: f32) -> (f32, f32, f32, f32) {
+        let zoom = self.zoom.max(0.001);
+        let left = (-self.offset.x) / zoom;
+        let right = (width - self.offset.x) / zoom;
+        let top = (-self.offset.y) / zoom;
+        let bottom = (height - self.offset.y) / zoom;
+        (left, right, top, bottom)
+    }
+
+    fn record_gpu_grid(
+        &self,
+        commands: &mut BasicCommandList,
+        left: f32,
+        right: f32,
+        top: f32,
+        bottom: f32,
+    ) {
+        let step = GRID_STEP * self.zoom;
+        if step < 4.0 {
+            return;
+        }
+
+        let minor = [180, 186, 200, 14];
+        let major = [220, 226, 240, 30];
+        let axis = [212, 119, 26, 46];
+        let world_left = (left / GRID_STEP).floor() as i32 - 2;
+        let world_right = (right / GRID_STEP).ceil() as i32 + 2;
+        let world_top = (top / GRID_STEP).floor() as i32 - 2;
+        let world_bottom = (bottom / GRID_STEP).ceil() as i32 + 2;
+
+        for ix in world_left..=world_right {
+            let x = ix as f32 * GRID_STEP;
+            let color = if ix == 0 {
+                axis
+            } else if ix % 5 == 0 {
+                major
+            } else {
+                minor
+            };
+
+            commands.draw_line(
+                Vec3::new(x, top, 0.0),
+                Vec3::new(x, bottom, 0.0),
+                color,
+                1.0,
+                true,
+                0.0,
+            );
+        }
+
+        for iy in world_top..=world_bottom {
+            let y = iy as f32 * GRID_STEP;
+            let color = if iy == 0 {
+                axis
+            } else if iy % 5 == 0 {
+                major
+            } else {
+                minor
+            };
+
+            commands.draw_line(
+                Vec3::new(left, y, 0.0),
+                Vec3::new(right, y, 0.0),
+                color,
+                1.0,
+                true,
+                0.0,
+            );
+        }
+    }
+
+    fn record_component_symbol_geometry(
+        &self,
+        commands: &mut BasicCommandList,
+        comp: &ElectronicComponent,
+        color: [u8; 4],
+    ) {
+        let center = Pos2::new(comp.position.x, comp.position.y);
+        let recipe = schematic_symbol_recipe(symbol_kind_for_component(comp));
+
+        for segment in recipe.segments {
+            let start = transform_local_world_point(center, segment[0], comp.rotation);
+            let end = transform_local_world_point(center, segment[1], comp.rotation);
+            commands.draw_line(
+                Vec3::new(start.x, start.y, 0.0),
+                Vec3::new(end.x, end.y, 0.0),
+                color,
+                1.0,
+                true,
+                0.0,
+            );
+        }
+
+        for circle in recipe.open_circles {
+            let center = transform_local_world_point(center, circle.center, comp.rotation);
+            record_circle_outline(commands, center, circle.radius, color);
+        }
+
+        for circle in recipe.filled_circles {
+            let center = transform_local_world_point(center, circle.center, comp.rotation);
+            record_circle_outline(commands, center, circle.radius, color);
+        }
     }
 
     pub(super) fn draw_context_menu(&mut self, ui: &mut egui::Ui) -> bool {
@@ -569,6 +762,7 @@ impl SchematicViewPanel {
         is_selected: bool,
         is_hovered: bool,
         hovered_pin: Option<usize>,
+        draw_symbol_geometry: bool,
     ) {
         let center = self.world_to_screen(Pos2::new(comp.position.x, comp.position.y), canvas_rect);
         let symbol_kind = symbol_kind_for_component(comp);
@@ -590,23 +784,29 @@ impl SchematicViewPanel {
             Color32::from_rgb(44, 46, 54)
         };
 
-        painter.rect_filled(body, 6.0 * self.zoom, fill);
-        painter.rect_stroke(body, 6.0 * self.zoom, Stroke::new(1.0, border));
-
-        for segment in recipe.segments {
-            let a = transform_local_point(center, segment[0], comp.rotation, self.zoom);
-            let b = transform_local_point(center, segment[1], comp.rotation, self.zoom);
-            painter.line_segment([a, b], Stroke::new((1.6 * self.zoom).max(1.2), Color32::from_rgb(228, 232, 240)));
+        if draw_symbol_geometry {
+            painter.rect_filled(body, 6.0 * self.zoom, fill);
+            painter.rect_stroke(body, 6.0 * self.zoom, Stroke::new(1.0, border));
+        } else if is_selected || is_hovered {
+            painter.rect_stroke(body, 6.0 * self.zoom, Stroke::new(1.0, border));
         }
 
-        for circle in recipe.open_circles {
-            let screen = transform_local_point(center, circle.center, comp.rotation, self.zoom);
-            painter.circle_stroke(screen, circle.radius * self.zoom, Stroke::new((1.2 * self.zoom).max(1.0), Color32::from_rgb(228, 232, 240)));
-        }
+        if draw_symbol_geometry {
+            for segment in recipe.segments {
+                let a = transform_local_point(center, segment[0], comp.rotation, self.zoom);
+                let b = transform_local_point(center, segment[1], comp.rotation, self.zoom);
+                painter.line_segment([a, b], Stroke::new((1.6 * self.zoom).max(1.2), Color32::from_rgb(228, 232, 240)));
+            }
 
-        for circle in recipe.filled_circles {
-            let screen = transform_local_point(center, circle.center, comp.rotation, self.zoom);
-            painter.circle_filled(screen, circle.radius * self.zoom, Color32::from_rgb(228, 232, 240));
+            for circle in recipe.open_circles {
+                let screen = transform_local_point(center, circle.center, comp.rotation, self.zoom);
+                painter.circle_stroke(screen, circle.radius * self.zoom, Stroke::new((1.2 * self.zoom).max(1.0), Color32::from_rgb(228, 232, 240)));
+            }
+
+            for circle in recipe.filled_circles {
+                let screen = transform_local_point(center, circle.center, comp.rotation, self.zoom);
+                painter.circle_filled(screen, circle.radius * self.zoom, Color32::from_rgb(228, 232, 240));
+            }
         }
 
         if symbol_kind == SchematicSymbolKind::Magnet {
@@ -1124,6 +1324,38 @@ fn symbol_kind_for_component(comp: &ElectronicComponent) -> SchematicSymbolKind 
         SimModel::Wire if comp.designator.eq_ignore_ascii_case("GND") => SchematicSymbolKind::Ground,
         _ => SchematicSymbolKind::Generic,
     }
+}
+
+fn transform_local_world_point(center: Pos2, local: [f32; 2], rotation_deg: f32) -> Pos2 {
+    let radians = rotation_deg.to_radians();
+    let cos_r = radians.cos();
+    let sin_r = radians.sin();
+    let x = local[0] * cos_r - local[1] * sin_r;
+    let y = local[0] * sin_r + local[1] * cos_r;
+    Pos2::new(center.x + x, center.y + y)
+}
+
+fn record_circle_outline(commands: &mut BasicCommandList, center: Pos2, radius: f32, color: [u8; 4]) {
+    const SEGMENTS: usize = 20;
+
+    let mut previous = Pos2::new(center.x + radius, center.y);
+    for step in 1..=SEGMENTS {
+        let angle = step as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
+        let next = Pos2::new(center.x + angle.cos() * radius, center.y + angle.sin() * radius);
+        commands.draw_line(
+            Vec3::new(previous.x, previous.y, 0.0),
+            Vec3::new(next.x, next.y, 0.0),
+            color,
+            1.0,
+            true,
+            0.0,
+        );
+        previous = next;
+    }
+}
+
+fn color32_to_rgba8(color: Color32) -> [u8; 4] {
+    [color.r(), color.g(), color.b(), color.a()]
 }
 
 fn transform_local_point(center: Pos2, local: [f32; 2], rotation_deg: f32, zoom: f32) -> Pos2 {

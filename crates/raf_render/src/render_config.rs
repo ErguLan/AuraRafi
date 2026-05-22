@@ -4,9 +4,11 @@
 //! Users opt-in via project settings. Zero cost when disabled:
 //! no GPU memory, no extra draw calls, no shader compilation.
 //!
-//! The engine ALWAYS starts in CPU painter mode. GPU features
-//! only activate when explicitly enabled AND the hardware supports them.
+//! The engine now follows the global render execution policy. GPU-backed
+//! surfaces are preferred in Auto/GPU-first modes, but project-level GPU
+//! toggles still gate heavier advanced features.
 
+use raf_core::config::RenderExecutionPolicy;
 use serde::{Deserialize, Serialize};
 
 /// Complete rendering configuration for a project.
@@ -159,6 +161,20 @@ impl Default for RenderConfig {
 }
 
 impl RenderConfig {
+    fn disable_gpu_only_features(&mut self) {
+        self.use_gpu = false;
+        self.shadows_enabled = false;
+        self.ssao_enabled = false;
+        self.pbr_enabled = false;
+        self.reflections_enabled = false;
+        self.raytrace_enabled = false;
+        self.gpu_deform_enabled = false;
+
+        if self.anti_aliasing == AntiAliasingMode::Msaa4x {
+            self.anti_aliasing = AntiAliasingMode::Fxaa;
+        }
+    }
+
     /// Potato preset: absolute minimum, everything off.
     pub fn potato() -> Self {
         Self {
@@ -238,6 +254,20 @@ impl RenderConfig {
         }
     }
 
+    /// Clamp GPU-dependent options according to the engine execution policy.
+    pub fn apply_execution_policy(&mut self, policy: RenderExecutionPolicy) {
+        if matches!(policy, RenderExecutionPolicy::CpuOnly) {
+            self.disable_gpu_only_features();
+        }
+    }
+
+    /// Clamp advanced GPU-heavy project options when the project disallows them.
+    pub fn apply_project_gpu_gate(&mut self, allow_advanced_gpu_features: bool) {
+        if !allow_advanced_gpu_features {
+            self.disable_gpu_only_features();
+        }
+    }
+
     /// Check if any GPU-dependent feature is enabled.
     pub fn requires_gpu(&self) -> bool {
         self.use_gpu
@@ -267,5 +297,29 @@ impl RenderConfig {
         if self.gpu_deform_enabled { count += 1; }
         if self.depth_accurate { count += 1; }
         count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cpu_policy_disables_gpu_features() {
+        let mut config = RenderConfig::high();
+        config.apply_execution_policy(RenderExecutionPolicy::CpuOnly);
+
+        assert!(!config.requires_gpu());
+        assert_eq!(config.anti_aliasing, AntiAliasingMode::Fxaa);
+    }
+
+    #[test]
+    fn project_gpu_gate_disables_advanced_gpu_features() {
+        let mut config = RenderConfig::medium();
+        config.apply_project_gpu_gate(false);
+
+        assert!(!config.use_gpu);
+        assert!(!config.pbr_enabled);
+        assert!(!config.gpu_deform_enabled);
     }
 }

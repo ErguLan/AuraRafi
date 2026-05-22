@@ -20,12 +20,18 @@ mod viewport_interaction;
 mod viewport_overlay;
 
 use egui::{Color32, Pos2, Rect, Stroke};
+use eframe::egui_wgpu;
+use eframe::wgpu;
 use glam::{Mat4, Vec3};
 use std::time::{Duration, Instant};
 
 use raf_core::config::Language;
 use raf_core::scene::graph::{SceneGraph, SceneNodeId, Primitive};
-use raf_render::bridge::{ViewportBridge, ViewportNavigationConfig, ViewportPointerInput};
+use raf_render::api_graphic_basic::device::SceneFrameOutput;
+use raf_render::bridge::{
+    RenderRuntime, RenderRuntimeSnapshot, ViewportBridge, ViewportNavigationConfig,
+    ViewportPointerInput,
+};
 use raf_render::gizmo::GizmoMode;
 use raf_render::render_config::RenderConfig;
 use raf_render::scene_renderer::RenderOptions as SceneRenderOptions;
@@ -93,7 +99,9 @@ pub struct ViewportPanel {
 
     // 2D mode state
     bridge: ViewportBridge,
+    render_runtime: RenderRuntimeSnapshot,
     texture: Option<egui::TextureHandle>,
+    gpu_texture_id: Option<egui::TextureId>,
     last_size: [u32; 2],
     render_cpu_ms: f32,
     upload_cpu_ms: f32,
@@ -126,7 +134,9 @@ impl Default for ViewportPanel {
             solid_face_tonality: true,
 
             bridge: ViewportBridge::default(),
+            render_runtime: RenderRuntimeSnapshot::default(),
             texture: None,
+            gpu_texture_id: None,
             last_size: [1, 1],
             render_cpu_ms: 0.0,
             upload_cpu_ms: 0.0,
@@ -141,6 +151,8 @@ impl ViewportPanel {
         &mut self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
         scene: &mut SceneGraph,
         is_dark: bool,
         _lang: Language,
@@ -275,7 +287,8 @@ impl ViewportPanel {
         let render_h = (vp_h * render_scale).round().max(1.0);
 
         let render_start = Instant::now();
-        let pixels = self.bridge.render(
+        let render_output = self.bridge.render(
+            render_runtime,
             scene,
             render_w,
             render_h,
@@ -287,22 +300,26 @@ impl ViewportPanel {
         );
         self.render_cpu_ms = smooth_metric_ms(self.render_cpu_ms, render_start.elapsed().as_secs_f32() * 1000.0);
 
-        // Create the image while the pixel borrow is still active
         let upload_start = Instant::now();
         let w = render_w as u32;
         let h = render_h as u32;
-        let size = [w as usize, h as usize];
-
-        let image = egui::ColorImage::from_rgba_premultiplied(size, pixels);
-
-        // Now the borrow on self.renderer is released, safe to call upload
-        self.upload_image(ctx, image, w, h);
-        self.upload_cpu_ms = smooth_metric_ms(self.upload_cpu_ms, upload_start.elapsed().as_secs_f32() * 1000.0);
+        match render_output {
+            SceneFrameOutput::CpuPixels(pixels) => {
+                let size = [w as usize, h as usize];
+                let image = egui::ColorImage::from_rgba_premultiplied(size, pixels.as_slice());
+                self.upload_image(ctx, image, w, h);
+                self.upload_cpu_ms = smooth_metric_ms(self.upload_cpu_ms, upload_start.elapsed().as_secs_f32() * 1000.0);
+            }
+            SceneFrameOutput::GpuTexture { view, width, height } => {
+                self.update_gpu_texture(wgpu_render_state, &view, width, height);
+                self.upload_cpu_ms = smooth_metric_ms(self.upload_cpu_ms, 0.0);
+            }
+        }
 
         // --- Draw the rendered image ---
-        if let Some(tex) = &self.texture {
+        if let Some(texture_id) = self.current_texture_id() {
             painter.image(
-                tex.id(),
+                texture_id,
                 rect,
                 egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                 Color32::WHITE,
@@ -370,6 +387,10 @@ impl ViewportPanel {
         self.render_cpu_ms
     }
 
+    pub fn set_render_runtime(&mut self, snapshot: RenderRuntimeSnapshot) {
+        self.render_runtime = snapshot;
+    }
+
     pub fn upload_cpu_ms(&self) -> f32 {
         self.upload_cpu_ms
     }
@@ -396,8 +417,13 @@ impl ViewportPanel {
         self.adaptive_render_scale.max(0.35)
     }
 
+    fn current_texture_id(&self) -> Option<egui::TextureId> {
+        self.gpu_texture_id.or_else(|| self.texture.as_ref().map(|texture| texture.id()))
+    }
+
     /// Upload pixel image to egui texture (reuses allocation when size matches).
     fn upload_image(&mut self, ctx: &egui::Context, image: egui::ColorImage, w: u32, h: u32) {
+        self.gpu_texture_id = None;
         if let Some(tex) = &mut self.texture {
             if self.last_size == [w, h] {
                 tex.set(image, egui::TextureOptions::LINEAR);
@@ -407,6 +433,37 @@ impl ViewportPanel {
         } else {
             self.texture = Some(ctx.load_texture("viewport_render", image, egui::TextureOptions::LINEAR));
         }
+        self.last_size = [w, h];
+    }
+
+    fn update_gpu_texture(
+        &mut self,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        texture_view: &wgpu::TextureView,
+        w: u32,
+        h: u32,
+    ) {
+        let Some(render_state) = wgpu_render_state else {
+            return;
+        };
+
+        let mut renderer = render_state.renderer.write();
+        if let Some(texture_id) = self.gpu_texture_id {
+            renderer.update_egui_texture_from_wgpu_texture(
+                render_state.device.as_ref(),
+                texture_view,
+                wgpu::FilterMode::Linear,
+                texture_id,
+            );
+        } else {
+            let texture_id = renderer.register_native_texture(
+                render_state.device.as_ref(),
+                texture_view,
+                wgpu::FilterMode::Linear,
+            );
+            self.gpu_texture_id = Some(texture_id);
+        }
+
         self.last_size = [w, h];
     }
 
@@ -421,8 +478,9 @@ impl ViewportPanel {
         let interaction_active = interacting || self.interaction_linger_s > 0.0;
         let budget_ms = self.render_cfg.frame_budget_ms.max(8.0);
         let previous_ms = self.measured_frame_ms().max(1.0);
+        let preset_bias = adaptive_interaction_quality_bias(budget_ms);
         let budget_ratio = if interaction_active {
-            (budget_ms / previous_ms).sqrt().clamp(0.35, 1.0)
+            ((budget_ms / previous_ms).sqrt() * preset_bias).clamp(0.35, 1.0)
         } else {
             1.0
         };
@@ -449,6 +507,39 @@ fn smooth_metric_ms(current: f32, sample: f32) -> f32 {
         sample
     } else {
         current * 0.85 + sample * 0.15
+    }
+}
+
+fn adaptive_interaction_quality_bias(frame_budget_ms: f32) -> f32 {
+    let reference_budget_ms = 16.6;
+    (reference_budget_ms / frame_budget_ms.max(reference_budget_ms)).clamp(0.45, 1.0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::adaptive_interaction_quality_bias;
+
+    #[test]
+    fn potato_bias_is_more_aggressive_than_medium() {
+        let potato_bias = adaptive_interaction_quality_bias(50.0);
+        let medium_bias = adaptive_interaction_quality_bias(16.6);
+
+        assert!(potato_bias < medium_bias);
+        assert_eq!(medium_bias, 1.0);
+    }
+
+    #[test]
+    fn lower_presets_drop_scale_more_for_same_frame_time() {
+        let requested_scale = 0.6_f32;
+        let previous_ms = 25.0_f32;
+        let potato_scale = (requested_scale
+            * ((50.0 / previous_ms).sqrt() * adaptive_interaction_quality_bias(50.0)).clamp(0.35, 1.0))
+            .clamp(0.35, requested_scale);
+        let medium_scale = (requested_scale
+            * ((16.6 / previous_ms).sqrt() * adaptive_interaction_quality_bias(16.6)).clamp(0.35, 1.0))
+            .clamp(0.35, requested_scale);
+
+        assert!(potato_scale < medium_scale);
     }
 }
 

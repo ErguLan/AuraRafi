@@ -238,6 +238,7 @@ impl Netlist {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::ElectronicComponent;
     use crate::schematic::Schematic;
 
     #[test]

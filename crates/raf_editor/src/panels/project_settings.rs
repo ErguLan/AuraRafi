@@ -86,6 +86,23 @@ pub fn show_project_settings(ui: &mut Ui, project: &mut Project, lang: Language)
                 )
                 .changed();
 
+            if !project.settings.allow_gpu_features
+                && matches!(
+                    project.settings.runtime_render_preset,
+                    RenderPreset::Medium | RenderPreset::High
+                )
+            {
+                project.settings.runtime_render_preset = RenderPreset::Low;
+                changed = true;
+            }
+
+            ui.add_space(2.0);
+            ui.label(
+                egui::RichText::new(t("app.allow_gpu_features_desc", lang))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(150, 150, 158)),
+            );
+
             ui.add_space(6.0);
             changed |= ui
                 .checkbox(
@@ -125,13 +142,19 @@ pub fn show_project_settings(ui: &mut Ui, project: &mut Project, lang: Language)
                             RenderPreset::Medium,
                             RenderPreset::High,
                         ] {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut project.settings.runtime_render_preset,
-                                    preset,
-                                    render_preset_label(preset),
-                                )
-                                .changed();
+                            let advanced_gpu_preset = matches!(preset, RenderPreset::Medium | RenderPreset::High);
+                            ui.add_enabled_ui(
+                                project.settings.allow_gpu_features || !advanced_gpu_preset,
+                                |ui| {
+                                    changed |= ui
+                                        .selectable_value(
+                                            &mut project.settings.runtime_render_preset,
+                                            preset,
+                                            render_preset_label(preset),
+                                        )
+                                        .changed();
+                                },
+                            );
                         }
                     });
             });

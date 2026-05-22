@@ -4,12 +4,12 @@
 //! - CPU painter (egui shapes, zero GPU, runs on anything)
 //! - GPU pipeline (wgpu, for when scenes get heavy)
 //!
-//! Default is CPU. The switch is cheap: just a flag + different code paths.
-//! No GPU resources are allocated until the user explicitly switches to GPU mode.
-//! This prevents the "Halo Slipspace" problem: engine that cannot scale.
+//! Default policy is GPU-first with fallback available through the global
+//! render execution policy. The switch is cheap: just a flag + different code
+//! paths. Potato or compatibility setups can still force CPU explicitly.
 
 use serde::{Deserialize, Serialize};
-use raf_core::config::Language;
+use raf_core::config::{Language, RenderExecutionPolicy};
 use raf_core::i18n::t;
 
 // ---------------------------------------------------------------------------
@@ -32,12 +32,22 @@ pub enum RenderBackend {
 
 impl Default for RenderBackend {
     fn default() -> Self {
-        // Always default to CPU - lightest option, runs on anything.
-        Self::CpuPainter
+        // GPU-first by default. Callers that need maximum compatibility should
+        // derive from RenderExecutionPolicy::CpuOnly instead of relying on the
+        // enum default.
+        Self::GpuWgpu
     }
 }
 
 impl RenderBackend {
+    /// Resolve the legacy backend enum from the global render execution policy.
+    pub fn from_execution_policy(policy: RenderExecutionPolicy) -> Self {
+        match policy {
+            RenderExecutionPolicy::CpuOnly => Self::CpuPainter,
+            RenderExecutionPolicy::Auto | RenderExecutionPolicy::GpuPreferred => Self::GpuWgpu,
+        }
+    }
+
     /// Display label for the UI.
     pub fn label(&self, lang: Language) -> String {
         match self {
@@ -89,7 +99,7 @@ pub struct BackendConfig {
 impl Default for BackendConfig {
     fn default() -> Self {
         Self {
-            backend: RenderBackend::CpuPainter,
+            backend: RenderBackend::from_execution_policy(RenderExecutionPolicy::Auto),
             gpu_suggest_threshold: 300, // Suggest GPU at 300+ entities
             cpu_max_triangles: 5000,    // ~200 low-poly objects max on CPU
             show_selector: true,
@@ -188,15 +198,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_is_cpu() {
+    fn default_is_gpu_first() {
         let config = BackendConfig::default();
-        assert_eq!(config.backend, RenderBackend::CpuPainter);
-        assert!(!config.backend.uses_gpu());
+        assert_eq!(config.backend, RenderBackend::GpuWgpu);
+        assert!(config.backend.uses_gpu());
     }
 
     #[test]
     fn suggests_gpu_correctly() {
-        let config = BackendConfig::default();
+        let mut config = BackendConfig::default();
+        config.backend = RenderBackend::CpuPainter;
         assert!(!config.should_suggest_gpu(100));
         assert!(config.should_suggest_gpu(400));
     }
@@ -211,9 +222,18 @@ mod tests {
     #[test]
     fn gpu_handles_more_tris() {
         let mut config = BackendConfig::default();
+        config.backend = RenderBackend::CpuPainter;
         let cpu_tris = config.effective_max_tris();
         config.backend = RenderBackend::GpuWgpu;
         let gpu_tris = config.effective_max_tris();
         assert!(gpu_tris > cpu_tris);
+    }
+
+    #[test]
+    fn cpu_policy_maps_to_cpu_backend() {
+        assert_eq!(
+            RenderBackend::from_execution_policy(RenderExecutionPolicy::CpuOnly),
+            RenderBackend::CpuPainter,
+        );
     }
 }

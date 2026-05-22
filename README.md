@@ -16,10 +16,10 @@ experimental, or pending end-to-end runtime connection.
 ## Features
 
 - **Hybrid Engine**: Game development (2D/3D) and electronic design in one tool
-- **Performance Focused**: CPU-first rendering path with adaptive quality from "Potato" to "High" presets
+- **Performance Focused**: GPU-priority rendering pipeline with a built-in CPU software fallback for potato PCs
 - **Visual Scripting**: No-code node editor with graph validation and basic executor
 - **In-Editor Runtime**: Game projects can enter Play mode directly in the editor with runtime scene cloning, node event execution, `.rhai` behaviors, simple physics, triggers, and audio playback
-- **Electronics Design**: Schematic editor, simulation, DRC, exports, and synchronized PCB 2D workspace
+- **Electronics Design**: Schematic editor, simulation, DRC, exports, and synchronized PCB 2D workspace, unified under the same graphics pipeline
 - **Modern Editor**: Dark/light themes, modular panels, intuitive layout
 - **AI-Ready**: Architecture prepared for AI agent integration via tool-calling when the runtime side matures
 - **Modular**: 9 workspace crates plus the main editor binary, with clean domain boundaries
@@ -68,9 +68,9 @@ What works today after launch:
 
 Current implementation profile:
 
-- The active editor viewport rendering path is software/CPU-first by design for low-end hardware compatibility.
+- The active editor viewport rendering path is GPU-priority with a built-in CPU software fallback for low-end hardware compatibility.
 - The game runtime is editor-integrated today: Play mode exists, but the standalone binary/fixed-timestep/animation side is still staged separately.
-- Electronics is currently the most end-to-end vertical: schematic, checks, simulation, export, and PCB 2D sync already live in the editor.
+- Electronics is currently the most end-to-end vertical: schematic, checks, simulation, export, and PCB 2D sync already live in the editor, unified under the same GPU-priority rendering pipeline.
 - The repository favors modular staging: some systems are usable now, others are intentionally prepared without being wired into final runtime flows yet.
 
 ## Documentation
@@ -91,7 +91,7 @@ Documentation note:
 ## Technology
 
 - **Language**: Rust (2021 edition)
-- **Rendering**: CPU-first software viewport with optional wgpu-oriented abstraction path
+- **Rendering**: GPU-priority rendering with wgpu (Vulkan/DX12/Metal) and a custom CPU software fallback pipeline via ApiGraphicBasic
 - **UI**: egui + eframe
 - **ECS**: hecs
 - **Math**: glam (SIMD-optimized)

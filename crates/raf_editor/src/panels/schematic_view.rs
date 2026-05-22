@@ -1,12 +1,15 @@
 mod canvas;
 
+use eframe::egui_wgpu;
 use egui::{Color32, Pos2, Rect, Stroke, Ui, Vec2};
 use raf_core::i18n::t;
 use raf_core::Language;
 use raf_electronics::library::ComponentLibrary;
 use raf_electronics::schematic::Schematic;
 use raf_electronics::simulation::SimulationResults;
+use raf_render::bridge::{RenderRuntime, RenderRuntimeSnapshot};
 
+use super::gpu_canvas::GpuCanvas;
 use crate::theme;
 
 const GRID_STEP: f32 = 20.0;
@@ -97,6 +100,8 @@ pub struct SchematicViewPanel {
     sim_phase: f32,
     show_export_menu: bool,
     export_message: Option<String>,
+    render_runtime: RenderRuntimeSnapshot,
+    gpu_canvas: GpuCanvas,
 }
 
 impl Default for SchematicViewPanel {
@@ -123,12 +128,19 @@ impl Default for SchematicViewPanel {
             sim_phase: 0.0,
             show_export_menu: false,
             export_message: None,
+            render_runtime: RenderRuntimeSnapshot::default(),
+            gpu_canvas: GpuCanvas::new("schematic_canvas_render"),
         }
     }
 }
 
 impl SchematicViewPanel {
-    pub fn show(&mut self, ui: &mut Ui) -> bool {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
+    ) -> bool {
         let mut changed = false;
 
         self.draw_toolbar(ui);
@@ -144,9 +156,9 @@ impl SchematicViewPanel {
             );
 
             self.draw_library(ui, lib_rect);
-            changed |= self.draw_canvas(ui, canvas_rect);
+            changed |= self.draw_canvas(ui, canvas_rect, wgpu_render_state, render_runtime);
         } else {
-            changed |= self.draw_canvas(ui, available);
+            changed |= self.draw_canvas(ui, available, wgpu_render_state, render_runtime);
         }
 
         changed |= self.draw_value_editor(ui);
@@ -156,6 +168,10 @@ impl SchematicViewPanel {
 
     pub fn selection(&self) -> SchematicSelection {
         self.selection
+    }
+
+    pub fn set_render_runtime(&mut self, snapshot: RenderRuntimeSnapshot) {
+        self.render_runtime = snapshot;
     }
 
     pub fn selected_component_index(&self) -> Option<usize> {
@@ -336,6 +352,16 @@ impl SchematicViewPanel {
                             .color(Color32::from_rgb(128, 132, 142)),
                     );
                 }
+
+                ui.label(
+                    egui::RichText::new(self.render_runtime.status_badge())
+                        .size(10.0)
+                        .color(if self.render_runtime.is_gpu_active() {
+                            theme::ACCENT
+                        } else {
+                            Color32::from_rgb(128, 132, 142)
+                        }),
+                );
 
                 let summary = format!(
                     "{} {} | {} {}",

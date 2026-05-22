@@ -7,11 +7,14 @@
 //!    node editor, schematic view)
 
 use eframe::egui;
+use eframe::egui_wgpu;
 use raf_core::i18n::t;
 use raf_core::config::{EngineSettings, RenderPreset, Theme};
 use raf_core::project::{Project, ProjectType, RecentProjects};
 use raf_core::scene::graph::Primitive;
+use raf_render::api_graphic_basic::device::SharedWgpuContext;
 use raf_core::scene::SceneGraph;
+use raf_render::bridge::{GraphicsSurfaceKind, RenderRuntime, RenderRuntimeSnapshot};
 use raf_render::render_config::RenderConfig;
 
 #[path = "panels/hub.rs"]
@@ -177,6 +180,7 @@ pub struct AuraRafiApp {
     complement_registry: raf_core::complement::ComplementRegistry,
     command_bus: raf_core::command::CommandBus,
     frame_count: u64,
+    graphics_runtime: RenderRuntime,
 
     // v0.3.0: UX state
     /// Whether scene has unsaved changes.
@@ -191,6 +195,7 @@ pub struct AuraRafiApp {
     redo_stack: Vec<EditorHistorySnapshot>,
     /// Project logo texture.
     logo_texture: Option<egui::TextureHandle>,
+    egui_wgpu_render_state: Option<egui_wgpu::RenderState>,
     ui_icons: UiIconAtlas,
     hub_search_query: String,
     hub_filter: HubProjectFilter,
@@ -213,6 +218,15 @@ impl AuraRafiApp {
             font_id.size = settings.font_size;
         });
         cc.egui_ctx.set_style(style);
+
+        let egui_wgpu_render_state = cc.wgpu_render_state.clone();
+        let mut graphics_runtime = RenderRuntime::default();
+        if let Some(render_state) = &egui_wgpu_render_state {
+            graphics_runtime.set_shared_wgpu_context(Some(SharedWgpuContext {
+                device: render_state.device.clone(),
+                queue: render_state.queue.clone(),
+            }));
+        }
 
         Self {
             screen: AppScreen::Loading {
@@ -237,6 +251,7 @@ impl AuraRafiApp {
 
             complement_registry: raf_core::complement::ComplementRegistry::new(),
             command_bus: raf_core::command::CommandBus::new(),
+            graphics_runtime,
 
             bottom_tab: BottomTab::Console,
             bottom_panel_snap_height: None,
@@ -249,6 +264,7 @@ impl AuraRafiApp {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             logo_texture: None,
+            egui_wgpu_render_state,
             ui_icons: UiIconAtlas::default(),
             hub_search_query: String::new(),
             hub_filter: HubProjectFilter::All,
@@ -262,6 +278,10 @@ impl eframe::App for AuraRafiApp {
 
         // Re-apply theme every frame (cheap, ensures consistency).
         app_theme::apply_theme(ctx, self.settings.theme, self.settings.theme_experimental);
+
+        if !matches!(&self.screen, AppScreen::Editor) {
+            self.graphics_runtime.activate_surface(GraphicsSurfaceKind::None);
+        }
 
         match self.screen.clone() {
             AppScreen::Loading {
@@ -291,6 +311,38 @@ impl eframe::App for AuraRafiApp {
 }
 
 impl AuraRafiApp {
+    fn prepare_graphics_surface(&mut self, surface: GraphicsSurfaceKind) -> RenderRuntimeSnapshot {
+        let allow_advanced_gpu_features = self
+            .current_project
+            .as_ref()
+            .map(|project| project.settings.allow_gpu_features)
+            .unwrap_or(false);
+
+        self.graphics_runtime.configure(
+            self.settings.render_execution_policy,
+            allow_advanced_gpu_features,
+        );
+        self.graphics_runtime.activate_surface(surface);
+        self.graphics_runtime.snapshot()
+    }
+
+    fn project_render_config(&self, project: &Project) -> RenderConfig {
+        let mut config = match project.settings.runtime_render_preset {
+            RenderPreset::Potato => RenderConfig::potato(),
+            RenderPreset::Low => RenderConfig::low(),
+            RenderPreset::Medium => RenderConfig::medium(),
+            RenderPreset::High => RenderConfig::high(),
+        };
+        config.apply_execution_policy(self.settings.render_execution_policy);
+        config.apply_project_gpu_gate(project.settings.allow_gpu_features);
+        config.depth_accurate = project.settings.depth_accurate;
+        config.depth_resolution_scale = project
+            .settings
+            .depth_resolution_scale
+            .clamp(0.35, 1.0);
+        config
+    }
+
     // -----------------------------------------------------------------------
     // Loading Screen
     // -----------------------------------------------------------------------
@@ -1241,24 +1293,13 @@ impl AuraRafiApp {
 
             match self.viewport_mode {
                 ViewportMode::Scene => {
+                    let runtime_snapshot = self.prepare_graphics_surface(GraphicsSurfaceKind::SceneViewport);
+                    self.viewport.set_render_runtime(runtime_snapshot);
                     self.viewport.frame_time_hint = ctx.input(|i| i.unstable_dt.max(0.0));
                     self.viewport.render_cfg = self
                         .current_project
                         .as_ref()
-                        .map(|project| {
-                            let mut config = match project.settings.runtime_render_preset {
-                                RenderPreset::Potato => RenderConfig::potato(),
-                                RenderPreset::Low => RenderConfig::low(),
-                                RenderPreset::Medium => RenderConfig::medium(),
-                                RenderPreset::High => RenderConfig::high(),
-                            };
-                            config.depth_accurate = project.settings.depth_accurate;
-                            config.depth_resolution_scale = project
-                                .settings
-                                .depth_resolution_scale
-                                .clamp(0.35, 1.0);
-                            config
-                        })
+                        .map(|project| self.project_render_config(project))
                         .unwrap_or_else(RenderConfig::potato);
                     self.viewport.grid_visible = self.settings.grid_visible;
                     self.viewport.grid_spacing = self.settings.grid_size.max(0.1);
@@ -1283,6 +1324,8 @@ impl AuraRafiApp {
                     let viewport_changed = self.viewport.show(
                         ctx,
                         ui,
+                        self.egui_wgpu_render_state.as_ref(),
+                        &mut self.graphics_runtime,
                         &mut self.scene,
                         self.settings.theme != Theme::Light,
                         self.settings.language,
@@ -1293,16 +1336,28 @@ impl AuraRafiApp {
                     }
                 }
                 ViewportMode::Schematic => {
+                    let runtime_snapshot = self.prepare_graphics_surface(GraphicsSurfaceKind::SchematicCanvas);
                     let before_snapshot = self.current_history_snapshot();
                     self.schematic_view.lang = self.settings.language;
-                    if self.schematic_view.show(ui) {
+                    self.schematic_view.set_render_runtime(runtime_snapshot);
+                    if self.schematic_view.show(
+                        ui,
+                        self.egui_wgpu_render_state.as_ref(),
+                        &mut self.graphics_runtime,
+                    ) {
                         self.record_document_change(before_snapshot);
                     }
                 }
                 ViewportMode::Pcb => {
+                    let runtime_snapshot = self.prepare_graphics_surface(GraphicsSurfaceKind::PcbCanvas);
                     let before_snapshot = self.current_history_snapshot();
                     self.pcb_view.lang = self.settings.language;
-                    if self.pcb_view.show(ui) {
+                    self.pcb_view.set_render_runtime(runtime_snapshot);
+                    if self.pcb_view.show(
+                        ui,
+                        self.egui_wgpu_render_state.as_ref(),
+                        &mut self.graphics_runtime,
+                    ) {
                         self.record_document_change(before_snapshot);
                     }
                 }

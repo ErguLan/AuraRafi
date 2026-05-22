@@ -52,7 +52,11 @@ pub struct ProjectSettings {
     /// Whether complement tabs are available for this project.
     #[serde(default = "default_true")]
     pub enable_complements: bool,
-    /// Hard gate for GPU-heavy features. Default false for potato mode.
+    /// Hard gate for advanced GPU-heavy project features.
+    ///
+    /// This does not choose the base backend anymore. Engine-level render
+    /// policy decides whether AuraRafi prefers GPU or CPU execution, while
+    /// this flag only unlocks heavier project-side GPU features.
     #[serde(default)]
     pub allow_gpu_features: bool,
     /// Runtime systems that can be toggled project-by-project.

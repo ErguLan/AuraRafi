@@ -202,7 +202,7 @@ pub struct BvhNode {
 
 /// Top-level acceleration structure.
 /// Contains the BVH tree for the entire scene.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AccelerationStructure {
     /// BVH nodes (flat array, root at index 0).
     pub nodes: Vec<BvhNode>,
@@ -212,6 +212,17 @@ pub struct AccelerationStructure {
     pub total_triangles: usize,
     /// Build time in milliseconds (for performance monitoring).
     pub build_time_ms: f32,
+}
+
+impl Default for AccelerationStructure {
+    fn default() -> Self {
+        Self {
+            nodes: Vec::new(),
+            dirty: true,
+            total_triangles: 0,
+            build_time_ms: 0.0,
+        }
+    }
 }
 
 impl AccelerationStructure {

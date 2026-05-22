@@ -204,3 +204,82 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
     return (center + n + s + e + w) / 5.0;
 }
 "#;
+
+/// Unified offscreen scene shader for ApiGraphicBasic.
+///
+/// Supports lit mesh rendering and debug/world lines without exposing raw API
+/// details to the rest of the engine.
+pub const BASIC_SCENE_WGSL: &str = r#"
+struct MeshUniforms {
+    mvp: mat4x4<f32>,
+    model: mat4x4<f32>,
+    color: vec4<f32>,
+    light_dir: vec4<f32>,
+    params: vec4<f32>,
+};
+
+struct MeshVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+};
+
+struct MeshVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) world_normal: vec3<f32>,
+};
+
+@group(0) @binding(0) var<uniform> mesh_uniforms: MeshUniforms;
+
+@vertex
+fn mesh_vs(input: MeshVertexInput) -> MeshVertexOutput {
+    var output: MeshVertexOutput;
+    output.clip_position = mesh_uniforms.mvp * vec4<f32>(input.position, 1.0);
+    output.world_normal = normalize((mesh_uniforms.model * vec4<f32>(input.normal, 0.0)).xyz);
+    return output;
+}
+
+@fragment
+fn mesh_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
+    let lit = mesh_uniforms.params.x;
+    let base_color = mesh_uniforms.color;
+    if (lit < 0.5) {
+        return base_color;
+    }
+
+    let light_dir = normalize(mesh_uniforms.light_dir.xyz);
+    let lambert = 0.3 + 0.7 * max(dot(normalize(input.world_normal), light_dir), 0.0);
+    return vec4<f32>(base_color.rgb * lambert, base_color.a);
+}
+
+struct LineUniforms {
+    mvp: mat4x4<f32>,
+    color: vec4<f32>,
+    params: vec4<f32>,
+};
+
+struct LineVertexInput {
+    @location(0) position: vec3<f32>,
+};
+
+struct LineVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> line_uniforms: LineUniforms;
+
+@vertex
+fn line_vs(input: LineVertexInput) -> LineVertexOutput {
+    var output: LineVertexOutput;
+    var clip = line_uniforms.mvp * vec4<f32>(input.position, 1.0);
+    clip.z = clip.z + line_uniforms.params.x * clip.w;
+    output.clip_position = clip;
+    output.color = line_uniforms.color;
+    return output;
+}
+
+@fragment
+fn line_fs(input: LineVertexOutput) -> @location(0) vec4<f32> {
+    return input.color;
+}
+"#;

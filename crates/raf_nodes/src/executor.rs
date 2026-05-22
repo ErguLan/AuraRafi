@@ -342,10 +342,11 @@ mod tests {
         let print = Node::print_action();
         let start_id = start.id;
         let start_out = start.pins[0].id;
+        let print_id = print.id;
         let print_in = print.pins[0].id;
         graph.add_node(start);
         graph.add_node(print);
-        graph.connect(start_id, start_out, print.id, print_in);
+        graph.connect(start_id, start_out, print_id, print_in);
 
         let result = execute(&graph, start_id);
         assert!(result.success);

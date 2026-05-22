@@ -3,7 +3,10 @@
 
 use crate::theme as app_theme;
 use egui::Ui;
-use raf_core::config::{EngineSettings, Language, RenderQuality, TargetPlatform, Theme, ViewportRenderMode};
+use raf_core::config::{
+    EngineSettings, Language, RenderExecutionPolicy, RenderQuality, TargetPlatform, Theme,
+    ViewportRenderMode,
+};
 use raf_core::i18n::t;
 
 /// Draw the settings panel.
@@ -165,6 +168,44 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                     ui.selectable_value(&mut settings.render_quality, RenderQuality::Medium, "Medium (2)");
                     ui.selectable_value(&mut settings.render_quality, RenderQuality::High, "High (3)");
                 });
+
+                ui.add_space(6.0);
+
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(t("settings.render_execution_policy", settings.language)).size(12.0));
+                    egui::ComboBox::from_id_salt("render_execution_policy_select")
+                        .selected_text(match settings.render_execution_policy {
+                            RenderExecutionPolicy::Auto => t("settings.render_execution_policy.auto", settings.language),
+                            RenderExecutionPolicy::CpuOnly => t("settings.render_execution_policy.cpu_only", settings.language),
+                            RenderExecutionPolicy::GpuPreferred => t("settings.render_execution_policy.gpu_preferred", settings.language),
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut settings.render_execution_policy,
+                                RenderExecutionPolicy::Auto,
+                                t("settings.render_execution_policy.auto", settings.language),
+                            );
+                            ui.selectable_value(
+                                &mut settings.render_execution_policy,
+                                RenderExecutionPolicy::CpuOnly,
+                                t("settings.render_execution_policy.cpu_only", settings.language),
+                            );
+                            ui.selectable_value(
+                                &mut settings.render_execution_policy,
+                                RenderExecutionPolicy::GpuPreferred,
+                                t("settings.render_execution_policy.gpu_preferred", settings.language),
+                            );
+                        });
+                });
+
+                if !settings.simple_mode {
+                    ui.add_space(4.0);
+                    ui.label(
+                        egui::RichText::new(t("settings.render_execution_policy_desc", settings.language))
+                            .size(11.0)
+                            .color(palette.text_dim),
+                    );
+                }
                 
                 ui.add_space(6.0);
 

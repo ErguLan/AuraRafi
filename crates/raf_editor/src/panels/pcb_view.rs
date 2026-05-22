@@ -1,9 +1,13 @@
 mod canvas;
 
+use eframe::egui_wgpu;
 use egui::{Color32, Stroke, Ui, Vec2};
 use raf_core::i18n::t;
 use raf_core::Language;
 use raf_electronics::{PcbLayout, PcbSyncSummary, Schematic};
+use raf_render::bridge::{RenderRuntime, RenderRuntimeSnapshot};
+
+use super::gpu_canvas::GpuCanvas;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PcbSelection {
@@ -31,6 +35,8 @@ pub struct PcbViewPanel {
     pub lang: Language,
     show_airwires: bool,
     last_sync: Option<PcbSyncSummary>,
+    render_runtime: RenderRuntimeSnapshot,
+    gpu_canvas: GpuCanvas,
 }
 
 impl Default for PcbViewPanel {
@@ -46,17 +52,24 @@ impl Default for PcbViewPanel {
             lang: Language::English,
             show_airwires: true,
             last_sync: None,
+            render_runtime: RenderRuntimeSnapshot::default(),
+            gpu_canvas: GpuCanvas::new("pcb_canvas_render"),
         }
     }
 }
 
 impl PcbViewPanel {
-    pub fn show(&mut self, ui: &mut Ui) -> bool {
+    pub fn show(
+        &mut self,
+        ui: &mut Ui,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
+    ) -> bool {
         let mut changed = false;
         changed |= self.draw_toolbar(ui);
         ui.separator();
         let available = ui.available_rect_before_wrap();
-        changed |= self.draw_canvas(ui, available);
+        changed |= self.draw_canvas(ui, available, wgpu_render_state, render_runtime);
         changed
     }
 
@@ -69,6 +82,10 @@ impl PcbViewPanel {
 
     pub fn selection(&self) -> PcbSelection {
         self.selection
+    }
+
+    pub fn set_render_runtime(&mut self, snapshot: RenderRuntimeSnapshot) {
+        self.render_runtime = snapshot;
     }
 
     pub fn clear_selection(&mut self) {
@@ -223,6 +240,17 @@ impl PcbViewPanel {
                     .color(Color32::from_rgb(150, 150, 160)),
                 );
             }
+
+            ui.separator();
+            ui.label(
+                egui::RichText::new(self.render_runtime.status_badge())
+                    .size(10.0)
+                    .color(if self.render_runtime.is_gpu_active() {
+                        Color32::from_rgb(212, 119, 26)
+                    } else {
+                        Color32::from_rgb(150, 150, 160)
+                    }),
+            );
         });
 
         changed
