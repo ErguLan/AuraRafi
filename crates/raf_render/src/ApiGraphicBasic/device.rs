@@ -530,25 +530,25 @@ impl GpuSceneState {
             });
 
             let mut current_pipeline = BasicPipelineKind::FlatColor;
-            for command in frame.commands.commands() {
+            for command in frame.commands.commands().iter().cloned() {
                 match command {
                     GraphicCommand::Clear { .. } => {}
-                    GraphicCommand::SetPipeline(pipeline) => current_pipeline = *pipeline,
+                    GraphicCommand::SetPipeline(pipeline) => current_pipeline = pipeline,
                     GraphicCommand::DrawMesh {
                         mesh_id,
                         transform,
                         color,
                     } => {
-                        let Some(mesh) = frame.commands.mesh(*mesh_id) else {
+                        let Some(mesh) = frame.commands.mesh(mesh_id) else {
                             continue;
                         };
                         self.draw_mesh(
                             device,
                             &mut pass,
                             mesh,
-                            *transform,
+                            transform,
                             frame,
-                            *color,
+                            color,
                             matches!(current_pipeline, BasicPipelineKind::PbrLit),
                         );
                     }
@@ -563,12 +563,12 @@ impl GpuSceneState {
                         self.draw_line(
                             device,
                             &mut pass,
-                            *start,
-                            *end,
+                            start,
+                            end,
                             frame,
-                            *color,
-                            *no_depth_test,
-                            *depth_bias,
+                            color,
+                            no_depth_test,
+                            depth_bias,
                         );
                     }
                     GraphicCommand::DrawGrid { .. } => {}

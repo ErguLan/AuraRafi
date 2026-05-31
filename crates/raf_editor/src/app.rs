@@ -8,6 +8,7 @@
 
 use eframe::egui;
 use eframe::egui_wgpu;
+use chrono::Utc;
 use raf_core::i18n::t;
 use raf_core::config::{EngineSettings, RenderPreset, Theme};
 use raf_core::project::{Project, ProjectType, RecentProjects};
@@ -80,6 +81,12 @@ enum ViewportMode {
     Scene,
     Schematic,
     Pcb,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingExitAction {
+    ToHub,
+    QuitApp,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -189,6 +196,8 @@ pub struct AuraRafiApp {
     last_action: String,
     /// Elapsed seconds since last auto-save.
     auto_save_elapsed: f32,
+    /// Last absolute timestamp used to advance the auto-save timer.
+    auto_save_last_tick: Option<f64>,
     /// Snapshots for undo in the active editor document.
     undo_stack: Vec<EditorHistorySnapshot>,
     /// Snapshots for redo.
@@ -199,6 +208,8 @@ pub struct AuraRafiApp {
     ui_icons: UiIconAtlas,
     hub_search_query: String,
     hub_filter: HubProjectFilter,
+    pending_exit_action: Option<PendingExitAction>,
+    allow_app_close: bool,
 }
 
 impl AuraRafiApp {
@@ -261,6 +272,7 @@ impl AuraRafiApp {
             scene_modified: false,
             last_action: String::new(),
             auto_save_elapsed: 0.0,
+            auto_save_last_tick: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             logo_texture: None,
@@ -268,6 +280,8 @@ impl AuraRafiApp {
             ui_icons: UiIconAtlas::default(),
             hub_search_query: String::new(),
             hub_filter: HubProjectFilter::All,
+            pending_exit_action: None,
+            allow_app_close: false,
         }
     }
 }
@@ -278,6 +292,8 @@ impl eframe::App for AuraRafiApp {
 
         // Re-apply theme every frame (cheap, ensures consistency).
         app_theme::apply_theme(ctx, self.settings.theme, self.settings.theme_experimental);
+
+        self.handle_window_close_request(ctx);
 
         if !matches!(&self.screen, AppScreen::Editor) {
             self.graphics_runtime.activate_surface(GraphicsSurfaceKind::None);
@@ -307,6 +323,8 @@ impl eframe::App for AuraRafiApp {
                 self.show_settings_screen(ctx);
             }
         }
+
+        self.show_unsaved_changes_dialog(ctx);
     }
 }
 
@@ -622,12 +640,14 @@ impl AuraRafiApp {
         self.handle_auto_save(ctx);
 
         // Top menu bar.
-        egui::TopBottomPanel::top("menu_bar").show(ctx, |ui| {
+        egui::TopBottomPanel::top("menu_bar")
+            .frame(egui::Frame::default().fill(palette.faint_bg).stroke(egui::Stroke::new(1.0, palette.separator)))
+            .show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 // -- File --
                 ui.menu_button(t("app.file", _lang), |ui| {
                     if ui.button(t("app.new_project", _lang)).clicked() {
-                        self.screen = AppScreen::ProjectHub;
+                        self.request_exit_action(PendingExitAction::ToHub, None);
                         ui.close_menu();
                     }
                     if ui.button(t("app.save_menu", _lang)).clicked() {
@@ -642,7 +662,7 @@ impl AuraRafiApp {
                     }
                     ui.separator();
                     if ui.button(t("app.exit_to_hub", _lang)).clicked() {
-                        self.screen = AppScreen::ProjectHub;
+                        self.request_exit_action(PendingExitAction::ToHub, None);
                         ui.close_menu();
                     }
                 });
@@ -723,7 +743,7 @@ impl AuraRafiApp {
                         }
                     }
                     if ui.button(t("app.close_project", _lang)).clicked() {
-                        self.screen = AppScreen::ProjectHub;
+                        self.request_exit_action(PendingExitAction::ToHub, None);
                         ui.close_menu();
                     }
                 });
@@ -780,25 +800,26 @@ impl AuraRafiApp {
                             self.handle_build();
                         }
 
-                        ui.separator();
+                        if self.settings.show_fps_counter {
+                            ui.separator();
 
-                        // FPS counter.
-                        let fps = if self.viewport_mode == ViewportMode::Scene {
-                            self.viewport.measured_fps()
-                        } else {
-                            ctx.input(|i| {
-                                if i.unstable_dt > 0.0 {
-                                    (1.0 / i.unstable_dt) as u32
-                                } else {
-                                    0
-                                }
-                            })
-                        };
-                        ui.label(
-                            egui::RichText::new(format!("{} FPS", fps))
-                                .size(11.0)
-                                .color(palette.text_dim),
-                        );
+                            let fps = if self.viewport_mode == ViewportMode::Scene {
+                                self.viewport.measured_fps()
+                            } else {
+                                ctx.input(|i| {
+                                    if i.unstable_dt > 0.0 {
+                                        (1.0 / i.unstable_dt) as u32
+                                    } else {
+                                        0
+                                    }
+                                })
+                            };
+                            ui.label(
+                                egui::RichText::new(format!("{} FPS", fps))
+                                    .size(11.0)
+                                    .color(palette.text_dim),
+                            );
+                        }
 
                         // Viewport mode indicator.
                         ui.separator();
@@ -819,6 +840,7 @@ impl AuraRafiApp {
 
         // Status bar at bottom.
         egui::TopBottomPanel::bottom("status_bar")
+            .frame(egui::Frame::default().fill(palette.faint_bg).stroke(egui::Stroke::new(1.0, palette.separator)))
             .max_height(22.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
@@ -861,7 +883,7 @@ impl AuraRafiApp {
                     ui.label(
                         egui::RichText::new(status_counts)
                             .size(11.0)
-                            .color(palette.text_dim),
+                            .color(palette.text),
                     );
                     ui.separator();
                     ui.label(
@@ -878,7 +900,7 @@ impl AuraRafiApp {
                         ui.label(
                             egui::RichText::new(&self.last_action)
                                 .size(11.0)
-                                .color(palette.text_dim),
+                                .color(palette.text),
                         );
                     }
                     ui.with_layout(
@@ -1457,6 +1479,112 @@ impl AuraRafiApp {
         }
     }
 
+    fn handle_window_close_request(&mut self, ctx: &egui::Context) {
+        let close_requested = ctx.input(|input| input.viewport().close_requested());
+        if !close_requested || self.allow_app_close {
+            return;
+        }
+
+        if self.current_project.is_some() && self.scene_modified {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            if self.pending_exit_action.is_none() {
+                self.pending_exit_action = Some(PendingExitAction::QuitApp);
+            }
+        }
+    }
+
+    fn show_unsaved_changes_dialog(&mut self, ctx: &egui::Context) {
+        let Some(action) = self.pending_exit_action else {
+            return;
+        };
+
+        let mut perform_action = None;
+        let lang = self.settings.language;
+
+        egui::Window::new(t("app.unsaved_changes_title", lang))
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .show(ctx, |ui| {
+                ui.set_min_width(360.0);
+                ui.label(t("app.unsaved_changes_message", lang));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button(t("app.cancel", lang)).clicked() {
+                        self.pending_exit_action = None;
+                        self.allow_app_close = false;
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if ui.button(t("app.discard_changes", lang)).clicked() {
+                            self.pending_exit_action = None;
+                            perform_action = Some(action);
+                        }
+
+                        if ui.button(t("app.save_changes", lang)).clicked() {
+                            if self.do_save() {
+                                self.pending_exit_action = None;
+                                perform_action = Some(action);
+                            }
+                        }
+                    });
+                });
+            });
+
+        if let Some(action) = perform_action {
+            self.perform_exit_action(action, ctx);
+        }
+    }
+
+    fn request_exit_action(&mut self, action: PendingExitAction, ctx: Option<&egui::Context>) {
+        if self.scene_modified {
+            self.pending_exit_action = Some(action);
+            return;
+        }
+
+        if let Some(ctx) = ctx {
+            self.perform_exit_action(action, ctx);
+        } else {
+            self.perform_exit_action_without_context(action);
+        }
+    }
+
+    fn perform_exit_action(&mut self, action: PendingExitAction, ctx: &egui::Context) {
+        match action {
+            PendingExitAction::ToHub => self.unload_current_project_to_hub(),
+            PendingExitAction::QuitApp => {
+                self.allow_app_close = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+    }
+
+    fn perform_exit_action_without_context(&mut self, action: PendingExitAction) {
+        if action == PendingExitAction::ToHub {
+            self.unload_current_project_to_hub();
+        }
+    }
+
+    fn unload_current_project_to_hub(&mut self) {
+        self.runtime = None;
+        self.current_project = None;
+        self.scene = SceneGraph::new();
+        self.viewport.selected.clear();
+        self.hierarchy.selected_node = None;
+        self.hierarchy.selected_nodes.clear();
+        self.schematic_view.clear_selection();
+        self.pcb_view.clear_selection();
+        self.asset_browser.project_assets_path = None;
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+        self.scene_modified = false;
+        self.auto_save_elapsed = 0.0;
+        self.auto_save_last_tick = None;
+        self.pending_exit_action = None;
+        self.allow_app_close = false;
+        self.screen = AppScreen::ProjectHub;
+    }
+
     // -----------------------------------------------------------------------
     // v0.3.0: Undo/Redo (scene snapshot based, max 50)
     // -----------------------------------------------------------------------
@@ -1706,36 +1834,74 @@ impl AuraRafiApp {
         self.console.log(LogLevel::Info, &msg);
     }
 
-    fn do_save(&mut self) {
-        let _lang = self.settings.language;
-        if let Some(project) = self.current_project.clone() {
-            let _ = project.save();
-            match project.project_type {
-                ProjectType::Game => {
-                    let scene_path = project.path.join("scene.ron");
-                    let nodes_path = project.path.join("nodes.ron");
-                    let _ = self.scene.save_ron(&scene_path);
-                    if let Ok(data) = ron::ser::to_string_pretty(
-                        &self.node_editor.document(),
-                        ron::ser::PrettyConfig::default(),
-                    ) {
-                        let _ = std::fs::write(nodes_path, data);
-                    }
-                }
-                ProjectType::Electronics => {
-                    self.sync_pcb_from_schematic();
-                    let schematic_path = project.path.join("schematic.ron");
-                    let pcb_path = project.path.join("pcb_layout.ron");
-                    let _ = save_schematic_document(&schematic_path, &self.schematic_view.schematic);
-                    let _ = save_pcb_document(&pcb_path, &self.pcb_view.layout);
-                }
+    fn do_save(&mut self) -> bool {
+        match self.save_current_project() {
+            Ok(()) => {
+                let msg = t("app.project_saved", self.settings.language);
+                self.last_action = msg.to_string();
+                self.console.log(LogLevel::Info, &msg);
+                true
             }
-            self.scene_modified = false;
-            self.auto_save_elapsed = 0.0;
-            let msg = t("app.project_saved", self.settings.language);
-            self.last_action = msg.to_string();
-            self.console.log(LogLevel::Info, &msg);
+            Err(error) => {
+                let msg = format!(
+                    "{}: {}",
+                    t("app.project_save_failed", self.settings.language),
+                    error
+                );
+                self.last_action = msg.clone();
+                self.console.log(LogLevel::Error, &msg);
+                false
+            }
         }
+    }
+
+    fn save_current_project(&mut self) -> Result<(), String> {
+        let mut project = self
+            .current_project
+            .clone()
+            .ok_or_else(|| "No active project".to_string())?;
+
+        project.modified_at = Utc::now();
+
+        match project.project_type {
+            ProjectType::Game => {
+                let scene_path = project.path.join("scene.ron");
+                let nodes_path = project.path.join("nodes.ron");
+
+                self.scene
+                    .save_ron(&scene_path)
+                    .map_err(|error| format!("scene.ron: {}", error))?;
+
+                let data = ron::ser::to_string_pretty(
+                    &self.node_editor.document(),
+                    ron::ser::PrettyConfig::default(),
+                )
+                .map_err(|error| format!("nodes.ron serialize: {}", error))?;
+
+                std::fs::write(&nodes_path, data)
+                    .map_err(|error| format!("nodes.ron: {}", error))?;
+            }
+            ProjectType::Electronics => {
+                self.sync_pcb_from_schematic();
+                let schematic_path = project.path.join("schematic.ron");
+                let pcb_path = project.path.join("pcb_layout.ron");
+
+                save_schematic_document(&schematic_path, &self.schematic_view.schematic)
+                    .map_err(|error| format!("schematic.ron: {}", error))?;
+                save_pcb_document(&pcb_path, &self.pcb_view.layout)
+                    .map_err(|error| format!("pcb_layout.ron: {}", error))?;
+            }
+        }
+
+        project
+            .save()
+            .map_err(|error| format!("project.ron: {}", error))?;
+
+        self.current_project = Some(project);
+        self.scene_modified = false;
+        self.auto_save_elapsed = 0.0;
+        self.auto_save_last_tick = None;
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -1765,7 +1931,9 @@ impl AuraRafiApp {
             Some(1) => self.do_undo(),
             Some(2) => self.do_redo(),
             Some(3) => self.do_duplicate(),
-            Some(4) => self.do_save(),
+            Some(4) => {
+                let _ = self.do_save();
+            }
             Some(5) => self.do_select_all(),
             Some(6) => self.do_delete(),
             _ => {}
@@ -1778,23 +1946,45 @@ impl AuraRafiApp {
 
     fn handle_auto_save(&mut self, ctx: &egui::Context) {
         if !self.scene_modified {
+            self.auto_save_last_tick = None;
             return;
         }
-        let dt = ctx.input(|i| i.predicted_dt);
+
+        let now = ctx.input(|i| i.time);
+        let dt = if let Some(last_tick) = self.auto_save_last_tick {
+            (now - last_tick).max(0.0) as f32
+        } else {
+            0.0
+        };
+        self.auto_save_last_tick = Some(now);
         self.auto_save_elapsed += dt;
         let interval = self.settings.auto_save_interval_seconds as f32;
         if interval > 0.0 && self.auto_save_elapsed >= interval {
-            self.do_save();
-            let _lang = self.settings.language;
-            let msg = t("app.auto_saved", self.settings.language);
-            self.last_action = msg.to_string();
-            self.console.log(LogLevel::Info, &msg);
+            match self.save_current_project() {
+                Ok(()) => {
+                    let msg = t("app.auto_saved", self.settings.language);
+                    self.last_action = msg.to_string();
+                    self.console.log(LogLevel::Info, &msg);
+                }
+                Err(error) => {
+                    let msg = format!(
+                        "{}: {}",
+                        t("app.auto_save_failed", self.settings.language),
+                        error
+                    );
+                    self.last_action = msg.clone();
+                    self.console.log(LogLevel::Error, &msg);
+                    self.auto_save_elapsed = 0.0;
+                    self.auto_save_last_tick = Some(now);
+                }
+            }
         }
     }
 
     fn mark_scene_modified(&mut self) {
         self.scene_modified = true;
         self.auto_save_elapsed = 0.0;
+        self.auto_save_last_tick = None;
     }
 
     // -----------------------------------------------------------------------
@@ -1939,6 +2129,8 @@ impl AuraRafiApp {
                 self.undo_stack.clear();
                 self.redo_stack.clear();
                 self.scene_modified = false;
+                self.auto_save_elapsed = 0.0;
+                self.auto_save_last_tick = None;
                 self.last_action.clear();
 
                 self.current_project = Some(project.clone());

@@ -70,6 +70,7 @@ impl Framebuffer {
     }
 
     /// Write a pixel bypassing the depth test entirely, without modifying the depth buffer.
+    #[inline]
     pub fn write_pixel_no_depth(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) -> bool {
         if x >= self.width || y >= self.height {
             return false;

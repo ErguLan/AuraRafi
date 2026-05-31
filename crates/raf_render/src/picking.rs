@@ -145,6 +145,9 @@ pub const GIZMO_LENGTH: f32 = 1.2;
 /// Radius of the rotation rings in world units.
 pub const GIZMO_ROTATION_RADIUS: f32 = 1.35;
 
+/// Radius of scale handles in screen pixels.
+pub const GIZMO_SCALE_HANDLE_RADIUS: f32 = 7.0;
+
 /// Segments used for projected rotation ring hit-testing.
 pub const GIZMO_ROTATION_SEGMENTS: usize = 48;
 
@@ -153,6 +156,44 @@ pub const GIZMO_HEAD_SIZE: f32 = 0.15;
 
 /// Line thickness for gizmo.
 pub const GIZMO_LINE_WIDTH: f32 = 2.5;
+
+/// A scale handle projected to screen coordinates.
+#[derive(Debug, Clone)]
+pub struct GizmoScaleHandle {
+    pub center: [f32; 2],
+    pub axis_index: usize,
+    pub sign: f32,
+}
+
+/// Project the 6 scale handles placed at the center of each face.
+pub fn project_gizmo_scale_handles(
+    entity_pos: Vec3,
+    entity_scale: Vec3,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Vec<GizmoScaleHandle> {
+    let extents = entity_scale.abs().max(Vec3::splat(0.1)) * 0.5;
+    let handles = [
+        (Vec3::new(extents.x, 0.0, 0.0), 0usize, 1.0f32),
+        (Vec3::new(-extents.x, 0.0, 0.0), 0usize, -1.0f32),
+        (Vec3::new(0.0, extents.y, 0.0), 1usize, 1.0f32),
+        (Vec3::new(0.0, -extents.y, 0.0), 1usize, -1.0f32),
+        (Vec3::new(0.0, 0.0, extents.z), 2usize, 1.0f32),
+        (Vec3::new(0.0, 0.0, -extents.z), 2usize, -1.0f32),
+    ];
+
+    handles
+        .iter()
+        .filter_map(|(offset, axis_index, sign)| {
+            project_to_screen(entity_pos + *offset, view_proj, vp_w, vp_h).map(|center| GizmoScaleHandle {
+                center,
+                axis_index: *axis_index,
+                sign: *sign,
+            })
+        })
+        .collect()
+}
 
 /// Project a gizmo arrow from entity position to screen.
 /// Returns (start_screen, end_screen, head_points) or None if behind camera.
@@ -243,6 +284,35 @@ pub fn pick_gizmo_arrow(
                 if is_better {
                     best = Some((i, dist));
                 }
+            }
+        }
+    }
+
+    best
+}
+
+/// Hit-test projected scale handles.
+pub fn pick_gizmo_scale_handle(
+    click: [f32; 2],
+    entity_pos: Vec3,
+    entity_scale: Vec3,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<(usize, f32, f32)> {
+    let mut best: Option<(usize, f32, f32)> = None;
+
+    for handle in project_gizmo_scale_handles(entity_pos, entity_scale, view_proj, vp_w, vp_h) {
+        let dx = click[0] - handle.center[0];
+        let dy = click[1] - handle.center[1];
+        let distance = (dx * dx + dy * dy).sqrt();
+        if distance <= GIZMO_SCALE_HANDLE_RADIUS + 4.0 {
+            let is_better = match best {
+                None => true,
+                Some((_, best_distance, _)) => distance < best_distance,
+            };
+            if is_better {
+                best = Some((handle.axis_index, distance, handle.sign));
             }
         }
     }

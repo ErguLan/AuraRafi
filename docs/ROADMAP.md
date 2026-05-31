@@ -219,7 +219,9 @@ Full architectural rewrite of the viewport and render pipeline. The monolithic v
 - [x] Framebuffer reuse across frames (no per-frame allocation), mesh caching per primitive type
 
 
-## v0.9.0 - AI Integration
+## v0.9.0 - AI Integration (Agentic Workspace)
+
+The 0.9.0 target establishes the editor IDE as the native "home" for the AI agent. The engine and IDE are built with an agentic design from the ground up: every core action is exposed as a registered tool key (interacting with the `CommandBus`), and the workspace leverages `.ai/` configuration schemas. Rather than just being a runtime companion, the AI behaves as a co-developer capable of editing the scene graph (e.g., generating multi-part models like a ship from primitives), writing/fixing script code (e.g., configuring walking/physics systems), and diagnosing IDE compiler or electrical errors.
 
 ### Infrastructure (prepared)
 - [x] WorldState snapshot: time, weather, biome, camera, resources, custom data (raf_core/world_state.rs)
@@ -228,15 +230,17 @@ Full architectural rewrite of the viewport and render pipeline. The monolithic v
 - [x] Mesh streaming provider: MeshChunk with grid coords + LOD, camera-based chunk loading/eviction, vertex budget (raf_ai/mesh_provider.rs)
 - [x] DirectorConfig: mode (Disabled/Observer/Active), update interval, action limits, per-action permissions
 - [x] AssetGenCache: in-memory with prompt hashing, auto-eviction, 50MB max
+- [x] Synaptic workspace foundation: standard tool keys and definitions registered via `ToolRegistry` (`crates/raf_ai/src/tool_registry.rs`) mapping directly to command execution.
 
-### Integration (pending - requires engine maturity)
+### Integration & Agentic Control (pending)
 - [ ] LLM provider connection (API integration with OpenClaw/OpenRouter/etc.)
-- [ ] Tool-calling execution pipeline (AI -> CommandBus)
+- [ ] Tool-calling execution pipeline: connecting `ToolRegistry` directly to the `CommandBus` for runtime & editor modifications
 - [ ] AI Director connected to game loop (reads WorldState, emits actions)
 - [ ] Mesh provider connected to viewport (streams chunks into EditableMesh)
 - [ ] Asset generator UI in asset browser panel ("Generate with AI" button)
-- [ ] AI-assisted entity creation (prompt -> spawn primitive with properties)
-- [ ] AI-assisted debugging (analyze console errors, suggest fixes)
+- [ ] AI-assisted entity & asset creation (e.g., prompt -> generate and position multi-primitive structures/prefabs)
+- [ ] AI-assisted script writing & configuration (e.g., writing Rhai/C++ code to enable mechanics like walking or custom character behavior)
+- [ ] AI-assisted debugging (monitoring console & compilation errors, automatically suggesting and applying code edits)
 - [ ] Chat history persistence
 - [ ] AI-generated textures applied as materials
 - [ ] Procedural terrain via mesh provider (no AI needed, algorithmic)

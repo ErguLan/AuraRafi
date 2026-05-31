@@ -134,6 +134,22 @@ impl HierarchyPanel {
             }
         });
 
+        if let Some(dragged) = self.dragged_node {
+            if let (Some(pointer), Some(node)) = (ui.input(|i| i.pointer.hover_pos()), scene.get(dragged)) {
+                let selection_extra = if self.selected_nodes.contains(&dragged) {
+                    self.selected_nodes.len().saturating_sub(1)
+                } else {
+                    0
+                };
+                let ghost_label = if selection_extra > 0 {
+                    format!("{} (+{})", node.name, selection_extra)
+                } else {
+                    node.name.clone()
+                };
+                paint_drag_preview(ui, pointer, &ghost_label);
+            }
+        }
+
         // Sync selected_node from multi-select (first element).
         self.selected_node = self.selected_nodes.first().copied();
     }
@@ -166,6 +182,7 @@ impl HierarchyPanel {
         let has_children = !child_ids.is_empty();
 
         let is_selected = self.selected_nodes.contains(&id);
+        let is_primary = self.selected_node == Some(id);
         let is_open = !self.collapsed_nodes.contains(&id);
         let is_renaming = matches!(self.renaming, Some((rename_id, _)) if rename_id == id);
 
@@ -267,7 +284,14 @@ impl HierarchyPanel {
                     );
                 }
 
-                let response = selectable_node_label(ui, &node_name, base_label_width, is_selected, text_color);
+                let response = selectable_node_label(
+                    ui,
+                    &node_name,
+                    base_label_width,
+                    is_selected,
+                    is_primary,
+                    text_color,
+                );
 
                 if response.clicked() {
                     self.handle_click(ui, id);
@@ -527,6 +551,7 @@ fn selectable_node_label(
     label: &str,
     width: f32,
     selected: bool,
+    primary: bool,
     text_color: egui::Color32,
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(
@@ -538,8 +563,33 @@ fn selectable_node_label(
         ui.painter().rect_filled(
             rect,
             4.0,
-            egui::Color32::from_rgba_premultiplied(212, 119, 26, 28),
+            if primary {
+                egui::Color32::from_rgba_premultiplied(212, 119, 26, 42)
+            } else {
+                egui::Color32::from_rgba_premultiplied(212, 119, 26, 24)
+            },
         );
+
+        ui.painter().rect_stroke(
+            rect,
+            4.0,
+            egui::Stroke::new(
+                if primary { 1.4 } else { 1.0 },
+                if primary {
+                    egui::Color32::from_rgb(232, 152, 58)
+                } else {
+                    egui::Color32::from_rgba_premultiplied(212, 119, 26, 120)
+                },
+            ),
+        );
+
+        if primary {
+            let accent_rect = egui::Rect::from_min_max(
+                egui::pos2(rect.left(), rect.top()),
+                egui::pos2(rect.left() + 3.0, rect.bottom()),
+            );
+            ui.painter().rect_filled(accent_rect, 2.0, egui::Color32::from_rgb(232, 152, 58));
+        }
     } else if response.hovered() {
         ui.painter().rect_filled(
             rect,
@@ -557,4 +607,29 @@ fn selectable_node_label(
     );
 
     response
+}
+
+fn paint_drag_preview(ui: &Ui, pointer: egui::Pos2, label: &str) {
+    let layer_id = egui::LayerId::new(egui::Order::Foreground, egui::Id::new("hierarchy_drag_preview"));
+    let painter = ui.ctx().layer_painter(layer_id);
+    let font_id = egui::FontId::proportional(11.0);
+    let galley = painter.layout_no_wrap(label.to_string(), font_id.clone(), egui::Color32::WHITE);
+    let size = galley.size() + egui::vec2(20.0, 12.0);
+    let rect = egui::Rect::from_min_size(pointer + egui::vec2(14.0, 12.0), size);
+
+    painter.rect_filled(
+        rect,
+        6.0,
+        egui::Color32::from_rgba_premultiplied(26, 27, 33, 230),
+    );
+    painter.rect_stroke(
+        rect,
+        6.0,
+        egui::Stroke::new(1.0, egui::Color32::from_rgb(212, 119, 26)),
+    );
+    painter.galley(
+        egui::pos2(rect.left() + 10.0, rect.center().y - galley.size().y * 0.5),
+        galley,
+        egui::Color32::WHITE,
+    );
 }

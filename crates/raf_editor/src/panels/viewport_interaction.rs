@@ -72,6 +72,7 @@ impl ViewportPanel {
                     self.selected.first().copied(),
                     view_proj,
                     local,
+                    self.uniform_scale_by_default,
                     vp_w,
                     vp_h,
                 );

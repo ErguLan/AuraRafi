@@ -216,6 +216,10 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
 
                 ui.add_space(4.0);
 
+                ui.checkbox(&mut settings.show_fps_counter, t("settings.show_fps_counter", settings.language));
+
+                ui.add_space(4.0);
+
                 ui.checkbox(&mut settings.vsync, t("settings.vsync", settings.language));
 
                 if !settings.simple_mode {

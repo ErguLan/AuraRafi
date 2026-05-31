@@ -142,19 +142,32 @@ impl SchematicViewPanel {
             if let PlacementMode::Component(idx) = &self.placement {
                 if let Some(mouse) = hover_mouse {
                     let world = self.snap_to_grid(self.screen_to_world(mouse, rect));
-                    let screen = self.world_to_screen(world, rect);
-                    let body = self.component_body_rect(screen, SchematicSymbolKind::Generic);
-                    painter.rect_filled(
-                        body,
-                        6.0 * self.zoom,
-                        Color32::from_rgba_premultiplied(212, 119, 26, 52),
-                    );
-                    painter.rect_stroke(
-                        body,
-                        6.0 * self.zoom,
-                        Stroke::new(1.5, Color32::from_rgba_premultiplied(212, 119, 26, 140)),
-                    );
                     if let Some(template) = self.library.components.get(*idx) {
+                        let mut preview = template.instantiate();
+                        preview.position = glam::Vec2::new(world.x, world.y);
+                        preview.rotation = self.placement_rotation();
+                        self.draw_component(
+                            &painter,
+                            rect,
+                            &preview,
+                            true,
+                            true,
+                            None,
+                            true,
+                        );
+
+                        let screen = self.world_to_screen(world, rect);
+                        let body = self.component_body_rect(screen, symbol_kind_for_component(&preview));
+                        painter.rect_filled(
+                            body,
+                            6.0 * self.zoom,
+                            Color32::from_rgba_premultiplied(212, 119, 26, 36),
+                        );
+                        painter.rect_stroke(
+                            body,
+                            6.0 * self.zoom,
+                            Stroke::new(1.2, Color32::from_rgba_premultiplied(212, 119, 26, 120)),
+                        );
                         painter.text(
                             Pos2::new(body.center().x, body.bottom() + 10.0),
                             egui::Align2::CENTER_TOP,
@@ -178,10 +191,6 @@ impl SchematicViewPanel {
                 ui.ctx().request_repaint();
             }
 
-            if self.show_export_menu {
-                self.draw_export_menu(&painter, rect);
-            }
-
             if let Some(candidate) = hover_candidate {
                 self.draw_hover_hint(&painter, rect, candidate);
             }
@@ -201,7 +210,7 @@ impl SchematicViewPanel {
             );
         }
 
-        if self.placement == PlacementMode::None {
+        if !self.show_export_menu && self.placement == PlacementMode::None {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(mouse) = hover_mouse {
                     if let Some(idx) = self.hit_test_component(mouse, rect) {
@@ -240,7 +249,7 @@ impl SchematicViewPanel {
             }
         }
 
-        if response.clicked() && self.drag_state.is_none() {
+        if !self.show_export_menu && response.clicked() && self.drag_state.is_none() {
             self.context_menu = None;
 
             if let Some(mouse) = hover_mouse {
@@ -251,6 +260,7 @@ impl SchematicViewPanel {
                         if let Some(template) = self.library.components.get(*idx) {
                             let mut comp = template.instantiate();
                             comp.position = glam::Vec2::new(candidate.world.x, candidate.world.y);
+                            comp.rotation = self.placement_rotation();
                             self.schematic.add_component(comp);
                             let last = self.schematic.components.len().saturating_sub(1);
                             self.selection = SchematicSelection::Component(last);
@@ -272,9 +282,22 @@ impl SchematicViewPanel {
                                 changed |= self.schematic.add_wire_path(&route_points, "") > 0;
                             }
 
-                            self.wire_start = Some(candidate.chain_anchor(end_world));
+                            let finish_wire = response.double_clicked_by(egui::PointerButton::Primary)
+                                || !matches!(candidate.kind, ConnectionKind::Grid);
+
+                            if finish_wire {
+                                self.wire_start = None;
+                                self.placement = PlacementMode::None;
+                            } else {
+                                self.wire_start = Some(candidate.chain_anchor(end_world));
+                            }
                         } else {
-                            self.wire_start = Some(candidate);
+                            if response.double_clicked_by(egui::PointerButton::Primary) {
+                                self.wire_start = None;
+                                self.placement = PlacementMode::None;
+                            } else {
+                                self.wire_start = Some(candidate);
+                            }
                         }
                     }
                     PlacementMode::None => {
@@ -293,11 +316,11 @@ impl SchematicViewPanel {
         }
 
         if response.clicked_by(egui::PointerButton::Secondary) {
-            if let PlacementMode::Wire = self.placement {
-                if self.wire_start.is_some() {
-                    self.wire_start = None;
-                    return changed;
-                }
+            if self.placement != PlacementMode::None {
+                self.wire_start = None;
+                self.placement = PlacementMode::None;
+                self.context_menu = None;
+                return changed;
             }
 
             if let Some(mouse) = hover_mouse {
@@ -321,15 +344,15 @@ impl SchematicViewPanel {
             }
         }
 
-        if response.dragged_by(egui::PointerButton::Middle) {
+        if !self.show_export_menu && response.dragged_by(egui::PointerButton::Middle) {
             self.offset += response.drag_delta();
         }
 
-        if self.context_menu.is_none() && response.dragged_by(egui::PointerButton::Secondary) {
+        if !self.show_export_menu && self.context_menu.is_none() && response.dragged_by(egui::PointerButton::Secondary) {
             self.offset += response.drag_delta();
         }
 
-        if ui.rect_contains_pointer(rect) {
+        if !self.show_export_menu && ui.rect_contains_pointer(rect) {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll != 0.0 {
                 if let Some(mouse) = hover_mouse {
@@ -371,23 +394,16 @@ impl SchematicViewPanel {
             let key_3 = ui.input(|i| i.key_pressed(egui::Key::Num3));
 
             if key_1 {
-                let result = raf_electronics::export_netlist_text(&self.schematic);
-                self.export_message = Some(format!("Netlist: {} bytes", result.content.len()));
-                self.show_export_menu = false;
-                tracing::info!("Export netlist:\n{}", result.content);
+                self.export_netlist(ui.ctx());
             }
             if key_2 {
-                let result = raf_electronics::export_bom_csv(&self.schematic);
-                self.export_message = Some(format!("BOM CSV: {} bytes", result.content.len()));
-                self.show_export_menu = false;
-                tracing::info!("Export BOM:\n{}", result.content);
+                self.export_bom_csv(ui.ctx());
             }
             if key_3 {
-                let result = raf_electronics::export_svg(&self.schematic);
-                self.export_message = Some(format!("SVG: {} bytes", result.content.len()));
-                self.show_export_menu = false;
-                tracing::info!("Export SVG:\n{}", result.content);
+                self.export_svg(ui.ctx());
             }
+
+            self.draw_export_menu(ui, rect);
         }
 
         if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
@@ -395,7 +411,10 @@ impl SchematicViewPanel {
         }
 
         if ui.input(|i| i.key_pressed(egui::Key::R)) {
-            if let Some(idx) = self.selected_component_index() {
+            if matches!(self.placement, PlacementMode::Component(_)) {
+                self.rotate_placement_preview();
+                changed = true;
+            } else if let Some(idx) = self.selected_component_index() {
                 let comp = &mut self.schematic.components[idx];
                 comp.rotation = (comp.rotation + 90.0) % 360.0;
                 changed = true;
@@ -1103,48 +1122,106 @@ impl SchematicViewPanel {
         );
     }
 
-    fn draw_export_menu(&self, painter: &egui::Painter, canvas_rect: Rect) {
-        let menu_rect = Rect::from_min_size(
-            Pos2::new(canvas_rect.center().x - 110.0, canvas_rect.top() + 60.0),
-            Vec2::new(220.0, 130.0),
-        );
+    fn export_netlist(&mut self, ctx: &egui::Context) {
+        let result = raf_electronics::export_netlist_text(&self.schematic);
+        ctx.copy_text(result.content.clone());
+        self.export_message = Some(format!(
+            "{}: {} bytes | {} | {}",
+            t("app.export_netlist_label", self.lang),
+            result.content.len(),
+            t("app.export_copied_clipboard", self.lang),
+            t("app.export_log_only", self.lang),
+        ));
+        self.show_export_menu = false;
+        tracing::info!("Export netlist:\n{}", result.content);
+    }
 
-        painter.rect_filled(menu_rect, 8.0, Color32::from_rgba_premultiplied(25, 25, 35, 240));
-        painter.rect_stroke(menu_rect, 8.0, Stroke::new(1.0, theme::ACCENT));
+    fn export_bom_csv(&mut self, ctx: &egui::Context) {
+        let result = raf_electronics::export_bom_csv(&self.schematic);
+        ctx.copy_text(result.content.clone());
+        self.export_message = Some(format!(
+            "{}: {} bytes | {} | {}",
+            t("app.export_bom_csv_label", self.lang),
+            result.content.len(),
+            t("app.export_copied_clipboard", self.lang),
+            t("app.export_log_only", self.lang),
+        ));
+        self.show_export_menu = false;
+        tracing::info!("Export BOM:\n{}", result.content);
+    }
 
-        painter.text(
-            Pos2::new(menu_rect.center().x, menu_rect.top() + 16.0),
-            egui::Align2::CENTER_CENTER,
-            t("app.export_schematic", self.lang),
-            egui::FontId::proportional(12.0),
-            theme::ACCENT,
-        );
+    fn export_svg(&mut self, ctx: &egui::Context) {
+        let result = raf_electronics::export_svg(&self.schematic);
+        ctx.copy_text(result.content.clone());
+        self.export_message = Some(format!(
+            "{}: {} bytes | {} | {}",
+            t("app.export_svg_label", self.lang),
+            result.content.len(),
+            t("app.export_copied_clipboard", self.lang),
+            t("app.export_log_only", self.lang),
+        ));
+        self.show_export_menu = false;
+        tracing::info!("Export SVG:\n{}", result.content);
+    }
 
-        let options = if self.lang == raf_core::config::Language::Spanish {
-            ["1. Netlist (texto)", "2. BOM (CSV)", "3. SVG (imagen vectorial)"]
-        } else {
-            ["1. Netlist (text)", "2. BOM (CSV)", "3. SVG (vector image)"]
-        };
+    fn draw_export_menu(&mut self, ui: &mut egui::Ui, canvas_rect: Rect) {
+        let menu_id = egui::Id::new("schematic_export_menu");
+        let menu_pos = Pos2::new(canvas_rect.center().x, canvas_rect.top() + 76.0);
 
-        let mut y = menu_rect.top() + 38.0;
-        for option in options {
-            painter.text(
-                Pos2::new(menu_rect.left() + 16.0, y),
-                egui::Align2::LEFT_CENTER,
-                option,
-                egui::FontId::proportional(11.0),
-                Color32::from_rgb(200, 200, 210),
-            );
-            y += 22.0;
-        }
+        egui::Area::new(menu_id)
+            .fixed_pos(menu_pos)
+            .pivot(egui::Align2::CENTER_TOP)
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                    ui.set_min_width(244.0);
 
-        painter.text(
-            Pos2::new(menu_rect.center().x, menu_rect.bottom() - 10.0),
-            egui::Align2::CENTER_BOTTOM,
-            t("app.esc_close_1_2_3_export", self.lang),
-            egui::FontId::proportional(9.0),
-            Color32::from_rgb(130, 130, 140),
-        );
+                    ui.label(
+                        egui::RichText::new(t("app.export_schematic", self.lang))
+                            .color(theme::ACCENT)
+                            .size(12.0),
+                    );
+                    ui.add_space(6.0);
+
+                    if ui
+                        .add_sized([220.0, 28.0], egui::Button::new(t("app.export_netlist_label", self.lang)))
+                        .clicked()
+                    {
+                        self.export_netlist(ui.ctx());
+                    }
+
+                    if ui
+                        .add_sized([220.0, 28.0], egui::Button::new(t("app.export_bom_csv_label", self.lang)))
+                        .clicked()
+                    {
+                        self.export_bom_csv(ui.ctx());
+                    }
+
+                    if ui
+                        .add_sized([220.0, 28.0], egui::Button::new(t("app.export_svg_label", self.lang)))
+                        .clicked()
+                    {
+                        self.export_svg(ui.ctx());
+                    }
+
+                    ui.add_space(6.0);
+                    ui.label(
+                        egui::RichText::new(t("app.export_log_notice", self.lang))
+                            .size(9.5)
+                            .color(Color32::from_rgb(130, 130, 140)),
+                    );
+                    ui.label(
+                        egui::RichText::new(t("app.esc_close_1_2_3_export", self.lang))
+                            .size(9.5)
+                            .color(Color32::from_rgb(130, 130, 140)),
+                    );
+                    ui.add_space(4.0);
+
+                    if ui.button(t("app.cancel", self.lang)).clicked() {
+                        self.show_export_menu = false;
+                    }
+                });
+            });
     }
 
     fn hit_test_component(&self, mouse: Pos2, canvas_rect: Rect) -> Option<usize> {

@@ -22,6 +22,10 @@ pub struct ViewportPointerInput {
     pub drag_secondary: bool,
     pub drag_middle: bool,
     pub hovered: bool,
+    pub move_forward: f32,
+    pub move_right: f32,
+    pub move_up: f32,
+    pub frame_time_s: f32,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -112,6 +116,35 @@ impl ViewportBridge {
 
     pub fn active_drag_axis(&self) -> GizmoAxis {
         self.transform_controller.drag_axis()
+    }
+
+    pub fn highlighted_gizmo_axis(&self) -> GizmoAxis {
+        self.transform_controller.highlighted_axis()
+    }
+
+    pub fn highlighted_gizmo_scale_sign(&self) -> f32 {
+        self.transform_controller.highlighted_scale_sign()
+    }
+
+    pub fn snap_view_to_axis(&mut self, axis: Vec3) {
+        let axis = axis.normalize_or_zero();
+        if axis.length_squared() <= f32::EPSILON {
+            return;
+        }
+
+        if axis.y.abs() > 0.99 {
+            self.orbit_yaw = 0.0;
+            self.orbit_pitch = 1.35 * axis.y.signum();
+            return;
+        }
+
+        self.orbit_yaw = axis.x.atan2(axis.z);
+        self.orbit_pitch = axis.y.clamp(-0.97, 0.97).asin();
+    }
+
+    pub fn reset_isometric_view(&mut self) {
+        self.orbit_yaw = std::f32::consts::FRAC_PI_4;
+        self.orbit_pitch = 0.5;
     }
 
     pub fn edit_session(&self) -> &ViewportEditSession {
@@ -222,12 +255,26 @@ impl ViewportBridge {
             .begin_drag(scene, selected, view_proj, pointer_local, vp_w, vp_h);
     }
 
+    pub fn update_transform_hover(
+        &mut self,
+        scene: &SceneGraph,
+        selected: Option<SceneNodeId>,
+        view_proj: &Mat4,
+        pointer_local: [f32; 2],
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        self.transform_controller
+            .update_hover(scene, selected, view_proj, pointer_local, vp_w, vp_h);
+    }
+
     pub fn apply_transform_drag(
         &mut self,
         scene: &mut SceneGraph,
         selected: Option<SceneNodeId>,
         view_proj: &Mat4,
         current_mouse: [f32; 2],
+        uniform_scale: bool,
         vp_w: f32,
         vp_h: f32,
     ) -> bool {
@@ -237,6 +284,7 @@ impl ViewportBridge {
             view_proj,
             current_mouse,
             self.orbit_distance,
+            uniform_scale,
             vp_w,
             vp_h,
         )
@@ -284,6 +332,17 @@ impl ViewportBridge {
             let pan_speed = self.orbit_distance * 0.002 * config.move_sensitivity;
             self.camera.target -= right * pointer_delta.x * pan_speed;
             self.camera.target += up * pointer_delta.y * pan_speed;
+        }
+
+        if input.hovered {
+            let dt = input.frame_time_s.max(1.0 / 240.0).min(1.0 / 15.0);
+            let forward = Vec3::new(self.orbit_yaw.sin(), 0.0, self.orbit_yaw.cos()).normalize_or_zero();
+            let right = Vec3::new(self.orbit_yaw.cos(), 0.0, -self.orbit_yaw.sin()).normalize_or_zero();
+            let up = Vec3::Y;
+            let move_speed = self.orbit_distance.max(2.0) * 0.85 * config.move_sensitivity * dt;
+            self.camera.target += forward * input.move_forward * move_speed;
+            self.camera.target += right * input.move_right * move_speed;
+            self.camera.target += up * input.move_up * move_speed;
         }
 
         if input.hovered && input.scroll_delta_y.abs() > 0.01 {

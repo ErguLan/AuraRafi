@@ -5,6 +5,124 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.8.9.1] - 2026-05-30 - Stabilization Pass, Viewport UX Polish, and Runtime Truth Docs
+
+### Added
+
+- **Session safety hardening**: unsaved-changes confirmation now covers close-to-hub and app close flows, save failures stay visible, and auto-save uses real elapsed editor time.
+- **Schematic usability pass**: placement preview rotation with `R`, clean placement/wire cancellation, clickable export popup, and clipboard copy feedback for Netlist, BOM, and SVG.
+- **PCB interaction pass**: wider hit-tests, hover overlays for components/traces/airwires, live outline preview, and hot airwire rebuild during component drag.
+- **Viewport and hierarchy polish**: primary multi-select highlight, hierarchy drag ghost, `WASD` + `Q/E` 3D movement, gizmo hover state, six face-based orange scale handles, interactive XYZ compass, quick grid/label toggles, adaptive HUD width, and persistent FPS counter toggle.
+- **Stabilization tracking docs**: new `docs/STABILIZATION_STATUS.md` plus `docs/TEMP_PHASE6_RUNTIME_TRUTH_PASS.md`, including the new Phase 7 definition for canonical renderer and graphics hot-path consolidation.
+
+### Changed
+
+- **Workspace versioning**: bumped the workspace release version to `0.8.9.1`.
+- **CPU scene renderer path**: simplified the software scene renderer toward direct framebuffer rasterization, direct grid/line submission, and less command-list indirection in the active CPU fallback path.
+- **Roadmap framing**: updated `docs/ROADMAP.md` so the `0.9.0` target is described as an agentic workspace/editor direction.
+- **Project temp hygiene**: root debug/temp artifacts are now ignored by git to keep the repo cleaner during stabilization work.
+
+### Fixed
+
+- **Save honesty**: project save and auto-save no longer silently clear dirty state when any write fails.
+- **Exit safety**: closing the app or returning to the hub now respects unsaved work instead of discarding editor state blindly.
+- **Schematic friction**: double-click/right-click wire issues, preview rotation behavior, export popup interaction conflicts, and export feedback gaps were corrected.
+- **PCB feedback**: route/outline/component interactions now expose clearer hover cues and avoid stale airwire visuals while dragging.
+- **Viewport feel**: labels back off during heavy interaction, top/bottom bars have stronger contrast, and scale gizmo behavior now matches `uniform_scale_by_default` more honestly.
+
+## [0.8.8] - 2026-05-22 - GPU-First Runtime and Electronics GPU Canvases
+
+### Added
+
+- **GPU-first shared render runtime**: scene viewport, schematic canvas, and PCB canvas now share the same runtime with hardware execution first and CPU fallback retained.
+- **Electronics GPU canvases**: schematic and PCB editors moved their heavy geometry rendering into the unified graphics pipeline.
+- **ApiGraphicBasic execution path**: command-buffer based scene execution expanded for both GPU hardware rendering and CPU raster fallback.
+
+### Changed
+
+- **Workspace versioning**: aligned the workspace package version with the current 0.8.8 release state.
+- **Viewport/runtime presentation**: native GPU texture presentation and shared wgpu integration now drive the main editor surfaces.
+
+### Fixed
+
+- **Electronics startup crash**: corrected the line pipeline bind-group mismatch that was breaking GPU initialization when opening electronics views.
+- **Renderer consistency**: stabilized the GPU-first path while preserving fallback behavior for low-end setups.
+
+## [0.8.5] - 2026-05-19 - Viewport Architecture Split and Software Z-buffer Rasterizer
+
+### Added
+
+- **Viewport Architecture Refactoring** (`crates/raf_editor/src/panels/`):
+  - Refactored viewport panel shell to a clean, lightweight egui panel (`viewport.rs`).
+  - Extracted HUD toolbar with G/R/S/F buttons, 2D/3D toggle, OBJ/VTX mode badge, and axis gizmo (`viewport_hud.rs`).
+  - Decoupled object-mode and vertex-mode drag and click interactions (`viewport_interaction.rs`).
+  - Added dedicated overlay rendering for labels, transform gizmos, and vertex edits (`viewport_overlay.rs`).
+- **Renderer Bridge Layer** (`crates/raf_render/src/bridge/`):
+  - Introduced `ViewportBridge` to own camera state, renderer, edit session, and transform controllers independently from egui.
+  - Implemented `ViewportTransformController` to manage gizmo drag lifecycle and axis projection.
+  - Created `ViewportEditSession` to manage per-entity editable mesh state, vertex selection, and vertex dragging.
+  - Implemented precise entity picking using ray-sphere broad phase and ray-triangle narrow phase intersection testing.
+- **Render Pipeline Overhaul** (`crates/raf_render/src/render_pipeline/`):
+  - Built a full MVP transform pipeline (model to view, projection, perspective divide, and screen coordinates mapping).
+  - Added 6-plane camera frustum culling.
+  - Implemented a Z-buffer scanline rasterizer (`rasterizer.rs`) with per-pixel depth test to replace the painter's algorithm.
+  - Added transparency rendering via src-over alpha blending sorted back-to-front.
+  - Added perspective and orthographic camera modes with smooth pan and zoom.
+  - Optimized rendering with framebuffer reuse across frames and primitive mesh caching.
+
+### Changed
+
+- Migrated all viewport selection state to support multi-select via `Vec<SceneNodeId>`.
+- Updated HUD click handling to block raycasts from passing through UI buttons.
+
+## [0.8.0] - 2026-04-27 - Editor Runtime, Rhai Behaviors, Physics, Audio, and Nodes Persistence
+
+### Added
+
+- **Editor-Integrated Play/Stop Flow**:
+  - Integrated Play/Stop execution path directly within game projects in the editor.
+  - Implemented runtime scene cloning to run simulations on a sandbox copy, keeping the original edit document intact.
+  - Enabled scene loading and runtime initialization using saved project states.
+- **Visual Scripting & Rhai Integration**:
+  - Added node graph serialization and persistence as `nodes.ron`.
+  - Wired node execution to hook into runtime `On Start` and `On Update` events.
+  - Integrated `.rhai` script execution engine for external behavior runtime.
+  - Provided script-facing API helpers to access `self`, `parent`, entity hierarchy paths, variables, velocities, and audio playback triggers.
+- **Physics and Collisions**:
+  - Added basic collision detection through scene colliders.
+  - Implemented simple physics simulations (gravity, damping, velocity, trigger-only rigid bodies).
+  - Added `AnimCollider` per bone (`raf_core/scene/anim_collider.rs`) supporting 5 contact response types (Stop, Blend, Slide, Recoil, Ignore), auto-generated for hands and feet.
+- **Audio & Inspector UI**:
+  - Added runtime audio playback for entity audio sources.
+  - Expanded properties inspector to view and edit runtime variables, rigid body properties, colliders, and audio sources.
+
+### Changed
+
+- Aligned project initialization, settings templates, and language translation keys for editor play/stop controls.
+
+## [0.7.9] - 2026-04-21 - Software Z-buffer Rasterizer, Solid Rendering Modes, Editor Stabilization
+
+### Added
+
+- **Software Rasterizer** (`crates/raf_render/src/software_raster.rs`):
+  - CPU-bound Z-buffer rasterizer with barycentric triangle rasterization, near-plane clipping, and alpha-aware depth testing.
+  - Selection outline shader-less implementation and wireframe rendering with depth testing.
+- **Render Config Options**:
+  - Added `depth_accurate`, `depth_resolution_scale`, and `selection_outline` toggles to `RenderConfig`.
+  - Added solid rendering settings: surface edges, x-ray mode, and face tonality.
+- **Script Support & UI Assets**:
+  - Created `script_support.rs` for automatic script language detection, cataloging, and external editor execution.
+  - Implemented `ui_icons.rs` with an asynchronous, threaded icon atlas loader operating within a strict texture budget.
+  - Extracted grid rendering into `viewport_grid.rs` under the new `ApiGraphicBasic` pipeline.
+- **Project Settings & Navigation**:
+  - Added project-specific configuration panels for layout, runtime, and graphics presets.
+  - Configurable mouse orbit inversions (X and Y axes).
+  - Hotkey `F` to focus and snap the camera to the selected entity.
+
+### Fixed
+
+- **Camera Movement**: Corrected WASD camera movement bug where orbit distance became stuck or corrupted during forward camera movement.
+
 ## [0.7.0] - 2026-04-15 - Advanced Rendering (Potato-First)
 
 ### Added

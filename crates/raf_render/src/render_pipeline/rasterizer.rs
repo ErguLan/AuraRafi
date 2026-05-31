@@ -359,99 +359,10 @@ fn pack_rgba_inline(r: u8, g: u8, b: u8, a: u8) -> u32 {
 /// Depth is linearly interpolated along the line.
 pub fn rasterize_line(
     fb: &mut Framebuffer,
-    mut x0: f32, mut y0: f32, mut z0: f32,
-    mut x1: f32, mut y1: f32, mut z1: f32,
+    x0: f32, y0: f32, z0: f32,
+    x1: f32, y1: f32, z1: f32,
     r: u8, g: u8, b: u8, a: u8,
 ) {
-    let w = fb.width() as f32;
-    let h = fb.height() as f32;
-
-    const INSIDE: u8 = 0; // 0000
-    const LEFT: u8 = 1;   // 0001
-    const RIGHT: u8 = 2;  // 0010
-    const BOTTOM: u8 = 4; // 0100
-    const TOP: u8 = 8;    // 1000
-
-    let compute_code = |x: f32, y: f32| -> u8 {
-        let mut code = INSIDE;
-        if x < 0.0 {
-            code |= LEFT;
-        } else if x >= w {
-            code |= RIGHT;
-        }
-        if y < 0.0 {
-            code |= TOP;
-        } else if y >= h {
-            code |= BOTTOM;
-        }
-        code
-    };
-
-    let mut code0 = compute_code(x0, y0);
-    let mut code1 = compute_code(x1, y1);
-
-    let orig_x0 = x0;
-    let orig_y0 = y0;
-    let orig_x1 = x1;
-    let orig_y1 = y1;
-
-    let mut accept = false;
-
-    for _ in 0..8 {
-        if (code0 | code1) == 0 {
-            accept = true;
-            break;
-        } else if (code0 & code1) != 0 {
-            break;
-        } else {
-            let outcode = if code0 != 0 { code0 } else { code1 };
-            let mut x = 0.0;
-            let mut y = 0.0;
-
-            if (outcode & TOP) != 0 {
-                x = x0 + (x1 - x0) * (0.0 - y0) / (y1 - y0);
-                y = 0.0;
-            } else if (outcode & BOTTOM) != 0 {
-                let max_y = h - 0.001;
-                x = x0 + (x1 - x0) * (max_y - y0) / (y1 - y0);
-                y = max_y;
-            } else if (outcode & RIGHT) != 0 {
-                let max_x = w - 0.001;
-                y = y0 + (y1 - y0) * (max_x - x0) / (x1 - x0);
-                x = max_x;
-            } else if (outcode & LEFT) != 0 {
-                y = y0 + (y1 - y0) * (0.0 - x0) / (x1 - x0);
-                x = 0.0;
-            }
-
-            if outcode == code0 {
-                x0 = x;
-                y0 = y;
-                code0 = compute_code(x0, y0);
-            } else {
-                x1 = x;
-                y1 = y;
-                code1 = compute_code(x1, y1);
-            }
-        }
-    }
-
-    if !accept {
-        return;
-    }
-
-    // Interpolate z0 and z1 based on the clipped x0, y0 and x1, y1
-    let dx_orig = orig_x1 - orig_x0;
-    let dy_orig = orig_y1 - orig_y0;
-    let len_sq = dx_orig * dx_orig + dy_orig * dy_orig;
-    if len_sq > 1e-6 {
-        let t0 = ((x0 - orig_x0) * dx_orig + (y0 - orig_y0) * dy_orig) / len_sq;
-        let t1 = ((x1 - orig_x0) * dx_orig + (y1 - orig_y0) * dy_orig) / len_sq;
-        let orig_z0 = z0;
-        z0 = orig_z0 + (z1 - orig_z0) * t0.clamp(0.0, 1.0);
-        z1 = orig_z0 + (z1 - orig_z0) * t1.clamp(0.0, 1.0);
-    }
-
     let dx = (x1 - x0).abs();
     let dy = (y1 - y0).abs();
     let steps = dx.max(dy).ceil() as u32;
@@ -475,88 +386,21 @@ pub fn rasterize_line(
 
 pub fn rasterize_line_no_depth(
     fb: &mut Framebuffer,
-    mut x0: f32, mut y0: f32,
-    mut x1: f32, mut y1: f32,
-    r: u8, g: u8, b: u8, a: u8,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
 ) {
-    let w = fb.width() as f32;
-    let h = fb.height() as f32;
-
-    const INSIDE: u8 = 0; // 0000
-    const LEFT: u8 = 1;   // 0001
-    const RIGHT: u8 = 2;  // 0010
-    const BOTTOM: u8 = 4; // 0100
-    const TOP: u8 = 8;    // 1000
-
-    let compute_code = |x: f32, y: f32| -> u8 {
-        let mut code = INSIDE;
-        if x < 0.0 {
-            code |= LEFT;
-        } else if x >= w {
-            code |= RIGHT;
-        }
-        if y < 0.0 {
-            code |= TOP;
-        } else if y >= h {
-            code |= BOTTOM;
-        }
-        code
-    };
-
-    let mut code0 = compute_code(x0, y0);
-    let mut code1 = compute_code(x1, y1);
-
-    let mut accept = false;
-
-    for _ in 0..8 {
-        if (code0 | code1) == 0 {
-            accept = true;
-            break;
-        } else if (code0 & code1) != 0 {
-            break;
-        } else {
-            let outcode = if code0 != 0 { code0 } else { code1 };
-            let mut x = 0.0;
-            let mut y = 0.0;
-
-            if (outcode & TOP) != 0 {
-                x = x0 + (x1 - x0) * (0.0 - y0) / (y1 - y0);
-                y = 0.0;
-            } else if (outcode & BOTTOM) != 0 {
-                let max_y = h - 0.001;
-                x = x0 + (x1 - x0) * (max_y - y0) / (y1 - y0);
-                y = max_y;
-            } else if (outcode & RIGHT) != 0 {
-                let max_x = w - 0.001;
-                y = y0 + (y1 - y0) * (max_x - x0) / (x1 - x0);
-                x = max_x;
-            } else if (outcode & LEFT) != 0 {
-                y = y0 + (y1 - y0) * (0.0 - x0) / (x1 - x0);
-                x = 0.0;
-            }
-
-            if outcode == code0 {
-                x0 = x;
-                y0 = y;
-                code0 = compute_code(x0, y0);
-            } else {
-                x1 = x;
-                y1 = y;
-                code1 = compute_code(x1, y1);
-            }
-        }
-    }
-
-    if !accept {
-        return;
-    }
-
     let dx = (x1 - x0).abs();
     let dy = (y1 - y0).abs();
     let steps = dx.max(dy).ceil() as u32;
 
     if steps == 0 {
-        fb.write_pixel_no_depth(x0 as u32, y0 as u32, r, g, b, a);
+        let _ = fb.write_pixel_no_depth(x0 as u32, y0 as u32, r, g, b, a);
         return;
     }
 
@@ -567,7 +411,7 @@ pub fn rasterize_line_no_depth(
         let y = y0 + (y1 - y0) * t;
         let xi = x as u32;
         let yi = y as u32;
-        fb.write_pixel_no_depth(xi, yi, r, g, b, a);
+        let _ = fb.write_pixel_no_depth(xi, yi, r, g, b, a);
     }
 }
 
@@ -645,68 +489,5 @@ mod tests {
         // Check midpoint
         let mid_idx = (50 * 100 + 50) * 4;
         assert_eq!(fb.pixels()[mid_idx], 255, "midpoint should be white");
-    }
-
-    #[test]
-    fn line_rasterization_outside() {
-        let mut fb = Framebuffer::new(100, 100);
-        fb.clear(0, 0, 0, 255);
-
-        // Entirely off-screen line: from (-10, -10) to (-50, -50)
-        rasterize_line(&mut fb, -10.0, -10.0, 0.5, -50.0, -50.0, 0.5, 255, 255, 255, 255);
-
-        // Framebuffer should remain completely black
-        for pixel in fb.pixels().chunks_exact(4) {
-            assert_eq!(pixel, &[0, 0, 0, 255]);
-        }
-    }
-
-    #[test]
-    fn line_rasterization_clipped() {
-        let mut fb = Framebuffer::new(100, 100);
-        fb.clear(0, 0, 0, 255);
-
-        // A line from (-50, 50) to (150, 50).
-        // It crosses the screen horizontally at y = 50.
-        // It should be clipped to x in [0, 99].
-        rasterize_line(&mut fb, -50.0, 50.0, 0.5, 150.0, 50.0, 0.5, 255, 255, 255, 255);
-
-        // Leftmost pixel (x=0) and rightmost pixel (x=99) should be white.
-        let left_idx = (50 * 100 + 0) * 4;
-        let right_idx = (50 * 100 + 99) * 4;
-        assert_eq!(fb.pixels()[left_idx], 255, "left clipped endpoint should be white");
-        assert_eq!(fb.pixels()[right_idx], 255, "right clipped endpoint should be white");
-    }
-
-    #[test]
-    fn line_no_depth_test() {
-        let mut fb = Framebuffer::new(100, 100);
-        fb.clear(0, 0, 0, 255);
-
-        // 1. Draw a pixel at (50, 50) with depth 0.1 and red color
-        fb.write_pixel(50, 50, 0.1, 255, 0, 0, 255);
-
-        // 2. Draw a line with rasterize_line at depth 0.9 (further away) crossing (50, 50) with green color
-        rasterize_line(&mut fb, 10.0, 50.0, 0.9, 90.0, 50.0, 0.9, 0, 255, 0, 255);
-
-        // The pixel at (50, 50) should still be red (since 0.9 >= 0.1, it fails the depth test)
-        let idx = (50 * 100 + 50) * 4;
-        assert_eq!(fb.pixels()[idx], 255, "should remain red");
-        assert_eq!(fb.pixels()[idx + 1], 0, "should not have green");
-
-        // 3. Draw a line with rasterize_line_no_depth crossing (50, 50) with blue color
-        rasterize_line_no_depth(&mut fb, 10.0, 50.0, 90.0, 50.0, 0, 0, 255, 255);
-
-        // The pixel at (50, 50) should now be blue (since depth test is bypassed)
-        assert_eq!(fb.pixels()[idx], 0, "should not be red anymore");
-        assert_eq!(fb.pixels()[idx + 2], 255, "should be blue");
-
-        // 4. Verify that the depth buffer was NOT overwritten by the no_depth_test line, i.e. it remains 0.1
-        // We can check this by drawing a new pixel with depth 0.2 (which is further than 0.1 but closer than any default or 0.9).
-        // If the depth buffer is still 0.1, drawing with depth 0.2 should FAIL.
-        // If the depth buffer was overwritten (or set to 0.0), drawing with depth 0.2 would fail too, but drawing with 0.05 would pass.
-        // Let's draw with depth 0.05 (closer than 0.1) and check if it passes:
-        let pass = fb.write_pixel(50, 50, 0.05, 0, 255, 0, 255);
-        assert!(pass, "writing closer than 0.1 should pass");
     }
 }

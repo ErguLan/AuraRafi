@@ -171,6 +171,12 @@ impl ViewportPanel {
                 i.key_pressed(egui::Key::Num3),
             )
         });
+        let movement_input = ctx.input(|i| {
+            let forward = (i.key_down(egui::Key::W) as i8 - i.key_down(egui::Key::S) as i8) as f32;
+            let right = (i.key_down(egui::Key::D) as i8 - i.key_down(egui::Key::A) as i8) as f32;
+            let up = (i.key_down(egui::Key::E) as i8 - i.key_down(egui::Key::Q) as i8) as f32;
+            (forward, right, up)
+        });
 
         if response.hovered() {
             if viewport_keys.0 {
@@ -197,6 +203,10 @@ impl ViewportPanel {
                 drag_secondary: response.dragged_by(egui::PointerButton::Secondary),
                 drag_middle: response.dragged_by(egui::PointerButton::Middle),
                 hovered: response.hovered(),
+                move_forward: movement_input.0,
+                move_right: movement_input.1,
+                move_up: movement_input.2,
+                frame_time_s: self.frame_time_hint.max(1.0 / 240.0),
             },
             self.mode == ViewportMode::View2D,
             ViewportNavigationConfig {
@@ -279,7 +289,12 @@ impl ViewportPanel {
             1.0
         };
         let render_scale = if self.mode == ViewportMode::View3D {
-            self.update_adaptive_render_scale(requested_scale, viewport_interacting)
+            self.update_adaptive_render_scale(
+                requested_scale,
+                viewport_interacting,
+                is_dragging,
+                self.selected.len(),
+            )
         } else {
             requested_scale
         };
@@ -334,8 +349,42 @@ impl ViewportPanel {
         }
 
         // --- Labels for entities ---
-        if self.show_labels {
+        if self.show_labels && self.should_draw_labels(viewport_interacting, is_dragging) {
             self.draw_entity_labels(&painter, rect, scene, &view_proj, vp_w, vp_h, is_dark);
+        }
+
+        if self.edit_mode != EditMode::Vertex {
+            if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
+                if response.hovered() && !self.overlay_blocks_world_input(rect, pointer) {
+                    let local = [pointer.x - rect.left(), pointer.y - rect.top()];
+                    self.bridge.update_transform_hover(
+                        scene,
+                        self.selected.first().copied(),
+                        &view_proj,
+                        local,
+                        vp_w,
+                        vp_h,
+                    );
+                } else {
+                    self.bridge.update_transform_hover(
+                        scene,
+                        None,
+                        &view_proj,
+                        [0.0, 0.0],
+                        vp_w,
+                        vp_h,
+                    );
+                }
+            } else {
+                self.bridge.update_transform_hover(
+                    scene,
+                    None,
+                    &view_proj,
+                    [0.0, 0.0],
+                    vp_w,
+                    vp_h,
+                );
+            }
         }
 
         if self.edit_mode == EditMode::Vertex {
@@ -344,11 +393,11 @@ impl ViewportPanel {
 
         // --- Gizmo overlay for selected entity ---
         let selected_world_pos = self.selected.first().and_then(|&id| {
-            scene.get(id).map(|_| scene.world_matrix(id).col(3).truncate())
+            scene.get(id).map(|node| (scene.world_matrix(id).col(3).truncate(), node.scale))
         });
-        if let Some(entity_pos) = selected_world_pos {
+        if let Some((entity_pos, entity_scale)) = selected_world_pos {
             if self.edit_mode != EditMode::Vertex {
-                self.draw_gizmo_overlay(&painter, rect, entity_pos, &view_proj, vp_w, vp_h);
+                self.draw_gizmo_overlay(&painter, rect, entity_pos, entity_scale, &view_proj, vp_w, vp_h);
             }
         }
 
@@ -467,7 +516,25 @@ impl ViewportPanel {
         self.last_size = [w, h];
     }
 
-    fn update_adaptive_render_scale(&mut self, requested_scale: f32, interacting: bool) -> f32 {
+    fn should_draw_labels(&self, interacting: bool, is_dragging: bool) -> bool {
+        if self.mode != ViewportMode::View3D {
+            return true;
+        }
+
+        if is_dragging {
+            return false;
+        }
+
+        !(interacting && self.selected.len() > 1)
+    }
+
+    fn update_adaptive_render_scale(
+        &mut self,
+        requested_scale: f32,
+        interacting: bool,
+        is_dragging: bool,
+        selection_count: usize,
+    ) -> f32 {
         let dt = self.frame_time_hint.clamp(1.0 / 240.0, 0.25);
         if interacting {
             self.interaction_linger_s = 0.20;
@@ -479,8 +546,15 @@ impl ViewportPanel {
         let budget_ms = self.render_cfg.frame_budget_ms.max(8.0);
         let previous_ms = self.measured_frame_ms().max(1.0);
         let preset_bias = adaptive_interaction_quality_bias(budget_ms);
+        let drag_bias = if is_dragging { 0.86 } else { 1.0 };
+        let multi_select_bias = if selection_count > 4 {
+            (1.0 - ((selection_count - 4) as f32 * 0.025)).clamp(0.72, 1.0)
+        } else {
+            1.0
+        };
         let budget_ratio = if interaction_active {
-            ((budget_ms / previous_ms).sqrt() * preset_bias).clamp(0.35, 1.0)
+            ((budget_ms / previous_ms).sqrt() * preset_bias * drag_bias * multi_select_bias)
+                .clamp(0.35, 1.0)
         } else {
             1.0
         };

@@ -34,6 +34,10 @@ impl PcbViewPanel {
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         let mut changed = false;
+        let hover_pos = ui.input(|i| i.pointer.hover_pos()).filter(|pointer| rect.contains(*pointer));
+        let hovered_component = hover_pos.and_then(|pointer| self.hit_component(rect, pointer));
+        let hovered_trace = hover_pos.and_then(|pointer| self.hit_trace(rect, pointer));
+        let hovered_airwire = hover_pos.and_then(|pointer| self.hit_airwire(rect, pointer));
         let render_w = rect.width().max(1.0).round() as u32;
         let render_h = rect.height().max(1.0).round() as u32;
         let gpu_frame = self.build_gpu_canvas_frame(render_w, render_h);
@@ -53,8 +57,9 @@ impl PcbViewPanel {
                 self.draw_airwires(&painter, rect);
             }
         }
-        self.draw_components(&painter, rect, !gpu_backdrop_ready);
-        self.draw_outline_draft(&painter, rect);
+        self.draw_trace_overlays(&painter, rect, hovered_trace, hovered_airwire);
+        self.draw_components(&painter, rect, !gpu_backdrop_ready, hovered_component);
+        self.draw_outline_draft(&painter, rect, hover_pos);
 
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
@@ -104,13 +109,16 @@ impl PcbViewPanel {
                             );
                             if let Some(component) = self.layout.components.get_mut(component_index) {
                                 if !component.locked {
-                                    component.position = snapped;
+                                    if component.position != snapped {
+                                        component.position = snapped;
+                                        self.layout.rebuild_airwires();
+                                        changed = true;
+                                    }
                                 }
                             }
                         }
                     } else {
                         self.drag_state = None;
-                        changed = true;
                     }
                 }
             }
@@ -148,13 +156,26 @@ impl PcbViewPanel {
 
                 if secondary_clicked {
                     self.outline_draft.clear();
+                    self.tool = PcbTool::Select;
                 }
             }
         }
 
         let hint = match self.tool {
-            PcbTool::Select => t("app.pcb_canvas_hint", self.lang),
-            PcbTool::Route => t("app.pcb_route_hint", self.lang),
+            PcbTool::Select => {
+                if hovered_component.is_some() {
+                    t("app.pcb_canvas_hint_hover_component", self.lang)
+                } else {
+                    t("app.pcb_canvas_hint", self.lang)
+                }
+            }
+            PcbTool::Route => {
+                if hovered_airwire.is_some() {
+                    t("app.pcb_route_hint_hover", self.lang)
+                } else {
+                    t("app.pcb_route_hint", self.lang)
+                }
+            }
             PcbTool::Outline => t("app.pcb_outline_hint", self.lang),
         };
         painter.text(
@@ -419,13 +440,20 @@ impl PcbViewPanel {
         }
     }
 
-    fn draw_components(&self, painter: &egui::Painter, rect: Rect, draw_fill_geometry: bool) {
+    fn draw_components(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        draw_fill_geometry: bool,
+        hovered_component: Option<usize>,
+    ) {
         for (index, component) in self.layout.components.iter().enumerate() {
             let footprint = footprint_definition(&component.footprint, component.pad_nets.len().max(1));
             let center = self.world_to_screen(rect, component.position);
             let body_size = egui::vec2(footprint.body_size.x * self.zoom, footprint.body_size.y * self.zoom);
             let body_rect = Rect::from_center_size(center, body_size);
             let selected = self.selection == PcbSelection::Component(index);
+            let hovered = hovered_component == Some(index);
 
             if draw_fill_geometry {
                 painter.rect(
@@ -436,6 +464,8 @@ impl PcbViewPanel {
                         if selected { 2.0 } else { 1.0 },
                         if selected {
                             Color32::from_rgb(225, 160, 70)
+                        } else if hovered {
+                            Color32::from_rgb(212, 186, 118)
                         } else {
                             Color32::from_rgb(70, 72, 82)
                         },
@@ -449,6 +479,8 @@ impl PcbViewPanel {
                         if selected { 2.0 } else { 1.0 },
                         if selected {
                             Color32::from_rgb(225, 160, 70)
+                        } else if hovered {
+                            Color32::from_rgb(212, 186, 118)
                         } else {
                             Color32::from_rgb(78, 82, 94)
                         },
@@ -483,6 +515,46 @@ impl PcbViewPanel {
                 egui::FontId::proportional(10.0),
                 Color32::from_rgb(180, 180, 190),
             );
+
+            if hovered && !selected {
+                painter.rect_stroke(
+                    body_rect.expand(4.0),
+                    8.0,
+                    Stroke::new(1.0, Color32::from_rgb(212, 186, 118)),
+                );
+            }
+        }
+    }
+
+    fn draw_trace_overlays(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        hovered_trace: Option<usize>,
+        hovered_airwire: Option<usize>,
+    ) {
+        if let Some(index) = hovered_trace {
+            if let Some(trace) = self.layout.traces.get(index) {
+                for pair in trace.points.windows(2) {
+                    painter.line_segment(
+                        [self.world_to_screen(rect, pair[0]), self.world_to_screen(rect, pair[1])],
+                        Stroke::new((trace.width * self.zoom * 0.14).max(3.0), Color32::from_rgb(255, 210, 140)),
+                    );
+                }
+            }
+        }
+
+        if let Some(index) = hovered_airwire {
+            if let Some(airwire) = self.layout.airwires.get(index) {
+                let start = self.world_to_screen(rect, airwire.from);
+                let end = self.world_to_screen(rect, airwire.to);
+                painter.line_segment(
+                    [start, end],
+                    Stroke::new(2.5, Color32::from_rgb(255, 220, 120)),
+                );
+                painter.circle_filled(start, 4.0, Color32::from_rgb(255, 220, 120));
+                painter.circle_filled(end, 4.0, Color32::from_rgb(255, 220, 120));
+            }
         }
     }
 
@@ -527,7 +599,7 @@ impl PcbViewPanel {
         }
     }
 
-    fn draw_outline_draft(&self, painter: &egui::Painter, rect: Rect) {
+    fn draw_outline_draft(&self, painter: &egui::Painter, rect: Rect, hover_pos: Option<Pos2>) {
         if self.outline_draft.is_empty() {
             return;
         }
@@ -543,6 +615,15 @@ impl PcbViewPanel {
         for point in &self.outline_draft {
             painter.circle_filled(self.world_to_screen(rect, *point), 3.0, Color32::from_rgb(250, 200, 120));
         }
+
+        if self.tool == PcbTool::Outline {
+            if let (Some(last), Some(pointer)) = (self.outline_draft.last().copied(), hover_pos) {
+                painter.line_segment(
+                    [self.world_to_screen(rect, last), pointer],
+                    Stroke::new(1.0, Color32::from_rgba_premultiplied(250, 200, 120, 180)),
+                );
+            }
+        }
     }
 
     fn hit_component(&self, rect: Rect, pointer: Pos2) -> Option<usize> {
@@ -552,8 +633,21 @@ impl PcbViewPanel {
                 self.world_to_screen(rect, component.position),
                 egui::vec2(footprint.body_size.x * self.zoom, footprint.body_size.y * self.zoom),
             );
-            if body_rect.expand(6.0).contains(pointer) {
+            if body_rect.expand(10.0).contains(pointer) {
                 return Some(index);
+            }
+
+            for (pad_index, pad) in footprint.pads.iter().enumerate() {
+                let Some(world) = self.layout.pad_world_position(index, pad_index) else {
+                    continue;
+                };
+                let pad_rect = Rect::from_center_size(
+                    self.world_to_screen(rect, world),
+                    egui::vec2(pad.size.x * self.zoom, pad.size.y * self.zoom),
+                );
+                if pad_rect.expand(8.0).contains(pointer) {
+                    return Some(index);
+                }
             }
         }
         None
@@ -564,7 +658,7 @@ impl PcbViewPanel {
             for pair in trace.points.windows(2) {
                 let start = self.world_to_screen(rect, pair[0]);
                 let end = self.world_to_screen(rect, pair[1]);
-                if distance_to_segment(pointer, start, end) <= 6.0 {
+                if distance_to_segment(pointer, start, end) <= 10.0 {
                     return Some(index);
                 }
             }
@@ -576,7 +670,7 @@ impl PcbViewPanel {
         for (index, airwire) in self.layout.airwires.iter().enumerate() {
             let start = self.world_to_screen(rect, airwire.from);
             let end = self.world_to_screen(rect, airwire.to);
-            if distance_to_segment(pointer, start, end) <= 6.0 {
+            if distance_to_segment(pointer, start, end) <= 12.0 {
                 return Some(index);
             }
         }

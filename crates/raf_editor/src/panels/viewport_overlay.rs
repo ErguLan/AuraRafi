@@ -51,6 +51,7 @@ impl ViewportPanel {
         painter: &egui::Painter,
         rect: Rect,
         entity_pos: Vec3,
+        entity_scale: Vec3,
         view_proj: &Mat4,
         vp_w: f32,
         vp_h: f32,
@@ -60,42 +61,39 @@ impl ViewportPanel {
             return;
         }
 
-        for arrow in &raf_render::picking::GIZMO_ARROWS {
-            if let Some(screen_arrow) = raf_render::picking::project_gizmo_arrow(entity_pos, arrow, view_proj, vp_w, vp_h) {
-                let offset = egui::vec2(rect.left(), rect.top());
-                let start = Pos2::new(screen_arrow.start[0], screen_arrow.start[1]) + offset;
-                let end = Pos2::new(screen_arrow.end[0], screen_arrow.end[1]) + offset;
-                let [r, g, b, a] = screen_arrow.color;
+        if matches!(gizmo.mode, GizmoMode::Scale) {
+            self.draw_scale_handles(painter, rect, entity_pos, entity_scale, view_proj, vp_w, vp_h);
+        } else {
+            for arrow in &raf_render::picking::GIZMO_ARROWS {
+                if let Some(screen_arrow) = raf_render::picking::project_gizmo_arrow(entity_pos, arrow, view_proj, vp_w, vp_h) {
+                    let offset = egui::vec2(rect.left(), rect.top());
+                    let start = Pos2::new(screen_arrow.start[0], screen_arrow.start[1]) + offset;
+                    let end = Pos2::new(screen_arrow.end[0], screen_arrow.end[1]) + offset;
+                    let [r, g, b, a] = screen_arrow.color;
 
-                let is_active = matches!((&self.bridge.active_drag_axis(), screen_arrow.label),
-                    (raf_render::gizmo::GizmoAxis::X, "X")
-                    | (raf_render::gizmo::GizmoAxis::Y, "Y")
-                    | (raf_render::gizmo::GizmoAxis::Z, "Z"));
-                let color = Color32::from_rgba_unmultiplied(r, g, b, if is_active { 255 } else { a });
-                painter.line_segment([start, end], Stroke::new(if is_active { 3.5 } else { 2.0 }, color));
+                    let highlighted_axis = self.bridge.highlighted_gizmo_axis();
+                    let is_active = matches!((&highlighted_axis, screen_arrow.label),
+                        (raf_render::gizmo::GizmoAxis::X, "X")
+                        | (raf_render::gizmo::GizmoAxis::Y, "Y")
+                        | (raf_render::gizmo::GizmoAxis::Z, "Z"));
+                    let color = Color32::from_rgba_unmultiplied(r, g, b, if is_active { 255 } else { a });
+                    painter.line_segment([start, end], Stroke::new(if is_active { 3.5 } else { 2.0 }, color));
 
-                if matches!(gizmo.mode, GizmoMode::Translate) {
-                    let tip = Pos2::new(screen_arrow.head_tip[0], screen_arrow.head_tip[1]) + offset;
-                    let left = Pos2::new(screen_arrow.head_left[0], screen_arrow.head_left[1]) + offset;
-                    let right = Pos2::new(screen_arrow.head_right[0], screen_arrow.head_right[1]) + offset;
-                    painter.add(egui::Shape::convex_polygon(vec![tip, left, right], color, Stroke::NONE));
-                }
+                    if matches!(gizmo.mode, GizmoMode::Translate) {
+                        let tip = Pos2::new(screen_arrow.head_tip[0], screen_arrow.head_tip[1]) + offset;
+                        let left = Pos2::new(screen_arrow.head_left[0], screen_arrow.head_left[1]) + offset;
+                        let right = Pos2::new(screen_arrow.head_right[0], screen_arrow.head_right[1]) + offset;
+                        painter.add(egui::Shape::convex_polygon(vec![tip, left, right], color, Stroke::NONE));
+                    }
 
-                if matches!(gizmo.mode, GizmoMode::Scale) {
-                    painter.rect_filled(
-                        Rect::from_center_size(end, egui::vec2(8.0, 8.0)),
-                        0.0,
+                    painter.text(
+                        end + egui::vec2(6.0, -6.0),
+                        egui::Align2::LEFT_BOTTOM,
+                        screen_arrow.label,
+                        egui::FontId::monospace(10.0),
                         color,
                     );
                 }
-
-                painter.text(
-                    end + egui::vec2(6.0, -6.0),
-                    egui::Align2::LEFT_BOTTOM,
-                    screen_arrow.label,
-                    egui::FontId::monospace(10.0),
-                    color,
-                );
             }
         }
 
@@ -117,6 +115,47 @@ impl ViewportPanel {
         );
     }
 
+    fn draw_scale_handles(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        entity_pos: Vec3,
+        entity_scale: Vec3,
+        view_proj: &Mat4,
+        vp_w: f32,
+        vp_h: f32,
+    ) {
+        let highlighted_axis = self.bridge.highlighted_gizmo_axis();
+        let highlighted_sign = self.bridge.highlighted_gizmo_scale_sign();
+        let offset = egui::vec2(rect.left(), rect.top());
+        let orange = Color32::from_rgb(232, 136, 38);
+        let orange_dim = Color32::from_rgba_unmultiplied(232, 136, 38, 170);
+
+        for handle in raf_render::picking::project_gizmo_scale_handles(entity_pos, entity_scale, view_proj, vp_w, vp_h) {
+            let center = Pos2::new(handle.center[0], handle.center[1]) + offset;
+            let axis = [
+                raf_render::gizmo::GizmoAxis::X,
+                raf_render::gizmo::GizmoAxis::Y,
+                raf_render::gizmo::GizmoAxis::Z,
+            ][handle.axis_index];
+            let is_active = highlighted_axis == axis && (highlighted_sign - handle.sign).abs() < 0.1;
+
+            painter.circle_filled(
+                center,
+                if is_active { 7.5 } else { 6.0 },
+                if is_active { orange } else { orange_dim },
+            );
+            painter.circle_stroke(
+                center,
+                if is_active { 7.5 } else { 6.0 },
+                Stroke::new(
+                    if is_active { 2.0 } else { 1.0 },
+                    if is_active { Color32::WHITE } else { Color32::from_rgba_unmultiplied(255, 220, 180, 120) },
+                ),
+            );
+        }
+    }
+
     fn draw_rotation_rings(
         &self,
         painter: &egui::Painter,
@@ -136,6 +175,11 @@ impl ViewportPanel {
         let radius = raf_render::picking::GIZMO_ROTATION_RADIUS;
 
         for (axis_idx, (axis_a, axis_b)) in axis_planes.iter().enumerate() {
+            let highlighted_axis = self.bridge.highlighted_gizmo_axis();
+            let is_active = matches!((highlighted_axis, axis_idx),
+                (raf_render::gizmo::GizmoAxis::X, 0)
+                | (raf_render::gizmo::GizmoAxis::Y, 1)
+                | (raf_render::gizmo::GizmoAxis::Z, 2));
             let mut previous = None;
             for step in 0..=48 {
                 let angle = (step as f32 / 48.0) * std::f32::consts::TAU;
@@ -146,7 +190,10 @@ impl ViewportPanel {
                 if let Some((screen, _)) = raf_render::math::transform::project_point(world_pt, view_proj, vp_w, vp_h) {
                     let current = Pos2::new(screen[0], screen[1]) + offset;
                     if let Some(prev) = previous {
-                        painter.line_segment([prev, current], Stroke::new(1.5, colors[axis_idx]));
+                        painter.line_segment(
+                            [prev, current],
+                            Stroke::new(if is_active { 2.5 } else { 1.5 }, colors[axis_idx]),
+                        );
                     }
                     previous = Some(current);
                 }

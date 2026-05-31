@@ -275,6 +275,9 @@ pub struct EngineSettings {
     /// Whether entity labels are shown in the viewport.
     #[serde(default = "default_true")]
     pub show_viewport_labels: bool,
+    /// Whether the editor toolbar FPS counter is visible.
+    #[serde(default = "default_true")]
+    pub show_fps_counter: bool,
     /// Multiplier for move gizmo drag response.
     #[serde(default = "default_gizmo_sensitivity")]
     pub move_gizmo_sensitivity: f32,
@@ -346,6 +349,7 @@ impl Default for EngineSettings {
             invert_mouse_y: true,
             viewport_render_mode: ViewportRenderMode::Solid,
             show_viewport_labels: true,
+            show_fps_counter: true,
             move_gizmo_sensitivity: 3.5,
             rotate_gizmo_sensitivity: 3.5,
             scale_gizmo_sensitivity: 3.5,

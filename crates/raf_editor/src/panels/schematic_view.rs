@@ -87,6 +87,7 @@ pub struct SchematicViewPanel {
     pub zoom: f32,
     selection: SchematicSelection,
     placement: PlacementMode,
+    placement_rotation: f32,
     wire_start: Option<ConnectionCandidate>,
     show_library: bool,
     test_results: Vec<String>,
@@ -115,6 +116,7 @@ impl Default for SchematicViewPanel {
             zoom: 1.0,
             selection: SchematicSelection::None,
             placement: PlacementMode::None,
+            placement_rotation: 0.0,
             wire_start: None,
             show_library: true,
             test_results: Vec::new(),
@@ -190,6 +192,14 @@ impl SchematicViewPanel {
 
     pub fn clear_selection(&mut self) {
         self.selection = SchematicSelection::None;
+    }
+
+    pub(super) fn placement_rotation(&self) -> f32 {
+        self.placement_rotation
+    }
+
+    pub(super) fn rotate_placement_preview(&mut self) {
+        self.placement_rotation = (self.placement_rotation + 90.0) % 360.0;
     }
 
     pub fn select_component(&mut self, idx: usize) {
@@ -316,6 +326,7 @@ impl SchematicViewPanel {
                 .clicked()
             {
                 self.show_export_menu = !self.show_export_menu;
+                self.context_menu = None;
             }
 
             ui.separator();
@@ -432,6 +443,7 @@ impl SchematicViewPanel {
 
             if response.clicked() {
                 self.placement = PlacementMode::Component(idx);
+                self.placement_rotation = 0.0;
                 self.wire_start = None;
             }
 
