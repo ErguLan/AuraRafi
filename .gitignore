@@ -24,3 +24,6 @@ desktop.ini
 /check_errors.txt
 /err.txt
 /tmp_*.py
+
+# Agent run logs
+/.codex-run-logs/
