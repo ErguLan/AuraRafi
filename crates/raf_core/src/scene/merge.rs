@@ -76,11 +76,7 @@ pub fn merge_meshes(inputs: &[MergeInput]) -> MergedMesh {
 
         // Copy faces with index offset.
         for face in &input.faces {
-            faces.push([
-                face[0] + v_offset,
-                face[1] + v_offset,
-                face[2] + v_offset,
-            ]);
+            faces.push([face[0] + v_offset, face[1] + v_offset, face[2] + v_offset]);
         }
 
         source_ranges.push(MergeSourceRange {
@@ -130,9 +126,10 @@ pub fn weld_vertices(
     }
 
     // Remap face indices.
-    let new_faces: Vec<[usize; 3]> = faces.iter().map(|f| {
-        [remap[f[0]], remap[f[1]], remap[f[2]]]
-    }).collect();
+    let new_faces: Vec<[usize; 3]> = faces
+        .iter()
+        .map(|f| [remap[f[0]], remap[f[1]], remap[f[2]]])
+        .collect();
 
     (new_verts, new_faces)
 }

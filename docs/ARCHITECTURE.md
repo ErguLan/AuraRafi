@@ -20,11 +20,12 @@ AuraRafi/
   editor/             Main binary that launches the editor
   crates/
     raf_core/         Core systems: ECS, scene graph, commands, events, config
-    raf_render/       CPU-first rendering, abstraction layer, optional GPU path
+    raf_render/       Shared graphics runtime, CPU fallback path, and prepared render abstraction
     raf_editor/       Visual editor UI built on egui/eframe
     raf_assets/       Asset importing, browsing, and management
     raf_electronics/  Electronic design: schematics, PCBs, simulation, DRC, export
     raf_nodes/        Visual scripting (no-code) node system + executor
+    raf_script/       Scripting runtime + Host API (Rhai + WASM + Node backends)
     raf_ai/           AI agent interface and tool registry
     raf_net/          Networking protocol stubs for future multiplayer
     raf_hardware/     Hardware integration: serial, sensors, actuators, robot, ML
@@ -41,15 +42,17 @@ editor (binary)
   -> raf_assets
   -> raf_electronics
   -> raf_nodes
+  -> raf_script
   -> raf_ai
   -> raf_net
   -> raf_hardware
 
-raf_editor -> raf_core, raf_render, raf_assets, raf_electronics, raf_nodes, raf_ai, raf_net
+raf_editor -> raf_core, raf_render, raf_assets, raf_electronics, raf_nodes, raf_script, raf_ai, raf_net
 raf_render -> raf_core
 raf_assets -> raf_core
 raf_electronics -> raf_core
 raf_nodes -> raf_core
+raf_script -> raf_core, raf_nodes
 raf_ai -> raf_core
 raf_net -> raf_core
 raf_hardware -> raf_core
@@ -57,6 +60,80 @@ raf_hardware -> raf_core
 
 All crates depend on `raf_core`, which provides the foundational types.
 No circular dependencies exist.
+
+## Unit System
+
+AuraRafi uses a single canonical scale across the entire engine. All internal calculations are done in SI units (meters, seconds, kilograms). The user-facing display unit is configurable but never affects computation.
+
+### Canonical Scale
+
+| Surface | Unit | Notes |
+|---|---|---|
+| Viewport 3D (games) | 1 world unit = 1 meter | position, scale, grid_spacing, orbit_distance |
+| Schematic canvas (electronics) | 1 schematic unit = 1 millimeter | component placement, wire endpoints, board outline |
+| PCB canvas | 1 schematic unit = 1 millimeter | inherits from schematic |
+| Schematic -> 3D conversion | multiply by 0.001 | mm to meters via `SCHEMATIC_TO_WORLD` |
+
+### Constants (`crates/raf_core/src/units.rs`)
+
+- `METERS_PER_UNIT = 1.0`: canonical scale factor for world space.
+- `MM_PER_SCHEMATIC_UNIT = 1.0`: canonical scale factor for the schematic canvas.
+- `SCHEMATIC_TO_WORLD = 0.001`: conversion from schematic (mm) to world (m).
+- `DEFAULT_GRID_SPACING_M = 1.0`: default 3D viewport grid spacing.
+- `DEFAULT_GRID_SPACING_MM = 1.0`: default schematic grid spacing.
+- `SCHEMATIC_SNAP_OPTIONS_MM = [0.5, 1.0, 2.54, 5.0]`: snap presets for the schematic grid.
+- `DEFAULT_TRACE_WIDTH_MM = 0.25`: JLCPCB minimum trace width.
+- `DEFAULT_PAD_SPACING_MM = 2.54`: standard DIP through-hole spacing.
+
+### Display Unit (`DisplayUnit` enum)
+
+- `Metric`: shows meters, square meters, cubic meters.
+- `Imperial`: shows feet, square feet, cubic feet (converted from internal meters).
+- `Game`: shows raw world units without suffix.
+
+The display unit is stored in `EngineSettings.display_unit` and only controls UI presentation. Calculations in the engine and in future scripting runtimes (Rust + C++ via FFI) always use SI meters.
+
+### Scale Conventions
+
+- Primitives: a Cube at scale 1.0 spans -0.5 to +0.5 = 1m on each side.
+- Human character: ~1.8 units tall.
+- Camera orbit distance: 8.0m default, 0.5m to 200m range.
+- PCB board: 100x100mm = 0.1m x 0.1m in world space.
+- Resistor footprint: 2mm x 1mm (0805 SMD) = 0.002m x 0.001m in world space.
+
+### Scripting Hook
+
+Future Rust and C++ scripting runtimes must import `raf_core::units` constants so that scripts operate in SI units without manual conversion. The `units.rs` module is public and FFI-friendly.
+
+## Scripting System (raf_script)
+
+Three scripting tiers share one Host API. See `docs/SCRIPTING_SYSTEM.md`
+for the full architecture and roadmap.
+
+- **Tier 1 (Rhai)**: sandboxed, pure Rust, beginner-friendly. Primary language.
+- **Tier 2 (WASM Native Module)**: C++/Rust/Zig compiled to `.wasm`. Sandboxed
+  via WASM runtime. The AuraRafi Host ABI is our own spec. Phase D.
+- **Tier 3 (Visual Nodes)**: no-code node graphs from `raf_nodes`. Interpreted
+  by the existing executor, wired to the Host API via `node_backend.rs`.
+
+All tiers call `ScriptContext` functions. No tier touches `SceneGraph`
+directly. Scripts hold `NodeHandle` values (opaque IDs), not references.
+
+The `raf_script` crate provides:
+- `ScriptContext`: per-frame context (scene, input, audio, time)
+- `NodeHandle`: opaque entity reference with Roblox-style methods
+- `ScriptValue`: dynamic value type crossing the script boundary
+- `backends/rhai_backend.rs`: Rhai engine with full Host API registration
+- `backends/wasm_backend.rs`: WASM module loading (stub, Phase D)
+- `backends/node_backend.rs`: Visual node executor wired to Host API
+
+Console commands `/script.create`, `/script.attach`, `/script.list`,
+`/script.validate`, `/script.run`, `/script.compile_nodes` are in
+`crates/raf_editor/src/commands/script.rs`.
+
+Settings: `EngineSettings.script_runtime_enabled`,
+`ProjectSettings.enable_scripting`, `allowed_script_languages`,
+`script_execution_mode`.
 
 ## Core Systems (raf_core)
 
@@ -154,11 +231,23 @@ Lightweight pub/sub system with type-erased events:
 
 ## Rendering (raf_render)
 
-GPU-priority rendering engine with a modular, zero-egui-dependency architecture, and a built-in CPU software fallback via ApiGraphicBasic.
+Shared graphics runtime for editor surfaces, with GPU hardware execution first when available and built-in CPU software fallback via ApiGraphicBasic.
 
-### New Renderer Architecture (v0.9.0)
+### Canonical Active Graphics Path
 
-The viewport was restructured into three clean layers:
+Today the active editor surfaces follow one canonical path:
+
+`SceneViewport | SchematicCanvas | PcbCanvas -> RenderRuntime -> BasicDevice -> GPU hardware if available -> CPU software fallback otherwise`
+
+Notes:
+
+- The scene viewport builds its scene frame through `viewport_bridge.rs` and `scene_renderer.rs` before delegating execution to `RenderRuntime`.
+- The schematic and PCB canvases feed the same shared graphics runtime, so all three surfaces now live under one graphics-device policy and one fallback contract.
+- `RenderBackendTrait`, `scene_data`, `world_stream`, ray tracing, and other advanced rendering modules remain prepared infrastructure rather than the primary active path today.
+
+### Scene Viewport Rendering Path (v0.9.0)
+
+The scene viewport path was restructured into three clean layers:
 
 **Layer 1 — Editor Shell** (`raf_editor::panels::viewport`)
 - `viewport.rs`: Thin ~302 line egui panel shell. Allocates rect, delegates camera input, calls render, uploads image, dispatches overlays.
@@ -390,3 +479,26 @@ Visual editor built on `egui`/`eframe`:
 - `Ctrl+S` / save now synchronizes PCB from the current schematic before writing the PCB document, preserving manual placement data while refreshing nets and missing/new components.
 - PCB routing is intentionally 2D-first. The current base supports board outline validation, physical footprint geometry, trace storage, and airwire regeneration without depending on any 3D board view.
 - The Gerber layer export path is still incomplete, but the placeholder now targets the PCB layout document instead of a hypothetical future 3D-only dependency.
+
+## AI Co-Developer Integration & Context Routing (v0.8.0+)
+
+To minimize token consumption, eradicate agent regressions, and avoid the generation of conflicting or outdated implementation structures, AuraRafi's development context is modularly partitioned under the `.ai/` directory.
+
+### Core Context Redirection
+* **Agent Master Context**: [Agent.md](Agent.md) in the root now acts as a dedicated synapse router, redirecting all incoming LLM agents to the structured `.ai/` workspace.
+* **Master System Truth**: [.ai/SYSTEM_TRUTH.md](.ai/SYSTEM_TRUTH.md) — The single compiler-grade registry housing the up-to-date architecture mapping of all engine crates, files, and modules. 
+* **Strict Quality Directives**: [.ai/instructions.md](.ai/instructions.md) — Universal non-negotiable rules enforcing English-only codebases, no emojis, strict i18n JSON translations, complete-before-test flows, and `app.rs` file modularity.
+
+### Specialized AI Roles
+Agents are categorized into four specialized roles to prevent token swelling and ensure maximum engineering focus:
+1. **CTO Lead (Systems & Core)**: [.ai/roles/cto_lead.md](.ai/roles/cto_lead.md) — Focuses on ECS (`hecs`), commands bus, memory safety, and thread-pool allocations.
+2. **Render Math (Graphics Programmer)**: [.ai/roles/render_math.md](.ai/roles/render_math.md) — Focuses on perspective/orthographic coordinate matrices, grids, ray picking, and PBR/CPU rasterization shaders.
+3. **CAD Electronics (Hardware Engineer)**: [.ai/roles/electronics.md](.ai/roles/electronics.md) — Focuses on routing, Union-Find netlists, DRC tests, DC Modified Nodal Analysis (MNA), and mapping RON components to 3D.
+4. **UI Designer (egui Minimalist)**: [.ai/roles/ui_designer.md](.ai/roles/ui_designer.md) — Focuses on visual alignments, responsive tab groups, and styling using `theme.rs` tokens.
+
+### Vision Triage Protocol
+To streamline development from screenshots, if an agent is presented with an application viewport frame or build output screenshot with no text context, it applies the standard **Vision Triage Protocol**:
+1. Identify active workspace coordinates, panels and layouts.
+2. Search terminal windows/console logs inside the image for compile warnings or errors.
+3. Assess depth-sorting overlapping lines or connection traces.
+4. Update the internally stored triage skill according to the findings to suggest high-impact structural fixes immediately.

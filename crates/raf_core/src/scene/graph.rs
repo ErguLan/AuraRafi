@@ -64,7 +64,7 @@ impl Primitive {
 }
 
 /// RGBA color for an entity (0-255 per channel).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct NodeColor {
     pub r: u8,
     pub g: u8,
@@ -217,7 +217,11 @@ impl SceneNode {
     }
 
     pub fn set_variable(&mut self, name: &str, value: VariableValue) {
-        if let Some(variable) = self.variables.iter_mut().find(|variable| variable.name == name) {
+        if let Some(variable) = self
+            .variables
+            .iter_mut()
+            .find(|variable| variable.name == name)
+        {
             variable.value = value;
             return;
         }
@@ -391,8 +395,15 @@ impl SceneGraph {
         id
     }
 
-    /// Reparent an existing node under a new parent or back to root.
-    pub fn reparent_node(&mut self, id: SceneNodeId, new_parent: Option<SceneNodeId>) -> bool {
+    /// Reparent an existing node, optionally before a specific sibling.
+    /// If `before` is Some, the node is inserted right before that sibling
+    /// (must share the same parent as `new_parent`). If None, it appends at end.
+    pub fn reparent_node_before(
+        &mut self,
+        id: SceneNodeId,
+        new_parent: Option<SceneNodeId>,
+        before: Option<SceneNodeId>,
+    ) -> bool {
         if !self.is_valid_node(id) {
             return false;
         }
@@ -403,8 +414,74 @@ impl SceneGraph {
             }
         }
 
+        // Validate before-sibling belongs to the same parent.
+        if let Some(before_id) = before {
+            let sibling_parent = if let Some(ref node) = self.nodes.get(before_id.0) {
+                node.parent
+            } else {
+                return false;
+            };
+            if sibling_parent != new_parent {
+                return false;
+            }
+            if before_id == id {
+                return false;
+            }
+        }
+
+        // Remove from old parent.
         if let Some(old_parent) = self.nodes[id.0].parent {
-            self.nodes[old_parent.0].children.retain(|child| *child != id);
+            if old_parent.0 < self.nodes.len() {
+                self.nodes[old_parent.0].children.retain(|c| *c != id);
+            }
+        } else {
+            self.roots.retain(|r| *r != id);
+        }
+
+        self.nodes[id.0].parent = new_parent;
+
+        // Insert into the correct position.
+        if let Some(before_id) = before {
+            let target = if let Some(parent_id) = new_parent {
+                &mut self.nodes[parent_id.0].children
+            } else {
+                &mut self.roots
+            };
+            if let Some(pos) = target.iter().position(|&c| c == before_id) {
+                target.insert(pos, id);
+            } else {
+                target.push(id);
+            }
+        } else {
+            if let Some(parent_id) = new_parent {
+                self.nodes[parent_id.0].children.push(id);
+            } else if !self.roots.contains(&id) {
+                self.roots.push(id);
+            }
+        }
+
+        true
+    }
+
+    /// Reparent an existing node under a new parent or back to root.
+    pub fn reparent_node(&mut self, id: SceneNodeId, new_parent: Option<SceneNodeId>) -> bool {
+        if !self.is_valid_node(id) {
+            return false;
+        }
+
+        if let Some(parent_id) = new_parent {
+            if !self.is_valid_node(parent_id)
+                || parent_id == id
+                || self.is_descendant(parent_id, id)
+            {
+                return false;
+            }
+        }
+
+        if let Some(old_parent) = self.nodes[id.0].parent {
+            self.nodes[old_parent.0]
+                .children
+                .retain(|child| *child != id);
         } else {
             self.roots.retain(|root_id| *root_id != id);
         }
@@ -485,7 +562,9 @@ impl SceneGraph {
                 .iter()
                 .position(|child_id| *child_id == id)
                 .unwrap_or(self.nodes[parent_id.0].children.len());
-            self.nodes[parent_id.0].children.retain(|child_id| *child_id != id);
+            self.nodes[parent_id.0]
+                .children
+                .retain(|child_id| *child_id != id);
 
             for (offset, child_id) in children.iter().enumerate() {
                 self.nodes[parent_id.0]

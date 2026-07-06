@@ -51,7 +51,9 @@ pub fn simulate_dc(schematic: &Schematic) -> SimulationResults {
     let mut results = SimulationResults::default();
 
     if netlist.nets.is_empty() || schematic.components.is_empty() {
-        results.messages.push("Empty circuit - nothing to simulate.".to_string());
+        results
+            .messages
+            .push("Empty circuit - nothing to simulate.".to_string());
         return results;
     }
 
@@ -97,11 +99,7 @@ pub fn simulate_dc(schematic: &Schematic) -> SimulationResults {
             .pins
             .iter()
             .enumerate()
-            .map(|(pi, _)| {
-                netlist
-                    .net_for_pin(ci, pi)
-                    .map(|n| n.id)
-            })
+            .map(|(pi, _)| netlist.net_for_pin(ci, pi).map(|n| n.id))
             .collect();
 
         match &comp.sim_model {
@@ -265,7 +263,9 @@ pub fn simulate_dc(schematic: &Schematic) -> SimulationResults {
                 results.component_power.insert(ci, power);
             }
 
-            results.messages.push("DC simulation completed successfully.".to_string());
+            results
+                .messages
+                .push("DC simulation completed successfully.".to_string());
         }
         None => {
             results.converged = false;
@@ -303,8 +303,20 @@ fn stamp_resistor(
     ground: usize,
     net_to_idx: &HashMap<usize, usize>,
 ) {
-    let idx_a = net_a.and_then(|n| if n == ground { None } else { net_to_idx.get(&n).copied() });
-    let idx_b = net_b.and_then(|n| if n == ground { None } else { net_to_idx.get(&n).copied() });
+    let idx_a = net_a.and_then(|n| {
+        if n == ground {
+            None
+        } else {
+            net_to_idx.get(&n).copied()
+        }
+    });
+    let idx_b = net_b.and_then(|n| {
+        if n == ground {
+            None
+        } else {
+            net_to_idx.get(&n).copied()
+        }
+    });
 
     if let Some(a) = idx_a {
         g[a][a] += conductance;
@@ -327,10 +339,20 @@ fn stamp_current_source(
     ground: usize,
     net_to_idx: &HashMap<usize, usize>,
 ) {
-    let idx_plus =
-        net_plus.and_then(|n| if n == ground { None } else { net_to_idx.get(&n).copied() });
-    let idx_minus =
-        net_minus.and_then(|n| if n == ground { None } else { net_to_idx.get(&n).copied() });
+    let idx_plus = net_plus.and_then(|n| {
+        if n == ground {
+            None
+        } else {
+            net_to_idx.get(&n).copied()
+        }
+    });
+    let idx_minus = net_minus.and_then(|n| {
+        if n == ground {
+            None
+        } else {
+            net_to_idx.get(&n).copied()
+        }
+    });
 
     if let Some(p) = idx_plus {
         i_vec[p] += current;

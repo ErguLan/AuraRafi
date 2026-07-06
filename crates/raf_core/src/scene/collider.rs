@@ -44,7 +44,10 @@ impl Aabb {
     /// Create from a set of vertex positions.
     pub fn from_points(points: &[Vec3]) -> Self {
         if points.is_empty() {
-            return Self { min: Vec3::ZERO, max: Vec3::ZERO };
+            return Self {
+                min: Vec3::ZERO,
+                max: Vec3::ZERO,
+            };
         }
         let mut min = points[0];
         let mut max = points[0];
@@ -72,16 +75,22 @@ impl Aabb {
 
     /// Check if a point is inside this AABB.
     pub fn contains_point(&self, point: Vec3) -> bool {
-        point.x >= self.min.x && point.x <= self.max.x
-            && point.y >= self.min.y && point.y <= self.max.y
-            && point.z >= self.min.z && point.z <= self.max.z
+        point.x >= self.min.x
+            && point.x <= self.max.x
+            && point.y >= self.min.y
+            && point.y <= self.max.y
+            && point.z >= self.min.z
+            && point.z <= self.max.z
     }
 
     /// Check if two AABBs overlap.
     pub fn intersects(&self, other: &Aabb) -> bool {
-        self.min.x <= other.max.x && self.max.x >= other.min.x
-            && self.min.y <= other.max.y && self.max.y >= other.min.y
-            && self.min.z <= other.max.z && self.max.z >= other.min.z
+        self.min.x <= other.max.x
+            && self.max.x >= other.min.x
+            && self.min.y <= other.max.y
+            && self.max.y >= other.min.y
+            && self.min.z <= other.max.z
+            && self.max.z >= other.min.z
     }
 
     /// Get the 8 corner points of this AABB (for wireframe rendering).
@@ -102,9 +111,18 @@ impl Aabb {
     pub fn edges(&self) -> [[Vec3; 2]; 12] {
         let c = self.corners();
         [
-            [c[0], c[1]], [c[1], c[2]], [c[2], c[3]], [c[3], c[0]], // front
-            [c[4], c[5]], [c[5], c[6]], [c[6], c[7]], [c[7], c[4]], // back
-            [c[0], c[4]], [c[1], c[5]], [c[2], c[6]], [c[3], c[7]], // sides
+            [c[0], c[1]],
+            [c[1], c[2]],
+            [c[2], c[3]],
+            [c[3], c[0]], // front
+            [c[4], c[5]],
+            [c[5], c[6]],
+            [c[6], c[7]],
+            [c[7], c[4]], // back
+            [c[0], c[4]],
+            [c[1], c[5]],
+            [c[2], c[6]],
+            [c[3], c[7]], // sides
         ]
     }
 }
@@ -122,7 +140,9 @@ impl ConvexHull {
     /// Uses a simple incremental approach (good enough for low-poly game meshes).
     pub fn from_points(points: &[Vec3]) -> Self {
         if points.len() <= 4 {
-            return Self { points: points.to_vec() };
+            return Self {
+                points: points.to_vec(),
+            };
         }
 
         // Simple approach: keep only points that are on the bounding "surface".
@@ -158,7 +178,9 @@ impl ConvexHull {
             }
         }
 
-        Self { points: hull_points }
+        Self {
+            points: hull_points,
+        }
     }
 
     /// Quick point-in-hull test (approximate: uses AABB of hull points).
@@ -219,7 +241,10 @@ impl Default for Collider {
     fn default() -> Self {
         Self {
             collider_type: ColliderType::None,
-            aabb: Aabb { min: Vec3::ZERO, max: Vec3::ZERO },
+            aabb: Aabb {
+                min: Vec3::ZERO,
+                max: Vec3::ZERO,
+            },
             convex_hull: None,
             mesh_collider: None,
             visible_in_editor: true,
@@ -309,10 +334,7 @@ mod tests {
 
     #[test]
     fn aabb_from_cube() {
-        let points = vec![
-            Vec3::new(-0.5, -0.5, -0.5),
-            Vec3::new(0.5, 0.5, 0.5),
-        ];
+        let points = vec![Vec3::new(-0.5, -0.5, -0.5), Vec3::new(0.5, 0.5, 0.5)];
         let aabb = Aabb::from_points(&points);
         assert!((aabb.center() - Vec3::ZERO).length() < 0.001);
         assert!((aabb.half_extents() - Vec3::splat(0.5)).length() < 0.001);
@@ -330,10 +352,7 @@ mod tests {
 
     #[test]
     fn collider_auto_fit() {
-        let points = vec![
-            Vec3::new(-1.0, 0.0, -1.0),
-            Vec3::new(1.0, 2.0, 1.0),
-        ];
+        let points = vec![Vec3::new(-1.0, 0.0, -1.0), Vec3::new(1.0, 2.0, 1.0)];
         let col = Collider::auto_fit(&points, ColliderType::Aabb);
         assert_eq!(col.collider_type, ColliderType::Aabb);
         assert!(col.aabb.contains_point(Vec3::new(0.0, 1.0, 0.0)));

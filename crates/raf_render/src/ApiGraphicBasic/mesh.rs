@@ -63,6 +63,9 @@ impl BasicMesh {
             v.normal = v.normal.normalize_or_zero();
         }
 
-        Self { vertices, indices: indices.to_vec() }
+        Self {
+            vertices,
+            indices: indices.to_vec(),
+        }
     }
 }

@@ -9,6 +9,8 @@
 //! - Settings panel
 
 pub mod app;
+pub mod commands;
+pub mod electronics_assets;
 pub mod game_runtime;
 pub mod panels;
 pub mod pcb_document;

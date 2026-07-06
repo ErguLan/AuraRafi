@@ -1,7 +1,7 @@
 //! PBR material system.
 //!
 //! Defines materials that describe how surfaces look under light.
-//! Uses the metallic/roughness PBR workflow 
+//! Uses the metallic/roughness PBR workflow
 //!
 //! Today: CpuPainter ignores most of this - just uses base_color.
 //! Tomorrow: wgpu backend uses full PBR with textures and normal maps.
@@ -10,9 +10,9 @@
 //! Zero cost: just structs. No texture loading happens until a GPU backend is active.
 
 use glam::{Vec3, Vec4};
-use serde::{Deserialize, Serialize};
 use raf_core::config::Language;
 use raf_core::i18n::t;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Material

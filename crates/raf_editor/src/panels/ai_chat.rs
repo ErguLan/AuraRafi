@@ -3,12 +3,12 @@
 //! The provider dropdown lets users choose between OpenClaw (local, works now),
 //! OpenRouter, OpenAI, GenAI, Claude (pending API key support).
 
-use raf_core::Language;
-use raf_core::i18n::t;
 use egui::Ui;
 use raf_ai::chat::{ChatMessage, ChatPanel, MessageRole};
 use raf_ai::openclaw::{ConnectionStatus, OpenClawClient};
 use raf_ai::provider::AiProvider;
+use raf_core::i18n::t;
+use raf_core::Language;
 
 use crate::theme;
 
@@ -140,11 +140,10 @@ impl AiChatPanel {
         scroll.show(ui, |ui| {
             for msg in &self.chat.messages {
                 let (prefix, color) = match msg.role {
-                    MessageRole::User => (
-                        t("app.you", self.lang),
-                        theme::ACCENT,
-                    ),
-                    MessageRole::Assistant => ("AI".to_string(), egui::Color32::from_rgb(100, 200, 140)),
+                    MessageRole::User => (t("app.you", self.lang), theme::ACCENT),
+                    MessageRole::Assistant => {
+                        ("AI".to_string(), egui::Color32::from_rgb(100, 200, 140))
+                    }
                     MessageRole::System => ("System".to_string(), theme::DARK_TEXT_DIM),
                 };
 
@@ -164,8 +163,7 @@ impl AiChatPanel {
             let hint = t("app.type_a_message", self.lang);
             let response = ui.add_sized(
                 [available_width, 28.0],
-                egui::TextEdit::singleline(&mut self.chat.input_text)
-                    .hint_text(hint),
+                egui::TextEdit::singleline(&mut self.chat.input_text).hint_text(hint),
             );
 
             // Send enabled only for OpenClaw (connected) or future providers (configured).
@@ -178,14 +176,11 @@ impl AiChatPanel {
 
             let send_enabled = can_send && !self.chat.input_text.is_empty();
             let send_label = t("app.send", self.lang);
-            let send_button = ui.add_enabled(
-                send_enabled,
-                egui::Button::new(send_label),
-            );
+            let send_button = ui.add_enabled(send_enabled, egui::Button::new(send_label));
 
             // Send on Enter key or button click.
-            let enter_pressed = response.lost_focus()
-                && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            let enter_pressed =
+                response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
             if (send_button.clicked() || enter_pressed) && send_enabled {
                 let input = self.chat.input_text.clone();
@@ -199,16 +194,16 @@ impl AiChatPanel {
                     // self.sending = true;
                     match self.openclaw.send_message(&input) {
                         Ok(response_text) => {
-                            self.chat.messages.push(ChatMessage::assistant(&response_text));
+                            self.chat
+                                .messages
+                                .push(ChatMessage::assistant(&response_text));
                         }
                         Err(err) => {
-                            self.chat.messages.push(ChatMessage::system(
-                                &format!(
-                                    "{}: {}",
-                                    t("app.error", self.lang),
-                                    err
-                                ),
-                            ));
+                            self.chat.messages.push(ChatMessage::system(&format!(
+                                "{}: {}",
+                                t("app.error", self.lang),
+                                err
+                            )));
                         }
                     }
                     self.sending = false;
@@ -223,7 +218,10 @@ impl AiChatPanel {
                         ui.layer_id(),
                         egui::Id::new("ai_tooltip"),
                         |ui| {
-                            ui.label(t("app.this_provider_is_not_implemented_yet_use_openclaw", self.lang));
+                            ui.label(t(
+                                "app.this_provider_is_not_implemented_yet_use_openclaw",
+                                self.lang,
+                            ));
                         },
                     );
                 }

@@ -10,7 +10,7 @@
 //!
 //! Zero cost when not used. The compiler eliminates dead implementations.
 
-use crate::scene_data::{SceneRenderData, RenderOutput};
+use crate::scene_data::{RenderOutput, SceneRenderData};
 
 // ---------------------------------------------------------------------------
 // Core render trait

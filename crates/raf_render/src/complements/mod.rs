@@ -12,6 +12,5 @@
 pub mod complement_trace;
 
 pub use complement_trace::{
-    AccelerationStructure, BvhNode, Ray, RayHit,
-    RayTraceConfig, RayTraceFeatures, RayTraceMode,
+    AccelerationStructure, BvhNode, Ray, RayHit, RayTraceConfig, RayTraceFeatures, RayTraceMode,
 };

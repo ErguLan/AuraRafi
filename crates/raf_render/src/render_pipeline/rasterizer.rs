@@ -45,7 +45,10 @@ pub fn rasterize_triangle(
     v0: ScreenVertex,
     v1: ScreenVertex,
     v2: ScreenVertex,
-    r: u8, g: u8, b: u8, a: u8,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
 ) {
     // Backface cull: compute signed area (2x cross product in screen space).
     // In screen space Y points DOWN, so the sign is inverted compared to
@@ -57,9 +60,15 @@ pub fn rasterize_triangle(
 
     // Sort vertices by Y (top to bottom: smallest Y first).
     let mut sorted = [v0, v1, v2];
-    if sorted[0].y > sorted[1].y { sorted.swap(0, 1); }
-    if sorted[1].y > sorted[2].y { sorted.swap(1, 2); }
-    if sorted[0].y > sorted[1].y { sorted.swap(0, 1); }
+    if sorted[0].y > sorted[1].y {
+        sorted.swap(0, 1);
+    }
+    if sorted[1].y > sorted[2].y {
+        sorted.swap(1, 2);
+    }
+    if sorted[0].y > sorted[1].y {
+        sorted.swap(0, 1);
+    }
 
     let [top, mid, bot] = sorted;
 
@@ -69,13 +78,39 @@ pub fn rasterize_triangle(
     // Upper half: top -> mid
     let height_upper = mid.y - top.y;
     if height_upper > 0.5 {
-        fill_scanlines(fb, &top, &mid, &bot, height_upper, true, fb_w, fb_h, r, g, b, a);
+        fill_scanlines(
+            fb,
+            &top,
+            &mid,
+            &bot,
+            height_upper,
+            true,
+            fb_w,
+            fb_h,
+            r,
+            g,
+            b,
+            a,
+        );
     }
 
     // Lower half: mid -> bot
     let height_lower = bot.y - mid.y;
     if height_lower > 0.5 {
-        fill_scanlines(fb, &top, &mid, &bot, height_lower, false, fb_w, fb_h, r, g, b, a);
+        fill_scanlines(
+            fb,
+            &top,
+            &mid,
+            &bot,
+            height_lower,
+            false,
+            fb_w,
+            fb_h,
+            r,
+            g,
+            b,
+            a,
+        );
     }
 }
 
@@ -89,7 +124,10 @@ fn fill_scanlines(
     is_upper: bool,
     fb_w: f32,
     fb_h: f32,
-    r: u8, g: u8, b: u8, a: u8,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
 ) {
     let total_height = bot.y - top.y;
     if total_height < 0.5 {
@@ -202,7 +240,10 @@ pub fn rasterize_triangle_blended(
     v0: ScreenVertex,
     v1: ScreenVertex,
     v2: ScreenVertex,
-    r: u8, g: u8, b: u8, a: u8,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
 ) {
     // Backface cull (same Y-down convention)
     let area = (v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y);
@@ -211,9 +252,15 @@ pub fn rasterize_triangle_blended(
     }
 
     let mut sorted = [v0, v1, v2];
-    if sorted[0].y > sorted[1].y { sorted.swap(0, 1); }
-    if sorted[1].y > sorted[2].y { sorted.swap(1, 2); }
-    if sorted[0].y > sorted[1].y { sorted.swap(0, 1); }
+    if sorted[0].y > sorted[1].y {
+        sorted.swap(0, 1);
+    }
+    if sorted[1].y > sorted[2].y {
+        sorted.swap(1, 2);
+    }
+    if sorted[0].y > sorted[1].y {
+        sorted.swap(0, 1);
+    }
 
     let [top, mid, bot] = sorted;
     let fb_w = fb.width() as f32;
@@ -238,7 +285,9 @@ pub fn rasterize_triangle_blended(
         let shade_long = top.shade + (bot.shade - top.shade) * t_long;
 
         let seg_h = mid.y - top.y;
-        if seg_h < 0.5 { continue; }
+        if seg_h < 0.5 {
+            continue;
+        }
         let t_short = (yf - top.y) / seg_h;
         let x_short = top.x + (mid.x - top.x) * t_short;
         let z_short = top.z + (mid.z - top.z) * t_short;
@@ -270,7 +319,9 @@ pub fn rasterize_triangle_blended(
         let shade_long = top.shade + (bot.shade - top.shade) * t_long;
 
         let seg_h = bot.y - mid.y;
-        if seg_h < 0.5 { continue; }
+        if seg_h < 0.5 {
+            continue;
+        }
         let t_short = (yf - mid.y) / seg_h;
         let x_short = mid.x + (bot.x - mid.x) * t_short;
         let z_short = mid.z + (bot.z - mid.z) * t_short;
@@ -299,10 +350,17 @@ pub fn rasterize_triangle_blended(
 fn fill_span_blended(
     fb: &mut Framebuffer,
     y: u32,
-    x_a: f32, z_a: f32, shade_a: f32,
-    x_b: f32, z_b: f32, shade_b: f32,
+    x_a: f32,
+    z_a: f32,
+    shade_a: f32,
+    x_b: f32,
+    z_b: f32,
+    shade_b: f32,
     fb_w: f32,
-    r: u8, g: u8, b: u8, a: u8,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
 ) {
     let (xl, xr, zl, zr, shade_l, shade_r) = if x_a < x_b {
         (x_a, x_b, z_a, z_b, shade_a, shade_b)
@@ -312,7 +370,9 @@ fn fill_span_blended(
 
     let x_start = xl.ceil().max(0.0) as u32;
     let x_end = xr.ceil().min(fb_w) as u32;
-    if x_start >= x_end { return; }
+    if x_start >= x_end {
+        return;
+    }
 
     let span = xr - xl;
     if span < 0.5 {
@@ -359,9 +419,16 @@ fn pack_rgba_inline(r: u8, g: u8, b: u8, a: u8) -> u32 {
 /// Depth is linearly interpolated along the line.
 pub fn rasterize_line(
     fb: &mut Framebuffer,
-    x0: f32, y0: f32, z0: f32,
-    x1: f32, y1: f32, z1: f32,
-    r: u8, g: u8, b: u8, a: u8,
+    x0: f32,
+    y0: f32,
+    z0: f32,
+    x1: f32,
+    y1: f32,
+    z1: f32,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
 ) {
     let dx = (x1 - x0).abs();
     let dy = (y1 - y0).abs();
@@ -430,9 +497,24 @@ mod tests {
 
         // CW-visual triangle in screen space (backface) -- should be culled.
         // v0=(50,10), v1=(90,90), v2=(10,90) in CW order visually.
-        let v0 = ScreenVertex { x: 50.0, y: 10.0, z: 0.5, shade: 1.0 };
-        let v1 = ScreenVertex { x: 90.0, y: 90.0, z: 0.5, shade: 1.0 };
-        let v2 = ScreenVertex { x: 10.0, y: 90.0, z: 0.5, shade: 1.0 };
+        let v0 = ScreenVertex {
+            x: 50.0,
+            y: 10.0,
+            z: 0.5,
+            shade: 1.0,
+        };
+        let v1 = ScreenVertex {
+            x: 90.0,
+            y: 90.0,
+            z: 0.5,
+            shade: 1.0,
+        };
+        let v2 = ScreenVertex {
+            x: 10.0,
+            y: 90.0,
+            z: 0.5,
+            shade: 1.0,
+        };
         rasterize_triangle(&mut fb, v0, v1, v2, 255, 0, 0, 255);
 
         // Check a pixel that would be inside -- should still be black
@@ -446,9 +528,24 @@ mod tests {
         fb.clear(0, 0, 0, 255);
 
         // CCW triangle (front face) - large, centered
-        let v0 = ScreenVertex { x: 50.0, y: 10.0, z: 0.5, shade: 1.0 };
-        let v1 = ScreenVertex { x: 10.0, y: 90.0, z: 0.5, shade: 1.0 };
-        let v2 = ScreenVertex { x: 90.0, y: 90.0, z: 0.5, shade: 1.0 };
+        let v0 = ScreenVertex {
+            x: 50.0,
+            y: 10.0,
+            z: 0.5,
+            shade: 1.0,
+        };
+        let v1 = ScreenVertex {
+            x: 10.0,
+            y: 90.0,
+            z: 0.5,
+            shade: 1.0,
+        };
+        let v2 = ScreenVertex {
+            x: 90.0,
+            y: 90.0,
+            z: 0.5,
+            shade: 1.0,
+        };
         rasterize_triangle(&mut fb, v0, v1, v2, 255, 0, 0, 255);
 
         // Check a pixel well inside the triangle (y=60 is safely between top and bottom)
@@ -462,15 +559,45 @@ mod tests {
         fb.clear(0, 0, 0, 255);
 
         // Red triangle at z=0.8 (far)
-        let v0 = ScreenVertex { x: 50.0, y: 10.0, z: 0.8, shade: 1.0 };
-        let v1 = ScreenVertex { x: 10.0, y: 90.0, z: 0.8, shade: 1.0 };
-        let v2 = ScreenVertex { x: 90.0, y: 90.0, z: 0.8, shade: 1.0 };
+        let v0 = ScreenVertex {
+            x: 50.0,
+            y: 10.0,
+            z: 0.8,
+            shade: 1.0,
+        };
+        let v1 = ScreenVertex {
+            x: 10.0,
+            y: 90.0,
+            z: 0.8,
+            shade: 1.0,
+        };
+        let v2 = ScreenVertex {
+            x: 90.0,
+            y: 90.0,
+            z: 0.8,
+            shade: 1.0,
+        };
         rasterize_triangle(&mut fb, v0, v1, v2, 255, 0, 0, 255);
 
         // Green triangle at z=0.3 (near) -- should overwrite red
-        let v3 = ScreenVertex { x: 50.0, y: 10.0, z: 0.3, shade: 1.0 };
-        let v4 = ScreenVertex { x: 10.0, y: 90.0, z: 0.3, shade: 1.0 };
-        let v5 = ScreenVertex { x: 90.0, y: 90.0, z: 0.3, shade: 1.0 };
+        let v3 = ScreenVertex {
+            x: 50.0,
+            y: 10.0,
+            z: 0.3,
+            shade: 1.0,
+        };
+        let v4 = ScreenVertex {
+            x: 10.0,
+            y: 90.0,
+            z: 0.3,
+            shade: 1.0,
+        };
+        let v5 = ScreenVertex {
+            x: 90.0,
+            y: 90.0,
+            z: 0.3,
+            shade: 1.0,
+        };
         rasterize_triangle(&mut fb, v3, v4, v5, 0, 255, 0, 255);
 
         // Check at y=60 (well inside both triangles)
@@ -484,7 +611,9 @@ mod tests {
         let mut fb = Framebuffer::new(100, 100);
         fb.clear(0, 0, 0, 255);
 
-        rasterize_line(&mut fb, 10.0, 50.0, 0.5, 90.0, 50.0, 0.5, 255, 255, 255, 255);
+        rasterize_line(
+            &mut fb, 10.0, 50.0, 0.5, 90.0, 50.0, 0.5, 255, 255, 255, 255,
+        );
 
         // Check midpoint
         let mid_idx = (50 * 100 + 50) * 4;

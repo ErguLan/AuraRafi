@@ -331,7 +331,10 @@ impl PcbLayout {
 
             let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
             for pad_index in 0..pad_node_count {
-                groups.entry(dsu.find(pad_index)).or_default().push(pad_index);
+                groups
+                    .entry(dsu.find(pad_index))
+                    .or_default()
+                    .push(pad_index);
             }
 
             let mut roots = groups.into_values().collect::<Vec<_>>();

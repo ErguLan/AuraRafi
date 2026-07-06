@@ -60,9 +60,12 @@ pub fn perspective_matrix(fov_radians: f32, aspect: f32, near: f32, far: f32) ->
 ///
 /// Used for 2D mode (Unity-style: same 3D pipeline, orthographic camera).
 pub fn orthographic_matrix(
-    left: f32, right: f32,
-    bottom: f32, top: f32,
-    near: f32, far: f32,
+    left: f32,
+    right: f32,
+    bottom: f32,
+    top: f32,
+    near: f32,
+    far: f32,
 ) -> Mat4 {
     Mat4::orthographic_rh(left, right, bottom, top, near, far)
 }
@@ -110,10 +113,7 @@ pub fn project_point(
     let ndc_y = clip.y / clip.w;
     let depth = clip.z / clip.w;
 
-    let screen = [
-        (ndc_x + 1.0) * 0.5 * vp_w,
-        (1.0 - ndc_y) * 0.5 * vp_h,
-    ];
+    let screen = [(ndc_x + 1.0) * 0.5 * vp_w, (1.0 - ndc_y) * 0.5 * vp_h];
 
     Some((screen, depth))
 }
@@ -202,10 +202,7 @@ fn clip_to_screen(clip: Vec4, vp_w: f32, vp_h: f32) -> Option<[f32; 2]> {
     }
     let ndc_x = clip.x / clip.w;
     let ndc_y = clip.y / clip.w;
-    Some([
-        (ndc_x + 1.0) * 0.5 * vp_w,
-        (1.0 - ndc_y) * 0.5 * vp_h,
-    ])
+    Some([(ndc_x + 1.0) * 0.5 * vp_w, (1.0 - ndc_y) * 0.5 * vp_h])
 }
 
 /// Compute flat shading brightness for a face.
@@ -257,24 +254,28 @@ mod tests {
 
         // Project origin, then unproject the screen point
         let (screen, _) = project_point(Vec3::ZERO, &vp, 800.0, 600.0).unwrap();
-        let (ray_origin, ray_dir) = screen_to_world_ray(
-            screen[0], screen[1], 800.0, 600.0, &vp_inv,
-        ).unwrap();
+        let (ray_origin, ray_dir) =
+            screen_to_world_ray(screen[0], screen[1], 800.0, 600.0, &vp_inv).unwrap();
 
         // Ray should pass through or near the origin
         // Project ray_origin onto ray toward origin
         let to_origin = Vec3::ZERO - ray_origin;
         let t = to_origin.dot(ray_dir);
         let closest = ray_origin + ray_dir * t;
-        assert!(closest.length() < 0.1,
-            "ray should pass near origin, closest point: {:?}", closest);
+        assert!(
+            closest.length() < 0.1,
+            "ray should pass near origin, closest point: {:?}",
+            closest
+        );
     }
 
     #[test]
     fn normal_matrix_uniform_scale() {
         let model = model_matrix(Vec3::ZERO, Vec3::ZERO, Vec3::splat(2.0));
         let n = transform_normal(Vec3::Y, &normal_matrix(&model));
-        assert!((n - Vec3::Y).length() < 0.001,
-            "uniform scale should not change normal direction");
+        assert!(
+            (n - Vec3::Y).length() < 0.001,
+            "uniform scale should not change normal direction"
+        );
     }
 }

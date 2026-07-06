@@ -125,9 +125,15 @@ pub fn show_attached_behaviors(
                                 });
 
                                 ui.add_space(6.0);
-                                script_chip(ui, validation.language.label(), Color32::from_rgb(35, 35, 42), Color32::from_rgb(190, 190, 198));
+                                script_chip(
+                                    ui,
+                                    validation.language.label(),
+                                    Color32::from_rgb(35, 35, 42),
+                                    Color32::from_rgb(190, 190, 198),
+                                );
 
-                                let (status_label, status_fill, status_text) = if !validation.exists {
+                                let (status_label, status_fill, status_text) = if !validation.exists
+                                {
                                     (
                                         t("app.script_missing", lang),
                                         Color32::from_rgb(70, 32, 32),
@@ -154,55 +160,78 @@ pub fn show_attached_behaviors(
                                 };
                                 script_chip(ui, &status_label, status_fill, status_text);
 
-                                if validation.exists && (validation.has_on_start || validation.has_on_update) {
-                                    let hooks_label = match (validation.has_on_start, validation.has_on_update) {
-                                        (true, true) => "on_start + on_update",
-                                        (true, false) => "on_start",
-                                        (false, true) => "on_update",
-                                        (false, false) => "-",
-                                    };
-                                    script_chip(ui, hooks_label, Color32::from_rgb(32, 42, 55), Color32::from_rgb(170, 200, 230));
+                                if validation.exists
+                                    && (validation.has_on_start || validation.has_on_update)
+                                {
+                                    let hooks_label =
+                                        match (validation.has_on_start, validation.has_on_update) {
+                                            (true, true) => "on_start + on_update",
+                                            (true, false) => "on_start",
+                                            (false, true) => "on_update",
+                                            (false, false) => "-",
+                                        };
+                                    script_chip(
+                                        ui,
+                                        hooks_label,
+                                        Color32::from_rgb(32, 42, 55),
+                                        Color32::from_rgb(170, 200, 230),
+                                    );
                                 }
 
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let remove_btn = egui::Button::new(
-                                        egui::RichText::new("X")
-                                            .size(11.0)
-                                            .color(Color32::from_rgb(180, 110, 110)),
-                                    )
-                                    .frame(false);
-                                    if ui.add(remove_btn).clicked() {
-                                        remove_index = Some(index);
-                                    }
-
-                                    let reveal_btn = egui::Button::new(
-                                        egui::RichText::new(t("app.script_reveal_folder", lang))
-                                            .size(10.0),
-                                    )
-                                    .rounding(4.0);
-                                    if ui
-                                        .add_enabled(validation.absolute_path.is_some(), reveal_btn)
-                                        .clicked()
-                                    {
-                                        if let Some(path) = &validation.absolute_path {
-                                            let _ = open_path_in_file_manager(path);
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let remove_btn = egui::Button::new(
+                                            egui::RichText::new("X")
+                                                .size(11.0)
+                                                .color(Color32::from_rgb(180, 110, 110)),
+                                        )
+                                        .frame(false);
+                                        if ui.add(remove_btn).clicked() {
+                                            remove_index = Some(index);
                                         }
-                                    }
 
-                                    let open_btn = egui::Button::new(
-                                        egui::RichText::new(t("app.script_open_external", lang))
+                                        let reveal_btn = egui::Button::new(
+                                            egui::RichText::new(t(
+                                                "app.script_reveal_folder",
+                                                lang,
+                                            ))
                                             .size(10.0),
-                                    )
-                                    .rounding(4.0);
-                                    if ui
-                                        .add_enabled(validation.absolute_path.is_some(), open_btn)
-                                        .clicked()
-                                    {
-                                        if let Some(path) = &validation.absolute_path {
-                                            let _ = open_script_in_external_editor(path);
+                                        )
+                                        .rounding(4.0);
+                                        if ui
+                                            .add_enabled(
+                                                validation.absolute_path.is_some(),
+                                                reveal_btn,
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some(path) = &validation.absolute_path {
+                                                let _ = open_path_in_file_manager(path);
+                                            }
                                         }
-                                    }
-                                });
+
+                                        let open_btn = egui::Button::new(
+                                            egui::RichText::new(t(
+                                                "app.script_open_external",
+                                                lang,
+                                            ))
+                                            .size(10.0),
+                                        )
+                                        .rounding(4.0);
+                                        if ui
+                                            .add_enabled(
+                                                validation.absolute_path.is_some(),
+                                                open_btn,
+                                            )
+                                            .clicked()
+                                        {
+                                            if let Some(path) = &validation.absolute_path {
+                                                let _ = open_script_in_external_editor(path);
+                                            }
+                                        }
+                                    },
+                                );
                             });
                         });
                     ui.add_space(4.0);
@@ -227,11 +256,9 @@ pub fn show_attached_behaviors(
                     state.ensure_catalog(assets_root);
                 }
 
-                let folder_btn = egui::Button::new(t("app.script_scripts_folder", lang)).rounding(4.0);
-                if ui
-                    .add_enabled(assets_root.is_some(), folder_btn)
-                    .clicked()
-                {
+                let folder_btn =
+                    egui::Button::new(t("app.script_scripts_folder", lang)).rounding(4.0);
+                if ui.add_enabled(assets_root.is_some(), folder_btn).clicked() {
                     if let Some(root) = assets_root {
                         let _ = open_path_in_file_manager(&root.join("scripts"));
                     }
@@ -258,7 +285,9 @@ pub fn show_attached_behaviors(
 
                 ui.horizontal(|ui| {
                     ui.label(t("app.search", lang));
-                    ui.add(egui::TextEdit::singleline(&mut state.search_filter).desired_width(180.0));
+                    ui.add(
+                        egui::TextEdit::singleline(&mut state.search_filter).desired_width(180.0),
+                    );
                     if ui.button(t("app.script_rescan", lang)).clicked() {
                         state.needs_rescan = true;
                         state.ensure_catalog(assets_root);
@@ -269,7 +298,9 @@ pub fn show_attached_behaviors(
                 let filter = state.search_filter.to_lowercase();
                 let filtered: Vec<_> = catalog
                     .iter()
-                    .filter(|entry| filter.is_empty() || entry.relative_path.to_lowercase().contains(&filter))
+                    .filter(|entry| {
+                        filter.is_empty() || entry.relative_path.to_lowercase().contains(&filter)
+                    })
                     .collect();
 
                 if filtered.is_empty() {
@@ -281,7 +312,10 @@ pub fn show_attached_behaviors(
                 } else {
                     egui::ScrollArea::vertical().show(ui, |ui| {
                         for entry in filtered {
-                            let already_attached = node.scripts.iter().any(|script| script == &entry.relative_path);
+                            let already_attached = node
+                                .scripts
+                                .iter()
+                                .any(|script| script == &entry.relative_path);
                             egui::Frame::none()
                                 .fill(Color32::from_rgb(27, 27, 32))
                                 .rounding(6.0)
@@ -298,9 +332,11 @@ pub fn show_attached_behaviors(
 
                                         ui.vertical(|ui| {
                                             ui.label(
-                                                egui::RichText::new(script_file_name(&entry.relative_path))
-                                                    .size(11.0)
-                                                    .color(Color32::from_rgb(225, 225, 230)),
+                                                egui::RichText::new(script_file_name(
+                                                    &entry.relative_path,
+                                                ))
+                                                .size(11.0)
+                                                .color(Color32::from_rgb(225, 225, 230)),
                                             );
                                             ui.label(
                                                 egui::RichText::new(&entry.relative_path)
@@ -309,34 +345,58 @@ pub fn show_attached_behaviors(
                                             );
                                         });
 
-                                        script_chip(ui, entry.language.label(), Color32::from_rgb(35, 35, 42), Color32::from_rgb(190, 190, 198));
+                                        script_chip(
+                                            ui,
+                                            entry.language.label(),
+                                            Color32::from_rgb(35, 35, 42),
+                                            Color32::from_rgb(190, 190, 198),
+                                        );
                                         if entry.has_on_start || entry.has_on_update {
-                                            let hooks_label = match (entry.has_on_start, entry.has_on_update) {
-                                                (true, true) => "on_start + on_update",
-                                                (true, false) => "on_start",
-                                                (false, true) => "on_update",
-                                                (false, false) => "-",
-                                            };
-                                            script_chip(ui, hooks_label, Color32::from_rgb(32, 42, 55), Color32::from_rgb(170, 200, 230));
+                                            let hooks_label =
+                                                match (entry.has_on_start, entry.has_on_update) {
+                                                    (true, true) => "on_start + on_update",
+                                                    (true, false) => "on_start",
+                                                    (false, true) => "on_update",
+                                                    (false, false) => "-",
+                                                };
+                                            script_chip(
+                                                ui,
+                                                hooks_label,
+                                                Color32::from_rgb(32, 42, 55),
+                                                Color32::from_rgb(170, 200, 230),
+                                            );
                                         }
 
-                                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                            let label = if already_attached {
-                                                t("app.script_attached", lang)
-                                            } else {
-                                                t("app.attach_script", lang)
-                                            };
-                                            let attach_btn = egui::Button::new(label).rounding(4.0);
-                                            if ui.add_enabled(!already_attached, attach_btn).clicked() {
-                                                node.scripts.push(entry.relative_path.clone());
-                                                changed = true;
-                                            }
+                                        ui.with_layout(
+                                            egui::Layout::right_to_left(egui::Align::Center),
+                                            |ui| {
+                                                let label = if already_attached {
+                                                    t("app.script_attached", lang)
+                                                } else {
+                                                    t("app.attach_script", lang)
+                                                };
+                                                let attach_btn =
+                                                    egui::Button::new(label).rounding(4.0);
+                                                if ui
+                                                    .add_enabled(!already_attached, attach_btn)
+                                                    .clicked()
+                                                {
+                                                    node.scripts.push(entry.relative_path.clone());
+                                                    changed = true;
+                                                }
 
-                                            let open_btn = egui::Button::new(t("app.script_open_external", lang)).rounding(4.0);
-                                            if ui.add(open_btn).clicked() {
-                                                let _ = open_script_in_external_editor(&entry.absolute_path);
-                                            }
-                                        });
+                                                let open_btn = egui::Button::new(t(
+                                                    "app.script_open_external",
+                                                    lang,
+                                                ))
+                                                .rounding(4.0);
+                                                if ui.add(open_btn).clicked() {
+                                                    let _ = open_script_in_external_editor(
+                                                        &entry.absolute_path,
+                                                    );
+                                                }
+                                            },
+                                        );
                                     });
                                 });
                             ui.add_space(4.0);
@@ -351,7 +411,10 @@ pub fn show_attached_behaviors(
                     }
 
                     if ui
-                        .add_enabled(assets_root_buf.is_some(), egui::Button::new(t("app.script_scripts_folder", lang)))
+                        .add_enabled(
+                            assets_root_buf.is_some(),
+                            egui::Button::new(t("app.script_scripts_folder", lang)),
+                        )
                         .clicked()
                     {
                         if let Some(root) = &assets_root_buf {
@@ -371,10 +434,6 @@ fn script_chip(ui: &mut Ui, label: &str, fill: Color32, text: Color32) {
         .rounding(10.0)
         .inner_margin(egui::Margin::symmetric(8.0, 3.0))
         .show(ui, |ui| {
-            ui.label(
-                egui::RichText::new(label)
-                    .size(9.0)
-                    .color(text),
-            );
+            ui.label(egui::RichText::new(label).size(9.0).color(text));
         });
 }

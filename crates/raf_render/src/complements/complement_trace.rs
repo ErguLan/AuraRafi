@@ -171,8 +171,8 @@ impl Default for RayTraceFeatures {
             reflections: true,
             global_illumination: true,
             ambient_occlusion: true,
-            refractions: false,  // Expensive, off by default
-            caustics: false,     // Very expensive, off by default
+            refractions: false, // Expensive, off by default
+            caustics: false,    // Very expensive, off by default
         }
     }
 }

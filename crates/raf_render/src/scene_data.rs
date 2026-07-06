@@ -307,7 +307,7 @@ mod tests {
     #[test]
     fn mesh_gpu_bytes() {
         let mesh = RenderMesh {
-            positions: vec![0.0; 9],   // 3 vertices
+            positions: vec![0.0; 9], // 3 vertices
             normals: vec![0.0; 9],
             uvs: vec![0.0; 6],
             indices: vec![0, 1, 2],

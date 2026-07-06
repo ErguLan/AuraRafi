@@ -29,9 +29,15 @@ pub fn build_3d_grid(bounds_min: Vec3, bounds_max: Vec3, spacing: f32) -> Vec<Gr
     let min_z = min_z_index as f32 * spacing;
     let max_z = max_z_index as f32 * spacing;
 
-    let density_step_x = (((max_x_index - min_x_index + 1) as f32 / MAX_MINOR_LINES_PER_AXIS as f32).ceil() as i32).max(1);
-    let density_step_z = (((max_z_index - min_z_index + 1) as f32 / MAX_MINOR_LINES_PER_AXIS as f32).ceil() as i32).max(1);
-    let mut lines = Vec::with_capacity(((max_x_index - min_x_index + max_z_index - min_z_index + 2) * 2) as usize);
+    let density_step_x =
+        (((max_x_index - min_x_index + 1) as f32 / MAX_MINOR_LINES_PER_AXIS as f32).ceil() as i32)
+            .max(1);
+    let density_step_z =
+        (((max_z_index - min_z_index + 1) as f32 / MAX_MINOR_LINES_PER_AXIS as f32).ceil() as i32)
+            .max(1);
+    let mut lines = Vec::with_capacity(
+        ((max_x_index - min_x_index + max_z_index - min_z_index + 2) * 2) as usize,
+    );
 
     for i in min_x_index..=max_x_index {
         let fi = i as f32 * spacing;

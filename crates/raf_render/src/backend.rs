@@ -8,9 +8,9 @@
 //! render execution policy. The switch is cheap: just a flag + different code
 //! paths. Potato or compatibility setups can still force CPU explicitly.
 
-use serde::{Deserialize, Serialize};
 use raf_core::config::{Language, RenderExecutionPolicy};
 use raf_core::i18n::t;
+use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Backend enum
@@ -104,7 +104,7 @@ impl Default for BackendConfig {
             cpu_max_triangles: 5000,    // ~200 low-poly objects max on CPU
             show_selector: true,
             target_fps_floor: 30.0,
-            frame_budget_ms: 16.0,      // 60fps budget
+            frame_budget_ms: 16.0, // 60fps budget
         }
     }
 }

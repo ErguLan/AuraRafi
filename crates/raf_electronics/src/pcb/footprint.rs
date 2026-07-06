@@ -72,13 +72,11 @@ pub fn footprint_definition(id: &str, pin_count: usize) -> FootprintDefinition {
         "TP-GND" => FootprintDefinition {
             id: id.to_string(),
             body_size: Vec2::new(28.0, 28.0),
-            pads: vec![
-                FootprintPadDefinition {
-                    name: "TP".to_string(),
-                    offset: Vec2::ZERO,
-                    size: Vec2::new(16.0, 16.0),
-                },
-            ],
+            pads: vec![FootprintPadDefinition {
+                name: "TP".to_string(),
+                offset: Vec2::ZERO,
+                size: Vec2::new(16.0, 16.0),
+            }],
             preview_asset: Some("footprints/test-point.png".to_string()),
         },
         _ => generic_footprint(id, pin_count.max(1)),

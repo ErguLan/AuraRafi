@@ -17,10 +17,7 @@ pub fn compile(graph: &NodeGraph) -> CompilationResult {
     for node in &graph.nodes {
         let conns = graph.connections_for(node.id);
         if conns.is_empty() && graph.nodes.len() > 1 {
-            errors.push(format!(
-                "Node '{}' has no connections",
-                node.name
-            ));
+            errors.push(format!("Node '{}' has no connections", node.name));
         }
     }
 

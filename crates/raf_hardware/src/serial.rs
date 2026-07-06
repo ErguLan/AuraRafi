@@ -125,7 +125,11 @@ impl SerialPort {
         if self.config.port.is_empty() {
             return Err("No port specified".to_string());
         }
-        tracing::info!("Serial: connecting to {} at {} baud", self.config.port, self.config.baud_rate);
+        tracing::info!(
+            "Serial: connecting to {} at {} baud",
+            self.config.port,
+            self.config.baud_rate
+        );
         // Stub: mark as connected.
         self.state = ConnectionState::Connected;
         Ok(())

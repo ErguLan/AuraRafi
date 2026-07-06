@@ -14,12 +14,12 @@
 //! - `robot` - High-level robot control interface (future)
 //! - `ml` - ML/AI training data export and inference bridge (future)
 
-pub mod serial;
-pub mod sensor;
 pub mod actuator;
-pub mod robot;
 pub mod ml;
+pub mod robot;
+pub mod sensor;
+pub mod serial;
 
-pub use serial::{SerialConfig, SerialMessage, SerialPort};
-pub use sensor::{SensorData, SensorType};
 pub use actuator::{ActuatorCommand, ActuatorType};
+pub use sensor::{SensorData, SensorType};
+pub use serial::{SerialConfig, SerialMessage, SerialPort};

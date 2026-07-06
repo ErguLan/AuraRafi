@@ -7,25 +7,42 @@ pub type Edge = [Vec3; 2];
 pub fn cube_edges() -> Vec<Edge> {
     let h = 0.5;
     let c = [
-        Vec3::new(-h, -h, -h), Vec3::new( h, -h, -h),
-        Vec3::new( h,  h, -h), Vec3::new(-h,  h, -h),
-        Vec3::new(-h, -h,  h), Vec3::new( h, -h,  h),
-        Vec3::new( h,  h,  h), Vec3::new(-h,  h,  h),
+        Vec3::new(-h, -h, -h),
+        Vec3::new(h, -h, -h),
+        Vec3::new(h, h, -h),
+        Vec3::new(-h, h, -h),
+        Vec3::new(-h, -h, h),
+        Vec3::new(h, -h, h),
+        Vec3::new(h, h, h),
+        Vec3::new(-h, h, h),
     ];
     vec![
-        [c[0], c[1]], [c[1], c[2]], [c[2], c[3]], [c[3], c[0]],
-        [c[4], c[5]], [c[5], c[6]], [c[6], c[7]], [c[7], c[4]],
-        [c[0], c[4]], [c[1], c[5]], [c[2], c[6]], [c[3], c[7]],
+        [c[0], c[1]],
+        [c[1], c[2]],
+        [c[2], c[3]],
+        [c[3], c[0]],
+        [c[4], c[5]],
+        [c[5], c[6]],
+        [c[6], c[7]],
+        [c[7], c[4]],
+        [c[0], c[4]],
+        [c[1], c[5]],
+        [c[2], c[6]],
+        [c[3], c[7]],
     ]
 }
 
 pub fn cube_faces() -> Vec<([Vec3; 4], Vec3)> {
     let h = 0.5;
     let c = [
-        Vec3::new(-h, -h, -h), Vec3::new( h, -h, -h),
-        Vec3::new( h,  h, -h), Vec3::new(-h,  h, -h),
-        Vec3::new(-h, -h,  h), Vec3::new( h, -h,  h),
-        Vec3::new( h,  h,  h), Vec3::new(-h,  h,  h),
+        Vec3::new(-h, -h, -h),
+        Vec3::new(h, -h, -h),
+        Vec3::new(h, h, -h),
+        Vec3::new(-h, h, -h),
+        Vec3::new(-h, -h, h),
+        Vec3::new(h, -h, h),
+        Vec3::new(h, h, h),
+        Vec3::new(-h, h, h),
     ];
     vec![
         ([c[4], c[5], c[6], c[7]], Vec3::Z),
@@ -113,11 +130,16 @@ pub fn sphere_faces(stacks: usize, slices: usize) -> Vec<([Vec3; 4], Vec3)> {
 pub fn plane_edges() -> Vec<Edge> {
     let h = 0.5;
     let c = [
-        Vec3::new(-h, 0.0, -h), Vec3::new( h, 0.0, -h),
-        Vec3::new( h, 0.0,  h), Vec3::new(-h, 0.0,  h),
+        Vec3::new(-h, 0.0, -h),
+        Vec3::new(h, 0.0, -h),
+        Vec3::new(h, 0.0, h),
+        Vec3::new(-h, 0.0, h),
     ];
     vec![
-        [c[0], c[1]], [c[1], c[2]], [c[2], c[3]], [c[3], c[0]],
+        [c[0], c[1]],
+        [c[1], c[2]],
+        [c[2], c[3]],
+        [c[3], c[0]],
         [c[0], c[2]],
     ]
 }
@@ -127,9 +149,9 @@ pub fn plane_faces() -> Vec<([Vec3; 4], Vec3)> {
     vec![(
         [
             Vec3::new(-h, 0.0, -h),
-            Vec3::new( h, 0.0, -h),
-            Vec3::new( h, 0.0,  h),
-            Vec3::new(-h, 0.0,  h),
+            Vec3::new(h, 0.0, -h),
+            Vec3::new(h, 0.0, h),
+            Vec3::new(-h, 0.0, h),
         ],
         Vec3::Y,
     )]
@@ -192,4 +214,4 @@ pub fn cylinder_faces(segments: usize) -> Vec<([Vec3; 4], Vec3)> {
         faces.push(([bot_center, bot1, bot0, bot0], Vec3::NEG_Y));
     }
     faces
-}
+}

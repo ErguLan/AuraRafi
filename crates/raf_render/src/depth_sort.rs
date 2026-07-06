@@ -47,7 +47,9 @@ pub struct DepthSorter {
 
 impl DepthSorter {
     pub fn new() -> Self {
-        Self { faces: Vec::with_capacity(512) }
+        Self {
+            faces: Vec::with_capacity(512),
+        }
     }
 
     /// Clear all faces (call at the start of each frame).
@@ -118,11 +120,14 @@ impl DepthSorter {
         // Deduplicate consecutive identical points (degenerate quads from caps).
         let mut deduped: Vec<[f32; 2]> = Vec::with_capacity(4);
         for p in &screen_pts {
-            let dominated = deduped.last().map(|last| {
-                let dx = last[0] - p[0];
-                let dy = last[1] - p[1];
-                (dx * dx + dy * dy) < 0.25
-            }).unwrap_or(false);
+            let dominated = deduped
+                .last()
+                .map(|last| {
+                    let dx = last[0] - p[0];
+                    let dy = last[1] - p[1];
+                    (dx * dx + dy * dy) < 0.25
+                })
+                .unwrap_or(false);
             if !dominated {
                 deduped.push(*p);
             }
@@ -198,7 +203,9 @@ impl DepthSorter {
     /// Sort all faces by depth (farthest first = painter's algorithm).
     pub fn sort(&mut self) {
         self.faces.sort_unstable_by(|a, b| {
-            b.depth.partial_cmp(&a.depth).unwrap_or(std::cmp::Ordering::Equal)
+            b.depth
+                .partial_cmp(&a.depth)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
     }
 
@@ -214,9 +221,10 @@ impl DepthSorter {
 
     /// Total triangle count (faces with 3 pts = 1 tri, 4 pts = 2 tris).
     pub fn triangle_count(&self) -> usize {
-        self.faces.iter().map(|f| {
-            if f.screen_points.len() >= 4 { 2 } else { 1 }
-        }).sum()
+        self.faces
+            .iter()
+            .map(|f| if f.screen_points.len() >= 4 { 2 } else { 1 })
+            .sum()
     }
 }
 
@@ -227,7 +235,9 @@ impl DepthSorter {
 /// Calculate directional light shading (dot product).
 /// Returns a brightness factor from 0.3 (shadow) to 1.0 (fully lit).
 pub fn face_brightness(face_normal: Vec3, light_dir: Vec3, model: &Mat4) -> f32 {
-    let world_normal = (*model * Vec4::from((face_normal, 0.0))).truncate().normalize();
+    let world_normal = (*model * Vec4::from((face_normal, 0.0)))
+        .truncate()
+        .normalize();
     let dot = world_normal.dot(light_dir.normalize());
     0.3 + 0.7 * dot.max(0.0)
 }

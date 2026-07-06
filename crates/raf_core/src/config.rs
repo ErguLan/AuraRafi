@@ -4,6 +4,7 @@
 //! editor preferences, and project defaults. Serialized to RON
 //! for human-readable config files.
 
+use crate::units::DisplayUnit;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -59,6 +60,10 @@ fn default_rotate_sensitivity() -> f32 {
 
 fn default_grid_load_distance() -> f32 {
     15.0
+}
+
+fn default_display_unit() -> DisplayUnit {
+    DisplayUnit::Metric
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +204,7 @@ impl TargetPlatform {
 // ---------------------------------------------------------------------------
 
 /// Complete engine settings, persisted to disk as RON.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EngineSettings {
     // -- Appearance --
     pub theme: Theme,
@@ -207,6 +212,10 @@ pub struct EngineSettings {
     pub theme_experimental: f32,
     pub font_size: f32,
     pub ui_scale: f32,
+    /// When true, the editor detects the system DPI at startup and applies
+    /// it as the UI scale factor. The manual slider is disabled while active.
+    #[serde(default = "default_true")]
+    pub auto_ui_scale: bool,
 
     // -- Language --
     pub language: Language,
@@ -226,7 +235,9 @@ pub struct EngineSettings {
     #[serde(default = "default_grid_load_distance")]
     pub grid_load_distance: f32,
     pub auto_save_interval_seconds: u32,
-    pub units_metric: bool,
+    /// Display unit system for the UI. Calculation is always in SI (meters).
+    #[serde(default = "default_display_unit")]
+    pub display_unit: DisplayUnit,
 
     // -- Solid Mode Rendering --
     /// Show surface edge lines in solid render mode.
@@ -278,6 +289,9 @@ pub struct EngineSettings {
     /// Whether the editor toolbar FPS counter is visible.
     #[serde(default = "default_true")]
     pub show_fps_counter: bool,
+    /// Enables the manual slash-command console entrypoint.
+    #[serde(default)]
+    pub command_console_enabled: bool,
     /// Multiplier for move gizmo drag response.
     #[serde(default = "default_gizmo_sensitivity")]
     pub move_gizmo_sensitivity: f32,
@@ -290,6 +304,25 @@ pub struct EngineSettings {
     /// If true, scale gizmo starts in uniform mode until Shift is held.
     #[serde(default)]
     pub uniform_scale_by_default: bool,
+
+    // -- Scripting (v0.8.x) --
+    /// Master switch for the script runtime. Off until the runtime is built.
+    /// See docs/SCRIPTING_SYSTEM.md.
+    #[serde(default)]
+    pub script_runtime_enabled: bool,
+    /// Default language for "New Script" templates.
+    #[serde(default = "default_script_language")]
+    pub default_script_language: ScriptLanguage,
+    /// Reload scripts automatically when files change on disk.
+    #[serde(default = "default_true")]
+    pub script_hot_reload: bool,
+    /// Maximum script execution time per frame, in milliseconds.
+    /// Prevents infinite loops from hanging the engine (Rhai only).
+    #[serde(default = "default_script_timeout_ms")]
+    pub script_timeout_ms: u32,
+    /// External editor command for opening .rhai / .cpp files.
+    #[serde(default = "default_script_editor_cmd")]
+    pub script_external_editor_cmd: String,
 
     // -- Window state (persisted) --
     pub window_width: u32,
@@ -318,6 +351,126 @@ impl Default for RenderPreset {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Scripting types
+// ---------------------------------------------------------------------------
+
+/// Scripting language for the AuraRafi Host API.
+/// See docs/SCRIPTING_SYSTEM.md for the tier system.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScriptLanguage {
+    /// Tier 1: sandboxed, pure Rust, beginner-friendly.
+    Rhai,
+    /// Tier 2: native-performance modules compiled to WASM.
+    /// Requires a WASM runtime (Phase D).
+    Cpp,
+    /// Tier 3: visual node graphs from raf_nodes.
+    Nodes,
+}
+
+impl Default for ScriptLanguage {
+    fn default() -> Self {
+        Self::Rhai
+    }
+}
+
+impl ScriptLanguage {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Rhai => "Rhai",
+            Self::Cpp => "C++ (WASM)",
+            Self::Nodes => "Visual Nodes",
+        }
+    }
+
+    pub fn all() -> [ScriptLanguage; 3] {
+        [Self::Rhai, Self::Cpp, Self::Nodes]
+    }
+}
+
+/// When scripts execute during the project lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ScriptExecutionMode {
+    /// Scripts do not run at all.
+    Disabled,
+    /// Scripts run only inside the editor (Play mode).
+    EditorOnly,
+    /// Scripts run in the editor and in exported runtime builds.
+    Runtime,
+}
+
+impl Default for ScriptExecutionMode {
+    fn default() -> Self {
+        Self::EditorOnly
+    }
+}
+
+impl ScriptExecutionMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Disabled => "Disabled",
+            Self::EditorOnly => "Editor Only",
+            Self::Runtime => "Runtime",
+        }
+    }
+
+    pub fn all() -> [ScriptExecutionMode; 3] {
+        [Self::Disabled, Self::EditorOnly, Self::Runtime]
+    }
+}
+
+/// Bitflags for which script languages a project allows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ScriptLanguageFlags(pub u8);
+
+impl ScriptLanguageFlags {
+    pub const RHAI: Self = Self(0x01);
+    pub const CPP: Self = Self(0x02);
+    pub const NODES: Self = Self(0x04);
+    pub const ALL: Self = Self(0x07);
+    pub const DEFAULT: Self = Self(0x05); // Rhai + Nodes
+
+    pub fn has(self, lang: ScriptLanguage) -> bool {
+        let bit = match lang {
+            ScriptLanguage::Rhai => 0x01,
+            ScriptLanguage::Cpp => 0x02,
+            ScriptLanguage::Nodes => 0x04,
+        };
+        (self.0 & bit) != 0
+    }
+
+    pub fn set(&mut self, lang: ScriptLanguage, enabled: bool) {
+        let bit = match lang {
+            ScriptLanguage::Rhai => 0x01,
+            ScriptLanguage::Cpp => 0x02,
+            ScriptLanguage::Nodes => 0x04,
+        };
+        if enabled {
+            self.0 |= bit;
+        } else {
+            self.0 &= !bit;
+        }
+    }
+}
+
+impl Default for ScriptLanguageFlags {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+fn default_script_language() -> ScriptLanguage {
+    ScriptLanguage::Rhai
+}
+
+fn default_script_timeout_ms() -> u32 {
+    100
+}
+
+fn default_script_editor_cmd() -> String {
+    "code".to_string()
+}
+
 impl Default for EngineSettings {
     fn default() -> Self {
         Self {
@@ -325,6 +478,7 @@ impl Default for EngineSettings {
             theme_experimental: 0.0,
             font_size: 14.0,
             ui_scale: 1.0,
+            auto_ui_scale: true,
             language: Language::English,
             render_quality: RenderQuality::Low,
             render_execution_policy: RenderExecutionPolicy::Auto,
@@ -336,7 +490,7 @@ impl Default for EngineSettings {
             grid_size: 1.0,
             grid_load_distance: 15.0,
             auto_save_interval_seconds: 120,
-            units_metric: true,
+            display_unit: DisplayUnit::Metric,
             solid_show_surface_edges: false,
             solid_xray_mode: false,
             solid_face_tonality: true,
@@ -350,10 +504,16 @@ impl Default for EngineSettings {
             viewport_render_mode: ViewportRenderMode::Solid,
             show_viewport_labels: true,
             show_fps_counter: true,
+            command_console_enabled: false,
             move_gizmo_sensitivity: 3.5,
             rotate_gizmo_sensitivity: 3.5,
             scale_gizmo_sensitivity: 3.5,
             uniform_scale_by_default: false,
+            script_runtime_enabled: false,
+            default_script_language: ScriptLanguage::Rhai,
+            script_hot_reload: true,
+            script_timeout_ms: 100,
+            script_external_editor_cmd: "code".to_string(),
             window_width: 1280,
             window_height: 720,
             window_maximized: false,
@@ -411,11 +571,8 @@ mod tests {
     #[test]
     fn round_trip_ron() {
         let settings = EngineSettings::default();
-        let serialized = ron::ser::to_string_pretty(
-            &settings,
-            ron::ser::PrettyConfig::default(),
-        )
-        .unwrap();
+        let serialized =
+            ron::ser::to_string_pretty(&settings, ron::ser::PrettyConfig::default()).unwrap();
         let deserialized: EngineSettings = ron::from_str(&serialized).unwrap();
         assert_eq!(deserialized.theme, settings.theme);
         assert_eq!(deserialized.language, settings.language);

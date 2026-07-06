@@ -68,17 +68,23 @@ pub fn axes() -> [GizmoAxisInfo; 3] {
     [
         GizmoAxisInfo {
             direction: Vec3::X,
-            color_r: 220, color_g: 70, color_b: 70,
+            color_r: 220,
+            color_g: 70,
+            color_b: 70,
             label: "X",
         },
         GizmoAxisInfo {
             direction: Vec3::Y,
-            color_r: 70, color_g: 220, color_b: 70,
+            color_r: 70,
+            color_g: 220,
+            color_b: 70,
             label: "Y",
         },
         GizmoAxisInfo {
             direction: Vec3::Z,
-            color_r: 70, color_g: 100, color_b: 220,
+            color_r: 70,
+            color_g: 100,
+            color_b: 220,
             label: "Z",
         },
     ]
@@ -99,11 +105,7 @@ impl GizmoState {
 
         let axes = [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z];
         for (i, axis) in axes.iter().enumerate() {
-            let dist_sq = point_to_segment_dist_sq(
-                click,
-                origin_2d,
-                axis_ends_2d[i],
-            );
+            let dist_sq = point_to_segment_dist_sq(click, origin_2d, axis_ends_2d[i]);
             if dist_sq < threshold_sq {
                 return *axis;
             }
@@ -123,11 +125,7 @@ impl GizmoState {
 }
 
 /// Squared distance from a point to a line segment (2D).
-fn point_to_segment_dist_sq(
-    p: [f32; 2],
-    a: [f32; 2],
-    b: [f32; 2],
-) -> f32 {
+fn point_to_segment_dist_sq(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
     let dx = b[0] - a[0];
     let dy = b[1] - a[1];
     let len_sq = dx * dx + dy * dy;
@@ -175,11 +173,7 @@ mod tests {
     fn hit_test_misses() {
         let gizmo = GizmoState::default();
         let origin = [100.0, 100.0];
-        let ends = [
-            [160.0, 100.0],
-            [100.0, 40.0],
-            [130.0, 130.0],
-        ];
+        let ends = [[160.0, 100.0], [100.0, 40.0], [130.0, 130.0]];
         // Click far away from any axis
         let result = gizmo.hit_test([200.0, 200.0], origin, ends);
         assert_eq!(result, GizmoAxis::None);

@@ -121,11 +121,7 @@ pub fn run_drc(schematic: &Schematic) -> DrcReport {
 }
 
 /// Rule 1: Find pins that are alone in their net (not connected to anything).
-fn check_floating_pins(
-    schematic: &Schematic,
-    netlist: &Netlist,
-    issues: &mut Vec<DrcIssue>,
-) {
+fn check_floating_pins(schematic: &Schematic, netlist: &Netlist, issues: &mut Vec<DrcIssue>) {
     for (ci, comp) in schematic.components.iter().enumerate() {
         for (pi, pin) in comp.pins.iter().enumerate() {
             if let Some(net) = netlist.net_for_pin(ci, pi) {
@@ -159,10 +155,7 @@ fn check_floating_pins(
 }
 
 /// Rule 2: Components that need a value but have it empty.
-fn check_missing_values(
-    schematic: &Schematic,
-    issues: &mut Vec<DrcIssue>,
-) {
+fn check_missing_values(schematic: &Schematic, issues: &mut Vec<DrcIssue>) {
     for comp in &schematic.components {
         let needs_value = matches!(
             comp.sim_model,
@@ -172,10 +165,7 @@ fn check_missing_values(
             issues.push(DrcIssue {
                 severity: DrcSeverity::Warning,
                 rule: "missing_value".to_string(),
-                message: format!(
-                    "Component {} has no value assigned",
-                    comp.designator
-                ),
+                message: format!("Component {} has no value assigned", comp.designator),
                 components: vec![comp.id],
                 location: Some(comp.position),
             });
@@ -184,11 +174,7 @@ fn check_missing_values(
 }
 
 /// Rule 3: Components with no pin connected to any other component.
-fn check_isolated_components(
-    schematic: &Schematic,
-    netlist: &Netlist,
-    issues: &mut Vec<DrcIssue>,
-) {
+fn check_isolated_components(schematic: &Schematic, netlist: &Netlist, issues: &mut Vec<DrcIssue>) {
     for (ci, comp) in schematic.components.iter().enumerate() {
         let has_connection = comp.pins.iter().enumerate().any(|(pi, _)| {
             netlist
@@ -213,10 +199,7 @@ fn check_isolated_components(
 }
 
 /// Rule 4: Wires without net names.
-fn check_unnamed_nets(
-    schematic: &Schematic,
-    issues: &mut Vec<DrcIssue>,
-) {
+fn check_unnamed_nets(schematic: &Schematic, issues: &mut Vec<DrcIssue>) {
     for wire in &schematic.wires {
         if wire.net.is_empty() {
             issues.push(DrcIssue {
@@ -239,11 +222,7 @@ fn check_unnamed_nets(
 /// Rule 5: Basic short circuit detection.
 /// Looks for nets where multiple voltage sources or power pins are
 /// connected without any load between them.
-fn check_short_circuit(
-    schematic: &Schematic,
-    netlist: &Netlist,
-    issues: &mut Vec<DrcIssue>,
-) {
+fn check_short_circuit(schematic: &Schematic, netlist: &Netlist, issues: &mut Vec<DrcIssue>) {
     use crate::component::PinDirection;
 
     for net in &netlist.nets {

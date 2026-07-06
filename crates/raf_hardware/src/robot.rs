@@ -5,9 +5,9 @@
 //! control loop. This module is a structural placeholder that
 //! will be implemented when the hardware layer is fully active.
 
-use serde::{Deserialize, Serialize};
-use crate::sensor::SensorData;
 use crate::actuator::ActuatorCommand;
+use crate::sensor::SensorData;
+use serde::{Deserialize, Serialize};
 
 /// Robot control mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

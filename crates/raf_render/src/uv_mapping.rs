@@ -29,13 +29,22 @@ pub fn generate_uv_box(position: Vec3, normal: Vec3, scale: f32) -> [f32; 2] {
 
     if abs_n.x >= abs_n.y && abs_n.x >= abs_n.z {
         // X-dominant face: project onto YZ.
-        [position.z * inv_scale * 0.5 + 0.5, position.y * inv_scale * 0.5 + 0.5]
+        [
+            position.z * inv_scale * 0.5 + 0.5,
+            position.y * inv_scale * 0.5 + 0.5,
+        ]
     } else if abs_n.y >= abs_n.x && abs_n.y >= abs_n.z {
         // Y-dominant face: project onto XZ.
-        [position.x * inv_scale * 0.5 + 0.5, position.z * inv_scale * 0.5 + 0.5]
+        [
+            position.x * inv_scale * 0.5 + 0.5,
+            position.z * inv_scale * 0.5 + 0.5,
+        ]
     } else {
         // Z-dominant face: project onto XY.
-        [position.x * inv_scale * 0.5 + 0.5, position.y * inv_scale * 0.5 + 0.5]
+        [
+            position.x * inv_scale * 0.5 + 0.5,
+            position.y * inv_scale * 0.5 + 0.5,
+        ]
     }
 }
 
@@ -65,11 +74,20 @@ pub fn generate_uv_planar(position: Vec3, axis: Vec3, scale: f32) -> [f32; 2] {
     let inv_scale = if scale > 0.001 { 1.0 / scale } else { 1.0 };
 
     if abs_axis.y > abs_axis.x && abs_axis.y > abs_axis.z {
-        [position.x * inv_scale * 0.5 + 0.5, position.z * inv_scale * 0.5 + 0.5]
+        [
+            position.x * inv_scale * 0.5 + 0.5,
+            position.z * inv_scale * 0.5 + 0.5,
+        ]
     } else if abs_axis.x > abs_axis.z {
-        [position.z * inv_scale * 0.5 + 0.5, position.y * inv_scale * 0.5 + 0.5]
+        [
+            position.z * inv_scale * 0.5 + 0.5,
+            position.y * inv_scale * 0.5 + 0.5,
+        ]
     } else {
-        [position.x * inv_scale * 0.5 + 0.5, position.y * inv_scale * 0.5 + 0.5]
+        [
+            position.x * inv_scale * 0.5 + 0.5,
+            position.y * inv_scale * 0.5 + 0.5,
+        ]
     }
 }
 
@@ -89,35 +107,73 @@ pub struct UvQuad {
 pub fn cube_uv_quads() -> Vec<UvQuad> {
     let faces: &[([Vec3; 4], Vec3)] = &[
         // Front (+Z).
-        ([Vec3::new(-1.0, -1.0,  1.0), Vec3::new( 1.0, -1.0,  1.0),
-          Vec3::new( 1.0,  1.0,  1.0), Vec3::new(-1.0,  1.0,  1.0)], Vec3::Z),
+        (
+            [
+                Vec3::new(-1.0, -1.0, 1.0),
+                Vec3::new(1.0, -1.0, 1.0),
+                Vec3::new(1.0, 1.0, 1.0),
+                Vec3::new(-1.0, 1.0, 1.0),
+            ],
+            Vec3::Z,
+        ),
         // Back (-Z).
-        ([Vec3::new( 1.0, -1.0, -1.0), Vec3::new(-1.0, -1.0, -1.0),
-          Vec3::new(-1.0,  1.0, -1.0), Vec3::new( 1.0,  1.0, -1.0)], Vec3::NEG_Z),
+        (
+            [
+                Vec3::new(1.0, -1.0, -1.0),
+                Vec3::new(-1.0, -1.0, -1.0),
+                Vec3::new(-1.0, 1.0, -1.0),
+                Vec3::new(1.0, 1.0, -1.0),
+            ],
+            Vec3::NEG_Z,
+        ),
         // Right (+X).
-        ([Vec3::new( 1.0, -1.0,  1.0), Vec3::new( 1.0, -1.0, -1.0),
-          Vec3::new( 1.0,  1.0, -1.0), Vec3::new( 1.0,  1.0,  1.0)], Vec3::X),
+        (
+            [
+                Vec3::new(1.0, -1.0, 1.0),
+                Vec3::new(1.0, -1.0, -1.0),
+                Vec3::new(1.0, 1.0, -1.0),
+                Vec3::new(1.0, 1.0, 1.0),
+            ],
+            Vec3::X,
+        ),
         // Left (-X).
-        ([Vec3::new(-1.0, -1.0, -1.0), Vec3::new(-1.0, -1.0,  1.0),
-          Vec3::new(-1.0,  1.0,  1.0), Vec3::new(-1.0,  1.0, -1.0)], Vec3::NEG_X),
+        (
+            [
+                Vec3::new(-1.0, -1.0, -1.0),
+                Vec3::new(-1.0, -1.0, 1.0),
+                Vec3::new(-1.0, 1.0, 1.0),
+                Vec3::new(-1.0, 1.0, -1.0),
+            ],
+            Vec3::NEG_X,
+        ),
         // Top (+Y).
-        ([Vec3::new(-1.0,  1.0,  1.0), Vec3::new( 1.0,  1.0,  1.0),
-          Vec3::new( 1.0,  1.0, -1.0), Vec3::new(-1.0,  1.0, -1.0)], Vec3::Y),
+        (
+            [
+                Vec3::new(-1.0, 1.0, 1.0),
+                Vec3::new(1.0, 1.0, 1.0),
+                Vec3::new(1.0, 1.0, -1.0),
+                Vec3::new(-1.0, 1.0, -1.0),
+            ],
+            Vec3::Y,
+        ),
         // Bottom (-Y).
-        ([Vec3::new(-1.0, -1.0, -1.0), Vec3::new( 1.0, -1.0, -1.0),
-          Vec3::new( 1.0, -1.0,  1.0), Vec3::new(-1.0, -1.0,  1.0)], Vec3::NEG_Y),
+        (
+            [
+                Vec3::new(-1.0, -1.0, -1.0),
+                Vec3::new(1.0, -1.0, -1.0),
+                Vec3::new(1.0, -1.0, 1.0),
+                Vec3::new(-1.0, -1.0, 1.0),
+            ],
+            Vec3::NEG_Y,
+        ),
     ];
 
-    faces.iter().map(|(verts, normal)| {
-        UvQuad {
+    faces
+        .iter()
+        .map(|(verts, normal)| UvQuad {
             positions: *verts,
-            uvs: [
-                [0.0, 1.0],
-                [1.0, 1.0],
-                [1.0, 0.0],
-                [0.0, 0.0],
-            ],
+            uvs: [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]],
             normal: *normal,
-        }
-    }).collect()
+        })
+        .collect()
 }

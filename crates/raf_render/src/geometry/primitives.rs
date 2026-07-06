@@ -31,47 +31,65 @@ pub fn cube(segments: usize) -> MeshData {
     // Face definitions: (4 corners CCW from outside, face normal)
     let faces: [([Vec3; 4], Vec3); 6] = [
         // +Z front
-        ([
-            Vec3::new(-h, -h, h),
-            Vec3::new(h, -h, h),
-            Vec3::new(h, h, h),
-            Vec3::new(-h, h, h),
-        ], Vec3::Z),
+        (
+            [
+                Vec3::new(-h, -h, h),
+                Vec3::new(h, -h, h),
+                Vec3::new(h, h, h),
+                Vec3::new(-h, h, h),
+            ],
+            Vec3::Z,
+        ),
         // -Z back
-        ([
-            Vec3::new(h, -h, -h),
-            Vec3::new(-h, -h, -h),
-            Vec3::new(-h, h, -h),
-            Vec3::new(h, h, -h),
-        ], Vec3::NEG_Z),
+        (
+            [
+                Vec3::new(h, -h, -h),
+                Vec3::new(-h, -h, -h),
+                Vec3::new(-h, h, -h),
+                Vec3::new(h, h, -h),
+            ],
+            Vec3::NEG_Z,
+        ),
         // -X left
-        ([
-            Vec3::new(-h, -h, -h),
-            Vec3::new(-h, -h, h),
-            Vec3::new(-h, h, h),
-            Vec3::new(-h, h, -h),
-        ], Vec3::NEG_X),
+        (
+            [
+                Vec3::new(-h, -h, -h),
+                Vec3::new(-h, -h, h),
+                Vec3::new(-h, h, h),
+                Vec3::new(-h, h, -h),
+            ],
+            Vec3::NEG_X,
+        ),
         // +X right
-        ([
-            Vec3::new(h, -h, h),
-            Vec3::new(h, -h, -h),
-            Vec3::new(h, h, -h),
-            Vec3::new(h, h, h),
-        ], Vec3::X),
+        (
+            [
+                Vec3::new(h, -h, h),
+                Vec3::new(h, -h, -h),
+                Vec3::new(h, h, -h),
+                Vec3::new(h, h, h),
+            ],
+            Vec3::X,
+        ),
         // +Y top
-        ([
-            Vec3::new(-h, h, h),
-            Vec3::new(h, h, h),
-            Vec3::new(h, h, -h),
-            Vec3::new(-h, h, -h),
-        ], Vec3::Y),
+        (
+            [
+                Vec3::new(-h, h, h),
+                Vec3::new(h, h, h),
+                Vec3::new(h, h, -h),
+                Vec3::new(-h, h, -h),
+            ],
+            Vec3::Y,
+        ),
         // -Y bottom
-        ([
-            Vec3::new(-h, -h, -h),
-            Vec3::new(h, -h, -h),
-            Vec3::new(h, -h, h),
-            Vec3::new(-h, -h, h),
-        ], Vec3::NEG_Y),
+        (
+            [
+                Vec3::new(-h, -h, -h),
+                Vec3::new(h, -h, -h),
+                Vec3::new(h, -h, h),
+                Vec3::new(-h, -h, h),
+            ],
+            Vec3::NEG_Y,
+        ),
     ];
 
     for (corners, normal) in &faces {
@@ -132,11 +150,11 @@ pub fn cylinder(segments: usize) -> MeshData {
     }
 
     for i in 0..seg {
-        let i0 = side_base + (i as u32) * 2;     // top[i]
-        let i1 = i0 + 1;                          // bot[i]
-        let i2 = side_base + (i as u32 + 1) * 2;  // top[i+1]
-        let i3 = i2 + 1;                          // bot[i+1]
-        // CCW from outside: bot[i], bot[i+1], top[i+1], top[i]
+        let i0 = side_base + (i as u32) * 2; // top[i]
+        let i1 = i0 + 1; // bot[i]
+        let i2 = side_base + (i as u32 + 1) * 2; // top[i+1]
+        let i3 = i2 + 1; // bot[i+1]
+                         // CCW from outside: bot[i], bot[i+1], top[i+1], top[i]
         mesh.push_quad(i1, i3, i2, i0);
     }
 
@@ -150,7 +168,11 @@ pub fn cylinder(segments: usize) -> MeshData {
     for i in 0..seg {
         let next = (i + 1) % seg;
         // CCW from above (+Y): center, current, next
-        mesh.push_triangle(top_center, top_ring_base + i as u32, top_ring_base + next as u32);
+        mesh.push_triangle(
+            top_center,
+            top_ring_base + i as u32,
+            top_ring_base + next as u32,
+        );
     }
 
     // --- Bottom cap (fan from center, normal = -Y) ---
@@ -163,7 +185,11 @@ pub fn cylinder(segments: usize) -> MeshData {
     for i in 0..seg {
         let next = (i + 1) % seg;
         // CCW from below (-Y): center, next, current (reversed because viewing from -Y)
-        mesh.push_triangle(bot_center, bot_ring_base + next as u32, bot_ring_base + i as u32);
+        mesh.push_triangle(
+            bot_center,
+            bot_ring_base + next as u32,
+            bot_ring_base + i as u32,
+        );
     }
 
     mesh
@@ -291,8 +317,12 @@ mod tests {
         let mesh = cube(1);
         // First 4 vertices are +Z face, all should have Z normal
         for i in 0..4 {
-            assert!((mesh.normals[i] - Vec3::Z).length() < 0.001,
-                "vertex {} normal should be +Z, got {:?}", i, mesh.normals[i]);
+            assert!(
+                (mesh.normals[i] - Vec3::Z).length() < 0.001,
+                "vertex {} normal should be +Z, got {:?}",
+                i,
+                mesh.normals[i]
+            );
         }
     }
 
@@ -327,7 +357,11 @@ mod tests {
         // Cube with 24 vertices (duplicated per face) produces more edge keys
         // because index pairs are unique per-face. Exact count depends on
         // triangle fan layout. Just verify it is reasonable and non-empty.
-        assert!(edges.len() >= 12, "expected at least 12 edges, got {}", edges.len());
+        assert!(
+            edges.len() >= 12,
+            "expected at least 12 edges, got {}",
+            edges.len()
+        );
     }
 
     #[test]
@@ -335,8 +369,11 @@ mod tests {
         let mesh = cylinder(12);
         let radius = mesh.bounding_radius();
         // Max distance from origin: corner of cap = sqrt(0.5^2 + 0.5^2) ~ 0.707
-        assert!(radius > 0.7 && radius < 0.72,
-            "expected ~0.707, got {}", radius);
+        assert!(
+            radius > 0.7 && radius < 0.72,
+            "expected ~0.707, got {}",
+            radius
+        );
     }
 
     #[test]

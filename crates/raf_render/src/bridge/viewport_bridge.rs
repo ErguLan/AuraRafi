@@ -59,6 +59,10 @@ pub struct ViewportBridge {
     orbit_yaw: f32,
     orbit_pitch: f32,
     orbit_distance: f32,
+    /// Pending smooth-focus target: (target_position, target_distance).
+    /// When set, the camera lerps towards this each frame and clears it
+    /// once it is close enough. Replaces the old instant `focus_selected`.
+    pending_focus: Option<(Vec3, f32)>,
 }
 
 impl Default for ViewportBridge {
@@ -79,6 +83,7 @@ impl ViewportBridge {
             orbit_yaw: std::f32::consts::FRAC_PI_4,
             orbit_pitch: 0.5,
             orbit_distance: 8.0,
+            pending_focus: None,
         }
     }
 
@@ -96,6 +101,32 @@ impl ViewportBridge {
 
     pub fn orbit_distance(&self) -> f32 {
         self.orbit_distance
+    }
+
+    pub fn orbit_yaw(&self) -> f32 {
+        self.orbit_yaw
+    }
+
+    pub fn orbit_pitch(&self) -> f32 {
+        self.orbit_pitch
+    }
+
+    pub fn camera_target(&self) -> Vec3 {
+        self.camera.target
+    }
+
+    pub fn set_camera_target(&mut self, target: Vec3) {
+        self.camera.target = target;
+        self.pending_focus = None;
+    }
+
+    pub fn set_orbit_angles(&mut self, yaw: f32, pitch: f32) {
+        self.orbit_yaw = yaw;
+        self.orbit_pitch = pitch.clamp(-1.4, 1.4);
+    }
+
+    pub fn set_orbit_distance(&mut self, distance: f32) {
+        self.orbit_distance = distance.clamp(0.5, 200.0);
     }
 
     pub fn offset_2d(&self) -> [f32; 2] {
@@ -197,7 +228,8 @@ impl ViewportBridge {
         vp_h: f32,
         pointer_local: [f32; 2],
     ) {
-        self.edit_session.begin_drag(scene, selected, view_proj, vp_w, vp_h, pointer_local);
+        self.edit_session
+            .begin_drag(scene, selected, view_proj, vp_w, vp_h, pointer_local);
     }
 
     pub fn drag_selected_vertices(
@@ -264,8 +296,14 @@ impl ViewportBridge {
         vp_w: f32,
         vp_h: f32,
     ) {
-        self.transform_controller
-            .update_hover(scene, selected, view_proj, pointer_local, vp_w, vp_h);
+        self.transform_controller.update_hover(
+            scene,
+            selected,
+            view_proj,
+            pointer_local,
+            vp_w,
+            vp_h,
+        );
     }
 
     pub fn apply_transform_drag(
@@ -275,6 +313,7 @@ impl ViewportBridge {
         view_proj: &Mat4,
         current_mouse: [f32; 2],
         uniform_scale: bool,
+        snap_to_ctrl: bool,
         vp_w: f32,
         vp_h: f32,
     ) -> bool {
@@ -285,6 +324,7 @@ impl ViewportBridge {
             current_mouse,
             self.orbit_distance,
             uniform_scale,
+            snap_to_ctrl,
             vp_w,
             vp_h,
         )
@@ -336,8 +376,10 @@ impl ViewportBridge {
 
         if input.hovered {
             let dt = input.frame_time_s.max(1.0 / 240.0).min(1.0 / 15.0);
-            let forward = Vec3::new(self.orbit_yaw.sin(), 0.0, self.orbit_yaw.cos()).normalize_or_zero();
-            let right = Vec3::new(self.orbit_yaw.cos(), 0.0, -self.orbit_yaw.sin()).normalize_or_zero();
+            let forward =
+                Vec3::new(self.orbit_yaw.sin(), 0.0, self.orbit_yaw.cos()).normalize_or_zero();
+            let right =
+                Vec3::new(self.orbit_yaw.cos(), 0.0, -self.orbit_yaw.sin()).normalize_or_zero();
             let up = Vec3::Y;
             let move_speed = self.orbit_distance.max(2.0) * 0.85 * config.move_sensitivity * dt;
             self.camera.target += forward * input.move_forward * move_speed;
@@ -374,19 +416,54 @@ impl ViewportBridge {
         selected: Option<SceneNodeId>,
         is_2d: bool,
     ) {
-        let Some(id) = selected else { return; };
-        let Some(node) = scene.get(id) else { return; };
+        let Some(id) = selected else {
+            return;
+        };
+        let Some(node) = scene.get(id) else {
+            return;
+        };
 
         let world = scene.world_matrix(id);
         let center = world.col(3).truncate();
-        let max_extent = node.scale.x.abs().max(node.scale.y.abs()).max(node.scale.z.abs());
+        let max_extent = node
+            .scale
+            .x
+            .abs()
+            .max(node.scale.y.abs())
+            .max(node.scale.z.abs());
 
         if is_2d {
             self.offset_2d = [center.x, center.y];
             self.zoom_2d = (4.0 / max_extent.max(0.25)).clamp(0.2, 25.0);
         } else {
-            self.camera.target = center;
-            self.orbit_distance = (max_extent * 3.0).clamp(1.5, 40.0);
+            let target_distance = (max_extent * 3.0).clamp(1.5, 40.0);
+            // Queue a smooth focus instead of snapping instantly.
+            self.pending_focus = Some((center, target_distance));
+        }
+    }
+
+    /// Advance the smooth-focus animation. Call this once per frame before
+    /// rendering. Returns true if the camera is still animating.
+    pub fn update_smooth_focus(&mut self) -> bool {
+        let Some((target_pos, target_dist)) = self.pending_focus else {
+            return false;
+        };
+
+        const LERP_FACTOR: f32 = 0.15;
+        const SNAP_EPS: f32 = 0.01;
+
+        self.camera.target = self.camera.target.lerp(target_pos, LERP_FACTOR);
+        self.orbit_distance = self.orbit_distance + (target_dist - self.orbit_distance) * LERP_FACTOR;
+
+        let pos_close = self.camera.target.distance(target_pos) < SNAP_EPS;
+        let dist_close = (self.orbit_distance - target_dist).abs() < SNAP_EPS * 10.0;
+        if pos_close && dist_close {
+            self.camera.target = target_pos;
+            self.orbit_distance = target_dist;
+            self.pending_focus = None;
+            false
+        } else {
+            true
         }
     }
 
@@ -403,7 +480,8 @@ impl ViewportBridge {
         vertex_edit_enabled: bool,
     ) -> SceneFrameOutput {
         let mesh_override = if vertex_edit_enabled {
-            self.edit_session.mesh_override(scene, selected.first().copied())
+            self.edit_session
+                .mesh_override(scene, selected.first().copied())
         } else {
             None
         };

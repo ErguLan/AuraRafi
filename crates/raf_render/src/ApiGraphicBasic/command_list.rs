@@ -1,19 +1,14 @@
 use std::sync::Arc;
 
-use glam::{Mat4, Vec3};
 use crate::api_graphic_basic::mesh::BasicMesh;
 use crate::api_graphic_basic::pipeline::BasicPipelineKind;
+use glam::{Mat4, Vec3};
 
 /// Individual drawing and configuration commands.
 #[derive(Debug, Clone)]
 pub enum GraphicCommand {
     /// Clear the framebuffer or screen target with a specified color.
-    Clear {
-        r: u8,
-        g: u8,
-        b: u8,
-        a: u8,
-    },
+    Clear { r: u8, g: u8, b: u8, a: u8 },
     /// Bind a specific rendering pipeline.
     SetPipeline(BasicPipelineKind),
     /// Draw a 3D indexed mesh.
@@ -135,6 +130,11 @@ impl BasicCommandList {
     /// Resolve a mesh by its frame-local ID.
     pub fn mesh(&self, mesh_id: usize) -> Option<&BasicMesh> {
         self.meshes.get(mesh_id).map(|mesh| mesh.as_ref())
+    }
+
+    /// Resolve the underlying shared mesh handle by its frame-local ID.
+    pub fn mesh_arc(&self, mesh_id: usize) -> Option<&Arc<BasicMesh>> {
+        self.meshes.get(mesh_id)
     }
 
     /// Clear the command list for the next frame.

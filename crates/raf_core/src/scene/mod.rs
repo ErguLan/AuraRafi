@@ -6,8 +6,10 @@ pub mod graph;
 pub mod merge;
 pub mod runtime;
 
-pub use graph::{NodeColor, Primitive, SceneGraph, SceneNode, SceneNodeId};
+pub use anim_collider::{
+    AnimCollider, AnimCollisionConfig, AnimCollisionHit, AnimCollisionResponse,
+};
 pub use collider::{Aabb, Collider, ColliderType};
-pub use merge::{MeshGroup, MergedMesh, merge_meshes, weld_vertices};
-pub use anim_collider::{AnimCollider, AnimCollisionConfig, AnimCollisionResponse, AnimCollisionHit};
+pub use graph::{NodeColor, Primitive, SceneGraph, SceneNode, SceneNodeId};
+pub use merge::{merge_meshes, weld_vertices, MergedMesh, MeshGroup};
 pub use runtime::{AudioSource, RigidBody, RigidBodyType, SceneVariable, VariableValue};

@@ -4,6 +4,10 @@ use glam::Vec2;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+fn default_visible() -> bool {
+    true
+}
+
 /// Pin direction for connection semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PinDirection {
@@ -58,6 +62,22 @@ pub struct Pin {
     pub net: String,
 }
 
+/// User-facing visual metadata for schematic/PCB inspectors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ComponentAppearance {
+    pub color: [u8; 4],
+    pub size: String,
+}
+
+impl Default for ComponentAppearance {
+    fn default() -> Self {
+        Self {
+            color: [92, 214, 142, 255],
+            size: "Normal".to_string(),
+        }
+    }
+}
+
 /// An electronic component (resistor, IC, transistor, etc.).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ElectronicComponent {
@@ -78,6 +98,18 @@ pub struct ElectronicComponent {
     pub footprint: String,
     /// Simulation model for this component.
     pub sim_model: SimModel,
+    /// Optional datasheet URL or project-relative path.
+    #[serde(default)]
+    pub datasheet: Option<String>,
+    /// Locks placement in schematic/PCB editing.
+    #[serde(default)]
+    pub locked: bool,
+    /// Visibility toggle for premium inspector workflows.
+    #[serde(default = "default_visible")]
+    pub visible: bool,
+    /// Visual metadata used by the editor.
+    #[serde(default)]
+    pub appearance: ComponentAppearance,
 }
 
 /// Parse a human-readable value string into ohms.
@@ -204,6 +236,10 @@ impl ElectronicComponent {
             rotation: 0.0,
             footprint: "0805".to_string(),
             sim_model: SimModel::Resistor { ohms },
+            datasheet: None,
+            locked: false,
+            visible: true,
+            appearance: ComponentAppearance::default(),
         }
     }
 
@@ -243,7 +279,16 @@ impl ElectronicComponent {
             position: Vec2::ZERO,
             rotation: 0.0,
             footprint: "0805".to_string(),
-            sim_model: SimModel::Led { forward_voltage: 2.0 },
+            sim_model: SimModel::Led {
+                forward_voltage: 2.0,
+            },
+            datasheet: None,
+            locked: false,
+            visible: true,
+            appearance: ComponentAppearance {
+                color: [255, 142, 56, 255],
+                size: "Normal".to_string(),
+            },
         }
     }
 
@@ -284,6 +329,13 @@ impl ElectronicComponent {
                 tesla,
                 north_up: true,
             },
+            datasheet: None,
+            locked: false,
+            visible: true,
+            appearance: ComponentAppearance {
+                color: [82, 178, 224, 255],
+                size: "Normal".to_string(),
+            },
         }
     }
 
@@ -314,9 +366,16 @@ impl ElectronicComponent {
             rotation: 0.0,
             footprint: "BAT-18650".to_string(),
             sim_model: SimModel::DcSource { voltage },
+            datasheet: None,
+            locked: false,
+            visible: true,
+            appearance: ComponentAppearance {
+                color: [255, 145, 35, 255],
+                size: "Normal".to_string(),
+            },
         }
     }
-    
+
     /// Create a Ground terminal.
     pub fn ground() -> Self {
         Self {
@@ -324,19 +383,24 @@ impl ElectronicComponent {
             designator: "GND".to_string(),
             value: "GND".to_string(),
             category: "Power".to_string(),
-            pins: vec![
-                Pin {
-                    id: Uuid::new_v4(),
-                    name: "GND".to_string(),
-                    direction: PinDirection::Ground,
-                    offset: Vec2::new(0.0, 0.0),
-                    net: String::new(),
-                },
-            ],
+            pins: vec![Pin {
+                id: Uuid::new_v4(),
+                name: "GND".to_string(),
+                direction: PinDirection::Ground,
+                offset: Vec2::new(0.0, 0.0),
+                net: String::new(),
+            }],
             position: Vec2::ZERO,
             rotation: 0.0,
             footprint: "TP-GND".to_string(),
             sim_model: SimModel::Wire, // electrically transparent
+            datasheet: None,
+            locked: false,
+            visible: true,
+            appearance: ComponentAppearance {
+                color: [112, 220, 140, 255],
+                size: "Normal".to_string(),
+            },
         }
     }
 }

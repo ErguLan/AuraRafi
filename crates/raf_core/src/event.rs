@@ -70,9 +70,7 @@ impl EventBus {
 
     /// Check if there are any pending events for a key.
     pub fn has_events(&self, key: &str) -> bool {
-        self.events
-            .get(key)
-            .map_or(false, |v| !v.is_empty())
+        self.events.get(key).map_or(false, |v| !v.is_empty())
     }
 
     /// Clear all events (call at end of frame).

@@ -115,7 +115,7 @@ impl Default for MeshProviderConfig {
             provider_type: MeshProviderType::None,
             chunk_size: 16.0,
             load_radius_chunks: 3,
-            max_loaded_chunks: 49, // 7x7 grid around camera
+            max_loaded_chunks: 49,      // 7x7 grid around camera
             max_total_vertices: 50_000, // Keep it lightweight
             stream_on_move: false,
         }
@@ -174,7 +174,10 @@ impl MeshProviderState {
             return None;
         }
         let cam = self.last_camera_grid;
-        let farthest_idx = self.loaded_chunks.iter().enumerate()
+        let farthest_idx = self
+            .loaded_chunks
+            .iter()
+            .enumerate()
             .max_by_key(|(_, c)| {
                 let dx = (c.grid_x - cam.0).abs();
                 let dz = (c.grid_z - cam.1).abs();
@@ -203,8 +206,8 @@ mod tests {
         let chunk = MeshChunk {
             grid_x: 0,
             grid_z: 0,
-            positions: vec![0.0; 9],    // 3 vertices
-            indices: vec![0, 1, 2],     // 1 triangle
+            positions: vec![0.0; 9], // 3 vertices
+            indices: vec![0, 1, 2],  // 1 triangle
             colors: vec![],
             complete: true,
             lod_level: 0,

@@ -18,7 +18,10 @@ pub struct Ray {
 impl Ray {
     /// Create a new ray.
     pub fn new(origin: Vec3, direction: Vec3) -> Self {
-        Self { origin, direction: direction.normalize_or_zero() }
+        Self {
+            origin,
+            direction: direction.normalize_or_zero(),
+        }
     }
 
     /// Get the point at parameter t along the ray.
@@ -61,9 +64,21 @@ pub fn ray_sphere(ray: &Ray, center: Vec3, radius: f32) -> Option<f32> {
 /// Uses the slab method for efficient computation.
 pub fn ray_aabb(ray: &Ray, aabb_min: Vec3, aabb_max: Vec3) -> Option<f32> {
     let inv_dir = Vec3::new(
-        if ray.direction.x.abs() > f32::EPSILON { 1.0 / ray.direction.x } else { f32::MAX },
-        if ray.direction.y.abs() > f32::EPSILON { 1.0 / ray.direction.y } else { f32::MAX },
-        if ray.direction.z.abs() > f32::EPSILON { 1.0 / ray.direction.z } else { f32::MAX },
+        if ray.direction.x.abs() > f32::EPSILON {
+            1.0 / ray.direction.x
+        } else {
+            f32::MAX
+        },
+        if ray.direction.y.abs() > f32::EPSILON {
+            1.0 / ray.direction.y
+        } else {
+            f32::MAX
+        },
+        if ray.direction.z.abs() > f32::EPSILON {
+            1.0 / ray.direction.z
+        } else {
+            f32::MAX
+        },
     );
 
     let t1 = (aabb_min.x - ray.origin.x) * inv_dir.x;

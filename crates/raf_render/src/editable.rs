@@ -163,29 +163,40 @@ impl EditableMesh {
         let h = 0.5;
         let vertices = vec![
             Vertex::new(Vec3::new(-h, -h, -h)), // 0
-            Vertex::new(Vec3::new( h, -h, -h)), // 1
-            Vertex::new(Vec3::new( h,  h, -h)), // 2
-            Vertex::new(Vec3::new(-h,  h, -h)), // 3
-            Vertex::new(Vec3::new(-h, -h,  h)), // 4
-            Vertex::new(Vec3::new( h, -h,  h)), // 5
-            Vertex::new(Vec3::new( h,  h,  h)), // 6
-            Vertex::new(Vec3::new(-h,  h,  h)), // 7
+            Vertex::new(Vec3::new(h, -h, -h)),  // 1
+            Vertex::new(Vec3::new(h, h, -h)),   // 2
+            Vertex::new(Vec3::new(-h, h, -h)),  // 3
+            Vertex::new(Vec3::new(-h, -h, h)),  // 4
+            Vertex::new(Vec3::new(h, -h, h)),   // 5
+            Vertex::new(Vec3::new(h, h, h)),    // 6
+            Vertex::new(Vec3::new(-h, h, h)),   // 7
         ];
         let faces = vec![
             // Front (+Z)
-            Face::new(4, 5, 6), Face::new(4, 6, 7),
+            Face::new(4, 5, 6),
+            Face::new(4, 6, 7),
             // Back (-Z)
-            Face::new(1, 0, 3), Face::new(1, 3, 2),
+            Face::new(1, 0, 3),
+            Face::new(1, 3, 2),
             // Left (-X)
-            Face::new(0, 4, 7), Face::new(0, 7, 3),
+            Face::new(0, 4, 7),
+            Face::new(0, 7, 3),
             // Right (+X)
-            Face::new(5, 1, 2), Face::new(5, 2, 6),
+            Face::new(5, 1, 2),
+            Face::new(5, 2, 6),
             // Top (+Y)
-            Face::new(3, 7, 6), Face::new(3, 6, 2),
+            Face::new(3, 7, 6),
+            Face::new(3, 6, 2),
             // Bottom (-Y)
-            Face::new(0, 1, 5), Face::new(0, 5, 4),
+            Face::new(0, 1, 5),
+            Face::new(0, 5, 4),
         ];
-        let mut mesh = Self { vertices, faces, selection: MeshSelection::default(), edit_mode: false };
+        let mut mesh = Self {
+            vertices,
+            faces,
+            selection: MeshSelection::default(),
+            edit_mode: false,
+        };
         mesh.recalculate_normals();
         mesh
     }
@@ -195,15 +206,17 @@ impl EditableMesh {
         let h = 0.5;
         let vertices = vec![
             Vertex::new(Vec3::new(-h, 0.0, -h)),
-            Vertex::new(Vec3::new( h, 0.0, -h)),
-            Vertex::new(Vec3::new( h, 0.0,  h)),
-            Vertex::new(Vec3::new(-h, 0.0,  h)),
+            Vertex::new(Vec3::new(h, 0.0, -h)),
+            Vertex::new(Vec3::new(h, 0.0, h)),
+            Vertex::new(Vec3::new(-h, 0.0, h)),
         ];
-        let faces = vec![
-            Face::new(0, 1, 2),
-            Face::new(0, 2, 3),
-        ];
-        Self { vertices, faces, selection: MeshSelection::default(), edit_mode: false }
+        let faces = vec![Face::new(0, 1, 2), Face::new(0, 2, 3)];
+        Self {
+            vertices,
+            faces,
+            selection: MeshSelection::default(),
+            edit_mode: false,
+        }
     }
 
     /// Create a cylinder mesh (segments around Y axis).
@@ -223,15 +236,15 @@ impl EditableMesh {
             let angle = std::f32::consts::TAU * (i as f32 / seg as f32);
             let x = r * angle.cos();
             let z = r * angle.sin();
-            vertices.push(Vertex::new(Vec3::new(x, h, z)));    // top ring
-            vertices.push(Vertex::new(Vec3::new(x, -h, z)));   // bottom ring
+            vertices.push(Vertex::new(Vec3::new(x, h, z))); // top ring
+            vertices.push(Vertex::new(Vec3::new(x, -h, z))); // bottom ring
         }
 
         for i in 0..seg {
             let next = (i + 1) % seg;
-            let ti = 2 + i * 2;      // top vertex i
-            let bi = 2 + i * 2 + 1;  // bottom vertex i
-            let tn = 2 + next * 2;   // top vertex next
+            let ti = 2 + i * 2; // top vertex i
+            let bi = 2 + i * 2 + 1; // bottom vertex i
+            let tn = 2 + next * 2; // top vertex next
             let bn = 2 + next * 2 + 1; // bottom vertex next
 
             // Side quads (2 triangles each)
@@ -245,7 +258,12 @@ impl EditableMesh {
             faces.push(Face::new(1, bn, bi));
         }
 
-        let mut mesh = Self { vertices, faces, selection: MeshSelection::default(), edit_mode: false };
+        let mut mesh = Self {
+            vertices,
+            faces,
+            selection: MeshSelection::default(),
+            edit_mode: false,
+        };
         mesh.recalculate_normals();
         mesh
     }
@@ -284,7 +302,12 @@ impl EditableMesh {
             }
         }
 
-        let mut mesh = Self { vertices, faces, selection: MeshSelection::default(), edit_mode: false };
+        let mut mesh = Self {
+            vertices,
+            faces,
+            selection: MeshSelection::default(),
+            edit_mode: false,
+        };
         mesh.recalculate_normals();
         mesh
     }
@@ -426,7 +449,11 @@ impl EditableMesh {
                 count += 1;
             }
         }
-        if count > 0 { sum / count as f32 } else { Vec3::ZERO }
+        if count > 0 {
+            sum / count as f32
+        } else {
+            Vec3::ZERO
+        }
     }
 
     /// Recalculate all vertex normals from face normals (area-weighted average).
@@ -475,20 +502,24 @@ impl EditableMesh {
                 }
             }
         }
-        edges.iter().map(|[a, b]| {
-            [self.vertices[*a].position, self.vertices[*b].position]
-        }).collect()
+        edges
+            .iter()
+            .map(|[a, b]| [self.vertices[*a].position, self.vertices[*b].position])
+            .collect()
     }
 
     /// Get face quads for rendering (as triangles: 3 corners + normal).
     pub fn render_faces(&self) -> Vec<([Vec3; 3], Vec3)> {
-        self.faces.iter().map(|face| {
-            let a = self.vertices[face.indices[0]].position;
-            let b = self.vertices[face.indices[1]].position;
-            let c = self.vertices[face.indices[2]].position;
-            let n = face.normal(&self.vertices);
-            ([a, b, c], n)
-        }).collect()
+        self.faces
+            .iter()
+            .map(|face| {
+                let a = self.vertices[face.indices[0]].position;
+                let b = self.vertices[face.indices[1]].position;
+                let c = self.vertices[face.indices[2]].position;
+                let n = face.normal(&self.vertices);
+                ([a, b, c], n)
+            })
+            .collect()
     }
 
     /// Convert the editable mesh into the renderer's indexed triangle format.

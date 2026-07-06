@@ -7,7 +7,9 @@ pub mod render_runtime;
 pub mod transform_controller;
 pub mod viewport_bridge;
 
-pub use input_handler::{ProjectedEditEdge, ProjectedEditOverlay, ProjectedEditVertex, ViewportEditSession};
+pub use input_handler::{
+    ProjectedEditEdge, ProjectedEditOverlay, ProjectedEditVertex, ViewportEditSession,
+};
 pub use render_runtime::{GraphicsSurfaceKind, RenderRuntime, RenderRuntimeSnapshot};
 pub use transform_controller::ViewportTransformController;
 pub use viewport_bridge::{ViewportBridge, ViewportNavigationConfig, ViewportPointerInput};

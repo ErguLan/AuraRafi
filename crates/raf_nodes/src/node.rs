@@ -73,12 +73,12 @@ impl NodeCategory {
     /// Accent color as RGBA for the node header.
     pub fn color(&self) -> [f32; 4] {
         match self {
-            Self::Event => [0.83, 0.33, 0.10, 1.0],  // Orange-ish
-            Self::Logic => [0.40, 0.60, 0.80, 1.0],   // Blue
-            Self::Action => [0.30, 0.70, 0.40, 1.0],   // Green
-            Self::Math => [0.70, 0.50, 0.80, 1.0],     // Purple
+            Self::Event => [0.83, 0.33, 0.10, 1.0],       // Orange-ish
+            Self::Logic => [0.40, 0.60, 0.80, 1.0],       // Blue
+            Self::Action => [0.30, 0.70, 0.40, 1.0],      // Green
+            Self::Math => [0.70, 0.50, 0.80, 1.0],        // Purple
             Self::Electronics => [0.80, 0.70, 0.20, 1.0], // Yellow
-            Self::Variable => [0.50, 0.50, 0.50, 1.0],  // Gray
+            Self::Variable => [0.50, 0.50, 0.50, 1.0],    // Gray
         }
     }
 }

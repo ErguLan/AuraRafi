@@ -53,7 +53,13 @@ impl NodeValue {
         match self {
             Self::Float(f) => *f,
             Self::Int(i) => *i as f64,
-            Self::Bool(b) => if *b { 1.0 } else { 0.0 },
+            Self::Bool(b) => {
+                if *b {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
             _ => 0.0,
         }
     }
@@ -63,7 +69,13 @@ impl NodeValue {
         match self {
             Self::Int(i) => *i,
             Self::Float(f) => *f as i64,
-            Self::Bool(b) => if *b { 1 } else { 0 },
+            Self::Bool(b) => {
+                if *b {
+                    1
+                } else {
+                    0
+                }
+            }
             _ => 0,
         }
     }
@@ -159,7 +171,9 @@ pub fn execute(graph: &NodeGraph, entry_node_id: NodeId) -> ExecutionOutput {
     while let Some(node_id) = current_node_id {
         steps += 1;
         if steps > max_steps {
-            output.errors.push("Execution exceeded maximum step limit".to_string());
+            output
+                .errors
+                .push("Execution exceeded maximum step limit".to_string());
             output.success = false;
             break;
         }
@@ -167,7 +181,9 @@ pub fn execute(graph: &NodeGraph, entry_node_id: NodeId) -> ExecutionOutput {
         let node = match graph.nodes.iter().find(|n| n.id == node_id) {
             Some(n) => n,
             None => {
-                output.errors.push(format!("Node not found during execution: {:?}", node_id));
+                output
+                    .errors
+                    .push(format!("Node not found during execution: {:?}", node_id));
                 output.success = false;
                 break;
             }
@@ -300,7 +316,10 @@ fn execute_node(
         "Spawn Entity" | "Destroy Entity" | "Set Position" => {
             // Evaluated by the external system listener (ECS bridging).
             // We just log that it fired for now.
-            output.logs.push(format!("Node {} executed - deferring to ECS Bridge", node.name));
+            output.logs.push(format!(
+                "Node {} executed - deferring to ECS Bridge",
+                node.name
+            ));
             for (pin_id, value) in inputs {
                 output.values.insert(*pin_id, value.clone());
             }

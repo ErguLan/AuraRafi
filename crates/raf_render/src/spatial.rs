@@ -216,13 +216,17 @@ impl FrustumPlane {
 impl Frustum {
     /// Check if a point is inside the frustum.
     pub fn contains_point(&self, point: Vec3) -> bool {
-        self.planes.iter().all(|p| p.distance_to_point(point) >= 0.0)
+        self.planes
+            .iter()
+            .all(|p| p.distance_to_point(point) >= 0.0)
     }
 
     /// Check if a sphere intersects the frustum.
     /// Used for bounding-sphere culling (fast, conservative).
     pub fn intersects_sphere(&self, center: Vec3, radius: f32) -> bool {
-        self.planes.iter().all(|p| p.distance_to_point(center) >= -radius)
+        self.planes
+            .iter()
+            .all(|p| p.distance_to_point(center) >= -radius)
     }
 
     /// Placeholder: build frustum from view-projection matrix.

@@ -134,7 +134,10 @@ pub fn scan_script_catalog(assets_root: &Path) -> Vec<ScriptCatalogEntry> {
     scripts
 }
 
-pub fn validate_attached_script(assets_root: Option<&Path>, relative_path: &str) -> ScriptValidation {
+pub fn validate_attached_script(
+    assets_root: Option<&Path>,
+    relative_path: &str,
+) -> ScriptValidation {
     let language = ScriptLanguage::from_path(relative_path);
     let supported = language.is_engine_supported();
 

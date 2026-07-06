@@ -36,9 +36,19 @@ impl GpuCanvas {
 
                 let size = [fallback_width as usize, fallback_height as usize];
                 let image = egui::ColorImage::from_rgba_premultiplied(size, pixels.as_slice());
-                self.upload_image(ctx, wgpu_render_state, image, fallback_width, fallback_height);
+                self.upload_image(
+                    ctx,
+                    wgpu_render_state,
+                    image,
+                    fallback_width,
+                    fallback_height,
+                );
             }
-            SceneFrameOutput::GpuTexture { view, width, height } => {
+            SceneFrameOutput::GpuTexture {
+                view,
+                width,
+                height,
+            } => {
                 self.update_gpu_texture(wgpu_render_state, &view, width, height);
             }
         }
@@ -83,7 +93,8 @@ impl GpuCanvas {
                 *texture = ctx.load_texture(self.texture_name, image, egui::TextureOptions::LINEAR);
             }
         } else {
-            self.texture = Some(ctx.load_texture(self.texture_name, image, egui::TextureOptions::LINEAR));
+            self.texture =
+                Some(ctx.load_texture(self.texture_name, image, egui::TextureOptions::LINEAR));
         }
 
         self.last_size = [width, height];
@@ -141,9 +152,21 @@ pub fn canvas_view_projection(left: f32, right: f32, top: f32, bottom: f32) -> M
     let translate_y = (bottom + top) / height;
 
     Mat4::from_cols_array(&[
-        scale_x, 0.0, 0.0, 0.0,
-        0.0, scale_y, 0.0, 0.0,
-        0.0, 0.0, 1.0, 0.0,
-        translate_x, translate_y, 0.0, 1.0,
+        scale_x,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        scale_y,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        translate_x,
+        translate_y,
+        0.0,
+        1.0,
     ])
 }

@@ -17,16 +17,12 @@
 /// For the CPU painter, we apply edge softening to face edges.
 ///
 /// Returns a blended color for drawing edges between adjacent faces.
-pub fn fxaa_edge_blend(
-    color_a: [u8; 3],
-    color_b: [u8; 3],
-    edge_factor: f32,
-) -> [u8; 3] {
+pub fn fxaa_edge_blend(color_a: [u8; 3], color_b: [u8; 3], edge_factor: f32) -> [u8; 3] {
     let t = edge_factor.clamp(0.0, 1.0);
     [
-        ((color_a[0] as f32 * (1.0 - t) + color_b[0] as f32 * t)) as u8,
-        ((color_a[1] as f32 * (1.0 - t) + color_b[1] as f32 * t)) as u8,
-        ((color_a[2] as f32 * (1.0 - t) + color_b[2] as f32 * t)) as u8,
+        (color_a[0] as f32 * (1.0 - t) + color_b[0] as f32 * t) as u8,
+        (color_a[1] as f32 * (1.0 - t) + color_b[1] as f32 * t) as u8,
+        (color_a[2] as f32 * (1.0 - t) + color_b[2] as f32 * t) as u8,
     ]
 }
 
@@ -38,11 +34,7 @@ pub fn fxaa_edge_blend(
 /// `bloom_intensity`: from RenderConfig (0.0 - 1.0).
 ///
 /// Returns the bloomed color.
-pub fn apply_bloom(
-    base_color: [u8; 3],
-    brightness: f32,
-    bloom_intensity: f32,
-) -> [u8; 3] {
+pub fn apply_bloom(base_color: [u8; 3], brightness: f32, bloom_intensity: f32) -> [u8; 3] {
     let threshold = 0.85;
     if brightness <= threshold || bloom_intensity <= 0.0 {
         return base_color;
@@ -60,11 +52,7 @@ pub fn apply_bloom(
 /// `screen_uv`: normalized screen position (0.0 - 1.0 for both x and y).
 /// `color`: input pixel color.
 /// `strength`: vignette intensity (0.0 = none, 1.0 = strong).
-pub fn apply_vignette(
-    color: [u8; 3],
-    screen_uv: [f32; 2],
-    strength: f32,
-) -> [u8; 3] {
+pub fn apply_vignette(color: [u8; 3], screen_uv: [f32; 2], strength: f32) -> [u8; 3] {
     if strength <= 0.0 {
         return color;
     }

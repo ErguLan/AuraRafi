@@ -72,7 +72,13 @@ impl UiIconAtlas {
             .or_else(|| self.textures.get(FALLBACK_ICON))
     }
 
-    pub fn paint(&self, painter: &egui::Painter, icon_name: &'static str, rect: Rect, tint: Color32) -> bool {
+    pub fn paint(
+        &self,
+        painter: &egui::Painter,
+        icon_name: &'static str,
+        rect: Rect,
+        tint: Color32,
+    ) -> bool {
         let Some(texture) = self.get(icon_name) else {
             return false;
         };
@@ -88,12 +94,7 @@ impl UiIconAtlas {
             painter.image(texture.id(), rect.expand(0.9), uv, soft_tint);
         }
 
-        painter.image(
-            texture.id(),
-            rect,
-            uv,
-            tint,
-        );
+        painter.image(texture.id(), rect, uv, tint);
         true
     }
 
@@ -138,8 +139,8 @@ impl UiIconAtlas {
 }
 
 fn spawn_icon_loader(request_rx: Receiver<&'static str>, result_tx: Sender<IconWorkerResult>) {
-    let icon_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../editor/assets/ui_icons");
+    let icon_root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../editor/assets/ui_icons");
 
     let _ = std::thread::Builder::new()
         .name("raf-ui-icon-loader".to_string())
@@ -153,7 +154,10 @@ fn spawn_icon_loader(request_rx: Receiver<&'static str>, result_tx: Sender<IconW
         });
 }
 
-fn load_icon_pixels(icon_root: &std::path::Path, icon_name: &'static str) -> Option<PendingIconUpload> {
+fn load_icon_pixels(
+    icon_root: &std::path::Path,
+    icon_name: &'static str,
+) -> Option<PendingIconUpload> {
     let icon_path = [
         icon_root.join("unos").join(icon_name),
         icon_root.join(icon_name),

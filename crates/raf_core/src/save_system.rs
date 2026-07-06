@@ -13,7 +13,7 @@ pub struct GameState {
     pub timestamp: f64,
     pub active_zone: String,
     pub player_id: Option<Uuid>,
-    
+
     // Key-value store for arbitrary nested arrays, strings and metadata.
     // e.g. {"inventory_items": "[1, 2, 5]", "current_health": "100"}
     pub dynamic_data: HashMap<String, String>,
@@ -35,12 +35,12 @@ impl GameState {
     /// Deserializes a save string. In future versions, this handles structure migrations.
     pub fn load_safely(data: &str) -> Result<Self, String> {
         let state: GameState = ron::from_str(data).map_err(|e| format!("Save Corrupted: {}", e))?;
-        
+
         // Example Hook: Migration Logic
         if state.version != SAVE_SCHEMA_VERSION {
             // run future migrations over state.dynamic_data
         }
-        
+
         Ok(state)
     }
 

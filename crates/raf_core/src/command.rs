@@ -165,12 +165,7 @@ mod tests {
     #[test]
     fn undo_redo() {
         let mut bus = CommandBus::new();
-        let cmd = Command::new(
-            "test",
-            "test",
-            "test command",
-            serde_json::json!({}),
-        );
+        let cmd = Command::new("test", "test", "test command", serde_json::json!({}));
         bus.record_executed(cmd);
         assert_eq!(bus.history_count(), 1);
 

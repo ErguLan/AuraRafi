@@ -37,6 +37,7 @@ use crate::panels::schematic_panels;
 use crate::panels::schematic_view::SchematicViewPanel;
 use crate::panels::settings_panel;
 use crate::panels::viewport::ViewportPanel;
+use crate::commands::CommandCatalog;
 use crate::pcb_document::{load_pcb_document, save_pcb_document};
 use crate::schematic_document::{load_schematic_document, save_schematic_document};
 use crate::theme as app_theme;
@@ -96,7 +97,7 @@ enum HubProjectFilter {
     Electronics,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum EditorHistorySnapshot {
     Scene(String),
     Schematic(String),
@@ -159,6 +160,7 @@ pub struct AuraRafiApp {
     screen: AppScreen,
     previous_screen: Option<AppScreen>,
     settings: EngineSettings,
+    settings_draft: Option<EngineSettings>,
     recent_projects: RecentProjects,
 
     // Active project
@@ -184,8 +186,8 @@ pub struct AuraRafiApp {
     _show_settings: bool,
     
     // Extensions
+    command_catalog: CommandCatalog,
     complement_registry: raf_core::complement::ComplementRegistry,
-    command_bus: raf_core::command::CommandBus,
     frame_count: u64,
     graphics_runtime: RenderRuntime,
 
@@ -202,6 +204,8 @@ pub struct AuraRafiApp {
     undo_stack: Vec<EditorHistorySnapshot>,
     /// Snapshots for redo.
     redo_stack: Vec<EditorHistorySnapshot>,
+    /// Pending snapshot used to collapse continuous edits into one undo step.
+    pending_history_snapshot: Option<EditorHistorySnapshot>,
     /// Project logo texture.
     logo_texture: Option<egui::TextureHandle>,
     egui_wgpu_render_state: Option<egui_wgpu::RenderState>,
@@ -210,6 +214,15 @@ pub struct AuraRafiApp {
     hub_filter: HubProjectFilter,
     pending_exit_action: Option<PendingExitAction>,
     allow_app_close: bool,
+    show_settings_close_dialog: bool,
+    /// Scene nodes copied with Ctrl+C (game mode clipboard).
+    scene_clipboard: Vec<raf_core::scene::graph::SceneNode>,
+    /// Camera bookmarks for 3 slots: (target, yaw, pitch, distance).
+    camera_bookmarks: [Option<(glam::Vec3, f32, f32, f32)>; 3],
+    /// Cross-probe: designator of the component to highlight when switching
+    /// between Schematic and PCB views. Set when selecting a component in
+    /// either view; consumed by the other view on mode switch.
+    cross_probe_designator: Option<String>,
 }
 
 impl AuraRafiApp {
@@ -246,6 +259,7 @@ impl AuraRafiApp {
             },
             previous_screen: None,
             settings,
+            settings_draft: None,
             recent_projects,
             current_project: None,
             scene: SceneGraph::new(),
@@ -260,8 +274,8 @@ impl AuraRafiApp {
             schematic_view: SchematicViewPanel::default(),
             pcb_view: PcbViewPanel::default(),
 
+            command_catalog: CommandCatalog::builtin(),
             complement_registry: raf_core::complement::ComplementRegistry::new(),
-            command_bus: raf_core::command::CommandBus::new(),
             graphics_runtime,
 
             bottom_tab: BottomTab::Console,
@@ -275,6 +289,7 @@ impl AuraRafiApp {
             auto_save_last_tick: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            pending_history_snapshot: None,
             logo_texture: None,
             egui_wgpu_render_state,
             ui_icons: UiIconAtlas::default(),
@@ -282,6 +297,10 @@ impl AuraRafiApp {
             hub_filter: HubProjectFilter::All,
             pending_exit_action: None,
             allow_app_close: false,
+            show_settings_close_dialog: false,
+            scene_clipboard: Vec::new(),
+            camera_bookmarks: [None, None, None],
+            cross_probe_designator: None,
         }
     }
 }
@@ -290,8 +309,35 @@ impl eframe::App for AuraRafiApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.frame_count += 1;
 
-        // Re-apply theme every frame (cheap, ensures consistency).
-        app_theme::apply_theme(ctx, self.settings.theme, self.settings.theme_experimental);
+        // Auto-detect system DPI once at startup when auto_ui_scale is enabled.
+        // Must run before borrowing active_settings to avoid borrow conflict.
+        if self.settings.auto_ui_scale && self.frame_count == 1 {
+            if let Some(native_ppp) = ctx.native_pixels_per_point() {
+                if native_ppp > 0.0 {
+                    self.settings.ui_scale = native_ppp.clamp(1.0, 2.0);
+                    let _ = self.settings.save(&dirs_config_dir());
+                }
+            }
+        }
+
+        let active_settings = self.active_ui_settings();
+        app_theme::apply_theme(
+            ctx,
+            active_settings.theme,
+            active_settings.theme_experimental,
+        );
+
+        let scale = if active_settings.auto_ui_scale {
+            self.settings.ui_scale
+        } else {
+            active_settings.ui_scale
+        };
+        ctx.set_pixels_per_point(scale.clamp(0.5, 3.0));
+        let mut style = (*ctx.style()).clone();
+        style.text_styles.iter_mut().for_each(|(_, font_id)| {
+            font_id.size = active_settings.font_size;
+        });
+        ctx.set_style(style);
 
         self.handle_window_close_request(ctx);
 
@@ -329,6 +375,14 @@ impl eframe::App for AuraRafiApp {
 }
 
 impl AuraRafiApp {
+    fn active_ui_settings(&self) -> &EngineSettings {
+        if matches!(self.screen, AppScreen::Settings) {
+            self.settings_draft.as_ref().unwrap_or(&self.settings)
+        } else {
+            &self.settings
+        }
+    }
+
     fn prepare_graphics_surface(&mut self, surface: GraphicsSurfaceKind) -> RenderRuntimeSnapshot {
         let allow_advanced_gpu_features = self
             .current_project
@@ -629,6 +683,7 @@ impl AuraRafiApp {
 
     fn show_editor(&mut self, ctx: &egui::Context) {
         let _lang = self.settings.language;
+        let mut document_changed_this_frame = false;
         let palette = app_theme::palette_for_visuals(ctx.style().visuals.dark_mode, self.settings.theme_experimental);
         self.ui_icons.request_icons(EDITOR_UI_ICONS);
         self.ui_icons.process_load_budget(ctx, ui_icon_budget(ctx));
@@ -656,8 +711,7 @@ impl AuraRafiApp {
                     }
                     ui.separator();
                     if ui.button(t("app.settings_menu", _lang)).clicked() {
-                        self.previous_screen = Some(AppScreen::Editor);
-                        self.screen = AppScreen::Settings;
+                        self.open_settings_screen(AppScreen::Editor);
                         ui.close_menu();
                     }
                     ui.separator();
@@ -859,31 +913,54 @@ impl AuraRafiApp {
                         );
                     }
                     ui.separator();
-                    let status_counts = match self.viewport_mode {
+                    let (status_counts, status_color) = match self.viewport_mode {
                         ViewportMode::Scene => {
-                            format!("{} {}", t("app.entities_count", _lang), self.scene.all_valid_ids().len())
+                            let text = format!("{} {}", t("app.entities_count", _lang), self.scene.all_valid_ids().len());
+                            (text, palette.text)
                         }
-                        ViewportMode::Schematic => format!(
-                            "{} {} | {} {}",
-                            t("app.schematic_components", _lang),
-                            self.schematic_view.schematic.components.len(),
-                            t("app.schematic_wires", _lang),
-                            self.schematic_view.schematic.wires.len()
-                        ),
-                        ViewportMode::Pcb => format!(
-                            "{} {} | {} {} | {} {}",
-                            t("app.pcb_components", _lang),
-                            self.pcb_view.layout.components.len(),
-                            t("app.pcb_traces", _lang),
-                            self.pcb_view.layout.traces.len(),
-                            t("app.pcb_airwires", _lang),
-                            self.pcb_view.layout.airwires.len()
-                        ),
+                        ViewportMode::Schematic => {
+                            let comp_count = self.schematic_view.schematic.components.len();
+                            let wire_count = self.schematic_view.schematic.wires.len();
+                            // Live DRC: run check and show error count badge.
+                            let drc_report = raf_electronics::drc::run_drc(&self.schematic_view.schematic);
+                            let drc_errors = drc_report.errors.len();
+                            let drc_label = if drc_errors > 0 {
+                                format!("DRC: {} {}", drc_errors, t("app.drc_errors", _lang))
+                            } else {
+                                t("app.drc_ok", _lang).to_string()
+                            };
+                            let text = format!(
+                                "{} {} | {} {} | {}",
+                                t("app.schematic_components", _lang),
+                                comp_count,
+                                t("app.schematic_wires", _lang),
+                                wire_count,
+                                drc_label,
+                            );
+                            let color = if drc_errors > 0 {
+                                egui::Color32::from_rgb(220, 80, 80)
+                            } else {
+                                palette.text
+                            };
+                            (text, color)
+                        }
+                        ViewportMode::Pcb => {
+                            let text = format!(
+                                "{} {} | {} {} | {} {}",
+                                t("app.pcb_components", _lang),
+                                self.pcb_view.layout.components.len(),
+                                t("app.pcb_traces", _lang),
+                                self.pcb_view.layout.traces.len(),
+                                t("app.pcb_airwires", _lang),
+                                self.pcb_view.layout.airwires.len()
+                            );
+                            (text, palette.text)
+                        }
                     };
                     ui.label(
                         egui::RichText::new(status_counts)
                             .size(11.0)
-                            .color(palette.text),
+                            .color(status_color),
                     );
                     ui.separator();
                     ui.label(
@@ -1070,10 +1147,19 @@ impl AuraRafiApp {
                             },
                         );
                     }
-                    BottomTab::Console => self.console.show(ui, self.settings.language),
+                    BottomTab::Console => {
+                        let cmds = self.command_catalog.command_names();
+                        self.console.show(ui, self.settings.language, true, &cmds);
+                    }
                     BottomTab::ProjectSettings => {
+                        let before_global_console_commands = self.settings.command_console_enabled;
                         let changed = if let Some(project) = self.current_project.as_mut() {
-                            project_settings::show_project_settings(ui, project, self.settings.language)
+                            project_settings::show_project_settings(
+                                ui,
+                                project,
+                                self.settings.language,
+                                &mut self.settings.command_console_enabled,
+                            )
                         } else {
                             ui.label(
                                 egui::RichText::new(t("app.no_entity_selected", self.settings.language))
@@ -1091,20 +1177,18 @@ impl AuraRafiApp {
                             self.last_action = msg.clone();
                             self.console.log(LogLevel::Info, &msg);
                         }
+                        if self.settings.command_console_enabled != before_global_console_commands {
+                            let _ = self.settings.save(&dirs_config_dir());
+                        }
                     }
                     BottomTab::AiChat => {
-                        self.ai_chat.lang = self.settings.language;
                         self.ai_chat.show(ui);
                     }
-                    BottomTab::NodeEditor => self.node_editor.show(ui, self.settings.language),
-                    BottomTab::Complement(id) => {
-                        let mut context = raf_core::complement::ComplementContext {
-                            lang: self.settings.language,
-                            command_bus: &mut self.command_bus,
-                        };
-                        if let Some(comp) = self.complement_registry.complements.iter_mut().find(|c| c.id() == id) {
-                            comp.draw_ui(&mut context); // No egui UI context in EngineComplement trait for now.
-                        }
+                    BottomTab::NodeEditor => {
+                        self.node_editor.show(ui, self.settings.language);
+                    }
+                    BottomTab::Complement(_) => {
+                        ui.label("Complement tab");
                     }
                 }
             });
@@ -1192,7 +1276,8 @@ impl AuraRafiApp {
                             }
                             if let Some((dragged, new_parent)) = actions.reparent {
                                 self.push_undo_snapshot();
-                                if self.scene.reparent_node(dragged, new_parent) {
+                                let before = actions.reparent_before;
+                                if self.scene.reparent_node_before(dragged, new_parent, before) {
                                     self.hierarchy.selected_node = Some(dragged);
                                     self.hierarchy.selected_nodes = vec![dragged];
                                     self.viewport.selected = vec![dragged];
@@ -1251,16 +1336,18 @@ impl AuraRafiApp {
                             }
 
                             let before_snapshot = self.current_history_snapshot();
+                            self.properties.set_display_unit(self.settings.display_unit);
                             let properties_changed = self.properties.show(
                                 ui,
                                 &mut self.scene,
                                 self.hierarchy.selected_node,
+                                &self.hierarchy.selected_nodes,
                                 self.settings.language,
                                 &self.ui_icons,
                                 self.asset_browser.project_assets_path.as_deref(),
                             );
                             if properties_changed {
-                                self.record_document_change(before_snapshot);
+                                document_changed_this_frame |= self.record_document_change(before_snapshot);
                             }
                         }
                         ViewportMode::Schematic => {
@@ -1270,7 +1357,7 @@ impl AuraRafiApp {
                                 &mut self.schematic_view,
                                 self.settings.language,
                             ) {
-                                self.record_document_change(before_snapshot);
+                                document_changed_this_frame |= self.record_document_change(before_snapshot);
                             }
                         }
                         ViewportMode::Pcb => {
@@ -1280,7 +1367,7 @@ impl AuraRafiApp {
                                 &mut self.pcb_view,
                                 self.settings.language,
                             ) {
-                                self.record_document_change(before_snapshot);
+                                document_changed_this_frame |= self.record_document_change(before_snapshot);
                             }
                         }
                     }
@@ -1300,6 +1387,11 @@ impl AuraRafiApp {
                         .selectable_label(self.viewport_mode == ViewportMode::Schematic, t("app.schematic_view", self.settings.language))
                         .clicked()
                     {
+                        // Cross-probe: if coming from PCB, try to select the
+                        // same component in schematic by designator.
+                        if let Some(designator) = self.cross_probe_designator.take() {
+                            self.schematic_view.select_by_designator(&designator);
+                        }
                         self.viewport_mode = ViewportMode::Schematic;
                     }
                     if ui
@@ -1307,6 +1399,11 @@ impl AuraRafiApp {
                         .clicked()
                     {
                         self.sync_pcb_from_schematic();
+                        // Cross-probe: if coming from schematic, try to select
+                        // the same component in PCB by designator.
+                        if let Some(designator) = self.cross_probe_designator.take() {
+                            self.pcb_view.select_by_designator(&designator);
+                        }
                         self.viewport_mode = ViewportMode::Pcb;
                     }
                 });
@@ -1326,7 +1423,7 @@ impl AuraRafiApp {
                     self.viewport.grid_visible = self.settings.grid_visible;
                     self.viewport.grid_spacing = self.settings.grid_size.max(0.1);
                     self.viewport.grid_load_distance = self.settings.grid_load_distance.max(0.0);
-                    self.viewport.fps_limit = self.settings.fps_limit.max(15);
+                    self.viewport.fps_limit = self.settings.fps_limit;
                     self.viewport.invert_mouse_x = self.settings.invert_mouse_x;
                     self.viewport.invert_mouse_y = self.settings.invert_mouse_y;
                     self.viewport.move_sensitivity = self.settings.move_gizmo_sensitivity.max(0.1);
@@ -1354,7 +1451,7 @@ impl AuraRafiApp {
                         &self.ui_icons,
                     );
                     if viewport_changed {
-                        self.record_document_change(before_snapshot);
+                        document_changed_this_frame |= self.record_document_change(before_snapshot);
                     }
                 }
                 ViewportMode::Schematic => {
@@ -1367,7 +1464,11 @@ impl AuraRafiApp {
                         self.egui_wgpu_render_state.as_ref(),
                         &mut self.graphics_runtime,
                     ) {
-                        self.record_document_change(before_snapshot);
+                        document_changed_this_frame |= self.record_document_change(before_snapshot);
+                    }
+                    // Cross-probe: capture selected component designator.
+                    if let Some(designator) = self.schematic_view.selected_designator() {
+                        self.cross_probe_designator = Some(designator);
                     }
                 }
                 ViewportMode::Pcb => {
@@ -1380,11 +1481,19 @@ impl AuraRafiApp {
                         self.egui_wgpu_render_state.as_ref(),
                         &mut self.graphics_runtime,
                     ) {
-                        self.record_document_change(before_snapshot);
+                        document_changed_this_frame |= self.record_document_change(before_snapshot);
+                    }
+                    // Cross-probe: capture selected component designator.
+                    if let Some(designator) = self.pcb_view.selected_designator() {
+                        self.cross_probe_designator = Some(designator);
                     }
                 }
             }
         });
+
+        if !document_changed_this_frame {
+            self.finalize_pending_history_snapshot();
+        }
 
         if self.viewport_mode == ViewportMode::Scene && self.viewport.selected != self.hierarchy.selected_nodes {
             self.hierarchy.selected_nodes = self.viewport.selected.clone();
@@ -1396,86 +1505,183 @@ impl AuraRafiApp {
     // Settings Screen
     // -----------------------------------------------------------------------
 
+    fn open_settings_screen(&mut self, previous_screen: AppScreen) {
+        self.previous_screen = Some(previous_screen);
+        self.settings_draft = Some(self.settings.clone());
+        self.screen = AppScreen::Settings;
+    }
+
     fn show_settings_screen(&mut self, ctx: &egui::Context) {
-        let _lang = self.settings.language;
+        if self.settings_draft.is_none() {
+            self.settings_draft = Some(self.settings.clone());
+        }
+
+        // Compare the current draft against the live settings BEFORE taking a
+        // mutable borrow. This detects changes made in previous frames, which
+        // is what the Esc key needs (Esc fires before the UI runs this frame).
+        let draft_changed_before_ui = self.settings_draft.as_ref() != Some(&self.settings);
+
+        let draft = self.settings_draft.as_mut().expect("settings draft initialized");
+        let lang = draft.language;
+        let palette = app_theme::palette_for_visuals(
+            ctx.style().visuals.dark_mode,
+            draft.theme_experimental,
+        );
+
         let mut close = false;
         let mut save = false;
-        let palette = app_theme::palette_for_visuals(ctx.style().visuals.dark_mode, self.settings.theme_experimental);
+        // Cancel button is clicked inside the UI closure; we defer the decision
+        // until after the mutable borrow on `draft` ends.
+        let mut cancel_clicked = false;
+
+        let keyboard_save = ctx.input(|i| {
+            (i.modifiers.ctrl || i.modifiers.mac_cmd) && i.key_pressed(egui::Key::S)
+        });
+        let keyboard_close = ctx.input(|i| i.key_pressed(egui::Key::Escape));
+
+        if keyboard_save {
+            save = true;
+            close = true;
+        } else if keyboard_close && !self.show_settings_close_dialog {
+            // Esc: only prompt if there are unsaved changes; otherwise close clean.
+            if draft_changed_before_ui {
+                self.show_settings_close_dialog = true;
+            } else {
+                close = true;
+            }
+        }
 
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.vertical_centered(|ui| {
-                ui.set_max_width(540.0); // Clean, constrained center column
-                
-                ui.add_space(32.0);
-                
-                // Professional Title (Extralight-like, subtle)
-                ui.label(
-                    egui::RichText::new(t("app.engine_settings_title", _lang))
-                        .size(16.0)
-                        .color(palette.text_dim),
-                );
-                
-                ui.add_space(20.0);
-                ui.separator();
-                ui.add_space(16.0);
+            ui.add_space(20.0);
+            ui.horizontal_centered(|ui| {
+                ui.set_max_width(620.0);
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width().min(620.0));
+                    ui.label(
+                        egui::RichText::new(t("app.engine_settings_title", lang))
+                            .size(16.0)
+                            .color(palette.text_dim),
+                    );
 
-                // Need a frame for the settings panel content
-                let frame = egui::Frame::none()
-                    .fill(palette.panel)
-                    .rounding(8.0)
-                    .inner_margin(24.0)
-                    .stroke(egui::Stroke::new(1.0, palette.border));
-                
-                frame.show(ui, |ui| {
-                    settings_panel::show_settings(ui, &mut self.settings);
-                });
+                    ui.add_space(14.0);
+                    ui.separator();
+                    ui.add_space(12.0);
 
-                ui.add_space(24.0);
+                    // Reserve space for the Save/Cancel bar so the ScrollArea
+                    // never pushes it off-screen (#12). 80px covers the button
+                    // row plus its surrounding spacing.
+                    let scroll_max_height = (ui.available_height() - 80.0).max(160.0);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(scroll_max_height)
+                        .show(ui, |ui| {
+                            let frame = egui::Frame::none()
+                                .fill(palette.panel)
+                                .rounding(8.0)
+                                .inner_margin(24.0)
+                                .stroke(egui::Stroke::new(1.0, palette.border));
 
-                // Action buttons below
-                ui.horizontal(|ui| {
-                    // Right aligned buttons
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Styled save button using accent but thinner or less aggressive
-                        let save_btn = egui::Button::new(
-                            egui::RichText::new(t("app.save_and_close", _lang))
-                                .size(13.0)
-                                .color(egui::Color32::WHITE),
-                        )
-                        .fill(app_theme::ACCENT)
-                        .rounding(4.0);
+                            frame.show(ui, |ui| {
+                                settings_panel::show_settings(ui, draft);
+                            });
+                        });
 
-                        if ui.add_sized([120.0, 32.0], save_btn).clicked() {
-                            save = true;
-                            close = true;
-                        }
+                    ui.add_space(14.0);
 
-                        ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let save_btn = egui::Button::new(
+                                egui::RichText::new(t("app.save_and_close", lang))
+                                    .size(13.0)
+                                    .color(egui::Color32::WHITE),
+                            )
+                            .fill(app_theme::ACCENT)
+                            .rounding(4.0);
 
-                        let cancel_btn = egui::Button::new(
-                            egui::RichText::new(t("app.cancel", _lang))
-                                .size(13.0),
-                        )
-                        .rounding(4.0);
+                            if ui.add_sized([120.0, 32.0], save_btn).clicked() {
+                                save = true;
+                                close = true;
+                            }
 
-                        if ui.add_sized([90.0, 32.0], cancel_btn).clicked() {
-                            close = true;
-                        }
+                            ui.add_space(12.0);
+
+                            let cancel_btn = egui::Button::new(
+                                egui::RichText::new(t("app.cancel", lang)).size(13.0),
+                            )
+                            .rounding(4.0);
+
+                            if ui.add_sized([90.0, 32.0], cancel_btn).clicked() {
+                                // Cancel mirrors Esc: prompt if there are unsaved
+                                // changes, otherwise close without prompting.
+                                // The change check runs after this closure ends
+                                // so we can borrow self.settings_draft again.
+                                cancel_clicked = true;
+                            }
+                        });
                     });
                 });
             });
         });
 
-        if close {
-            if save {
-                let config_dir = dirs_config_dir();
-                let _ = self.settings.save(&config_dir);
-                self.console.log(LogLevel::Info, "Settings saved.");
+        // Recompute the change flag AFTER the UI ran, so the Cancel button
+        // sees edits made in this frame too. The mutable borrow on `draft`
+        // has ended by now, so we can borrow self.settings_draft again.
+        let draft_changed = self.settings_draft.as_ref() != Some(&self.settings);
+        if cancel_clicked {
+            if draft_changed {
+                self.show_settings_close_dialog = true;
+            } else {
+                close = true;
             }
-            self.screen = self
-                .previous_screen
-                .take()
-                .unwrap_or(AppScreen::ProjectHub);
+        }
+
+        // Settings close confirmation dialog.
+        if self.show_settings_close_dialog {
+            let lang = self.settings.language;
+            egui::Window::new(t("app.unsaved_changes_title", lang))
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ctx, |ui| {
+                    ui.set_min_width(300.0);
+                    ui.label("Save changes to settings before closing?");
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(t("app.cancel", lang)).clicked() {
+                            self.show_settings_close_dialog = false;
+                        }
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui.button(t("app.discard_changes", lang)).clicked() {
+                                self.show_settings_close_dialog = false;
+                                close = true;
+                            }
+                            ui.add_space(8.0);
+                            if ui.button(t("app.save_and_close", lang)).clicked() {
+                                self.show_settings_close_dialog = false;
+                                save = true;
+                                close = true;
+                            }
+                        });
+                    });
+                });
+            if self.show_settings_close_dialog {
+                return;
+            }
+        }
+
+        if close {
+            let next_screen = self.previous_screen.take().unwrap_or(AppScreen::ProjectHub);
+            if save {
+                if let Some(draft) = self.settings_draft.take() {
+                    self.settings = draft;
+                    let config_dir = dirs_config_dir();
+                    let _ = self.settings.save(&config_dir);
+                    self.console.log(LogLevel::Info, "Settings saved.");
+                }
+            } else {
+                self.settings_draft = None;
+            }
+            self.screen = next_screen;
         }
     }
 
@@ -1577,6 +1783,7 @@ impl AuraRafiApp {
         self.asset_browser.project_assets_path = None;
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.pending_history_snapshot = None;
         self.scene_modified = false;
         self.auto_save_elapsed = 0.0;
         self.auto_save_last_tick = None;
@@ -1591,6 +1798,7 @@ impl AuraRafiApp {
 
     /// Push current document state to undo stack.
     fn push_undo_snapshot(&mut self) {
+        self.finalize_pending_history_snapshot();
         if let Some(snapshot) = self.current_history_snapshot() {
             self.push_history_snapshot(snapshot);
         }
@@ -1610,6 +1818,23 @@ impl AuraRafiApp {
         }
     }
 
+    fn current_history_snapshot_like(
+        &self,
+        snapshot: &EditorHistorySnapshot,
+    ) -> Option<EditorHistorySnapshot> {
+        match snapshot {
+            EditorHistorySnapshot::Scene(_) => ron::ser::to_string(&self.scene)
+                .ok()
+                .map(EditorHistorySnapshot::Scene),
+            EditorHistorySnapshot::Schematic(_) => ron::ser::to_string(&self.schematic_view.schematic)
+                .ok()
+                .map(EditorHistorySnapshot::Schematic),
+            EditorHistorySnapshot::Pcb(_) => ron::ser::to_string(&self.pcb_view.layout)
+                .ok()
+                .map(EditorHistorySnapshot::Pcb),
+        }
+    }
+
     fn push_history_snapshot(&mut self, snapshot: EditorHistorySnapshot) {
         self.undo_stack.push(snapshot);
         if self.undo_stack.len() > 50 {
@@ -1619,11 +1844,45 @@ impl AuraRafiApp {
         self.mark_scene_modified();
     }
 
-    fn record_document_change(&mut self, before_snapshot: Option<EditorHistorySnapshot>) {
-        if let Some(snapshot) = before_snapshot {
-            self.push_history_snapshot(snapshot);
-        } else {
+    fn record_document_change(&mut self, before_snapshot: Option<EditorHistorySnapshot>) -> bool {
+        let Some(snapshot) = before_snapshot else {
             self.mark_scene_modified();
+            return true;
+        };
+
+        let current_snapshot = self.current_history_snapshot_like(&snapshot);
+        let document_changed = current_snapshot
+            .as_ref()
+            .map(|current| current != &snapshot)
+            .unwrap_or(true);
+        let scene_drag_pending = matches!(snapshot, EditorHistorySnapshot::Scene(_))
+            && self.viewport.is_drag_ongoing();
+
+        if !document_changed && !scene_drag_pending {
+            return false;
+        }
+
+        if self.pending_history_snapshot.is_none() {
+            self.pending_history_snapshot = Some(snapshot);
+            self.redo_stack.clear();
+        }
+
+        if document_changed {
+            self.mark_scene_modified();
+        }
+
+        true
+    }
+
+    fn finalize_pending_history_snapshot(&mut self) {
+        if let Some(snapshot) = self.pending_history_snapshot.take() {
+            let changed = self
+                .current_history_snapshot_like(&snapshot)
+                .map(|current| current != snapshot)
+                .unwrap_or(true);
+            if changed {
+                self.push_history_snapshot(snapshot);
+            }
         }
     }
 
@@ -1664,8 +1923,9 @@ impl AuraRafiApp {
     }
 
     fn do_undo(&mut self) {
+        self.finalize_pending_history_snapshot();
         if let Some(snapshot) = self.undo_stack.pop() {
-            if let Some(current) = self.current_history_snapshot() {
+            if let Some(current) = self.current_history_snapshot_like(&snapshot) {
                 self.redo_stack.push(current);
             }
             if self.apply_history_snapshot(snapshot) {
@@ -1678,8 +1938,9 @@ impl AuraRafiApp {
     }
 
     fn do_redo(&mut self) {
+        self.finalize_pending_history_snapshot();
         if let Some(snapshot) = self.redo_stack.pop() {
-            if let Some(current) = self.current_history_snapshot() {
+            if let Some(current) = self.current_history_snapshot_like(&snapshot) {
                 self.undo_stack.push(current);
             }
             if self.apply_history_snapshot(snapshot) {
@@ -1908,23 +2169,123 @@ impl AuraRafiApp {
     // v0.3.0: Global shortcuts
     // -----------------------------------------------------------------------
 
+    fn do_copy(&mut self) {
+        if self.viewport_mode != ViewportMode::Scene {
+            return;
+        }
+        if self.hierarchy.selected_nodes.is_empty() {
+            return;
+        }
+        self.scene_clipboard.clear();
+        for &id in &self.hierarchy.selected_nodes {
+            if let Some(node) = self.scene.get(id) {
+                self.scene_clipboard.push(node.clone());
+            }
+        }
+        let _lang = self.settings.language;
+        let msg = format!("{} {}", self.scene_clipboard.len(), t("app.copied_msg", _lang));
+        self.last_action = msg.clone();
+        self.console.log(LogLevel::Info, &msg);
+    }
+
+    fn do_paste(&mut self) {
+        if self.viewport_mode != ViewportMode::Scene {
+            return;
+        }
+        if self.scene_clipboard.is_empty() {
+            return;
+        }
+        if self.runtime.is_some() {
+            let msg = t("app.runtime_scene_locked", self.settings.language);
+            self.last_action = msg.clone();
+            self.console.log(LogLevel::Info, &msg);
+            return;
+        }
+        self.push_undo_snapshot();
+        let _lang = self.settings.language;
+        let paste_count = self.scene_clipboard.len();
+        let mut new_ids = Vec::new();
+        let mut offset_index = 0u32;
+        for node in &self.scene_clipboard {
+            // Add a root node with the clipboard node's data, then offset it.
+            let id = self.scene.add_root_with_primitive(&node.name, node.primitive);
+            if let Some(n) = self.scene.get_mut(id) {
+                n.position = node.position + glam::Vec3::new(1.0, 0.0, 1.0) * (offset_index as f32 + 1.0);
+                n.rotation = node.rotation;
+                n.scale = node.scale;
+                n.color = node.color;
+                n.visible = node.visible;
+                n.name = format!("{} copy", node.name);
+            }
+            new_ids.push(id);
+            offset_index += 1;
+        }
+        if !new_ids.is_empty() {
+            self.hierarchy.selected_nodes = new_ids.clone();
+            self.hierarchy.selected_node = new_ids.first().copied();
+            self.viewport.selected = new_ids;
+            self.mark_scene_modified();
+            let msg = format!("{} {}", paste_count, t("app.pasted_msg", _lang));
+            self.last_action = msg.clone();
+            self.console.log(LogLevel::Info, &msg);
+        }
+    }
+
+    fn do_bookmark_save(&mut self, slot: usize) {
+        if self.viewport_mode != ViewportMode::Scene {
+            return;
+        }
+        let snapshot = self.viewport.camera_bookmark_snapshot();
+        self.camera_bookmarks[slot] = Some(snapshot);
+        let _lang = self.settings.language;
+        let msg = format!("{} {}", t("app.bookmark_saved", _lang), slot + 1);
+        self.last_action = msg.clone();
+        self.console.log(LogLevel::Info, &msg);
+    }
+
+    fn do_bookmark_restore(&mut self, slot: usize) {
+        if self.viewport_mode != ViewportMode::Scene {
+            return;
+        }
+        let Some((target, yaw, pitch, dist)) = self.camera_bookmarks[slot] else {
+            let _lang = self.settings.language;
+            let msg = format!("{} {}", t("app.bookmark_empty", _lang), slot + 1);
+            self.last_action = msg.clone();
+            self.console.log(LogLevel::Info, &msg);
+            return;
+        };
+        self.viewport.restore_camera_bookmark(target, yaw, pitch, dist);
+        let _lang = self.settings.language;
+        let msg = format!("{} {}", t("app.bookmark_restored", _lang), slot + 1);
+        self.last_action = msg.clone();
+        self.console.log(LogLevel::Info, &msg);
+    }
+
     fn handle_global_shortcuts(&mut self, ctx: &egui::Context) {
         let text_input_active = ctx.wants_keyboard_input();
         let node_editor_owns_history = self.bottom_tab == BottomTab::NodeEditor;
         let action: Option<u8> = ctx.input(|i| {
             let ctrl = i.modifiers.ctrl || i.modifiers.mac_cmd;
-            if ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Z) && !node_editor_owns_history {
-                return Some(2);
-            }
             if ctrl && i.key_pressed(egui::Key::S) { return Some(4); }
             if text_input_active {
                 return None;
+            }
+            if ctrl && i.modifiers.shift && i.key_pressed(egui::Key::Z) && !node_editor_owns_history {
+                return Some(2);
             }
             if ctrl && i.key_pressed(egui::Key::Z) && !node_editor_owns_history { return Some(1); }
             if ctrl && i.key_pressed(egui::Key::Y) && !node_editor_owns_history { return Some(2); }
             if ctrl && i.key_pressed(egui::Key::D) { return Some(3); }
             if ctrl && i.key_pressed(egui::Key::A) { return Some(5); }
             if i.key_pressed(egui::Key::Delete) { return Some(6); }
+            if ctrl && i.key_pressed(egui::Key::C) { return Some(7); }
+            if ctrl && i.key_pressed(egui::Key::V) { return Some(8); }
+            if ctrl && i.key_pressed(egui::Key::Num1) { return Some(9); }
+            if ctrl && i.key_pressed(egui::Key::Num2) { return Some(10); }
+            if ctrl && i.key_pressed(egui::Key::Num3) { return Some(11); }
+            if !ctrl && i.key_pressed(egui::Key::Num1) { return Some(12); }
+            if !ctrl && i.key_pressed(egui::Key::Num2) { return Some(13); }
+            if !ctrl && i.key_pressed(egui::Key::Num3) { return Some(14); }
             None
         });
         match action {
@@ -1936,6 +2297,14 @@ impl AuraRafiApp {
             }
             Some(5) => self.do_select_all(),
             Some(6) => self.do_delete(),
+            Some(7) => self.do_copy(),
+            Some(8) => self.do_paste(),
+            Some(9) => self.do_bookmark_save(0),
+            Some(10) => self.do_bookmark_save(1),
+            Some(11) => self.do_bookmark_save(2),
+            Some(12) => self.do_bookmark_restore(0),
+            Some(13) => self.do_bookmark_restore(1),
+            Some(14) => self.do_bookmark_restore(2),
             _ => {}
         }
     }

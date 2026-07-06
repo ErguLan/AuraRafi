@@ -6,7 +6,7 @@
 //! - `scenes/` (scene files)
 //! - `scripts/` (user scripts, if any)
 
-use crate::config::RenderPreset;
+use crate::config::{RenderPreset, ScriptExecutionMode, ScriptLanguageFlags};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -52,6 +52,9 @@ pub struct ProjectSettings {
     /// Whether complement tabs are available for this project.
     #[serde(default = "default_true")]
     pub enable_complements: bool,
+    /// Whether this project accepts manual slash commands from the console.
+    #[serde(default)]
+    pub enable_console_commands: bool,
     /// Hard gate for advanced GPU-heavy project features.
     ///
     /// This does not choose the base backend anymore. Engine-level render
@@ -66,6 +69,9 @@ pub struct ProjectSettings {
     pub enable_physics: bool,
     #[serde(default = "default_true")]
     pub pause_when_unfocused: bool,
+    /// Save immediately after each committed editor action.
+    #[serde(default)]
+    pub linear_save: bool,
     /// Preferred runtime preset for this specific project.
     #[serde(default)]
     pub runtime_render_preset: RenderPreset,
@@ -78,6 +84,19 @@ pub struct ProjectSettings {
     /// Scene name to create/use by default.
     #[serde(default = "default_main_scene_name")]
     pub default_scene_name: String,
+    // -- Scripting (v0.8.x) --
+    /// Whether scripting is enabled for this project.
+    #[serde(default = "default_true")]
+    pub enable_scripting: bool,
+    /// Bitflags of allowed script languages. C++ (WASM) requires explicit opt-in.
+    #[serde(default)]
+    pub allowed_script_languages: ScriptLanguageFlags,
+    /// When scripts execute during the project lifecycle.
+    #[serde(default)]
+    pub script_execution_mode: ScriptExecutionMode,
+    /// Attach a default script to newly created entities.
+    #[serde(default)]
+    pub auto_attach_scripts: bool,
 }
 
 impl Default for ProjectSettings {
@@ -86,14 +105,20 @@ impl Default for ProjectSettings {
             show_hierarchy_panel: true,
             show_properties_panel: true,
             enable_complements: true,
+            enable_console_commands: false,
             allow_gpu_features: false,
             enable_audio: true,
             enable_physics: true,
             pause_when_unfocused: true,
+            linear_save: false,
             runtime_render_preset: RenderPreset::Potato,
             depth_accurate: false,
             depth_resolution_scale: default_depth_resolution_scale(),
             default_scene_name: default_main_scene_name(),
+            enable_scripting: true,
+            allowed_script_languages: ScriptLanguageFlags::DEFAULT,
+            script_execution_mode: ScriptExecutionMode::EditorOnly,
+            auto_attach_scripts: false,
         }
     }
 }

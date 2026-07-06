@@ -148,21 +148,19 @@ impl OpenClawClient {
         }
 
         match req.send_json(body) {
-            Ok(resp) => {
-                match resp.into_string() {
-                    Ok(text) => {
-                        self.status = ConnectionStatus::Connected;
-                        self.last_error.clear();
-                        self.parse_response(&text)
-                    }
-                    Err(e) => {
-                        self.status = ConnectionStatus::Error;
-                        let msg = format!("Error reading response: {}", e);
-                        self.last_error = msg.clone();
-                        Err(msg)
-                    }
+            Ok(resp) => match resp.into_string() {
+                Ok(text) => {
+                    self.status = ConnectionStatus::Connected;
+                    self.last_error.clear();
+                    self.parse_response(&text)
                 }
-            }
+                Err(e) => {
+                    self.status = ConnectionStatus::Error;
+                    let msg = format!("Error reading response: {}", e);
+                    self.last_error = msg.clone();
+                    Err(msg)
+                }
+            },
             Err(e) => {
                 self.status = ConnectionStatus::Error;
                 let msg = format!("{}", e);

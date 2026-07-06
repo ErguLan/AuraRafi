@@ -176,24 +176,32 @@ pub fn rasterize_quad(
     depth: &[f32; 4],
     color: [u8; 4],
 ) {
-    rasterize_triangle(fb, &RasterTriangle {
-        screen: [screen[0], screen[1], screen[2]],
-        depth: [depth[0], depth[1], depth[2]],
-        color,
-    });
-    rasterize_triangle(fb, &RasterTriangle {
-        screen: [screen[0], screen[2], screen[3]],
-        depth: [depth[0], depth[2], depth[3]],
-        color,
-    });
+    rasterize_triangle(
+        fb,
+        &RasterTriangle {
+            screen: [screen[0], screen[1], screen[2]],
+            depth: [depth[0], depth[1], depth[2]],
+            color,
+        },
+    );
+    rasterize_triangle(
+        fb,
+        &RasterTriangle {
+            screen: [screen[0], screen[2], screen[3]],
+            depth: [depth[0], depth[2], depth[3]],
+            color,
+        },
+    );
 }
 
 /// Rasterize a wireframe line (Bresenham) with depth test.
 /// Used for wireframe mode and selection outlines.
 pub fn rasterize_line(
     fb: &mut SoftwareFramebuffer,
-    p0: [f32; 2], d0: f32,
-    p1: [f32; 2], d1: f32,
+    p0: [f32; 2],
+    d0: f32,
+    p1: [f32; 2],
+    d1: f32,
     color: [u8; 4],
     width: f32,
 ) {
@@ -270,10 +278,7 @@ pub fn project_quad_for_raster(
         let ndc_x = clip.x / w;
         let ndc_y = clip.y / w;
 
-        screen[i] = [
-            (ndc_x + 1.0) * 0.5 * vp_w,
-            (1.0 - ndc_y) * 0.5 * vp_h,
-        ];
+        screen[i] = [(ndc_x + 1.0) * 0.5 * vp_w, (1.0 - ndc_y) * 0.5 * vp_h];
         depth[i] = clip.z / w;
     }
 
@@ -320,7 +325,9 @@ pub fn rasterize_selection_outline(
     // Draw 4 edges of the quad.
     for i in 0..4 {
         let j = (i + 1) % 4;
-        rasterize_line(fb, screen[i], depth[i], screen[j], depth[j], color, line_width);
+        rasterize_line(
+            fb, screen[i], depth[i], screen[j], depth[j], color, line_width,
+        );
     }
 }
 
@@ -361,11 +368,11 @@ mod tests {
         fb.write_pixel(1, 1, 0.9, 255, 0, 0, 255);
         let idx = (1 * 4 + 1) * 4;
         assert_eq!(fb.color[idx], 255); // Red.
-        // Write closer pixel (should overwrite).
+                                        // Write closer pixel (should overwrite).
         fb.write_pixel(1, 1, 0.1, 0, 255, 0, 255);
         assert_eq!(fb.color[idx], 0);
         assert_eq!(fb.color[idx + 1], 255); // Green wins.
-        // Write farther pixel (should NOT overwrite).
+                                            // Write farther pixel (should NOT overwrite).
         fb.write_pixel(1, 1, 0.5, 0, 0, 255, 255);
         assert_eq!(fb.color[idx + 1], 255); // Still green.
     }

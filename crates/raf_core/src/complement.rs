@@ -34,22 +34,22 @@ pub struct ComplementContext<'a> {
 pub trait EngineComplement {
     /// Unique identifier for the complement
     fn id(&self) -> &str;
-    
+
     /// Display name (for tabs and windows)
     fn name(&self) -> &str;
-    
+
     /// Target domain (Games, Electronics, Universal)
     fn domain(&self) -> ComplementDomain;
-    
+
     /// How this complement shows up in the UI
     fn presentation(&self) -> ComplementPresentation;
-    
+
     /// Called once when the complement is registered
     fn on_init(&mut self, _context: &mut ComplementContext<'_>) {}
-    
+
     /// Called every frame if Headless or if window is open
     fn on_update(&mut self, _context: &mut ComplementContext<'_>) {}
-    
+
     /// The actual egui code. Only called if Presentation is BottomTab or FloatingWindow.
     /// The context is where we eventually bind UI frameworks (like egui).
     /// Kept out of raf_core to preserve separation of concerns. To draw we pass raw UI downcasted via Any or safely bridged later.

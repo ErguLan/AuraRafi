@@ -173,11 +173,11 @@ impl GpuDeformer {
     pub fn gpu_overhead_per_vertex(&self) -> usize {
         match self.deformer_type {
             DeformerType::None => 0,
-            DeformerType::Cloth => 48,     // position + velocity + prev_pos
-            DeformerType::Hair => 32,      // position + velocity
+            DeformerType::Cloth => 48, // position + velocity + prev_pos
+            DeformerType::Hair => 32,  // position + velocity
             DeformerType::Vegetation => 4, // Just displacement offset
-            DeformerType::Water => 4,      // Height displacement
-            DeformerType::Skeletal => 16,  // Bone indices + weights
+            DeformerType::Water => 4,  // Height displacement
+            DeformerType::Skeletal => 16, // Bone indices + weights
             DeformerType::BlendShape => 12, // Delta position per target
             DeformerType::Custom => 16,
         }

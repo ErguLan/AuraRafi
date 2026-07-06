@@ -282,20 +282,48 @@ impl RenderConfig {
     /// Count how many expensive features are active (for status display).
     pub fn active_feature_count(&self) -> u32 {
         let mut count = 0;
-        if self.use_gpu { count += 1; }
-        if self.specular_enabled { count += 1; }
-        if self.max_point_lights > 0 { count += 1; }
-        if self.shadows_enabled { count += 1; }
-        if self.bloom_enabled { count += 1; }
-        if self.ssao_enabled { count += 1; }
-        if self.fog_enabled { count += 1; }
-        if self.anti_aliasing != AntiAliasingMode::None { count += 1; }
-        if self.textures_enabled { count += 1; }
-        if self.pbr_enabled { count += 1; }
-        if self.reflections_enabled { count += 1; }
-        if self.raytrace_enabled { count += 1; }
-        if self.gpu_deform_enabled { count += 1; }
-        if self.depth_accurate { count += 1; }
+        if self.use_gpu {
+            count += 1;
+        }
+        if self.specular_enabled {
+            count += 1;
+        }
+        if self.max_point_lights > 0 {
+            count += 1;
+        }
+        if self.shadows_enabled {
+            count += 1;
+        }
+        if self.bloom_enabled {
+            count += 1;
+        }
+        if self.ssao_enabled {
+            count += 1;
+        }
+        if self.fog_enabled {
+            count += 1;
+        }
+        if self.anti_aliasing != AntiAliasingMode::None {
+            count += 1;
+        }
+        if self.textures_enabled {
+            count += 1;
+        }
+        if self.pbr_enabled {
+            count += 1;
+        }
+        if self.reflections_enabled {
+            count += 1;
+        }
+        if self.raytrace_enabled {
+            count += 1;
+        }
+        if self.gpu_deform_enabled {
+            count += 1;
+        }
+        if self.depth_accurate {
+            count += 1;
+        }
         count
     }
 }

@@ -16,10 +16,10 @@ experimental, or pending end-to-end runtime connection.
 ## Features
 
 - **Hybrid Engine**: Game development (2D/3D) and electronic design in one tool
-- **Performance Focused**: GPU-priority rendering pipeline with a built-in CPU software fallback for potato PCs
+- **Performance Focused**: shared graphics runtime for Scene, Schematic, and PCB surfaces, using GPU hardware first when available and CPU software fallback for potato PCs
 - **Visual Scripting**: No-code node editor with graph validation and basic executor
-- **In-Editor Runtime**: Game projects can enter Play mode directly in the editor with runtime scene cloning, node event execution, `.rhai` behaviors, simple physics, triggers, and audio playback
-- **Electronics Design**: Schematic editor, simulation, DRC, exports, and synchronized PCB 2D workspace, unified under the same graphics pipeline
+- **Runtime Foundations**: scene/runtime data, node persistence, and script-facing groundwork exist in the repo, while live game Play mode is currently staged during renderer/runtime consolidation
+- **Electronics Design**: Schematic editor, simulation, DRC, exports, and synchronized PCB 2D workspace, unified under the same shared graphics runtime
 - **Modern Editor**: Dark/light themes, modular panels, intuitive layout
 - **AI-Ready**: Architecture prepared for AI agent integration via tool-calling when the runtime side matures
 - **Modular**: 9 workspace crates plus the main editor binary, with clean domain boundaries
@@ -46,8 +46,8 @@ step before running the editor.
 
 What works today after launch:
 
-- Game projects open with the scene editor, hierarchy, properties, asset browser, and software-rendered viewport.
-- Game projects can run inside the editor without a separate runtime binary: the runtime clones the current scene, executes saved node graphs from `nodes.ron`, runs attached `.rhai` scripts, and drives simple gravity/trigger/audio behavior without mutating the edit document.
+- Game projects open with the scene editor, hierarchy, properties, asset browser, and a scene viewport routed through the shared graphics runtime (GPU when available, CPU fallback retained).
+- Game runtime foundations remain in the repository, but live Play mode is currently temporarily disconnected while renderer/runtime truth is being stabilized.
 - Electronics projects open with the schematic editor and can switch into PCB View for synchronized physical layout editing.
 - Save/load, undo/redo, project persistence, DRC, DC simulation, SVG/BOM/netlist export, and localized UI are already integrated.
 - Some roadmap systems are intentionally present as prepared architecture and are documented as such in the changelog and architecture docs.
@@ -57,7 +57,7 @@ What works today after launch:
 | Crate | Purpose |
 |-------|---------|
 | `raf_core` | ECS, scene graph, command bus, events, configuration |
-| `raf_render` | CPU-first renderer, render abstraction, lighting/post-process systems, optional GPU path scaffolding |
+| `raf_render` | Shared graphics runtime for Scene/Schematic/PCB, CPU software fallback path, and prepared render abstraction/backends |
 | `raf_editor` | Visual editor UI with egui/eframe |
 | `raf_assets` | Asset importing, browsing, primitives |
 | `raf_electronics` | Schematic editor domain, simulation, DRC, export pipeline, synchronized PCB layout model |
@@ -68,9 +68,9 @@ What works today after launch:
 
 Current implementation profile:
 
-- The active editor viewport rendering path is GPU-priority with a built-in CPU software fallback for low-end hardware compatibility.
-- The game runtime is editor-integrated today: Play mode exists, but the standalone binary/fixed-timestep/animation side is still staged separately.
-- Electronics is currently the most end-to-end vertical: schematic, checks, simulation, export, and PCB 2D sync already live in the editor, unified under the same GPU-priority rendering pipeline.
+- The active editor surfaces use a shared graphics runtime: GPU hardware first when available, CPU software fallback retained for low-end compatibility.
+- The game runtime is currently staged rather than fully active: the repository keeps scene/runtime foundations, but live Play mode is temporarily disconnected while renderer and runtime truth are consolidated.
+- Electronics is currently the most end-to-end vertical: schematic, checks, simulation, export, and PCB 2D sync already live in the editor, unified under the same shared graphics runtime.
 - The repository favors modular staging: some systems are usable now, others are intentionally prepared without being wired into final runtime flows yet.
 
 ## Documentation
@@ -91,7 +91,7 @@ Documentation note:
 ## Technology
 
 - **Language**: Rust (2021 edition)
-- **Rendering**: GPU-priority rendering with wgpu (Vulkan/DX12/Metal) and a custom CPU software fallback pipeline via ApiGraphicBasic
+- **Rendering**: shared graphics runtime via `RenderRuntime` + `ApiGraphicBasic`, using GPU hardware execution when available and CPU software fallback when not; the scene viewport keeps a dedicated CPU scene path as the reference fallback implementation
 - **UI**: egui + eframe
 - **ECS**: hecs
 - **Math**: glam (SIMD-optimized)

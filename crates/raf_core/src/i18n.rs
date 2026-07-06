@@ -22,13 +22,9 @@ fn parse_json(raw: &str) -> HashMap<String, String> {
 /// Translate a language key into the respective text
 pub fn t(key: &str, lang: Language) -> String {
     let dict = match lang {
-        Language::English => {
-            EN_DICT.get_or_init(|| parse_json(include_str!("../locales/en.json")))
-        }
-        Language::Spanish => {
-            ES_DICT.get_or_init(|| parse_json(include_str!("../locales/es.json")))
-        }
+        Language::English => EN_DICT.get_or_init(|| parse_json(include_str!("../locales/en.json"))),
+        Language::Spanish => ES_DICT.get_or_init(|| parse_json(include_str!("../locales/es.json"))),
     };
-    
+
     dict.get(key).cloned().unwrap_or_else(|| key.to_string())
 }

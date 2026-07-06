@@ -64,10 +64,7 @@ pub fn export_netlist_text(schematic: &Schematic) -> ExportResult {
             if ci < schematic.components.len() {
                 let comp = &schematic.components[ci];
                 if pi < comp.pins.len() {
-                    out.push_str(&format!(
-                        "    {}.{}\n",
-                        comp.designator, comp.pins[pi].name
-                    ));
+                    out.push_str(&format!("    {}.{}\n", comp.designator, comp.pins[pi].name));
                 }
             }
         }
@@ -205,7 +202,9 @@ pub fn export_svg(schematic: &Schematic) -> ExportResult {
 
         svg.push_str(&format!(
             "<text class=\"desig-text\" x=\"{:.1}\" y=\"{:.1}\" text-anchor=\"middle\">{}</text>\n",
-            cx, cy - half_h - 4.0, escape_xml(&comp.designator)
+            cx,
+            cy - half_h - 4.0,
+            escape_xml(&comp.designator)
         ));
 
         svg.push_str(&format!(
@@ -234,7 +233,11 @@ pub fn export_svg(schematic: &Schematic) -> ExportResult {
             let py = cy + rot_oy;
             let pin_color = pin_direction_svg_color(pin.direction);
 
-            let edge_x = if rot_ox < 0.0 { cx - half_w } else { cx + half_w };
+            let edge_x = if rot_ox < 0.0 {
+                cx - half_w
+            } else {
+                cx + half_w
+            };
             let edge_y = cy + rot_oy;
 
             svg.push_str(&format!(
@@ -330,24 +333,10 @@ impl GerberTarget {
     pub fn required_layers(&self) -> &[&str] {
         match self {
             Self::Jlcpcb => &[
-                ".GTL",
-                ".GBL",
-                ".GTS",
-                ".GBS",
-                ".GTO",
-                ".GBO",
-                ".GKO",
-                ".DRL",
+                ".GTL", ".GBL", ".GTS", ".GBS", ".GTO", ".GBO", ".GKO", ".DRL",
             ],
             Self::PcbWay => &[
-                ".GTL",
-                ".GBL",
-                ".GTS",
-                ".GBS",
-                ".GTO",
-                ".GBO",
-                ".GML",
-                ".DRL",
+                ".GTL", ".GBL", ".GTS", ".GBS", ".GTO", ".GBO", ".GML", ".DRL",
             ],
         }
     }
@@ -381,7 +370,11 @@ pub fn export_gerber_layout_stub(
     content.push_str(&format!("* Open Airwires: {}\n", layout.airwires.len()));
     content.push_str(&format!(
         "* Outline Closed: {}\n",
-        if layout.outline_is_closed() { "yes" } else { "no" }
+        if layout.outline_is_closed() {
+            "yes"
+        } else {
+            "no"
+        }
     ));
     content.push_str("*\n");
     content.push_str("* STATUS: PLACEHOLDER - final Gerber writer pending\n");
@@ -406,13 +399,11 @@ pub fn export_gerber_layout_stub(
 }
 
 pub fn share_circuit(schematic: &Schematic) -> Result<String, String> {
-    ron::ser::to_string(schematic)
-        .map_err(|e| format!("Failed to serialize schematic: {}", e))
+    ron::ser::to_string(schematic).map_err(|e| format!("Failed to serialize schematic: {}", e))
 }
 
 pub fn load_shared_circuit(data: &str) -> Result<Schematic, String> {
-    ron::from_str(data)
-        .map_err(|e| format!("Failed to deserialize schematic: {}", e))
+    ron::from_str(data).map_err(|e| format!("Failed to deserialize schematic: {}", e))
 }
 
 #[cfg(test)]

@@ -65,18 +65,8 @@ impl Netlist {
         // Each entry: (component_index, pin_index, world_position)
         let mut pin_positions: Vec<(usize, usize, Vec2)> = Vec::new();
         for (ci, comp) in schematic.components.iter().enumerate() {
-            let rot_rad = comp.rotation.to_radians();
-            let cos_r = rot_rad.cos();
-            let sin_r = rot_rad.sin();
             for (pi, pin) in comp.pins.iter().enumerate() {
-                let raw_ox = pin.offset.x * 20.0; // GRID_STEP
-                let raw_oy = pin.offset.y * 20.0;
-                let rot_ox = raw_ox * cos_r - raw_oy * sin_r;
-                let rot_oy = raw_ox * sin_r + raw_oy * cos_r;
-                let world = Vec2::new(
-                    comp.position.x + rot_ox,
-                    comp.position.y + rot_oy,
-                );
+                let world = crate::schematic::component_pin_world_position(comp, pin);
                 pin_positions.push((ci, pi, world));
             }
         }
@@ -106,8 +96,14 @@ impl Netlist {
 
         // For each wire, find pins near its endpoints and union them.
         for wire in &schematic.wires {
-            let wire_start = Vec2::new(wire.start.x, wire.start.y);
-            let wire_end = Vec2::new(wire.end.x, wire.end.y);
+            let wire_start = wire
+                .start_anchor
+                .and_then(|anchor| schematic.resolve_anchor(anchor))
+                .unwrap_or_else(|| Vec2::new(wire.start.x, wire.start.y));
+            let wire_end = wire
+                .end_anchor
+                .and_then(|anchor| schematic.resolve_anchor(anchor))
+                .unwrap_or_else(|| Vec2::new(wire.end.x, wire.end.y));
 
             let mut start_pins: Vec<usize> = Vec::new();
             let mut end_pins: Vec<usize> = Vec::new();
@@ -144,12 +140,20 @@ impl Netlist {
                 let wi = &schematic.wires[i];
                 let wj = &schematic.wires[j];
                 let points_i = [
-                    Vec2::new(wi.start.x, wi.start.y),
-                    Vec2::new(wi.end.x, wi.end.y),
+                    wi.start_anchor
+                        .and_then(|anchor| schematic.resolve_anchor(anchor))
+                        .unwrap_or_else(|| Vec2::new(wi.start.x, wi.start.y)),
+                    wi.end_anchor
+                        .and_then(|anchor| schematic.resolve_anchor(anchor))
+                        .unwrap_or_else(|| Vec2::new(wi.end.x, wi.end.y)),
                 ];
                 let points_j = [
-                    Vec2::new(wj.start.x, wj.start.y),
-                    Vec2::new(wj.end.x, wj.end.y),
+                    wj.start_anchor
+                        .and_then(|anchor| schematic.resolve_anchor(anchor))
+                        .unwrap_or_else(|| Vec2::new(wj.start.x, wj.start.y)),
+                    wj.end_anchor
+                        .and_then(|anchor| schematic.resolve_anchor(anchor))
+                        .unwrap_or_else(|| Vec2::new(wj.end.x, wj.end.y)),
                 ];
 
                 for pi in &points_i {
@@ -188,7 +192,10 @@ impl Netlist {
             if wire.net.is_empty() {
                 continue;
             }
-            let wire_start = Vec2::new(wire.start.x, wire.start.y);
+            let wire_start = wire
+                .start_anchor
+                .and_then(|anchor| schematic.resolve_anchor(anchor))
+                .unwrap_or_else(|| Vec2::new(wire.start.x, wire.start.y));
             // Find any pin near this wire's start to get its root.
             for (idx, (_ci, _pi, pos)) in pin_positions.iter().enumerate() {
                 if pos.distance(wire_start) < POSITION_TOLERANCE {
@@ -229,9 +236,11 @@ impl Netlist {
 
     /// Find which net a specific pin belongs to.
     pub fn net_for_pin(&self, comp_index: usize, pin_index: usize) -> Option<&Net> {
-        self.nets
-            .iter()
-            .find(|n| n.pins.iter().any(|&(ci, pi)| ci == comp_index && pi == pin_index))
+        self.nets.iter().find(|n| {
+            n.pins
+                .iter()
+                .any(|&(ci, pi)| ci == comp_index && pi == pin_index)
+        })
     }
 }
 
@@ -239,7 +248,7 @@ impl Netlist {
 mod tests {
     use super::*;
     use crate::component::ElectronicComponent;
-    use crate::schematic::Schematic;
+    use crate::schematic::{Schematic, WireAnchor};
 
     #[test]
     fn empty_schematic_produces_empty_netlist() {
@@ -276,11 +285,7 @@ mod tests {
         // Wire from R1 pin 2 (offset +20) to R2 pin 1 (offset -20).
         // R1 at 100, pin2 offset = +1*20 = at x=120.
         // R2 at 140, pin1 offset = -1*20 = at x=120.
-        sch.add_wire(
-            Vec2::new(120.0, 100.0),
-            Vec2::new(120.0, 100.0),
-            "VCC",
-        );
+        sch.add_wire(Vec2::new(120.0, 100.0), Vec2::new(120.0, 100.0), "VCC");
 
         let nl = Netlist::from_schematic(&sch);
         // R1.pin2 and R2.pin1 should be in the same net.
@@ -289,6 +294,41 @@ mod tests {
         let net = net.unwrap();
         assert_eq!(net.name, "VCC");
         // That net should also contain R2 pin 1.
+        assert!(net.pins.iter().any(|&(ci, pi)| ci == 1 && pi == 0));
+    }
+
+    #[test]
+    fn anchored_wire_endpoints_drive_netlist_even_when_points_are_stale() {
+        let mut sch = Schematic::new("Test");
+        let mut r1 = ElectronicComponent::resistor("10k");
+        r1.position = Vec2::new(100.0, 100.0);
+        let r1_id = r1.id;
+        let r1_pin2 = r1.pins[1].id;
+        sch.add_component(r1);
+
+        let mut r2 = ElectronicComponent::resistor("4.7k");
+        r2.position = Vec2::new(200.0, 100.0);
+        let r2_id = r2.id;
+        let r2_pin1 = r2.pins[0].id;
+        sch.add_component(r2);
+
+        sch.add_wire_anchored(
+            Vec2::ZERO,
+            Vec2::ZERO,
+            "NET_A",
+            Some(WireAnchor::Pin {
+                component_id: r1_id,
+                pin_id: r1_pin2,
+            }),
+            Some(WireAnchor::Pin {
+                component_id: r2_id,
+                pin_id: r2_pin1,
+            }),
+        );
+
+        let nl = Netlist::from_schematic(&sch);
+        let net = nl.net_for_pin(0, 1).expect("R1 pin 2 should be connected");
+        assert_eq!(net.name, "NET_A");
         assert!(net.pins.iter().any(|&(ci, pi)| ci == 1 && pi == 0));
     }
 }

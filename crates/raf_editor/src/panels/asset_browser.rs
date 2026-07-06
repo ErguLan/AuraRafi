@@ -84,23 +84,38 @@ impl AssetBrowserPanel {
 
             // Filter buttons.
             let all_active = self.selected_filter.is_none();
-            if ui.selectable_label(all_active, t("app.all", lang)).clicked() {
+            if ui
+                .selectable_label(all_active, t("app.all", lang))
+                .clicked()
+            {
                 self.selected_filter = None;
             }
             let img_active = self.selected_filter == Some(AssetType::Image);
-            if ui.selectable_label(img_active, t("app.images", lang)).clicked() {
+            if ui
+                .selectable_label(img_active, t("app.images", lang))
+                .clicked()
+            {
                 self.selected_filter = Some(AssetType::Image);
             }
             let mdl_active = self.selected_filter == Some(AssetType::Model3D);
-            if ui.selectable_label(mdl_active, t("app.models", lang)).clicked() {
+            if ui
+                .selectable_label(mdl_active, t("app.models", lang))
+                .clicked()
+            {
                 self.selected_filter = Some(AssetType::Model3D);
             }
             let aud_active = self.selected_filter == Some(AssetType::Audio);
-            if ui.selectable_label(aud_active, t("app.audio", lang)).clicked() {
+            if ui
+                .selectable_label(aud_active, t("app.audio", lang))
+                .clicked()
+            {
                 self.selected_filter = Some(AssetType::Audio);
             }
             let scr_active = self.selected_filter == Some(AssetType::Scene);
-            if ui.selectable_label(scr_active, t("app.scripts_filter", lang)).clicked() {
+            if ui
+                .selectable_label(scr_active, t("app.scripts_filter", lang))
+                .clicked()
+            {
                 self.selected_filter = Some(AssetType::Scene);
             }
 
@@ -145,9 +160,7 @@ impl AssetBrowserPanel {
         }
 
         // --- Drag-and-drop zone ---
-        let dropped = ui.input(|i| {
-            i.raw.dropped_files.clone()
-        });
+        let dropped = ui.input(|i| i.raw.dropped_files.clone());
         if !dropped.is_empty() {
             self.handle_dropped_files(&dropped, lang);
         }
@@ -202,7 +215,8 @@ impl AssetBrowserPanel {
                                             .fit_to_exact_size(egui::Vec2::new(20.0, 20.0)),
                                     );
                                 } else {
-                                    let (fallback_icon, fallback_color) = asset_type_visual(&entry.asset_type);
+                                    let (fallback_icon, fallback_color) =
+                                        asset_type_visual(&entry.asset_type);
                                     ui.label(
                                         egui::RichText::new(fallback_icon)
                                             .size(20.0)
@@ -287,11 +301,8 @@ impl AssetBrowserPanel {
                 let target = scripts_dir.join(&name);
                 if !target.exists() {
                     if std::fs::write(&target, header).is_ok() {
-                        self.status_message = Some(format!(
-                            "{}: {}",
-                            t("app.script_created", lang),
-                            name
-                        ));
+                        self.status_message =
+                            Some(format!("{}: {}", t("app.script_created", lang), name));
                         // Show IDE dialog immediately.
                         self.show_ide_dialog = true;
                         self.ide_dialog_file = format!("scripts/{}", name);
@@ -474,15 +485,18 @@ impl AssetBrowserPanel {
 /// Return icon and color for each asset type.
 fn asset_type_visual(at: &AssetType) -> (&'static str, egui::Color32) {
     match at {
-        AssetType::Image => ("\u{1F5BC}", egui::Color32::from_rgb(120, 180, 230)),   // frame picture
-        AssetType::Model3D => ("\u{25A6}", egui::Color32::from_rgb(200, 160, 100)),   // mesh grid
-        AssetType::Audio => ("\u{266B}", egui::Color32::from_rgb(160, 200, 140)),      // music note
-        AssetType::Scene => ("\u{2630}", egui::Color32::from_rgb(180, 140, 220)),      // trigram
-        AssetType::Unknown => ("\u{2753}", egui::Color32::from_rgb(130, 130, 140)),   // question mark
+        AssetType::Image => ("\u{1F5BC}", egui::Color32::from_rgb(120, 180, 230)), // frame picture
+        AssetType::Model3D => ("\u{25A6}", egui::Color32::from_rgb(200, 160, 100)), // mesh grid
+        AssetType::Audio => ("\u{266B}", egui::Color32::from_rgb(160, 200, 140)),  // music note
+        AssetType::Scene => ("\u{2630}", egui::Color32::from_rgb(180, 140, 220)),  // trigram
+        AssetType::Unknown => ("\u{2753}", egui::Color32::from_rgb(130, 130, 140)), // question mark
     }
 }
 
-fn icon_for_asset<'a>(icons: &'a UiIconAtlas, asset_type: &AssetType) -> Option<&'a egui::TextureHandle> {
+fn icon_for_asset<'a>(
+    icons: &'a UiIconAtlas,
+    asset_type: &AssetType,
+) -> Option<&'a egui::TextureHandle> {
     let key = match asset_type {
         AssetType::Image => "image.png",
         AssetType::Model3D => "model.png",
@@ -514,15 +528,24 @@ fn script_template(kind: ScriptTemplateKind) -> (&'static str, &'static str) {
 /// Classify file extension into AssetType.
 fn classify_file(name: &str) -> AssetType {
     let lower = name.to_lowercase();
-    if lower.ends_with(".png") || lower.ends_with(".jpg") || lower.ends_with(".jpeg")
-        || lower.ends_with(".bmp") || lower.ends_with(".tga") || lower.ends_with(".webp")
+    if lower.ends_with(".png")
+        || lower.ends_with(".jpg")
+        || lower.ends_with(".jpeg")
+        || lower.ends_with(".bmp")
+        || lower.ends_with(".tga")
+        || lower.ends_with(".webp")
     {
         AssetType::Image
-    } else if lower.ends_with(".obj") || lower.ends_with(".gltf") || lower.ends_with(".glb")
-        || lower.ends_with(".fbx") || lower.ends_with(".stl")
+    } else if lower.ends_with(".obj")
+        || lower.ends_with(".gltf")
+        || lower.ends_with(".glb")
+        || lower.ends_with(".fbx")
+        || lower.ends_with(".stl")
     {
         AssetType::Model3D
-    } else if lower.ends_with(".wav") || lower.ends_with(".ogg") || lower.ends_with(".mp3")
+    } else if lower.ends_with(".wav")
+        || lower.ends_with(".ogg")
+        || lower.ends_with(".mp3")
         || lower.ends_with(".flac")
     {
         AssetType::Audio
@@ -543,7 +566,6 @@ fn format_size(bytes: u64) -> String {
         format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
     }
 }
-
 
 /// Open a URL in the default browser.
 fn open_url(url: &str) {

@@ -26,14 +26,12 @@ pub enum DirectorAction {
     /// Spawn an entity at a position.
     SpawnEntity {
         name: String,
-        primitive: String,  // "cube", "sphere", etc.
+        primitive: String, // "cube", "sphere", etc.
         position: [f32; 3],
     },
 
     /// Remove an entity by name.
-    RemoveEntity {
-        name: String,
-    },
+    RemoveEntity { name: String },
 
     /// Change weather.
     SetWeather {
@@ -41,32 +39,19 @@ pub enum DirectorAction {
     },
 
     /// Change time of day.
-    SetTime {
-        hour: u8,
-        minute: u8,
-    },
+    SetTime { hour: u8, minute: u8 },
 
     /// Modify an entity's scale (e.g., "grow a plant").
-    ScaleEntity {
-        name: String,
-        scale: [f32; 3],
-    },
+    ScaleEntity { name: String, scale: [f32; 3] },
 
     /// Change an entity's color/material (e.g., "leaves turn brown in autumn").
-    SetEntityColor {
-        name: String,
-        color_rgb: [u8; 3],
-    },
+    SetEntityColor { name: String, color_rgb: [u8; 3] },
 
     /// Log a message to the console (AI narration / debug).
-    LogMessage {
-        message: String,
-    },
+    LogMessage { message: String },
 
     /// Play a sound effect (future).
-    PlaySound {
-        sound_name: String,
-    },
+    PlaySound { sound_name: String },
 
     /// Custom action with key-value data (extensible).
     Custom {

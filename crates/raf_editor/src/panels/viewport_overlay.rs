@@ -24,7 +24,9 @@ impl ViewportPanel {
 
             let world = scene.world_matrix(id);
             let pos = world.col(3).truncate() + Vec3::new(0.0, 0.6, 0.0);
-            if let Some((screen, _)) = raf_render::math::transform::project_point(pos, view_proj, vp_w, vp_h) {
+            if let Some((screen, _)) =
+                raf_render::math::transform::project_point(pos, view_proj, vp_w, vp_h)
+            {
                 let sx = rect.left() + screen[0];
                 let sy = rect.top() + screen[1];
                 if rect.contains(Pos2::new(sx, sy)) {
@@ -62,28 +64,56 @@ impl ViewportPanel {
         }
 
         if matches!(gizmo.mode, GizmoMode::Scale) {
-            self.draw_scale_handles(painter, rect, entity_pos, entity_scale, view_proj, vp_w, vp_h);
+            self.draw_scale_handles(
+                painter,
+                rect,
+                entity_pos,
+                entity_scale,
+                view_proj,
+                vp_w,
+                vp_h,
+            );
         } else {
             for arrow in &raf_render::picking::GIZMO_ARROWS {
-                if let Some(screen_arrow) = raf_render::picking::project_gizmo_arrow(entity_pos, arrow, view_proj, vp_w, vp_h) {
+                if let Some(screen_arrow) = raf_render::picking::project_gizmo_arrow(
+                    entity_pos, arrow, view_proj, vp_w, vp_h,
+                ) {
                     let offset = egui::vec2(rect.left(), rect.top());
                     let start = Pos2::new(screen_arrow.start[0], screen_arrow.start[1]) + offset;
                     let end = Pos2::new(screen_arrow.end[0], screen_arrow.end[1]) + offset;
                     let [r, g, b, a] = screen_arrow.color;
 
-                    let highlighted_axis = self.bridge.highlighted_gizmo_axis();
-                    let is_active = matches!((&highlighted_axis, screen_arrow.label),
+                    let highlighted_axis = if self.selected.len() > 1 {
+                        self.multi_selection_highlighted_axis()
+                    } else {
+                        self.bridge.highlighted_gizmo_axis()
+                    };
+                    let is_active = matches!(
+                        (&highlighted_axis, screen_arrow.label),
                         (raf_render::gizmo::GizmoAxis::X, "X")
-                        | (raf_render::gizmo::GizmoAxis::Y, "Y")
-                        | (raf_render::gizmo::GizmoAxis::Z, "Z"));
-                    let color = Color32::from_rgba_unmultiplied(r, g, b, if is_active { 255 } else { a });
-                    painter.line_segment([start, end], Stroke::new(if is_active { 3.5 } else { 2.0 }, color));
+                            | (raf_render::gizmo::GizmoAxis::Y, "Y")
+                            | (raf_render::gizmo::GizmoAxis::Z, "Z")
+                    );
+                    let color =
+                        Color32::from_rgba_unmultiplied(r, g, b, if is_active { 255 } else { a });
+                    painter.line_segment(
+                        [start, end],
+                        Stroke::new(if is_active { 3.5 } else { 2.0 }, color),
+                    );
 
                     if matches!(gizmo.mode, GizmoMode::Translate) {
-                        let tip = Pos2::new(screen_arrow.head_tip[0], screen_arrow.head_tip[1]) + offset;
-                        let left = Pos2::new(screen_arrow.head_left[0], screen_arrow.head_left[1]) + offset;
-                        let right = Pos2::new(screen_arrow.head_right[0], screen_arrow.head_right[1]) + offset;
-                        painter.add(egui::Shape::convex_polygon(vec![tip, left, right], color, Stroke::NONE));
+                        let tip =
+                            Pos2::new(screen_arrow.head_tip[0], screen_arrow.head_tip[1]) + offset;
+                        let left = Pos2::new(screen_arrow.head_left[0], screen_arrow.head_left[1])
+                            + offset;
+                        let right =
+                            Pos2::new(screen_arrow.head_right[0], screen_arrow.head_right[1])
+                                + offset;
+                        painter.add(egui::Shape::convex_polygon(
+                            vec![tip, left, right],
+                            color,
+                            Stroke::NONE,
+                        ));
                     }
 
                     painter.text(
@@ -125,20 +155,35 @@ impl ViewportPanel {
         vp_w: f32,
         vp_h: f32,
     ) {
-        let highlighted_axis = self.bridge.highlighted_gizmo_axis();
-        let highlighted_sign = self.bridge.highlighted_gizmo_scale_sign();
+        let highlighted_axis = if self.selected.len() > 1 {
+            self.multi_selection_highlighted_axis()
+        } else {
+            self.bridge.highlighted_gizmo_axis()
+        };
+        let highlighted_sign = if self.selected.len() > 1 {
+            self.multi_selection_highlighted_scale_sign()
+        } else {
+            self.bridge.highlighted_gizmo_scale_sign()
+        };
         let offset = egui::vec2(rect.left(), rect.top());
         let orange = Color32::from_rgb(232, 136, 38);
         let orange_dim = Color32::from_rgba_unmultiplied(232, 136, 38, 170);
 
-        for handle in raf_render::picking::project_gizmo_scale_handles(entity_pos, entity_scale, view_proj, vp_w, vp_h) {
+        for handle in raf_render::picking::project_gizmo_scale_handles(
+            entity_pos,
+            entity_scale,
+            view_proj,
+            vp_w,
+            vp_h,
+        ) {
             let center = Pos2::new(handle.center[0], handle.center[1]) + offset;
             let axis = [
                 raf_render::gizmo::GizmoAxis::X,
                 raf_render::gizmo::GizmoAxis::Y,
                 raf_render::gizmo::GizmoAxis::Z,
             ][handle.axis_index];
-            let is_active = highlighted_axis == axis && (highlighted_sign - handle.sign).abs() < 0.1;
+            let is_active =
+                highlighted_axis == axis && (highlighted_sign - handle.sign).abs() < 0.1;
 
             painter.circle_filled(
                 center,
@@ -150,7 +195,11 @@ impl ViewportPanel {
                 if is_active { 7.5 } else { 6.0 },
                 Stroke::new(
                     if is_active { 2.0 } else { 1.0 },
-                    if is_active { Color32::WHITE } else { Color32::from_rgba_unmultiplied(255, 220, 180, 120) },
+                    if is_active {
+                        Color32::WHITE
+                    } else {
+                        Color32::from_rgba_unmultiplied(255, 220, 180, 120)
+                    },
                 ),
             );
         }
@@ -175,11 +224,17 @@ impl ViewportPanel {
         let radius = raf_render::picking::GIZMO_ROTATION_RADIUS;
 
         for (axis_idx, (axis_a, axis_b)) in axis_planes.iter().enumerate() {
-            let highlighted_axis = self.bridge.highlighted_gizmo_axis();
-            let is_active = matches!((highlighted_axis, axis_idx),
+            let highlighted_axis = if self.selected.len() > 1 {
+                self.multi_selection_highlighted_axis()
+            } else {
+                self.bridge.highlighted_gizmo_axis()
+            };
+            let is_active = matches!(
+                (highlighted_axis, axis_idx),
                 (raf_render::gizmo::GizmoAxis::X, 0)
-                | (raf_render::gizmo::GizmoAxis::Y, 1)
-                | (raf_render::gizmo::GizmoAxis::Z, 2));
+                    | (raf_render::gizmo::GizmoAxis::Y, 1)
+                    | (raf_render::gizmo::GizmoAxis::Z, 2)
+            );
             let mut previous = None;
             for step in 0..=48 {
                 let angle = (step as f32 / 48.0) * std::f32::consts::TAU;
@@ -187,7 +242,9 @@ impl ViewportPanel {
                     + *axis_a * (angle.cos() * radius)
                     + *axis_b * (angle.sin() * radius);
 
-                if let Some((screen, _)) = raf_render::math::transform::project_point(world_pt, view_proj, vp_w, vp_h) {
+                if let Some((screen, _)) =
+                    raf_render::math::transform::project_point(world_pt, view_proj, vp_w, vp_h)
+                {
                     let current = Pos2::new(screen[0], screen[1]) + offset;
                     if let Some(prev) = previous {
                         painter.line_segment(
@@ -216,7 +273,9 @@ impl ViewportPanel {
             view_proj,
             vp_w,
             vp_h,
-        ) else { return; };
+        ) else {
+            return;
+        };
 
         for edge in overlay.edges {
             painter.line_segment(
@@ -229,11 +288,18 @@ impl ViewportPanel {
         }
 
         for vertex in overlay.vertices {
-            let pos = Pos2::new(rect.left() + vertex.position[0], rect.top() + vertex.position[1]);
+            let pos = Pos2::new(
+                rect.left() + vertex.position[0],
+                rect.top() + vertex.position[1],
+            );
             painter.circle_filled(
                 pos,
                 if vertex.selected { 5.0 } else { 3.5 },
-                if vertex.selected { Color32::WHITE } else { Color32::from_rgb(255, 160, 40) },
+                if vertex.selected {
+                    Color32::WHITE
+                } else {
+                    Color32::from_rgb(255, 160, 40)
+                },
             );
             painter.circle_stroke(
                 pos,

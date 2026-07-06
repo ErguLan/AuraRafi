@@ -33,11 +33,7 @@ impl AssetBrowser {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_file() {
-                    let ext = path
-                        .extension()
-                        .unwrap_or_default()
-                        .to_str()
-                        .unwrap_or("");
+                    let ext = path.extension().unwrap_or_default().to_str().unwrap_or("");
                     let name = path
                         .file_name()
                         .unwrap_or_default()

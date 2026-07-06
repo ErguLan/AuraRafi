@@ -37,9 +37,7 @@ impl Frustum {
     pub fn from_matrix(vp: &Mat4) -> Self {
         let m = vp.to_cols_array_2d();
         // Row vectors of the VP matrix (column-major storage)
-        let row = |r: usize| -> Vec4 {
-            Vec4::new(m[0][r], m[1][r], m[2][r], m[3][r])
-        };
+        let row = |r: usize| -> Vec4 { Vec4::new(m[0][r], m[1][r], m[2][r], m[3][r]) };
 
         let r0 = row(0);
         let r1 = row(1);
@@ -54,7 +52,10 @@ impl Frustum {
                     d: sum.w / len,
                 }
             } else {
-                Plane { normal: Vec3::Y, d: 0.0 }
+                Plane {
+                    normal: Vec3::Y,
+                    d: 0.0,
+                }
             }
         };
 
@@ -101,9 +102,21 @@ impl Frustum {
         for plane in &self.planes {
             // Find the positive vertex (furthest along the normal direction)
             let positive = Vec3::new(
-                if plane.normal.x >= 0.0 { aabb_max.x } else { aabb_min.x },
-                if plane.normal.y >= 0.0 { aabb_max.y } else { aabb_min.y },
-                if plane.normal.z >= 0.0 { aabb_max.z } else { aabb_min.z },
+                if plane.normal.x >= 0.0 {
+                    aabb_max.x
+                } else {
+                    aabb_min.x
+                },
+                if plane.normal.y >= 0.0 {
+                    aabb_max.y
+                } else {
+                    aabb_min.y
+                },
+                if plane.normal.z >= 0.0 {
+                    aabb_max.z
+                } else {
+                    aabb_min.z
+                },
             );
 
             if plane.distance_to(positive) < 0.0 {
@@ -123,11 +136,7 @@ mod tests {
     use super::*;
 
     fn test_frustum() -> Frustum {
-        let view = Mat4::look_at_rh(
-            Vec3::new(0.0, 0.0, 5.0),
-            Vec3::ZERO,
-            Vec3::Y,
-        );
+        let view = Mat4::look_at_rh(Vec3::new(0.0, 0.0, 5.0), Vec3::ZERO, Vec3::Y);
         let proj = Mat4::perspective_rh(60.0f32.to_radians(), 1.0, 0.1, 100.0);
         Frustum::from_matrix(&(proj * view))
     }
@@ -165,9 +174,6 @@ mod tests {
     #[test]
     fn aabb_far_invisible() {
         let frustum = test_frustum();
-        assert!(!frustum.intersects_aabb(
-            Vec3::new(-1.0, -1.0, 200.0),
-            Vec3::new(1.0, 1.0, 201.0),
-        ));
+        assert!(!frustum.intersects_aabb(Vec3::new(-1.0, -1.0, 200.0), Vec3::new(1.0, 1.0, 201.0),));
     }
 }

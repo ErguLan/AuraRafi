@@ -7,7 +7,8 @@
 use raf_core::config::RenderExecutionPolicy;
 
 use crate::api_graphic_basic::device::{
-    BasicBackendType, BasicDevice, BasicDeviceConfig, SceneFrameOutput, SharedWgpuContext,
+    BasicBackendType, BasicDevice, BasicDeviceConfig, SceneFrameMetrics, SceneFrameOutput,
+    SharedWgpuContext,
 };
 use crate::scene_renderer::SceneRenderFrame;
 
@@ -31,12 +32,13 @@ impl GraphicsSurfaceKind {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct RenderRuntimeSnapshot {
     pub surface: GraphicsSurfaceKind,
     pub policy: RenderExecutionPolicy,
     pub active_backend: Option<BasicBackendType>,
     pub advanced_gpu_features_allowed: bool,
+    pub last_frame_metrics: SceneFrameMetrics,
 }
 
 impl Default for RenderRuntimeSnapshot {
@@ -46,6 +48,7 @@ impl Default for RenderRuntimeSnapshot {
             policy: RenderExecutionPolicy::Auto,
             active_backend: None,
             advanced_gpu_features_allowed: false,
+            last_frame_metrics: SceneFrameMetrics::default(),
         }
     }
 }
@@ -134,6 +137,11 @@ impl RenderRuntime {
             policy: self.policy,
             active_backend: self.device.as_ref().map(|device| device.backend()),
             advanced_gpu_features_allowed: self.advanced_gpu_features_allowed,
+            last_frame_metrics: self
+                .device
+                .as_ref()
+                .map(|device| device.last_frame_metrics())
+                .unwrap_or_default(),
         }
     }
 

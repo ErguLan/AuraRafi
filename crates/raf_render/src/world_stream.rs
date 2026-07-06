@@ -171,7 +171,7 @@ impl Default for WorldStreamConfig {
         Self {
             enabled: false, // Off by default - only for open world games
             region_size: 128.0,
-            load_radius: 3,      // 7x7 = 49 regions max loaded
+            load_radius: 3, // 7x7 = 49 regions max loaded
             unload_radius: 5,
             max_loaded_regions: 49,
             max_total_triangles: 200_000,
@@ -188,7 +188,7 @@ impl WorldStreamConfig {
         Self {
             enabled: true,
             region_size: 128.0,
-            load_radius: 1,     // 3x3 = 9 regions
+            load_radius: 1, // 3x3 = 9 regions
             unload_radius: 2,
             max_loaded_regions: 9,
             max_total_triangles: 50_000,
@@ -203,7 +203,7 @@ impl WorldStreamConfig {
         Self {
             enabled: true,
             region_size: 256.0,
-            load_radius: 5,     // 11x11 = 121 regions
+            load_radius: 5, // 11x11 = 121 regions
             unload_radius: 7,
             max_loaded_regions: 121,
             max_total_triangles: 2_000_000,
@@ -287,17 +287,25 @@ impl WorldStreamState {
 
     /// Recompute stats from region data.
     pub fn update_stats(&mut self) {
-        self.loaded_count = self.regions.iter()
+        self.loaded_count = self
+            .regions
+            .iter()
             .filter(|r| r.state == RegionState::Loaded || r.state == RegionState::PartiallyLoaded)
             .count();
-        self.loading_count = self.regions.iter()
+        self.loading_count = self
+            .regions
+            .iter()
             .filter(|r| r.state == RegionState::Loading)
             .count();
-        self.total_triangles = self.regions.iter()
+        self.total_triangles = self
+            .regions
+            .iter()
             .filter(|r| r.state == RegionState::Loaded || r.state == RegionState::PartiallyLoaded)
             .map(|r| r.triangle_count)
             .sum();
-        self.total_memory = self.regions.iter()
+        self.total_memory = self
+            .regions
+            .iter()
             .filter(|r| r.state == RegionState::Loaded || r.state == RegionState::PartiallyLoaded)
             .map(|r| r.mem_bytes)
             .sum();

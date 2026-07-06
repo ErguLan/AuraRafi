@@ -34,12 +34,7 @@ pub fn project_point(
 }
 
 /// Project a 3D edge to 2D. Returns None if either point is behind camera.
-pub fn project_edge(
-    edge: &[Vec3; 2],
-    view_proj: &Mat4,
-    w: f32,
-    h: f32,
-) -> Option<[[f32; 2]; 2]> {
+pub fn project_edge(edge: &[Vec3; 2], view_proj: &Mat4, w: f32, h: f32) -> Option<[[f32; 2]; 2]> {
     let mut a_clip = *view_proj * Vec4::new(edge[0].x, edge[0].y, edge[0].z, 1.0);
     let mut b_clip = *view_proj * Vec4::new(edge[1].x, edge[1].y, edge[1].z, 1.0);
 
@@ -85,7 +80,9 @@ fn clip_to_screen(clip: Vec4, viewport_width: f32, viewport_height: f32) -> Opti
 /// Calculate basic directional light shading (dot product).
 /// Returns a brightness factor from 0.3 to 1.0.
 pub fn face_brightness(face_normal: Vec3, light_dir: Vec3, model_rotation: &Mat4) -> f32 {
-    let world_normal = (*model_rotation * Vec4::from((face_normal, 0.0))).truncate().normalize();
+    let world_normal = (*model_rotation * Vec4::from((face_normal, 0.0)))
+        .truncate()
+        .normalize();
     let dot = world_normal.dot(light_dir.normalize());
     // Remap from [-1, 1] to [0.3, 1.0] for ambient + diffuse
     0.3 + 0.7 * dot.max(0.0)

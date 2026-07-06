@@ -83,7 +83,12 @@ pub fn compute_lighting(
     let mut brightness = env.ambient;
 
     // Directional light.
-    if let Light::Directional { direction, intensity, .. } = &env.sun {
+    if let Light::Directional {
+        direction,
+        intensity,
+        ..
+    } = &env.sun
+    {
         let ndl = n.dot(*direction).max(0.0);
         brightness += ndl * intensity;
 
@@ -100,7 +105,12 @@ pub fn compute_lighting(
     let count = (max_points as usize).min(env.point_lights.len());
     for light in env.point_lights.iter().take(count) {
         match light {
-            Light::Point { position, intensity, radius, .. } => {
+            Light::Point {
+                position,
+                intensity,
+                radius,
+                ..
+            } => {
                 let to_light = *position - face_center;
                 let dist = to_light.length();
                 if dist < *radius && dist > 0.001 {
@@ -117,7 +127,14 @@ pub fn compute_lighting(
                     }
                 }
             }
-            Light::Spot { position, direction, intensity, radius, cone_angle, .. } => {
+            Light::Spot {
+                position,
+                direction,
+                intensity,
+                radius,
+                cone_angle,
+                ..
+            } => {
                 let to_light = *position - face_center;
                 let dist = to_light.length();
                 if dist < *radius && dist > 0.001 {
@@ -126,7 +143,8 @@ pub fn compute_lighting(
                     if spot_dot > cone_angle.cos() {
                         let ndl = n.dot(dir).max(0.0);
                         let attenuation = 1.0 - (dist / radius).powi(2);
-                        let spot_factor = ((spot_dot - cone_angle.cos()) / (1.0 - cone_angle.cos())).min(1.0);
+                        let spot_factor =
+                            ((spot_dot - cone_angle.cos()) / (1.0 - cone_angle.cos())).min(1.0);
                         brightness += ndl * intensity * attenuation * spot_factor;
                     }
                 }

@@ -123,7 +123,11 @@ impl SchematicGraph {
     // -------------------------------------------------------------------
 
     /// Add a component at a position. Returns its index.
-    pub fn add_component(&mut self, component: ElectronicComponent, position: Vec2) -> SchematicNodeId {
+    pub fn add_component(
+        &mut self,
+        component: ElectronicComponent,
+        position: Vec2,
+    ) -> SchematicNodeId {
         let id = SchematicNodeId(self.nodes.len());
         self.nodes.push(SchematicNode::new(component, position));
         self.modified = true;
@@ -191,6 +195,8 @@ impl SchematicGraph {
             start,
             end,
             net: net_name.to_string(),
+            start_anchor: None,
+            end_anchor: None,
         };
         let id = wire.id;
         self.wires.push(wire);
@@ -249,10 +255,7 @@ impl SchematicGraph {
                     let near_end = (pin_world - wire.end).length_squared() < snap_dist_sq;
 
                     if near_start || near_end {
-                        net_map
-                            .entry(wire.net.clone())
-                            .or_default()
-                            .push((ci, pi));
+                        net_map.entry(wire.net.clone()).or_default().push((ci, pi));
                     }
                 }
             }
@@ -275,9 +278,9 @@ impl SchematicGraph {
 
     /// Find which net a pin belongs to.
     pub fn net_for_pin(&self, component_idx: usize, pin_idx: usize) -> Option<&Net> {
-        self.nets.iter().find(|net| {
-            net.pins.contains(&(component_idx, pin_idx))
-        })
+        self.nets
+            .iter()
+            .find(|net| net.pins.contains(&(component_idx, pin_idx)))
     }
 
     // -------------------------------------------------------------------
@@ -307,7 +310,9 @@ impl SchematicGraph {
     /// Find the component closest to a canvas position (for click picking).
     pub fn pick_component(&self, canvas_pos: Vec2, radius: f32) -> Option<usize> {
         let radius_sq = radius * radius;
-        self.nodes.iter().enumerate()
+        self.nodes
+            .iter()
+            .enumerate()
             .filter(|(_, n)| n.visible)
             .filter(|(_, n)| (n.canvas_position - canvas_pos).length_squared() < radius_sq)
             .min_by(|(_, a), (_, b)| {
@@ -321,7 +326,9 @@ impl SchematicGraph {
     /// Find the wire closest to a canvas position.
     pub fn pick_wire(&self, canvas_pos: Vec2, threshold: f32) -> Option<usize> {
         let threshold_sq = threshold * threshold;
-        self.wires.iter().enumerate()
+        self.wires
+            .iter()
+            .enumerate()
             .filter_map(|(i, w)| {
                 let dist_sq = point_to_segment_dist_sq_2d(canvas_pos, w.start, w.end);
                 if dist_sq < threshold_sq {
@@ -401,10 +408,12 @@ impl SchematicGraph {
         let warning = LegacyWarning {
             message_en: "Could not parse schematic file. \
                          The file may be corrupted or from an incompatible version. \
-                         A new empty schematic has been created.".to_string(),
+                         A new empty schematic has been created."
+                .to_string(),
             message_es: "No se pudo leer el archivo de esquematico. \
                          El archivo puede estar corrupto o ser de una version incompatible. \
-                         Se ha creado un esquematico vacio.".to_string(),
+                         Se ha creado un esquematico vacio."
+                .to_string(),
             is_legacy: false,
         };
         (Self::default(), Some(warning))

@@ -31,9 +31,18 @@ impl Default for LodConfig {
     fn default() -> Self {
         Self {
             levels: vec![
-                LodLevel { max_distance: 10.0, detail: 3 },  // High detail: close
-                LodLevel { max_distance: 25.0, detail: 2 },  // Medium: middle
-                LodLevel { max_distance: 50.0, detail: 1 },  // Low: far away
+                LodLevel {
+                    max_distance: 10.0,
+                    detail: 3,
+                }, // High detail: close
+                LodLevel {
+                    max_distance: 25.0,
+                    detail: 2,
+                }, // Medium: middle
+                LodLevel {
+                    max_distance: 50.0,
+                    detail: 1,
+                }, // Low: far away
             ],
             enabled: false, // Off by default to keep things simple
             cull_distance: 100.0,
@@ -63,11 +72,11 @@ impl LodConfig {
     /// Convert detail level (1-3) to polygon counts for sphere/cylinder.
     pub fn segments_for_detail(detail: u8) -> usize {
         match detail {
-            0 => 4,   // Extremely low poly
-            1 => 6,   // Low poly
-            2 => 8,   // Medium
-            3 => 12,  // High for this engine
-            _ => 16,  // Max
+            0 => 4,  // Extremely low poly
+            1 => 6,  // Low poly
+            2 => 8,  // Medium
+            3 => 12, // High for this engine
+            _ => 16, // Max
         }
     }
 
@@ -100,7 +109,7 @@ mod tests {
     fn lod_enabled_selects_level() {
         let mut lod = LodConfig::default();
         lod.enabled = true;
-        assert_eq!(lod.detail_for_distance(5.0), Some(3));  // Close
+        assert_eq!(lod.detail_for_distance(5.0), Some(3)); // Close
         assert_eq!(lod.detail_for_distance(15.0), Some(2)); // Mid
         assert_eq!(lod.detail_for_distance(40.0), Some(1)); // Far
     }

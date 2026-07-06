@@ -165,7 +165,7 @@ impl Default for AnimCollisionConfig {
             enabled: true,          // ON by default - our marketing advantage
             check_every_n_steps: 1, // Every step (precise)
             default_response: AnimCollisionResponse::Stop,
-            auto_generate: true,    // Auto-create for hands/feet
+            auto_generate: true, // Auto-create for hands/feet
             max_colliders_per_anim: 8,
             show_debug: false,
         }

@@ -70,7 +70,12 @@ impl CpuTexture {
         let idx = ((py * self.width + px) * 4) as usize;
 
         if idx + 3 < self.data.len() {
-            [self.data[idx], self.data[idx + 1], self.data[idx + 2], self.data[idx + 3]]
+            [
+                self.data[idx],
+                self.data[idx + 1],
+                self.data[idx + 2],
+                self.data[idx + 3],
+            ]
         } else {
             [255, 0, 255, 255]
         }
@@ -238,7 +243,11 @@ fn try_parse_bmp(data: &[u8], source: &Path) -> Option<CpuTexture> {
             let b = data[px];
             let g = data[px + 1];
             let r = data[px + 2];
-            let a = if bytes_per_pixel == 4 { data[px + 3] } else { 255 };
+            let a = if bytes_per_pixel == 4 {
+                data[px + 3]
+            } else {
+                255
+            };
             rgba.extend_from_slice(&[r, g, b, a]);
         }
     }

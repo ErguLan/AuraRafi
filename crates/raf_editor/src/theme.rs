@@ -153,7 +153,11 @@ fn dark_palette(experimental: f32) -> ThemePalette {
         selection: mix_color(DARK_SELECTION, Color32::from_rgb(38, 78, 104), factor),
         border: mix_color(DARK_BORDER, Color32::from_rgb(66, 92, 122), factor),
         separator: mix_color(DARK_SEPARATOR, Color32::from_rgb(42, 62, 82), factor),
-        faint_bg: mix_color(Color32::from_rgb(28, 28, 28), Color32::from_rgb(24, 36, 50), factor),
+        faint_bg: mix_color(
+            Color32::from_rgb(28, 28, 28),
+            Color32::from_rgb(24, 36, 50),
+            factor,
+        ),
     }
 }
 
@@ -164,13 +168,29 @@ fn light_palette(experimental: f32) -> ThemePalette {
         panel: mix_color(LIGHT_PANEL, Color32::from_rgb(236, 247, 255), factor),
         widget: mix_color(LIGHT_WIDGET, Color32::from_rgb(211, 228, 245), factor),
         widget_hover: mix_color(LIGHT_WIDGET_HOVER, Color32::from_rgb(197, 218, 238), factor),
-        widget_active: mix_color(Color32::from_rgb(200, 200, 210), Color32::from_rgb(184, 208, 232), factor),
+        widget_active: mix_color(
+            Color32::from_rgb(200, 200, 210),
+            Color32::from_rgb(184, 208, 232),
+            factor,
+        ),
         text: mix_color(LIGHT_TEXT, Color32::from_rgb(27, 43, 66), factor),
         text_dim: mix_color(LIGHT_TEXT_DIM, Color32::from_rgb(88, 106, 132), factor),
-        selection: mix_color(Color32::from_rgb(255, 230, 190), Color32::from_rgb(176, 214, 248), factor),
+        selection: mix_color(
+            Color32::from_rgb(255, 230, 190),
+            Color32::from_rgb(176, 214, 248),
+            factor,
+        ),
         border: mix_color(LIGHT_BORDER, Color32::from_rgb(170, 198, 224), factor),
-        separator: mix_color(Color32::from_rgb(225, 227, 232), Color32::from_rgb(186, 210, 232), factor),
-        faint_bg: mix_color(Color32::from_rgb(235, 235, 240), Color32::from_rgb(218, 231, 244), factor),
+        separator: mix_color(
+            Color32::from_rgb(225, 227, 232),
+            Color32::from_rgb(186, 210, 232),
+            factor,
+        ),
+        faint_bg: mix_color(
+            Color32::from_rgb(235, 235, 240),
+            Color32::from_rgb(218, 231, 244),
+            factor,
+        ),
     }
 }
 

@@ -128,7 +128,8 @@ impl WorldState {
 
     /// Get a custom data value.
     pub fn get_custom(&self, key: &str) -> Option<&str> {
-        self.custom_data.iter()
+        self.custom_data
+            .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
     }

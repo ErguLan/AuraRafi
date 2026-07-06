@@ -10,6 +10,7 @@ members = [
     "crates/raf_ai",
     "crates/raf_net",
     "crates/raf_hardware",
+    "crates/raf_script",
     "editor",
 ]
 
@@ -63,6 +64,9 @@ uuid = { version = "1", features = ["v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 libloading = "0.8"
 
+# Scripting
+rhai = { version = "1.19", features = ["sync"] }
+
 # HTTP (lightweight, blocking - no async runtime needed)
 ureq = { version = "2", features = ["json"] }
 
@@ -76,6 +80,7 @@ raf_nodes = { path = "crates/raf_nodes" }
 raf_ai = { path = "crates/raf_ai" }
 raf_net = { path = "crates/raf_net" }
 raf_hardware = { path = "crates/raf_hardware" }
+raf_script = { path = "crates/raf_script" }
 
 [profile.release]
 opt-level = 3

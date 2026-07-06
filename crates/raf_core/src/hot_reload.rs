@@ -13,10 +13,10 @@
 //! - Collaborative dev: another dev saves to shared folder, your engine sees it
 //! - Live editing: change a config file and see results instantly
 
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
 // Watch categories
@@ -146,7 +146,7 @@ pub struct HotReloadConfig {
 impl Default for HotReloadConfig {
     fn default() -> Self {
         Self {
-            enabled: true, // On by default - this is expected behavior
+            enabled: true,           // On by default - this is expected behavior
             poll_interval_secs: 2.0, // Check every 2 seconds
             watch_recursive: true,
             max_watched_files: 500,
@@ -202,16 +202,17 @@ impl HotReloadState {
 
     /// Register a specific file to watch.
     pub fn watch_file(&mut self, path: &Path, category: WatchCategory) {
-        let last_modified = std::fs::metadata(path)
-            .and_then(|m| m.modified())
-            .ok();
+        let last_modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
 
-        self.watched.insert(path.to_path_buf(), WatchedFile {
-            path: path.to_path_buf(),
-            category,
-            last_modified,
-            changed: false,
-        });
+        self.watched.insert(
+            path.to_path_buf(),
+            WatchedFile {
+                path: path.to_path_buf(),
+                category,
+                last_modified,
+                changed: false,
+            },
+        );
     }
 
     /// Stop watching a file.
@@ -239,17 +240,13 @@ impl HotReloadState {
 
             if path.is_dir() && config.watch_recursive {
                 // Skip hidden directories and target directories.
-                let name = path.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("");
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 if name.starts_with('.') || name == "target" || name == "target_gnu" {
                     continue;
                 }
                 self.scan_directory(&path, config);
             } else if path.is_file() {
-                let ext = path.extension()
-                    .and_then(|e| e.to_str())
-                    .unwrap_or("");
+                let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
                 let category = WatchCategory::from_extension(ext);
 
@@ -400,9 +397,7 @@ impl HotReloadState {
         let count = self.pending_changes.len();
         if count == 1 {
             let c = &self.pending_changes[0];
-            let name = c.path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?");
+            let name = c.path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
             format!("{} changed", name)
         } else {
             format!("{} files changed", count)
@@ -417,9 +412,7 @@ impl HotReloadState {
         let count = self.pending_changes.len();
         if count == 1 {
             let c = &self.pending_changes[0];
-            let name = c.path.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("?");
+            let name = c.path.file_name().and_then(|n| n.to_str()).unwrap_or("?");
             format!("{} modificado", name)
         } else {
             format!("{} archivos modificados", count)

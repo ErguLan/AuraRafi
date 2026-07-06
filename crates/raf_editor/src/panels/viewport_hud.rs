@@ -33,6 +33,7 @@ impl ViewportPanel {
         rect: Rect,
         is_dark: bool,
         icons: &UiIconAtlas,
+        lang: Language,
     ) {
         self.draw_toolbar(painter, rect, is_dark, icons);
         self.draw_mode_toggle(painter, rect, is_dark);
@@ -42,6 +43,10 @@ impl ViewportPanel {
         if self.mode == ViewportMode::View3D {
             self.draw_axis_gizmo(painter, rect, is_dark);
         }
+
+        // Tooltips for HUD buttons (grid, labels, G/R/S/F, 2D/3D, axis gizmo).
+        // Drawn last so they sit on top of every other HUD element.
+        self.draw_hud_tooltips(painter, rect, lang);
     }
 
     pub(super) fn handle_hud_click(
@@ -61,9 +66,11 @@ impl ViewportPanel {
         if let Some(action) = self.toolbar_action_at(rect, pos) {
             match action {
                 HudAction::SetGizmo(mode) => self.bridge.set_gizmo_mode(mode),
-                HudAction::Focus => self
-                    .bridge
-                    .focus_selected(scene, self.selected.first().copied(), self.mode == ViewportMode::View2D),
+                HudAction::Focus => self.bridge.focus_selected(
+                    scene,
+                    self.selected.first().copied(),
+                    self.mode == ViewportMode::View2D,
+                ),
                 _ => {}
             }
             return true;
@@ -123,15 +130,24 @@ impl ViewportPanel {
         painter.rect_stroke(group_rect, 6.0, Stroke::new(0.5, hud_group_border(is_dark)));
 
         let buttons = [
-            (HudAction::SetGizmo(GizmoMode::Translate), Some("move.png"), "G"),
-            (HudAction::SetGizmo(GizmoMode::Rotate), Some("rotate.png"), "R"),
+            (
+                HudAction::SetGizmo(GizmoMode::Translate),
+                Some("move.png"),
+                "G",
+            ),
+            (
+                HudAction::SetGizmo(GizmoMode::Rotate),
+                Some("rotate.png"),
+                "R",
+            ),
             (HudAction::SetGizmo(GizmoMode::Scale), None, "S"),
             (HudAction::Focus, Some("focus.png"), "F"),
         ];
 
         for (index, (action, icon_name, fallback)) in buttons.iter().enumerate() {
             let button_rect = self.toolbar_button_rect(rect, index);
-            let is_active = matches!(action, HudAction::SetGizmo(mode) if *mode == self.bridge.gizmo().mode);
+            let is_active =
+                matches!(action, HudAction::SetGizmo(mode) if *mode == self.bridge.gizmo().mode);
 
             if is_active {
                 let active_bg = if is_dark {
@@ -184,7 +200,12 @@ impl ViewportPanel {
 
         let badge_rect = self.edit_mode_badge_rect(rect);
         let badge_fill = if self.edit_mode == EditMode::Vertex {
-            Color32::from_rgba_unmultiplied(theme::ACCENT.r(), theme::ACCENT.g(), theme::ACCENT.b(), 60)
+            Color32::from_rgba_unmultiplied(
+                theme::ACCENT.r(),
+                theme::ACCENT.g(),
+                theme::ACCENT.b(),
+                60,
+            )
         } else if is_dark {
             Color32::from_rgba_unmultiplied(40, 40, 44, 180)
         } else {
@@ -223,7 +244,10 @@ impl ViewportPanel {
         painter.rect_filled(group_rect, 5.0, hud_group_fill(is_dark));
         painter.rect_stroke(group_rect, 5.0, Stroke::new(0.5, hud_group_border(is_dark)));
 
-        for (index, mode) in [ViewportMode::View2D, ViewportMode::View3D].iter().enumerate() {
+        for (index, mode) in [ViewportMode::View2D, ViewportMode::View3D]
+            .iter()
+            .enumerate()
+        {
             let button_rect = self.mode_toggle_button_rect(rect, index);
             let is_active = self.mode == *mode;
             if is_active {
@@ -249,7 +273,11 @@ impl ViewportPanel {
                 },
                 egui::FontId::proportional(10.0),
                 if is_active {
-                    if is_dark { Color32::from_gray(235) } else { Color32::from_gray(35) }
+                    if is_dark {
+                        Color32::from_gray(235)
+                    } else {
+                        Color32::from_gray(35)
+                    }
                 } else if is_dark {
                     Color32::from_gray(120)
                 } else {
@@ -281,7 +309,11 @@ impl ViewportPanel {
             egui::Align2::RIGHT_CENTER,
             info,
             egui::FontId::proportional(9.0),
-            if is_dark { Color32::from_gray(215) } else { Color32::from_gray(55) },
+            if is_dark {
+                Color32::from_gray(215)
+            } else {
+                Color32::from_gray(55)
+            },
         );
     }
 
@@ -293,7 +325,12 @@ impl ViewportPanel {
         for (index, is_active) in [self.grid_visible, self.show_labels].iter().enumerate() {
             let button_rect = self.toggle_button_rect(rect, index);
             let fill = if *is_active {
-                Color32::from_rgba_unmultiplied(theme::ACCENT.r(), theme::ACCENT.g(), theme::ACCENT.b(), if is_dark { 70 } else { 58 })
+                Color32::from_rgba_unmultiplied(
+                    theme::ACCENT.r(),
+                    theme::ACCENT.g(),
+                    theme::ACCENT.b(),
+                    if is_dark { 70 } else { 58 },
+                )
             } else if is_dark {
                 Color32::from_rgba_unmultiplied(38, 38, 42, 190)
             } else {
@@ -316,7 +353,11 @@ impl ViewportPanel {
                         "Aa",
                         egui::FontId::proportional(9.0),
                         if *is_active {
-                            if is_dark { Color32::WHITE } else { Color32::from_gray(30) }
+                            if is_dark {
+                                Color32::WHITE
+                            } else {
+                                Color32::from_gray(30)
+                            }
                         } else if is_dark {
                             Color32::from_gray(180)
                         } else {
@@ -337,7 +378,11 @@ impl ViewportPanel {
         is_dark: bool,
     ) {
         let color = if is_active {
-            if is_dark { Color32::WHITE } else { Color32::from_gray(30) }
+            if is_dark {
+                Color32::WHITE
+            } else {
+                Color32::from_gray(30)
+            }
         } else if is_dark {
             Color32::from_gray(180)
         } else {
@@ -350,11 +395,17 @@ impl ViewportPanel {
 
         for factor in [0.0, 0.5, 1.0] {
             let x = egui::lerp(left..=right, factor);
-            painter.line_segment([Pos2::new(x, top), Pos2::new(x, bottom)], Stroke::new(1.0, color));
+            painter.line_segment(
+                [Pos2::new(x, top), Pos2::new(x, bottom)],
+                Stroke::new(1.0, color),
+            );
         }
         for factor in [0.0, 0.5, 1.0] {
             let y = egui::lerp(top..=bottom, factor);
-            painter.line_segment([Pos2::new(left, y), Pos2::new(right, y)], Stroke::new(1.0, color));
+            painter.line_segment(
+                [Pos2::new(left, y), Pos2::new(right, y)],
+                Stroke::new(1.0, color),
+            );
         }
     }
 
@@ -379,7 +430,11 @@ impl ViewportPanel {
             egui::Align2::CENTER_CENTER,
             "ISO",
             egui::FontId::proportional(7.0),
-            if is_dark { Color32::from_gray(220) } else { Color32::from_gray(50) },
+            if is_dark {
+                Color32::from_gray(220)
+            } else {
+                Color32::from_gray(50)
+            },
         );
 
         for endpoint in self.axis_gizmo_endpoints(rect) {
@@ -420,9 +475,10 @@ impl ViewportPanel {
     fn info_overlay_text(&self) -> String {
         let stats = self.bridge.stats();
         let graphics_status = self.render_runtime.status_badge();
+        let gfx = self.render_runtime.last_frame_metrics;
         match self.mode {
             ViewportMode::View2D => format!(
-                "{} | {} | Zoom {:.2}x | Sel {} | R {:.1}ms | U {:.1}ms",
+                "{} | {} | Zoom {:.2}x | Sel {} | R {:.1}ms | U {:.1}ms | G {:.2}ms | L {}",
                 match self.edit_mode {
                     EditMode::Object => "OBJ",
                     EditMode::Vertex => "VTX",
@@ -432,9 +488,11 @@ impl ViewportPanel {
                 self.selected.len(),
                 self.render_cpu_ms(),
                 self.upload_cpu_ms(),
+                gfx.frame_cpu_ms,
+                gfx.line_draw_calls,
             ),
             ViewportMode::View3D => format!(
-                "{} | {} | {} | E {}/{} | T {} | Sel {} | D {:.1} | Q {:.2}x | R {:.1}ms | U {:.1}ms",
+                "{} | {} | {} | E {}/{} | T {} | Sel {} | D {:.1}m | Q {:.2}x | R {:.1}ms | U {:.1}ms | G {:.2}ms | M {}/{} | L {}",
                 match self.edit_mode {
                     EditMode::Object => "OBJ",
                     EditMode::Vertex => "VTX",
@@ -453,6 +511,10 @@ impl ViewportPanel {
                 self.effective_render_scale(),
                 self.render_cpu_ms(),
                 self.upload_cpu_ms(),
+                gfx.frame_cpu_ms,
+                gfx.mesh_cache_hits,
+                gfx.mesh_cache_misses,
+                gfx.line_draw_calls,
             ),
         }
     }
@@ -466,7 +528,9 @@ impl ViewportPanel {
         ];
 
         actions.iter().enumerate().find_map(|(index, action)| {
-            self.toolbar_button_rect(rect, index).contains(pos).then_some(*action)
+            self.toolbar_button_rect(rect, index)
+                .contains(pos)
+                .then_some(*action)
         })
     }
 
@@ -474,14 +538,22 @@ impl ViewportPanel {
         [ViewportMode::View2D, ViewportMode::View3D]
             .iter()
             .enumerate()
-            .find_map(|(index, mode)| self.mode_toggle_button_rect(rect, index).contains(pos).then_some(*mode))
+            .find_map(|(index, mode)| {
+                self.mode_toggle_button_rect(rect, index)
+                    .contains(pos)
+                    .then_some(*mode)
+            })
     }
 
     fn toggle_action_at(&self, rect: Rect, pos: Pos2) -> Option<HudAction> {
         [HudAction::ToggleGrid, HudAction::ToggleLabels]
             .iter()
             .enumerate()
-            .find_map(|(index, action)| self.toggle_button_rect(rect, index).contains(pos).then_some(*action))
+            .find_map(|(index, action)| {
+                self.toggle_button_rect(rect, index)
+                    .contains(pos)
+                    .then_some(*action)
+            })
     }
 
     fn axis_gizmo_action_at(&self, rect: Rect, pos: Pos2) -> Option<HudAction> {
@@ -495,15 +567,18 @@ impl ViewportPanel {
             return Some(HudAction::ResetView);
         }
 
-        self.axis_gizmo_endpoints(rect)
-            .iter()
-            .find_map(|endpoint| (endpoint.end.distance(pos) <= 11.0).then_some(HudAction::SnapAxis(endpoint.axis)))
+        self.axis_gizmo_endpoints(rect).iter().find_map(|endpoint| {
+            (endpoint.end.distance(pos) <= 11.0).then_some(HudAction::SnapAxis(endpoint.axis))
+        })
     }
 
     fn toolbar_group_rect(&self, rect: Rect) -> Rect {
         let width = (HUD_BUTTON_SIZE + HUD_BUTTON_GAP) * 4.0 - HUD_BUTTON_GAP;
         Rect::from_min_size(
-            Pos2::new(rect.left() + HUD_PADDING - 3.0, rect.top() + HUD_PADDING - 3.0),
+            Pos2::new(
+                rect.left() + HUD_PADDING - 3.0,
+                rect.top() + HUD_PADDING - 3.0,
+            ),
             egui::vec2(width + 6.0, HUD_BUTTON_SIZE + 6.0),
         )
     }
@@ -565,7 +640,9 @@ impl ViewportPanel {
         let group_rect = self.toggle_group_rect(rect);
         Rect::from_min_size(
             Pos2::new(
-                group_rect.left() + 3.0 + index as f32 * (HUD_TOGGLE_BUTTON_WIDTH + HUD_TOGGLE_BUTTON_GAP),
+                group_rect.left()
+                    + 3.0
+                    + index as f32 * (HUD_TOGGLE_BUTTON_WIDTH + HUD_TOGGLE_BUTTON_GAP),
                 group_rect.top() + 3.0,
             ),
             egui::vec2(HUD_TOGGLE_BUTTON_WIDTH, HUD_TOGGLE_BUTTON_HEIGHT),
@@ -578,6 +655,155 @@ impl ViewportPanel {
             egui::vec2(56.0, 56.0),
         )
     }
+
+    /// Paint hover tooltips for every interactive HUD button.
+    ///
+    /// The HUD is drawn directly with `Painter` calls (no `egui::Response`),
+    /// so we cannot use `on_hover_text`. Instead we hit-test the pointer
+    /// against each known rect and paint a small floating label on a
+    /// foreground layer so it is never covered by the viewport image.
+    fn draw_hud_tooltips(&self, painter: &egui::Painter, rect: Rect, lang: Language) {
+        let Some(pointer) = painter.ctx().input(|i| i.pointer.hover_pos()) else {
+            return;
+        };
+        // Avoid showing a tooltip when the pointer is actively pressing/dragging.
+        if painter.ctx().input(|i| i.pointer.primary_down()) {
+            return;
+        }
+
+        let tooltip_text: Option<String> = (|| {
+            // Toolbar: G / R / S / F
+            let toolbar_labels = [
+                t("viewport.hud.move", lang),
+                t("viewport.hud.rotate", lang),
+                t("viewport.hud.scale", lang),
+                t("viewport.hud.focus", lang),
+            ];
+            for (index, label) in toolbar_labels.iter().enumerate() {
+                if self.toolbar_button_rect(rect, index).contains(pointer) {
+                    return Some((*label).to_string());
+                }
+            }
+
+            // Edit mode badge (OBJ/VTX).
+            if self.edit_mode_badge_rect(rect).contains(pointer) {
+                return Some(t("viewport.hud.toggle_edit_mode", lang).to_string());
+            }
+
+            // 2D / 3D toggle.
+            for (index, mode) in [ViewportMode::View2D, ViewportMode::View3D]
+                .iter()
+                .enumerate()
+            {
+                if self.mode_toggle_button_rect(rect, index).contains(pointer) {
+                    return Some(
+                        match mode {
+                            ViewportMode::View2D => t("viewport.hud.2d_view", lang),
+                            ViewportMode::View3D => t("viewport.hud.3d_view", lang),
+                        }
+                        .to_string(),
+                    );
+                }
+            }
+
+            // Visual toggles: grid / labels.
+            let toggle_labels = [
+                t("viewport.hud.toggle_grid", lang),
+                t("viewport.hud.toggle_labels", lang),
+            ];
+            for (index, label) in toggle_labels.iter().enumerate() {
+                if self.toggle_button_rect(rect, index).contains(pointer) {
+                    return Some((*label).to_string());
+                }
+            }
+
+            // Axis gizmo (3D only).
+            if self.mode == ViewportMode::View3D {
+                let gizmo_rect = self.axis_gizmo_rect(rect);
+                if gizmo_rect.contains(pointer) {
+                    let center = gizmo_rect.center();
+                    if center.distance(pointer) <= 10.0 {
+                        return Some(t("viewport.hud.reset_iso", lang).to_string());
+                    }
+                    for endpoint in self.axis_gizmo_endpoints(rect) {
+                        if endpoint.end.distance(pointer) <= 11.0 {
+                            let label_key = match endpoint.label {
+                                "X" => "viewport.hud.snap_x",
+                                "Y" => "viewport.hud.snap_y",
+                                "Z" => "viewport.hud.snap_z",
+                                _ => continue,
+                            };
+                            return Some(t(label_key, lang).to_string());
+                        }
+                    }
+                }
+            }
+
+            None
+        })();
+
+        if let Some(text) = tooltip_text {
+            paint_hud_tooltip(painter, pointer, &text, is_dark_from_visuals(painter));
+        }
+    }
+}
+
+fn is_dark_from_visuals(painter: &egui::Painter) -> bool {
+    painter.ctx().style().visuals.dark_mode
+}
+
+fn paint_hud_tooltip(painter: &egui::Painter, pointer: Pos2, text: &str, is_dark: bool) {
+    let layer_id = egui::LayerId::new(
+        egui::Order::Foreground,
+        egui::Id::new("viewport_hud_tooltip"),
+    );
+    let ctx_painter = painter.ctx().layer_painter(layer_id);
+    let font_id = egui::FontId::proportional(11.0);
+    let galley = ctx_painter.layout_no_wrap(
+        text.to_string(),
+        font_id,
+        if is_dark {
+            egui::Color32::from_gray(235)
+        } else {
+            egui::Color32::from_gray(30)
+        },
+    );
+    let pad = egui::vec2(8.0, 5.0);
+    let size = galley.size() + pad * 2.0;
+    // Place tooltip below and to the right of the cursor, flip if it would
+    // overflow the screen.
+    let mut origin = pointer + egui::vec2(14.0, 16.0);
+    let screen_rect = painter.ctx().screen_rect();
+    if origin.x + size.x > screen_rect.right() - 4.0 {
+        origin.x = pointer.x - size.x - 14.0;
+    }
+    if origin.y + size.y > screen_rect.bottom() - 4.0 {
+        origin.y = pointer.y - size.y - 16.0;
+    }
+    let rect = egui::Rect::from_min_size(origin, size);
+
+    let fill = if is_dark {
+        egui::Color32::from_rgba_premultiplied(26, 27, 33, 235)
+    } else {
+        egui::Color32::from_rgba_premultiplied(245, 245, 248, 240)
+    };
+    let stroke = if is_dark {
+        egui::Color32::from_rgba_premultiplied(60, 60, 65, 200)
+    } else {
+        egui::Color32::from_rgba_premultiplied(180, 180, 185, 200)
+    };
+
+    ctx_painter.rect_filled(rect, 4.0, fill);
+    ctx_painter.rect_stroke(rect, 4.0, egui::Stroke::new(1.0, stroke));
+    ctx_painter.galley(
+        egui::pos2(rect.left() + pad.x, rect.top() + pad.y),
+        galley,
+        if is_dark {
+            egui::Color32::from_gray(235)
+        } else {
+            egui::Color32::from_gray(30)
+        },
+    );
 }
 
 fn hud_group_fill(is_dark: bool) -> Color32 {

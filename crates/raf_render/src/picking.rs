@@ -97,7 +97,9 @@ pub fn pick_entity_ray(
 
     for (i, (world_pos, radius)) in entities.iter().enumerate() {
         let expanded_radius = radius.max(0.45) * 1.15;
-        let Some(hit_distance) = intersect_ray_sphere(ray_origin, ray_dir, *world_pos, expanded_radius) else {
+        let Some(hit_distance) =
+            intersect_ray_sphere(ray_origin, ray_dir, *world_pos, expanded_radius)
+        else {
             continue;
         };
 
@@ -134,9 +136,21 @@ pub struct GizmoArrow {
 
 /// The 3 transform gizmo arrows.
 pub const GIZMO_ARROWS: [GizmoArrow; 3] = [
-    GizmoArrow { axis: Vec3::X, color: [220, 70, 70, 255], label: "X" },
-    GizmoArrow { axis: Vec3::Y, color: [70, 200, 70, 255], label: "Y" },
-    GizmoArrow { axis: Vec3::Z, color: [70, 100, 220, 255], label: "Z" },
+    GizmoArrow {
+        axis: Vec3::X,
+        color: [220, 70, 70, 255],
+        label: "X",
+    },
+    GizmoArrow {
+        axis: Vec3::Y,
+        color: [70, 200, 70, 255],
+        label: "Y",
+    },
+    GizmoArrow {
+        axis: Vec3::Z,
+        color: [70, 100, 220, 255],
+        label: "Z",
+    },
 ];
 
 /// Length of gizmo arrows in world units.
@@ -186,10 +200,12 @@ pub fn project_gizmo_scale_handles(
     handles
         .iter()
         .filter_map(|(offset, axis_index, sign)| {
-            project_to_screen(entity_pos + *offset, view_proj, vp_w, vp_h).map(|center| GizmoScaleHandle {
-                center,
-                axis_index: *axis_index,
-                sign: *sign,
+            project_to_screen(entity_pos + *offset, view_proj, vp_w, vp_h).map(|center| {
+                GizmoScaleHandle {
+                    center,
+                    axis_index: *axis_index,
+                    sign: *sign,
+                }
             })
         })
         .collect()
@@ -271,11 +287,7 @@ pub fn pick_gizmo_arrow(
 
     for (i, arrow) in GIZMO_ARROWS.iter().enumerate() {
         if let Some(screen) = project_gizmo_arrow(entity_pos, arrow, view_proj, vp_w, vp_h) {
-            let dist = point_to_segment_distance(
-                click,
-                screen.start,
-                screen.end,
-            );
+            let dist = point_to_segment_distance(click, screen.start, screen.end);
             if dist < 8.0 {
                 let is_better = match best {
                     None => true,
@@ -329,11 +341,7 @@ pub fn pick_gizmo_rotation_ring(
     vp_w: f32,
     vp_h: f32,
 ) -> Option<(usize, f32)> {
-    let axis_planes = [
-        (Vec3::Y, Vec3::Z),
-        (Vec3::X, Vec3::Z),
-        (Vec3::X, Vec3::Y),
-    ];
+    let axis_planes = [(Vec3::Y, Vec3::Z), (Vec3::X, Vec3::Z), (Vec3::X, Vec3::Y)];
 
     let mut best: Option<(usize, f32)> = None;
 
@@ -387,10 +395,7 @@ fn project_to_screen(point: Vec3, view_proj: &Mat4, vp_w: f32, vp_h: f32) -> Opt
     }
     let ndc_x = clip.x / clip.w;
     let ndc_y = clip.y / clip.w;
-    Some([
-        (ndc_x + 1.0) * 0.5 * vp_w,
-        (1.0 - ndc_y) * 0.5 * vp_h,
-    ])
+    Some([(ndc_x + 1.0) * 0.5 * vp_w, (1.0 - ndc_y) * 0.5 * vp_h])
 }
 
 fn screen_to_world_ray(

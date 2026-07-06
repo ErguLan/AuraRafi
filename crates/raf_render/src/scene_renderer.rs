@@ -73,6 +73,13 @@ pub struct RenderOptions {
     pub solid_face_tonality: bool,
     pub selection_outline: bool,
     pub selection_outline_color: [u8; 4],
+    /// Outline color for secondary (non-primary) selected entities.
+    /// Used when multiple entities are selected to distinguish the primary
+    /// from the rest, like Unity/Blender do.
+    pub secondary_selection_outline_color: [u8; 4],
+    /// Entity ID of the primary selection (first in the multi-select list).
+    /// When None or not found, all selected entities use the primary color.
+    pub primary_selected: Option<u64>,
     pub grid_y: f32,
     pub grid_no_depth_test: bool,
 }
@@ -89,6 +96,8 @@ impl Default for RenderOptions {
             solid_face_tonality: true,
             selection_outline: true,
             selection_outline_color: [255, 160, 40, 255],
+            secondary_selection_outline_color: [255, 120, 20, 180],
+            primary_selected: None,
             grid_y: -0.02,
             grid_no_depth_test: false,
         }
@@ -208,7 +217,8 @@ impl SceneRenderer {
         let h = (vp_h as u32).max(1);
 
         self.framebuffer.resize(w, h);
-        self.framebuffer.clear(bg_color[0], bg_color[1], bg_color[2], bg_color[3]);
+        self.framebuffer
+            .clear(bg_color[0], bg_color[1], bg_color[2], bg_color[3]);
 
         let view = camera.view_matrix();
         let proj = camera.projection_matrix(vp_w, vp_h);
@@ -259,7 +269,13 @@ impl SceneRenderer {
                 _ => cube_radius,
             };
 
-            let bounding_r = mesh_radius * node.scale.x.abs().max(node.scale.y.abs()).max(node.scale.z.abs());
+            let bounding_r = mesh_radius
+                * node
+                    .scale
+                    .x
+                    .abs()
+                    .max(node.scale.y.abs())
+                    .max(node.scale.z.abs());
 
             if let Some(bounds) = &mut grid_bounds {
                 bounds.expand_with(world_pos, bounding_r);
@@ -308,34 +324,40 @@ impl SceneRenderer {
 
         // Sort: opaque first (front-to-back for early Z rejection),
         // then transparent (back-to-front for correct blending).
-        jobs.sort_by(|a, b| {
-            match (a.is_transparent, b.is_transparent) {
-                (false, true) => std::cmp::Ordering::Less,
-                (true, false) => std::cmp::Ordering::Greater,
-                (false, false) => a.dist_to_camera.partial_cmp(&b.dist_to_camera).unwrap_or(std::cmp::Ordering::Equal),
-                (true, true) => b.dist_to_camera.partial_cmp(&a.dist_to_camera).unwrap_or(std::cmp::Ordering::Equal),
-            }
+        jobs.sort_by(|a, b| match (a.is_transparent, b.is_transparent) {
+            (false, true) => std::cmp::Ordering::Less,
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, false) => a
+                .dist_to_camera
+                .partial_cmp(&b.dist_to_camera)
+                .unwrap_or(std::cmp::Ordering::Equal),
+            (true, true) => b
+                .dist_to_camera
+                .partial_cmp(&a.dist_to_camera)
+                .unwrap_or(std::cmp::Ordering::Equal),
         });
 
         // Execute render jobs (now we can borrow framebuffer mutably)
-        let use_tonality = !(matches!(options.mode, RenderMode::Solid) && !options.solid_face_tonality);
+        let use_tonality =
+            !(matches!(options.mode, RenderMode::Solid) && !options.solid_face_tonality);
         for job in &jobs {
             let override_mesh = mesh_override.and_then(|(override_id, override_mesh)| {
                 (override_id == job.id).then_some(override_mesh)
             });
             let override_edges = override_mesh.map(primitives::extract_edges);
 
-            let (mesh, edges): (&MeshData, &[[Vec3; 2]]) = if let Some(override_mesh) = override_mesh {
-                (override_mesh, override_edges.as_deref().unwrap_or(&[]))
-            } else {
-                match job.primitive {
-                    Primitive::Cube => (cube_mesh, cube_edges),
-                    Primitive::Cylinder => (cylinder_mesh, cylinder_edges),
-                    Primitive::Sphere => (sphere_mesh, sphere_edges),
-                    Primitive::Plane => (plane_mesh, plane_edges),
-                    _ => (cube_mesh, cube_edges),
-                }
-            };
+            let (mesh, edges): (&MeshData, &[[Vec3; 2]]) =
+                if let Some(override_mesh) = override_mesh {
+                    (override_mesh, override_edges.as_deref().unwrap_or(&[]))
+                } else {
+                    match job.primitive {
+                        Primitive::Cube => (cube_mesh, cube_edges),
+                        Primitive::Cylinder => (cylinder_mesh, cylinder_edges),
+                        Primitive::Sphere => (sphere_mesh, sphere_edges),
+                        Primitive::Plane => (plane_mesh, plane_edges),
+                        _ => (cube_mesh, cube_edges),
+                    }
+                };
 
             let mvp = vp * job.model;
             let normal_mat = transform::normal_matrix(&job.model);
@@ -374,17 +396,26 @@ impl SceneRenderer {
 
                 // Perspective divide -> NDC -> screen
                 let shade0 = if use_tonality {
-                    0.3 + 0.7 * transform::transform_normal(mesh.normals[i0], &normal_mat).dot(light_dir).max(0.0)
+                    0.3 + 0.7
+                        * transform::transform_normal(mesh.normals[i0], &normal_mat)
+                            .dot(light_dir)
+                            .max(0.0)
                 } else {
                     1.0
                 };
                 let shade1 = if use_tonality {
-                    0.3 + 0.7 * transform::transform_normal(mesh.normals[i1], &normal_mat).dot(light_dir).max(0.0)
+                    0.3 + 0.7
+                        * transform::transform_normal(mesh.normals[i1], &normal_mat)
+                            .dot(light_dir)
+                            .max(0.0)
                 } else {
                     1.0
                 };
                 let shade2 = if use_tonality {
-                    0.3 + 0.7 * transform::transform_normal(mesh.normals[i2], &normal_mat).dot(light_dir).max(0.0)
+                    0.3 + 0.7
+                        * transform::transform_normal(mesh.normals[i2], &normal_mat)
+                            .dot(light_dir)
+                            .max(0.0)
                 } else {
                     1.0
                 };
@@ -449,18 +480,18 @@ impl SceneRenderer {
 
             if draw_surface_edges || (options.selection_outline && job.is_selected) {
                 let edge_color = if job.is_selected && options.selection_outline {
-                    options.selection_outline_color
+                    // Distinguish primary from secondary selection when
+                    // multiple entities are selected (Unity/Blender style).
+                    let is_primary = options.primary_selected == Some(job.id.0 as u64);
+                    if is_primary {
+                        options.selection_outline_color
+                    } else {
+                        options.secondary_selection_outline_color
+                    }
                 } else {
                     surface_edge_color(job.base_color)
                 };
-                draw_wireframe_overlay(
-                    &mut self.framebuffer,
-                    edges,
-                    &mvp,
-                    vp_w,
-                    vp_h,
-                    edge_color,
-                );
+                draw_wireframe_overlay(&mut self.framebuffer, edges, &mvp, vp_w, vp_h, edge_color);
             }
         }
 
@@ -589,7 +620,8 @@ impl SceneRenderer {
                 .unwrap_or(std::cmp::Ordering::Equal),
         });
 
-        let use_tonality = !(matches!(options.mode, RenderMode::Solid) && !options.solid_face_tonality);
+        let use_tonality =
+            !(matches!(options.mode, RenderMode::Solid) && !options.solid_face_tonality);
         let mut grid_drawn = false;
         for job in &jobs {
             if job.is_transparent && !grid_drawn {
@@ -607,8 +639,9 @@ impl SceneRenderer {
                 grid_drawn = true;
             }
 
-            let override_mesh = mesh_override
-                .and_then(|(override_id, override_mesh)| (override_id == job.id).then_some(override_mesh));
+            let override_mesh = mesh_override.and_then(|(override_id, override_mesh)| {
+                (override_id == job.id).then_some(override_mesh)
+            });
             let override_edges = override_mesh.map(primitives::extract_edges);
             let override_basic_mesh = override_mesh.map(|mesh| Arc::new(mesh_to_basic(mesh)));
 
@@ -616,7 +649,8 @@ impl SceneRenderer {
                 if let Some(override_mesh) = override_mesh {
                     (
                         override_mesh,
-                        override_basic_mesh.unwrap_or_else(|| Arc::new(mesh_to_basic(override_mesh))),
+                        override_basic_mesh
+                            .unwrap_or_else(|| Arc::new(mesh_to_basic(override_mesh))),
                         override_edges.as_deref().unwrap_or(&[]),
                     )
                 } else {
@@ -627,8 +661,12 @@ impl SceneRenderer {
                             Arc::clone(&cylinder_basic_mesh),
                             cylinder_edges,
                         ),
-                        Primitive::Sphere => (sphere_mesh, Arc::clone(&sphere_basic_mesh), sphere_edges),
-                        Primitive::Plane => (plane_mesh, Arc::clone(&plane_basic_mesh), plane_edges),
+                        Primitive::Sphere => {
+                            (sphere_mesh, Arc::clone(&sphere_basic_mesh), sphere_edges)
+                        }
+                        Primitive::Plane => {
+                            (plane_mesh, Arc::clone(&plane_basic_mesh), plane_edges)
+                        }
                         _ => (cube_mesh, Arc::clone(&cube_basic_mesh), cube_edges),
                     }
                 };
@@ -663,7 +701,12 @@ impl SceneRenderer {
 
             if draw_surface_edges || (options.selection_outline && job.is_selected) {
                 let edge_color = if job.is_selected && options.selection_outline {
-                    options.selection_outline_color
+                    let is_primary = options.primary_selected == Some(job.id.0 as u64);
+                    if is_primary {
+                        options.selection_outline_color
+                    } else {
+                        options.secondary_selection_outline_color
+                    }
                 } else {
                     surface_edge_color(job.base_color)
                 };
@@ -703,10 +746,7 @@ impl SceneRenderer {
     }
 }
 
-pub(crate) fn rasterize_basic_scene_frame(
-    frame: &SceneRenderFrame,
-    framebuffer: &mut Framebuffer,
-) {
+pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer: &mut Framebuffer) {
     framebuffer.resize(frame.width, frame.height);
     let vp_w = frame.width as f32;
     let vp_h = frame.height as f32;
@@ -777,11 +817,13 @@ fn mesh_to_basic(mesh: &MeshData) -> BasicMesh {
         mesh.positions
             .iter()
             .enumerate()
-            .map(|(index, position)| crate::api_graphic_basic::mesh::BasicVertex {
-                position: *position,
-                normal: mesh.normals.get(index).copied().unwrap_or(Vec3::Y),
-                uv: [0.0, 0.0],
-            })
+            .map(
+                |(index, position)| crate::api_graphic_basic::mesh::BasicVertex {
+                    position: *position,
+                    normal: mesh.normals.get(index).copied().unwrap_or(Vec3::Y),
+                    uv: [0.0, 0.0],
+                },
+            )
             .collect(),
         mesh.indices.clone(),
     )
@@ -1002,17 +1044,7 @@ fn draw_wireframe_overlay(
         let z1 = (c1.z / c1.w + 1.0) * 0.5 - 0.001;
 
         rasterizer::rasterize_line(
-            fb,
-            x0,
-            y0,
-            z0,
-            x1,
-            y1,
-            z1,
-            color[0],
-            color[1],
-            color[2],
-            color[3],
+            fb, x0, y0, z0, x1, y1, z1, color[0], color[1], color[2], color[3],
         );
     }
 }
@@ -1131,17 +1163,7 @@ fn draw_world_line(
     let z1 = ((c1.z / c1.w + 1.0) * 0.5 + depth_bias).min(0.9995);
 
     rasterizer::rasterize_line(
-        fb,
-        x0,
-        y0,
-        z0,
-        x1,
-        y1,
-        z1,
-        color[0],
-        color[1],
-        color[2],
-        color[3],
+        fb, x0, y0, z0, x1, y1, z1, color[0], color[1], color[2], color[3],
     );
 }
 
@@ -1153,4 +1175,3 @@ fn line_outside_clip(c0: Vec4, c1: Vec4) -> bool {
         || (c0.z < -c0.w && c1.z < -c1.w)
         || (c0.z > c0.w && c1.z > c1.w)
 }
-

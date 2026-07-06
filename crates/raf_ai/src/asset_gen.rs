@@ -200,9 +200,7 @@ impl AssetGenCache {
     /// Look up a cached mesh by prompt.
     pub fn get_mesh(&self, prompt: &str) -> Option<&GeneratedMesh> {
         let hash = Self::hash_prompt(prompt);
-        self.meshes.iter()
-            .find(|(h, _)| *h == hash)
-            .map(|(_, m)| m)
+        self.meshes.iter().find(|(h, _)| *h == hash).map(|(_, m)| m)
     }
 
     /// Cache a generated mesh. Evicts oldest if over budget.

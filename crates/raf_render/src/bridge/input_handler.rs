@@ -50,8 +50,12 @@ impl ViewportEditSession {
     }
 
     pub fn prepare_selected_mesh(&mut self, scene: &SceneGraph, selected: Option<SceneNodeId>) {
-        let Some(id) = selected else { return; };
-        let Some(node) = scene.get(id) else { return; };
+        let Some(id) = selected else {
+            return;
+        };
+        let Some(node) = scene.get(id) else {
+            return;
+        };
         let _ = self.ensure_edit_mesh(id, node);
     }
 
@@ -76,12 +80,17 @@ impl ViewportEditSession {
         click_local: [f32; 2],
         shift: bool,
     ) -> bool {
-        let Some(id) = selected else { return false; };
-        let Some(node) = scene.get(id) else { return false; };
+        let Some(id) = selected else {
+            return false;
+        };
+        let Some(node) = scene.get(id) else {
+            return false;
+        };
         let model = scene.world_matrix(id);
         let mesh = self.ensure_edit_mesh(id, node);
 
-        if let Some(vertex_idx) = pick_edit_vertex(mesh, &model, view_proj, vp_w, vp_h, click_local) {
+        if let Some(vertex_idx) = pick_edit_vertex(mesh, &model, view_proj, vp_w, vp_h, click_local)
+        {
             if !shift {
                 mesh.selection.clear();
             }
@@ -104,8 +113,12 @@ impl ViewportEditSession {
         vp_h: f32,
         pointer_local: [f32; 2],
     ) {
-        let Some(id) = selected else { return; };
-        let Some(node) = scene.get(id) else { return; };
+        let Some(id) = selected else {
+            return;
+        };
+        let Some(node) = scene.get(id) else {
+            return;
+        };
         let model = scene.world_matrix(id);
 
         let can_start_drag = {
@@ -133,9 +146,15 @@ impl ViewportEditSession {
             return false;
         }
 
-        let Some(id) = selected else { return false; };
-        let Some(node) = scene.get(id) else { return false; };
-        let Some(last_pointer) = self.last_pointer else { return false; };
+        let Some(id) = selected else {
+            return false;
+        };
+        let Some(node) = scene.get(id) else {
+            return false;
+        };
+        let Some(last_pointer) = self.last_pointer else {
+            return false;
+        };
 
         let delta = [
             current_pointer[0] - last_pointer[0],
@@ -208,7 +227,8 @@ impl ViewportEditSession {
         vp_h: f32,
     ) -> Option<SceneNodeId> {
         let vp_inv = view_proj.inverse();
-        let (ray_origin, ray_dir) = transform::screen_to_world_ray(screen_x, screen_y, vp_w, vp_h, &vp_inv)?;
+        let (ray_origin, ray_dir) =
+            transform::screen_to_world_ray(screen_x, screen_y, vp_w, vp_h, &vp_inv)?;
         let ray = Ray::new(ray_origin, ray_dir);
 
         let mut best: Option<(SceneNodeId, f32)> = None;
@@ -223,7 +243,13 @@ impl ViewportEditSession {
 
             let world = scene.world_matrix(id);
             let center = world.col(3).truncate();
-            let radius = node.scale.x.abs().max(node.scale.y.abs()).max(node.scale.z.abs()) * 0.5;
+            let radius = node
+                .scale
+                .x
+                .abs()
+                .max(node.scale.y.abs())
+                .max(node.scale.z.abs())
+                * 0.5;
 
             if let Some(t) = ray_sphere(&ray, center, radius.max(0.3)) {
                 let mesh = self.mesh_data_for_pick(id, node);
@@ -239,13 +265,15 @@ impl ViewportEditSession {
     }
 
     fn ensure_edit_mesh(&mut self, id: SceneNodeId, node: &SceneNode) -> &mut EditableMesh {
-        self.editable_meshes.entry(id).or_insert_with(|| match node.primitive {
-            Primitive::Cube => EditableMesh::cube(),
-            Primitive::Plane | Primitive::Sprite2D => EditableMesh::plane(),
-            Primitive::Cylinder => EditableMesh::cylinder(16),
-            Primitive::Sphere => EditableMesh::sphere(8, 12),
-            Primitive::Empty => EditableMesh::cube(),
-        })
+        self.editable_meshes
+            .entry(id)
+            .or_insert_with(|| match node.primitive {
+                Primitive::Cube => EditableMesh::cube(),
+                Primitive::Plane | Primitive::Sprite2D => EditableMesh::plane(),
+                Primitive::Cylinder => EditableMesh::cylinder(16),
+                Primitive::Sphere => EditableMesh::sphere(8, 12),
+                Primitive::Empty => EditableMesh::cube(),
+            })
     }
 
     fn mesh_data_for_pick(&self, id: SceneNodeId, node: &SceneNode) -> MeshData {

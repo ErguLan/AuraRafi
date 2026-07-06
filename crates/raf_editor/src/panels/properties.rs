@@ -7,7 +7,8 @@ use glam::Vec3;
 use raf_core::config::Language;
 use raf_core::i18n::t;
 use raf_core::scene::graph::{NodeColor, Primitive, SceneGraph, SceneNode, SceneNodeId};
-use raf_core::scene::{Collider, ColliderType, SceneVariable, VariableValue, RigidBodyType};
+use raf_core::scene::{Collider, ColliderType, RigidBodyType, SceneVariable, VariableValue};
+use raf_core::units::DisplayUnit;
 use std::path::Path;
 
 use crate::ui_icons::UiIconAtlas;
@@ -15,38 +16,45 @@ use crate::ui_icons::UiIconAtlas;
 /// State for the properties panel.
 pub struct PropertiesPanel {
     script_bindings: crate::panels::behaviors::ScriptBindingsState,
+    display_unit: DisplayUnit,
 }
 
 impl Default for PropertiesPanel {
     fn default() -> Self {
         Self {
             script_bindings: crate::panels::behaviors::ScriptBindingsState::default(),
+            display_unit: DisplayUnit::Metric,
         }
     }
 }
 
 impl PropertiesPanel {
+    /// Set the display unit from engine settings.
+    pub fn set_display_unit(&mut self, unit: DisplayUnit) {
+        self.display_unit = unit;
+    }
+
     /// Draw the properties panel for the selected node.
     pub fn show(
         &mut self,
         ui: &mut Ui,
         scene: &mut SceneGraph,
         selected: Option<SceneNodeId>,
+        all_selected: &[SceneNodeId],
         lang: Language,
         icons: &UiIconAtlas,
         project_assets_path: Option<&Path>,
     ) -> bool {
+        let unit_suffix = self.display_unit.distance_suffix();
         let mut changed = false;
         ui.horizontal(|ui| {
             if let Some(icon) = icons.get("shape.png") {
-                ui.add(
-                    egui::Image::new(icon)
-                        .fit_to_exact_size(egui::Vec2::new(16.0, 16.0)),
-                );
+                ui.add(egui::Image::new(icon).fit_to_exact_size(egui::Vec2::new(16.0, 16.0)));
             }
             ui.label(
                 egui::RichText::new(t("app.properties", lang))
-                    .size(11.0).strong()
+                    .size(11.0)
+                    .strong()
                     .color(egui::Color32::from_rgb(130, 130, 140)),
             );
         });
@@ -83,6 +91,13 @@ impl PropertiesPanel {
             .unwrap_or_else(|| t("app.no_parent", lang));
         let children_count = metadata.children.len();
         let scripts_count = metadata.scripts.len();
+
+        // Multi-edit: snapshot color/visible before the UI runs so we can
+        // detect changes and propagate them to all selected nodes.
+        let multi_edit_count = all_selected.iter().filter(|&&sid| sid != id).count();
+        let color_before = metadata.color;
+        let visible_before = metadata.visible;
+        let multi_edit = multi_edit_count > 0;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             let node = match scene.get_mut(id) {
@@ -132,12 +147,22 @@ impl PropertiesPanel {
                     }
                 });
 
-                ui.add_space(8.0);
-                changed |= edit_vec3(ui, t("app.position", lang), &mut node.position, 0.1);
-                ui.add_space(6.0);
-                changed |= edit_vec3(ui, t("app.rotation", lang), &mut node.rotation, 0.5);
-                ui.add_space(6.0);
-                changed |= edit_vec3(ui, t("app.scale", lang), &mut node.scale, 0.05);
+            ui.add_space(8.0);
+            changed |= edit_vec3(ui, t("app.position", lang), &mut node.position, 0.1);
+            ui.label(
+                egui::RichText::new(format!("({})", unit_suffix))
+                    .size(9.0)
+                    .color(Color32::from_rgb(100, 100, 110)),
+            );
+            ui.add_space(6.0);
+            changed |= edit_vec3(ui, t("app.rotation", lang), &mut node.rotation, 0.5);
+            ui.add_space(6.0);
+            changed |= edit_vec3(ui, t("app.scale", lang), &mut node.scale, 0.05);
+            ui.label(
+                egui::RichText::new(format!("({}3)", unit_suffix))
+                    .size(9.0)
+                    .color(Color32::from_rgb(100, 100, 110)),
+            );
             });
 
             ui.add_space(4.0);
@@ -228,6 +253,33 @@ impl PropertiesPanel {
             });
         });
 
+        // Multi-edit propagation: if the primary node's color or visibility
+        // changed, apply the same values to every other selected node.
+        if multi_edit && changed {
+            if let Some(primary) = scene.get(id) {
+                let color_after = primary.color;
+                let visible_after = primary.visible;
+                if color_after != color_before {
+                    for &sid in all_selected {
+                        if sid != id {
+                            if let Some(n) = scene.get_mut(sid) {
+                                n.color = color_after;
+                            }
+                        }
+                    }
+                }
+                if visible_after != visible_before {
+                    for &sid in all_selected {
+                        if sid != id {
+                            if let Some(n) = scene.get_mut(sid) {
+                                n.visible = visible_after;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // Add modular "Attached Behaviors" UI below standard properties.
         // Needs `&mut SceneGraph`, so we call it outside the previous `node` borrow.
         changed |= crate::panels::behaviors::show_attached_behaviors(
@@ -259,10 +311,7 @@ fn inspector_card(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 if let Some(icon) = icons.get(icon_name) {
-                    ui.add(
-                        egui::Image::new(icon)
-                            .fit_to_exact_size(egui::Vec2::new(16.0, 16.0)),
-                    );
+                    ui.add(egui::Image::new(icon).fit_to_exact_size(egui::Vec2::new(16.0, 16.0)));
                 }
                 ui.label(
                     egui::RichText::new(title)
@@ -308,11 +357,17 @@ fn edit_vec3(ui: &mut Ui, label: String, value: &mut Vec3, speed: f64) -> bool {
     ui.add_space(2.0);
     ui.horizontal(|ui| {
         ui.label("X");
-        changed |= ui.add(egui::DragValue::new(&mut value.x).speed(speed)).changed();
+        changed |= ui
+            .add(egui::DragValue::new(&mut value.x).speed(speed))
+            .changed();
         ui.label("Y");
-        changed |= ui.add(egui::DragValue::new(&mut value.y).speed(speed)).changed();
+        changed |= ui
+            .add(egui::DragValue::new(&mut value.y).speed(speed))
+            .changed();
         ui.label("Z");
-        changed |= ui.add(egui::DragValue::new(&mut value.z).speed(speed)).changed();
+        changed |= ui
+            .add(egui::DragValue::new(&mut value.z).speed(speed))
+            .changed();
     });
     changed
 }
@@ -349,7 +404,10 @@ fn show_variables_editor(ui: &mut Ui, node: &mut SceneNode, lang: Language) -> b
                             .selected_text(selected_kind)
                             .show_ui(ui, |ui| {
                                 for kind in ["Bool", "Number", "Text"] {
-                                    if ui.selectable_value(&mut selected_kind, kind, kind).changed() {
+                                    if ui
+                                        .selectable_value(&mut selected_kind, kind, kind)
+                                        .changed()
+                                    {
                                         variable.value = match kind {
                                             "Bool" => VariableValue::Bool(false),
                                             "Number" => VariableValue::Number(0.0),
@@ -409,7 +467,10 @@ fn show_audio_source_editor(ui: &mut Ui, node: &mut SceneNode, lang: Language) -
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         changed |= ui
-            .checkbox(&mut node.audio_source.autoplay, t("app.audio_autoplay", lang))
+            .checkbox(
+                &mut node.audio_source.autoplay,
+                t("app.audio_autoplay", lang),
+            )
             .changed();
         changed |= ui
             .checkbox(&mut node.audio_source.looping, t("app.audio_looping", lang))
@@ -431,7 +492,10 @@ fn show_physics_editor(ui: &mut Ui, node: &mut SceneNode, lang: Language) -> boo
     let mut changed = false;
 
     changed |= ui
-        .checkbox(&mut node.rigid_body.enabled, t("app.enable_rigidbody", lang))
+        .checkbox(
+            &mut node.rigid_body.enabled,
+            t("app.enable_rigidbody", lang),
+        )
         .changed();
 
     ui.add_space(6.0);
@@ -503,7 +567,12 @@ fn show_physics_editor(ui: &mut Ui, node: &mut SceneNode, lang: Language) -> boo
     });
 
     ui.add_space(6.0);
-    changed |= edit_vec3(ui, t("app.velocity", lang), &mut node.rigid_body.velocity, 0.05);
+    changed |= edit_vec3(
+        ui,
+        t("app.velocity", lang),
+        &mut node.rigid_body.velocity,
+        0.05,
+    );
 
     changed
 }
@@ -511,7 +580,9 @@ fn show_physics_editor(ui: &mut Ui, node: &mut SceneNode, lang: Language) -> boo
 fn edit_variable_value(ui: &mut Ui, value: &mut VariableValue) -> bool {
     match value {
         VariableValue::Bool(current) => ui.checkbox(current, "").changed(),
-        VariableValue::Number(current) => ui.add(egui::DragValue::new(current).speed(0.1)).changed(),
+        VariableValue::Number(current) => {
+            ui.add(egui::DragValue::new(current).speed(0.1)).changed()
+        }
         VariableValue::Text(current) => ui
             .add(egui::TextEdit::singleline(current).desired_width(120.0))
             .changed(),

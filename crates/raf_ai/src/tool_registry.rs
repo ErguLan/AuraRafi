@@ -3,10 +3,10 @@
 //! This enables AI agents to discover and call engine functions
 //! through a standardized JSON schema interface.
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use raf_core::config::Language;
 use raf_core::i18n::t;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// Definition of a callable tool (engine operation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,9 +101,14 @@ impl ToolRegistry {
                     description: "Type of entity to create".to_string(),
                     required: true,
                     enum_values: Some(vec![
-                        "cube".into(), "sphere".into(), "cylinder".into(),
-                        "plane".into(), "sprite".into(), "light".into(),
-                        "camera".into(), "empty".into(),
+                        "cube".into(),
+                        "sphere".into(),
+                        "cylinder".into(),
+                        "plane".into(),
+                        "sprite".into(),
+                        "light".into(),
+                        "camera".into(),
+                        "empty".into(),
                     ]),
                 },
             ],
@@ -128,8 +133,12 @@ impl ToolRegistry {
                     description: "Property name".to_string(),
                     required: true,
                     enum_values: Some(vec![
-                        "position".into(), "rotation".into(), "scale".into(),
-                        "name".into(), "visible".into(), "color".into(),
+                        "position".into(),
+                        "rotation".into(),
+                        "scale".into(),
+                        "name".into(),
+                        "visible".into(),
+                        "color".into(),
                     ]),
                 },
                 ToolParameter {
@@ -147,15 +156,13 @@ impl ToolRegistry {
             name: "import_asset".to_string(),
             category: "asset".to_string(),
             description: t("ai.tool.import_asset.desc", Language::English),
-            parameters: vec![
-                ToolParameter {
-                    name: "path".to_string(),
-                    param_type: "string".to_string(),
-                    description: "File path to import".to_string(),
-                    required: true,
-                    enum_values: None,
-                },
-            ],
+            parameters: vec![ToolParameter {
+                name: "path".to_string(),
+                param_type: "string".to_string(),
+                description: "File path to import".to_string(),
+                required: true,
+                enum_values: None,
+            }],
             returns: "Asset ID".to_string(),
         });
 
@@ -170,8 +177,11 @@ impl ToolRegistry {
                     description: "Type of component".to_string(),
                     required: true,
                     enum_values: Some(vec![
-                        "resistor".into(), "capacitor".into(), "led".into(),
-                        "transistor".into(), "ic".into(),
+                        "resistor".into(),
+                        "capacitor".into(),
+                        "led".into(),
+                        "transistor".into(),
+                        "ic".into(),
                     ]),
                 },
                 ToolParameter {
@@ -234,15 +244,13 @@ impl ToolRegistry {
             name: "remove_component".to_string(),
             category: "electronics".to_string(),
             description: "Remove an electronic component by its designator".to_string(),
-            parameters: vec![
-                ToolParameter {
-                    name: "designator".to_string(),
-                    param_type: "string".to_string(),
-                    description: "Component designator (e.g. R1, C2)".to_string(),
-                    required: true,
-                    enum_values: None,
-                },
-            ],
+            parameters: vec![ToolParameter {
+                name: "designator".to_string(),
+                param_type: "string".to_string(),
+                description: "Component designator (e.g. R1, C2)".to_string(),
+                required: true,
+                enum_values: None,
+            }],
             returns: "Success boolean".to_string(),
         });
 
@@ -273,15 +281,13 @@ impl ToolRegistry {
             name: "rotate_component".to_string(),
             category: "electronics".to_string(),
             description: "Rotate an electronic component by 90 degrees".to_string(),
-            parameters: vec![
-                ToolParameter {
-                    name: "designator".to_string(),
-                    param_type: "string".to_string(),
-                    description: "Component designator".to_string(),
-                    required: true,
-                    enum_values: None,
-                },
-            ],
+            parameters: vec![ToolParameter {
+                name: "designator".to_string(),
+                param_type: "string".to_string(),
+                description: "Component designator".to_string(),
+                required: true,
+                enum_values: None,
+            }],
             returns: "New rotation angle".to_string(),
         });
 
@@ -313,17 +319,13 @@ impl ToolRegistry {
             name: "export_schematic".to_string(),
             category: "electronics".to_string(),
             description: "Export schematic in the specified format".to_string(),
-            parameters: vec![
-                ToolParameter {
-                    name: "format".to_string(),
-                    param_type: "string".to_string(),
-                    description: "Export format".to_string(),
-                    required: true,
-                    enum_values: Some(vec![
-                        "netlist".into(), "bom_csv".into(), "svg".into(),
-                    ]),
-                },
-            ],
+            parameters: vec![ToolParameter {
+                name: "format".to_string(),
+                param_type: "string".to_string(),
+                description: "Export format".to_string(),
+                required: true,
+                enum_values: Some(vec!["netlist".into(), "bom_csv".into(), "svg".into()]),
+            }],
             returns: "Exported content string".to_string(),
         });
 
@@ -347,17 +349,18 @@ impl ToolRegistry {
             name: "export_project".to_string(),
             category: "project".to_string(),
             description: "Export the project".to_string(),
-            parameters: vec![
-                ToolParameter {
-                    name: "format".to_string(),
-                    param_type: "string".to_string(),
-                    description: "Export format".to_string(),
-                    required: true,
-                    enum_values: Some(vec![
-                        "netlist".into(), "bom".into(), "svg".into(), "executable".into(),
-                    ]),
-                },
-            ],
+            parameters: vec![ToolParameter {
+                name: "format".to_string(),
+                param_type: "string".to_string(),
+                description: "Export format".to_string(),
+                required: true,
+                enum_values: Some(vec![
+                    "netlist".into(),
+                    "bom".into(),
+                    "svg".into(),
+                    "executable".into(),
+                ]),
+            }],
             returns: "Export path".to_string(),
         });
 

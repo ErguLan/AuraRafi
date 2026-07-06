@@ -30,9 +30,10 @@ impl AuraRafiApp {
                 };
                 
                 node.color = raf_core::NodeColor::rgb(38, 38, 38); // IC black
-                // Schematic position is 2D (x,y), map it to XZ plane on board
-                // Scale factor: divide schematic grid pixels by 50 to get 3D units
-                node.position = glam::Vec3::new(comp.position.x / 50.0, 0.1, comp.position.y / 50.0);
+                // Schematic position is 2D in mm, convert to world meters.
+                let wx = raf_core::units::schematic_to_world(comp.position.x);
+                let wz = raf_core::units::schematic_to_world(comp.position.y);
+                node.position = glam::Vec3::new(wx, 0.1, wz);
                 
                 // Add pins as child copper pads
                 for pin in &comp.pins {
@@ -41,7 +42,9 @@ impl AuraRafiApp {
                         pin_node.primitive = raf_core::Primitive::Cylinder;
                         pin_node.scale = glam::Vec3::new(0.04, 0.04, 0.04);
                         pin_node.color = raf_core::NodeColor::rgb(204, 178, 51); // Gold/Copper
-                        pin_node.position = glam::Vec3::new(pin.offset.x / 1.5, 0.0, pin.offset.y / 1.5);
+                        let pin_x = raf_core::units::schematic_to_world(pin.offset.x);
+                        let pin_z = raf_core::units::schematic_to_world(pin.offset.y);
+                        pin_node.position = glam::Vec3::new(pin_x, 0.0, pin_z);
                     }
                 }
             }

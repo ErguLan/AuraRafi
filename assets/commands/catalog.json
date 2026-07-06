@@ -1,0 +1,549 @@
+{
+  "version": 1,
+  "commands": [
+    {
+      "name": "help",
+      "aliases": ["h", "?"],
+      "domain": "shared",
+      "category": "system",
+      "description_key": "commands.help.desc",
+      "parameters": [],
+      "examples": ["/help", "/help domain=game"]
+    },
+    {
+      "name": "commands",
+      "aliases": ["list"],
+      "domain": "shared",
+      "category": "system",
+      "description_key": "commands.commands.desc",
+      "parameters": [],
+      "examples": ["/commands domain=electronics"]
+    },
+    {
+      "name": "describe",
+      "aliases": ["describe.command"],
+      "domain": "shared",
+      "category": "system",
+      "description_key": "commands.describe.desc",
+      "parameters": [
+        {"name": "command", "kind": "string", "required": true, "description_key": "commands.param.command"}
+      ],
+      "examples": ["/describe game.add"]
+    },
+    {
+      "name": "history",
+      "aliases": [],
+      "domain": "shared",
+      "category": "system",
+      "description_key": "commands.history.desc",
+      "parameters": [],
+      "examples": ["/history"]
+    },
+    {
+      "name": "clear",
+      "aliases": ["cls"],
+      "domain": "shared",
+      "category": "system",
+      "description_key": "commands.clear.desc",
+      "parameters": [],
+      "examples": ["/clear"]
+    },
+    {
+      "name": "undo",
+      "aliases": ["u"],
+      "domain": "shared",
+      "category": "editor",
+      "description_key": "commands.undo.desc",
+      "parameters": [],
+      "examples": ["/undo"]
+    },
+    {
+      "name": "redo",
+      "aliases": ["rdo"],
+      "domain": "shared",
+      "category": "editor",
+      "description_key": "commands.redo.desc",
+      "parameters": [],
+      "examples": ["/redo"]
+    },
+    {
+      "name": "project.info",
+      "aliases": ["project"],
+      "domain": "shared",
+      "category": "project",
+      "description_key": "commands.project_info.desc",
+      "parameters": [],
+      "examples": ["/project.info"]
+    },
+    {
+      "name": "workspace.read",
+      "aliases": ["read"],
+      "domain": "shared",
+      "category": "workspace",
+      "description_key": "commands.workspace_read.desc",
+      "parameters": [
+        {"name": "path", "kind": "path", "required": true, "description_key": "commands.param.path"},
+        {"name": "max_bytes", "kind": "usize", "required": false, "default": "65536", "description_key": "commands.param.max_bytes"}
+      ],
+      "examples": ["/read path=scripts/player.rhai"]
+    },
+    {
+      "name": "workspace.search",
+      "aliases": ["search"],
+      "domain": "shared",
+      "category": "workspace",
+      "description_key": "commands.workspace_search.desc",
+      "parameters": [
+        {"name": "query", "kind": "string", "required": true, "description_key": "commands.param.query"},
+        {"name": "max_results", "kind": "usize", "required": false, "default": "80", "description_key": "commands.param.max_results"}
+      ],
+      "examples": ["/search query=player"]
+    },
+    {
+      "name": "game.add",
+      "aliases": ["add", "spawn"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_add.desc",
+      "parameters": [
+        {"name": "primitive", "kind": "enum", "required": false, "default": "cube", "description_key": "commands.param.primitive"},
+        {"name": "name", "kind": "string", "required": false, "description_key": "commands.param.name"},
+        {"name": "x", "kind": "f32", "required": false, "default": "0"},
+        {"name": "y", "kind": "f32", "required": false, "default": "0"},
+        {"name": "z", "kind": "f32", "required": false, "default": "0"}
+      ],
+      "examples": ["/game.add primitive=cube name=Block x=0 y=1 z=0"]
+    },
+    {
+      "name": "game.select",
+      "aliases": ["select"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_select.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true, "description_key": "commands.param.target"}
+      ],
+      "examples": ["/game.select target=Cube 1"]
+    },
+    {
+      "name": "game.rename",
+      "aliases": ["rename"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_rename.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": false},
+        {"name": "name", "kind": "string", "required": true}
+      ],
+      "examples": ["/game.rename target=Cube 1 name=Player"]
+    },
+    {
+      "name": "game.delete",
+      "aliases": ["game.remove"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_delete.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": false}
+      ],
+      "examples": ["/game.delete target=Player"]
+    },
+    {
+      "name": "game.duplicate",
+      "aliases": ["game.copy"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_duplicate.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": false}
+      ],
+      "examples": ["/game.duplicate target=Player"]
+    },
+    {
+      "name": "game.set_transform",
+      "aliases": ["game.transform"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_set_transform.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": false}
+      ],
+      "examples": ["/game.set_transform target=Player x=1 y=2 z=0 sx=2 sy=1 sz=2"]
+    },
+    {
+      "name": "game.move",
+      "aliases": [],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_move.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": false}
+      ],
+      "examples": ["/game.move target=Player dx=1 dy=0 dz=0"]
+    },
+    {
+      "name": "game.rotate",
+      "aliases": [],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_rotate.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": false}
+      ],
+      "examples": ["/game.rotate target=Player ry=90"]
+    },
+    {
+      "name": "game.scale",
+      "aliases": [],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_scale.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": false}
+      ],
+      "examples": ["/game.scale target=Player factor=1.25"]
+    },
+    {
+      "name": "game.color",
+      "aliases": ["game.set_color"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_color.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": false},
+        {"name": "color", "kind": "color", "required": true}
+      ],
+      "examples": ["/game.color target=Player color=#44AAFF"]
+    },
+    {
+      "name": "game.arrange_grid",
+      "aliases": [],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_arrange_grid.desc",
+      "parameters": [
+        {"name": "spacing", "kind": "f32", "required": false, "default": "2.0"}
+      ],
+      "examples": ["/game.arrange_grid spacing=2.5"]
+    },
+    {
+      "name": "game.generate_prefab",
+      "aliases": ["game.prefab"],
+      "domain": "game",
+      "category": "generation",
+      "description_key": "commands.game_generate_prefab.desc",
+      "parameters": [
+        {"name": "kind", "kind": "string", "required": false, "default": "platform"},
+        {"name": "name", "kind": "string", "required": false}
+      ],
+      "examples": [
+        "/game.generate_prefab kind=tower name=WatchTower",
+        "/game.generate_prefab kind=boat name=Basic_Boat"
+      ]
+    },
+    {
+      "name": "game.describe_scene",
+      "aliases": ["game.describe"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_describe_scene.desc",
+      "parameters": [],
+      "examples": ["/game.describe_scene"]
+    },
+    {
+      "name": "game.focus",
+      "aliases": [],
+      "domain": "game",
+      "category": "viewport",
+      "description_key": "commands.game_focus.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": false}
+      ],
+      "examples": ["/game.focus target=Player"]
+    },
+    {
+      "name": "electronics.add_part",
+      "aliases": ["part", "add_part"],
+      "domain": "electronics",
+      "category": "schematic",
+      "description_key": "commands.electronics_add_part.desc",
+      "parameters": [
+        {"name": "kind", "kind": "string", "required": false, "default": "resistor"},
+        {"name": "value", "kind": "string", "required": false},
+        {"name": "x", "kind": "f32", "required": false, "default": "0"},
+        {"name": "y", "kind": "f32", "required": false, "default": "0"}
+      ],
+      "examples": ["/electronics.add_part kind=resistor value=10k x=100 y=100"]
+    },
+    {
+      "name": "electronics.wire",
+      "aliases": ["wire"],
+      "domain": "electronics",
+      "category": "schematic",
+      "description_key": "commands.electronics_wire.desc",
+      "parameters": [
+        {"name": "x1", "kind": "f32", "required": true},
+        {"name": "y1", "kind": "f32", "required": true},
+        {"name": "x2", "kind": "f32", "required": true},
+        {"name": "y2", "kind": "f32", "required": true}
+      ],
+      "examples": ["/electronics.wire x1=80 y1=100 x2=120 y2=100 net=N001"]
+    },
+    {
+      "name": "electronics.set_value",
+      "aliases": ["set_value"],
+      "domain": "electronics",
+      "category": "schematic",
+      "description_key": "commands.electronics_set_value.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true},
+        {"name": "value", "kind": "string", "required": true}
+      ],
+      "examples": ["/electronics.set_value target=R1 value=4.7k"]
+    },
+    {
+      "name": "electronics.rotate",
+      "aliases": [],
+      "domain": "electronics",
+      "category": "schematic",
+      "description_key": "commands.electronics_rotate.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true},
+        {"name": "degrees", "kind": "f32", "required": false, "default": "90"}
+      ],
+      "examples": ["/electronics.rotate target=R1 degrees=90"]
+    },
+    {
+      "name": "electronics.delete",
+      "aliases": [],
+      "domain": "electronics",
+      "category": "schematic",
+      "description_key": "commands.electronics_delete.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true}
+      ],
+      "examples": ["/electronics.delete target=R1"]
+    },
+    {
+      "name": "electronics.select",
+      "aliases": [],
+      "domain": "electronics",
+      "category": "schematic",
+      "description_key": "commands.electronics_select.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true}
+      ],
+      "examples": ["/electronics.select target=R1"]
+    },
+    {
+      "name": "electronics.generate_circuit",
+      "aliases": ["circuit"],
+      "domain": "electronics",
+      "category": "generation",
+      "description_key": "commands.electronics_generate_circuit.desc",
+      "parameters": [
+        {"name": "kind", "kind": "string", "required": false, "default": "led"}
+      ],
+      "examples": ["/electronics.generate_circuit kind=led"]
+    },
+    {
+      "name": "electronics.autolayout",
+      "aliases": [],
+      "domain": "electronics",
+      "category": "schematic",
+      "description_key": "commands.electronics_autolayout.desc",
+      "parameters": [
+        {"name": "spacing", "kind": "f32", "required": false, "default": "80"}
+      ],
+      "examples": ["/electronics.autolayout spacing=90"]
+    },
+    {
+      "name": "electronics.drc",
+      "aliases": ["drc"],
+      "domain": "electronics",
+      "category": "analysis",
+      "description_key": "commands.electronics_drc.desc",
+      "parameters": [],
+      "examples": ["/electronics.drc"]
+    },
+    {
+      "name": "electronics.simulate",
+      "aliases": ["simulate"],
+      "domain": "electronics",
+      "category": "analysis",
+      "description_key": "commands.electronics_simulate.desc",
+      "parameters": [],
+      "examples": ["/electronics.simulate"]
+    },
+    {
+      "name": "electronics.netlist",
+      "aliases": ["netlist"],
+      "domain": "electronics",
+      "category": "analysis",
+      "description_key": "commands.electronics_netlist.desc",
+      "parameters": [],
+      "examples": ["/electronics.netlist"]
+    },
+    {
+      "name": "electronics.bom",
+      "aliases": ["bom"],
+      "domain": "electronics",
+      "category": "analysis",
+      "description_key": "commands.electronics_bom.desc",
+      "parameters": [],
+      "examples": ["/electronics.bom"]
+    },
+    {
+      "name": "electronics.describe",
+      "aliases": [],
+      "domain": "electronics",
+      "category": "schematic",
+      "description_key": "commands.electronics_describe.desc",
+      "parameters": [],
+      "examples": ["/electronics.describe"]
+    },
+    {
+      "name": "pcb.sync",
+      "aliases": [],
+      "domain": "electronics",
+      "category": "pcb",
+      "description_key": "commands.pcb_sync.desc",
+      "parameters": [],
+      "examples": ["/pcb.sync"]
+    },
+    {
+      "name": "pcb.route_airwire",
+      "aliases": ["pcb.route"],
+      "domain": "electronics",
+      "category": "pcb",
+      "description_key": "commands.pcb_route_airwire.desc",
+      "parameters": [
+        {"name": "index", "kind": "usize", "required": false, "default": "0"}
+      ],
+      "examples": ["/pcb.route_airwire index=0"]
+    },
+    {
+      "name": "pcb.set_board",
+      "aliases": [],
+      "domain": "electronics",
+      "category": "pcb",
+      "description_key": "commands.pcb_set_board.desc",
+      "parameters": [
+        {"name": "width", "kind": "f32", "required": false, "default": "420"},
+        {"name": "height", "kind": "f32", "required": false, "default": "280"}
+      ],
+      "examples": ["/pcb.set_board width=80 height=50"]
+    },
+    {
+      "name": "pcb.move",
+      "aliases": [],
+      "domain": "electronics",
+      "category": "pcb",
+      "description_key": "commands.pcb_move.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true}
+      ],
+      "examples": ["/pcb.move target=R1 x=120 y=90"]
+    },
+    {
+      "name": "pcb.rotate",
+      "aliases": [],
+      "domain": "electronics",
+      "category": "pcb",
+      "description_key": "commands.pcb_rotate.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true},
+        {"name": "degrees", "kind": "f32", "required": false, "default": "90"}
+      ],
+      "examples": ["/pcb.rotate target=R1 degrees=90"]
+    },
+    {
+      "name": "pcb.describe",
+      "aliases": [],
+      "domain": "electronics",
+      "category": "pcb",
+      "description_key": "commands.pcb_describe.desc",
+      "parameters": [],
+      "examples": ["/pcb.describe"]
+    },
+    {
+      "name": "script.create",
+      "aliases": ["script.new"],
+      "domain": "shared",
+      "category": "script",
+      "description_key": "commands.script_create.desc",
+      "parameters": [
+        {"name": "lang", "kind": "string", "required": false, "description_key": "commands.param.name", "default": "rhai"},
+        {"name": "name", "kind": "string", "required": false, "description_key": "commands.param.name", "default": "new_script"}
+      ],
+      "examples": ["/script.create lang=rhai name=player_controller"]
+    },
+    {
+      "name": "script.attach",
+      "aliases": [],
+      "domain": "shared",
+      "category": "script",
+      "description_key": "commands.script_attach.desc",
+      "parameters": [
+        {"name": "file", "kind": "string", "required": true, "description_key": "commands.param.path"},
+        {"name": "entity", "kind": "string", "required": true, "description_key": "commands.param.target"}
+      ],
+      "examples": ["/script.attach file=player_controller.rhai entity=Player"]
+    },
+    {
+      "name": "script.detach",
+      "aliases": [],
+      "domain": "shared",
+      "category": "script",
+      "description_key": "commands.script_detach.desc",
+      "parameters": [
+        {"name": "file", "kind": "string", "required": true, "description_key": "commands.param.path"},
+        {"name": "entity", "kind": "string", "required": true, "description_key": "commands.param.target"}
+      ],
+      "examples": ["/script.detach file=player_controller.rhai entity=Player"]
+    },
+    {
+      "name": "script.list",
+      "aliases": ["script.ls"],
+      "domain": "shared",
+      "category": "script",
+      "description_key": "commands.script_list.desc",
+      "parameters": [],
+      "examples": ["/script.list"]
+    },
+    {
+      "name": "script.validate",
+      "aliases": ["script.check"],
+      "domain": "shared",
+      "category": "script",
+      "description_key": "commands.script_validate.desc",
+      "parameters": [
+        {"name": "file", "kind": "string", "required": true, "description_key": "commands.param.path"}
+      ],
+      "examples": ["/script.validate file=player_controller.rhai"]
+    },
+    {
+      "name": "script.run",
+      "aliases": [],
+      "domain": "shared",
+      "category": "script",
+      "description_key": "commands.script_run.desc",
+      "parameters": [
+        {"name": "file", "kind": "string", "required": true, "description_key": "commands.param.path"}
+      ],
+      "examples": ["/script.run file=player_controller.rhai"]
+    },
+    {
+      "name": "script.compile_nodes",
+      "aliases": [],
+      "domain": "shared",
+      "category": "script",
+      "description_key": "commands.script_compile_nodes.desc",
+      "parameters": [
+        {"name": "flow", "kind": "string", "required": false, "description_key": "commands.param.name", "default": "Main"},
+        {"name": "output", "kind": "string", "required": false, "description_key": "commands.param.path", "default": "compiled.rhai"}
+      ],
+      "examples": ["/script.compile_nodes flow=Main output=compiled.rhai"]
+    }
+  ]
+}

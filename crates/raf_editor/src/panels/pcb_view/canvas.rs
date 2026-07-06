@@ -12,6 +12,8 @@ use raf_render::scene_renderer::{FrameStats, SceneRenderFrame};
 
 use super::{PcbSelection, PcbTool, PcbViewPanel};
 use crate::panels::gpu_canvas::canvas_view_projection;
+use crate::panels::schematic_view::electronics_palette;
+use crate::theme;
 
 const GRID_STEP: f32 = 20.0;
 const PCB_Z_GRID: f32 = 0.92;
@@ -33,8 +35,12 @@ impl PcbViewPanel {
     ) -> bool {
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
         let painter = ui.painter_at(rect);
+        self.canvas_dark_mode = ui.visuals().dark_mode;
+        let palette = electronics_palette(self.canvas_dark_mode);
         let mut changed = false;
-        let hover_pos = ui.input(|i| i.pointer.hover_pos()).filter(|pointer| rect.contains(*pointer));
+        let hover_pos = ui
+            .input(|i| i.pointer.hover_pos())
+            .filter(|pointer| rect.contains(*pointer));
         let hovered_component = hover_pos.and_then(|pointer| self.hit_component(rect, pointer));
         let hovered_trace = hover_pos.and_then(|pointer| self.hit_trace(rect, pointer));
         let hovered_airwire = hover_pos.and_then(|pointer| self.hit_airwire(rect, pointer));
@@ -42,14 +48,20 @@ impl PcbViewPanel {
         let render_h = rect.height().max(1.0).round() as u32;
         let gpu_frame = self.build_gpu_canvas_frame(render_w, render_h);
         let render_output = render_runtime.render_scene_frame(&gpu_frame);
-        self.gpu_canvas
-            .present(ui.ctx(), wgpu_render_state, render_output, render_w, render_h);
+        self.render_runtime = render_runtime.snapshot();
+        self.gpu_canvas.present(
+            ui.ctx(),
+            wgpu_render_state,
+            render_output,
+            render_w,
+            render_h,
+        );
         let gpu_backdrop_ready = self.gpu_canvas.is_ready();
 
         if gpu_backdrop_ready {
             self.gpu_canvas.paint(&painter, rect);
         } else {
-            painter.rect_filled(rect, 6.0, Color32::from_rgb(17, 17, 20));
+            painter.rect_filled(rect, 0.0, palette.canvas_bg);
             self.draw_grid(&painter, rect);
             self.draw_board(&painter, rect);
             self.draw_traces(&painter, rect);
@@ -68,18 +80,21 @@ impl PcbViewPanel {
             }
         }
 
-        if response.dragged_by(egui::PointerButton::Middle) || response.dragged_by(egui::PointerButton::Secondary) {
+        if response.dragged_by(egui::PointerButton::Middle)
+            || response.dragged_by(egui::PointerButton::Secondary)
+        {
             let delta = ui.input(|i| i.pointer.delta());
             self.offset += delta;
         }
 
         let pointer_pos = ui.input(|i| i.pointer.interact_pos());
         let primary_clicked = response.clicked_by(egui::PointerButton::Primary);
+        let primary_drag_started = response.drag_started_by(egui::PointerButton::Primary);
         let secondary_clicked = response.clicked_by(egui::PointerButton::Secondary);
 
         match self.tool {
             PcbTool::Select => {
-                if primary_clicked {
+                if primary_drag_started {
                     if let Some(pointer) = pointer_pos {
                         let world = self.snap_world(rect, self.screen_to_world(rect, pointer));
                         if let Some(component_index) = self.hit_component(rect, pointer) {
@@ -87,12 +102,23 @@ impl PcbViewPanel {
                             if let Some(component) = self.layout.components.get(component_index) {
                                 self.drag_state = Some((component_index, component.position - world));
                             }
+                        }
+                    }
+                }
+
+                if primary_clicked {
+                    if let Some(pointer) = pointer_pos {
+                        if let Some(component_index) = self.hit_component(rect, pointer) {
+                            self.selection = PcbSelection::Component(component_index);
+                            self.drag_state = None;
                         } else if let Some(trace_index) = self.hit_trace(rect, pointer) {
                             self.selection = PcbSelection::Trace(trace_index);
                             self.drag_state = None;
                         } else if let Some(airwire_index) = self.hit_airwire(rect, pointer) {
                             self.selection = PcbSelection::Airwire(airwire_index);
+                            self.tool = PcbTool::Route;
                             self.drag_state = None;
+                            changed = true;
                         } else {
                             self.selection = PcbSelection::None;
                             self.drag_state = None;
@@ -103,11 +129,10 @@ impl PcbViewPanel {
                 if let Some((component_index, anchor)) = self.drag_state {
                     if ui.input(|i| i.pointer.primary_down()) {
                         if let Some(pointer) = pointer_pos {
-                            let snapped = self.snap_world(
-                                rect,
-                                self.screen_to_world(rect, pointer) + anchor,
-                            );
-                            if let Some(component) = self.layout.components.get_mut(component_index) {
+                            let snapped =
+                                self.snap_world(rect, self.screen_to_world(rect, pointer) + anchor);
+                            if let Some(component) = self.layout.components.get_mut(component_index)
+                            {
                                 if !component.locked {
                                     if component.position != snapped {
                                         component.position = snapped;
@@ -140,7 +165,11 @@ impl PcbViewPanel {
                     if let Some(pointer) = pointer_pos {
                         let world = self.snap_world(rect, self.screen_to_world(rect, pointer));
                         if self.outline_draft.len() >= 3
-                            && self.outline_draft.first().map(|first| first.distance(world) <= GRID_STEP * 0.5).unwrap_or(false)
+                            && self
+                                .outline_draft
+                                .first()
+                                .map(|first| first.distance(world) <= GRID_STEP * 0.5)
+                                .unwrap_or(false)
                         {
                             let mut closed = self.outline_draft.clone();
                             closed.push(self.outline_draft[0]);
@@ -163,7 +192,9 @@ impl PcbViewPanel {
 
         let hint = match self.tool {
             PcbTool::Select => {
-                if hovered_component.is_some() {
+                if self.selected_airwire_index().is_some() {
+                    t("app.pcb_route_selected_hint", self.lang)
+                } else if hovered_component.is_some() {
                     t("app.pcb_canvas_hint_hover_component", self.lang)
                 } else {
                     t("app.pcb_canvas_hint", self.lang)
@@ -178,12 +209,18 @@ impl PcbViewPanel {
             }
             PcbTool::Outline => t("app.pcb_outline_hint", self.lang),
         };
+        // Show cursor position in mm (PCB canvas unit = 1mm).
+        let cursor_mm = hover_pos.map(|p| {
+            let w = self.screen_to_world(rect, p);
+            format!("Cursor: {:.1}, {:.1} mm | ", w.x, w.y)
+        }).unwrap_or_default();
+        let info_text = format!("{}{}", cursor_mm, hint);
         painter.text(
             Pos2::new(rect.left() + 12.0, rect.bottom() - 18.0),
             egui::Align2::LEFT_BOTTOM,
-            hint,
+            info_text,
             egui::FontId::proportional(11.0),
-            Color32::from_rgb(140, 140, 150),
+            palette.text_muted,
         );
 
         changed
@@ -191,7 +228,8 @@ impl PcbViewPanel {
 
     fn build_gpu_canvas_frame(&self, width: u32, height: u32) -> SceneRenderFrame {
         let mut commands = BasicCommandList::new();
-        commands.clear([17, 17, 20, 255]);
+        let palette = electronics_palette(self.canvas_dark_mode);
+        commands.clear(color_array(palette.canvas_bg));
 
         let (left, right, top, bottom) = self.visible_world_bounds(width as f32, height as f32);
         self.record_gpu_grid(&mut commands, left, right, top, bottom);
@@ -244,7 +282,11 @@ impl PcbViewPanel {
             commands.draw_line(
                 Vec3::new(x, top, PCB_Z_GRID),
                 Vec3::new(x, bottom, PCB_Z_GRID),
-                [27, 27, 32, 255],
+                if self.canvas_dark_mode {
+                    [25, 31, 38, 255]
+                } else {
+                    [211, 220, 232, 255]
+                },
                 1.0,
                 false,
                 0.0,
@@ -256,7 +298,11 @@ impl PcbViewPanel {
             commands.draw_line(
                 Vec3::new(left, y, PCB_Z_GRID),
                 Vec3::new(right, y, PCB_Z_GRID),
-                [27, 27, 32, 255],
+                if self.canvas_dark_mode {
+                    [25, 31, 38, 255]
+                } else {
+                    [211, 220, 232, 255]
+                },
                 1.0,
                 false,
                 0.0,
@@ -277,11 +323,16 @@ impl PcbViewPanel {
                 .collect();
             let indices = triangle_fan_indices(outline_points.len());
             if !indices.is_empty() {
-                let mesh_id = commands.register_mesh(Arc::new(BasicMesh::from_positions(&positions, &indices)));
+                let mesh_id = commands
+                    .register_mesh(Arc::new(BasicMesh::from_positions(&positions, &indices)));
                 commands.draw_mesh(
                     mesh_id,
                     Mat4::from_translation(Vec3::new(0.0, 0.0, PCB_Z_BOARD_FILL)),
-                    [23, 44, 28, 255],
+                    if self.canvas_dark_mode {
+                        [21, 46, 33, 255]
+                    } else {
+                        [199, 232, 209, 255]
+                    },
                 );
             }
         }
@@ -297,7 +348,11 @@ impl PcbViewPanel {
             commands.draw_line(
                 Vec3::new(pair[0].x, pair[0].y, PCB_Z_BOARD_OUTLINE),
                 Vec3::new(pair[1].x, pair[1].y, PCB_Z_BOARD_OUTLINE),
-                [178, 198, 130, 255],
+                if self.canvas_dark_mode {
+                    [101, 187, 126, 255]
+                } else {
+                    [55, 145, 82, 255]
+                },
                 1.0,
                 false,
                 0.0,
@@ -358,18 +413,23 @@ impl PcbViewPanel {
         let pad_mesh_id = commands.register_mesh(centered_unit_quad_mesh());
 
         for (index, component) in self.layout.components.iter().enumerate() {
-            let footprint = footprint_definition(&component.footprint, component.pad_nets.len().max(1));
+            let footprint =
+                footprint_definition(&component.footprint, component.pad_nets.len().max(1));
             let body_color = if self.selection == PcbSelection::Component(index) {
-                [58, 50, 40, 255]
+                [70, 52, 31, 255]
             } else if component.locked {
-                [46, 46, 52, 255]
+                [42, 45, 52, 255]
             } else {
-                [40, 40, 46, 255]
+                [26, 31, 39, 255]
             };
 
             commands.draw_mesh(
                 body_mesh_id,
-                quad_transform(component.position, footprint.body_size, PCB_Z_COMPONENT_BODY),
+                quad_transform(
+                    component.position,
+                    footprint.body_size,
+                    PCB_Z_COMPONENT_BODY,
+                ),
                 body_color,
             );
 
@@ -378,9 +438,9 @@ impl PcbViewPanel {
                     continue;
                 };
                 let pad_color = if self.selection == PcbSelection::Component(index) {
-                    [236, 194, 112, 255]
+                    [255, 205, 110, 255]
                 } else {
-                    [210, 170, 96, 255]
+                    [226, 132, 42, 255]
                 };
                 commands.draw_mesh(
                     pad_mesh_id,
@@ -400,16 +460,29 @@ impl PcbViewPanel {
         let start_x = ((rect.left() + self.offset.x) % spacing + spacing) % spacing;
         let start_y = ((rect.top() + self.offset.y) % spacing + spacing) % spacing;
 
-        let grid_stroke = Stroke::new(1.0, Color32::from_rgb(27, 27, 32));
+        let grid_stroke = Stroke::new(
+            1.0,
+            if self.canvas_dark_mode {
+                Color32::from_rgb(25, 31, 38)
+            } else {
+                Color32::from_rgb(211, 220, 232)
+            },
+        );
         let mut x = rect.left() + start_x;
         while x <= rect.right() {
-            painter.line_segment([Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())], grid_stroke);
+            painter.line_segment(
+                [Pos2::new(x, rect.top()), Pos2::new(x, rect.bottom())],
+                grid_stroke,
+            );
             x += spacing;
         }
 
         let mut y = rect.top() + start_y;
         while y <= rect.bottom() {
-            painter.line_segment([Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)], grid_stroke);
+            painter.line_segment(
+                [Pos2::new(rect.left(), y), Pos2::new(rect.right(), y)],
+                grid_stroke,
+            );
             y += spacing;
         }
     }
@@ -418,6 +491,7 @@ impl PcbViewPanel {
         if self.layout.board_outline.points.len() < 2 {
             return;
         }
+        let palette = electronics_palette(self.canvas_dark_mode);
 
         let board_points = self
             .layout
@@ -428,15 +502,53 @@ impl PcbViewPanel {
             .collect::<Vec<_>>();
 
         if self.layout.outline_is_closed() && board_points.len() >= 4 {
+            let shadow_points = board_points
+                .iter()
+                .map(|point| *point + egui::vec2(0.0, 3.0))
+                .collect::<Vec<_>>();
+            painter.add(egui::Shape::convex_polygon(
+                shadow_points,
+                Color32::from_rgba_premultiplied(
+                    0,
+                    0,
+                    0,
+                    if self.canvas_dark_mode { 90 } else { 28 },
+                ),
+                Stroke::NONE,
+            ));
             painter.add(egui::Shape::convex_polygon(
                 board_points.clone(),
-                Color32::from_rgb(23, 44, 28),
+                if self.canvas_dark_mode {
+                    Color32::from_rgb(21, 46, 33)
+                } else {
+                    Color32::from_rgb(199, 232, 209)
+                },
                 Stroke::NONE,
             ));
         }
 
         for pair in board_points.windows(2) {
-            painter.line_segment([pair[0], pair[1]], Stroke::new(2.0, Color32::from_rgb(178, 198, 130)));
+            painter.line_segment(
+                [pair[0], pair[1]],
+                Stroke::new(
+                    2.0,
+                    if self.canvas_dark_mode {
+                        Color32::from_rgb(101, 187, 126)
+                    } else {
+                        Color32::from_rgb(55, 145, 82)
+                    },
+                ),
+            );
+        }
+
+        if let Some(first) = board_points.first().copied() {
+            painter.text(
+                first + egui::vec2(8.0, 18.0),
+                egui::Align2::LEFT_TOP,
+                &self.layout.name,
+                egui::FontId::proportional(11.0),
+                palette.text_dim,
+            );
         }
     }
 
@@ -448,79 +560,140 @@ impl PcbViewPanel {
         hovered_component: Option<usize>,
     ) {
         for (index, component) in self.layout.components.iter().enumerate() {
-            let footprint = footprint_definition(&component.footprint, component.pad_nets.len().max(1));
+            let footprint =
+                footprint_definition(&component.footprint, component.pad_nets.len().max(1));
             let center = self.world_to_screen(rect, component.position);
-            let body_size = egui::vec2(footprint.body_size.x * self.zoom, footprint.body_size.y * self.zoom);
-            let body_rect = Rect::from_center_size(center, body_size);
+            let asset_size =
+                footprint_asset_screen_size(&component.footprint, footprint.body_size, self.zoom);
+            let body_size = egui::vec2(
+                footprint.body_size.x * self.zoom,
+                footprint.body_size.y * self.zoom,
+            );
+            let visual_size =
+                egui::vec2(body_size.x.max(asset_size.x), body_size.y.max(asset_size.y));
+            let visual_rect = Rect::from_center_size(center, visual_size);
             let selected = self.selection == PcbSelection::Component(index);
             let hovered = hovered_component == Some(index);
+            let palette = electronics_palette(self.canvas_dark_mode);
+            let stroke_color = if selected {
+                theme::ACCENT
+            } else if hovered {
+                Color32::from_rgb(255, 205, 110)
+            } else if self.canvas_dark_mode {
+                Color32::from_rgb(72, 82, 96)
+            } else {
+                Color32::from_rgb(146, 158, 174)
+            };
+            let fill_color = if selected {
+                palette.card_active
+            } else if hovered {
+                palette.card_hover
+            } else if component.locked {
+                Color32::from_rgb(42, 45, 52)
+            } else {
+                palette.card_bg
+            };
 
             if draw_fill_geometry {
                 painter.rect(
-                    body_rect,
+                    visual_rect,
                     6.0,
-                    Color32::from_rgb(40, 40, 46),
-                    Stroke::new(
-                        if selected { 2.0 } else { 1.0 },
-                        if selected {
-                            Color32::from_rgb(225, 160, 70)
-                        } else if hovered {
-                            Color32::from_rgb(212, 186, 118)
-                        } else {
-                            Color32::from_rgb(70, 72, 82)
-                        },
-                    ),
+                    fill_color,
+                    Stroke::new(if selected { 2.0 } else { 1.0 }, stroke_color),
                 );
             } else {
                 painter.rect_stroke(
-                    body_rect,
+                    visual_rect,
                     6.0,
-                    Stroke::new(
-                        if selected { 2.0 } else { 1.0 },
-                        if selected {
-                            Color32::from_rgb(225, 160, 70)
-                        } else if hovered {
-                            Color32::from_rgb(212, 186, 118)
-                        } else {
-                            Color32::from_rgb(78, 82, 94)
-                        },
-                    ),
+                    Stroke::new(if selected { 2.0 } else { 1.0 }, stroke_color),
                 );
             }
 
-            if draw_fill_geometry {
-                for (pad_index, pad) in footprint.pads.iter().enumerate() {
-                    if let Some(world) = self.layout.pad_world_position(index, pad_index) {
-                        let pad_center = self.world_to_screen(rect, world);
-                        let pad_rect = Rect::from_center_size(
-                            pad_center,
-                            egui::vec2(pad.size.x * self.zoom, pad.size.y * self.zoom),
+            let asset_rect = visual_rect.shrink2(egui::vec2(4.0, 6.0));
+            let tint = if component.locked {
+                Color32::from_rgba_premultiplied(210, 214, 220, 170)
+            } else {
+                Color32::WHITE
+            };
+            let _ = self.asset_atlas.paint(
+                painter,
+                footprint_asset_name(&component.footprint),
+                asset_rect,
+                tint,
+            );
+
+            for (pad_index, pad) in footprint.pads.iter().enumerate() {
+                if let Some(world) = self.layout.pad_world_position(index, pad_index) {
+                    let pad_center = self.world_to_screen(rect, world);
+                    let pad_rect = Rect::from_center_size(
+                        pad_center,
+                        egui::vec2(
+                            (pad.size.x * self.zoom).max(7.0),
+                            (pad.size.y * self.zoom).max(7.0),
+                        ),
+                    );
+                    let pad_net = component
+                        .pad_nets
+                        .get(pad_index)
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    let pad_color = net_color(pad_net, pad_index);
+                    painter.rect_filled(pad_rect, 3.0, pad_color);
+                    painter.rect_stroke(
+                        pad_rect,
+                        3.0,
+                        Stroke::new(1.0, Color32::from_rgb(255, 224, 150)),
+                    );
+
+                    if selected || hovered {
+                        painter.text(
+                            pad_center + egui::vec2(0.0, -10.0),
+                            egui::Align2::CENTER_BOTTOM,
+                            &pad.name,
+                            egui::FontId::proportional(9.0),
+                            palette.text_dim,
                         );
-                        painter.rect_filled(pad_rect, 3.0, Color32::from_rgb(210, 170, 96));
+                        if !pad_net.trim().is_empty() {
+                            painter.text(
+                                pad_center + egui::vec2(0.0, 11.0),
+                                egui::Align2::CENTER_TOP,
+                                pad_net,
+                                egui::FontId::proportional(8.0),
+                                palette.text_muted,
+                            );
+                        }
                     }
                 }
             }
 
             painter.text(
-                body_rect.center_top() + egui::vec2(0.0, -6.0),
+                visual_rect.center_top() + egui::vec2(0.0, -6.0),
                 egui::Align2::CENTER_BOTTOM,
                 &component.designator,
-                egui::FontId::proportional(11.0),
-                Color32::WHITE,
+                egui::FontId::proportional(12.0),
+                if selected {
+                    theme::ACCENT
+                } else {
+                    palette.text
+                },
             );
             painter.text(
-                body_rect.center_bottom() + egui::vec2(0.0, 4.0),
+                visual_rect.center_bottom() + egui::vec2(0.0, 4.0),
                 egui::Align2::CENTER_TOP,
-                &component.footprint,
+                if component.value.trim().is_empty() {
+                    &component.footprint
+                } else {
+                    &component.value
+                },
                 egui::FontId::proportional(10.0),
-                Color32::from_rgb(180, 180, 190),
+                palette.text_dim,
             );
 
             if hovered && !selected {
                 painter.rect_stroke(
-                    body_rect.expand(4.0),
+                    visual_rect.expand(4.0),
                     8.0,
-                    Stroke::new(1.0, Color32::from_rgb(212, 186, 118)),
+                    Stroke::new(1.0, Color32::from_rgb(255, 205, 110)),
                 );
             }
         }
@@ -537,8 +710,14 @@ impl PcbViewPanel {
             if let Some(trace) = self.layout.traces.get(index) {
                 for pair in trace.points.windows(2) {
                     painter.line_segment(
-                        [self.world_to_screen(rect, pair[0]), self.world_to_screen(rect, pair[1])],
-                        Stroke::new((trace.width * self.zoom * 0.14).max(3.0), Color32::from_rgb(255, 210, 140)),
+                        [
+                            self.world_to_screen(rect, pair[0]),
+                            self.world_to_screen(rect, pair[1]),
+                        ],
+                        Stroke::new(
+                            (trace.width * self.zoom * 0.14).max(4.0),
+                            Color32::from_rgb(255, 210, 140),
+                        ),
                     );
                 }
             }
@@ -548,9 +727,13 @@ impl PcbViewPanel {
             if let Some(airwire) = self.layout.airwires.get(index) {
                 let start = self.world_to_screen(rect, airwire.from);
                 let end = self.world_to_screen(rect, airwire.to);
-                painter.line_segment(
-                    [start, end],
+                draw_dashed_line(
+                    painter,
+                    start,
+                    end,
                     Stroke::new(2.5, Color32::from_rgb(255, 220, 120)),
+                    8.0,
+                    5.0,
                 );
                 painter.circle_filled(start, 4.0, Color32::from_rgb(255, 220, 120));
                 painter.circle_filled(end, 4.0, Color32::from_rgb(255, 220, 120));
@@ -561,8 +744,8 @@ impl PcbViewPanel {
     fn draw_traces(&self, painter: &egui::Painter, rect: Rect) {
         for (index, trace) in self.layout.traces.iter().enumerate() {
             let color = match trace.layer {
-                raf_electronics::PcbLayer::TopCopper => Color32::from_rgb(224, 120, 72),
-                raf_electronics::PcbLayer::BottomCopper => Color32::from_rgb(84, 172, 214),
+                raf_electronics::PcbLayer::TopCopper => Color32::from_rgb(238, 132, 28),
+                raf_electronics::PcbLayer::BottomCopper => Color32::from_rgb(94, 176, 245),
             };
             let stroke = Stroke::new(
                 (trace.width * self.zoom * 0.12).max(2.0),
@@ -574,10 +757,11 @@ impl PcbViewPanel {
             );
 
             for pair in trace.points.windows(2) {
-                painter.line_segment(
-                    [self.world_to_screen(rect, pair[0]), self.world_to_screen(rect, pair[1])],
-                    stroke,
-                );
+                let start = self.world_to_screen(rect, pair[0]);
+                let end = self.world_to_screen(rect, pair[1]);
+                painter.line_segment([start, end], stroke);
+                painter.circle_filled(start, stroke.width * 0.45, stroke.color);
+                painter.circle_filled(end, stroke.width * 0.45, stroke.color);
             }
         }
     }
@@ -585,14 +769,45 @@ impl PcbViewPanel {
     fn draw_airwires(&self, painter: &egui::Painter, rect: Rect) {
         for (index, airwire) in self.layout.airwires.iter().enumerate() {
             let selected = self.selection == PcbSelection::Airwire(index);
-            painter.line_segment(
-                [self.world_to_screen(rect, airwire.from), self.world_to_screen(rect, airwire.to)],
+            let start = self.world_to_screen(rect, airwire.from);
+            let end = self.world_to_screen(rect, airwire.to);
+            let stroke = Stroke::new(
+                if selected { 2.0 } else { 1.2 },
+                if selected {
+                    Color32::from_rgb(255, 220, 120)
+                } else {
+                    Color32::from_rgba_premultiplied(255, 204, 86, 165)
+                },
+            );
+            draw_dashed_line(
+                painter,
+                start,
+                end,
+                stroke,
+                if selected { 9.0 } else { 7.0 },
+                5.0,
+            );
+            painter.circle_stroke(
+                start,
+                if selected { 4.0 } else { 3.0 },
                 Stroke::new(
-                    if selected { 2.0 } else { 1.0 },
+                    1.0,
                     if selected {
                         Color32::from_rgb(255, 220, 120)
                     } else {
-                        Color32::from_rgb(170, 170, 60)
+                        stroke.color
+                    },
+                ),
+            );
+            painter.circle_stroke(
+                end,
+                if selected { 4.0 } else { 3.0 },
+                Stroke::new(
+                    1.0,
+                    if selected {
+                        Color32::from_rgb(255, 220, 120)
+                    } else {
+                        stroke.color
                     },
                 ),
             );
@@ -607,13 +822,20 @@ impl PcbViewPanel {
         let stroke = Stroke::new(1.5, Color32::from_rgb(250, 200, 120));
         for pair in self.outline_draft.windows(2) {
             painter.line_segment(
-                [self.world_to_screen(rect, pair[0]), self.world_to_screen(rect, pair[1])],
+                [
+                    self.world_to_screen(rect, pair[0]),
+                    self.world_to_screen(rect, pair[1]),
+                ],
                 stroke,
             );
         }
 
         for point in &self.outline_draft {
-            painter.circle_filled(self.world_to_screen(rect, *point), 3.0, Color32::from_rgb(250, 200, 120));
+            painter.circle_filled(
+                self.world_to_screen(rect, *point),
+                3.0,
+                Color32::from_rgb(250, 200, 120),
+            );
         }
 
         if self.tool == PcbTool::Outline {
@@ -628,11 +850,12 @@ impl PcbViewPanel {
 
     fn hit_component(&self, rect: Rect, pointer: Pos2) -> Option<usize> {
         for (index, component) in self.layout.components.iter().enumerate().rev() {
-            let footprint = footprint_definition(&component.footprint, component.pad_nets.len().max(1));
-            let body_rect = Rect::from_center_size(
-                self.world_to_screen(rect, component.position),
-                egui::vec2(footprint.body_size.x * self.zoom, footprint.body_size.y * self.zoom),
-            );
+            let footprint =
+                footprint_definition(&component.footprint, component.pad_nets.len().max(1));
+            let visual_size =
+                footprint_asset_screen_size(&component.footprint, footprint.body_size, self.zoom);
+            let body_rect =
+                Rect::from_center_size(self.world_to_screen(rect, component.position), visual_size);
             if body_rect.expand(10.0).contains(pointer) {
                 return Some(index);
             }
@@ -749,4 +972,82 @@ fn triangle_fan_indices(vertex_count: usize) -> Vec<u32> {
         indices.push((index + 1) as u32);
     }
     indices
+}
+
+fn footprint_asset_name(footprint: &str) -> &'static str {
+    let id = footprint.trim();
+    if id.eq_ignore_ascii_case("0805") {
+        "footprints/0805.png"
+    } else if id.eq_ignore_ascii_case("MAG-10x5") {
+        "footprints/magnet-10x5.png"
+    } else if id.eq_ignore_ascii_case("BAT-18650") {
+        "footprints/battery-18650.png"
+    } else if id.eq_ignore_ascii_case("TP-GND") {
+        "footprints/test-point.png"
+    } else {
+        "footprints/generic.png"
+    }
+}
+
+fn footprint_asset_screen_size(footprint: &str, body_size: Vec2, zoom: f32) -> egui::Vec2 {
+    let id = footprint.trim();
+    let size = if id.eq_ignore_ascii_case("0805") {
+        Vec2::new(66.0, 44.0)
+    } else if id.eq_ignore_ascii_case("MAG-10x5") {
+        Vec2::new(92.0, 54.0)
+    } else if id.eq_ignore_ascii_case("BAT-18650") {
+        Vec2::new(136.0, 56.0)
+    } else if id.eq_ignore_ascii_case("TP-GND") {
+        Vec2::new(48.0, 48.0)
+    } else {
+        Vec2::new(
+            (body_size.x + 28.0).max(64.0),
+            (body_size.y + 22.0).max(42.0),
+        )
+    };
+    egui::vec2(size.x * zoom, size.y * zoom)
+}
+
+fn draw_dashed_line(
+    painter: &egui::Painter,
+    start: Pos2,
+    end: Pos2,
+    stroke: Stroke,
+    dash: f32,
+    gap: f32,
+) {
+    let delta = end - start;
+    let length = delta.length();
+    if length <= f32::EPSILON {
+        return;
+    }
+
+    let dir = delta / length;
+    let mut cursor = 0.0;
+    while cursor < length {
+        let next = (cursor + dash).min(length);
+        painter.line_segment([start + dir * cursor, start + dir * next], stroke);
+        cursor += dash + gap;
+    }
+}
+
+fn color_array(color: Color32) -> [u8; 4] {
+    [color.r(), color.g(), color.b(), color.a()]
+}
+
+fn net_color(net: &str, index: usize) -> Color32 {
+    let trimmed = net.trim();
+    if trimmed.eq_ignore_ascii_case("gnd") || trimmed == "0" {
+        return Color32::from_rgb(94, 176, 245);
+    }
+    if trimmed.contains('+') || trimmed.to_ascii_lowercase().contains("vcc") {
+        return Color32::from_rgb(238, 132, 28);
+    }
+
+    match index % 4 {
+        0 => Color32::from_rgb(92, 214, 142),
+        1 => Color32::from_rgb(238, 132, 28),
+        2 => Color32::from_rgb(94, 176, 245),
+        _ => Color32::from_rgb(255, 204, 86),
+    }
 }

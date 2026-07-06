@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.8.9.1] - 2026-05-30 - Stabilization Pass, Viewport UX Polish, and Runtime Truth Docs
 
+## [0.8.9.2] - 2026-06-30 - Hierarchy Explorer Pass, Electronics UX Hardening, and Group Gizmo Foundations
+
+### Added
+
+- **Hierarchy explorer pass**: real-time search/filter, `Ctrl+Click` toggle multi-select, smarter drag-and-drop zones (before/after/child), stronger child-target highlight, and clearer drag-ghost feedback in the scene tree.
+- **Electronics guidance pass**: contextual schematic/PCB hints, automatic airwire-to-route handoff in PCB, live schematic box-select highlight, and auto-close behavior for the schematic value popup when selection changes or the user clicks outside it.
+- **Group gizmo foundation**: first-pass multi-selection move/rotate/scale path in the Game viewport using group bounds instead of anchoring the gizmo to only the primary selected object.
+
+### Changed
+
+- **Undo/redo stabilization**: `pending_history_snapshot` is now wired into document-change flow, redo rebuilds the correct document-domain snapshot, and drag gating avoids pushing noise from plain selection clicks.
+- **Shortcut focus safety**: `Ctrl+Shift+Z` now respects text-field focus the same way `Ctrl+Z` / `Ctrl+Y` already did.
+- **Stabilization tracking**: `docs/STABILIZATION_STATUS.md` now reflects the 2026-06-29 and 2026-06-30 verification passes more honestly, including what was really wired versus what still needs manual closure.
+- **Release labeling**: this git/changelog release is labeled `0.8.9.2` while Cargo workspace packages remain on `0.8.9`.
+
+### Fixed
+
+- **Schematic transform regressions**: rotate/mirror and inspector-driven transform edits now pre-anchor nearby legacy wire endpoints before applying the transform, reducing cases where cables stay behind after the first rotation.
+- **PCB discoverability**: selecting an airwire from `Select` now moves the user into the right routing context instead of leaving the next step implicit.
+- **Hierarchy drop clarity**: center drop targets are now easier to read during drag/reparent operations.
+- **Editor compile sanity**: the current stabilization pass was revalidated with `cargo check -p raf_editor`.
+
 ### Added
 
 - **Session safety hardening**: unsaved-changes confirmation now covers close-to-hub and app close flows, save failures stay visible, and auto-save uses real elapsed editor time.
@@ -17,8 +39,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **Workspace versioning**: bumped the workspace release version to `0.8.9.1`.
+- **Release labeling**: the git/changelog release was labeled `0.8.9.1` while Cargo workspace packages remained on `0.8.9`.
 - **CPU scene renderer path**: simplified the software scene renderer toward direct framebuffer rasterization, direct grid/line submission, and less command-list indirection in the active CPU fallback path.
+- **Renderer truth docs**: aligned `README.md`, `docs/ARCHITECTURE.md`, `docs/RENDERER.md`, and stabilization notes around one canonical graphics story: shared graphics runtime for Scene/Schematic/PCB, GPU hardware first when available, CPU fallback retained, and game runtime still staged separately.
+- **GPU hot path consolidation**: `ApiGraphicBasic` now reuses shared-mesh GPU buffers, grows reusable per-draw uniform and line slots, and exposes backend frame metrics through the runtime snapshot and viewport HUD instead of paying fresh buffer creation cost every draw.
 - **Roadmap framing**: updated `docs/ROADMAP.md` so the `0.9.0` target is described as an agentic workspace/editor direction.
 - **Project temp hygiene**: root debug/temp artifacts are now ignored by git to keep the repo cleaner during stabilization work.
 
@@ -30,18 +54,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **PCB feedback**: route/outline/component interactions now expose clearer hover cues and avoid stale airwire visuals while dragging.
 - **Viewport feel**: labels back off during heavy interaction, top/bottom bars have stronger contrast, and scale gizmo behavior now matches `uniform_scale_by_default` more honestly.
 
-## [0.8.8] - 2026-05-22 - GPU-First Runtime and Electronics GPU Canvases
+## [0.8.8] - 2026-05-22 - Shared Graphics Runtime and Electronics GPU Canvases
 
 ### Added
 
-- **GPU-first shared render runtime**: scene viewport, schematic canvas, and PCB canvas now share the same runtime with hardware execution first and CPU fallback retained.
+- **Shared graphics runtime**: scene viewport, schematic canvas, and PCB canvas now share the same graphics runtime with hardware execution first and CPU fallback retained.
 - **Electronics GPU canvases**: schematic and PCB editors moved their heavy geometry rendering into the unified graphics pipeline.
 - **ApiGraphicBasic execution path**: command-buffer based scene execution expanded for both GPU hardware rendering and CPU raster fallback.
 
 ### Changed
 
 - **Workspace versioning**: aligned the workspace package version with the current 0.8.8 release state.
-- **Viewport/runtime presentation**: native GPU texture presentation and shared wgpu integration now drive the main editor surfaces.
+- **Viewport graphics presentation**: native GPU texture presentation and shared wgpu integration now drive the main editor surfaces.
 
 ### Fixed
 
