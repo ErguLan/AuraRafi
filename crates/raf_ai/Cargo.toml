@@ -13,3 +13,4 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 ureq = { workspace = true }
+ron = { workspace = true }

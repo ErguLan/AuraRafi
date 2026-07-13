@@ -10,6 +10,8 @@ pub enum MessageRole {
     User,
     Assistant,
     System,
+    /// Result of a tool call, sent back to the model.
+    Tool,
 }
 
 /// A single chat message.
@@ -73,14 +75,10 @@ pub struct ChatPanel {
 impl Default for ChatPanel {
     fn default() -> Self {
         Self {
-            messages: vec![ChatMessage::system(
-                "AI Integration: Haven't been developed yet. \
-                 This panel will allow AI agents to interact with the engine \
-                 using tool-calling to create, modify, and manage your project.",
-            )],
+            messages: Vec::new(),
             input_text: String::new(),
             is_processing: false,
-            is_available: false, // Not functional yet.
+            is_available: true,
         }
     }
 }

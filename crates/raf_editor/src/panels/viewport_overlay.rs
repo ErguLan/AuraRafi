@@ -1,4 +1,5 @@
 use super::*;
+use raf_core::scene::WorldTransformCache;
 
 impl ViewportPanel {
     pub(super) fn draw_entity_labels(
@@ -16,35 +17,64 @@ impl ViewportPanel {
         } else {
             Color32::from_rgba_unmultiplied(40, 40, 50, 180)
         };
+        let transforms = WorldTransformCache::build(scene);
+        let max_labels = label_budget_for_triangles(self.render_cfg.max_triangles);
+        let mut drawn = 0;
 
-        for (id, node) in scene.iter() {
-            if !node.visible || node.name.is_empty() {
-                continue;
-            }
+        // Draw selected labels first so a dense scene cannot hide the active
+        // object behind a low-end label budget.
+        for selected_pass in [true, false] {
+            for (id, node) in scene.iter() {
+                if drawn >= max_labels || !node.visible || node.name.is_empty() {
+                    continue;
+                }
+                let selected = self.selected.contains(&id);
+                if selected != selected_pass {
+                    continue;
+                }
 
-            let world = scene.world_matrix(id);
-            let pos = world.col(3).truncate() + Vec3::new(0.0, 0.6, 0.0);
-            if let Some((screen, _)) =
-                raf_render::math::transform::project_point(pos, view_proj, vp_w, vp_h)
-            {
-                let sx = rect.left() + screen[0];
-                let sy = rect.top() + screen[1];
-                if rect.contains(Pos2::new(sx, sy)) {
-                    let color = if self.selected.contains(&id) {
-                        crate::theme::ACCENT
-                    } else {
-                        label_color
-                    };
-
-                    painter.text(
-                        Pos2::new(sx, sy),
-                        egui::Align2::CENTER_BOTTOM,
-                        &node.name,
-                        egui::FontId::proportional(10.0),
-                        color,
-                    );
+                let world = transforms
+                    .world_matrix(id)
+                    .unwrap_or_else(|| node.local_matrix());
+                let pos = world.col(3).truncate() + Vec3::new(0.0, 0.6, 0.0);
+                if let Some((screen, _)) =
+                    raf_render::math::transform::project_point(pos, view_proj, vp_w, vp_h)
+                {
+                    let sx = rect.left() + screen[0];
+                    let sy = rect.top() + screen[1];
+                    if rect.contains(Pos2::new(sx, sy)) {
+                        painter.text(
+                            Pos2::new(sx, sy),
+                            egui::Align2::CENTER_BOTTOM,
+                            &node.name,
+                            egui::FontId::proportional(10.0),
+                            if selected {
+                                crate::theme::ACCENT
+                            } else {
+                                label_color
+                            },
+                        );
+                        drawn += 1;
+                    }
                 }
             }
+        }
+    }
+
+    fn gizmo_size_factor(&self) -> f32 {
+        if self.gizmo_growth_scale <= 0.0 {
+            return 1.0;
+        }
+        let dist = self.bridge.orbit_distance().max(1.0);
+        let dist_factor = (dist / 5.0).max(1.0);
+        1.0 + (dist_factor - 1.0) * (self.gizmo_growth_scale / 100.0)
+    }
+
+    pub(super) fn gizmo_presentation_scale(&self) -> f32 {
+        if matches!(self.bridge.gizmo().mode, GizmoMode::Scale) {
+            1.0
+        } else {
+            self.gizmo_size_factor()
         }
     }
 
@@ -62,6 +92,7 @@ impl ViewportPanel {
         if !gizmo.visible {
             return;
         }
+        let gizmo_f = self.gizmo_presentation_scale();
 
         if matches!(gizmo.mode, GizmoMode::Scale) {
             self.draw_scale_handles(
@@ -75,8 +106,8 @@ impl ViewportPanel {
             );
         } else {
             for arrow in &raf_render::picking::GIZMO_ARROWS {
-                if let Some(screen_arrow) = raf_render::picking::project_gizmo_arrow(
-                    entity_pos, arrow, view_proj, vp_w, vp_h,
+                if let Some(screen_arrow) = raf_render::picking::project_gizmo_arrow_scaled(
+                    entity_pos, arrow, gizmo_f, view_proj, vp_w, vp_h,
                 ) {
                     let offset = egui::vec2(rect.left(), rect.top());
                     let start = Pos2::new(screen_arrow.start[0], screen_arrow.start[1]) + offset;
@@ -131,10 +162,14 @@ impl ViewportPanel {
             self.draw_rotation_rings(painter, rect, entity_pos, view_proj, vp_w, vp_h);
         }
 
-        let mode_label = match gizmo.mode {
-            GizmoMode::Translate => "Move (G)",
-            GizmoMode::Rotate => "Rotate (R)",
-            GizmoMode::Scale => "Scale (S)",
+        let mode_label = if self.select_mode {
+            "Select (C)"
+        } else {
+            match gizmo.mode {
+                GizmoMode::Translate => "Move (G)",
+                GizmoMode::Rotate => "Rotate (R)",
+                GizmoMode::Scale => "Scale (T)",
+            }
         };
         painter.text(
             Pos2::new(rect.right() - 8.0, rect.top() + 8.0),
@@ -155,6 +190,7 @@ impl ViewportPanel {
         vp_w: f32,
         vp_h: f32,
     ) {
+        let gizmo_f = 1.0;
         let highlighted_axis = if self.selected.len() > 1 {
             self.multi_selection_highlighted_axis()
         } else {
@@ -169,9 +205,10 @@ impl ViewportPanel {
         let orange = Color32::from_rgb(232, 136, 38);
         let orange_dim = Color32::from_rgba_unmultiplied(232, 136, 38, 170);
 
+        let scaled_entity_scale = entity_scale * gizmo_f;
         for handle in raf_render::picking::project_gizmo_scale_handles(
             entity_pos,
-            entity_scale,
+            scaled_entity_scale,
             view_proj,
             vp_w,
             vp_h,
@@ -214,6 +251,7 @@ impl ViewportPanel {
         vp_w: f32,
         vp_h: f32,
     ) {
+        let gizmo_f = self.gizmo_size_factor();
         let offset = egui::vec2(rect.left(), rect.top());
         let colors = [
             Color32::from_rgb(220, 70, 70),
@@ -221,7 +259,7 @@ impl ViewportPanel {
             Color32::from_rgb(70, 100, 220),
         ];
         let axis_planes = [(Vec3::Y, Vec3::Z), (Vec3::X, Vec3::Z), (Vec3::X, Vec3::Y)];
-        let radius = raf_render::picking::GIZMO_ROTATION_RADIUS;
+        let radius = raf_render::picking::GIZMO_ROTATION_RADIUS * gizmo_f;
 
         for (axis_idx, (axis_a, axis_b)) in axis_planes.iter().enumerate() {
             let highlighted_axis = if self.selected.len() > 1 {
@@ -315,5 +353,30 @@ impl ViewportPanel {
             egui::FontId::proportional(10.0),
             Color32::from_rgba_unmultiplied(255, 180, 90, 180),
         );
+    }
+}
+
+fn label_budget_for_triangles(max_triangles: u32) -> usize {
+    if max_triangles <= 2_000 {
+        24
+    } else if max_triangles <= 20_000 {
+        64
+    } else if max_triangles <= 100_000 {
+        128
+    } else {
+        256
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::label_budget_for_triangles;
+
+    #[test]
+    fn label_budget_scales_with_render_tier() {
+        assert_eq!(label_budget_for_triangles(2_000), 24);
+        assert_eq!(label_budget_for_triangles(20_000), 64);
+        assert_eq!(label_budget_for_triangles(100_000), 128);
+        assert_eq!(label_budget_for_triangles(500_000), 256);
     }
 }

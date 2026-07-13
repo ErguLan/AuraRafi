@@ -11,9 +11,10 @@ const HUD_TOGGLE_BUTTON_GAP: f32 = 4.0;
 #[derive(Clone, Copy)]
 enum HudAction {
     SetGizmo(GizmoMode),
-    Focus,
+    Select,
     ToggleGrid,
     ToggleLabels,
+    ToggleFocusLock,
     SnapAxis(Vec3),
     ResetView,
 }
@@ -65,12 +66,15 @@ impl ViewportPanel {
 
         if let Some(action) = self.toolbar_action_at(rect, pos) {
             match action {
-                HudAction::SetGizmo(mode) => self.bridge.set_gizmo_mode(mode),
-                HudAction::Focus => self.bridge.focus_selected(
-                    scene,
-                    self.selected.first().copied(),
-                    self.mode == ViewportMode::View2D,
-                ),
+                HudAction::SetGizmo(mode) => {
+                    self.select_mode = false;
+                    self.bridge.gizmo_mut().visible = true;
+                    self.bridge.set_gizmo_mode(mode);
+                }
+                HudAction::Select => {
+                    self.select_mode = !self.select_mode;
+                    self.bridge.gizmo_mut().visible = !self.select_mode;
+                }
                 _ => {}
             }
             return true;
@@ -90,6 +94,11 @@ impl ViewportPanel {
             match action {
                 HudAction::ToggleGrid => self.grid_visible = !self.grid_visible,
                 HudAction::ToggleLabels => self.show_labels = !self.show_labels,
+                HudAction::ToggleFocusLock => {
+                    if self.focus_lock_enabled {
+                        self.set_focus_lock(scene, !self.focus_locked);
+                    }
+                }
                 _ => {}
             }
             return true;
@@ -140,14 +149,17 @@ impl ViewportPanel {
                 Some("rotate.png"),
                 "R",
             ),
-            (HudAction::SetGizmo(GizmoMode::Scale), None, "S"),
-            (HudAction::Focus, Some("focus.png"), "F"),
+            (HudAction::SetGizmo(GizmoMode::Scale), None, "T"),
+            (HudAction::Select, None, "C"),
         ];
 
         for (index, (action, icon_name, fallback)) in buttons.iter().enumerate() {
             let button_rect = self.toolbar_button_rect(rect, index);
-            let is_active =
-                matches!(action, HudAction::SetGizmo(mode) if *mode == self.bridge.gizmo().mode);
+            let is_active = match action {
+                HudAction::SetGizmo(mode) => *mode == self.bridge.gizmo().mode,
+                HudAction::Select => self.select_mode,
+                _ => false,
+            };
 
             if is_active {
                 let active_bg = if is_dark {
@@ -322,7 +334,10 @@ impl ViewportPanel {
         painter.rect_filled(group_rect, 5.0, hud_group_fill(is_dark));
         painter.rect_stroke(group_rect, 5.0, Stroke::new(0.5, hud_group_border(is_dark)));
 
-        for (index, is_active) in [self.grid_visible, self.show_labels].iter().enumerate() {
+        for (index, is_active) in [self.grid_visible, self.show_labels, self.focus_locked]
+            .iter()
+            .enumerate()
+        {
             let button_rect = self.toggle_button_rect(rect, index);
             let fill = if *is_active {
                 Color32::from_rgba_unmultiplied(
@@ -358,6 +373,21 @@ impl ViewportPanel {
                             } else {
                                 Color32::from_gray(30)
                             }
+                        } else if is_dark {
+                            Color32::from_gray(180)
+                        } else {
+                            Color32::from_gray(90)
+                        },
+                    );
+                }
+                2 => {
+                    painter.text(
+                        button_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        "F",
+                        egui::FontId::proportional(9.0),
+                        if *is_active {
+                            Color32::WHITE
                         } else if is_dark {
                             Color32::from_gray(180)
                         } else {
@@ -498,10 +528,14 @@ impl ViewportPanel {
                     EditMode::Vertex => "VTX",
                 },
                 graphics_status,
-                match self.bridge.gizmo().mode {
-                    GizmoMode::Translate => "Move",
-                    GizmoMode::Rotate => "Rotate",
-                    GizmoMode::Scale => "Scale",
+                if self.select_mode {
+                    "Select"
+                } else {
+                    match self.bridge.gizmo().mode {
+                        GizmoMode::Translate => "Move",
+                        GizmoMode::Rotate => "Rotate",
+                        GizmoMode::Scale => "Scale",
+                    }
                 },
                 stats.visible_entities,
                 stats.total_entities,
@@ -520,18 +554,21 @@ impl ViewportPanel {
     }
 
     fn toolbar_action_at(&self, rect: Rect, pos: Pos2) -> Option<HudAction> {
-        let actions = [
+        let toolbar_items = [
             HudAction::SetGizmo(GizmoMode::Translate),
             HudAction::SetGizmo(GizmoMode::Rotate),
             HudAction::SetGizmo(GizmoMode::Scale),
-            HudAction::Focus,
+            HudAction::Select,
         ];
 
-        actions.iter().enumerate().find_map(|(index, action)| {
-            self.toolbar_button_rect(rect, index)
-                .contains(pos)
-                .then_some(*action)
-        })
+        toolbar_items
+            .iter()
+            .enumerate()
+            .find_map(|(index, action)| {
+                self.toolbar_button_rect(rect, index)
+                    .contains(pos)
+                    .then_some(*action)
+            })
     }
 
     fn mode_toggle_at(&self, rect: Rect, pos: Pos2) -> Option<ViewportMode> {
@@ -546,14 +583,18 @@ impl ViewportPanel {
     }
 
     fn toggle_action_at(&self, rect: Rect, pos: Pos2) -> Option<HudAction> {
-        [HudAction::ToggleGrid, HudAction::ToggleLabels]
-            .iter()
-            .enumerate()
-            .find_map(|(index, action)| {
-                self.toggle_button_rect(rect, index)
-                    .contains(pos)
-                    .then_some(*action)
-            })
+        [
+            HudAction::ToggleGrid,
+            HudAction::ToggleLabels,
+            HudAction::ToggleFocusLock,
+        ]
+        .iter()
+        .enumerate()
+        .find_map(|(index, action)| {
+            self.toggle_button_rect(rect, index)
+                .contains(pos)
+                .then_some(*action)
+        })
     }
 
     fn axis_gizmo_action_at(&self, rect: Rect, pos: Pos2) -> Option<HudAction> {
@@ -629,7 +670,7 @@ impl ViewportPanel {
 
     fn toggle_group_rect(&self, rect: Rect) -> Rect {
         let info_rect = self.info_rect(rect);
-        let width = (HUD_TOGGLE_BUTTON_WIDTH * 2.0) + HUD_TOGGLE_BUTTON_GAP + 6.0;
+        let width = (HUD_TOGGLE_BUTTON_WIDTH * 3.0) + (HUD_TOGGLE_BUTTON_GAP * 2.0) + 6.0;
         Rect::from_min_size(
             Pos2::new(info_rect.right() - width, info_rect.bottom() + 6.0),
             egui::vec2(width, HUD_TOGGLE_BUTTON_HEIGHT + 6.0),
@@ -672,12 +713,12 @@ impl ViewportPanel {
         }
 
         let tooltip_text: Option<String> = (|| {
-            // Toolbar: G / R / S / F
+            // Toolbar: G / R / T / C
             let toolbar_labels = [
                 t("viewport.hud.move", lang),
                 t("viewport.hud.rotate", lang),
                 t("viewport.hud.scale", lang),
-                t("viewport.hud.focus", lang),
+                "Select (C)".to_string(),
             ];
             for (index, label) in toolbar_labels.iter().enumerate() {
                 if self.toolbar_button_rect(rect, index).contains(pointer) {
@@ -706,10 +747,11 @@ impl ViewportPanel {
                 }
             }
 
-            // Visual toggles: grid / labels.
+            // Visual toggles: grid / labels / focus lock.
             let toggle_labels = [
                 t("viewport.hud.toggle_grid", lang),
                 t("viewport.hud.toggle_labels", lang),
+                t("viewport.hud.focus", lang),
             ];
             for (index, label) in toggle_labels.iter().enumerate() {
                 if self.toggle_button_rect(rect, index).contains(pointer) {

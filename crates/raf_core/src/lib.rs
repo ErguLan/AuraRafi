@@ -10,6 +10,7 @@
 //! - **WorldState**: Lightweight game world snapshot for AI observation
 //! - **HotReload**: Polling-based file watcher for live project updates
 
+pub mod ai;
 pub mod command;
 pub mod complement;
 pub mod config;
@@ -21,6 +22,7 @@ pub mod i18n;
 pub mod project;
 pub mod save_system;
 pub mod scene;
+pub mod session;
 pub mod units;
 pub mod world_state;
 
@@ -32,5 +34,5 @@ pub use ecs::world::GameWorld;
 pub use event::{EventBus, EventId};
 pub use hot_reload::{FileChange, HotReloadConfig, HotReloadState, WatchCategory};
 pub use project::{Project, ProjectType};
-pub use scene::{NodeColor, Primitive, SceneGraph, SceneNode, SceneNodeId};
+pub use scene::{NodeColor, Primitive, SceneGraph, SceneNode, SceneNodeId, WorldTransformCache};
 pub use world_state::{Weather, WorldState, WorldTime};

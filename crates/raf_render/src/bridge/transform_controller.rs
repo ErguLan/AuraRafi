@@ -57,6 +57,10 @@ impl ViewportTransformController {
         &self.gizmo
     }
 
+    pub fn gizmo_mut(&mut self) -> &mut GizmoState {
+        &mut self.gizmo
+    }
+
     pub fn set_mode(&mut self, mode: GizmoMode) {
         self.gizmo.mode = mode;
         self.gizmo.active_axis = GizmoAxis::None;
@@ -93,6 +97,19 @@ impl ViewportTransformController {
         vp_w: f32,
         vp_h: f32,
     ) {
+        self.update_hover_scaled(scene, selected, view_proj, pointer_local, vp_w, vp_h, 1.0);
+    }
+
+    pub fn update_hover_scaled(
+        &mut self,
+        scene: &SceneGraph,
+        selected: Option<SceneNodeId>,
+        view_proj: &Mat4,
+        pointer_local: [f32; 2],
+        vp_w: f32,
+        vp_h: f32,
+        presentation_scale: f32,
+    ) {
         if self.drag_axis != GizmoAxis::None {
             self.gizmo.active_axis = self.drag_axis;
             return;
@@ -112,12 +129,22 @@ impl ViewportTransformController {
         let entity_pos = scene.world_matrix(id).col(3).truncate();
 
         let gizmo_hit = match self.gizmo.mode {
-            GizmoMode::Rotate => {
-                picking::pick_gizmo_rotation_ring(pointer_local, entity_pos, view_proj, vp_w, vp_h)
-            }
-            GizmoMode::Translate => {
-                picking::pick_gizmo_arrow(pointer_local, entity_pos, view_proj, vp_w, vp_h)
-            }
+            GizmoMode::Rotate => picking::pick_gizmo_rotation_ring_scaled(
+                pointer_local,
+                entity_pos,
+                presentation_scale,
+                view_proj,
+                vp_w,
+                vp_h,
+            ),
+            GizmoMode::Translate => picking::pick_gizmo_arrow_scaled(
+                pointer_local,
+                entity_pos,
+                presentation_scale,
+                view_proj,
+                vp_w,
+                vp_h,
+            ),
             GizmoMode::Scale => {
                 let hit = picking::pick_gizmo_scale_handle(
                     pointer_local,
@@ -150,6 +177,19 @@ impl ViewportTransformController {
         vp_w: f32,
         vp_h: f32,
     ) {
+        self.begin_drag_scaled(scene, selected, view_proj, pointer_local, vp_w, vp_h, 1.0);
+    }
+
+    pub fn begin_drag_scaled(
+        &mut self,
+        scene: &SceneGraph,
+        selected: Option<SceneNodeId>,
+        view_proj: &Mat4,
+        pointer_local: [f32; 2],
+        vp_w: f32,
+        vp_h: f32,
+        presentation_scale: f32,
+    ) {
         let Some(id) = selected else {
             return;
         };
@@ -159,12 +199,22 @@ impl ViewportTransformController {
         let entity_pos = scene.world_matrix(id).col(3).truncate();
 
         let gizmo_hit = match self.gizmo.mode {
-            GizmoMode::Rotate => {
-                picking::pick_gizmo_rotation_ring(pointer_local, entity_pos, view_proj, vp_w, vp_h)
-            }
-            GizmoMode::Translate => {
-                picking::pick_gizmo_arrow(pointer_local, entity_pos, view_proj, vp_w, vp_h)
-            }
+            GizmoMode::Rotate => picking::pick_gizmo_rotation_ring_scaled(
+                pointer_local,
+                entity_pos,
+                presentation_scale,
+                view_proj,
+                vp_w,
+                vp_h,
+            ),
+            GizmoMode::Translate => picking::pick_gizmo_arrow_scaled(
+                pointer_local,
+                entity_pos,
+                presentation_scale,
+                view_proj,
+                vp_w,
+                vp_h,
+            ),
             GizmoMode::Scale => {
                 let hit = picking::pick_gizmo_scale_handle(
                     pointer_local,
@@ -277,7 +327,13 @@ impl ViewportTransformController {
         match self.gizmo.mode {
             GizmoMode::Translate => {
                 if let (Some(node), Some(start_pos)) = (scene.get_mut(id), self.drag_start_pos) {
-                    node.position = start_pos + axis_dir * delta;
+                    let snap_step = if snap_to_ctrl { 1.0 } else { 0.0 };
+                    let snapped_delta = if snap_step > 0.0 {
+                        (delta / snap_step).round() * snap_step
+                    } else {
+                        delta
+                    };
+                    node.position = start_pos + axis_dir * snapped_delta;
                 }
             }
             GizmoMode::Scale => {
@@ -293,12 +349,18 @@ impl ViewportTransformController {
                         GizmoAxis::None => return false,
                     };
 
+                    let new_axis_scale = (start_axis_scale + delta).max(0.01);
+                    let snapped = if snap_to_ctrl {
+                        let step = 0.5;
+                        (new_axis_scale / step).round() * step
+                    } else {
+                        new_axis_scale
+                    };
                     if uniform_scale {
-                        let factor = (1.0 + (delta * 2.0) / start_axis_scale).max(0.05);
+                        let factor = (snapped / start_axis_scale).max(0.05);
                         node.scale = (start_scale * factor).max(Vec3::splat(0.01));
                     } else {
-                        let new_axis_scale = (start_axis_scale + delta).max(0.01);
-                        let axis_delta = new_axis_scale - start_axis_scale;
+                        let axis_delta = snapped - start_axis_scale;
                         node.scale = (start_scale + axis_dir * axis_delta).max(Vec3::splat(0.01));
                         node.position = start_pos + face_dir * (axis_delta * 0.5);
                     }
@@ -316,10 +378,7 @@ impl ViewportTransformController {
                     // the object rotated backwards. By accumulating the
                     // per-frame delta we keep rotating in the same direction.
                     let last = self.last_drag_mouse.unwrap_or(start_mouse);
-                    let inc_mouse = [
-                        current_mouse[0] - last[0],
-                        current_mouse[1] - last[1],
-                    ];
+                    let inc_mouse = [current_mouse[0] - last[0], current_mouse[1] - last[1]];
                     let inc_projection = (inc_mouse[0] * axis_screen_dir[0]
                         + inc_mouse[1] * axis_screen_dir[1])
                         / axis_len;

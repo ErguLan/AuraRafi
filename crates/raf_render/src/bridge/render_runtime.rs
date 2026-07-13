@@ -37,6 +37,8 @@ pub struct RenderRuntimeSnapshot {
     pub surface: GraphicsSurfaceKind,
     pub policy: RenderExecutionPolicy,
     pub active_backend: Option<BasicBackendType>,
+    /// Changes whenever the backing ApiGraphicBasic device is recreated.
+    pub device_generation: u64,
     pub advanced_gpu_features_allowed: bool,
     pub last_frame_metrics: SceneFrameMetrics,
 }
@@ -47,6 +49,7 @@ impl Default for RenderRuntimeSnapshot {
             surface: GraphicsSurfaceKind::None,
             policy: RenderExecutionPolicy::Auto,
             active_backend: None,
+            device_generation: 0,
             advanced_gpu_features_allowed: false,
             last_frame_metrics: SceneFrameMetrics::default(),
         }
@@ -77,6 +80,7 @@ pub struct RenderRuntime {
     shared_wgpu_context: Option<SharedWgpuContext>,
     surface: GraphicsSurfaceKind,
     device: Option<BasicDevice>,
+    device_generation: u64,
 }
 
 impl Default for RenderRuntime {
@@ -87,6 +91,7 @@ impl Default for RenderRuntime {
             shared_wgpu_context: None,
             surface: GraphicsSurfaceKind::None,
             device: None,
+            device_generation: 0,
         }
     }
 }
@@ -136,6 +141,7 @@ impl RenderRuntime {
             surface: self.surface,
             policy: self.policy,
             active_backend: self.device.as_ref().map(|device| device.backend()),
+            device_generation: self.device_generation,
             advanced_gpu_features_allowed: self.advanced_gpu_features_allowed,
             last_frame_metrics: self
                 .device
@@ -158,6 +164,7 @@ impl RenderRuntime {
             let mut config = BasicDeviceConfig::from_render_policy(self.policy);
             config.shared_wgpu_context = self.shared_wgpu_context.clone();
             self.device = Some(BasicDevice::new(config));
+            self.device_generation = self.device_generation.wrapping_add(1);
         }
     }
 }
@@ -174,6 +181,7 @@ mod tests {
 
         let snapshot = runtime.snapshot();
         assert_eq!(snapshot.active_backend, Some(BasicBackendType::CpuSoftware));
+        assert_eq!(snapshot.device_generation, 1);
         assert_eq!(snapshot.status_badge(), "GFX CPU");
     }
 
@@ -186,6 +194,20 @@ mod tests {
 
         let snapshot = runtime.snapshot();
         assert_eq!(snapshot.active_backend, None);
+        assert_eq!(snapshot.device_generation, 1);
         assert_eq!(snapshot.status_badge(), "GFX idle");
+    }
+
+    #[test]
+    fn device_generation_changes_after_device_reset() {
+        let mut runtime = RenderRuntime::default();
+        runtime.configure(RenderExecutionPolicy::CpuOnly, false);
+        runtime.activate_surface(GraphicsSurfaceKind::SchematicCanvas);
+        let first_generation = runtime.snapshot().device_generation;
+
+        runtime.set_shared_wgpu_context(None);
+        runtime.activate_surface(GraphicsSurfaceKind::SchematicCanvas);
+
+        assert!(runtime.snapshot().device_generation > first_generation);
     }
 }

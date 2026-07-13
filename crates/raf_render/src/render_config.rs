@@ -8,7 +8,7 @@
 //! surfaces are preferred in Auto/GPU-first modes, but project-level GPU
 //! toggles still gate heavier advanced features.
 
-use raf_core::config::RenderExecutionPolicy;
+use raf_core::config::{RenderExecutionPolicy, RenderPreset};
 use serde::{Deserialize, Serialize};
 
 /// Complete rendering configuration for a project.
@@ -125,6 +125,36 @@ pub enum AntiAliasingMode {
     Msaa4x,
 }
 
+/// Lightweight resource profile derived from a render config.
+///
+/// This is intentionally advisory. It gives editor UI, runtime scheduling, and
+/// future systems one place to ask "how much should this tier spend?" without
+/// duplicating renderer flags across panels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RenderResourceProfile {
+    pub max_triangles: u32,
+    pub frame_budget_ms: f32,
+    pub preferred_surface_scale: f32,
+    pub max_texture_size: u32,
+    pub shadow_resolution: u32,
+    pub max_point_lights: u32,
+    pub post_process_passes: u8,
+    pub gpu_feature_passes: u8,
+    pub particle_budget: u32,
+    pub skeletal_animation_budget: u32,
+    pub pbr_enabled: bool,
+    pub requires_gpu: bool,
+}
+
+impl RenderResourceProfile {
+    pub fn estimated_surface_pixels(&self, width: u32, height: u32) -> u64 {
+        let scale = self.preferred_surface_scale.clamp(0.25, 1.0);
+        let scaled_width = ((width as f32) * scale).ceil().max(1.0) as u64;
+        let scaled_height = ((height as f32) * scale).ceil().max(1.0) as u64;
+        scaled_width * scaled_height
+    }
+}
+
 impl Default for RenderConfig {
     fn default() -> Self {
         Self {
@@ -161,6 +191,16 @@ impl Default for RenderConfig {
 }
 
 impl RenderConfig {
+    /// Build a config from the persisted project preset.
+    pub fn for_preset(preset: RenderPreset) -> Self {
+        match preset {
+            RenderPreset::Potato => Self::potato(),
+            RenderPreset::Low => Self::low(),
+            RenderPreset::Medium => Self::medium(),
+            RenderPreset::High => Self::high(),
+        }
+    }
+
     fn disable_gpu_only_features(&mut self) {
         self.use_gpu = false;
         self.shadows_enabled = false;
@@ -326,6 +366,62 @@ impl RenderConfig {
         }
         count
     }
+
+    /// Derive the resource budget implied by the current config.
+    pub fn resource_profile(&self) -> RenderResourceProfile {
+        let post_process_passes = u8::from(self.bloom_enabled)
+            + u8::from(self.ssao_enabled)
+            + u8::from(self.anti_aliasing != AntiAliasingMode::None);
+
+        let gpu_feature_passes = u8::from(self.shadows_enabled)
+            + u8::from(self.pbr_enabled)
+            + u8::from(self.reflections_enabled)
+            + u8::from(self.raytrace_enabled)
+            + u8::from(self.gpu_deform_enabled);
+
+        let preferred_surface_scale = if self.frame_budget_ms >= 45.0 {
+            0.75
+        } else if self.max_triangles <= 20_000 {
+            0.9
+        } else {
+            1.0
+        };
+
+        let particle_budget = if self.max_triangles <= 2_000 {
+            0
+        } else if self.requires_gpu() {
+            (self.max_triangles / 20).min(20_000)
+        } else {
+            (self.max_triangles / 50).min(1_000)
+        };
+
+        let skeletal_animation_budget = if self.pbr_enabled || self.gpu_deform_enabled {
+            (self.max_triangles / 10_000).clamp(1, 64)
+        } else if self.max_triangles >= 20_000 {
+            4
+        } else {
+            0
+        };
+
+        RenderResourceProfile {
+            max_triangles: self.max_triangles,
+            frame_budget_ms: self.frame_budget_ms,
+            preferred_surface_scale,
+            max_texture_size: self.max_texture_size,
+            shadow_resolution: if self.shadows_enabled {
+                self.shadow_resolution
+            } else {
+                0
+            },
+            max_point_lights: self.max_point_lights,
+            post_process_passes,
+            gpu_feature_passes,
+            particle_budget,
+            skeletal_animation_budget,
+            pbr_enabled: self.pbr_enabled,
+            requires_gpu: self.requires_gpu(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -349,5 +445,47 @@ mod tests {
         assert!(!config.use_gpu);
         assert!(!config.pbr_enabled);
         assert!(!config.gpu_deform_enabled);
+    }
+
+    #[test]
+    fn preset_constructor_matches_named_presets() {
+        assert_eq!(
+            RenderConfig::for_preset(RenderPreset::Potato).max_triangles,
+            2_000
+        );
+        assert_eq!(
+            RenderConfig::for_preset(RenderPreset::Low).max_texture_size,
+            512
+        );
+        assert_eq!(
+            RenderConfig::for_preset(RenderPreset::Medium).shadow_resolution,
+            1024
+        );
+        assert_eq!(
+            RenderConfig::for_preset(RenderPreset::High).max_texture_size,
+            2048
+        );
+    }
+
+    #[test]
+    fn potato_profile_has_no_gpu_cost() {
+        let profile = RenderConfig::potato().resource_profile();
+
+        assert!(!profile.requires_gpu);
+        assert_eq!(profile.shadow_resolution, 0);
+        assert_eq!(profile.post_process_passes, 0);
+        assert_eq!(profile.particle_budget, 0);
+        assert_eq!(profile.estimated_surface_pixels(100, 80), 60 * 75);
+    }
+
+    #[test]
+    fn medium_profile_exposes_gpu_budget() {
+        let profile = RenderConfig::medium().resource_profile();
+
+        assert!(profile.requires_gpu);
+        assert_eq!(profile.shadow_resolution, 1024);
+        assert!(profile.post_process_passes >= 2);
+        assert!(profile.particle_budget > 0);
+        assert!(profile.pbr_enabled);
     }
 }

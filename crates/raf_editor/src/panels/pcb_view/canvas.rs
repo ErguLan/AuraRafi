@@ -1,29 +1,19 @@
-use std::sync::Arc;
-
 use eframe::egui_wgpu;
 use egui::{Color32, Pos2, Rect, Sense, Stroke, Ui};
-use glam::{Mat4, Vec2, Vec3};
+use glam::Vec2;
 use raf_core::i18n::t;
-use raf_electronics::footprint_definition;
-use raf_render::api_graphic_basic::command_list::BasicCommandList;
-use raf_render::api_graphic_basic::mesh::BasicMesh;
-use raf_render::bridge::RenderRuntime;
-use raf_render::scene_renderer::{FrameStats, SceneRenderFrame};
+use raf_electronics::{footprint_definition, CadObjectKind, CadScene};
+use raf_render::api_graphic_basic::cad_surface::CadSurfaceHitRegion;
+use raf_render::bridge::{GraphicsSurfaceKind, RenderRuntime};
 
 use super::{PcbSelection, PcbTool, PcbViewPanel};
-use crate::panels::gpu_canvas::canvas_view_projection;
+use crate::panels::electronics_cad_surface_host::CadSurfaceSelection;
 use crate::panels::schematic_view::electronics_palette;
 use crate::theme;
 
 const GRID_STEP: f32 = 20.0;
-const PCB_Z_GRID: f32 = 0.92;
-const PCB_Z_BOARD_FILL: f32 = 0.78;
-const PCB_Z_BOARD_OUTLINE: f32 = 0.74;
-const PCB_Z_BOTTOM_TRACE: f32 = 0.58;
-const PCB_Z_TOP_TRACE: f32 = 0.44;
-const PCB_Z_AIRWIRE: f32 = 0.30;
-const PCB_Z_COMPONENT_BODY: f32 = 0.18;
-const PCB_Z_COMPONENT_PAD: f32 = 0.14;
+const GPU_DETAIL_COMPONENT_LIMIT: usize = 96;
+const GPU_DETAIL_ZOOM_THRESHOLD: f32 = 1.15;
 
 impl PcbViewPanel {
     pub(super) fn draw_canvas(
@@ -41,25 +31,51 @@ impl PcbViewPanel {
         let hover_pos = ui
             .input(|i| i.pointer.hover_pos())
             .filter(|pointer| rect.contains(*pointer));
-        let hovered_component = hover_pos.and_then(|pointer| self.hit_component(rect, pointer));
-        let hovered_trace = hover_pos.and_then(|pointer| self.hit_trace(rect, pointer));
-        let hovered_airwire = hover_pos.and_then(|pointer| self.hit_airwire(rect, pointer));
         let render_w = rect.width().max(1.0).round() as u32;
         let render_h = rect.height().max(1.0).round() as u32;
-        let gpu_frame = self.build_gpu_canvas_frame(render_w, render_h);
-        let render_output = render_runtime.render_scene_frame(&gpu_frame);
-        self.render_runtime = render_runtime.snapshot();
-        self.gpu_canvas.present(
+        let (left, right, top, bottom) =
+            self.visible_world_bounds(render_w as f32, render_h as f32);
+        let mut cad_scene = CadScene::from_pcb(&self.layout);
+        if !self.show_airwires {
+            cad_scene
+                .objects
+                .retain(|object| object.kind != CadObjectKind::Airwire);
+        }
+        let cad_selection = self.cad_surface_selection();
+        self.cad_surface_host.present(
             ui.ctx(),
             wgpu_render_state,
-            render_output,
-            render_w,
-            render_h,
+            render_runtime,
+            GraphicsSurfaceKind::PcbCanvas,
+            &cad_scene,
+            [render_w, render_h],
+            [left, right, top, bottom],
+            self.canvas_dark_mode,
+            &cad_selection,
         );
-        let gpu_backdrop_ready = self.gpu_canvas.is_ready();
+        self.render_runtime = self.cad_surface_host.last_runtime();
+        let gpu_backdrop_ready = self.cad_surface_host.is_ready();
+        let hovered_surface_region = hover_pos
+            .and_then(|pointer| {
+                self.cad_surface_host
+                    .hit_test_world(self.screen_to_world(rect, pointer))
+            })
+            .cloned();
+        let hovered_component = hovered_surface_region
+            .as_ref()
+            .and_then(|region| self.component_index_from_cad_region(region))
+            .or_else(|| hover_pos.and_then(|pointer| self.hit_component(rect, pointer)));
+        let hovered_trace = hovered_surface_region
+            .as_ref()
+            .and_then(|region| self.trace_index_from_cad_region(region))
+            .or_else(|| hover_pos.and_then(|pointer| self.hit_trace(rect, pointer)));
+        let hovered_airwire = hovered_surface_region
+            .as_ref()
+            .and_then(|region| self.airwire_index_from_cad_region(region))
+            .or_else(|| hover_pos.and_then(|pointer| self.hit_airwire(rect, pointer)));
 
         if gpu_backdrop_ready {
-            self.gpu_canvas.paint(&painter, rect);
+            self.cad_surface_host.paint(&painter, rect);
         } else {
             painter.rect_filled(rect, 0.0, palette.canvas_bg);
             self.draw_grid(&painter, rect);
@@ -70,7 +86,16 @@ impl PcbViewPanel {
             }
         }
         self.draw_trace_overlays(&painter, rect, hovered_trace, hovered_airwire);
-        self.draw_components(&painter, rect, !gpu_backdrop_ready, hovered_component);
+        let draw_detail_overlay = !gpu_backdrop_ready
+            || self.layout.components.len() <= GPU_DETAIL_COMPONENT_LIMIT
+            || self.zoom >= GPU_DETAIL_ZOOM_THRESHOLD;
+        self.draw_components(
+            &painter,
+            rect,
+            !gpu_backdrop_ready,
+            draw_detail_overlay,
+            hovered_component,
+        );
         self.draw_outline_draft(&painter, rect, hover_pos);
 
         if response.hovered() {
@@ -97,10 +122,13 @@ impl PcbViewPanel {
                 if primary_drag_started {
                     if let Some(pointer) = pointer_pos {
                         let world = self.snap_world(rect, self.screen_to_world(rect, pointer));
-                        if let Some(component_index) = self.hit_component(rect, pointer) {
+                        if let Some(component_index) =
+                            hovered_component.or_else(|| self.hit_component(rect, pointer))
+                        {
                             self.selection = PcbSelection::Component(component_index);
                             if let Some(component) = self.layout.components.get(component_index) {
-                                self.drag_state = Some((component_index, component.position - world));
+                                self.drag_state =
+                                    Some((component_index, component.position - world));
                             }
                         }
                     }
@@ -108,13 +136,19 @@ impl PcbViewPanel {
 
                 if primary_clicked {
                     if let Some(pointer) = pointer_pos {
-                        if let Some(component_index) = self.hit_component(rect, pointer) {
+                        if let Some(component_index) =
+                            hovered_component.or_else(|| self.hit_component(rect, pointer))
+                        {
                             self.selection = PcbSelection::Component(component_index);
                             self.drag_state = None;
-                        } else if let Some(trace_index) = self.hit_trace(rect, pointer) {
+                        } else if let Some(trace_index) =
+                            hovered_trace.or_else(|| self.hit_trace(rect, pointer))
+                        {
                             self.selection = PcbSelection::Trace(trace_index);
                             self.drag_state = None;
-                        } else if let Some(airwire_index) = self.hit_airwire(rect, pointer) {
+                        } else if let Some(airwire_index) =
+                            hovered_airwire.or_else(|| self.hit_airwire(rect, pointer))
+                        {
                             self.selection = PcbSelection::Airwire(airwire_index);
                             self.tool = PcbTool::Route;
                             self.drag_state = None;
@@ -150,7 +184,9 @@ impl PcbViewPanel {
             PcbTool::Route => {
                 if primary_clicked {
                     if let Some(pointer) = pointer_pos {
-                        if let Some(airwire_index) = self.hit_airwire(rect, pointer) {
+                        if let Some(airwire_index) =
+                            hovered_airwire.or_else(|| self.hit_airwire(rect, pointer))
+                        {
                             self.selection = PcbSelection::Airwire(airwire_index);
                             if self.layout.route_airwire(airwire_index) {
                                 self.selection = PcbSelection::None;
@@ -210,10 +246,12 @@ impl PcbViewPanel {
             PcbTool::Outline => t("app.pcb_outline_hint", self.lang),
         };
         // Show cursor position in mm (PCB canvas unit = 1mm).
-        let cursor_mm = hover_pos.map(|p| {
-            let w = self.screen_to_world(rect, p);
-            format!("Cursor: {:.1}, {:.1} mm | ", w.x, w.y)
-        }).unwrap_or_default();
+        let cursor_mm = hover_pos
+            .map(|p| {
+                let w = self.screen_to_world(rect, p);
+                format!("Cursor: {:.1}, {:.1} mm | ", w.x, w.y)
+            })
+            .unwrap_or_default();
         let info_text = format!("{}{}", cursor_mm, hint);
         painter.text(
             Pos2::new(rect.left() + 12.0, rect.bottom() - 18.0),
@@ -226,28 +264,60 @@ impl PcbViewPanel {
         changed
     }
 
-    fn build_gpu_canvas_frame(&self, width: u32, height: u32) -> SceneRenderFrame {
-        let mut commands = BasicCommandList::new();
-        let palette = electronics_palette(self.canvas_dark_mode);
-        commands.clear(color_array(palette.canvas_bg));
-
-        let (left, right, top, bottom) = self.visible_world_bounds(width as f32, height as f32);
-        self.record_gpu_grid(&mut commands, left, right, top, bottom);
-        self.record_board_geometry(&mut commands);
-        self.record_trace_geometry(&mut commands);
-        if self.show_airwires {
-            self.record_airwire_geometry(&mut commands);
+    fn component_index_from_cad_region(&self, region: &CadSurfaceHitRegion) -> Option<usize> {
+        if !matches!(region.kind, CadObjectKind::Component | CadObjectKind::Pad) {
+            return None;
         }
-        self.record_component_geometry(&mut commands);
+        let id = region.source_id.as_deref()?;
+        self.layout
+            .components
+            .iter()
+            .position(|component| component.component_id.to_string() == id)
+    }
 
-        SceneRenderFrame {
-            commands,
-            view_proj: canvas_view_projection(left, right, top, bottom),
-            light_dir: Vec3::Z,
-            width,
-            height,
-            stats: FrameStats::default(),
+    fn trace_index_from_cad_region(&self, region: &CadSurfaceHitRegion) -> Option<usize> {
+        if region.kind != CadObjectKind::Trace {
+            return None;
         }
+        let id = region.source_id.as_deref()?;
+        self.layout
+            .traces
+            .iter()
+            .position(|trace| trace.id.to_string() == id)
+    }
+
+    fn airwire_index_from_cad_region(&self, region: &CadSurfaceHitRegion) -> Option<usize> {
+        if region.kind != CadObjectKind::Airwire {
+            return None;
+        }
+        region.id.strip_prefix("airwire:")?.parse::<usize>().ok()
+    }
+
+    fn cad_surface_selection(&self) -> CadSurfaceSelection {
+        let mut selection = CadSurfaceSelection::default();
+
+        match self.selection {
+            PcbSelection::Component(index) => {
+                if let Some(component) = self.layout.components.get(index) {
+                    selection
+                        .source_ids
+                        .push(*component.component_id.as_bytes());
+                }
+            }
+            PcbSelection::Trace(index) => {
+                if let Some(trace) = self.layout.traces.get(index) {
+                    selection.source_ids.push(*trace.id.as_bytes());
+                }
+            }
+            PcbSelection::Airwire(index) => {
+                if index < self.layout.airwires.len() {
+                    selection.object_ids.push(format!("airwire:{index}"));
+                }
+            }
+            PcbSelection::None => {}
+        }
+
+        selection
     }
 
     fn visible_world_bounds(&self, width: f32, height: f32) -> (f32, f32, f32, f32) {
@@ -257,198 +327,6 @@ impl PcbViewPanel {
         let top = (-self.offset.y) / zoom;
         let bottom = (height - self.offset.y) / zoom;
         (left, right, top, bottom)
-    }
-
-    fn record_gpu_grid(
-        &self,
-        commands: &mut BasicCommandList,
-        left: f32,
-        right: f32,
-        top: f32,
-        bottom: f32,
-    ) {
-        let spacing = GRID_STEP * self.zoom.max(0.1);
-        if spacing < 8.0 {
-            return;
-        }
-
-        let world_left = (left / GRID_STEP).floor() as i32 - 2;
-        let world_right = (right / GRID_STEP).ceil() as i32 + 2;
-        let world_top = (top / GRID_STEP).floor() as i32 - 2;
-        let world_bottom = (bottom / GRID_STEP).ceil() as i32 + 2;
-
-        for ix in world_left..=world_right {
-            let x = ix as f32 * GRID_STEP;
-            commands.draw_line(
-                Vec3::new(x, top, PCB_Z_GRID),
-                Vec3::new(x, bottom, PCB_Z_GRID),
-                if self.canvas_dark_mode {
-                    [25, 31, 38, 255]
-                } else {
-                    [211, 220, 232, 255]
-                },
-                1.0,
-                false,
-                0.0,
-            );
-        }
-
-        for iy in world_top..=world_bottom {
-            let y = iy as f32 * GRID_STEP;
-            commands.draw_line(
-                Vec3::new(left, y, PCB_Z_GRID),
-                Vec3::new(right, y, PCB_Z_GRID),
-                if self.canvas_dark_mode {
-                    [25, 31, 38, 255]
-                } else {
-                    [211, 220, 232, 255]
-                },
-                1.0,
-                false,
-                0.0,
-            );
-        }
-    }
-
-    fn record_board_geometry(&self, commands: &mut BasicCommandList) {
-        let outline_points = self.board_outline_points();
-        if outline_points.len() < 2 {
-            return;
-        }
-
-        if self.layout.outline_is_closed() && outline_points.len() >= 3 {
-            let positions: Vec<Vec3> = outline_points
-                .iter()
-                .map(|point| Vec3::new(point.x, point.y, 0.0))
-                .collect();
-            let indices = triangle_fan_indices(outline_points.len());
-            if !indices.is_empty() {
-                let mesh_id = commands
-                    .register_mesh(Arc::new(BasicMesh::from_positions(&positions, &indices)));
-                commands.draw_mesh(
-                    mesh_id,
-                    Mat4::from_translation(Vec3::new(0.0, 0.0, PCB_Z_BOARD_FILL)),
-                    if self.canvas_dark_mode {
-                        [21, 46, 33, 255]
-                    } else {
-                        [199, 232, 209, 255]
-                    },
-                );
-            }
-        }
-
-        let mut polyline = outline_points.clone();
-        if self.layout.outline_is_closed() && polyline.first() != polyline.last() {
-            if let Some(first) = polyline.first().copied() {
-                polyline.push(first);
-            }
-        }
-
-        for pair in polyline.windows(2) {
-            commands.draw_line(
-                Vec3::new(pair[0].x, pair[0].y, PCB_Z_BOARD_OUTLINE),
-                Vec3::new(pair[1].x, pair[1].y, PCB_Z_BOARD_OUTLINE),
-                if self.canvas_dark_mode {
-                    [101, 187, 126, 255]
-                } else {
-                    [55, 145, 82, 255]
-                },
-                1.0,
-                false,
-                0.0,
-            );
-        }
-    }
-
-    fn record_trace_geometry(&self, commands: &mut BasicCommandList) {
-        for (index, trace) in self.layout.traces.iter().enumerate() {
-            let color = if self.selection == PcbSelection::Trace(index) {
-                [255, 210, 140, 255]
-            } else {
-                match trace.layer {
-                    raf_electronics::PcbLayer::TopCopper => [224, 120, 72, 255],
-                    raf_electronics::PcbLayer::BottomCopper => [84, 172, 214, 255],
-                }
-            };
-
-            let z = match trace.layer {
-                raf_electronics::PcbLayer::TopCopper => PCB_Z_TOP_TRACE,
-                raf_electronics::PcbLayer::BottomCopper => PCB_Z_BOTTOM_TRACE,
-            };
-
-            for pair in trace.points.windows(2) {
-                commands.draw_line(
-                    Vec3::new(pair[0].x, pair[0].y, z),
-                    Vec3::new(pair[1].x, pair[1].y, z),
-                    color,
-                    trace.width.max(1.0),
-                    false,
-                    0.0,
-                );
-            }
-        }
-    }
-
-    fn record_airwire_geometry(&self, commands: &mut BasicCommandList) {
-        for (index, airwire) in self.layout.airwires.iter().enumerate() {
-            let color = if self.selection == PcbSelection::Airwire(index) {
-                [255, 220, 120, 255]
-            } else {
-                [170, 170, 60, 255]
-            };
-
-            commands.draw_line(
-                Vec3::new(airwire.from.x, airwire.from.y, PCB_Z_AIRWIRE),
-                Vec3::new(airwire.to.x, airwire.to.y, PCB_Z_AIRWIRE),
-                color,
-                1.0,
-                false,
-                0.0,
-            );
-        }
-    }
-
-    fn record_component_geometry(&self, commands: &mut BasicCommandList) {
-        let body_mesh_id = commands.register_mesh(centered_unit_quad_mesh());
-        let pad_mesh_id = commands.register_mesh(centered_unit_quad_mesh());
-
-        for (index, component) in self.layout.components.iter().enumerate() {
-            let footprint =
-                footprint_definition(&component.footprint, component.pad_nets.len().max(1));
-            let body_color = if self.selection == PcbSelection::Component(index) {
-                [70, 52, 31, 255]
-            } else if component.locked {
-                [42, 45, 52, 255]
-            } else {
-                [26, 31, 39, 255]
-            };
-
-            commands.draw_mesh(
-                body_mesh_id,
-                quad_transform(
-                    component.position,
-                    footprint.body_size,
-                    PCB_Z_COMPONENT_BODY,
-                ),
-                body_color,
-            );
-
-            for (pad_index, pad) in footprint.pads.iter().enumerate() {
-                let Some(world) = self.layout.pad_world_position(index, pad_index) else {
-                    continue;
-                };
-                let pad_color = if self.selection == PcbSelection::Component(index) {
-                    [255, 205, 110, 255]
-                } else {
-                    [226, 132, 42, 255]
-                };
-                commands.draw_mesh(
-                    pad_mesh_id,
-                    quad_transform(world, pad.size, PCB_Z_COMPONENT_PAD),
-                    pad_color,
-                );
-            }
-        }
     }
 
     fn draw_grid(&self, painter: &egui::Painter, rect: Rect) {
@@ -557,6 +435,7 @@ impl PcbViewPanel {
         painter: &egui::Painter,
         rect: Rect,
         draw_fill_geometry: bool,
+        draw_detail_overlay: bool,
         hovered_component: Option<usize>,
     ) {
         for (index, component) in self.layout.components.iter().enumerate() {
@@ -574,6 +453,9 @@ impl PcbViewPanel {
             let visual_rect = Rect::from_center_size(center, visual_size);
             let selected = self.selection == PcbSelection::Component(index);
             let hovered = hovered_component == Some(index);
+            if !draw_detail_overlay && !selected && !hovered {
+                continue;
+            }
             let palette = electronics_palette(self.canvas_dark_mode);
             let stroke_color = if selected {
                 theme::ACCENT
@@ -900,14 +782,6 @@ impl PcbViewPanel {
         None
     }
 
-    fn board_outline_points(&self) -> Vec<Vec2> {
-        let mut points = self.layout.board_outline.points.clone();
-        if points.len() >= 2 && points.first() == points.last() {
-            points.pop();
-        }
-        points
-    }
-
     fn world_to_screen(&self, rect: Rect, world: Vec2) -> Pos2 {
         Pos2::new(
             rect.left() + self.offset.x + world.x * self.zoom,
@@ -941,37 +815,6 @@ fn distance_to_segment(point: Pos2, start: Pos2, end: Pos2) -> f32 {
     let t = (to_point.dot(segment) / len_sq).clamp(0.0, 1.0);
     let projection = start + segment * t;
     point.distance(projection)
-}
-
-fn centered_unit_quad_mesh() -> Arc<BasicMesh> {
-    Arc::new(BasicMesh::from_positions(
-        &[
-            Vec3::new(-0.5, -0.5, 0.0),
-            Vec3::new(0.5, -0.5, 0.0),
-            Vec3::new(0.5, 0.5, 0.0),
-            Vec3::new(-0.5, 0.5, 0.0),
-        ],
-        &[0, 1, 2, 0, 2, 3],
-    ))
-}
-
-fn quad_transform(center: Vec2, size: Vec2, z: f32) -> Mat4 {
-    Mat4::from_translation(Vec3::new(center.x, center.y, z))
-        * Mat4::from_scale(Vec3::new(size.x.max(0.001), size.y.max(0.001), 1.0))
-}
-
-fn triangle_fan_indices(vertex_count: usize) -> Vec<u32> {
-    if vertex_count < 3 {
-        return Vec::new();
-    }
-
-    let mut indices = Vec::with_capacity((vertex_count - 2) * 3);
-    for index in 1..(vertex_count - 1) {
-        indices.push(0);
-        indices.push(index as u32);
-        indices.push((index + 1) as u32);
-    }
-    indices
 }
 
 fn footprint_asset_name(footprint: &str) -> &'static str {
@@ -1029,10 +872,6 @@ fn draw_dashed_line(
         painter.line_segment([start + dir * cursor, start + dir * next], stroke);
         cursor += dash + gap;
     }
-}
-
-fn color_array(color: Color32) -> [u8; 4] {
-    [color.r(), color.g(), color.b(), color.a()]
 }
 
 fn net_color(net: &str, index: usize) -> Color32 {

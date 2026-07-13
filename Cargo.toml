@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/raf_core",
+    "crates/raf_ui",
     "crates/raf_render",
     "crates/raf_editor",
     "crates/raf_assets",
@@ -15,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.8.9"
+version = "0.9.0"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/AuraRafi/AuraRafi"
@@ -72,6 +73,7 @@ ureq = { version = "2", features = ["json"] }
 
 # Internal crates
 raf_core = { path = "crates/raf_core" }
+raf_ui = { path = "crates/raf_ui" }
 raf_render = { path = "crates/raf_render" }
 raf_editor = { path = "crates/raf_editor" }
 raf_assets = { path = "crates/raf_assets" }

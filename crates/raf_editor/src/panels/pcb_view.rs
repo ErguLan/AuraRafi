@@ -9,7 +9,7 @@ use raf_render::bridge::{RenderRuntime, RenderRuntimeSnapshot};
 
 use crate::electronics_assets::ElectronicsAssetAtlas;
 
-use super::gpu_canvas::GpuCanvas;
+use super::electronics_cad_surface_host::ElectronicsCadSurfaceHost;
 use super::schematic_view::electronics_palette;
 use crate::theme;
 
@@ -40,7 +40,7 @@ pub struct PcbViewPanel {
     show_airwires: bool,
     last_sync: Option<PcbSyncSummary>,
     render_runtime: RenderRuntimeSnapshot,
-    gpu_canvas: GpuCanvas,
+    cad_surface_host: ElectronicsCadSurfaceHost,
     asset_atlas: ElectronicsAssetAtlas,
     canvas_dark_mode: bool,
 }
@@ -59,7 +59,7 @@ impl Default for PcbViewPanel {
             show_airwires: true,
             last_sync: None,
             render_runtime: RenderRuntimeSnapshot::default(),
-            gpu_canvas: GpuCanvas::new("pcb_canvas_render"),
+            cad_surface_host: ElectronicsCadSurfaceHost::new("pcb_canvas_render"),
             asset_atlas: ElectronicsAssetAtlas::default(),
             canvas_dark_mode: true,
         }
@@ -193,170 +193,193 @@ impl PcbViewPanel {
             Stroke::new(1.0, palette.border),
         );
 
-        ui.allocate_ui_at_rect(toolbar_rect.shrink2(Vec2::new(10.0, 6.0)), |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 7.0;
+        ui.allocate_new_ui(
+            egui::UiBuilder::new().max_rect(toolbar_rect.shrink2(Vec2::new(10.0, 6.0))),
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 7.0;
 
-                if self
-                    .toolbar_icon_button(
-                        ui,
-                        "toolbar/select.png",
-                        self.tool == PcbTool::Select,
-                        t("app.pcb_tool_select", self.lang),
-                    )
-                    .clicked()
-                {
-                    self.tool = PcbTool::Select;
-                }
-
-                if self
-                    .toolbar_icon_button(
-                        ui,
-                        "toolbar/wire.png",
-                        self.tool == PcbTool::Route,
-                        t("app.pcb_tool_route", self.lang),
-                    )
-                    .clicked()
-                {
-                    self.tool = PcbTool::Route;
-                }
-
-                if self
-                    .toolbar_icon_button(
-                        ui,
-                        "toolbar/outline.png",
-                        self.tool == PcbTool::Outline,
-                        t("app.pcb_tool_outline", self.lang),
-                    )
-                    .clicked()
-                {
-                    self.tool = PcbTool::Outline;
-                }
-
-                if self
-                    .toolbar_icon_button(
-                        ui,
-                        "toolbar/airwire.png",
-                        self.show_airwires,
-                        t("app.pcb_airwires", self.lang),
-                    )
-                    .clicked()
-                {
-                    self.show_airwires = !self.show_airwires;
-                }
-
-                if self
-                    .toolbar_icon_button(
-                        ui,
-                        "toolbar/fit.png",
-                        false,
-                        t("app.electronics_fit", self.lang),
-                    )
-                    .clicked()
-                {
-                    self.fit_board_to_view(rect.width(), rect.height());
-                }
-
-                ui.add_space(10.0);
-
-                if self.tool == PcbTool::Outline
-                    && ui
-                        .add_sized(
-                            [112.0, 30.0],
-                            egui::Button::new(
-                                egui::RichText::new(t("app.pcb_new_outline", self.lang))
-                                    .size(11.0)
-                                    .color(palette.text),
-                            )
-                            .fill(palette.card_bg)
-                            .stroke(Stroke::new(1.0, palette.border)),
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/select.png",
+                            self.tool == PcbTool::Select,
+                            t("app.pcb_tool_select", self.lang),
                         )
                         .clicked()
-                {
-                    self.outline_draft.clear();
-                }
-
-                if self.selected_airwire_index().is_some()
-                    && ui
-                        .add_sized(
-                            [128.0, 30.0],
-                            egui::Button::new(
-                                egui::RichText::new(t("app.pcb_route_selected", self.lang))
-                                    .size(11.0)
-                                    .color(Color32::WHITE),
-                            )
-                            .fill(Color32::from_rgb(121, 70, 22))
-                            .stroke(Stroke::new(1.0, theme::ACCENT)),
-                        )
-                        .clicked()
-                {
-                    if let Some(idx) = self.selected_airwire_index() {
-                        changed |= self.layout.route_airwire(idx);
-                        self.selection = PcbSelection::None;
+                    {
+                        self.tool = PcbTool::Select;
                     }
-                }
 
-                let outline_color = if self.layout.outline_is_closed() {
-                    Color32::from_rgb(92, 214, 142)
-                } else {
-                    Color32::from_rgb(255, 180, 95)
-                };
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(format!(
-                        "{}: {}",
-                        t("app.pcb_outline_status", self.lang),
-                        if self.layout.outline_is_closed() {
-                            t("app.pcb_outline_closed", self.lang)
-                        } else {
-                            t("app.pcb_outline_open", self.lang)
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/wire.png",
+                            self.tool == PcbTool::Route,
+                            t("app.pcb_tool_route", self.lang),
+                        )
+                        .clicked()
+                    {
+                        self.tool = PcbTool::Route;
+                    }
+
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/outline.png",
+                            self.tool == PcbTool::Outline,
+                            t("app.pcb_tool_outline", self.lang),
+                        )
+                        .clicked()
+                    {
+                        self.tool = PcbTool::Outline;
+                    }
+
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/airwire.png",
+                            self.show_airwires,
+                            t("app.pcb_airwires", self.lang),
+                        )
+                        .clicked()
+                    {
+                        self.show_airwires = !self.show_airwires;
+                    }
+
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/fit.png",
+                            false,
+                            t("app.electronics_fit", self.lang),
+                        )
+                        .clicked()
+                    {
+                        self.fit_board_to_view(rect.width(), rect.height());
+                    }
+
+                    ui.add_space(10.0);
+
+                    if self.tool == PcbTool::Outline
+                        && ui
+                            .add_sized(
+                                [112.0, 30.0],
+                                egui::Button::new(
+                                    egui::RichText::new(t("app.pcb_new_outline", self.lang))
+                                        .size(11.0)
+                                        .color(palette.text),
+                                )
+                                .fill(palette.card_bg)
+                                .stroke(Stroke::new(1.0, palette.border)),
+                            )
+                            .clicked()
+                    {
+                        self.outline_draft.clear();
+                    }
+
+                    if self.selected_airwire_index().is_some()
+                        && ui
+                            .add_sized(
+                                [128.0, 30.0],
+                                egui::Button::new(
+                                    egui::RichText::new(t("app.pcb_route_selected", self.lang))
+                                        .size(11.0)
+                                        .color(Color32::WHITE),
+                                )
+                                .fill(Color32::from_rgb(121, 70, 22))
+                                .stroke(Stroke::new(1.0, theme::ACCENT)),
+                            )
+                            .clicked()
+                    {
+                        if let Some(idx) = self.selected_airwire_index() {
+                            changed |= self.layout.route_airwire(idx);
+                            self.selection = PcbSelection::None;
                         }
-                    ))
-                    .size(11.0)
-                    .color(outline_color),
-                );
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(
-                        egui::RichText::new(self.render_runtime.status_badge())
-                            .size(10.0)
-                            .color(if self.render_runtime.is_gpu_active() {
-                                theme::ACCENT
-                            } else {
-                                palette.text_muted
-                            }),
-                    );
-
-                    let summary = format!(
-                        "{} {} | {} {} | {} {}",
-                        t("app.pcb_components", self.lang),
-                        self.layout.components.len(),
-                        t("app.pcb_traces", self.lang),
-                        self.layout.traces.len(),
-                        t("app.pcb_airwires", self.lang),
-                        self.layout.airwires.len()
-                    );
-                    ui.label(
-                        egui::RichText::new(summary)
-                            .size(11.0)
-                            .color(palette.text_muted),
-                    );
-
-                    if let Some(sync) = &self.last_sync {
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "+{} ~{} -{}",
-                                sync.added_components,
-                                sync.updated_components,
-                                sync.removed_components
-                            ))
-                            .size(10.0)
-                            .color(palette.text_muted),
-                        );
                     }
+
+                    let outline_color = if self.layout.outline_is_closed() {
+                        Color32::from_rgb(92, 214, 142)
+                    } else {
+                        Color32::from_rgb(255, 180, 95)
+                    };
+                    ui.add_space(8.0);
+                    ui.label(
+                        egui::RichText::new(format!(
+                            "{}: {}",
+                            t("app.pcb_outline_status", self.lang),
+                            if self.layout.outline_is_closed() {
+                                t("app.pcb_outline_closed", self.lang)
+                            } else {
+                                t("app.pcb_outline_open", self.lang)
+                            }
+                        ))
+                        .size(11.0)
+                        .color(outline_color),
+                    );
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let cache = self.cad_surface_host.cache_stats();
+                        if cache.frame_builds > 0 {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} {}/{}",
+                                    t("app.cad_surface_cache", self.lang),
+                                    cache.frame_cache_hits,
+                                    cache.frame_builds + cache.frame_cache_hits
+                                ))
+                                .size(10.0)
+                                .color(
+                                    if cache.last_frame_reused {
+                                        theme::ACCENT
+                                    } else {
+                                        palette.text_muted
+                                    },
+                                ),
+                            );
+                        }
+
+                        ui.label(
+                            egui::RichText::new(self.render_runtime.status_badge())
+                                .size(10.0)
+                                .color(if self.render_runtime.is_gpu_active() {
+                                    theme::ACCENT
+                                } else {
+                                    palette.text_muted
+                                }),
+                        );
+
+                        let summary = format!(
+                            "{} {} | {} {} | {} {}",
+                            t("app.pcb_components", self.lang),
+                            self.layout.components.len(),
+                            t("app.pcb_traces", self.lang),
+                            self.layout.traces.len(),
+                            t("app.pcb_airwires", self.lang),
+                            self.layout.airwires.len()
+                        );
+                        ui.label(
+                            egui::RichText::new(summary)
+                                .size(11.0)
+                                .color(palette.text_muted),
+                        );
+
+                        if let Some(sync) = &self.last_sync {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "+{} ~{} -{}",
+                                    sync.added_components,
+                                    sync.updated_components,
+                                    sync.removed_components
+                                ))
+                                .size(10.0)
+                                .color(palette.text_muted),
+                            );
+                        }
+                    });
                 });
-            });
-        });
+            },
+        );
 
         ui.allocate_space(Vec2::new(rect.width(), 42.0));
         changed

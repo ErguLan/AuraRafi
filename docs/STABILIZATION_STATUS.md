@@ -4,6 +4,68 @@ Fecha: 2026-07-05
 
 Este documento resume que ya esta resuelto en codigo, que ya venia funcionando, que sigue pendiente y en que fase cae cada bloque. La idea es tener una sola fuente de verdad mientras cerramos la estabilizacion antes de testear a fondo.
 
+## Actualizacion 2026-07-12
+
+- FPS visible: el contador deja de derivarse de `egui::unstable_dt` o solo del
+  tiempo de CPU del viewport. Usa un reloj monotono suavizado del editor, por
+  lo que un frame ocioso no se reporta como un valor astronomico. El limitador
+  reutiliza la ultima presentacion valida hasta el siguiente intervalo, de modo
+  que limita trabajo real de CPU/GPU y no solo solicitudes de repaint.
+- Gizmo: `gizmo_growth_scale` ahora escala la geometria compartida de Move y
+  Rotate, incluido el hit-test. El grosor se mantiene estable y Scale queda
+  completamente fuera de esa opcion.
+- Focus: F con focus lock apagado solo encuadra la seleccion. Con lock activo,
+  WASD aplica una inspeccion temporal relativa a la camara y vuelve al punto de
+  foco unicamente al soltar las teclas, sin el rebote de seguimiento.
+- Sessions: Properties incluye una pestana Sessions para activar o crear
+  mundos, interfaces y documentos de electronica aislados.
+- Agent: `electronics.diagnose` une topologia pin-red, DRC y simulacion para
+  analisis de conexiones antes de que el agente sugiera cambios.
+- Agent history: los cambios de documentos hechos por herramientas del agente
+  ahora entran a Undo/Redo; las peticiones Undo/Redo del propio agente se
+  encolan al editor sin acoplar el callback de herramientas a la interfaz.
+- UI: `raf_ui` suma reglas de estilo por clase/id/tipo, texto atlas reutilizable
+  y entrada retained de puntero, foco, drag y menu contextual para la futura
+  superficie nativa.
+- Assets IA: la ruta remota usa `gpt-image-2` por defecto; la nueva herramienta
+  `asset.generate_local_png` crea iconos, badges, sprites temporales y texturas
+  de referencia de forma determinista, offline y bajo demanda. Ninguna ruta
+  mantiene Python activo dentro del loop del editor.
+
+Pendiente de cierre: compilacion completa, pruebas de crates y recorrido manual
+del viewport, chat, Sessions y CAD sobre la app nativa.
+
+## Decision GPU/WGPU Antes De Runtime
+
+La ruta de trabajo definida para el editor y el engine es GPU nativa. CPU queda
+para recuperacion, pruebas, ejecucion sin adaptador valido y equipos
+incompatibles; no es el modo visual objetivo de un proyecto normal. Un perfil
+ligero reduce resolucion, draw calls y memoria en una GPU integrada, no degrada
+automaticamente al rasterizador CPU.
+
+`wgpu` se conserva como backend intercambiable de `ApiGraphicBasic`, no como
+una dependencia de interfaz. El cuello actual no es que WGPU renderice un
+viewport: la ventana y la composicion siguen cruzando Eframe/Egui. La migracion
+ya tiene UI retenida, atlas de texto local, compositor WGPU directo, input
+Winit y host de ventana nativo sin Egui.
+
+Antes de runtime se debe decidir con evidencia:
+
+- El workspace usa WGPU 23 y necesita una auditoria de upgrade antes de adoptar
+  APIs avanzadas de largo plazo.
+- Vulkan, DX12 y Metal no exponen las mismas capabilities. Las funciones
+  futuras deben estar por tier y conservar alternativas ligeras.
+- ApiGraphicBasic ya evita el piso WebGL2 en su inicializacion propia, pero
+  faltan mediciones de adaptador, memoria y frame pacing antes de elegir
+  politicas definitivas.
+- PBR, sombras, postprocesado, particulas, animacion esqueletica y picking GPU
+  no se activan en esta estabilizacion. Solo se preservan sus fronteras limpias.
+- Si WGPU no cumple las mediciones, se sustituye su backend bajo
+  ApiGraphicBasic; no se reescriben UI, escenas, documentos ni comandos.
+
+Validacion obligatoria antes de runtime: GPU integrada y dedicada, resize
+sostenido, perdida/restauracion de device, Linux, macOS, frame pacing y memoria.
+
 ## Resuelto En Codigo
 
 - Crear proyecto nuevo de juego: funciona bien.
@@ -107,7 +169,7 @@ Se abordaron Fase 12 (descubribilidad HUD), Fase 14 (settings sin friccion), Fas
 
 ### Verificacion
 
-- `cargo check -p aura_rafi_editor` pasa limpio (solo warnings preexistentes de `allocate_ui_at_rect` deprecation en pcb_view.rs y schematic_view.rs, no tocados en esta sesion).
+- `cargo check -p aura_rafi_editor` pasa limpio en la pasada registrada; las llamadas `allocate_ui_at_rect` de electronics fueron migradas a `allocate_new_ui` despues.
 
 ### Bugs cerrados en esta sesion
 
@@ -189,7 +251,7 @@ Sesion dedicada a implementar las features de UX/UI propuestas para competir con
 
 ### Verificacion
 
-- `cargo check -p aura_rafi_editor` pasa limpio (solo warnings preexistentes de `allocate_ui_at_rect` deprecation).
+- `cargo check -p aura_rafi_editor` pasa limpio en la pasada registrada; las llamadas `allocate_ui_at_rect` de electronics fueron migradas a `allocate_new_ui` despues.
 
 ### Pendiente real despues de esta sesion
 
@@ -982,3 +1044,77 @@ Criterio de cierre:
 - **Docs**: docs/SCRIPTING_SYSTEM.md (nuevo, arquitectura completa + roadmap), docs/ARCHITECTURE.md actualizado, .ai/SYSTEM_TRUTH.md actualizado, docs/COMMANDS.md actualizado.
 
 Estado del scripting: arquitectura lista, runtime no implementado. El Host API y el backend Rhai compilan y tienen tests, pero no hay ScriptRuntime en pp.rs todavia (Phase B del roadmap). Los visual nodes siguen logeando "deferring to ECS Bridge" hasta Phase C.
+
+---
+
+## Actualizacion 2026-07-01 — UX / Movimiento / Settings
+
+### Resumen
+
+Sesion enfocada en bugs de movimiento reportados por el CEO y mejoras de UX chicas pero de alto impacto.
+
+### Resuelto en codigo
+
+| Feature | Descripcion | Archivos |
+|---|---|---|
+| **WS invertido** | W ahora mueve hacia adelante (direccion de la camara), S hacia atras. `settings.invert_ws` checkbox en Settings > Editor > Mouse para restaurar comportamiento viejo. | `viewport.rs`, `viewport_interaction.rs`, `config.rs`, `settings_panel.rs`, `en.json`, `es.json` |
+| **Focus Lock (tecla F)** | F togglea bloqueo de enfoque (si `focus_lock_enabled` en settings). Cuando activo, la camara sigue al objeto seleccionado cada frame. Icono "F" en HUD (junto a grid/labels). Toggle ON/OFF con click en el icono o tecla F. | `viewport.rs`, `viewport_interaction.rs`, `viewport_hud.rs`, `config.rs`, `settings_panel.rs`, `app.rs` |
+| **Gizmo auto-scaling** | Manijas de scale (circulos), rotation rings y flechas de translate crecen con la distancia de camara. `settings.gizmo_growth_scale` slider (0-100%) en Settings > Editor > Gizmo Controls. | `viewport_overlay.rs`, `config.rs`, `settings_panel.rs`, `en.json`, `es.json` |
+| **Ctrl bloquea movimiento** | Cuando Ctrl esta presionado, WASD y F no se procesan. Soluciona conflicto Ctrl+D (duplicate) moviendo la camara. | `viewport.rs`, `viewport_interaction.rs` |
+| **Free drag (click y mover)** | Click en un objeto (sin tocar gizmo) inicia un drag libre. El objeto se mueve en el plano horizontal (Y constante) siguiendo el mouse, como en Roblox Studio. | `viewport.rs`, `viewport_interaction.rs` |
+| **Camera boundary bounce fix** | Orbit pitch ahora usa soft-clamp cerca de los limites (-1.4, 1.4) para evitar rebote cuando se llega al tope. | `viewport_bridge.rs` |
+| **Part selector bug fix** | El radio de picking usaba `node.scale` local ignorando escala de padres. Corregido a world-space usando `world.x_axis/y_axis/z_axis.length()`. | `input_handler.rs` |
+
+### Nuevas settings agregadas
+
+| Setting | Tipo | Default | Ubicacion |
+|---|---|---|---|
+| `invert_ws` | bool | false | Settings > Editor > Mouse |
+| `focus_lock_enabled` | bool | true | Settings > Editor |
+| `gizmo_growth_scale` | f32 (0-100) | 0.0 | Settings > Editor > Gizmo Controls |
+
+### Archivos modificados en total
+
+| Archivo | Cambios |
+|---|---|
+| `crates/raf_core/src/config.rs` | `invert_ws`, `focus_lock_enabled`, `gizmo_growth_scale` fields + defaults |
+| `crates/raf_editor/src/panels/settings_panel.rs` | UI: invert_ws checkbox, focus_lock checkbox+desc, gizmo_growth slider |
+| `crates/raf_core/locales/en.json` | 4 nuevas keys i18n |
+| `crates/raf_core/locales/es.json` | 4 nuevas keys i18n |
+| `crates/raf_editor/src/panels/viewport.rs` | fields: invert_ws, focus_lock_enabled, focus_locked, gizmo_growth_scale, free_drag_*; WS fix con invert; Ctrl guard; focus lock update |
+| `crates/raf_editor/src/panels/viewport_interaction.rs` | F key toggle focus lock; Ctrl guard; free drag logic en start/drag/stop |
+| `crates/raf_editor/src/panels/viewport_hud.rs` | HudAction::ToggleFocusLock; draw como tercer toggle; tooltip; click handler |
+| `crates/raf_editor/src/panels/viewport_overlay.rs` | gizmo_size_factor(); sizes multiplicados por factor |
+| `crates/raf_editor/src/app.rs` | Sync de nuevas settings al viewport |
+| `crates/raf_render/src/bridge/viewport_bridge.rs` | Soft-clamp de pitch orbit |
+| `crates/raf_render/src/bridge/input_handler.rs` | World-space radius para picking |
+
+### Bugs cerrados
+
+| # | Bug | Estado |
+|---|---|---|
+| (nuevo) | WS invertido (W=backward, S=forward) | Fixeado: W=forward, S=backward por defecto |
+| (nuevo) | Ctrl+D mueve camara | Fixeado: Ctrl bloquea WASD/F |
+| (nuevo) | Part selector no detecta objetos grandes/gigantes | Fixeado: radius en world-space |
+| (nuevo) | Gizmo handles chicos cuando camara lejana | Fixeado: auto-scaling con growth offset |
+| (nuevo) | F no togglea correctamente | Fixeado: F ahora togglea focus lock |
+
+### Sigue abierto
+
+- Salida a archivo en export (#20)
+- Validacion manual de rotacion schematic (#1), gizmo grupal (#8), undo largo (#3)
+- PCB mover componentes (#4, #5, #6)
+- Limit FPS cableado real (#11)
+- Settings scroll bug (#12)
+
+## Actualizacion 2026-07-07 - Superficies CAD, render tiers y runtime Rhai
+
+- `raf_electronics::cad_scene` ahora deriva escenas CAD retenidas desde schematic y PCB: componentes, pins, wires, traces, pads, airwires, labels, board outline y DRC markers.
+- `ApiGraphicBasic::cad_surface` convierte esas escenas CAD a `BasicCommandList`, y `ElectronicsCadSurfaceHost` presenta schematic/PCB por el runtime grafico compartido con fallback CPU.
+- `RenderConfig::for_preset` y `RenderConfig::resource_profile` formalizan los presupuestos por tier: triangulos, textura, escala de superficie, sombras, post-proceso, luces y budgets futuros.
+- `ViewportSurfaceHost` ahora deriva un `ViewportSurfacePlan` del tier activo: escala de superficie, frame budget, sombras preparadas, post-proceso, PBR, particulas y skeletal animation quedan como contrato de superficie, no como logica desperdigada en egui.
+- `raf_script::runtime::RhaiScriptRuntime` queda como harness preparado: carga scripts `.rhai` adjuntos, ejecuta `on_start` y `on_update(dt)` contra una escena clonada y reporta errores reales del Host API.
+- `raf_editor::game_runtime` sigue como fachada preparada, no como Play mode activo. Convierte input egui a `InputSnapshot` y mantiene separada la escena editable de la escena clonada para futuras conexiones.
+- `/script.run` usa la misma sesion Rhai para ejecutar `on_start` una vez contra una escena clonada, sin mutar el documento editable.
+- `SelectionIdBuffer` define el contrato de seleccion pixel-perfect: ID por pixel, prioridad por capa y desempate por profundidad. `IdBufferSpec::scaled_extent` deja listo el sizing por tier.
+- Play mode del producto sigue guardado en `app.rs`; el harness Rhai ya compila y tiene tests, pero falta reactivar el flujo completo con consola, estado visible, nodes, physics y scene locking validados juntos.

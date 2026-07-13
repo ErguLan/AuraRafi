@@ -13,6 +13,27 @@ that are intentionally prepared for later runtime integration. This document
 tries to distinguish those states instead of flattening everything into
 "implemented" or "placeholder".
 
+## Sessions And User UI
+
+Projects can contain multiple sessions without becoming multiple projects. The
+registry is `sessions/index.ron`; a session owns scene, node graph, UI document,
+schematic and PCB document paths under `sessions/<uuid>/`. Assets and scripts
+remain shared at the project root. Existing projects retain legacy root paths
+until they are saved through the session flow.
+
+Each game session also persists an `editor_camera.ron` resource. It stores the
+editor camera block outside `SceneGraph`, so navigation state and bookmarks are
+session-specific without creating an invisible or hardcoded hierarchy node.
+
+Commands and Agent tools can list, create, open, duplicate and remove sessions.
+Opening a session saves dirty work first, restores the selected documents and
+clears undo history at the session boundary. Removing a non-active session
+removes its registry entry but retains files for recovery.
+
+Game UI is stored as an empty `raf_ui::UiDocument`, not as camera children. A
+camera can opt into a document reference only when the author selects Camera
+space.
+
 ## Workspace Layout
 
 ```
@@ -20,9 +41,10 @@ AuraRafi/
   editor/             Main binary that launches the editor
   crates/
     raf_core/         Core systems: ECS, scene graph, commands, events, config
+    raf_ui/           Rust-native retained UI model, docking, style, events
     raf_render/       Shared graphics runtime, CPU fallback path, and prepared render abstraction
     raf_editor/       Visual editor UI built on egui/eframe
-    raf_assets/       Asset importing, browsing, and management
+    raf_assets/       Asset importing, browsing, JSON primitive manifests
     raf_electronics/  Electronic design: schematics, PCBs, simulation, DRC, export
     raf_nodes/        Visual scripting (no-code) node system + executor
     raf_script/       Scripting runtime + Host API (Rhai + WASM + Node backends)
@@ -48,7 +70,8 @@ editor (binary)
   -> raf_hardware
 
 raf_editor -> raf_core, raf_render, raf_assets, raf_electronics, raf_nodes, raf_script, raf_ai, raf_net
-raf_render -> raf_core
+raf_render -> raf_core, raf_ui
+raf_ui -> serde, serde_json
 raf_assets -> raf_core
 raf_electronics -> raf_core
 raf_nodes -> raf_core
@@ -126,10 +149,16 @@ The `raf_script` crate provides:
 - `backends/rhai_backend.rs`: Rhai engine with full Host API registration
 - `backends/wasm_backend.rs`: WASM module loading (stub, Phase D)
 - `backends/node_backend.rs`: Visual node executor wired to Host API
+- `runtime.rs`: lightweight Rhai runtime session for attached scripts on a
+  cloned runtime scene
 
 Console commands `/script.create`, `/script.attach`, `/script.list`,
 `/script.validate`, `/script.run`, `/script.compile_nodes` are in
 `crates/raf_editor/src/commands/script.rs`.
+
+`raf_editor::game_runtime` remains the editor facade. It keeps the editable
+scene separate from the runtime clone, converts window input into
+`InputSnapshot`, and delegates Rhai lifecycle execution to `raf_script`.
 
 Settings: `EngineSettings.script_runtime_enabled`,
 `ProjectSettings.enable_scripting`, `allowed_script_languages`,
@@ -157,6 +186,18 @@ Flat-array scene graph with parent-child hierarchy.
 - O(1) node lookup by index
 
 The scene document now carries both editor-facing transform data and lightweight runtime-facing data so Play mode can clone and simulate a project without inventing a second scene format.
+
+### Electronics CAD Scene
+
+`raf_electronics::cad_scene` derives a retained, pickable CAD scene from
+existing schematic and PCB data. It emits objects for components, pins, wires,
+traces, pads, airwires, net labels, board outlines, and DRC markers without
+expanding the component library. The intent is to move electronics rendering
+and selection toward the same canvas-first model as the scene viewport.
+
+`raf_render::ApiGraphicBasic::cad_surface` records `CadScene` into the shared
+command-list renderer, keeping electronics on the same GPU-first and
+CPU-fallback path as the viewport.
 
 ### Command Bus
 
@@ -233,6 +274,10 @@ Lightweight pub/sub system with type-erased events:
 
 Shared graphics runtime for editor surfaces, with GPU hardware execution first when available and built-in CPU software fallback via ApiGraphicBasic.
 
+The renderer direction is canvas-first: scene, schematic, PCB, and the studio
+UI surface all move toward `RenderRuntime -> BasicDevice`, with egui kept as a
+temporary editor shell where it is still useful.
+
 ### Canonical Active Graphics Path
 
 Today the active editor surfaces follow one canonical path:
@@ -243,6 +288,8 @@ Notes:
 
 - The scene viewport builds its scene frame through `viewport_bridge.rs` and `scene_renderer.rs` before delegating execution to `RenderRuntime`.
 - The schematic and PCB canvases feed the same shared graphics runtime, so all three surfaces now live under one graphics-device policy and one fallback contract.
+- `raf_ui` provides the retained, non-egui UI data model for chrome, docking, floating panels, events, palette, and i18n text keys. `ApiGraphicBasic::ui_surface` records that data into `BasicCommandList`.
+- `SelectionIdBuffer` defines the pixel-perfect picking contract for future GPU readback and CPU-neutral selection tests, with layer/priority policy controlled by `PickingPolicy`.
 - `RenderBackendTrait`, `scene_data`, `world_stream`, ray tracing, and other advanced rendering modules remain prepared infrastructure rather than the primary active path today.
 
 ### Scene Viewport Rendering Path (v0.9.0)
@@ -388,7 +435,7 @@ Visual editor built on `egui`/`eframe`:
 - `ComponentLibrary`: Built-in parts (Resistor, Capacitor, LED, Magnet)
 - `Netlist`: Union-find algorithm builds nets from wire endpoints and pin positions (rotation-aware)
 - Auto-designator assignment (R1, R2, C1, MAG1, etc.)
-- `DrcReport`: 6 rules - floating pins, missing values, isolated components, unnamed nets, short circuit, LED without resistor
+- `DrcReport`: 8 built-in checks - floating pins, missing values, isolated components, unnamed nets, short circuits, LED current limiting, dangling wire endpoints, and component-pin bypass shorts
 - DC simulation engine: Modified Nodal Analysis, Gaussian elimination with partial pivoting, node voltages, branch currents, power dissipation
 - Export: SVG vector image (styled, rotation-aware), BOM CSV (grouped with quantities), text netlist
 - Gerber export structure for JLCPCB/PCBWay (manufacturer-specific layers defined, placeholder until PCB 3D layout)

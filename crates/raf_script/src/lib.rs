@@ -21,12 +21,14 @@ pub mod host_api;
 pub mod lifetime;
 pub mod node_handle;
 pub mod prelude;
+pub mod runtime;
 pub mod value;
 
 pub use backends::{ExecutionResult, LoadedScript, ScriptTier};
 pub use errors::{ScriptError, ScriptResult};
 pub use host_api::{AudioCommand, AudioCommandQueue, InputSnapshot, ScriptContext, TimeInfo};
 pub use node_handle::{NodeHandle, HOST_API_VERSION};
+pub use runtime::{RhaiScriptRuntime, ScriptRuntimeOptions, ScriptRuntimeReport};
 pub use value::ScriptValue;
 
 pub use prelude::*;

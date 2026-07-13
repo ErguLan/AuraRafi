@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "Plane Asset",
+  "parts": [
+    {
+      "name": "Plane",
+      "primitive": "plane",
+      "position": [0.0, 0.0, 0.0],
+      "scale": [1.0, 1.0, 1.0],
+      "color_rgba": [205, 205, 205, 255]
+    }
+  ]
+}

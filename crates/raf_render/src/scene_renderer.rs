@@ -32,6 +32,7 @@ use crate::render_pipeline::framebuffer::Framebuffer;
 use crate::render_pipeline::rasterizer::{self, ScreenVertex};
 
 use raf_core::scene::graph::{Primitive, SceneGraph, SceneNodeId};
+use raf_core::scene::WorldTransformCache;
 
 /// Render statistics for the current frame.
 #[derive(Debug, Clone, Default)]
@@ -44,6 +45,12 @@ pub struct FrameStats {
     pub triangles_rendered: u32,
     /// Triangles culled by backface test.
     pub triangles_culled: u32,
+    /// Visible entities skipped because the frame triangle budget was reached.
+    pub budget_culled_entities: u32,
+    /// Triangles withheld by the frame triangle budget.
+    pub budget_culled_triangles: u32,
+    /// Entities outside the active streamed camera region.
+    pub streaming_culled_entities: u32,
 }
 
 /// Render mode for the viewport.
@@ -82,6 +89,14 @@ pub struct RenderOptions {
     pub primary_selected: Option<u64>,
     pub grid_y: f32,
     pub grid_no_depth_test: bool,
+    /// Maximum scene triangles recorded for this frame. `u32::MAX` is unlimited.
+    pub triangle_budget: u32,
+    /// Enable region-based visibility before frustum culling and draw sorting.
+    pub world_streaming_enabled: bool,
+    /// Edge length in meters for a streamed world region.
+    pub world_stream_region_size: f32,
+    /// Visible region radius around the camera.
+    pub world_stream_load_radius: u32,
 }
 
 impl Default for RenderOptions {
@@ -100,6 +115,10 @@ impl Default for RenderOptions {
             primary_selected: None,
             grid_y: -0.02,
             grid_no_depth_test: false,
+            triangle_budget: u32::MAX,
+            world_streaming_enabled: false,
+            world_stream_region_size: 128.0,
+            world_stream_load_radius: 3,
         }
     }
 }
@@ -227,6 +246,7 @@ impl SceneRenderer {
         let light_dir = light_dir.normalize();
         let cam_eye = camera.eye();
         let selected_ids: HashSet<_> = selected.iter().copied().collect();
+        let transforms = WorldTransformCache::build(scene);
 
         let cube_mesh = &self.cube_mesh;
         let cube_edges = self.cube_edges.as_slice();
@@ -242,8 +262,6 @@ impl SceneRenderer {
         let plane_radius = self.plane_radius;
 
         let mut stats = FrameStats::default();
-        let mut grid_bounds: Option<GridBounds> = None;
-
         // Collect render jobs first (avoids borrow conflict on self)
         let mut jobs: Vec<RenderJob> = Vec::new();
 
@@ -258,8 +276,15 @@ impl SceneRenderer {
             stats.total_entities += 1;
 
             // World matrix (includes parent chain)
-            let model = scene.world_matrix(id);
+            let model = transforms
+                .world_matrix(id)
+                .unwrap_or_else(|| node.local_matrix());
             let world_pos = model.col(3).truncate();
+
+            if !within_world_stream_radius(world_pos, cam_eye, options) {
+                stats.streaming_culled_entities += 1;
+                continue;
+            }
 
             let mesh_radius = match node.primitive {
                 Primitive::Cube => cube_radius,
@@ -276,12 +301,6 @@ impl SceneRenderer {
                     .abs()
                     .max(node.scale.y.abs())
                     .max(node.scale.z.abs());
-
-            if let Some(bounds) = &mut grid_bounds {
-                bounds.expand_with(world_pos, bounding_r);
-            } else {
-                grid_bounds = Some(GridBounds::from_center_radius(world_pos, bounding_r));
-            }
 
             if !frustum.intersects_sphere(world_pos, bounding_r) {
                 continue;
@@ -307,19 +326,15 @@ impl SceneRenderer {
                 is_selected,
                 dist_to_camera: dist,
                 is_transparent,
+                bounding_radius: bounding_r,
+                triangle_count: primitive_triangle_count(
+                    node.primitive,
+                    &self.cube_mesh,
+                    &self.cylinder_mesh,
+                    &self.sphere_mesh,
+                    &self.plane_mesh,
+                ),
             });
-        }
-
-        if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
-            draw_world_grid(
-                &mut self.framebuffer,
-                camera,
-                vp_w,
-                vp_h,
-                options.grid_spacing,
-                options.grid_load_distance,
-                grid_bounds,
-            );
         }
 
         // Sort: opaque first (front-to-back for early Z rejection),
@@ -336,6 +351,20 @@ impl SceneRenderer {
                 .partial_cmp(&a.dist_to_camera)
                 .unwrap_or(std::cmp::Ordering::Equal),
         });
+        apply_triangle_budget(&mut jobs, options.triangle_budget, &mut stats);
+        let grid_bounds = grid_bounds_for_jobs(&jobs);
+
+        if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
+            draw_world_grid(
+                &mut self.framebuffer,
+                camera,
+                vp_w,
+                vp_h,
+                options.grid_spacing,
+                options.grid_load_distance,
+                grid_bounds,
+            );
+        }
 
         // Execute render jobs (now we can borrow framebuffer mutably)
         let use_tonality =
@@ -521,6 +550,7 @@ impl SceneRenderer {
         let light_dir = light_dir.normalize();
         let cam_eye = camera.eye();
         let selected_ids: HashSet<_> = selected.iter().copied().collect();
+        let transforms = WorldTransformCache::build(scene);
 
         let cube_mesh = &self.cube_mesh;
         let cube_basic_mesh = Arc::clone(&self.cube_basic_mesh);
@@ -540,7 +570,6 @@ impl SceneRenderer {
         let plane_radius = self.plane_radius;
 
         let mut stats = FrameStats::default();
-        let mut grid_bounds: Option<GridBounds> = None;
         let mut commands = BasicCommandList::new();
         commands.clear(bg_color);
 
@@ -556,8 +585,15 @@ impl SceneRenderer {
 
             stats.total_entities += 1;
 
-            let model = scene.world_matrix(id);
+            let model = transforms
+                .world_matrix(id)
+                .unwrap_or_else(|| node.local_matrix());
             let world_pos = model.col(3).truncate();
+
+            if !within_world_stream_radius(world_pos, cam_eye, options) {
+                stats.streaming_culled_entities += 1;
+                continue;
+            }
 
             let mesh_radius = match node.primitive {
                 Primitive::Cube => cube_radius,
@@ -574,12 +610,6 @@ impl SceneRenderer {
                     .abs()
                     .max(node.scale.y.abs())
                     .max(node.scale.z.abs());
-
-            if let Some(bounds) = &mut grid_bounds {
-                bounds.expand_with(world_pos, bounding_r);
-            } else {
-                grid_bounds = Some(GridBounds::from_center_radius(world_pos, bounding_r));
-            }
 
             if !frustum.intersects_sphere(world_pos, bounding_r) {
                 continue;
@@ -604,6 +634,14 @@ impl SceneRenderer {
                 is_selected,
                 dist_to_camera: dist,
                 is_transparent,
+                bounding_radius: bounding_r,
+                triangle_count: primitive_triangle_count(
+                    node.primitive,
+                    &self.cube_mesh,
+                    &self.cylinder_mesh,
+                    &self.sphere_mesh,
+                    &self.plane_mesh,
+                ),
             });
         }
 
@@ -619,6 +657,8 @@ impl SceneRenderer {
                 .partial_cmp(&a.dist_to_camera)
                 .unwrap_or(std::cmp::Ordering::Equal),
         });
+        apply_triangle_budget(&mut jobs, options.triangle_budget, &mut stats);
+        let grid_bounds = grid_bounds_for_jobs(&jobs);
 
         let use_tonality =
             !(matches!(options.mode, RenderMode::Solid) && !options.solid_face_tonality);
@@ -810,6 +850,138 @@ struct RenderJob {
     is_selected: bool,
     dist_to_camera: f32,
     is_transparent: bool,
+    bounding_radius: f32,
+    triangle_count: u32,
+}
+
+fn primitive_triangle_count(
+    primitive: Primitive,
+    cube: &MeshData,
+    cylinder: &MeshData,
+    sphere: &MeshData,
+    plane: &MeshData,
+) -> u32 {
+    match primitive {
+        Primitive::Cube => cube.triangle_count() as u32,
+        Primitive::Cylinder => cylinder.triangle_count() as u32,
+        Primitive::Sphere => sphere.triangle_count() as u32,
+        Primitive::Plane => plane.triangle_count() as u32,
+        Primitive::Empty | Primitive::Sprite2D => 0,
+    }
+}
+
+fn within_world_stream_radius(world_pos: Vec3, camera_pos: Vec3, options: RenderOptions) -> bool {
+    if !options.world_streaming_enabled {
+        return true;
+    }
+
+    let region_size = options.world_stream_region_size.clamp(16.0, 1024.0);
+    let radius = options.world_stream_load_radius.max(1) as i32;
+    let camera_region = (
+        (camera_pos.x / region_size).floor() as i32,
+        (camera_pos.z / region_size).floor() as i32,
+    );
+    let entity_region = (
+        (world_pos.x / region_size).floor() as i32,
+        (world_pos.z / region_size).floor() as i32,
+    );
+
+    (entity_region.0 - camera_region.0).abs() <= radius
+        && (entity_region.1 - camera_region.1).abs() <= radius
+}
+
+fn apply_triangle_budget(jobs: &mut Vec<RenderJob>, triangle_budget: u32, stats: &mut FrameStats) {
+    if triangle_budget == u32::MAX {
+        return;
+    }
+
+    let mut used_triangles = 0u32;
+    jobs.retain(|job| {
+        let within_budget = used_triangles.saturating_add(job.triangle_count) <= triangle_budget;
+        if job.is_selected || within_budget {
+            used_triangles = used_triangles.saturating_add(job.triangle_count);
+            true
+        } else {
+            stats.budget_culled_entities += 1;
+            stats.budget_culled_triangles += job.triangle_count;
+            false
+        }
+    });
+}
+
+fn grid_bounds_for_jobs(jobs: &[RenderJob]) -> Option<GridBounds> {
+    let mut bounds: Option<GridBounds> = None;
+    for job in jobs {
+        let world_pos = job.model.col(3).truncate();
+        if let Some(existing) = &mut bounds {
+            existing.expand_with(world_pos, job.bounding_radius);
+        } else {
+            bounds = Some(GridBounds::from_center_radius(
+                world_pos,
+                job.bounding_radius,
+            ));
+        }
+    }
+    bounds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(id: usize, selected: bool) -> RenderJob {
+        RenderJob {
+            id: SceneNodeId(id),
+            primitive: Primitive::Cube,
+            model: Mat4::IDENTITY,
+            base_color: [255, 255, 255, 255],
+            is_selected: selected,
+            dist_to_camera: id as f32,
+            is_transparent: false,
+            bounding_radius: 1.0,
+            triangle_count: 12,
+        }
+    }
+
+    #[test]
+    fn triangle_budget_keeps_selection_and_reports_culled_work() {
+        let mut jobs = vec![job(0, false), job(1, false), job(2, true)];
+        let mut stats = FrameStats::default();
+
+        apply_triangle_budget(&mut jobs, 12, &mut stats);
+
+        assert_eq!(jobs.len(), 2);
+        assert_eq!(jobs[0].id, SceneNodeId(0));
+        assert_eq!(jobs[1].id, SceneNodeId(2));
+        assert_eq!(stats.budget_culled_entities, 1);
+        assert_eq!(stats.budget_culled_triangles, 12);
+    }
+
+    #[test]
+    fn world_stream_radius_filters_distant_xz_regions() {
+        let options = RenderOptions {
+            world_streaming_enabled: true,
+            world_stream_region_size: 100.0,
+            world_stream_load_radius: 1,
+            ..RenderOptions::default()
+        };
+
+        assert!(within_world_stream_radius(
+            Vec3::new(150.0, 500.0, 0.0),
+            Vec3::ZERO,
+            options
+        ));
+        assert!(!within_world_stream_radius(
+            Vec3::new(250.0, 0.0, 0.0),
+            Vec3::ZERO,
+            options
+        ));
+        assert!(!within_world_stream_radius(
+            Vec3::new(0.0, 0.0, -150.0),
+            Vec3::ZERO,
+            options
+        ));
+    }
 }
 
 fn mesh_to_basic(mesh: &MeshData) -> BasicMesh {

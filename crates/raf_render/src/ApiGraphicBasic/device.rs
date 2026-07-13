@@ -129,7 +129,9 @@ impl BasicDevice {
         }
 
         if !config.force_cpu && config.allow_gpu {
-            // Attempt to initialize GPU with loose limits and high compatibility margin
+            // The primary path is native GPU rendering. CPU remains a fallback;
+            // compatibility limits should not silently force the renderer down
+            // to a WebGL2-era feature floor on desktop hardware.
             if let Some(gpu_state) = Self::try_init_gpu() {
                 tracing::info!(
                     "ApiGraphicBasic successfully initialized GPU Hardware backend (wgpu)."
@@ -265,7 +267,7 @@ impl BasicDevice {
 
         // Request adapter using block_on for async initialization (run inside a lightweight runtime wrapper)
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::LowPower, // Prioritize integrated GPUs/laptops
+            power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: None,
             force_fallback_adapter: false, // Fallback is requested if direct hardware creation fails
         }))?;
@@ -275,7 +277,7 @@ impl BasicDevice {
             &wgpu::DeviceDescriptor {
                 label: Some("AuraRafi_Device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_webgl2_defaults(), // Lowest denominator limits for maximum compatibility
+                required_limits: wgpu::Limits::downlevel_defaults(),
                 memory_hints: wgpu::MemoryHints::Performance,
             },
             None,

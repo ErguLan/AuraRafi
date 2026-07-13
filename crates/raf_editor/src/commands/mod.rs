@@ -5,12 +5,15 @@
 //! handlers because the engine mutations still need typed access to editor
 //! documents.
 
+pub mod assets;
 pub mod catalog;
 pub mod electronics;
 pub mod game;
 pub mod output;
 pub mod parser;
 pub mod script;
+pub mod sessions;
+pub mod ui_document;
 pub mod workspace;
 
 pub use catalog::{CommandCatalog, CommandDefinition};

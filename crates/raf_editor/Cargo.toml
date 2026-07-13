@@ -11,8 +11,10 @@ raf_render = { workspace = true }
 raf_assets = { workspace = true }
 raf_electronics = { workspace = true }
 raf_nodes = { workspace = true }
+raf_script = { workspace = true }
 raf_ai = { workspace = true }
 raf_net = { workspace = true }
+raf_ui = { workspace = true }
 egui = { workspace = true }
 eframe = { workspace = true }
 glam = { workspace = true }

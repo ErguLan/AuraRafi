@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+use crate::session::ProjectSessionRegistry;
+
 fn default_true() -> bool {
     true
 }
@@ -22,6 +24,14 @@ fn default_main_scene_name() -> String {
 
 fn default_depth_resolution_scale() -> f32 {
     0.6
+}
+
+fn default_world_stream_region_size() -> f32 {
+    128.0
+}
+
+fn default_world_stream_load_radius() -> u32 {
+    3
 }
 
 /// Type of project: Game or Electronics.
@@ -81,6 +91,18 @@ pub struct ProjectSettings {
     /// Internal resolution scale used by the software depth pass.
     #[serde(default = "default_depth_resolution_scale")]
     pub depth_resolution_scale: f32,
+    /// Enable region-based scene visibility for large-world projects.
+    #[serde(default)]
+    pub world_streaming_enabled: bool,
+    /// Edge length in meters for a streamed world region.
+    #[serde(default = "default_world_stream_region_size")]
+    pub world_stream_region_size: f32,
+    /// Number of visible regions kept around the viewport camera.
+    #[serde(default = "default_world_stream_load_radius")]
+    pub world_stream_load_radius: u32,
+    /// Positive values prefer lower detail as regions move away from the camera.
+    #[serde(default)]
+    pub world_stream_lod_bias: i8,
     /// Scene name to create/use by default.
     #[serde(default = "default_main_scene_name")]
     pub default_scene_name: String,
@@ -114,6 +136,10 @@ impl Default for ProjectSettings {
             runtime_render_preset: RenderPreset::Potato,
             depth_accurate: false,
             depth_resolution_scale: default_depth_resolution_scale(),
+            world_streaming_enabled: false,
+            world_stream_region_size: default_world_stream_region_size(),
+            world_stream_load_radius: default_world_stream_load_radius(),
+            world_stream_lod_bias: 0,
             default_scene_name: default_main_scene_name(),
             enable_scripting: true,
             allowed_script_languages: ScriptLanguageFlags::DEFAULT,
@@ -174,6 +200,10 @@ impl Project {
             settings: ProjectSettings::default(),
         };
 
+        let sessions = ProjectSessionRegistry::new(project_type);
+        sessions
+            .save(&project_dir)
+            .map_err(|error| format!("could not initialize sessions: {error}"))?;
         project.save()?;
         Ok(project)
     }
@@ -263,5 +293,23 @@ impl RecentProjects {
             Ok(data) => ron::from_str(&data).unwrap_or_default(),
             Err(_) => Self::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn world_streaming_defaults_are_lightweight_and_persisted() {
+        let settings = ProjectSettings::default();
+        assert!(!settings.world_streaming_enabled);
+        assert_eq!(settings.world_stream_region_size, 128.0);
+        assert_eq!(settings.world_stream_load_radius, 3);
+        assert_eq!(settings.world_stream_lod_bias, 0);
+
+        let serialized = ron::ser::to_string(&settings).expect("settings serialize");
+        let loaded: ProjectSettings = ron::from_str(&serialized).expect("settings deserialize");
+        assert_eq!(loaded.world_stream_region_size, 128.0);
     }
 }

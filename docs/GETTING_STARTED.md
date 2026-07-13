@@ -83,14 +83,15 @@ The central viewport shows your game scene in 2D or 3D:
 
 ### Play Mode
 
-Game projects now have an editor-integrated runtime slice:
+Game runtime is currently prepared, not product-active. The engine already has
+pieces for cloned-scene execution, input snapshots, and an isolated Rhai
+lifecycle harness, but the top-level Play flow stays guarded while the renderer
+and editor surface architecture are stabilized.
 
-- Click **Run Game** to enter Play mode
-- The engine clones the current scene into a temporary runtime scene
-- Saved node graphs from `nodes.ron` execute `On Start` and `On Update`
-- Attached `.rhai` behaviors can read input, access `self` / `parent` / paths, set variables, move entities, trigger audio, and react to trigger overlaps
-- Simple rigid body physics, gravity, damping, and trigger-only collider checks run on the runtime copy
-- Click **Stop Game** to leave Play mode and return to the edit document unchanged
+- Attached `.rhai` scripts can be checked with `/script.run`; this executes
+  `on_start` once against a cloned scene and does not mutate the edit document.
+- Full Play mode, physics, audio playback, node execution, and scene locking
+  are planned to reconnect after the viewport and surface migration is stable.
 
 ### Schematic View (Electronics Projects)
 

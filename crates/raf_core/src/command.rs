@@ -153,7 +153,7 @@ mod tests {
         bus.submit(Command::new(
             "create_entity",
             "scene",
-            "Create a cube",
+            "Import a cube asset",
             serde_json::json!({"name": "Cube"}),
         ));
         assert_eq!(bus.pending_count(), 1);

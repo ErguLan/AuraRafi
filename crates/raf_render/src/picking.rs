@@ -220,7 +220,22 @@ pub fn project_gizmo_arrow(
     vp_w: f32,
     vp_h: f32,
 ) -> Option<GizmoScreenArrow> {
-    let tip = entity_pos + arrow.axis * GIZMO_LENGTH;
+    project_gizmo_arrow_scaled(entity_pos, arrow, 1.0, view_proj, vp_w, vp_h)
+}
+
+/// Project a gizmo arrow with a presentation-only world scale.
+///
+/// The same scale is consumed by rendering and hit-testing so a larger gizmo
+/// never becomes visually detached from its selectable geometry.
+pub fn project_gizmo_arrow_scaled(
+    entity_pos: Vec3,
+    arrow: &GizmoArrow,
+    presentation_scale: f32,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<GizmoScreenArrow> {
+    let tip = entity_pos + arrow.axis * GIZMO_LENGTH * presentation_scale.max(0.1);
 
     // Project start and end.
     let start = project_to_screen(entity_pos, view_proj, vp_w, vp_h)?;
@@ -283,10 +298,24 @@ pub fn pick_gizmo_arrow(
     vp_w: f32,
     vp_h: f32,
 ) -> Option<(usize, f32)> {
+    pick_gizmo_arrow_scaled(click, entity_pos, 1.0, view_proj, vp_w, vp_h)
+}
+
+/// Hit-test transform arrows using the same presentation scale as drawing.
+pub fn pick_gizmo_arrow_scaled(
+    click: [f32; 2],
+    entity_pos: Vec3,
+    presentation_scale: f32,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<(usize, f32)> {
     let mut best: Option<(usize, f32)> = None;
 
     for (i, arrow) in GIZMO_ARROWS.iter().enumerate() {
-        if let Some(screen) = project_gizmo_arrow(entity_pos, arrow, view_proj, vp_w, vp_h) {
+        if let Some(screen) =
+            project_gizmo_arrow_scaled(entity_pos, arrow, presentation_scale, view_proj, vp_w, vp_h)
+        {
             let dist = point_to_segment_distance(click, screen.start, screen.end);
             if dist < 8.0 {
                 let is_better = match best {
@@ -341,7 +370,20 @@ pub fn pick_gizmo_rotation_ring(
     vp_w: f32,
     vp_h: f32,
 ) -> Option<(usize, f32)> {
+    pick_gizmo_rotation_ring_scaled(click, entity_pos, 1.0, view_proj, vp_w, vp_h)
+}
+
+/// Hit-test a rotation ring with a presentation-only world scale.
+pub fn pick_gizmo_rotation_ring_scaled(
+    click: [f32; 2],
+    entity_pos: Vec3,
+    presentation_scale: f32,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<(usize, f32)> {
     let axis_planes = [(Vec3::Y, Vec3::Z), (Vec3::X, Vec3::Z), (Vec3::X, Vec3::Y)];
+    let radius = GIZMO_ROTATION_RADIUS * presentation_scale.max(0.1);
 
     let mut best: Option<(usize, f32)> = None;
 
@@ -351,9 +393,8 @@ pub fn pick_gizmo_rotation_ring(
 
         for step in 0..=GIZMO_ROTATION_SEGMENTS {
             let angle = (step as f32 / GIZMO_ROTATION_SEGMENTS as f32) * std::f32::consts::TAU;
-            let world_point = entity_pos
-                + *axis_a * (angle.cos() * GIZMO_ROTATION_RADIUS)
-                + *axis_b * (angle.sin() * GIZMO_ROTATION_RADIUS);
+            let world_point =
+                entity_pos + *axis_a * (angle.cos() * radius) + *axis_b * (angle.sin() * radius);
 
             if let Some(screen_point) = project_to_screen(world_point, view_proj, vp_w, vp_h) {
                 if let Some(prev) = previous {

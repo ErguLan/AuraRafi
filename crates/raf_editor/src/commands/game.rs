@@ -1,4 +1,5 @@
 use glam::Vec3;
+use raf_assets::{builtin_primitive_model_kinds, PrimitiveModelManifest};
 use raf_core::scene::graph::{NodeColor, Primitive, SceneGraph, SceneNodeId};
 
 use crate::commands::output::CommandOutput;
@@ -45,7 +46,28 @@ fn add_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> Comm
         .arg("name")
         .map(str::to_string)
         .unwrap_or_else(|| format!("{} {}", primitive.label(), ctx.scene.len() + 1));
-    let id = ctx.scene.add_root_with_primitive(&name, primitive);
+    let id = match PrimitiveModelManifest::builtin_for_primitive(primitive) {
+        Ok(Some(manifest)) => match manifest.instantiate_single_root_into_scene(
+            ctx.scene,
+            Some(&name),
+            primitive_asset_source(primitive),
+        ) {
+            Ok(id) => id,
+            Err(error) => {
+                return CommandOutput::error(
+                    "Create entity",
+                    format!("Could not import primitive asset: {error}"),
+                );
+            }
+        },
+        Ok(None) => ctx.scene.add_root_with_primitive(&name, primitive),
+        Err(error) => {
+            return CommandOutput::error(
+                "Create entity",
+                format!("Could not load primitive asset manifest: {error}"),
+            );
+        }
+    };
 
     if let Some(node) = ctx.scene.get_mut(id) {
         node.position = Vec3::new(
@@ -75,6 +97,16 @@ fn add_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> Comm
         node_detail_lines(id, node, ctx.scene),
         node_json(id, node, ctx.scene),
     )
+}
+
+fn primitive_asset_source(primitive: Primitive) -> Option<&'static str> {
+    match primitive {
+        Primitive::Cube => Some("builtin://primitive/cube"),
+        Primitive::Sphere => Some("builtin://primitive/sphere"),
+        Primitive::Cylinder => Some("builtin://primitive/cylinder"),
+        Primitive::Plane => Some("builtin://primitive/plane"),
+        Primitive::Empty | Primitive::Sprite2D => None,
+    }
 }
 
 fn select_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
@@ -328,181 +360,63 @@ fn generate_prefab(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) ->
         .arg("kind")
         .unwrap_or("platform")
         .to_ascii_lowercase();
+    let manifest = match PrimitiveModelManifest::builtin(&kind) {
+        Ok(Some(manifest)) => manifest,
+        Ok(None) => {
+            return CommandOutput::warning(
+                "Generate prefab",
+                vec![
+                    format!("Unknown prefab kind: {kind}"),
+                    format!("available: {}", builtin_primitive_model_kinds().join(", ")),
+                ],
+                serde_json::json!({
+                    "ok": false,
+                    "reason": "unknown_manifest",
+                    "kind": kind,
+                    "available": builtin_primitive_model_kinds()
+                }),
+            );
+        }
+        Err(error) => {
+            return CommandOutput::error(
+                "Generate prefab",
+                format!("Could not load primitive manifest for {kind}: {error}"),
+            );
+        }
+    };
     let group_name = command
         .arg("name")
         .map(str::to_string)
-        .unwrap_or_else(|| format!("{} Prefab", title_case(&kind)));
-    let root = ctx.scene.add_root_folder(&group_name);
-    let mut created = vec![root];
-
-    let recipes: Vec<(&str, Primitive, Vec3, Vec3, NodeColor)> = match kind.as_str() {
-        "tower" => vec![
-            (
-                "Base",
-                Primitive::Cube,
-                Vec3::new(0.0, 0.25, 0.0),
-                Vec3::new(3.0, 0.5, 3.0),
-                NodeColor::rgb(90, 100, 120),
-            ),
-            (
-                "Column A",
-                Primitive::Cylinder,
-                Vec3::new(-1.0, 1.8, -1.0),
-                Vec3::new(0.35, 3.2, 0.35),
-                NodeColor::rgb(160, 160, 180),
-            ),
-            (
-                "Column B",
-                Primitive::Cylinder,
-                Vec3::new(1.0, 1.8, -1.0),
-                Vec3::new(0.35, 3.2, 0.35),
-                NodeColor::rgb(160, 160, 180),
-            ),
-            (
-                "Column C",
-                Primitive::Cylinder,
-                Vec3::new(-1.0, 1.8, 1.0),
-                Vec3::new(0.35, 3.2, 0.35),
-                NodeColor::rgb(160, 160, 180),
-            ),
-            (
-                "Column D",
-                Primitive::Cylinder,
-                Vec3::new(1.0, 1.8, 1.0),
-                Vec3::new(0.35, 3.2, 0.35),
-                NodeColor::rgb(160, 160, 180),
-            ),
-            (
-                "Deck",
-                Primitive::Cube,
-                Vec3::new(0.0, 3.5, 0.0),
-                Vec3::new(3.4, 0.35, 3.4),
-                NodeColor::rgb(210, 150, 80),
-            ),
-        ],
-        "gate" => vec![
-            (
-                "Left Pillar",
-                Primitive::Cube,
-                Vec3::new(-1.2, 1.0, 0.0),
-                Vec3::new(0.5, 2.0, 0.5),
-                NodeColor::rgb(110, 130, 160),
-            ),
-            (
-                "Right Pillar",
-                Primitive::Cube,
-                Vec3::new(1.2, 1.0, 0.0),
-                Vec3::new(0.5, 2.0, 0.5),
-                NodeColor::rgb(110, 130, 160),
-            ),
-            (
-                "Lintel",
-                Primitive::Cube,
-                Vec3::new(0.0, 2.15, 0.0),
-                Vec3::new(3.0, 0.35, 0.55),
-                NodeColor::rgb(190, 120, 70),
-            ),
-        ],
-        "boat" | "ship" => vec![
-            (
-                "Hull Center",
-                Primitive::Cube,
-                Vec3::new(0.0, 0.35, 0.0),
-                Vec3::new(4.2, 0.7, 1.35),
-                NodeColor::rgb(34, 92, 128),
-            ),
-            (
-                "Bow Block",
-                Primitive::Cube,
-                Vec3::new(2.35, 0.45, 0.0),
-                Vec3::new(0.8, 0.55, 1.05),
-                NodeColor::rgb(44, 112, 154),
-            ),
-            (
-                "Stern Block",
-                Primitive::Cube,
-                Vec3::new(-2.25, 0.55, 0.0),
-                Vec3::new(0.7, 0.85, 1.2),
-                NodeColor::rgb(31, 78, 112),
-            ),
-            (
-                "Deck",
-                Primitive::Cube,
-                Vec3::new(-0.25, 0.88, 0.0),
-                Vec3::new(2.6, 0.16, 1.0),
-                NodeColor::rgb(196, 134, 74),
-            ),
-            (
-                "Mast",
-                Primitive::Cylinder,
-                Vec3::new(0.1, 2.0, 0.0),
-                Vec3::new(0.12, 2.35, 0.12),
-                NodeColor::rgb(136, 90, 52),
-            ),
-            (
-                "Sail",
-                Primitive::Cube,
-                Vec3::new(0.55, 2.25, 0.0),
-                Vec3::new(1.15, 1.45, 0.06),
-                NodeColor::rgb(236, 232, 218),
-            ),
-            (
-                "Flag",
-                Primitive::Cube,
-                Vec3::new(0.42, 3.35, 0.0),
-                Vec3::new(0.62, 0.28, 0.05),
-                NodeColor::rgb(220, 66, 58),
-            ),
-        ],
-        _ => vec![
-            (
-                "Platform",
-                Primitive::Cube,
-                Vec3::new(0.0, 0.1, 0.0),
-                Vec3::new(5.0, 0.2, 3.0),
-                NodeColor::rgb(90, 160, 220),
-            ),
-            (
-                "Marker",
-                Primitive::Cylinder,
-                Vec3::new(0.0, 0.75, 0.0),
-                Vec3::new(0.4, 1.1, 0.4),
-                NodeColor::rgb(255, 170, 70),
-            ),
-            (
-                "Beacon",
-                Primitive::Sphere,
-                Vec3::new(0.0, 1.55, 0.0),
-                Vec3::new(0.45, 0.45, 0.45),
-                NodeColor::rgb(255, 220, 90),
-            ),
-        ],
+        .unwrap_or_else(|| manifest.name.clone());
+    let created = manifest.instantiate_into_scene_with_name(ctx.scene, Some(&group_name));
+    let Some(root) = created.first().copied() else {
+        return CommandOutput::error(
+            "Generate prefab",
+            "Primitive manifest produced no root node.",
+        );
     };
-
-    for (part_name, primitive, position, scale, color) in recipes {
-        let id = ctx.scene.add_child(root, part_name);
-        if let Some(node) = ctx.scene.get_mut(id) {
-            node.primitive = primitive;
-            node.position = position;
-            node.scale = scale;
-            node.color = color;
-        }
-        created.push(id);
-    }
+    let part_count = created.len().saturating_sub(1);
 
     select_ids(ctx, vec![root]);
     CommandOutput::changed(
-        format!("Generated {group_name}"),
+        format!("Imported {group_name}"),
         vec![
             format!("kind: {kind}"),
+            format!("manifest: {}", manifest.name),
+            format!("schema_version: {}", manifest.schema_version),
             format!("root_id: {}", root.0),
             format!("created_nodes: {}", created.len()),
-            "mesh_strategy: prefab built from persisted primitives".to_string(),
+            format!("parts: {part_count}"),
+            "source: embedded_json_manifest".to_string(),
         ],
         serde_json::json!({
             "ok": true,
             "kind": kind,
+            "manifest": manifest.name,
+            "schema_version": manifest.schema_version,
+            "source": "embedded_json_manifest",
             "root_id": root.0,
+            "part_count": part_count,
             "created_ids": created.iter().map(|id| id.0).collect::<Vec<_>>()
         }),
     )
@@ -637,6 +551,12 @@ fn node_detail_lines(
         format_vec3("bounds_min", bounds.0),
         format_vec3("bounds_max", bounds.1),
     ];
+    if let Some(source_asset) = &node.source_asset {
+        lines.push(format!("source_asset: {source_asset}"));
+    }
+    if let Some(schema_version) = node.source_schema_version {
+        lines.push(format!("source_schema_version: {schema_version}"));
+    }
     lines.extend(local_vertex_lines(node.primitive, node.scale));
     lines
 }
@@ -664,7 +584,9 @@ fn node_json(
                 "index_count": mesh_index_count(node.primitive),
                 "bounds_min": vec3_json(bounds_min),
                 "bounds_max": vec3_json(bounds_max)
-            }
+            },
+            "source_asset": node.source_asset,
+            "source_schema_version": node.source_schema_version
         }
     })
 }
@@ -704,12 +626,12 @@ fn local_vertex_lines(primitive: Primitive, scale: Vec3) -> Vec<String> {
             .map(|(index, vertex)| format_vec3(&format!("local_vertex_{index}"), *vertex))
             .collect()
         }
-        Primitive::Cylinder => vec![
-            "local_vertex_note: cylinder is generated by renderer recipe; command reports scaled axis bounds.".to_string(),
-        ],
-        Primitive::Sphere => vec![
-            "local_vertex_note: sphere is generated by renderer recipe; command reports scaled radius bounds.".to_string(),
-        ],
+        Primitive::Cylinder => {
+            vec!["local_vertex_note: cylinder uses builtin primitive asset bounds.".to_string()]
+        }
+        Primitive::Sphere => {
+            vec!["local_vertex_note: sphere uses builtin primitive asset bounds.".to_string()]
+        }
         Primitive::Empty => Vec::new(),
     }
 }
@@ -789,10 +711,44 @@ fn vec3_json(value: Vec3) -> serde_json::Value {
     serde_json::json!([value.x, value.y, value.z])
 }
 
-fn title_case(value: &str) -> String {
-    let mut chars = value.chars();
-    match chars.next() {
-        Some(first) => first.to_ascii_uppercase().to_string() + chars.as_str(),
-        None => String::new(),
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::output::CommandLevel;
+    use crate::commands::parser::{parse_console_input, ParsedInput};
+
+    #[test]
+    fn add_primitive_uses_builtin_asset_manifest() {
+        let mut scene = SceneGraph::new();
+        let mut hierarchy = HierarchyPanel::default();
+        let mut viewport = ViewportPanel::default();
+        let ParsedInput::Command(command) =
+            parse_console_input("/game.add primitive=cube name=Block x=1 y=2 z=3").unwrap()
+        else {
+            panic!("expected command");
+        };
+        let mut ctx = GameCommandContext {
+            scene: &mut scene,
+            hierarchy: &mut hierarchy,
+            viewport: &mut viewport,
+        };
+
+        let output = execute("game.add", &command, &mut ctx);
+
+        assert_eq!(output.level, CommandLevel::Info);
+        assert!(output.changed);
+        let selected = ctx.hierarchy.selected_node.expect("selected node");
+        let node = ctx.scene.get(selected).expect("created node");
+        assert_eq!(node.name, "Block");
+        assert_eq!(node.primitive, Primitive::Cube);
+        assert_eq!(node.position, Vec3::new(1.0, 2.0, 3.0));
+        assert_eq!(
+            node.source_asset.as_deref(),
+            Some("builtin://primitive/cube")
+        );
+        assert_eq!(
+            output.json["entity"]["source_asset"],
+            "builtin://primitive/cube"
+        );
     }
 }

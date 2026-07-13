@@ -1,7 +1,7 @@
 # AuraRafi Manual Commands
 
-The Console can act as a small manual command runner before the full AI
-tool-calling pipeline is connected.
+The Console is a manual command runner that uses the same domain handlers as
+the AI tool-calling pipeline.
 
 ## Activation
 
@@ -26,6 +26,25 @@ Supported forms:
 
 Tab autocompletes command names. Arrow Up and Arrow Down navigate command
 history. `/` alone maps to `/help`.
+
+## Sessions And Generated Assets
+
+| Command | Purpose |
+| --- | --- |
+| `/session.list` | Lists the active project session registry. |
+| `/session.create name=<name> kind=world|interface|electronics` | Creates an isolated session. |
+| `/session.open session=<name-or-uuid>` | Activates a session after preserving dirty work. |
+| `/session.duplicate source=<name-or-uuid> name=<name>` | Copies session documents into a new session. |
+| `/session.remove session=<name-or-uuid>` | Removes a non-active registry entry and retains files for recovery. |
+| `/ui.document.describe` | Describes the active session's empty-or-authored UI document. |
+| `/ui.node.add id=<id> kind=<kind> parent=root text_key=<i18n-key>` | Adds a user-authored UI node. |
+| `/ui.node.remove id=<id>` | Removes a non-root UI node. |
+| `/ui.document.set_space space=screen|world|camera` | Chooses where that user UI renders. |
+| `/ui.document.bind_camera camera=<key>` | Links a document to a camera by reference, not hierarchy ownership. |
+| `/asset.generate_image prompt="..." name=<asset> size=square|landscape|portrait transparent=true|false` | Starts the isolated remote image worker with `gpt-image-2` by default. |
+| `/asset.generate_local_png prompt="..." name=<asset> style=icon|badge|sprite|texture` | Starts the inexpensive local procedural PNG worker; no API key or network required. |
+| `/asset.image_status job=<uuid>` | Reads an image generation job. |
+| `/asset.cancel_image job=<uuid>` | Stops a running image generation job. |
 
 ## Domains
 
@@ -66,7 +85,7 @@ Electronics:
 - `/electronics.set_value`, `/electronics.rotate`
 - `/electronics.delete`, `/electronics.select`
 - `/electronics.generate_circuit`, `/electronics.autolayout`
-- `/electronics.drc`, `/electronics.simulate`
+- `/electronics.drc`, `/electronics.diagnose`, `/electronics.simulate`
 - `/electronics.netlist`, `/electronics.bom`, `/electronics.describe`
 
 PCB:
@@ -82,8 +101,11 @@ Script (shared, all project types):
 
 Script commands manage `.rhai` and `.cpp` files in `assets/scripts/`.
 `/script.create` writes a template file. `/script.attach` binds a file to
-a scene entity by name. `/script.run` is a one-shot test (Phase B).
-`/script.compile_nodes` converts a node graph to Rhai source (Phase E).
+a scene entity by name. The shared Rhai runtime session now exists in
+`raf_script`; `/script.run` executes `on_start` once against a cloned scene so
+the editor document is not mutated.
+`/script.compile_nodes` is prepared for the future node-runtime connection and
+does not activate a product runtime.
 See `docs/SCRIPTING_SYSTEM.md` for the full scripting architecture.
 
 ## Output Contract

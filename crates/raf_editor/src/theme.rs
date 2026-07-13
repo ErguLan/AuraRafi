@@ -143,19 +143,19 @@ pub fn normalize_experimental(value: f32) -> f32 {
 fn dark_palette(experimental: f32) -> ThemePalette {
     let factor = normalize_experimental(experimental);
     ThemePalette {
-        bg: mix_color(DARK_BG, Color32::from_rgb(10, 22, 34), factor),
-        panel: mix_color(DARK_PANEL, Color32::from_rgb(16, 30, 46), factor),
-        widget: mix_color(DARK_WIDGET, Color32::from_rgb(24, 41, 60), factor),
-        widget_hover: mix_color(DARK_WIDGET_HOVER, Color32::from_rgb(31, 53, 76), factor),
-        widget_active: mix_color(DARK_WIDGET_ACTIVE, Color32::from_rgb(40, 66, 92), factor),
-        text: mix_color(DARK_TEXT, Color32::from_rgb(222, 235, 255), factor),
-        text_dim: mix_color(DARK_TEXT_DIM, Color32::from_rgb(132, 150, 176), factor),
-        selection: mix_color(DARK_SELECTION, Color32::from_rgb(38, 78, 104), factor),
-        border: mix_color(DARK_BORDER, Color32::from_rgb(66, 92, 122), factor),
-        separator: mix_color(DARK_SEPARATOR, Color32::from_rgb(42, 62, 82), factor),
+        bg: mix_color(DARK_BG, Color32::from_rgb(14, 14, 14), factor),
+        panel: mix_color(DARK_PANEL, Color32::from_rgb(22, 21, 20), factor),
+        widget: mix_color(DARK_WIDGET, Color32::from_rgb(32, 30, 28), factor),
+        widget_hover: mix_color(DARK_WIDGET_HOVER, Color32::from_rgb(42, 38, 34), factor),
+        widget_active: mix_color(DARK_WIDGET_ACTIVE, Color32::from_rgb(52, 45, 38), factor),
+        text: mix_color(DARK_TEXT, Color32::from_rgb(236, 234, 230), factor),
+        text_dim: mix_color(DARK_TEXT_DIM, Color32::from_rgb(150, 144, 136), factor),
+        selection: mix_color(DARK_SELECTION, Color32::from_rgb(76, 48, 28), factor),
+        border: mix_color(DARK_BORDER, Color32::from_rgb(74, 62, 48), factor),
+        separator: mix_color(DARK_SEPARATOR, Color32::from_rgb(48, 43, 38), factor),
         faint_bg: mix_color(
             Color32::from_rgb(28, 28, 28),
-            Color32::from_rgb(24, 36, 50),
+            Color32::from_rgb(36, 32, 28),
             factor,
         ),
     }
@@ -164,31 +164,31 @@ fn dark_palette(experimental: f32) -> ThemePalette {
 fn light_palette(experimental: f32) -> ThemePalette {
     let factor = normalize_experimental(experimental);
     ThemePalette {
-        bg: mix_color(LIGHT_BG, Color32::from_rgb(226, 239, 255), factor),
-        panel: mix_color(LIGHT_PANEL, Color32::from_rgb(236, 247, 255), factor),
-        widget: mix_color(LIGHT_WIDGET, Color32::from_rgb(211, 228, 245), factor),
-        widget_hover: mix_color(LIGHT_WIDGET_HOVER, Color32::from_rgb(197, 218, 238), factor),
+        bg: mix_color(LIGHT_BG, Color32::from_rgb(250, 250, 250), factor),
+        panel: mix_color(LIGHT_PANEL, Color32::from_rgb(255, 255, 255), factor),
+        widget: mix_color(LIGHT_WIDGET, Color32::from_rgb(235, 235, 235), factor),
+        widget_hover: mix_color(LIGHT_WIDGET_HOVER, Color32::from_rgb(226, 226, 226), factor),
         widget_active: mix_color(
             Color32::from_rgb(200, 200, 210),
-            Color32::from_rgb(184, 208, 232),
+            Color32::from_rgb(214, 206, 196),
             factor,
         ),
-        text: mix_color(LIGHT_TEXT, Color32::from_rgb(27, 43, 66), factor),
-        text_dim: mix_color(LIGHT_TEXT_DIM, Color32::from_rgb(88, 106, 132), factor),
+        text: mix_color(LIGHT_TEXT, Color32::from_rgb(38, 38, 38), factor),
+        text_dim: mix_color(LIGHT_TEXT_DIM, Color32::from_rgb(112, 112, 112), factor),
         selection: mix_color(
             Color32::from_rgb(255, 230, 190),
-            Color32::from_rgb(176, 214, 248),
+            Color32::from_rgb(255, 226, 194),
             factor,
         ),
-        border: mix_color(LIGHT_BORDER, Color32::from_rgb(170, 198, 224), factor),
+        border: mix_color(LIGHT_BORDER, Color32::from_rgb(205, 205, 205), factor),
         separator: mix_color(
             Color32::from_rgb(225, 227, 232),
-            Color32::from_rgb(186, 210, 232),
+            Color32::from_rgb(218, 218, 218),
             factor,
         ),
         faint_bg: mix_color(
             Color32::from_rgb(235, 235, 240),
-            Color32::from_rgb(218, 231, 244),
+            Color32::from_rgb(240, 238, 234),
             factor,
         ),
     }

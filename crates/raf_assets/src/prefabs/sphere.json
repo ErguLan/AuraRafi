@@ -1,0 +1,13 @@
+{
+  "schema_version": 1,
+  "name": "Sphere Asset",
+  "parts": [
+    {
+      "name": "Sphere",
+      "primitive": "sphere",
+      "position": [0.0, 0.0, 0.0],
+      "scale": [1.0, 1.0, 1.0],
+      "color_rgba": [236, 236, 236, 255]
+    }
+  ]
+}

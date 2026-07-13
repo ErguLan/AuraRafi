@@ -48,7 +48,11 @@ impl fmt::Display for ScriptError {
             Self::InvalidArgument(msg) => write!(f, "Invalid script argument: {}", msg),
             Self::Timeout => write!(f, "Script exceeded per-frame operation limit"),
             Self::VersionMismatch { expected, found } => {
-                write!(f, "Host API version mismatch: expected {}, found {}", expected, found)
+                write!(
+                    f,
+                    "Host API version mismatch: expected {}, found {}",
+                    expected, found
+                )
             }
             Self::Io(msg) => write!(f, "Script I/O error: {}", msg),
         }

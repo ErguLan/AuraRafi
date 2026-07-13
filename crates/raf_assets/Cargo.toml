@@ -10,6 +10,7 @@ raf_core = { workspace = true }
 image = { workspace = true }
 gltf = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 notify = { workspace = true }
 uuid = { workspace = true }

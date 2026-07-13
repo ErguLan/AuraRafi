@@ -144,6 +144,9 @@ mod tests {
     #[test]
     fn coerce_vec3() {
         assert_eq!(ScriptValue::Float(2.0).as_vec3(), [2.0, 2.0, 2.0]);
-        assert_eq!(ScriptValue::Vec3([1.0, 2.0, 3.0]).as_vec3(), [1.0, 2.0, 3.0]);
+        assert_eq!(
+            ScriptValue::Vec3([1.0, 2.0, 3.0]).as_vec3(),
+            [1.0, 2.0, 3.0]
+        );
     }
 }

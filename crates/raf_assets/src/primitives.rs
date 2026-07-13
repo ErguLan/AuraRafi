@@ -8,9 +8,13 @@ use uuid::Uuid;
 /// Primitive shape type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrimitiveShape {
+    #[serde(alias = "cube", alias = "box", alias = "block")]
     Cube,
+    #[serde(alias = "sphere", alias = "ball")]
     Sphere,
+    #[serde(alias = "cylinder", alias = "tube")]
     Cylinder,
+    #[serde(alias = "plane", alias = "floor")]
     Plane,
 }
 

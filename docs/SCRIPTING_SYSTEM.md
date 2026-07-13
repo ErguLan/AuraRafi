@@ -5,9 +5,12 @@ covers the three scripting tiers, the shared Host API, how visual nodes
 execute, how commands create scripts, the security model, configuration
 surfaces, and a phased mini-roadmap.
 
-Status: **Architecture spec.** Runtime does not exist yet. This document
-defines the contract so that when the runtime is built, every tier plugs in
-without refactor.
+Status: **Architecture prepared for runtime.** `raf_script::runtime` is a
+small lifecycle harness that can load attached Rhai scripts, compile them, run
+`on_start`, and run `on_update(dt)` through the shared Host API on a cloned
+scene. It is intentionally not advertised as the game runtime yet; the product
+Play flow stays guarded until editor/runtime state, logs, physics, nodes, and
+scene locking are reconnected end to end.
 
 ---
 
@@ -24,8 +27,9 @@ API), Unreal (C++ + Blueprint share the reflection layer), and Godot
 | 2 | WASM Native Module (C++, Rust, Zig, AssemblyScript) | Advanced users, performance-critical code | Full (WASM sandbox) | Near-native (~2-5x native) |
 | 3 | Visual Nodes | Non-programmers, prototyping | Full (executor is in-process) | Interpreted graph walk |
 
-Tier 1 and Tier 3 ship first. Tier 2 is designed now, implemented when the
-runtime is built and a WASM runtime dependency is approved.
+Tier 1 ships first as the executable script path. Tier 3 exists as editor and
+executor infrastructure, but scene-mutating node bridges are still pending.
+Tier 2 is designed now and waits for an approved WASM runtime dependency.
 
 ---
 
@@ -45,7 +49,11 @@ Three disconnected systems exist today. This section is the honest baseline.
 - Scans `assets/` for script files, validates presence of `on_start`/`on_update` by text search.
 - `SceneNode.scripts: Vec<String>` stores relative paths.
 - `behaviors.rs` panel attaches/detaches scripts, shows validation status, opens VS Code.
-- **Gap**: No runtime loads or executes these files. The paths are stored metadata only.
+- `raf_script::runtime::RhaiScriptRuntime` can load attached `.rhai` files
+  from project or assets script folders and execute lifecycle functions on a
+  cloned scene for isolated runtime-prep tests.
+- **Gap**: The product Play button is still guarded; this is prepared
+  infrastructure, not the active game loop.
 
 ### 2.3 CommandBus (`crates/raf_core/src/command.rs`)
 - Full serializable command bus with submit/flush/record/undo/redo.
@@ -53,8 +61,12 @@ Three disconnected systems exist today. This section is the honest baseline.
 
 ### 2.4 Console Commands (`crates/raf_editor/src/commands/`)
 - Slash command parser with handlers for `game.*`, `electronics.*`, `pcb.*`, `workspace.*`.
-- These handlers DO mutate the scene and are the only working "scripting" surface today.
-- **Gap**: No `script.*` domain exists. Commands cannot create, attach, or run scripts.
+- These handlers DO mutate the scene and remain the command surface for agent
+  and console operations.
+- `script.*` commands exist for create, attach, detach, list, validate, run,
+  and node compile stubs.
+- `/script.run` uses the same Rhai runtime session for one-shot `on_start`
+  tests against a cloned scene.
 
 ### 2.5 C++ Modding (`docs/CPP_MODDING.md`)
 - Documents a `.dll` + JSON command bus approach.
@@ -157,9 +169,9 @@ pub struct ScriptContext<'a> {
 }
 ```
 
-The context is constructed per-frame by the (future) `ScriptRuntime` system
-and passed to each script's `on_update(dt)`. Scripts receive it implicitly
-(Rhai) or as a pointer (WASM).
+The context is constructed per frame by `raf_script::runtime` and passed to
+each script's `on_update(dt)`. Scripts receive it implicitly in Rhai. WASM will
+receive it through the Host ABI once Tier 2 is wired.
 
 ### 5.2 NodeHandle
 
@@ -229,7 +241,7 @@ in `crates/raf_core/src/units.rs`. Scripts never convert units manually.
 Scene loaded
     |
     v
-ScriptRuntime collects all node.scripts paths
+Prepared script harness collects all node.scripts paths
     |
     v
 For each script:
@@ -330,10 +342,9 @@ Add to `assets/commands/catalog.json` following the existing schema:
 name, aliases, domain, description_key, parameters, examples.
 
 ### 8.4 Command-to-script bridge
-Commands that need to run script logic go through the Host API, not through
-a parallel path. This means `/script.run` constructs a `ScriptContext`,
-creates a Rhai engine, and calls `on_start` through the same code a future
-runtime would use. No duplicate execution path.
+Commands that need to run script logic must go through the Host API, not
+through a parallel path. `/script.run` reuses `raf_script::runtime` and runs
+against a cloned scene so command testing does not mutate the editor document.
 
 ---
 
@@ -394,7 +405,7 @@ New fields with `#[serde(default)]`:
 
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
-| `script_runtime_enabled` | `bool` | `false` | Master switch. Off until runtime exists. |
+| `script_runtime_enabled` | `bool` | `false` | Master switch for the prepared script lifecycle harness. Keep off until Play/runtime is connected. |
 | `default_script_language` | `ScriptLanguage` | `Rhai` | Template language for "New Script". |
 | `script_hot_reload` | `bool` | `true` | Reload scripts on file change. |
 | `script_timeout_ms` | `u32` | `100` | Max execution time per frame (Rhai `set_max_operations`). |
@@ -465,6 +476,9 @@ crates/raf_script/
       wasm_backend.rs         -- WASM module load, instantiate, call (stub for now)
       node_backend.rs         -- Bridges raf_nodes executor to host_api
 
+    runtime.rs                -- Rhai script session: load attached scripts,
+                                  call on_start/on_update on runtime scenes
+
     host/
       mod.rs
       scene_ops.rs            -- get_node, spawn, destroy, find_child, get_parent
@@ -482,19 +496,20 @@ Dependencies:
 - `serde` (for ScriptValue serialization)
 - WASM runtime dependency deferred to Tier 2 implementation.
 
-The crate compiles today with Rhai backend only. `wasm_backend.rs` is a
-documented stub that returns `ScriptError::WasmNotImplemented`. `node_backend.rs`
-calls into `raf_nodes::executor` and wires its output to the Host API.
+The crate compiles and tests the Rhai backend plus the first runtime session.
+`wasm_backend.rs` is a documented stub that returns
+`ScriptError::WasmNotImplemented`. `node_backend.rs` calls into
+`raf_nodes::executor` and wires its output to the Host API.
 
 ---
 
 ## 14. Mini-Roadmap
 
-### Phase A: Architecture scaffold (this session)
+### Phase A: Architecture scaffold (done)
 - Create `crates/raf_script/` with the structure above.
 - Implement `ScriptContext`, `NodeHandle`, `ScriptValue`, `ScriptError`.
 - Implement `host/` modules with real SceneGraph calls.
-- Implement `rhai_backend.rs` with full Host API registration (compiles, does not run yet).
+- Implement `rhai_backend.rs` with full Host API registration.
 - `wasm_backend.rs` stub returning `WasmNotImplemented`.
 - `node_backend.rs` wiring `raf_nodes::executor` to Host API.
 - Add settings fields to `EngineSettings` and `ProjectSettings`.
@@ -503,12 +518,16 @@ calls into `raf_nodes::executor` and wires its output to the Host API.
 - i18n keys for all new strings.
 - This document.
 
-### Phase B: Editor Play mode (next)
-- `ScriptRuntime` system in `app.rs` behind `script_runtime_enabled` flag.
-- In editor Play mode: load scripts, call `on_start`, call `on_update(dt)`.
+### Phase B: Prepared script lifecycle harness (in progress)
+- `raf_script::runtime::RhaiScriptRuntime` loads attached scripts, calls
+  `on_start`, and calls `on_update(dt)` on a cloned scene.
+- `GameRuntimeState` owns the editor facade and converts egui input to the
+  engine-agnostic `InputSnapshot`.
+- Keep the top-level Play button guarded until runtime state, console logs,
+  physics, nodes, and scene locking are validated together.
 - Console output for script logs and errors.
 - Hot-reload via `notify` watcher.
-- `/script.run` command for one-shot testing.
+- `/script.run` command for one-shot testing through the same runtime session.
 
 ### Phase C: Visual node wiring (next)
 - Replace `executor.rs` "deferring to ECS Bridge" with Host API calls.

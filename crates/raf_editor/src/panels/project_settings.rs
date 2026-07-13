@@ -1,7 +1,5 @@
 use egui::Ui;
-use raf_core::config::{
-    Language, RenderPreset, ScriptExecutionMode, ScriptLanguage,
-};
+use raf_core::config::{Language, RenderPreset, ScriptExecutionMode, ScriptLanguage};
 use raf_core::i18n::t;
 use raf_core::project::Project;
 
@@ -171,7 +169,10 @@ pub fn show_project_settings(
             for script_lang in ScriptLanguage::all() {
                 let mut enabled = project.settings.allowed_script_languages.has(script_lang);
                 if ui.checkbox(&mut enabled, script_lang.label()).changed() {
-                    project.settings.allowed_script_languages.set(script_lang, enabled);
+                    project
+                        .settings
+                        .allowed_script_languages
+                        .set(script_lang, enabled);
                     changed = true;
                 }
             }
@@ -283,6 +284,56 @@ pub fn show_project_settings(
                             );
                         }
                     });
+            });
+
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            changed |= ui
+                .checkbox(
+                    &mut project.settings.world_streaming_enabled,
+                    t("app.world_streaming", lang),
+                )
+                .changed();
+            ui.label(
+                egui::RichText::new(t("app.world_streaming_desc", lang))
+                    .size(10.0)
+                    .color(egui::Color32::from_rgb(150, 150, 158)),
+            );
+
+            ui.add_enabled_ui(project.settings.world_streaming_enabled, |ui| {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    ui.label(t("app.world_stream_region_size", lang));
+                    changed |= ui
+                        .add(
+                            egui::Slider::new(
+                                &mut project.settings.world_stream_region_size,
+                                32.0..=512.0,
+                            )
+                            .step_by(16.0)
+                            .suffix(" m"),
+                        )
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label(t("app.world_stream_radius", lang));
+                    changed |= ui
+                        .add(egui::Slider::new(
+                            &mut project.settings.world_stream_load_radius,
+                            1..=8,
+                        ))
+                        .changed();
+                });
+                ui.horizontal(|ui| {
+                    ui.label(t("app.world_stream_lod_bias", lang));
+                    changed |= ui
+                        .add(egui::Slider::new(
+                            &mut project.settings.world_stream_lod_bias,
+                            0..=4,
+                        ))
+                        .changed();
+                });
             });
         });
     });

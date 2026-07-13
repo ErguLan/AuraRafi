@@ -3,6 +3,7 @@
 
 use crate::theme as app_theme;
 use egui::Ui;
+use raf_core::ai::{AgentMode, AiProvider, AiProviderConfig};
 use raf_core::config::{
     EngineSettings, Language, RenderExecutionPolicy, RenderQuality, ScriptLanguage, TargetPlatform,
     Theme, ViewportRenderMode,
@@ -10,8 +11,9 @@ use raf_core::config::{
 use raf_core::i18n::t;
 
 /// Draw the settings panel.
-pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
+pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) -> bool {
     let palette = app_theme::palette_for(settings.theme, settings.theme_experimental);
+    let changed = false;
 
     egui::ScrollArea::vertical().show(ui, |ui| {
         // -- Simple Mode (top, prominent, clean) --
@@ -91,8 +93,7 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
 
             ui.horizontal(|ui| {
                 ui.label(
-                    egui::RichText::new(t("settings.auto_ui_scale", settings.language))
-                        .size(12.0),
+                    egui::RichText::new(t("settings.auto_ui_scale", settings.language)).size(12.0),
                 );
                 ui.checkbox(&mut settings.auto_ui_scale, "");
             });
@@ -107,12 +108,9 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
             ui.add_enabled_ui(!settings.auto_ui_scale, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(
-                        egui::RichText::new(t("settings.ui_scale", settings.language))
-                            .size(12.0),
+                        egui::RichText::new(t("settings.ui_scale", settings.language)).size(12.0),
                     );
-                    ui.add(
-                        egui::Slider::new(&mut settings.ui_scale, 0.5..=3.0).step_by(0.1),
-                    );
+                    ui.add(egui::Slider::new(&mut settings.ui_scale, 0.5..=3.0).step_by(0.1));
                 });
             });
             ui.add_space(8.0);
@@ -403,6 +401,16 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
             );
             ui.add_space(2.0);
             ui.checkbox(
+                &mut settings.focus_lock_enabled,
+                t("settings.focus_lock_enabled", settings.language),
+            );
+            ui.label(
+                egui::RichText::new(t("settings.focus_lock_enabled_desc", settings.language))
+                    .size(11.0)
+                    .color(palette.text_dim),
+            );
+            ui.add_space(2.0);
+            ui.checkbox(
                 &mut settings.solid_show_surface_edges,
                 t("settings.solid_show_surface_edges", settings.language),
             );
@@ -466,11 +474,7 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                         .selected_text(settings.display_unit.label())
                         .show_ui(ui, |ui| {
                             for unit in raf_core::units::DisplayUnit::all() {
-                                ui.selectable_value(
-                                    &mut settings.display_unit,
-                                    unit,
-                                    unit.label(),
-                                );
+                                ui.selectable_value(&mut settings.display_unit, unit, unit.label());
                             }
                         });
                 });
@@ -489,6 +493,22 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                 &mut settings.invert_mouse_y,
                 t("settings.invert_mouse_y", settings.language),
             );
+            ui.add_space(2.0);
+            ui.checkbox(
+                &mut settings.invert_ws,
+                t("settings.invert_ws", settings.language),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(t("settings.wasd_speed", settings.language)).size(12.0),
+                );
+                ui.add(
+                    egui::Slider::new(&mut settings.wasd_speed, 0.5..=5.0)
+                        .logarithmic(true)
+                        .suffix("x"),
+                );
+            });
             ui.add_space(10.0);
 
             ui.separator();
@@ -537,6 +557,18 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
                 &mut settings.uniform_scale_by_default,
                 t("settings.uniform_scale_by_default", settings.language),
             );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(t("settings.gizmo_growth_scale", settings.language))
+                        .size(12.0),
+                );
+                ui.add(
+                    egui::Slider::new(&mut settings.gizmo_growth_scale, 0.0..=100.0)
+                        .step_by(1.0)
+                        .suffix("%"),
+                );
+            });
             ui.add_space(8.0);
 
             ui.separator();
@@ -624,5 +656,276 @@ pub fn show_settings(ui: &mut Ui, settings: &mut EngineSettings) {
             });
             ui.add_space(8.0);
         });
+
+        ui.add_space(4.0);
+
+        // -- AI Providers --
+        egui::CollapsingHeader::new(
+            egui::RichText::new(t("settings.ai_providers", settings.language)).strong(),
+        )
+        .default_open(false)
+        .show(ui, |ui| {
+            ui.add_space(8.0);
+
+            ui.label(
+                egui::RichText::new(t("settings.ai_provider_default", settings.language))
+                    .size(12.0),
+            );
+            ui.add_space(4.0);
+            egui::ComboBox::from_id_salt("default_ai_provider_select")
+                .selected_text(settings.default_ai_provider.display_name())
+                .show_ui(ui, |ui| {
+                    for provider in AiProvider::editor_supported() {
+                        ui.selectable_value(
+                            &mut settings.default_ai_provider,
+                            *provider,
+                            provider.display_name(),
+                        );
+                    }
+                });
+
+            ui.add_space(12.0);
+
+            // Agent mode selector.
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(t("settings.agent_mode", settings.language)).size(12.0),
+                );
+                egui::ComboBox::from_id_salt("settings_agent_mode_select")
+                    .selected_text(match settings.agent_mode {
+                        AgentMode::Passive => t("settings.agent_mode_passive", settings.language),
+                        AgentMode::Active => t("settings.agent_mode_active", settings.language),
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut settings.agent_mode,
+                            AgentMode::Passive,
+                            t("settings.agent_mode_passive", settings.language),
+                        );
+                        ui.selectable_value(
+                            &mut settings.agent_mode,
+                            AgentMode::Active,
+                            t("settings.agent_mode_active", settings.language),
+                        );
+                    });
+            });
+            ui.label(
+                egui::RichText::new(t("settings.agent_mode_desc", settings.language))
+                    .size(11.0)
+                    .color(palette.text_dim),
+            );
+            if settings.agent_mode == AgentMode::Active {
+                ui.label(
+                    egui::RichText::new(t("app.agent_active_mode_warning", settings.language))
+                        .size(11.0)
+                        .color(egui::Color32::from_rgb(230, 160, 60)),
+                );
+            }
+
+            ui.add_space(12.0);
+
+            // Model shortcuts.
+            ui.label(
+                egui::RichText::new(t("settings.ai_models_title", settings.language))
+                    .size(12.0)
+                    .strong(),
+            );
+            ui.add_space(4.0);
+
+            if settings.agent_model_shortcuts.is_empty() {
+                ui.label(
+                    egui::RichText::new("No shortcuts yet. Add one below or from the Agent panel.")
+                        .size(11.0)
+                        .color(palette.text_dim),
+                );
+            } else {
+                for shortcut in settings.agent_model_shortcuts.clone() {
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            egui::RichText::new(format!(
+                                "{} -> {} ({}",
+                                shortcut.label,
+                                shortcut.model_id,
+                                shortcut.provider.display_name()
+                            ))
+                            .size(11.0)
+                            .color(palette.text),
+                        );
+                        if ui
+                            .button(egui::RichText::new("Remove").size(10.0))
+                            .clicked()
+                        {
+                            settings
+                                .agent_model_shortcuts
+                                .retain(|s| s.label != shortcut.label);
+                        }
+                    });
+                }
+            }
+
+            ui.add_space(12.0);
+
+            // Simple mode only shows the default provider card.
+            let providers_to_show: Vec<AiProvider> = if settings.simple_mode {
+                vec![settings.default_ai_provider]
+            } else {
+                AiProvider::editor_supported().to_vec()
+            };
+
+            for provider in providers_to_show {
+                let config = settings
+                    .ai_providers
+                    .iter_mut()
+                    .find(|c| c.provider == provider)
+                    .expect("ai_providers contains all providers by default");
+                ai_provider_card(
+                    ui,
+                    settings.language,
+                    config,
+                    &mut settings.default_ai_provider,
+                );
+                ui.add_space(10.0);
+            }
+
+            ui.add_space(8.0);
+        });
+    });
+
+    changed
+}
+
+fn ai_provider_card(
+    ui: &mut Ui,
+    lang: Language,
+    config: &mut AiProviderConfig,
+    default_provider: &mut AiProvider,
+) {
+    let palette = app_theme::palette_for_visuals(ui.ctx().style().visuals.dark_mode, 0.0);
+    let is_default = *default_provider == config.provider;
+
+    let frame = egui::Frame::none()
+        .fill(palette.widget)
+        .rounding(8.0)
+        .inner_margin(12.0)
+        .stroke(egui::Stroke::new(
+            1.0,
+            if is_default {
+                app_theme::ACCENT
+            } else {
+                palette.border
+            },
+        ));
+
+    frame.show(ui, |ui| {
+        // Header: provider name + default badge + enable toggle.
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(config.provider.display_name())
+                    .size(12.0)
+                    .strong()
+                    .color(if is_default {
+                        app_theme::ACCENT
+                    } else {
+                        palette.text
+                    }),
+            );
+
+            if is_default {
+                ui.add_space(6.0);
+                ui.label(
+                    egui::RichText::new(t("settings.ai_provider_default", lang))
+                        .size(10.0)
+                        .color(app_theme::ACCENT),
+                );
+            }
+
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let mut enabled = config.enabled;
+                if ui
+                    .checkbox(&mut enabled, t("settings.ai_provider_enabled", lang))
+                    .changed()
+                {
+                    config.enabled = enabled;
+                }
+            });
+        });
+
+        ui.add_space(4.0);
+        ui.label(
+            egui::RichText::new(if lang == Language::Spanish {
+                config.provider.description_es()
+            } else {
+                config.provider.description()
+            })
+            .size(11.0)
+            .color(palette.text_dim),
+        );
+
+        ui.add_space(8.0);
+
+        // Base URL.
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(t("settings.ai_provider_base_url", lang))
+                    .size(11.0)
+                    .color(palette.text_dim),
+            );
+            ui.add(egui::TextEdit::singleline(&mut config.base_url).desired_width(220.0));
+        });
+
+        ui.add_space(4.0);
+
+        // Model.
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(t("settings.ai_provider_model", lang))
+                    .size(11.0)
+                    .color(palette.text_dim),
+            );
+            ui.add(egui::TextEdit::singleline(&mut config.model).desired_width(160.0));
+        });
+
+        ui.add_space(4.0);
+
+        // API key with show/hide toggle.
+        let show_key_id = ui.make_persistent_id(("ai_provider_show_key", config.provider));
+        let mut show_key = ui.data_mut(|data| data.get_temp::<bool>(show_key_id).unwrap_or(false));
+
+        ui.horizontal(|ui| {
+            ui.label(
+                egui::RichText::new(t("settings.ai_provider_api_key", lang))
+                    .size(11.0)
+                    .color(palette.text_dim),
+            );
+            ui.add(
+                egui::TextEdit::singleline(&mut config.api_key)
+                    .password(!show_key)
+                    .desired_width(180.0),
+            );
+            if ui
+                .button(if show_key {
+                    t("settings.ai_provider_hide", lang)
+                } else {
+                    t("settings.ai_provider_show", lang)
+                })
+                .clicked()
+            {
+                show_key = !show_key;
+            }
+        });
+
+        ui.data_mut(|data| data.insert_temp(show_key_id, show_key));
+
+        ui.add_space(6.0);
+
+        // Default button.
+        if !is_default {
+            if ui
+                .button(t("settings.ai_provider_set_default", lang))
+                .clicked()
+            {
+                *default_provider = config.provider;
+            }
+        }
     });
 }

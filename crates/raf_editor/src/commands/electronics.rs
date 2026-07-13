@@ -30,6 +30,7 @@ pub fn execute(
         "electronics.generate_circuit" => generate_circuit(command, ctx),
         "electronics.autolayout" => autolayout(command, ctx),
         "electronics.drc" => run_drc(ctx),
+        "electronics.diagnose" => diagnose(ctx),
         "electronics.simulate" => simulate(ctx),
         "electronics.netlist" => netlist(ctx),
         "electronics.bom" => bom(ctx),
@@ -341,6 +342,131 @@ fn run_drc(ctx: &mut ElectronicsCommandContext<'_>) -> CommandOutput {
             "errors": report.errors.len(),
             "warnings": report.warnings.len(),
             "info": report.info.len()
+        }),
+    )
+}
+
+/// Return one structured circuit-inspection payload for assistants and humans.
+/// It combines topology, DRC and simulation so a model does not have to infer
+/// a broken connection from a component count alone.
+fn diagnose(ctx: &mut ElectronicsCommandContext<'_>) -> CommandOutput {
+    let schematic = &ctx.schematic_view.schematic;
+    let netlist = schematic.netlist();
+    let report = schematic.run_drc();
+    let simulation = schematic.simulate_dc();
+
+    let components = schematic
+        .components
+        .iter()
+        .enumerate()
+        .map(|(component_index, component)| {
+            let pins = component
+                .pins
+                .iter()
+                .enumerate()
+                .map(|(pin_index, pin)| {
+                    let net = netlist
+                        .net_for_pin(component_index, pin_index)
+                        .map(|net| net.name.clone());
+                    serde_json::json!({
+                        "name": pin.name,
+                        "direction": format!("{:?}", pin.direction),
+                        "net": net,
+                    })
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "index": component_index,
+                "designator": component.designator,
+                "value": component.value,
+                "position": [component.position.x, component.position.y],
+                "rotation": component.rotation,
+                "pins": pins,
+            })
+        })
+        .collect::<Vec<_>>();
+    let nets = netlist
+        .nets
+        .iter()
+        .map(|net| {
+            let pins = net
+                .pins
+                .iter()
+                .filter_map(|(component_index, pin_index)| {
+                    let component = schematic.components.get(*component_index)?;
+                    let pin = component.pins.get(*pin_index)?;
+                    Some(format!("{}.{}", component.designator, pin.name))
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "id": net.id,
+                "name": net.name,
+                "pins": pins,
+            })
+        })
+        .collect::<Vec<_>>();
+    let issue_json = report
+        .all_issues()
+        .iter()
+        .map(|issue| {
+            let designators = issue
+                .components
+                .iter()
+                .filter_map(|id| {
+                    schematic
+                        .components
+                        .iter()
+                        .find(|component| component.id == *id)
+                        .map(|component| component.designator.clone())
+                })
+                .collect::<Vec<_>>();
+            serde_json::json!({
+                "severity": format!("{:?}", issue.severity),
+                "rule": issue.rule,
+                "message": issue.message,
+                "components": designators,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut lines = vec![
+        format!("components: {}", schematic.components.len()),
+        format!("wires: {}", schematic.wires.len()),
+        format!("nets: {}", netlist.nets.len()),
+        format!("drc_passed: {}", report.passed()),
+        format!("simulation_converged: {}", simulation.converged),
+    ];
+    for issue in report.all_issues().iter().take(24) {
+        lines.push(format!(
+            "{:?} {}: {}",
+            issue.severity, issue.rule, issue.message
+        ));
+    }
+    for message in simulation.messages.iter().take(12) {
+        lines.push(format!("simulation: {message}"));
+    }
+
+    CommandOutput::info(
+        "Circuit diagnosis",
+        lines,
+        serde_json::json!({
+            "ok": true,
+            "summary": {
+                "components": schematic.components.len(),
+                "wires": schematic.wires.len(),
+                "nets": netlist.nets.len(),
+                "drc_passed": report.passed(),
+                "simulation_converged": simulation.converged,
+            },
+            "components": components,
+            "nets": nets,
+            "issues": issue_json,
+            "simulation": {
+                "messages": simulation.messages,
+                "node_voltages": simulation.node_voltages,
+                "component_currents": simulation.component_currents,
+                "component_power": simulation.component_power,
+            }
         }),
     )
 }

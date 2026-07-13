@@ -37,10 +37,7 @@ pub fn compile_module(_path: &str, _wasm_bytes: &[u8]) -> ScriptResult<()> {
 }
 
 /// Call the `on_start` exported function of a WASM module.
-pub fn call_on_start(
-    _module: &WasmModuleHandle,
-    _ctx: &mut ScriptContext<'_>,
-) -> ExecutionResult {
+pub fn call_on_start(_module: &WasmModuleHandle, _ctx: &mut ScriptContext<'_>) -> ExecutionResult {
     ExecutionResult::error(ScriptError::WasmNotImplemented.to_string())
 }
 

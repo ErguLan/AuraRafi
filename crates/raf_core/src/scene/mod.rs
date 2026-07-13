@@ -5,6 +5,7 @@ pub mod collider;
 pub mod graph;
 pub mod merge;
 pub mod runtime;
+pub mod transforms;
 
 pub use anim_collider::{
     AnimCollider, AnimCollisionConfig, AnimCollisionHit, AnimCollisionResponse,
@@ -13,3 +14,4 @@ pub use collider::{Aabb, Collider, ColliderType};
 pub use graph::{NodeColor, Primitive, SceneGraph, SceneNode, SceneNodeId};
 pub use merge::{merge_meshes, weld_vertices, MergedMesh, MeshGroup};
 pub use runtime::{AudioSource, RigidBody, RigidBodyType, SceneVariable, VariableValue};
+pub use transforms::WorldTransformCache;

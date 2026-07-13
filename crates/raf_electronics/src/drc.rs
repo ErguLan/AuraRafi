@@ -6,7 +6,7 @@
 use crate::component::SimModel;
 use crate::extensions::run_registered_drc_rules;
 use crate::netlist::Netlist;
-use crate::schematic::Schematic;
+use crate::schematic::{Schematic, WireAnchor};
 use glam::Vec2;
 use uuid::Uuid;
 
@@ -104,6 +104,15 @@ pub fn run_drc(schematic: &Schematic) -> DrcReport {
 
     // Rule 6: LED without current-limiting resistor.
     check_led_without_resistor(schematic, &netlist, &mut warnings);
+
+    // Rule 7: A wire endpoint must terminate at a pin, a valid pin anchor,
+    // or another wire endpoint. This exposes visually close but electrically
+    // disconnected drawing mistakes to the Agent and the CAD canvas.
+    check_wire_endpoints(schematic, &mut errors, &mut warnings);
+
+    // Rule 8: A wire must not bypass a multi-pin component by placing two of
+    // its pins on the same electrical net.
+    check_component_pin_shorts(schematic, &netlist, &mut errors);
 
     for issue in run_registered_drc_rules(schematic) {
         match issue.severity {
@@ -224,9 +233,10 @@ fn check_unnamed_nets(schematic: &Schematic, issues: &mut Vec<DrcIssue>) {
 /// connected without any load between them.
 fn check_short_circuit(schematic: &Schematic, netlist: &Netlist, issues: &mut Vec<DrcIssue>) {
     use crate::component::PinDirection;
+    use std::collections::HashSet;
 
     for net in &netlist.nets {
-        let mut power_count = 0usize;
+        let mut power_components = HashSet::new();
         let mut power_comps: Vec<Uuid> = Vec::new();
 
         for &(ci, pi) in &net.pins {
@@ -239,23 +249,132 @@ fn check_short_circuit(schematic: &Schematic, netlist: &Netlist, issues: &mut Ve
             }
             let pin = &comp.pins[pi];
 
-            if pin.direction == PinDirection::Power {
-                power_count += 1;
+            let is_power_source = pin.direction == PinDirection::Power
+                || matches!(comp.sim_model, SimModel::DcSource { .. });
+            if is_power_source && power_components.insert(comp.id) {
                 power_comps.push(comp.id);
             }
         }
 
-        if power_count > 1 {
+        if power_comps.len() > 1 {
             issues.push(DrcIssue {
                 severity: DrcSeverity::Error,
                 rule: "short_circuit".to_string(),
                 message: format!(
                     "Potential short circuit: {} power sources on net '{}'",
-                    power_count, net.name
+                    power_comps.len(),
+                    net.name
                 ),
                 components: power_comps,
                 location: None,
             });
+        }
+    }
+}
+
+fn check_wire_endpoints(
+    schematic: &Schematic,
+    errors: &mut Vec<DrcIssue>,
+    warnings: &mut Vec<DrcIssue>,
+) {
+    const ENDPOINT_TOLERANCE: f32 = 2.0;
+
+    for (wire_index, wire) in schematic.wires.iter().enumerate() {
+        for (endpoint_name, point, anchor) in [
+            ("start", wire.start, wire.start_anchor),
+            ("end", wire.end, wire.end_anchor),
+        ] {
+            if let Some(WireAnchor::Pin {
+                component_id,
+                pin_id,
+            }) = anchor
+            {
+                if schematic
+                    .pin_world_position_by_ids(component_id, pin_id)
+                    .is_none()
+                {
+                    errors.push(DrcIssue {
+                        severity: DrcSeverity::Error,
+                        rule: "invalid_wire_anchor".to_string(),
+                        message: format!(
+                            "Wire {} {} anchor references a missing component pin",
+                            wire_index + 1,
+                            endpoint_name
+                        ),
+                        components: vec![component_id],
+                        location: Some(point),
+                    });
+                }
+                continue;
+            }
+
+            let touches_pin = schematic.components.iter().any(|component| {
+                component.pins.iter().any(|pin| {
+                    crate::schematic::component_pin_world_position(component, pin).distance(point)
+                        < ENDPOINT_TOLERANCE
+                })
+            });
+            let touches_wire = schematic
+                .wires
+                .iter()
+                .enumerate()
+                .any(|(other_index, other)| {
+                    other_index != wire_index
+                        && (other.start.distance(point) < ENDPOINT_TOLERANCE
+                            || other.end.distance(point) < ENDPOINT_TOLERANCE)
+                });
+
+            if !touches_pin && !touches_wire {
+                warnings.push(DrcIssue {
+                    severity: DrcSeverity::Warning,
+                    rule: "dangling_wire_endpoint".to_string(),
+                    message: format!(
+                        "Wire {} {} is not connected to a pin or junction",
+                        wire_index + 1,
+                        endpoint_name
+                    ),
+                    components: Vec::new(),
+                    location: Some(point),
+                });
+            }
+        }
+    }
+}
+
+fn check_component_pin_shorts(
+    schematic: &Schematic,
+    netlist: &Netlist,
+    issues: &mut Vec<DrcIssue>,
+) {
+    for (component_index, component) in schematic.components.iter().enumerate() {
+        if component.pins.len() < 2 || matches!(component.sim_model, SimModel::Wire) {
+            continue;
+        }
+        for first_pin in 0..component.pins.len() {
+            let Some(first_net) = netlist.net_for_pin(component_index, first_pin) else {
+                continue;
+            };
+            for second_pin in (first_pin + 1)..component.pins.len() {
+                let Some(second_net) = netlist.net_for_pin(component_index, second_pin) else {
+                    continue;
+                };
+                if first_net.id == second_net.id {
+                    issues.push(DrcIssue {
+                        severity: DrcSeverity::Error,
+                        rule: "component_pins_shorted".to_string(),
+                        message: format!(
+                            "{} pins {} and {} share net '{}' and bypass the component",
+                            component.designator,
+                            component.pins[first_pin].name,
+                            component.pins[second_pin].name,
+                            first_net.name
+                        ),
+                        components: vec![component.id],
+                        location: Some(component.position),
+                    });
+                    break;
+                }
+            }
         }
     }
 }
@@ -326,6 +445,43 @@ mod tests {
             report.errors.iter().any(|i| i.rule == "isolated_component"),
             "Expected isolated_component error"
         );
+    }
+
+    #[test]
+    fn component_pins_shorted_is_reported() {
+        let mut sch = Schematic::new("Shorted");
+        sch.add_component(ElectronicComponent::resistor("1k"));
+        let start = crate::schematic::component_pin_world_position(
+            &sch.components[0],
+            &sch.components[0].pins[0],
+        );
+        let end = crate::schematic::component_pin_world_position(
+            &sch.components[0],
+            &sch.components[0].pins[1],
+        );
+        sch.add_wire(start, end, "N_SHORT");
+
+        let report = run_drc(&sch);
+        assert!(report
+            .errors
+            .iter()
+            .any(|issue| issue.rule == "component_pins_shorted"));
+    }
+
+    #[test]
+    fn dangling_wire_endpoint_is_reported() {
+        let mut sch = Schematic::new("Dangling");
+        sch.add_wire(
+            Vec2::new(100.0, 100.0),
+            Vec2::new(180.0, 100.0),
+            "N_DANGLING",
+        );
+
+        let report = run_drc(&sch);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|issue| issue.rule == "dangling_wire_endpoint"));
     }
 
     #[test]

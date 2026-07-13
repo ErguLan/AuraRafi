@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "Platform Prefab",
+  "parts": [
+    {
+      "name": "Platform",
+      "primitive": "cube",
+      "position": [0.0, 0.1, 0.0],
+      "scale": [5.0, 0.2, 3.0],
+      "color_rgba": [42, 42, 44, 255]
+    },
+    {
+      "name": "Marker",
+      "primitive": "cylinder",
+      "position": [0.0, 0.75, 0.0],
+      "scale": [0.4, 1.1, 0.4],
+      "color_rgba": [212, 119, 26, 255]
+    },
+    {
+      "name": "Beacon",
+      "primitive": "sphere",
+      "position": [0.0, 1.55, 0.0],
+      "scale": [0.45, 0.45, 0.45],
+      "color_rgba": [255, 220, 90, 255]
+    }
+  ]
+}

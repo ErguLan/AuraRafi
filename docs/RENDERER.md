@@ -25,6 +25,8 @@ Today the active editor surfaces follow one graphics contract:
 SceneViewport  -> ViewportBridge -> SceneRenderer -> RenderRuntime -> BasicDevice
 SchematicCanvas ---------------------------------> RenderRuntime -> BasicDevice
 PcbCanvas ---------------------------------------> RenderRuntime -> BasicDevice
+StudioUiSurface ---------------------------------> RenderRuntime -> BasicDevice
+ElectronicsCadSurface ---------------------------> RenderRuntime -> BasicDevice
 
 BasicDevice -> GPU hardware when available
 BasicDevice -> CPU software fallback otherwise
@@ -52,6 +54,56 @@ Phase 7 freezes one minimum contract for the active editor surfaces:
   fallback behavior diverge.
 - Transient tooling paths such as editable mesh overrides may stay uncached,
   but they must still execute through the same runtime contract.
+- Retained UI surfaces must record through `BasicCommandList` and keep text as
+  i18n keys until the text atlas resolves the active language.
+
+## Viewport Surface Host
+
+`ViewportSurfaceHost` is the viewport presentation boundary. Today it still
+uses the egui texture bridge for final painting, but `ViewportPanel` no longer
+owns texture upload details directly. The host now also owns a
+`ViewportSurfacePlan` derived from `RenderConfig::resource_profile`.
+
+The plan exposes the short-term renderer roadmap without enabling heavy work
+by accident:
+
+- preferred render size / adaptive surface scale for low-end machines
+- frame budget and triangle cap
+- texture cap and point-light budget
+- prepared shadow resolution
+- prepared post-processing pass count
+- prepared PBR, particle, and skeletal animation budgets
+
+This makes the viewport surface the place where future direct-wgpu,
+post-processing, shadow maps, PBR, particles, and skeletal animation can attach
+without putting that policy back into egui panels.
+
+## Render Resource Profile
+
+`RenderConfig::for_preset` is the canonical mapping from project
+`RenderPreset` to renderer flags. `RenderConfig::resource_profile` derives the
+runtime budget for the selected tier: maximum triangles, frame budget,
+preferred surface scale, texture cap, shadow map size, point light count,
+post-process passes, GPU feature passes, and future particle/skeletal
+animation budgets.
+
+The profile is advisory rather than a hidden auto-switch. Panels and runtime
+systems can inspect it to stay within the selected tier, while CPU fallback and
+explicit project gates still decide what actually runs.
+
+## Studio UI Surface
+
+`raf_ui` is the first retained, non-egui UI data model for editor chrome and
+canvas overlays. `ApiGraphicBasic::ui_surface` is the render adapter that turns
+that data into `BasicCommandList` geometry.
+
+The surface produces a `SceneRenderFrame` backed by `BasicCommandList`, which
+means it can be executed by the same GPU-first and CPU-fallback path as scene,
+schematic, and PCB surfaces. The initial implementation supports panels,
+toolbars, buttons, labels, overlays, canvas regions, row/column layout,
+absolute layout, hit testing, focus state, input snapshots, docking z-order,
+and text atlas requests. Text is still metadata at this layer; a later atlas
+renderer resolves active language strings into glyphs.
 
 ## Architecture Layers
 
@@ -68,6 +120,8 @@ Phase 7 freezes one minimum contract for the active editor surfaces:
   -----------------------------------------------
   raf_render  -  ApiGraphicBasic/
     device.rs                GPU-first execution + CPU fallback presentation
+    ui_surface/              retained UI render adapter for raf_ui nodes
+    cad_surface.rs           retained electronics CAD scene adapter
   -----------------------------------------------
   raf_render  -  scene_renderer.rs
     geometry/                MeshData + primitive constructors
@@ -145,6 +199,8 @@ Owns camera state, `SceneRenderer`, `ViewportEditSession`, and
 |--------|---------|
 | `handle_camera_input()` | Orbit, pan, zoom from pointer input |
 | `update_camera()` | Recompute position from orbit parameters |
+| `editor_camera_block()` | Snapshot the editor camera as a serializable resource |
+| `apply_editor_camera_block()` | Restore editor camera state without touching the scene hierarchy |
 | `render()` | Build the scene viewport frame and delegate to the shared graphics runtime |
 | `pick_entity()` | Ray-sphere broad phase + ray-triangle narrow phase |
 | `begin/apply/end_transform_drag()` | Gizmo translate/rotate/scale |
@@ -199,6 +255,40 @@ Geometry and behavior:
 - Scale gizmo: face-based handles projected in screen space.
 - Drag math: project axis to screen, project mouse delta onto that axis, scale
   by `orbit_distance / (min(vp_w, vp_h) * 0.5)`.
+
+## Picking Tiers
+
+The active picking path remains CPU raycast with ray-sphere broad phase and
+ray-triangle narrow phase. `PickingPolicy` now defines the migration path for
+pixel-perfect selection:
+
+| Tier | Role |
+|---|---|
+| `RaycastCpu` | Baseline path and potato/default mode |
+| `IdBufferGpu` | Future GPU ID buffer readback |
+| `Hybrid` | UI/gizmo priority first, then ID buffer/CPU fallback |
+
+`SelectionIdBuffer` defines the ID-buffer semantics independently from the
+future GPU pass. It stores object IDs per pixel, ignores empty pixels, lets
+higher priority win over lower priority, and resolves equal priority by nearest
+depth. `IdBufferSpec::scaled_extent` gives each tier a predictable buffer size
+without duplicating resolution-scale math.
+
+## Electronics CAD Surface
+
+`raf_electronics::CadScene` turns schematic and PCB data into retained CAD
+objects with layer and pick-priority metadata. `ApiGraphicBasic::cad_surface`
+records those objects into a `BasicCommandList`:
+
+- Components, pads, pins, labels, and DRC markers become quad geometry.
+- Wires, traces, board outlines, and airwires become line geometry.
+- The output frame remains CPU/GPU-neutral and runs through `BasicDevice`.
+- `ElectronicsCadSurfaceHost` is the editor bridge that passes visible world
+  bounds, activates the schematic or PCB graphics surface, and presents the
+  resulting GPU texture or CPU pixels through `GpuCanvas`.
+- Schematic and PCB both use the CAD surface host for their primary retained
+  canvas backdrops; egui remains for fallback drawing and dynamic overlays
+  during the transition.
 
 ## Camera
 

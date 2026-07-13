@@ -10,7 +10,7 @@ use raf_electronics::schematic::Schematic;
 use raf_electronics::simulation::SimulationResults;
 use raf_render::bridge::{RenderRuntime, RenderRuntimeSnapshot};
 
-use super::gpu_canvas::GpuCanvas;
+use super::electronics_cad_surface_host::ElectronicsCadSurfaceHost;
 use crate::electronics_assets::ElectronicsAssetAtlas;
 use crate::theme;
 
@@ -173,7 +173,7 @@ pub struct SchematicViewPanel {
     show_export_menu: bool,
     export_message: Option<String>,
     render_runtime: RenderRuntimeSnapshot,
-    gpu_canvas: GpuCanvas,
+    cad_surface_host: ElectronicsCadSurfaceHost,
     asset_atlas: ElectronicsAssetAtlas,
     canvas_dark_mode: bool,
 }
@@ -215,7 +215,7 @@ impl Default for SchematicViewPanel {
             show_export_menu: false,
             export_message: None,
             render_runtime: RenderRuntimeSnapshot::default(),
-            gpu_canvas: GpuCanvas::new("schematic_canvas_render"),
+            cad_surface_host: ElectronicsCadSurfaceHost::new("schematic_canvas_render"),
             asset_atlas: ElectronicsAssetAtlas::default(),
             canvas_dark_mode: true,
         }
@@ -361,9 +361,11 @@ impl SchematicViewPanel {
     /// Returns the designator of the currently selected component, if any.
     pub fn selected_designator(&self) -> Option<String> {
         match &self.selection {
-            SchematicSelection::Component(idx) => {
-                self.schematic.components.get(*idx).map(|c| c.designator.clone())
-            }
+            SchematicSelection::Component(idx) => self
+                .schematic
+                .components
+                .get(*idx)
+                .map(|c| c.designator.clone()),
             _ => None,
         }
     }
@@ -563,136 +565,159 @@ impl SchematicViewPanel {
             Stroke::new(1.0, palette.border),
         );
 
-        ui.allocate_ui_at_rect(toolbar_rect.shrink2(Vec2::new(10.0, 6.0)), |ui| {
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 7.0;
+        ui.allocate_new_ui(
+            egui::UiBuilder::new().max_rect(toolbar_rect.shrink2(Vec2::new(10.0, 6.0))),
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 7.0;
 
-                if self
-                    .toolbar_icon_button(
-                        ui,
-                        "toolbar/select.png",
-                        matches!(self.placement, PlacementMode::None),
-                        t("app.electronics_tool_select", self.lang),
-                    )
-                    .clicked()
-                {
-                    self.placement = PlacementMode::None;
-                    self.wire_start = None;
-                }
-
-                if self
-                    .toolbar_icon_button(
-                        ui,
-                        "toolbar/rotate.png",
-                        false,
-                        t("app.rotate_r", self.lang),
-                    )
-                    .clicked()
-                {
-                    self.rotate_placement_preview();
-                }
-
-                if self
-                    .toolbar_icon_button(
-                        ui,
-                        "toolbar/fit.png",
-                        false,
-                        t("app.electronics_fit", self.lang),
-                    )
-                    .clicked()
-                {
-                    self.offset = Vec2::new(260.0, 150.0);
-                    self.zoom = 1.2;
-                }
-
-                if self
-                    .toolbar_icon_button(
-                        ui,
-                        "toolbar/grid.png",
-                        self.show_library,
-                        t("app.electronics_toggle_library", self.lang),
-                    )
-                    .clicked()
-                {
-                    self.show_library = !self.show_library;
-                }
-
-                ui.add_space(10.0);
-
-                if self
-                    .toolbar_icon_button(
-                        ui,
-                        "toolbar/play.png",
-                        self.show_test_results,
-                        t("app.electronics_play_test", self.lang),
-                    )
-                    .clicked()
-                {
-                    self.test_results = self.schematic.electrical_test();
-                    self.show_test_results = true;
-                }
-
-                if self
-                    .toolbar_icon_button(
-                        ui,
-                        "toolbar/export.png",
-                        self.show_export_menu,
-                        t("app.export_schematic", self.lang),
-                    )
-                    .clicked()
-                {
-                    self.show_export_menu = !self.show_export_menu;
-                    self.context_menu = None;
-                }
-
-                ui.add_space(10.0);
-
-                ui.label(
-                    egui::RichText::new("2D")
-                        .size(11.0)
-                        .strong()
-                        .color(theme::ACCENT),
-                );
-                ui.label(
-                    egui::RichText::new("3D")
-                        .size(11.0)
-                        .color(palette.text_muted),
-                );
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if let Some(message) = &self.export_message {
-                        ui.label(
-                            egui::RichText::new(message)
-                                .size(10.0)
-                                .color(palette.text_muted),
-                        );
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/select.png",
+                            matches!(self.placement, PlacementMode::None),
+                            t("app.electronics_tool_select", self.lang),
+                        )
+                        .clicked()
+                    {
+                        self.placement = PlacementMode::None;
+                        self.wire_start = None;
                     }
 
-                    ui.label(
-                        egui::RichText::new(self.render_runtime.status_badge())
-                            .size(10.0)
-                            .color(if self.render_runtime.is_gpu_active() {
-                                theme::ACCENT
-                            } else {
-                                palette.text_muted
-                            }),
-                    );
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/rotate.png",
+                            false,
+                            t("app.rotate_r", self.lang),
+                        )
+                        .clicked()
+                    {
+                        self.rotate_placement_preview();
+                    }
 
-                    let summary = format!(
-                        "{} {} | {} {}",
-                        t("app.schematic_components", self.lang),
-                        self.schematic.components.len(),
-                        t("app.schematic_wires", self.lang),
-                        self.schematic.wires.len()
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/fit.png",
+                            false,
+                            t("app.electronics_fit", self.lang),
+                        )
+                        .clicked()
+                    {
+                        self.offset = Vec2::new(260.0, 150.0);
+                        self.zoom = 1.2;
+                    }
+
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/grid.png",
+                            self.show_library,
+                            t("app.electronics_toggle_library", self.lang),
+                        )
+                        .clicked()
+                    {
+                        self.show_library = !self.show_library;
+                    }
+
+                    ui.add_space(10.0);
+
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/play.png",
+                            self.show_test_results,
+                            t("app.electronics_play_test", self.lang),
+                        )
+                        .clicked()
+                    {
+                        self.test_results = self.schematic.electrical_test();
+                        self.show_test_results = true;
+                    }
+
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/export.png",
+                            self.show_export_menu,
+                            t("app.export_schematic", self.lang),
+                        )
+                        .clicked()
+                    {
+                        self.show_export_menu = !self.show_export_menu;
+                        self.context_menu = None;
+                    }
+
+                    ui.add_space(10.0);
+
+                    ui.label(
+                        egui::RichText::new("2D")
+                            .size(11.0)
+                            .strong()
+                            .color(theme::ACCENT),
                     );
                     ui.label(
-                        egui::RichText::new(summary)
+                        egui::RichText::new("3D")
                             .size(11.0)
                             .color(palette.text_muted),
                     );
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(message) = &self.export_message {
+                            ui.label(
+                                egui::RichText::new(message)
+                                    .size(10.0)
+                                    .color(palette.text_muted),
+                            );
+                        }
+
+                        let cache = self.cad_surface_host.cache_stats();
+                        if cache.frame_builds > 0 {
+                            ui.label(
+                                egui::RichText::new(format!(
+                                    "{} {}/{}",
+                                    t("app.cad_surface_cache", self.lang),
+                                    cache.frame_cache_hits,
+                                    cache.frame_builds + cache.frame_cache_hits
+                                ))
+                                .size(10.0)
+                                .color(
+                                    if cache.last_frame_reused {
+                                        theme::ACCENT
+                                    } else {
+                                        palette.text_muted
+                                    },
+                                ),
+                            );
+                        }
+
+                        ui.label(
+                            egui::RichText::new(self.render_runtime.status_badge())
+                                .size(10.0)
+                                .color(if self.render_runtime.is_gpu_active() {
+                                    theme::ACCENT
+                                } else {
+                                    palette.text_muted
+                                }),
+                        );
+
+                        let summary = format!(
+                            "{} {} | {} {}",
+                            t("app.schematic_components", self.lang),
+                            self.schematic.components.len(),
+                            t("app.schematic_wires", self.lang),
+                            self.schematic.wires.len()
+                        );
+                        ui.label(
+                            egui::RichText::new(summary)
+                                .size(11.0)
+                                .color(palette.text_muted),
+                        );
+                    });
                 });
-            });
-        });
+            },
+        );
 
         ui.allocate_space(Vec2::new(rect.width(), 42.0));
 
@@ -768,7 +793,7 @@ impl SchematicViewPanel {
             Pos2::new(rect.left() + 10.0, rect.top() + 34.0),
             Vec2::new(rect.width() - 20.0, 28.0),
         );
-        ui.allocate_ui_at_rect(search_rect, |ui| {
+        ui.allocate_new_ui(egui::UiBuilder::new().max_rect(search_rect), |ui| {
             ui.add_sized(
                 search_rect.size(),
                 egui::TextEdit::singleline(&mut self.library_search)

@@ -8,12 +8,14 @@ use glam::{Mat4, Vec3};
 use raf_core::scene::graph::{SceneGraph, SceneNodeId};
 
 use crate::api_graphic_basic::device::SceneFrameOutput;
+use crate::bridge::editor_camera::{EditorCameraBlock, EditorCameraMode};
 use crate::bridge::input_handler::{ProjectedEditOverlay, ViewportEditSession};
+use crate::bridge::picking_policy::PickingPolicy;
 use crate::bridge::render_runtime::RenderRuntime;
 use crate::bridge::transform_controller::ViewportTransformController;
 use crate::camera::{Camera, CameraMode};
 use crate::gizmo::{GizmoAxis, GizmoMode, GizmoState};
-use crate::scene_renderer::{FrameStats, RenderOptions, SceneRenderer};
+use crate::scene_renderer::{FrameStats, RenderOptions, SceneRenderFrame, SceneRenderer};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ViewportPointerInput {
@@ -53,6 +55,7 @@ pub struct ViewportBridge {
     camera: Camera,
     renderer: SceneRenderer,
     edit_session: ViewportEditSession,
+    picking_policy: PickingPolicy,
     transform_controller: ViewportTransformController,
     offset_2d: [f32; 2],
     zoom_2d: f32,
@@ -77,6 +80,7 @@ impl ViewportBridge {
             camera: Camera::default(),
             renderer: SceneRenderer::new(1, 1),
             edit_session: ViewportEditSession::default(),
+            picking_policy: PickingPolicy::default(),
             transform_controller: ViewportTransformController::default(),
             offset_2d: [0.0, 0.0],
             zoom_2d: 1.0,
@@ -91,12 +95,55 @@ impl ViewportBridge {
         &self.camera
     }
 
+    pub fn editor_camera_block(&self) -> EditorCameraBlock {
+        EditorCameraBlock {
+            mode: match self.camera.mode {
+                CameraMode::Orthographic => EditorCameraMode::Orthographic2D,
+                CameraMode::Perspective => EditorCameraMode::Orbit,
+            },
+            target: self.camera.target,
+            yaw: self.orbit_yaw,
+            pitch: self.orbit_pitch,
+            distance: self.orbit_distance,
+            offset_2d: self.offset_2d,
+            zoom_2d: self.zoom_2d,
+            fov_degrees: self.camera.fov,
+            near_clip: self.camera.near,
+            far_clip: self.camera.far,
+            ..EditorCameraBlock::default()
+        }
+        .sanitized()
+    }
+
+    pub fn apply_editor_camera_block(&mut self, block: &EditorCameraBlock) {
+        let block = block.clone().sanitized();
+        self.camera.target = block.target;
+        self.camera.fov = block.fov_degrees;
+        self.camera.near = block.near_clip;
+        self.camera.far = block.far_clip;
+        self.orbit_yaw = block.yaw;
+        self.orbit_pitch = block.pitch;
+        self.orbit_distance = block.distance;
+        self.offset_2d = block.offset_2d;
+        self.zoom_2d = block.zoom_2d;
+        self.pending_focus = None;
+        self.update_camera(block.mode == EditorCameraMode::Orthographic2D);
+    }
+
     pub fn view_projection(&self, width: f32, height: f32) -> Mat4 {
         self.camera.view_projection(width, height)
     }
 
     pub fn stats(&self) -> &FrameStats {
         &self.renderer.stats
+    }
+
+    pub fn picking_policy(&self) -> PickingPolicy {
+        self.picking_policy
+    }
+
+    pub fn set_picking_policy(&mut self, policy: PickingPolicy) {
+        self.picking_policy = policy;
     }
 
     pub fn orbit_distance(&self) -> f32 {
@@ -139,6 +186,10 @@ impl ViewportBridge {
 
     pub fn gizmo(&self) -> &GizmoState {
         self.transform_controller.gizmo()
+    }
+
+    pub fn gizmo_mut(&mut self) -> &mut GizmoState {
+        self.transform_controller.gizmo_mut()
     }
 
     pub fn set_gizmo_mode(&mut self, mode: GizmoMode) {
@@ -270,8 +321,15 @@ impl ViewportBridge {
         vp_w: f32,
         vp_h: f32,
     ) -> Option<SceneNodeId> {
-        self.edit_session
-            .pick_entity(scene, view_proj, screen_x, screen_y, vp_w, vp_h)
+        self.edit_session.pick_entity_with_policy(
+            scene,
+            view_proj,
+            screen_x,
+            screen_y,
+            vp_w,
+            vp_h,
+            self.picking_policy,
+        )
     }
 
     pub fn begin_transform_drag(
@@ -285,6 +343,27 @@ impl ViewportBridge {
     ) {
         self.transform_controller
             .begin_drag(scene, selected, view_proj, pointer_local, vp_w, vp_h);
+    }
+
+    pub fn begin_transform_drag_scaled(
+        &mut self,
+        scene: &SceneGraph,
+        selected: Option<SceneNodeId>,
+        view_proj: &Mat4,
+        pointer_local: [f32; 2],
+        vp_w: f32,
+        vp_h: f32,
+        presentation_scale: f32,
+    ) {
+        self.transform_controller.begin_drag_scaled(
+            scene,
+            selected,
+            view_proj,
+            pointer_local,
+            vp_w,
+            vp_h,
+            presentation_scale,
+        );
     }
 
     pub fn update_transform_hover(
@@ -303,6 +382,27 @@ impl ViewportBridge {
             pointer_local,
             vp_w,
             vp_h,
+        );
+    }
+
+    pub fn update_transform_hover_scaled(
+        &mut self,
+        scene: &SceneGraph,
+        selected: Option<SceneNodeId>,
+        view_proj: &Mat4,
+        pointer_local: [f32; 2],
+        vp_w: f32,
+        vp_h: f32,
+        presentation_scale: f32,
+    ) {
+        self.transform_controller.update_hover_scaled(
+            scene,
+            selected,
+            view_proj,
+            pointer_local,
+            vp_w,
+            vp_h,
+            presentation_scale,
         );
     }
 
@@ -362,7 +462,20 @@ impl ViewportBridge {
             let y_factor = if config.invert_mouse_y { -1.0 } else { 1.0 };
 
             self.orbit_yaw += pointer_delta.x * 0.005 * config.rotate_sensitivity * x_factor;
-            self.orbit_pitch += pointer_delta.y * 0.005 * config.rotate_sensitivity * y_factor;
+            let pitch_delta = pointer_delta.y * 0.005 * config.rotate_sensitivity * y_factor;
+            // Soft-clamp pitch near limits to avoid bounce.
+            if (self.orbit_pitch > 1.3 && pitch_delta > 0.0)
+                || (self.orbit_pitch < -1.3 && pitch_delta < 0.0)
+            {
+                let remaining = if pitch_delta > 0.0 {
+                    1.4 - self.orbit_pitch
+                } else {
+                    -1.4 - self.orbit_pitch
+                };
+                self.orbit_pitch += remaining.signum() * remaining.abs().min(pitch_delta.abs());
+            } else {
+                self.orbit_pitch += pitch_delta;
+            }
             self.orbit_pitch = self.orbit_pitch.clamp(-1.4, 1.4);
         }
 
@@ -453,7 +566,8 @@ impl ViewportBridge {
         const SNAP_EPS: f32 = 0.01;
 
         self.camera.target = self.camera.target.lerp(target_pos, LERP_FACTOR);
-        self.orbit_distance = self.orbit_distance + (target_dist - self.orbit_distance) * LERP_FACTOR;
+        self.orbit_distance =
+            self.orbit_distance + (target_dist - self.orbit_distance) * LERP_FACTOR;
 
         let pos_close = self.camera.target.distance(target_pos) < SNAP_EPS;
         let dist_close = (self.orbit_distance - target_dist).abs() < SNAP_EPS * 10.0;
@@ -479,6 +593,36 @@ impl ViewportBridge {
         options: RenderOptions,
         vertex_edit_enabled: bool,
     ) -> SceneFrameOutput {
+        let frame = self.build_scene_frame(
+            scene,
+            vp_w,
+            vp_h,
+            selected,
+            bg_color,
+            light_dir,
+            options,
+            vertex_edit_enabled,
+        );
+        render_runtime.render_scene_frame(&frame)
+    }
+
+    /// Builds a renderer-neutral frame for a viewport surface.
+    ///
+    /// Keeping this separate from presentation lets a retained surface reuse
+    /// the command frame while the scene, camera, and render options remain
+    /// unchanged. The existing `render` method remains as the convenient
+    /// immediate path for callers that do not host a retained surface.
+    pub fn build_scene_frame(
+        &mut self,
+        scene: &SceneGraph,
+        vp_w: f32,
+        vp_h: f32,
+        selected: &[SceneNodeId],
+        bg_color: [u8; 4],
+        light_dir: Vec3,
+        options: RenderOptions,
+        vertex_edit_enabled: bool,
+    ) -> SceneRenderFrame {
         let mesh_override = if vertex_edit_enabled {
             self.edit_session
                 .mesh_override(scene, selected.first().copied())
@@ -486,7 +630,7 @@ impl ViewportBridge {
             None
         };
 
-        let frame = self.renderer.build_frame(
+        self.renderer.build_frame(
             scene,
             &self.camera,
             vp_w,
@@ -496,8 +640,6 @@ impl ViewportBridge {
             light_dir,
             options,
             mesh_override.as_ref().map(|(id, mesh)| (*id, mesh)),
-        );
-        self.renderer.stats = frame.stats.clone();
-        render_runtime.render_scene_frame(&frame)
+        )
     }
 }

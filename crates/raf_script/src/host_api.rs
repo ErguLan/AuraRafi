@@ -8,8 +8,8 @@
 //! system in the editor or standalone runtime. The context is built
 //! per-frame from live engine state.
 
-use raf_core::scene::SceneGraph;
 use raf_core::scene::graph::SceneNodeId;
+use raf_core::scene::SceneGraph;
 
 use crate::node_handle::NodeHandle;
 use crate::value::ScriptValue;
@@ -65,11 +65,15 @@ pub enum AudioCommand {
 
 impl AudioCommandQueue {
     pub fn play(&mut self, name: &str) {
-        self.commands.push(AudioCommand::Play { name: name.to_string() });
+        self.commands.push(AudioCommand::Play {
+            name: name.to_string(),
+        });
     }
 
     pub fn stop(&mut self, name: &str) {
-        self.commands.push(AudioCommand::Stop { name: name.to_string() });
+        self.commands.push(AudioCommand::Stop {
+            name: name.to_string(),
+        });
     }
 
     pub fn set_volume(&mut self, name: &str, volume: f32) {
@@ -96,7 +100,10 @@ pub struct TimeInfo {
 
 impl Default for TimeInfo {
     fn default() -> Self {
-        Self { elapsed: 0.0, delta_time: 0.016 }
+        Self {
+            elapsed: 0.0,
+            delta_time: 0.016,
+        }
     }
 }
 

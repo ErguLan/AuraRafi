@@ -5,9 +5,7 @@
 //! use raf_script::prelude::*;
 //! ```
 
-pub use crate::backends::{
-    ExecutionResult, LoadedScript, ScriptReturn, ScriptTier,
-};
+pub use crate::backends::{ExecutionResult, LoadedScript, ScriptReturn, ScriptTier};
 pub use crate::errors::{ScriptError, ScriptResult};
 pub use crate::host_api::{
     AudioCommand, AudioCommandQueue, InputSnapshot, ScriptContext, TimeInfo,

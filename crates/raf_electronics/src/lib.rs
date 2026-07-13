@@ -3,6 +3,8 @@
 //! Electronic design subsystem: schematic editor, PCB layout,
 //! simulation, DRC, export, and component library for AuraRafi.
 
+pub mod cad_interaction;
+pub mod cad_scene;
 pub mod component;
 pub mod drc;
 pub mod export;
@@ -14,6 +16,10 @@ pub mod schematic;
 pub mod schematic_graph;
 pub mod simulation;
 
+pub use cad_interaction::{pick as pick_cad_object, CadInteractionState, CadPickHit, CadSelection};
+pub use cad_scene::{
+    CadLayerKind, CadObject, CadObjectKind, CadPickPriority, CadRect, CadScene, CadSurfaceKind,
+};
 pub use component::{ElectronicComponent, PinDirection, SimModel};
 pub use drc::{run_drc, DrcIssue, DrcReport, DrcSeverity};
 pub use export::{

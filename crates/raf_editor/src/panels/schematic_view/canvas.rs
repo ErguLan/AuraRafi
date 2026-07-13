@@ -7,25 +7,27 @@
 
 use eframe::egui_wgpu;
 use egui::{Color32, Pos2, Rect, Stroke, Vec2};
-use glam::Vec3;
 use raf_core::i18n::t;
 use raf_electronics::component::{ElectronicComponent, Pin, PinDirection, SimModel};
 use raf_electronics::schematic::WireAnchor;
 use raf_electronics::simulation::SimulationResults;
-use raf_render::api_graphic_basic::command_list::BasicCommandList;
+use raf_electronics::{CadObjectKind, CadScene};
+use raf_render::api_graphic_basic::cad_surface::CadSurfaceHitRegion;
 use raf_render::api_graphic_basic::schematic_symbols::{
     schematic_symbol_recipe, SchematicSymbolKind,
 };
-use raf_render::bridge::RenderRuntime;
-use raf_render::scene_renderer::{FrameStats, SceneRenderFrame};
+use raf_render::bridge::{GraphicsSurfaceKind, RenderRuntime};
 
 use super::{
     electronics_palette, ConnectionCandidate, ConnectionKind, ContextMenu, PlacementMode,
     SchematicSelection, SchematicViewPanel, COMP_BODY_H, COMP_BODY_W, GRID_STEP, PIN_DOT_RADIUS,
     PIN_SNAP_DISTANCE, WIRE_ENDPOINT_SNAP_DISTANCE, WIRE_HIT_DISTANCE, WIRE_JUNCTION_SNAP_DISTANCE,
 };
-use crate::panels::gpu_canvas::canvas_view_projection;
+use crate::panels::electronics_cad_surface_host::CadSurfaceSelection;
 use crate::theme;
+
+const GPU_DETAIL_COMPONENT_LIMIT: usize = 96;
+const GPU_DETAIL_ZOOM_THRESHOLD: f32 = 1.15;
 
 impl SchematicViewPanel {
     /// Renders and handles interaction events for the schematic canvas container.
@@ -56,25 +58,44 @@ impl SchematicViewPanel {
             .filter(|mouse| rect.contains(*mouse));
         let hover_candidate =
             hover_mouse.map(|mouse| self.resolve_connection_candidate(mouse, rect));
-        let hovered_component = hover_mouse.and_then(|mouse| self.hit_test_component(mouse, rect));
-        let hovered_wire = hover_mouse.and_then(|mouse| self.hit_test_wire(mouse, rect));
         let render_w = rect.width().max(1.0).round() as u32;
         let render_h = rect.height().max(1.0).round() as u32;
-        let gpu_frame = self.build_gpu_canvas_frame(render_w, render_h, hovered_wire);
-        let render_output = render_runtime.render_scene_frame(&gpu_frame);
-        self.render_runtime = render_runtime.snapshot();
-        self.gpu_canvas.present(
+        let (left, right, top, bottom) =
+            self.visible_world_bounds(render_w as f32, render_h as f32);
+        let cad_scene = CadScene::from_schematic(&self.schematic);
+        let cad_selection = self.cad_surface_selection();
+        self.cad_surface_host.present(
             ui.ctx(),
             wgpu_render_state,
-            render_output,
-            render_w,
-            render_h,
+            render_runtime,
+            GraphicsSurfaceKind::SchematicCanvas,
+            &cad_scene,
+            [render_w, render_h],
+            [left, right, top, bottom],
+            self.canvas_dark_mode,
+            &cad_selection,
         );
-        let gpu_backdrop_ready = self.gpu_canvas.is_ready();
+        self.render_runtime = self.cad_surface_host.last_runtime();
+        let gpu_backdrop_ready = self.cad_surface_host.is_ready();
+        let hovered_surface_region = hover_mouse
+            .and_then(|mouse| {
+                let world = self.screen_to_world(mouse, rect);
+                self.cad_surface_host
+                    .hit_test_world(glam::Vec2::new(world.x, world.y))
+            })
+            .cloned();
+        let hovered_component = hovered_surface_region
+            .as_ref()
+            .and_then(|region| self.component_index_from_cad_region(region))
+            .or_else(|| hover_mouse.and_then(|mouse| self.hit_test_component(mouse, rect)));
+        let hovered_wire = hovered_surface_region
+            .as_ref()
+            .and_then(|region| self.wire_index_from_cad_region(region))
+            .or_else(|| hover_mouse.and_then(|mouse| self.hit_test_wire(mouse, rect)));
 
         {
             if gpu_backdrop_ready {
-                self.gpu_canvas.paint(&painter, rect);
+                self.cad_surface_host.paint(&painter, rect);
             } else {
                 painter.rect_filled(rect, 0.0, palette.canvas_bg);
             }
@@ -149,13 +170,11 @@ impl SchematicViewPanel {
                 if let Some(end) = end_world {
                     let end_screen = self.world_to_screen(Pos2::new(end.x, end.y), rect);
                     // Dashed line between the two points.
-                    painter.line_segment(
-                        [start_screen, end_screen],
-                        Stroke::new(2.0, Color32::from_rgb(100, 200, 255)),
-                    );
+                    painter
+                        .line_segment([start_screen, end_screen], Stroke::new(2.0, theme::ACCENT));
                     // Endpoints.
-                    painter.circle_filled(start_screen, 4.0, Color32::from_rgb(100, 200, 255));
-                    painter.circle_filled(end_screen, 4.0, Color32::from_rgb(100, 200, 255));
+                    painter.circle_filled(start_screen, 4.0, theme::ACCENT);
+                    painter.circle_filled(end_screen, 4.0, theme::ACCENT);
                     // Distance label.
                     let dist = (end - start).length();
                     let mid = Pos2::new(
@@ -168,21 +187,19 @@ impl SchematicViewPanel {
                         egui::Align2::CENTER_CENTER,
                         &label,
                         egui::FontId::proportional(12.0),
-                        Color32::from_rgb(100, 200, 255),
+                        theme::ACCENT,
                     );
                 }
             }
 
+            let draw_detail_overlay = !gpu_backdrop_ready
+                || self.schematic.components.len() <= GPU_DETAIL_COMPONENT_LIMIT
+                || self.zoom >= GPU_DETAIL_ZOOM_THRESHOLD;
             for (idx, comp) in self.schematic.components.iter().enumerate() {
                 let preview_selected = self.box_select_rect.map_or(false, |box_rect| {
-                    let center = self.world_to_screen(
-                        Pos2::new(comp.position.x, comp.position.y),
-                        rect,
-                    );
-                    let body = self.component_body_rect(
-                        center,
-                        symbol_kind_for_component(comp),
-                    );
+                    let center =
+                        self.world_to_screen(Pos2::new(comp.position.x, comp.position.y), rect);
+                    let body = self.component_body_rect(center, symbol_kind_for_component(comp));
                     box_rect.intersects(body)
                 });
                 let is_selected = self.is_component_selected(idx) || preview_selected;
@@ -202,6 +219,7 @@ impl SchematicViewPanel {
                     is_hovered,
                     hovered_pin,
                     !gpu_backdrop_ready,
+                    draw_detail_overlay,
                 );
             }
 
@@ -230,7 +248,7 @@ impl SchematicViewPanel {
                         let mut preview = template.instantiate();
                         preview.position = glam::Vec2::new(world.x, world.y);
                         preview.rotation = self.placement_rotation();
-                        self.draw_component(&painter, rect, &preview, true, true, None, true);
+                        self.draw_component(&painter, rect, &preview, true, true, None, true, true);
 
                         let screen = self.world_to_screen(world, rect);
                         let body =
@@ -264,7 +282,9 @@ impl SchematicViewPanel {
                             let mut preview = component.clone();
                             preview.position =
                                 glam::Vec2::new(world.x, world.y) + (component.position - origin);
-                            self.draw_component(&painter, rect, &preview, true, true, None, true);
+                            self.draw_component(
+                                &painter, rect, &preview, true, true, None, true, true,
+                            );
                         }
                     }
                 }
@@ -292,10 +312,12 @@ impl SchematicViewPanel {
                 t("app.schematic_canvas_hint", self.lang)
             };
             // Show cursor position in mm (schematic unit = 1mm).
-            let cursor_mm = hover_mouse.map(|m| {
-                let w = self.screen_to_world(m, rect);
-                format!("Cursor: {:.1}, {:.1} mm", w.x, w.y)
-            }).unwrap_or_default();
+            let cursor_mm = hover_mouse
+                .map(|m| {
+                    let w = self.screen_to_world(m, rect);
+                    format!("Cursor: {:.1}, {:.1} mm", w.x, w.y)
+                })
+                .unwrap_or_default();
             let info_text = format!("Zoom: {:.1}x | {} | {}", self.zoom, cursor_mm, help_copy);
             painter.text(
                 Pos2::new(rect.left() + 10.0, rect.top() + 10.0),
@@ -309,7 +331,9 @@ impl SchematicViewPanel {
         if !self.show_export_menu && matches!(self.placement, PlacementMode::None) {
             if response.drag_started_by(egui::PointerButton::Primary) {
                 if let Some(mouse) = hover_mouse {
-                    if let Some(idx) = self.hit_test_component(mouse, rect) {
+                    if let Some(idx) =
+                        hovered_component.or_else(|| self.hit_test_component(mouse, rect))
+                    {
                         let shift = ui.input(|i| i.modifiers.shift);
                         let ctrl = ui.input(|i| i.modifiers.ctrl);
                         if !self.is_component_selected(idx) || shift || ctrl {
@@ -526,14 +550,18 @@ impl SchematicViewPanel {
                     }
                     PlacementMode::None => {
                         if response.double_clicked_by(egui::PointerButton::Primary) {
-                            if let Some(idx) = self.hit_test_component(mouse, rect) {
+                            if let Some(idx) =
+                                hovered_component.or_else(|| self.hit_test_component(mouse, rect))
+                            {
                                 if idx < self.schematic.components.len() {
                                     self.editing_value =
                                         Some((idx, self.schematic.components[idx].value.clone()));
-                                        self.value_editor_just_opened = true;
+                                    self.value_editor_just_opened = true;
                                     self.selection = SchematicSelection::Component(idx);
                                 }
-                            } else if let Some(idx) = self.hit_test_wire(mouse, rect) {
+                            } else if let Some(idx) =
+                                hovered_wire.or_else(|| self.hit_test_wire(mouse, rect))
+                            {
                                 let world = self.snap_to_grid(self.screen_to_world(mouse, rect));
                                 changed |= self.split_wire_at_world(world, Some(idx));
                                 self.selection = SchematicSelection::Wire(
@@ -543,11 +571,15 @@ impl SchematicViewPanel {
                         } else if let Some((_idx, _, _)) = self.hit_test_pin(mouse, rect) {
                             self.placement = PlacementMode::Wire;
                             self.wire_start = Some(candidate);
-                        } else if let Some(idx) = self.hit_test_component(mouse, rect) {
+                        } else if let Some(idx) =
+                            hovered_component.or_else(|| self.hit_test_component(mouse, rect))
+                        {
                             let shift = ui.input(|i| i.modifiers.shift);
                             let ctrl = ui.input(|i| i.modifiers.ctrl);
                             self.select_component_with_modifiers(idx, shift, ctrl);
-                        } else if let Some(idx) = self.hit_test_wire(mouse, rect) {
+                        } else if let Some(idx) =
+                            hovered_wire.or_else(|| self.hit_test_wire(mouse, rect))
+                        {
                             self.selection = SchematicSelection::Wire(idx);
                         } else {
                             self.selection = SchematicSelection::None;
@@ -579,10 +611,12 @@ impl SchematicViewPanel {
                 let target = if let Some((idx, _, _)) = self.hit_test_pin(mouse, rect) {
                     self.selection = SchematicSelection::Component(idx);
                     SchematicSelection::Component(idx)
-                } else if let Some(idx) = self.hit_test_component(mouse, rect) {
+                } else if let Some(idx) =
+                    hovered_component.or_else(|| self.hit_test_component(mouse, rect))
+                {
                     self.selection = SchematicSelection::Component(idx);
                     SchematicSelection::Component(idx)
-                } else if let Some(idx) = self.hit_test_wire(mouse, rect) {
+                } else if let Some(idx) = hovered_wire.or_else(|| self.hit_test_wire(mouse, rect)) {
                     self.selection = SchematicSelection::Wire(idx);
                     SchematicSelection::Wire(idx)
                 } else {
@@ -726,66 +760,6 @@ impl SchematicViewPanel {
         changed
     }
 
-    /// Generates a GPU-backed rendering frame for high-performance backdrop presentation.
-    ///
-    /// Constructs a `SceneRenderFrame` by recording draw commands for:
-    /// - The clearing color (background palette).
-    /// - The orthogonal/coordinate grid via `record_gpu_grid`.
-    /// - Static wires (including highlighted states).
-    /// - Electronic component symbol shapes (lines, open/filled circles) using instanced recipes.
-    fn build_gpu_canvas_frame(
-        &self,
-        width: u32,
-        height: u32,
-        hovered_wire: Option<usize>,
-    ) -> SceneRenderFrame {
-        let mut commands = BasicCommandList::new();
-        let palette = electronics_palette(self.canvas_dark_mode);
-        commands.clear(color32_to_rgba8(palette.canvas_bg));
-
-        let (left, right, top, bottom) = self.visible_world_bounds(width as f32, height as f32);
-        self.record_gpu_grid(&mut commands, left, right, top, bottom);
-
-        let selected_wires = self.selected_wire_indices();
-
-        for (idx, wire) in self.schematic.wires.iter().enumerate() {
-            let color = if selected_wires.contains(&idx) {
-                color32_to_rgba8(theme::ACCENT)
-            } else if hovered_wire == Some(idx) || matches!(self.placement, PlacementMode::Wire) {
-                [118, 226, 134, 255]
-            } else {
-                [82, 200, 100, 255]
-            };
-
-            commands.draw_line(
-                Vec3::new(wire.start.x, wire.start.y, 0.0),
-                Vec3::new(wire.end.x, wire.end.y, 0.0),
-                color,
-                1.0,
-                true,
-                0.0,
-            );
-        }
-
-        for (idx, comp) in self.schematic.components.iter().enumerate() {
-            let color = if self.is_component_selected(idx) {
-                color32_to_rgba8(theme::ACCENT)
-            } else {
-                [228, 232, 240, 255]
-            };
-            self.record_component_symbol_geometry(&mut commands, comp, color);
-        }
-
-        SceneRenderFrame {
-            commands,
-            view_proj: canvas_view_projection(left, right, top, bottom),
-            light_dir: Vec3::Z,
-            width,
-            height,
-            stats: FrameStats::default(),
-        }
-    }
-
     /// Computes the visible coordinate boundaries in world space.
     ///
     /// Maps screen viewport dimensions to schematic coordinates based on the current camera
@@ -798,112 +772,6 @@ impl SchematicViewPanel {
         let top = (-self.offset.y) / zoom;
         let bottom = (height - self.offset.y) / zoom;
         (left, right, top, bottom)
-    }
-
-    /// Records line primitives representing the background grid into the provided command list.
-    ///
-    /// Generates subdividing coordinates based on the current zoom level and grid step,
-    /// drawing primary axes, major subdivision lines (every 5 steps), and minor lines with highly
-    /// optimized opacity-transparent strokes depending on the canvas color scheme (dark vs light).
-    fn record_gpu_grid(
-        &self,
-        commands: &mut BasicCommandList,
-        left: f32,
-        right: f32,
-        top: f32,
-        bottom: f32,
-    ) {
-        let step = GRID_STEP * self.zoom;
-        if step < 4.0 {
-            return;
-        }
-
-        let (minor, major, axis) = if self.canvas_dark_mode {
-            ([180, 186, 200, 14], [220, 226, 240, 30], [212, 119, 26, 46])
-        } else {
-            ([70, 80, 96, 22], [70, 80, 96, 42], [212, 119, 26, 74])
-        };
-        let world_left = (left / GRID_STEP).floor() as i32 - 2;
-        let world_right = (right / GRID_STEP).ceil() as i32 + 2;
-        let world_top = (top / GRID_STEP).floor() as i32 - 2;
-        let world_bottom = (bottom / GRID_STEP).ceil() as i32 + 2;
-
-        for ix in world_left..=world_right {
-            let x = ix as f32 * GRID_STEP;
-            let color = if ix == 0 {
-                axis
-            } else if ix % 5 == 0 {
-                major
-            } else {
-                minor
-            };
-
-            commands.draw_line(
-                Vec3::new(x, top, 0.0),
-                Vec3::new(x, bottom, 0.0),
-                color,
-                1.0,
-                true,
-                0.0,
-            );
-        }
-
-        for iy in world_top..=world_bottom {
-            let y = iy as f32 * GRID_STEP;
-            let color = if iy == 0 {
-                axis
-            } else if iy % 5 == 0 {
-                major
-            } else {
-                minor
-            };
-
-            commands.draw_line(
-                Vec3::new(left, y, 0.0),
-                Vec3::new(right, y, 0.0),
-                color,
-                1.0,
-                true,
-                0.0,
-            );
-        }
-    }
-
-    /// Adds vector geometric components for a given electronic symbol into the draw command buffer.
-    ///
-    /// Translates, rotates, and renders localized segment lines and concentric circle elements
-    /// extracted from the layout schema template.
-    fn record_component_symbol_geometry(
-        &self,
-        commands: &mut BasicCommandList,
-        comp: &ElectronicComponent,
-        color: [u8; 4],
-    ) {
-        let center = Pos2::new(comp.position.x, comp.position.y);
-        let recipe = schematic_symbol_recipe(symbol_kind_for_component(comp));
-
-        for segment in recipe.segments {
-            let start = transform_local_world_point(center, segment[0], comp.rotation);
-            let end = transform_local_world_point(center, segment[1], comp.rotation);
-            commands.draw_line(
-                Vec3::new(start.x, start.y, 0.0),
-                Vec3::new(end.x, end.y, 0.0),
-                color,
-                1.0,
-                true,
-                0.0,
-            );
-        }
-
-        for circle in recipe.open_circles {
-            let center = transform_local_world_point(center, circle.center, comp.rotation);
-            record_circle_outline(commands, center, circle.radius, color);
-        }
-
-        for circle in recipe.filled_circles {
-            let center = transform_local_world_point(center, circle.center, comp.rotation);
-            record_circle_outline(commands, center, circle.radius, color);
-        }
     }
 
     /// Renders the floating popup context menu at the mouse cursor position.
@@ -1156,9 +1024,9 @@ impl SchematicViewPanel {
         }
 
         if !self.value_editor_just_opened {
-            let clicked_outside = ui.ctx().input(|i| {
-                i.pointer.primary_clicked() || i.pointer.secondary_clicked()
-            });
+            let clicked_outside = ui
+                .ctx()
+                .input(|i| i.pointer.primary_clicked() || i.pointer.secondary_clicked());
             if clicked_outside {
                 if let (Some(rect), Some(pointer)) =
                     (window_rect, ui.ctx().input(|i| i.pointer.interact_pos()))
@@ -1201,8 +1069,7 @@ impl SchematicViewPanel {
                 ui.add_space(6.0);
                 let response = ui.add_sized(
                     [ui.available_width(), 24.0],
-                    egui::TextEdit::singleline(&mut buffer)
-                        .hint_text("VCC / GND / N001"),
+                    egui::TextEdit::singleline(&mut buffer).hint_text("VCC / GND / N001"),
                 );
                 response.request_focus();
                 ui.add_space(8.0);
@@ -1456,7 +1323,12 @@ impl SchematicViewPanel {
         is_hovered: bool,
         hovered_pin: Option<usize>,
         draw_symbol_geometry: bool,
+        draw_detail_overlay: bool,
     ) {
+        if !draw_detail_overlay && !is_selected && !is_hovered {
+            return;
+        }
+
         let palette = electronics_palette(self.canvas_dark_mode);
         let center = self.world_to_screen(Pos2::new(comp.position.x, comp.position.y), canvas_rect);
         let symbol_kind = symbol_kind_for_component(comp);
@@ -1485,7 +1357,9 @@ impl SchematicViewPanel {
             painter.rect_stroke(body, 6.0 * self.zoom, Stroke::new(1.0, border));
         }
 
-        let painted_asset = if comp.rotation.abs() < 0.1 || (comp.rotation % 360.0).abs() < 0.1 {
+        let painted_asset = if draw_detail_overlay
+            && (comp.rotation.abs() < 0.1 || (comp.rotation % 360.0).abs() < 0.1)
+        {
             self.asset_atlas.paint(
                 painter,
                 symbol_asset_for_component(comp),
@@ -2078,6 +1952,45 @@ impl SchematicViewPanel {
         best.map(|(idx, _)| idx)
     }
 
+    fn component_index_from_cad_region(&self, region: &CadSurfaceHitRegion) -> Option<usize> {
+        if !matches!(region.kind, CadObjectKind::Component | CadObjectKind::Pin) {
+            return None;
+        }
+        let id = region.source_id.as_deref()?;
+        self.schematic
+            .components
+            .iter()
+            .position(|component| component.id.to_string() == id)
+    }
+
+    fn wire_index_from_cad_region(&self, region: &CadSurfaceHitRegion) -> Option<usize> {
+        if region.kind != CadObjectKind::Wire {
+            return None;
+        }
+        let id = region.source_id.as_deref()?;
+        self.schematic
+            .wires
+            .iter()
+            .position(|wire| wire.id.to_string() == id)
+    }
+
+    fn cad_surface_selection(&self) -> CadSurfaceSelection {
+        let mut selection = CadSurfaceSelection::default();
+
+        for index in self.selected_component_indices() {
+            if let Some(component) = self.schematic.components.get(index) {
+                selection.source_ids.push(*component.id.as_bytes());
+            }
+        }
+        for index in self.selected_wire_indices() {
+            if let Some(wire) = self.schematic.wires.get(index) {
+                selection.source_ids.push(*wire.id.as_bytes());
+            }
+        }
+
+        selection
+    }
+
     /// Resolves closest connection targets (Terminal pin, Wire ends, mid-wire segment intersection/junction, or Grid location).
     fn resolve_connection_candidate(&self, mouse: Pos2, canvas_rect: Rect) -> ConnectionCandidate {
         let mut candidate =
@@ -2187,7 +2100,6 @@ impl SchematicViewPanel {
         &mut self,
         component: &ElectronicComponent,
     ) {
-
         for wire in &mut self.schematic.wires {
             for pin in &component.pins {
                 let pin_world = component_pin_world(&component, pin);
@@ -2352,49 +2264,6 @@ fn wire_anchor_for_candidate(
             WireAnchor::Point(glam::Vec2::new(candidate.world.x, candidate.world.y)),
         ),
     }
-}
-
-/// Rotates dynamic coordinates around a center projection anchor by a specific angle.
-fn transform_local_world_point(center: Pos2, local: [f32; 2], rotation_deg: f32) -> Pos2 {
-    let radians = rotation_deg.to_radians();
-    let cos_r = radians.cos();
-    let sin_r = radians.sin();
-    let x = local[0] * cos_r - local[1] * sin_r;
-    let y = local[0] * sin_r + local[1] * cos_r;
-    Pos2::new(center.x + x, center.y + y)
-}
-
-/// Records a circular shape using a set number of segment approximations.
-fn record_circle_outline(
-    commands: &mut BasicCommandList,
-    center: Pos2,
-    radius: f32,
-    color: [u8; 4],
-) {
-    const SEGMENTS: usize = 20;
-
-    let mut previous = Pos2::new(center.x + radius, center.y);
-    for step in 1..=SEGMENTS {
-        let angle = step as f32 / SEGMENTS as f32 * std::f32::consts::TAU;
-        let next = Pos2::new(
-            center.x + angle.cos() * radius,
-            center.y + angle.sin() * radius,
-        );
-        commands.draw_line(
-            Vec3::new(previous.x, previous.y, 0.0),
-            Vec3::new(next.x, next.y, 0.0),
-            color,
-            1.0,
-            true,
-            0.0,
-        );
-        previous = next;
-    }
-}
-
-/// Converts a 32-bit egui Color object down to raw RGBA arrays.
-fn color32_to_rgba8(color: Color32) -> [u8; 4] {
-    [color.r(), color.g(), color.b(), color.a()]
 }
 
 /// Transforms local geometric elements based on rotation angle and zoom factor coordinates.

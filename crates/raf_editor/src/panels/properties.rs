@@ -147,22 +147,22 @@ impl PropertiesPanel {
                     }
                 });
 
-            ui.add_space(8.0);
-            changed |= edit_vec3(ui, t("app.position", lang), &mut node.position, 0.1);
-            ui.label(
-                egui::RichText::new(format!("({})", unit_suffix))
-                    .size(9.0)
-                    .color(Color32::from_rgb(100, 100, 110)),
-            );
-            ui.add_space(6.0);
-            changed |= edit_vec3(ui, t("app.rotation", lang), &mut node.rotation, 0.5);
-            ui.add_space(6.0);
-            changed |= edit_vec3(ui, t("app.scale", lang), &mut node.scale, 0.05);
-            ui.label(
-                egui::RichText::new(format!("({}3)", unit_suffix))
-                    .size(9.0)
-                    .color(Color32::from_rgb(100, 100, 110)),
-            );
+                ui.add_space(8.0);
+                changed |= edit_vec3(ui, t("app.position", lang), &mut node.position, 0.1);
+                ui.label(
+                    egui::RichText::new(format!("({})", unit_suffix))
+                        .size(9.0)
+                        .color(Color32::from_rgb(100, 100, 110)),
+                );
+                ui.add_space(6.0);
+                changed |= edit_vec3(ui, t("app.rotation", lang), &mut node.rotation, 0.5);
+                ui.add_space(6.0);
+                changed |= edit_vec3(ui, t("app.scale", lang), &mut node.scale, 0.05);
+                ui.label(
+                    egui::RichText::new(format!("({}3)", unit_suffix))
+                        .size(9.0)
+                        .color(Color32::from_rgb(100, 100, 110)),
+                );
             });
 
             ui.add_space(4.0);

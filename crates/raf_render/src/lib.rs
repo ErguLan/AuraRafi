@@ -29,6 +29,7 @@ pub mod gizmo;
 pub mod lod;
 pub mod mesh;
 pub mod picking;
+pub mod picking_id_buffer;
 pub mod pipeline;
 pub mod projection;
 pub mod renderer;
@@ -66,6 +67,7 @@ pub use picking::{
     pick_entity, pick_gizmo_arrow, project_gizmo_arrow, GizmoScreenArrow, PickResult, GIZMO_ARROWS,
     GIZMO_LINE_WIDTH,
 };
+pub use picking_id_buffer::{PickHit, PickObjectId, PickPixel, SelectionIdBuffer};
 pub use pipeline::RenderPipeline;
 pub use renderer::Renderer;
 
@@ -74,7 +76,7 @@ pub use lighting::{apply_fog, bloom_factor, compute_lighting, Light, LightingEnv
 pub use post_process::{
     adjust_saturation, apply_bloom, apply_vignette, fxaa_edge_blend, tonemap_reinhard,
 };
-pub use render_config::{AntiAliasingMode, RenderConfig};
+pub use render_config::{AntiAliasingMode, RenderConfig, RenderResourceProfile};
 pub use texture::{CpuTexture, TextureCache};
 pub use uv_mapping::{
     cube_uv_quads, generate_uv_box, generate_uv_cylindrical, generate_uv_spherical, UvProjection,

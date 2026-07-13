@@ -95,7 +95,9 @@ pub fn create_engine(timeout_ops: u64) -> Engine {
     // --- Constants and helpers ---
 
     // vec3(x, y, z) -> ScriptValue::Vec3
-    engine.register_fn("vec3", |x: f32, y: f32, z: f32| ScriptValue::vec3(x, y, z));
+    engine.register_fn("vec3", |x: f64, y: f64, z: f64| {
+        ScriptValue::vec3(x as f32, y as f32, z as f32)
+    });
 
     // color(r, g, b) -> ScriptValue::Color (alpha defaults to 255)
     engine.register_fn("color", |r: INT, g: INT, b: INT| {
@@ -112,9 +114,15 @@ pub fn create_engine(timeout_ops: u64) -> Engine {
         with_ctx(|ctx| ctx.get_node(&name).unwrap_or(NodeHandle::from_raw(0)))
     });
 
-    engine.register_fn("spawn_entity", |name: ImmutableString, prim: ImmutableString| -> NodeHandle {
-        with_ctx(|ctx| ctx.spawn_entity(&name, &prim).unwrap_or(NodeHandle::from_raw(0)))
-    });
+    engine.register_fn(
+        "spawn_entity",
+        |name: ImmutableString, prim: ImmutableString| -> NodeHandle {
+            with_ctx(|ctx| {
+                ctx.spawn_entity(&name, &prim)
+                    .unwrap_or(NodeHandle::from_raw(0))
+            })
+        },
+    );
 
     engine.register_fn("destroy_entity", |handle: NodeHandle| {
         with_ctx(|ctx| {
@@ -123,54 +131,136 @@ pub fn create_engine(timeout_ops: u64) -> Engine {
     });
 
     // --- Transform operations (all in meters, radians) ---
-    engine.register_fn("set_position", |handle: NodeHandle, x: f32, y: f32, z: f32| {
-        with_ctx(|ctx| {
-            let _ = handle.set_position(ctx, x, y, z);
-        });
-    });
+    engine.register_fn(
+        "set_position",
+        |handle: NodeHandle, x: f64, y: f64, z: f64| {
+            with_ctx(|ctx| {
+                let _ = handle.set_position(ctx, x as f32, y as f32, z as f32);
+            });
+        },
+    );
+    engine.register_fn(
+        "set_position",
+        |handle: &mut NodeHandle, x: f64, y: f64, z: f64| {
+            with_ctx(|ctx| {
+                let _ = handle.set_position(ctx, x as f32, y as f32, z as f32);
+            });
+        },
+    );
 
-    engine.register_fn("set_rotation", |handle: NodeHandle, x: f32, y: f32, z: f32| {
-        with_ctx(|ctx| {
-            let _ = handle.set_rotation(ctx, x, y, z);
-        });
-    });
+    engine.register_fn(
+        "set_rotation",
+        |handle: NodeHandle, x: f64, y: f64, z: f64| {
+            with_ctx(|ctx| {
+                let _ = handle.set_rotation(ctx, x as f32, y as f32, z as f32);
+            });
+        },
+    );
+    engine.register_fn(
+        "set_rotation",
+        |handle: &mut NodeHandle, x: f64, y: f64, z: f64| {
+            with_ctx(|ctx| {
+                let _ = handle.set_rotation(ctx, x as f32, y as f32, z as f32);
+            });
+        },
+    );
 
-    engine.register_fn("set_scale", |handle: NodeHandle, x: f32, y: f32, z: f32| {
+    engine.register_fn("set_scale", |handle: NodeHandle, x: f64, y: f64, z: f64| {
         with_ctx(|ctx| {
-            let _ = handle.set_scale(ctx, x, y, z);
+            let _ = handle.set_scale(ctx, x as f32, y as f32, z as f32);
         });
     });
+    engine.register_fn(
+        "set_scale",
+        |handle: &mut NodeHandle, x: f64, y: f64, z: f64| {
+            with_ctx(|ctx| {
+                let _ = handle.set_scale(ctx, x as f32, y as f32, z as f32);
+            });
+        },
+    );
 
     engine.register_fn("get_position", |handle: NodeHandle| -> [f32; 3] {
         with_ctx(|ctx| handle.get_position(ctx).unwrap_or([0.0, 0.0, 0.0]))
     });
-
-    engine.register_fn("move_by", |handle: NodeHandle, dx: f32, dy: f32, dz: f32| {
-        with_ctx(|ctx| {
-            let _ = handle.move_by(ctx, dx, dy, dz);
-        });
+    engine.register_fn("get_position", |handle: &mut NodeHandle| -> [f32; 3] {
+        with_ctx(|ctx| handle.get_position(ctx).unwrap_or([0.0, 0.0, 0.0]))
     });
 
-    engine.register_fn("rotate_by", |handle: NodeHandle, dx: f32, dy: f32, dz: f32| {
-        with_ctx(|ctx| {
-            let _ = handle.rotate_by(ctx, dx, dy, dz);
-        });
-    });
+    engine.register_fn(
+        "move_by",
+        |handle: NodeHandle, dx: f64, dy: f64, dz: f64| {
+            with_ctx(|ctx| {
+                let _ = handle.move_by(ctx, dx as f32, dy as f32, dz as f32);
+            });
+        },
+    );
+    engine.register_fn(
+        "move_by",
+        |handle: &mut NodeHandle, dx: f64, dy: f64, dz: f64| {
+            with_ctx(|ctx| {
+                let _ = handle.move_by(ctx, dx as f32, dy as f32, dz as f32);
+            });
+        },
+    );
+
+    engine.register_fn(
+        "rotate_by",
+        |handle: NodeHandle, dx: f64, dy: f64, dz: f64| {
+            with_ctx(|ctx| {
+                let _ = handle.rotate_by(ctx, dx as f32, dy as f32, dz as f32);
+            });
+        },
+    );
+    engine.register_fn(
+        "rotate_by",
+        |handle: &mut NodeHandle, dx: f64, dy: f64, dz: f64| {
+            with_ctx(|ctx| {
+                let _ = handle.rotate_by(ctx, dx as f32, dy as f32, dz as f32);
+            });
+        },
+    );
 
     // --- Property operations ---
-    engine.register_fn("set_color", |handle: NodeHandle, r: INT, g: INT, b: INT, a: INT| {
-        with_ctx(|ctx| {
-            let _ = handle.set_color(ctx, r as u8, g as u8, b as u8, a as u8);
-        });
-    });
+    engine.register_fn(
+        "set_color",
+        |handle: NodeHandle, r: INT, g: INT, b: INT, a: INT| {
+            with_ctx(|ctx| {
+                let _ = handle.set_color(ctx, r as u8, g as u8, b as u8, a as u8);
+            });
+        },
+    );
+    engine.register_fn(
+        "set_color",
+        |handle: &mut NodeHandle, r: INT, g: INT, b: INT, a: INT| {
+            with_ctx(|ctx| {
+                let _ = handle.set_color(ctx, r as u8, g as u8, b as u8, a as u8);
+            });
+        },
+    );
 
-    engine.register_fn("set_color_rgb", |handle: NodeHandle, r: INT, g: INT, b: INT| {
-        with_ctx(|ctx| {
-            let _ = handle.set_color(ctx, r as u8, g as u8, b as u8, 255);
-        });
-    });
+    engine.register_fn(
+        "set_color_rgb",
+        |handle: NodeHandle, r: INT, g: INT, b: INT| {
+            with_ctx(|ctx| {
+                let _ = handle.set_color(ctx, r as u8, g as u8, b as u8, 255);
+            });
+        },
+    );
+    engine.register_fn(
+        "set_color_rgb",
+        |handle: &mut NodeHandle, r: INT, g: INT, b: INT| {
+            with_ctx(|ctx| {
+                let _ = handle.set_color(ctx, r as u8, g as u8, b as u8, 255);
+            });
+        },
+    );
 
     engine.register_fn("set_visible", |handle: NodeHandle, visible: bool| {
+        with_ctx(|ctx| {
+            let _ = handle.set_visible(ctx, visible);
+        });
+    });
+    engine.register_fn("set_visible", |handle: &mut NodeHandle, visible: bool| {
         with_ctx(|ctx| {
             let _ = handle.set_visible(ctx, visible);
         });
@@ -181,6 +271,14 @@ pub fn create_engine(timeout_ops: u64) -> Engine {
             let _ = handle.set_name(ctx, &name);
         });
     });
+    engine.register_fn(
+        "set_name",
+        |handle: &mut NodeHandle, name: ImmutableString| {
+            with_ctx(|ctx| {
+                let _ = handle.set_name(ctx, &name);
+            });
+        },
+    );
 
     // --- Input operations ---
     engine.register_fn("is_key_pressed", |key: ImmutableString| -> bool {
@@ -204,17 +302,17 @@ pub fn create_engine(timeout_ops: u64) -> Engine {
         with_ctx(|ctx| ctx.stop_audio(&name));
     });
 
-    engine.register_fn("set_volume", |name: ImmutableString, volume: f32| {
-        with_ctx(|ctx| ctx.set_volume(&name, volume));
+    engine.register_fn("set_volume", |name: ImmutableString, volume: f64| {
+        with_ctx(|ctx| ctx.set_volume(&name, volume as f32));
     });
 
     // --- Time operations ---
-    engine.register_fn("get_delta_time", || -> f32 {
-        with_ctx(|ctx| ctx.get_delta_time())
+    engine.register_fn("get_delta_time", || -> f64 {
+        with_ctx(|ctx| ctx.get_delta_time() as f64)
     });
 
-    engine.register_fn("get_elapsed_time", || -> f32 {
-        with_ctx(|ctx| ctx.get_elapsed_time())
+    engine.register_fn("get_elapsed_time", || -> f64 {
+        with_ctx(|ctx| ctx.get_elapsed_time() as f64)
     });
 
     engine
@@ -284,7 +382,13 @@ pub fn call_on_update(
     if !script.has_on_update {
         return ExecutionResult::ok();
     }
-    call_fn_with_ctx(engine, &script.ast, "on_update", ctx, vec![Dynamic::from_float(dt as f64)])
+    call_fn_with_ctx(
+        engine,
+        &script.ast,
+        "on_update",
+        ctx,
+        vec![Dynamic::from_float(dt as f64)],
+    )
 }
 
 /// Call the `on_destroy` function of a compiled script.
@@ -323,14 +427,7 @@ fn run_fn_safe(
     let mut scope = rhai::Scope::new();
     match engine.call_fn::<Dynamic>(&mut scope, ast, fn_name, args) {
         Ok(_) => ExecutionResult::ok(),
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("not found") || msg.contains("FnNotFound") {
-                ExecutionResult::ok()
-            } else {
-                ExecutionResult::error(msg)
-            }
-        }
+        Err(e) => ExecutionResult::error(e.to_string()),
     }
 }
 

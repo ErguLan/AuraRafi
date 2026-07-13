@@ -85,10 +85,10 @@ impl NodeColor {
     pub fn for_primitive(prim: Primitive) -> Self {
         match prim {
             Primitive::Empty => Self::rgb(120, 120, 120),
-            Primitive::Cube => Self::rgb(90, 160, 220),
-            Primitive::Sphere => Self::rgb(220, 130, 50),
-            Primitive::Plane => Self::rgb(100, 180, 100),
-            Primitive::Cylinder => Self::rgb(180, 100, 180),
+            Primitive::Cube => Self::rgb(224, 116, 24),
+            Primitive::Sphere => Self::rgb(236, 236, 236),
+            Primitive::Plane => Self::rgb(150, 150, 150),
+            Primitive::Cylinder => Self::rgb(58, 58, 58),
             Primitive::Sprite2D => Self::rgb(220, 200, 80),
         }
     }
@@ -142,6 +142,12 @@ pub struct SceneNode {
     /// Organizational folder/group node inside the hierarchy.
     #[serde(default)]
     pub is_folder: bool,
+    /// Optional asset/manifest identifier used to create this node.
+    #[serde(default)]
+    pub source_asset: Option<String>,
+    /// Schema version of the source manifest, when this node came from one.
+    #[serde(default)]
+    pub source_schema_version: Option<u32>,
 }
 
 impl SceneNode {
@@ -165,6 +171,8 @@ impl SceneNode {
             collider: Collider::default(),
             rigid_body: RigidBody::default(),
             is_folder: false,
+            source_asset: None,
+            source_schema_version: None,
         }
     }
 
@@ -188,6 +196,8 @@ impl SceneNode {
             collider: Collider::default(),
             rigid_body: RigidBody::default(),
             is_folder: false,
+            source_asset: None,
+            source_schema_version: None,
         }
     }
 
@@ -379,6 +389,47 @@ impl SceneGraph {
         self.nodes.is_empty()
     }
 
+    /// Hashes only the scene fields that can change the rendered frame.
+    ///
+    /// This is deliberately not a persistence hash. It excludes editor-only
+    /// metadata such as scripts and variables so an idle viewport can reuse
+    /// its retained frame without treating unrelated authoring changes as
+    /// renderer invalidations.
+    pub fn render_fingerprint(&self) -> u64 {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        mix_render_fingerprint(&mut hash, self.nodes.len() as u64);
+
+        for (index, node) in self.nodes.iter().enumerate() {
+            mix_render_fingerprint(&mut hash, index as u64);
+            mix_render_fingerprint(&mut hash, (!node.name.is_empty()) as u64);
+            mix_render_fingerprint(&mut hash, node.visible as u64);
+            mix_render_fingerprint(&mut hash, node.is_folder as u64);
+            mix_render_fingerprint(&mut hash, primitive_fingerprint(node.primitive));
+            mix_render_fingerprint(
+                &mut hash,
+                node.parent.map(|id| id.0 as u64).unwrap_or(u64::MAX),
+            );
+            for value in [
+                node.position.x,
+                node.position.y,
+                node.position.z,
+                node.rotation.x,
+                node.rotation.y,
+                node.rotation.z,
+                node.scale.x,
+                node.scale.y,
+                node.scale.z,
+            ] {
+                mix_render_fingerprint(&mut hash, value.to_bits() as u64);
+            }
+            for channel in [node.color.r, node.color.g, node.color.b, node.color.a] {
+                mix_render_fingerprint(&mut hash, channel as u64);
+            }
+        }
+
+        hash
+    }
+
     /// Iterate all nodes (flat).
     pub fn iter(&self) -> impl Iterator<Item = (SceneNodeId, &SceneNode)> {
         self.nodes
@@ -409,7 +460,10 @@ impl SceneGraph {
         }
 
         if let Some(parent_id) = new_parent {
-            if !self.is_valid_node(parent_id) || parent_id == id || self.is_descendant(parent_id, id) {
+            if !self.is_valid_node(parent_id)
+                || parent_id == id
+                || self.is_descendant(parent_id, id)
+            {
                 return false;
             }
         }
@@ -653,6 +707,22 @@ impl SceneGraph {
     }
 }
 
+fn mix_render_fingerprint(hash: &mut u64, value: u64) {
+    *hash ^= value;
+    *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+}
+
+fn primitive_fingerprint(primitive: Primitive) -> u64 {
+    match primitive {
+        Primitive::Empty => 0,
+        Primitive::Cube => 1,
+        Primitive::Sphere => 2,
+        Primitive::Plane => 3,
+        Primitive::Cylinder => 4,
+        Primitive::Sprite2D => 5,
+    }
+}
+
 impl Default for SceneGraph {
     fn default() -> Self {
         Self::new()
@@ -696,5 +766,22 @@ mod tests {
         let translation = world.col(3);
         assert!((translation.x - 10.0).abs() < 0.001);
         assert!((translation.y - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn render_fingerprint_tracks_visual_changes_only() {
+        let mut graph = SceneGraph::new();
+        let node = graph.add_root_with_primitive("Cube", Primitive::Cube);
+        let initial = graph.render_fingerprint();
+
+        graph
+            .get_mut(node)
+            .unwrap()
+            .scripts
+            .push("logic.rhai".to_string());
+        assert_eq!(graph.render_fingerprint(), initial);
+
+        graph.get_mut(node).unwrap().position.x = 4.0;
+        assert_ne!(graph.render_fingerprint(), initial);
     }
 }

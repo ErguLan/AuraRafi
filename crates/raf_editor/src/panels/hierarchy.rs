@@ -113,7 +113,11 @@ impl HierarchyPanel {
             );
             if !self.search_query.is_empty() {
                 if ui
-                    .add(egui::Button::new("✕").frame(false).min_size(egui::vec2(16.0, 16.0)))
+                    .add(
+                        egui::Button::new("✕")
+                            .frame(false)
+                            .min_size(egui::vec2(16.0, 16.0)),
+                    )
                     .clicked()
                 {
                     self.search_query.clear();
@@ -173,7 +177,11 @@ impl HierarchyPanel {
             let bg_response = ui.interact(
                 ui.max_rect(),
                 ui.make_persistent_id("hierarchy_bg"),
-                egui::Sense { click: true, drag: true, focusable: false },
+                egui::Sense {
+                    click: true,
+                    drag: true,
+                    focusable: false,
+                },
             );
 
             // Box select start.
@@ -192,9 +200,8 @@ impl HierarchyPanel {
 
             // Compute box select rect from start to current pointer each frame.
             self.box_select_rect = self.box_select_start.and_then(|start| {
-                ui.input(|i| i.pointer.interact_pos()).map(|current| {
-                    egui::Rect::from_two_pos(start, current)
-                })
+                ui.input(|i| i.pointer.interact_pos())
+                    .map(|current| egui::Rect::from_two_pos(start, current))
             });
 
             if bg_response.clicked() {
@@ -354,9 +361,10 @@ impl HierarchyPanel {
         // When filtering, hide nodes that don't match (but still render matching children).
         if is_filtering && !node.name.to_lowercase().contains(filter_lower) {
             // Check if any descendant matches.
-            let child_matches = node.children.iter().any(|&cid| {
-                self.node_matches_filter(scene, cid, filter_lower)
-            });
+            let child_matches = node
+                .children
+                .iter()
+                .any(|&cid| self.node_matches_filter(scene, cid, filter_lower));
             if !child_matches {
                 return;
             }
@@ -370,7 +378,8 @@ impl HierarchyPanel {
         let has_children = !child_ids.is_empty();
         let parent_id = node.parent;
 
-        let is_selected = self.selected_nodes.contains(&id) || self.box_select_candidates.contains(&id);
+        let is_selected =
+            self.selected_nodes.contains(&id) || self.box_select_candidates.contains(&id);
         let is_primary = self.selected_node == Some(id);
         let is_open = !self.collapsed_nodes.contains(&id);
         let is_renaming = matches!(self.renaming, Some((rename_id, _)) if rename_id == id);
@@ -501,7 +510,8 @@ impl HierarchyPanel {
                     let can_drop_here = matches!(self.dragged_node, Some(dragged) if dragged != id);
                     if can_drop_here && response.hovered() {
                         let row_rect = response.rect;
-                        let rel_y = ui.input(|i| i.pointer.hover_pos())
+                        let rel_y = ui
+                            .input(|i| i.pointer.hover_pos())
                             .map(|p| (p.y - row_rect.top()) / row_rect.height())
                             .unwrap_or(0.5);
 
@@ -517,13 +527,19 @@ impl HierarchyPanel {
                         if is_above {
                             let line_y = row_rect.top();
                             ui.painter().line_segment(
-                                [egui::pos2(row_rect.left(), line_y), egui::pos2(row_rect.right(), line_y)],
+                                [
+                                    egui::pos2(row_rect.left(), line_y),
+                                    egui::pos2(row_rect.right(), line_y),
+                                ],
                                 egui::Stroke::new(2.0, egui::Color32::from_rgb(212, 119, 26)),
                             );
                         } else if is_below {
                             let line_y = row_rect.bottom();
                             ui.painter().line_segment(
-                                [egui::pos2(row_rect.left(), line_y), egui::pos2(row_rect.right(), line_y)],
+                                [
+                                    egui::pos2(row_rect.left(), line_y),
+                                    egui::pos2(row_rect.right(), line_y),
+                                ],
                                 egui::Stroke::new(2.0, egui::Color32::from_rgb(212, 119, 26)),
                             );
                         } else {
@@ -546,8 +562,11 @@ impl HierarchyPanel {
                                 egui::pos2(row_rect.left(), row_rect.top()),
                                 egui::pos2(row_rect.left() + 3.0, row_rect.bottom()),
                             );
-                            ui.painter()
-                                .rect_filled(accent_rect, 2.0, egui::Color32::from_rgb(232, 152, 58));
+                            ui.painter().rect_filled(
+                                accent_rect,
+                                2.0,
+                                egui::Color32::from_rgb(232, 152, 58),
+                            );
                             // Drop target marker dot.
                             ui.painter().circle_filled(
                                 egui::pos2(row_rect.left() + 8.0, row_rect.center().y),
@@ -574,12 +593,16 @@ impl HierarchyPanel {
                                     // Insert AFTER this node (same parent).
                                     // Find the next sibling to insert before, or None to append.
                                     let siblings = if let Some(pid) = parent_id {
-                                        scene.get(pid).map(|p| p.children.clone()).unwrap_or_default()
+                                        scene
+                                            .get(pid)
+                                            .map(|p| p.children.clone())
+                                            .unwrap_or_default()
                                     } else {
                                         scene.roots().to_vec()
                                     };
                                     let pos = siblings.iter().position(|&s| s == id);
-                                    let next_sibling = pos.and_then(|p| siblings.get(p + 1).copied());
+                                    let next_sibling =
+                                        pos.and_then(|p| siblings.get(p + 1).copied());
                                     self.pending_reparent = Some((dragged, parent_id));
                                     self.pending_insert_before = next_sibling;
                                 } else {
@@ -662,8 +685,16 @@ impl HierarchyPanel {
         if has_children && (is_open || is_filtering) {
             for (ci, child_id) in child_ids.iter().enumerate() {
                 self.show_node(
-                    ui, scene, *child_id, depth + 1, lang, icons, panel_width,
-                    is_filtering, filter_lower, ci,
+                    ui,
+                    scene,
+                    *child_id,
+                    depth + 1,
+                    lang,
+                    icons,
+                    panel_width,
+                    is_filtering,
+                    filter_lower,
+                    ci,
                 );
             }
         }
@@ -971,7 +1002,10 @@ fn paint_drag_preview(
 
     // Text column to the right of the icon.
     painter.galley(
-        egui::pos2(icon_rect.right() + icon_gap, rect.center().y - galley.size().y * 0.5),
+        egui::pos2(
+            icon_rect.right() + icon_gap,
+            rect.center().y - galley.size().y * 0.5,
+        ),
         galley,
         egui::Color32::WHITE,
     );

@@ -4,8 +4,13 @@
 
 pub mod browser;
 pub mod importer;
+pub mod primitive_manifest;
 pub mod primitives;
 
 pub use browser::AssetBrowser;
 pub use importer::{AssetImporter, AssetType};
+pub use primitive_manifest::{
+    builtin_primitive_model_kinds, PrimitiveManifestError, PrimitiveModelManifest,
+    PrimitiveModelPart,
+};
 pub use primitives::{Primitive3D, PrimitiveShape};

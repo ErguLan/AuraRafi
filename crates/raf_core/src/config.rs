@@ -4,6 +4,7 @@
 //! editor preferences, and project defaults. Serialized to RON
 //! for human-readable config files.
 
+use crate::ai::{AgentMode, AiModelShortcut, AiProvider, AiProviderConfig};
 use crate::units::DisplayUnit;
 use serde::{Deserialize, Serialize};
 
@@ -52,6 +53,14 @@ fn default_invert_mouse_y() -> bool {
 
 fn default_gizmo_sensitivity() -> f32 {
     3.5
+}
+
+fn default_gizmo_growth() -> f32 {
+    0.0
+}
+
+fn default_wasd_speed() -> f32 {
+    1.0
 }
 
 fn default_rotate_sensitivity() -> f32 {
@@ -295,6 +304,9 @@ pub struct EngineSettings {
     /// Multiplier for move gizmo drag response.
     #[serde(default = "default_gizmo_sensitivity")]
     pub move_gizmo_sensitivity: f32,
+    /// Multiplier for WASD camera movement speed.
+    #[serde(default = "default_wasd_speed")]
+    pub wasd_speed: f32,
     /// Multiplier for rotate gizmo drag response.
     #[serde(default = "default_rotate_sensitivity")]
     pub rotate_gizmo_sensitivity: f32,
@@ -304,6 +316,15 @@ pub struct EngineSettings {
     /// If true, scale gizmo starts in uniform mode until Shift is held.
     #[serde(default)]
     pub uniform_scale_by_default: bool,
+    /// Invert WASD forward/backward movement.
+    #[serde(default)]
+    pub invert_ws: bool,
+    /// F key toggles focus lock mode (camera follows selected object).
+    #[serde(default = "default_true")]
+    pub focus_lock_enabled: bool,
+    /// Gizmo handle growth scale (0 = fixed size, 100 = grows with camera distance).
+    #[serde(default = "default_gizmo_growth")]
+    pub gizmo_growth_scale: f32,
 
     // -- Scripting (v0.8.x) --
     /// Master switch for the script runtime. Off until the runtime is built.
@@ -323,6 +344,30 @@ pub struct EngineSettings {
     /// External editor command for opening .rhai / .cpp files.
     #[serde(default = "default_script_editor_cmd")]
     pub script_external_editor_cmd: String,
+
+    // -- AI providers (v0.9.0) --
+    /// Configured AI providers. Defaults include all supported providers with
+    /// sensible URLs and models; the user supplies API keys and enables them.
+    #[serde(default = "default_ai_providers")]
+    pub ai_providers: Vec<AiProviderConfig>,
+
+    /// Provider selected by default when starting a new conversation.
+    #[serde(default)]
+    pub default_ai_provider: AiProvider,
+
+    /// Agent permission mode: Passive asks before destructive commands,
+    /// Active executes them immediately after warning the user.
+    #[serde(default)]
+    pub agent_mode: AgentMode,
+
+    /// User-defined model shortcuts shown in the Agent model selector.
+    #[serde(default = "default_agent_model_shortcuts")]
+    pub agent_model_shortcuts: Vec<AiModelShortcut>,
+
+    /// Label of the model shortcut selected by default. "provider_default"
+    /// means the raw model configured in the active provider card.
+    #[serde(default)]
+    pub default_agent_model: String,
 
     // -- Window state (persisted) --
     pub window_width: u32,
@@ -471,6 +516,17 @@ fn default_script_editor_cmd() -> String {
     "code".to_string()
 }
 
+fn default_ai_providers() -> Vec<AiProviderConfig> {
+    AiProvider::editor_supported()
+        .iter()
+        .map(|provider| AiProviderConfig::for_provider(*provider))
+        .collect()
+}
+
+fn default_agent_model_shortcuts() -> Vec<AiModelShortcut> {
+    Vec::new()
+}
+
 impl Default for EngineSettings {
     fn default() -> Self {
         Self {
@@ -509,11 +565,20 @@ impl Default for EngineSettings {
             rotate_gizmo_sensitivity: 3.5,
             scale_gizmo_sensitivity: 3.5,
             uniform_scale_by_default: false,
+            invert_ws: false,
+            focus_lock_enabled: true,
+            gizmo_growth_scale: 0.0,
+            wasd_speed: 1.0,
             script_runtime_enabled: false,
             default_script_language: ScriptLanguage::Rhai,
             script_hot_reload: true,
             script_timeout_ms: 100,
             script_external_editor_cmd: "code".to_string(),
+            ai_providers: default_ai_providers(),
+            default_ai_provider: AiProvider::OpenRouter,
+            agent_mode: AgentMode::Passive,
+            agent_model_shortcuts: default_agent_model_shortcuts(),
+            default_agent_model: String::new(),
             window_width: 1280,
             window_height: 720,
             window_maximized: false,
@@ -548,9 +613,30 @@ impl EngineSettings {
                     settings.rotate_gizmo_sensitivity = 3.5;
                     settings.scale_gizmo_sensitivity = 3.5;
                 }
+                settings.normalize_ai_providers();
                 settings
             }
             Err(_) => Self::default(),
+        }
+    }
+
+    fn normalize_ai_providers(&mut self) {
+        self.ai_providers
+            .retain(|config| config.provider.is_editor_supported());
+        for provider in AiProvider::editor_supported() {
+            if !self
+                .ai_providers
+                .iter()
+                .any(|config| config.provider == *provider)
+            {
+                self.ai_providers
+                    .push(AiProviderConfig::for_provider(*provider));
+            }
+        }
+        self.agent_model_shortcuts
+            .retain(|shortcut| shortcut.provider.is_editor_supported());
+        if !self.default_ai_provider.is_editor_supported() {
+            self.default_ai_provider = AiProvider::OpenRouter;
         }
     }
 }
@@ -576,5 +662,21 @@ mod tests {
         let deserialized: EngineSettings = ron::from_str(&serialized).unwrap();
         assert_eq!(deserialized.theme, settings.theme);
         assert_eq!(deserialized.language, settings.language);
+    }
+
+    #[test]
+    fn load_normalizes_legacy_ai_provider_configuration() {
+        let mut settings = EngineSettings::default();
+        settings.default_ai_provider = AiProvider::Claude;
+        settings
+            .ai_providers
+            .push(AiProviderConfig::for_provider(AiProvider::Claude));
+        settings.normalize_ai_providers();
+
+        assert_eq!(settings.default_ai_provider, AiProvider::OpenRouter);
+        assert!(settings
+            .ai_providers
+            .iter()
+            .all(|config| config.provider.is_editor_supported()));
     }
 }

@@ -51,11 +51,19 @@ pub struct ExecutionResult {
 
 impl ExecutionResult {
     pub fn ok() -> Self {
-        Self { logs: Vec::new(), errors: Vec::new(), success: true }
+        Self {
+            logs: Vec::new(),
+            errors: Vec::new(),
+            success: true,
+        }
     }
 
     pub fn error(msg: impl Into<String>) -> Self {
-        Self { logs: Vec::new(), errors: vec![msg.into()], success: false }
+        Self {
+            logs: Vec::new(),
+            errors: vec![msg.into()],
+            success: false,
+        }
     }
 
     pub fn from_error(error: &ScriptError) -> Self {

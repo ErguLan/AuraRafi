@@ -1,11 +1,11 @@
-//! OpenClaw client - connects to the local OpenClaw gateway.
+//! Puerto client - bridge to OpenClawd / OpenClaw gateways.
 //!
-//! OpenClaw runs on localhost:18789 by default. This client sends messages
+//! OpenClawd typically runs on localhost:18789. This client sends messages
 //! via HTTP POST and receives responses. Lightweight, blocking, no async.
 
 use serde::{Deserialize, Serialize};
 
-/// Connection status to OpenClaw.
+/// Connection status to a Puerto gateway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionStatus {
     /// Not connected, never tried.
@@ -18,18 +18,18 @@ pub enum ConnectionStatus {
     Sending,
 }
 
-/// OpenClaw gateway client configuration.
+/// Puerto gateway client configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenClawConfig {
+pub struct PuertoConfig {
     /// Gateway URL (default: http://localhost:18789).
     pub gateway_url: String,
-    /// Auth token (optional, from openclaw dashboard).
+    /// Auth token (optional, from the gateway dashboard).
     pub token: String,
     /// Whether to auto-connect on startup.
     pub auto_connect: bool,
 }
 
-impl Default for OpenClawConfig {
+impl Default for PuertoConfig {
     fn default() -> Self {
         Self {
             gateway_url: "http://localhost:18789".to_string(),
@@ -39,38 +39,38 @@ impl Default for OpenClawConfig {
     }
 }
 
-/// Response from OpenClaw gateway.
+/// Response from a Puerto-compatible gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenClawResponse {
+pub struct PuertoResponse {
     /// The assistant's text response.
     #[serde(default)]
-    pub output: Vec<OpenClawOutput>,
+    pub output: Vec<PuertoOutput>,
     /// Error message if any.
     #[serde(default)]
     pub error: Option<String>,
 }
 
-/// A single output block from OpenClaw.
+/// A single output block from a Puerto gateway.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenClawOutput {
+pub struct PuertoOutput {
     #[serde(default, rename = "type")]
     pub output_type: String,
     #[serde(default)]
-    pub content: Vec<OpenClawContent>,
+    pub content: Vec<PuertoContent>,
 }
 
 /// Content block in an output.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenClawContent {
+pub struct PuertoContent {
     #[serde(default, rename = "type")]
     pub content_type: String,
     #[serde(default)]
     pub text: String,
 }
 
-/// The OpenClaw client.
-pub struct OpenClawClient {
-    pub config: OpenClawConfig,
+/// The Puerto bridge client.
+pub struct PuertoClient {
+    pub config: PuertoConfig,
     pub status: ConnectionStatus,
     /// Last error message for display.
     pub last_error: String,
@@ -78,13 +78,13 @@ pub struct OpenClawClient {
     agent: ureq::Agent,
 }
 
-impl Default for OpenClawClient {
+impl Default for PuertoClient {
     fn default() -> Self {
         let agent = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(15))
             .build();
         Self {
-            config: OpenClawConfig::default(),
+            config: PuertoConfig::default(),
             status: ConnectionStatus::Disconnected,
             last_error: String::new(),
             agent,
@@ -92,9 +92,9 @@ impl Default for OpenClawClient {
     }
 }
 
-impl OpenClawClient {
+impl PuertoClient {
     /// Create a client with custom config.
-    pub fn with_config(config: OpenClawConfig) -> Self {
+    pub fn with_config(config: PuertoConfig) -> Self {
         let agent = ureq::AgentBuilder::new()
             .timeout(std::time::Duration::from_secs(15))
             .build();
@@ -106,7 +106,7 @@ impl OpenClawClient {
         }
     }
 
-    /// Test connection to the OpenClaw gateway.
+    /// Test connection to the gateway.
     /// Returns true if the gateway is reachable.
     pub fn ping(&mut self) -> bool {
         let url = format!("{}/", self.config.gateway_url.trim_end_matches('/'));
@@ -125,7 +125,7 @@ impl OpenClawClient {
         }
     }
 
-    /// Send a message to OpenClaw and get the response text.
+    /// Send a message to the gateway and get the response text.
     /// Uses the OpenResponses-compatible endpoint POST /v1/responses.
     pub fn send_message(&mut self, message: &str) -> Result<String, String> {
         self.status = ConnectionStatus::Sending;
@@ -172,7 +172,7 @@ impl OpenClawClient {
 
     /// Parse the OpenResponses JSON or return raw text.
     fn parse_response(&self, text: &str) -> Result<String, String> {
-        if let Ok(parsed) = serde_json::from_str::<OpenClawResponse>(text) {
+        if let Ok(parsed) = serde_json::from_str::<PuertoResponse>(text) {
             if let Some(err) = parsed.error {
                 return Err(err);
             }

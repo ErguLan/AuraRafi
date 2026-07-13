@@ -10,6 +10,7 @@
 //! This works with any render backend (CPU painter or wgpu).
 
 use glam::Vec3;
+use raf_core::project::ProjectSettings;
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -183,6 +184,20 @@ impl Default for WorldStreamConfig {
 }
 
 impl WorldStreamConfig {
+    /// Derive streaming policy from persisted project settings.
+    pub fn from_project_settings(settings: &ProjectSettings) -> Self {
+        let load_radius = settings.world_stream_load_radius.clamp(1, 8);
+        Self {
+            enabled: settings.world_streaming_enabled,
+            region_size: settings.world_stream_region_size.clamp(16.0, 1024.0),
+            load_radius,
+            unload_radius: load_radius.saturating_add(2),
+            max_loaded_regions: ((load_radius * 2 + 1) as usize).pow(2),
+            lod_bias: settings.world_stream_lod_bias.clamp(0, 4),
+            ..Self::default()
+        }
+    }
+
     /// Ultra-lightweight preset for potato PCs.
     pub fn potato() -> Self {
         Self {
@@ -332,6 +347,26 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.max_loaded_regions, 9);
         assert_eq!(config.lod_bias, 2);
+    }
+
+    #[test]
+    fn project_settings_keep_streaming_within_safe_limits() {
+        let settings = ProjectSettings {
+            world_streaming_enabled: true,
+            world_stream_region_size: 4.0,
+            world_stream_load_radius: 99,
+            world_stream_lod_bias: 12,
+            ..ProjectSettings::default()
+        };
+
+        let config = WorldStreamConfig::from_project_settings(&settings);
+
+        assert!(config.enabled);
+        assert_eq!(config.region_size, 16.0);
+        assert_eq!(config.load_radius, 8);
+        assert_eq!(config.unload_radius, 10);
+        assert_eq!(config.max_loaded_regions, 289);
+        assert_eq!(config.lod_bias, 4);
     }
 
     #[test]

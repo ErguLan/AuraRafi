@@ -13,7 +13,8 @@ The engine foundation is in place and several vertical slices have already moved
 - [x] Event bus for decoupled communication
 - [x] Project management (create, load, save)
 - [x] Configuration system with RON persistence
-- [x] Editor UI with panels (egui/eframe)
+- [x] Temporary editor shell with panels (egui/eframe)
+- [x] Rust-native retained UI foundation (`raf_ui` + ApiGraphicBasic direct host)
 - [x] Theme system (dark/light + orange accent)
 - [x] Visual node editor with connections
 - [x] Schematic editor with component library (Resistor, Capacitor, LED, Magnet)
@@ -33,7 +34,7 @@ The engine foundation is in place and several vertical slices have already moved
 - [x] Robot control interface structure
 - [x] ML training data export structure
 - [x] Inline tests distributed across workspace crates
-- [x] CPU-first editor rendering path with optional GPU-oriented abstraction
+- [x] GPU-first editor rendering path with optional CPU recovery path
 - [x] Electronics dual-workspace flow: schematic + synchronized PCB 2D canvas
 
 ## v0.2.0 - Rendering (Done)
@@ -102,7 +103,7 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 
 - [x] Component rotation and mirroring (R key + context menu, rotation-aware pin rendering)
 - [x] Automatic net naming (union-find netlist builder assigns N001, N002... or wire labels)
-- [x] Design Rule Check (DRC) - 6 rules: floating pins, missing values, isolated components, unnamed nets, short circuit, LED without resistor
+- [x] Design Rule Check (DRC) - topology checks for floating pins, missing values, isolated components, unnamed nets, short circuits, LED current limiting, dangling wire endpoints, and component-pin bypass shorts
 - [x] BOM (Bill of Materials) generation (CSV export with grouping and quantity counting)
 - [ ] Gerber file export (JLCPCB/PCBWay) - structure ready, now staged around synced PCB layout rather than a mandatory 3D board path
 - [ ] PCB layout view (basic 3D)
@@ -144,37 +145,37 @@ Prepared rendering goals in this phase also include:
 - Shadow mapping
 - Ambient occlusion (SSAO)
 
-### Implementation (v0.7.0 - ALL features disabled by default, potato mode preserved)
-- [x] Per-project RenderConfig: 17 opt-in toggles, 4 presets (Potato/Low/Medium/High), zero cost when off
-- [x] WGSL shader suite (embedded as string constants, loaded only when use_gpu=true):
-  - PBR vertex/fragment (metallic/roughness, Schlick fresnel, Blinn-Phong specular)
-  - Flat/unlit shader (gizmos, wireframe, debug)
-  - Shadow depth pass (directional light)
-  - Bloom extract pass (brightness threshold)
-  - FXAA post-process (luma-based edge detection)
-- [x] Enhanced CPU lighting: point lights with attenuation, spot lights with cone, specular (Blinn-Phong), configurable max lights
-- [x] Fog system: distance-based color blending, configurable start/end/color
-- [x] Post-processing suite (CPU painter): bloom glow, vignette, FXAA edge blending, Reinhard tone mapping, saturation control, sRGB conversion
-- [x] Texture system: CPU-side loading (BMP native parser, zero deps), UV sampling, LRU cache (50MB budget), auto-downscale
-- [x] UV mapping: box/spherical/cylindrical/planar projection, cube UV quad generation
-- [x] RenderPreset in EngineSettings (serialized, per-project)
+### Current implementation boundary
+
+- [x] Per-project RenderConfig and GPU-first resource profiles with Potato,
+  Low, Medium, and High budgets.
+- [x] ApiGraphicBasic surface plans reserve explicit budgets for future
+  shadows, post-processing, PBR, particles, and skeletal animation.
+- [x] Flat scene/CAD rendering, camera, selection, gizmos, and retained UI
+  composition through the shared graphics runtime.
+- [ ] PBR, shadows, post-processing, particle systems, skeletal animation,
+  advanced lighting, and ray tracing are intentionally not product-enabled
+  while the renderer and editor are stabilized.
 - [ ] 2D sprite rendering (textured quads in 2D mode)
 
-## v0.8.0 - Game Runtime (Done)
+## v0.8.0 - Game Runtime (Prepared, Not Product-Active)
 
-The 0.8.0 target is now satisfied as an editor-integrated runtime slice focused on low-end hardware and real project wiring instead of a separate executable first.
+The product Play/runtime flow is intentionally guarded while the renderer and
+editor surface architecture are stabilized. Current work should be treated as
+prepared infrastructure: cloned scene execution, Rhai lifecycle harness, input
+snapshot shape, and future service boundaries.
 
-- [x] Editor-integrated Play/Stop flow for game projects
-- [x] Runtime scene cloning so simulation does not mutate the edit document
-- [x] Scene loading and runtime initialization from saved project state
+- [ ] Editor-integrated Play/Stop flow for game projects
+- [x] Runtime-prep scene cloning so tests do not mutate the edit document
+- [ ] Scene loading and runtime initialization from saved project state
 - [x] Node graph persistence as `nodes.ron`
-- [x] Runtime execution of saved node graphs through `On Start` and `On Update`
-- [x] Keyboard input snapshot for runtime scripts
-- [x] External behavior runtime with `.rhai` scripts
-- [x] Script-facing access to `self`, `parent`, entity paths, variables, movement, velocity, and audio triggers
-- [x] Basic collision detection through scene colliders
-- [x] Simple physics (gravity, damping, velocity, trigger-only bodies)
-- [x] Audio playback for entity audio sources inside Play mode
+- [ ] Runtime execution of saved node graphs through `On Start` and `On Update`
+- [x] Keyboard input snapshot shape for future runtime scripts
+- [x] External `.rhai` lifecycle harness for prepared runtime tests
+- [ ] Script-facing access to `self`, `parent`, entity paths, variables, movement, velocity, and audio triggers
+- [ ] Basic collision detection through scene colliders
+- [ ] Simple physics (gravity, damping, velocity, trigger-only bodies)
+- [ ] Audio playback for entity audio sources inside Play mode
 - [x] Properties inspector support for runtime variables, audio sources, rigid bodies, and colliders
 - [x] Animation-aware collision structure (raf_core/scene/anim_collider.rs): AnimCollider per bone, 5 response types (Stop/Blend/Slide/Recoil/Ignore), auto-generate for hands/feet, enabled by DEFAULT (marketing differentiator)
 
@@ -232,18 +233,25 @@ The 0.9.0 target establishes the editor IDE as the native "home" for the AI agen
 - [x] AssetGenCache: in-memory with prompt hashing, auto-eviction, 50MB max
 - [x] Synaptic workspace foundation: standard tool keys and definitions registered via `ToolRegistry` (`crates/raf_ai/src/tool_registry.rs`) mapping directly to command execution.
 
-### Integration & Agentic Control (pending)
-- [ ] LLM provider connection (API integration with OpenClaw/OpenRouter/etc.)
-- [ ] Tool-calling execution pipeline: connecting `ToolRegistry` directly to the `CommandBus` for runtime & editor modifications
+### Integration & Agentic Control (done)
+- [x] LLM provider connection (OpenRouter, OpenAI, GenAI, Claude, Puerto via OpenAI-compatible `/chat/completions`)
+- [x] Tool-calling execution pipeline: `AgentToolExecutor` routes tool calls to command handlers (`game`, `electronics`, `script`, `workspace`)
+- [x] Non-blocking runtime: HTTP requests run on a background thread, UI stays responsive via `poll()` state machine
+- [x] Tool name sanitization: dots and invalid characters in command names are sanitized for provider compatibility (e.g., `project.info` -> `project_info`)
+- [x] Chat persistence: `AgentHistory` saves/loads per-project conversation sessions as RON files
+- [x] Chat session management: left sidebar with session list, new/delete/switch sessions
+- [x] Agentic response style: AGENT.md now instructs chain-of-thought (plan -> execute -> summarize)
+- [x] Improved temperature (0.7) for more natural, expressive responses
+
+### Pending (next)
 - [ ] AI Director connected to game loop (reads WorldState, emits actions)
 - [ ] Mesh provider connected to viewport (streams chunks into EditableMesh)
 - [ ] Asset generator UI in asset browser panel ("Generate with AI" button)
-- [ ] AI-assisted entity & asset creation (e.g., prompt -> generate and position multi-primitive structures/prefabs)
-- [ ] AI-assisted script writing & configuration (e.g., writing Rhai/C++ code to enable mechanics like walking or custom character behavior)
-- [ ] AI-assisted debugging (monitoring console & compilation errors, automatically suggesting and applying code edits)
-- [ ] Chat history persistence
+- [ ] AI-assisted entity & asset creation (prompt -> generate multi-primitive prefabs)
+- [ ] AI-assisted script writing & configuration (Rhai/C++ code generation)
+- [ ] AI-assisted debugging (console error monitoring, auto-fix suggestions)
 - [ ] AI-generated textures applied as materials
-- [ ] Procedural terrain via mesh provider (no AI needed, algorithmic)
+- [ ] Procedural terrain via mesh provider (algorithmic, no AI needed)
 
 ## v0.10.0 - Hardware & IoT
 

@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "name": "Gate Prefab",
+  "parts": [
+    {
+      "name": "Left Pillar",
+      "primitive": "cube",
+      "position": [-1.2, 1.0, 0.0],
+      "scale": [0.5, 2.0, 0.5],
+      "color_rgba": [76, 76, 82, 255]
+    },
+    {
+      "name": "Right Pillar",
+      "primitive": "cube",
+      "position": [1.2, 1.0, 0.0],
+      "scale": [0.5, 2.0, 0.5],
+      "color_rgba": [76, 76, 82, 255]
+    },
+    {
+      "name": "Lintel",
+      "primitive": "cube",
+      "position": [0.0, 2.15, 0.0],
+      "scale": [3.0, 0.35, 0.55],
+      "color_rgba": [212, 119, 26, 255]
+    }
+  ]
+}

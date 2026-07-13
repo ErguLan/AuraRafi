@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "name": "Boat Prefab",
+  "parts": [
+    {
+      "name": "Hull Center",
+      "primitive": "cube",
+      "position": [0.0, 0.35, 0.0],
+      "scale": [4.2, 0.7, 1.35],
+      "color_rgba": [48, 48, 52, 255]
+    },
+    {
+      "name": "Bow Block",
+      "primitive": "cube",
+      "position": [2.35, 0.45, 0.0],
+      "scale": [0.8, 0.55, 1.05],
+      "color_rgba": [66, 66, 72, 255]
+    },
+    {
+      "name": "Stern Block",
+      "primitive": "cube",
+      "position": [-2.25, 0.55, 0.0],
+      "scale": [0.7, 0.85, 1.2],
+      "color_rgba": [38, 38, 42, 255]
+    },
+    {
+      "name": "Deck",
+      "primitive": "cube",
+      "position": [-0.25, 0.88, 0.0],
+      "scale": [2.6, 0.16, 1.0],
+      "color_rgba": [196, 134, 74, 255]
+    },
+    {
+      "name": "Mast",
+      "primitive": "cylinder",
+      "position": [0.1, 2.0, 0.0],
+      "scale": [0.12, 2.35, 0.12],
+      "color_rgba": [136, 90, 52, 255]
+    },
+    {
+      "name": "Sail",
+      "primitive": "cube",
+      "position": [0.55, 2.25, 0.0],
+      "scale": [1.15, 1.45, 0.06],
+      "color_rgba": [236, 232, 218, 255]
+    },
+    {
+      "name": "Flag",
+      "primitive": "cube",
+      "position": [0.42, 3.35, 0.0],
+      "scale": [0.62, 0.28, 0.05],
+      "color_rgba": [212, 119, 26, 255]
+    }
+  ]
+}

@@ -16,7 +16,11 @@ pub fn set_color(
     handle.set_color(ctx, r, g, b, a)
 }
 
-pub fn set_visible(ctx: &mut ScriptContext<'_>, handle: NodeHandle, visible: bool) -> ScriptResult<()> {
+pub fn set_visible(
+    ctx: &mut ScriptContext<'_>,
+    handle: NodeHandle,
+    visible: bool,
+) -> ScriptResult<()> {
     handle.set_visible(ctx, visible)
 }
 

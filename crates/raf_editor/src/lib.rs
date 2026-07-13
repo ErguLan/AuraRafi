@@ -8,14 +8,18 @@
 //! - Internationalization (EN/ES)
 //! - Settings panel
 
+pub mod agent_executor;
 pub mod app;
 pub mod commands;
 pub mod electronics_assets;
+mod frame_timing;
 pub mod game_runtime;
 pub mod panels;
 pub mod pcb_document;
 pub mod schematic_document;
 pub mod script_support;
+pub mod session_document;
+pub mod studio_surface;
 pub mod theme;
 pub mod ui_icons;
 

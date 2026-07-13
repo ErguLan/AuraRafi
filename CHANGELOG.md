@@ -5,6 +5,47 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0] - 2026-07-13 - Surface Foundation, Session Architecture, and GPU-First Stabilization
+
+### Added
+
+- **Retained UI foundation**: introduced `raf_ui`, retained surface documents,
+  docking metadata, focus/input routing, bitmap text atlas, direct GPU
+  composition, and a reusable CPU recovery compositor under ApiGraphicBasic.
+- **Session architecture**: projects can now organize independent worlds,
+  interfaces, and electronics designs while sharing assets and scripts.
+- **Editor camera block**: editor camera state is session-scoped and persisted
+  without appearing as a user scene node.
+- **Electronics CAD bridge**: schematic and PCB model data can produce retained
+  graphics scenes with stable hit identities, DRC markers, and shared GPU/CPU
+  presentation paths.
+- **Asset generation paths**: remote image generation defaults to `gpt-image-2`;
+  a local procedural PNG worker creates lightweight icons, badges, sprites,
+  and temporary textures without a network dependency.
+- **Data-backed primitive manifests**: built-in primitive prefabs now live in
+  JSON manifests and import through the asset pipeline instead of generated
+  scene code.
+
+### Changed
+
+- **GPU-first policy**: ApiGraphicBasic remains the common graphics boundary;
+  GPU is the normal execution path and CPU remains a deliberate recovery path.
+- **Viewport and CAD surfaces**: scene, schematic, and PCB rendering now have
+  explicit surface hosts, reusable frame caches, and future-facing quality
+  budget boundaries without enabling heavyweight effects prematurely.
+- **Agent integration**: agent history participates in editor undo/redo, and
+  electronics diagnostics can combine topology, rule checks, and simulation
+  context before suggesting a change.
+
+### Compatibility
+
+- **Workspace version**: all workspace packages now resolve to `0.9.0` through
+  the root Cargo workspace version.
+- **Existing projects**: project loading retains a legacy session path so
+  existing root-level scene, node, schematic, and PCB documents remain usable.
+- **Validation status**: broad compilation and manual editor validation remain
+  required before treating this release as production-ready.
+
 ## [0.8.9.1] - 2026-05-30 - Stabilization Pass, Viewport UX Polish, and Runtime Truth Docs
 
 ## [0.8.9.2] - 2026-06-30 - Hierarchy Explorer Pass, Electronics UX Hardening, and Group Gizmo Foundations

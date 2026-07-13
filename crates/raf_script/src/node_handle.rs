@@ -53,7 +53,13 @@ impl NodeHandle {
     }
 
     /// Set world-space position in meters.
-    pub fn set_position(&self, ctx: &mut ScriptContext<'_>, x: f32, y: f32, z: f32) -> ScriptResult<()> {
+    pub fn set_position(
+        &self,
+        ctx: &mut ScriptContext<'_>,
+        x: f32,
+        y: f32,
+        z: f32,
+    ) -> ScriptResult<()> {
         let id = self.to_scene_id();
         let node = ctx
             .scene
@@ -64,7 +70,13 @@ impl NodeHandle {
     }
 
     /// Set euler rotation in radians.
-    pub fn set_rotation(&self, ctx: &mut ScriptContext<'_>, x: f32, y: f32, z: f32) -> ScriptResult<()> {
+    pub fn set_rotation(
+        &self,
+        ctx: &mut ScriptContext<'_>,
+        x: f32,
+        y: f32,
+        z: f32,
+    ) -> ScriptResult<()> {
         let id = self.to_scene_id();
         let node = ctx
             .scene
@@ -75,7 +87,13 @@ impl NodeHandle {
     }
 
     /// Set scale (multiplier, 1.0 = original).
-    pub fn set_scale(&self, ctx: &mut ScriptContext<'_>, x: f32, y: f32, z: f32) -> ScriptResult<()> {
+    pub fn set_scale(
+        &self,
+        ctx: &mut ScriptContext<'_>,
+        x: f32,
+        y: f32,
+        z: f32,
+    ) -> ScriptResult<()> {
         let id = self.to_scene_id();
         let node = ctx
             .scene
@@ -113,7 +131,13 @@ impl NodeHandle {
     }
 
     /// Move by a delta in meters.
-    pub fn move_by(&self, ctx: &mut ScriptContext<'_>, dx: f32, dy: f32, dz: f32) -> ScriptResult<()> {
+    pub fn move_by(
+        &self,
+        ctx: &mut ScriptContext<'_>,
+        dx: f32,
+        dy: f32,
+        dz: f32,
+    ) -> ScriptResult<()> {
         let id = self.to_scene_id();
         let node = ctx
             .scene
@@ -124,7 +148,13 @@ impl NodeHandle {
     }
 
     /// Rotate by a delta in radians.
-    pub fn rotate_by(&self, ctx: &mut ScriptContext<'_>, dx: f32, dy: f32, dz: f32) -> ScriptResult<()> {
+    pub fn rotate_by(
+        &self,
+        ctx: &mut ScriptContext<'_>,
+        dx: f32,
+        dy: f32,
+        dz: f32,
+    ) -> ScriptResult<()> {
         let id = self.to_scene_id();
         let node = ctx
             .scene
@@ -135,7 +165,14 @@ impl NodeHandle {
     }
 
     /// Set RGBA color (0-255 per channel).
-    pub fn set_color(&self, ctx: &mut ScriptContext<'_>, r: u8, g: u8, b: u8, a: u8) -> ScriptResult<()> {
+    pub fn set_color(
+        &self,
+        ctx: &mut ScriptContext<'_>,
+        r: u8,
+        g: u8,
+        b: u8,
+        a: u8,
+    ) -> ScriptResult<()> {
         let id = self.to_scene_id();
         let node = ctx
             .scene

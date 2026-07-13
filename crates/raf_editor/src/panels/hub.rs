@@ -122,8 +122,7 @@ impl AuraRafiApp {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         let available_width = ui.available_width();
-                        let content_width = (available_width
-                            - HUB_CONTENT_HORIZONTAL_MARGIN * 2.0)
+                        let content_width = (available_width - HUB_CONTENT_HORIZONTAL_MARGIN * 2.0)
                             .clamp(HUB_CONTENT_MIN_WIDTH, HUB_CONTENT_MAX_WIDTH);
                         let side_pad = ((available_width - content_width) / 2.0).max(24.0);
 
@@ -359,10 +358,7 @@ fn hub_nav_link(
         .rect_stroke(rect, 6.0, egui::Stroke::new(1.0, stroke_color));
 
     if active {
-        let indicator = egui::Rect::from_min_size(
-            rect.min,
-            egui::vec2(2.0, rect.height()),
-        );
+        let indicator = egui::Rect::from_min_size(rect.min, egui::vec2(2.0, rect.height()));
         ui.painter().rect_filled(indicator, 1.0, app_theme::ACCENT);
     }
 
@@ -374,7 +370,11 @@ fn hub_nav_link(
         ui.painter(),
         icon_name,
         icon_rect,
-        if active { app_theme::ACCENT } else { palette.text_dim },
+        if active {
+            app_theme::ACCENT
+        } else {
+            palette.text_dim
+        },
     );
 
     ui.painter().text(
@@ -382,7 +382,11 @@ fn hub_nav_link(
         egui::Align2::LEFT_CENTER,
         label.clone(),
         egui::FontId::proportional(12.5),
-        if active { palette.text } else { palette.text_dim },
+        if active {
+            palette.text
+        } else {
+            palette.text_dim
+        },
     );
 
     response.on_hover_text(label)
@@ -510,8 +514,7 @@ fn hub_primary_button(
     let width = icon_size.x + 8.0 + text_width + padding.x * 2.0;
     let height = 34.0;
 
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
 
     let fill = if primary {
         if response.hovered() {
@@ -581,7 +584,9 @@ fn hub_search_bar(
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 // Search input.
-                let search_icon_rect = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover()).0;
+                let search_icon_rect = ui
+                    .allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::hover())
+                    .0;
                 atlas.paint(
                     ui.painter(),
                     "search_filter_HUB.png",
@@ -676,8 +681,7 @@ fn hub_filter_pill(
     let width = text_width + padding.x * 2.0;
     let height = 26.0;
 
-    let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
 
     let fill = if selected {
         app_theme::ACCENT
@@ -698,7 +702,8 @@ fn hub_filter_pill(
     };
 
     ui.painter().rect_filled(rect, 6.0, fill);
-    ui.painter().rect_stroke(rect, 6.0, egui::Stroke::new(1.0, stroke));
+    ui.painter()
+        .rect_stroke(rect, 6.0, egui::Stroke::new(1.0, stroke));
 
     ui.painter().text(
         rect.center(),
@@ -739,15 +744,7 @@ fn hub_project_grid(
 
     ui.horizontal_wrapped(|ui| {
         for (index, entry) in projects.iter().enumerate() {
-            let action = hub_project_card(
-                ui,
-                atlas,
-                palette,
-                lang,
-                entry,
-                index == 0,
-                card_width,
-            );
+            let action = hub_project_card(ui, atlas, palette, lang, entry, index == 0, card_width);
             if pending_action.is_none() {
                 *pending_action = action;
             }
@@ -812,10 +809,8 @@ fn hub_project_card(
     let name_color = palette.text;
 
     if featured {
-        let dot_rect = egui::Rect::from_center_size(
-            egui::pos2(name_x + 4.0, name_y),
-            egui::vec2(6.0, 6.0),
-        );
+        let dot_rect =
+            egui::Rect::from_center_size(egui::pos2(name_x + 4.0, name_y), egui::vec2(6.0, 6.0));
         ui.painter().rect_filled(dot_rect, 3.0, app_theme::ACCENT);
     }
 
@@ -853,14 +848,10 @@ fn hub_project_card(
         let right_x = card_rect.right() - 10.0;
         let top_y = card_rect.top() + 10.0;
 
-        let forget_rect = egui::Rect::from_min_size(
-            egui::pos2(right_x - button_size.x, top_y),
-            button_size,
-        );
-        let duplicate_rect =
-            forget_rect.translate(egui::vec2(-(button_size.x + button_gap), 0.0));
-        let open_rect =
-            duplicate_rect.translate(egui::vec2(-(button_size.x + button_gap), 0.0));
+        let forget_rect =
+            egui::Rect::from_min_size(egui::pos2(right_x - button_size.x, top_y), button_size);
+        let duplicate_rect = forget_rect.translate(egui::vec2(-(button_size.x + button_gap), 0.0));
+        let open_rect = duplicate_rect.translate(egui::vec2(-(button_size.x + button_gap), 0.0));
 
         let path_key = entry.path.to_string_lossy();
 
@@ -945,10 +936,7 @@ fn hub_project_thumbnail(
 
     // Subtle top glow line.
     let glow_height = 1.5;
-    let glow_rect = egui::Rect::from_min_size(
-        rect.min,
-        egui::vec2(rect.width(), glow_height),
-    );
+    let glow_rect = egui::Rect::from_min_size(rect.min, egui::vec2(rect.width(), glow_height));
     painter.rect_filled(glow_rect, 0.0, glow_color);
 
     // Icon centered in the thumbnail.

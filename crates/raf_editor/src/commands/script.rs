@@ -10,7 +10,8 @@
 use std::path::Path;
 
 use raf_core::config::ScriptLanguage;
-use raf_core::scene::SceneGraph;
+use raf_core::scene::{Primitive, SceneGraph};
+use raf_script::{RhaiScriptRuntime, ScriptRuntimeOptions};
 
 use crate::commands::output::CommandOutput;
 use crate::commands::parser::ParsedCommand;
@@ -206,7 +207,10 @@ fn detach_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) ->
     if removed {
         CommandOutput::changed(
             "Script detached",
-            vec![format!("Entity: {}", entity_name), format!("Script: {}", relative)],
+            vec![
+                format!("Entity: {}", entity_name),
+                format!("Script: {}", relative),
+            ],
             serde_json::json!({"entity": entity_name, "script": relative}),
         )
     } else {
@@ -319,36 +323,82 @@ fn validate_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) 
     );
 
     if level == "warning" {
-        CommandOutput::warning(
-            "Script validation",
-            output.lines,
-            output.json,
-        )
+        CommandOutput::warning("Script validation", output.lines, output.json)
     } else {
         output
     }
 }
 
 /// Run a script's on_start once in the editor (testing).
-/// Phase B: this will construct a ScriptContext and call the Rhai backend.
-fn run_script(command: &ParsedCommand, _ctx: &mut ScriptCommandContext<'_>) -> CommandOutput {
+/// Runs against a cloned scene so the editor document is not mutated.
+fn run_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> CommandOutput {
     let Some(file) = command.arg("file") else {
         return CommandOutput::error("Run script", "Missing file=<relative path>.");
     };
 
-    CommandOutput::warning(
-        "Run script",
-        vec![
-            format!("Target: {}", file),
-            "Script execution is not yet wired. The Host API and Rhai backend are".to_string(),
-            "implemented in raf_script, but the ScriptRuntime system (Phase B) is not.".to_string(),
-            "See docs/SCRIPTING_SYSTEM.md for the roadmap.".to_string(),
-        ],
-        serde_json::json!({
-            "file": file,
-            "status": "runtime_not_ready",
-        }),
-    )
+    let relative = normalize_script_path(file);
+    let mut runtime_scene = ctx.scene.clone();
+    for id in runtime_scene.all_valid_ids() {
+        if let Some(node) = runtime_scene.get_mut(id) {
+            node.scripts.clear();
+        }
+    }
+
+    let runner = runtime_scene.add_root_with_primitive("__script_run__", Primitive::Empty);
+    if let Some(node) = runtime_scene.get_mut(runner) {
+        node.scripts.push(relative.clone());
+    }
+
+    let (mut runtime, load_report) = RhaiScriptRuntime::load_from_scene(
+        &runtime_scene,
+        ctx.assets_root,
+        ScriptRuntimeOptions::default(),
+    );
+    let loaded_scripts = runtime.script_count();
+    let start_report = if loaded_scripts > 0 {
+        runtime.call_start(&mut runtime_scene)
+    } else {
+        Default::default()
+    };
+
+    let mut lines = vec![
+        format!("Target: {}", relative),
+        format!("Loaded scripts: {}", loaded_scripts),
+        "Executed on a cloned scene; editor scene was not mutated.".to_string(),
+    ];
+    lines.extend(load_report.logs.clone());
+    lines.extend(start_report.logs.clone());
+    lines.extend(
+        load_report
+            .errors
+            .iter()
+            .chain(start_report.errors.iter())
+            .map(|error| format!("Error: {}", error)),
+    );
+
+    let errors: Vec<String> = load_report
+        .errors
+        .into_iter()
+        .chain(start_report.errors)
+        .collect();
+    let logs: Vec<String> = load_report
+        .logs
+        .into_iter()
+        .chain(start_report.logs)
+        .collect();
+    let json = serde_json::json!({
+        "file": relative,
+        "status": if errors.is_empty() { "ok" } else { "error" },
+        "loaded_scripts": loaded_scripts,
+        "logs": logs,
+        "errors": errors,
+    });
+
+    if json["status"] == "ok" {
+        CommandOutput::info("Run script", lines, json)
+    } else {
+        CommandOutput::warning("Run script", lines, json)
+    }
 }
 
 /// Compile a node graph flow to Rhai source.
@@ -371,6 +421,14 @@ fn compile_nodes(command: &ParsedCommand, _ctx: &mut ScriptCommandContext<'_>) -
             "status": "phase_e_not_started",
         }),
     )
+}
+
+fn normalize_script_path(file: &str) -> String {
+    if Path::new(file).is_absolute() || file.starts_with("scripts/") {
+        file.to_string()
+    } else {
+        format!("scripts/{}", file)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -465,16 +523,64 @@ int is_key_pressed(const char* key, int key_len);
 // Exported to the engine.
 __attribute__((export_name("on_start")))
 void on_start() {{
-    // TODO: implement
+    // Add module initialization through the future Host ABI here.
 }}
 
 __attribute__((export_name("on_update")))
 void on_update(float dt) {{
-    // TODO: implement
+    // Add frame behavior through the future Host ABI here.
 }}
 
 }}
 "#,
         name = name
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::output::CommandLevel;
+    use crate::commands::parser::{parse_console_input, ParsedInput};
+    use glam::Vec3;
+    use std::fs;
+    use uuid::Uuid;
+
+    #[test]
+    fn run_script_executes_on_clone_without_mutating_editor_scene() {
+        let project_root =
+            std::env::temp_dir().join(format!("raf_script_command_{}", Uuid::new_v4()));
+        let script_dir = project_root.join("assets").join("scripts");
+        fs::create_dir_all(&script_dir).unwrap();
+        fs::write(
+            script_dir.join("run_once.rhai"),
+            r#"
+fn on_start() {
+    let body = get_node("Body");
+    body.set_position(9.0, 0.0, 0.0);
+}
+"#,
+        )
+        .unwrap();
+
+        let mut scene = SceneGraph::new();
+        let body = scene.add_root_with_primitive("Body", Primitive::Cube);
+        let ParsedInput::Command(command) =
+            parse_console_input("/script.run file=run_once.rhai").unwrap()
+        else {
+            panic!("expected command");
+        };
+        let mut ctx = ScriptCommandContext {
+            scene: &mut scene,
+            assets_root: Some(&project_root.join("assets")),
+        };
+
+        let output = execute("script.run", &command, &mut ctx);
+
+        assert_eq!(output.level, CommandLevel::Info);
+        assert_eq!(output.json["status"], "ok");
+        assert_eq!(ctx.scene.get(body).unwrap().position, Vec3::ZERO);
+
+        let _ = fs::remove_dir_all(project_root);
+    }
 }

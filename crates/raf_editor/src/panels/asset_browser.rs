@@ -7,6 +7,7 @@ use egui::Ui;
 use raf_assets::importer::AssetType;
 use raf_core::config::Language;
 use raf_core::i18n::t;
+use std::fs::ReadDir;
 use std::path::PathBuf;
 
 use crate::script_support::{asset_relative_path, is_script_file, open_script_in_external_editor};
@@ -41,6 +42,8 @@ pub struct AssetBrowserPanel {
     show_script_menu: bool,
     /// Pending directories for deferred asset scanning.
     pending_scan_dirs: Vec<PathBuf>,
+    /// Directory iterator currently being consumed within the per-frame budget.
+    active_scan_dir: Option<ReadDir>,
     /// Whether a scan is currently in progress.
     pub scan_in_progress: bool,
 }
@@ -67,6 +70,7 @@ impl Default for AssetBrowserPanel {
             add_entity_clicked: false,
             show_script_menu: false,
             pending_scan_dirs: Vec::new(),
+            active_scan_dir: None,
             scan_in_progress: false,
         }
     }
@@ -377,6 +381,7 @@ impl AssetBrowserPanel {
     /// Scan the project assets folder and populate entries.
     pub fn scan_project_folder(&mut self) {
         self.entries.clear();
+        self.active_scan_dir = None;
         if let Some(base) = &self.project_assets_path {
             if base.exists() {
                 self.pending_scan_dirs.clear();
@@ -395,36 +400,44 @@ impl AssetBrowserPanel {
         let mut processed = 0usize;
 
         while processed < max_entries {
-            let Some(dir) = self.pending_scan_dirs.pop() else {
-                self.scan_in_progress = false;
-                return;
+            if self.active_scan_dir.is_none() {
+                let Some(dir) = self.pending_scan_dirs.pop() else {
+                    self.scan_in_progress = false;
+                    return;
+                };
+                self.active_scan_dir = std::fs::read_dir(dir).ok();
+                continue;
+            }
+
+            let next_entry = self
+                .active_scan_dir
+                .as_mut()
+                .and_then(|directory| directory.next());
+            let Some(entry) = next_entry else {
+                self.active_scan_dir = None;
+                continue;
+            };
+            let Ok(entry) = entry else {
+                continue;
             };
 
-            let read = match std::fs::read_dir(&dir) {
-                Ok(read) => read,
-                Err(_) => continue,
-            };
+            let path = entry.path();
+            if path.is_dir() {
+                self.pending_scan_dirs.push(path);
+                continue;
+            }
 
-            for entry in read.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    self.pending_scan_dirs.push(path);
-                    continue;
-                }
-
-                if let Some(fname) = path.file_name().and_then(|name| name.to_str()) {
-                    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                    self.entries.push(AssetEntry {
-                        name: fname.to_string(),
-                        asset_type: classify_file(fname),
-                        size_display: format_size(size),
-                        full_path: Some(path),
-                    });
-                    processed += 1;
-                    if processed >= max_entries {
-                        break;
-                    }
-                }
+            if let Some(fname) = path.file_name().and_then(|name| name.to_str()) {
+                let size = std::fs::metadata(&path)
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(0);
+                self.entries.push(AssetEntry {
+                    name: fname.to_string(),
+                    asset_type: classify_file(fname),
+                    size_display: format_size(size),
+                    full_path: Some(path),
+                });
+                processed += 1;
             }
         }
     }
@@ -485,11 +498,11 @@ impl AssetBrowserPanel {
 /// Return icon and color for each asset type.
 fn asset_type_visual(at: &AssetType) -> (&'static str, egui::Color32) {
     match at {
-        AssetType::Image => ("\u{1F5BC}", egui::Color32::from_rgb(120, 180, 230)), // frame picture
-        AssetType::Model3D => ("\u{25A6}", egui::Color32::from_rgb(200, 160, 100)), // mesh grid
-        AssetType::Audio => ("\u{266B}", egui::Color32::from_rgb(160, 200, 140)),  // music note
-        AssetType::Scene => ("\u{2630}", egui::Color32::from_rgb(180, 140, 220)),  // trigram
-        AssetType::Unknown => ("\u{2753}", egui::Color32::from_rgb(130, 130, 140)), // question mark
+        AssetType::Image => ("IMG", egui::Color32::from_rgb(150, 150, 150)),
+        AssetType::Model3D => ("3D", egui::Color32::from_rgb(212, 119, 26)),
+        AssetType::Audio => ("AUD", egui::Color32::from_rgb(110, 170, 120)),
+        AssetType::Scene => ("SRC", egui::Color32::from_rgb(170, 170, 170)),
+        AssetType::Unknown => ("?", egui::Color32::from_rgb(130, 130, 140)),
     }
 }
 
@@ -582,5 +595,56 @@ fn open_url(url: &str) {
     #[cfg(target_os = "linux")]
     {
         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+
+    #[test]
+    fn budgeted_scan_keeps_remaining_directory_entries() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("raf_asset_browser_scan_{stamp}"));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).expect("create test directories");
+        for name in ["a.png", "b.png", "c.gltf", "d.rhai", "nested/e.wav"] {
+            let path = root.join(name);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).expect("create nested parent");
+            }
+            fs::write(path, "asset").expect("write test asset");
+        }
+
+        let mut panel = AssetBrowserPanel {
+            project_assets_path: Some(root.clone()),
+            ..Default::default()
+        };
+        panel.scan_project_folder();
+        let mut passes = 0;
+        while panel.scan_in_progress {
+            panel.process_scan_budget(1);
+            passes += 1;
+            assert!(
+                passes < 32,
+                "asset scan should finish within a small budget"
+            );
+        }
+
+        let mut names: Vec<_> = panel
+            .entries
+            .iter()
+            .map(|entry| entry.name.as_str())
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["a.png", "b.png", "c.gltf", "d.rhai", "e.wav"]);
+
+        let _ = fs::remove_dir_all(root);
     }
 }

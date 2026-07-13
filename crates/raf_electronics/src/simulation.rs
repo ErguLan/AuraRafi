@@ -423,7 +423,6 @@ fn gaussian_solve(a: &mut Vec<Vec<f64>>, b: &mut Vec<f64>) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::component::ElectronicComponent;
     use crate::schematic::Schematic;
 
     #[test]

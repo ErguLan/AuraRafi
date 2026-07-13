@@ -233,7 +233,7 @@
       "category": "generation",
       "description_key": "commands.game_generate_prefab.desc",
       "parameters": [
-        {"name": "kind", "kind": "string", "required": false, "default": "platform"},
+        {"name": "kind", "kind": "string", "required": false, "default": "platform", "description_key": "commands.param.prefab_kind"},
         {"name": "name", "kind": "string", "required": false}
       ],
       "examples": [
@@ -365,6 +365,15 @@
       "description_key": "commands.electronics_drc.desc",
       "parameters": [],
       "examples": ["/electronics.drc"]
+    },
+    {
+      "name": "electronics.diagnose",
+      "aliases": ["diagnose", "circuit.diagnose"],
+      "domain": "electronics",
+      "category": "analysis",
+      "description_key": "commands.electronics_diagnose.desc",
+      "parameters": [],
+      "examples": ["/electronics.diagnose"]
     },
     {
       "name": "electronics.simulate",
@@ -544,6 +553,180 @@
         {"name": "output", "kind": "string", "required": false, "description_key": "commands.param.path", "default": "compiled.rhai"}
       ],
       "examples": ["/script.compile_nodes flow=Main output=compiled.rhai"]
+    },
+    {
+      "name": "ui.document.describe",
+      "aliases": ["ui.describe"],
+      "domain": "shared",
+      "category": "ui",
+      "description_key": "commands.ui_document_describe.desc",
+      "parameters": [],
+      "examples": ["/ui.document.describe"]
+    },
+    {
+      "name": "ui.node.add",
+      "aliases": ["ui.add"],
+      "domain": "shared",
+      "category": "ui",
+      "description_key": "commands.ui_node_add.desc",
+      "parameters": [
+        {"name": "id", "kind": "string", "required": true, "description_key": "commands.param.ui_node_id"},
+        {"name": "kind", "kind": "enum", "required": true, "description_key": "commands.param.ui_node_kind"},
+        {"name": "parent", "kind": "string", "required": false, "default": "root", "description_key": "commands.param.ui_parent"},
+        {"name": "text_key", "kind": "string", "required": false, "description_key": "commands.param.text_key"},
+        {"name": "interactive", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.interactive"},
+        {"name": "focusable", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.focusable"}
+      ],
+      "examples": ["/ui.node.add id=start_button kind=button parent=root text_key=game.start interactive=true"]
+    },
+    {
+      "name": "ui.node.remove",
+      "aliases": ["ui.remove"],
+      "domain": "shared",
+      "category": "ui",
+      "description_key": "commands.ui_node_remove.desc",
+      "parameters": [
+        {"name": "id", "kind": "string", "required": true, "description_key": "commands.param.ui_node_id"}
+      ],
+      "examples": ["/ui.node.remove id=start_button"]
+    },
+    {
+      "name": "ui.document.set_space",
+      "aliases": [],
+      "domain": "shared",
+      "category": "ui",
+      "description_key": "commands.ui_document_set_space.desc",
+      "parameters": [
+        {"name": "space", "kind": "enum", "required": true, "description_key": "commands.param.ui_space"}
+      ],
+      "examples": ["/ui.document.set_space space=world"]
+    },
+    {
+      "name": "ui.document.bind_camera",
+      "aliases": [],
+      "domain": "shared",
+      "category": "ui",
+      "description_key": "commands.ui_document_bind_camera.desc",
+      "parameters": [
+        {"name": "camera", "kind": "string", "required": true, "description_key": "commands.param.camera"}
+      ],
+      "examples": ["/ui.document.bind_camera camera=player.camera"]
+    },
+    {
+      "name": "ui.document.clear_camera",
+      "aliases": [],
+      "domain": "shared",
+      "category": "ui",
+      "description_key": "commands.ui_document_clear_camera.desc",
+      "parameters": [],
+      "examples": ["/ui.document.clear_camera"]
+    },
+    {
+      "name": "session.list",
+      "aliases": ["sessions"],
+      "domain": "shared",
+      "category": "project",
+      "description_key": "commands.session_list.desc",
+      "parameters": [],
+      "examples": ["/session.list"]
+    },
+    {
+      "name": "session.create",
+      "aliases": [],
+      "domain": "shared",
+      "category": "project",
+      "description_key": "commands.session_create.desc",
+      "parameters": [
+        {"name": "name", "kind": "string", "required": true, "description_key": "commands.param.name"},
+        {"name": "kind", "kind": "enum", "required": false, "default": "world", "description_key": "commands.param.session_kind"}
+      ],
+      "examples": ["/session.create name=Forest kind=world"]
+    },
+    {
+      "name": "session.open",
+      "aliases": [],
+      "domain": "shared",
+      "category": "project",
+      "description_key": "commands.session_open.desc",
+      "parameters": [
+        {"name": "session", "kind": "string", "required": true, "description_key": "commands.param.session"}
+      ],
+      "examples": ["/session.open session=Forest"]
+    },
+    {
+      "name": "session.duplicate",
+      "aliases": [],
+      "domain": "shared",
+      "category": "project",
+      "description_key": "commands.session_duplicate.desc",
+      "parameters": [
+        {"name": "source", "kind": "string", "required": true, "description_key": "commands.param.session"},
+        {"name": "name", "kind": "string", "required": true, "description_key": "commands.param.name"}
+      ],
+      "examples": ["/session.duplicate source=Forest name=Forest_Night"]
+    },
+    {
+      "name": "session.remove",
+      "aliases": [],
+      "domain": "shared",
+      "category": "project",
+      "description_key": "commands.session_remove.desc",
+      "parameters": [
+        {"name": "session", "kind": "string", "required": true, "description_key": "commands.param.session"}
+      ],
+      "examples": ["/session.remove session=Forest_Night"]
+    },
+    {
+      "name": "asset.generate_image",
+      "aliases": ["asset.image"],
+      "domain": "shared",
+      "category": "asset",
+      "description_key": "commands.asset_generate_image.desc",
+      "parameters": [
+        {"name": "prompt", "kind": "string", "required": true, "description_key": "commands.param.prompt"},
+        {"name": "name", "kind": "string", "required": true, "description_key": "commands.param.name"},
+        {"name": "size", "kind": "enum", "required": false, "default": "square", "description_key": "commands.param.image_size"},
+        {"name": "transparent", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.transparent"},
+        {"name": "model", "kind": "string", "required": false, "default": "gpt-image-2", "description_key": "commands.param.model"}
+      ],
+      "examples": ["/asset.generate_image prompt=\"painted stone wall texture\" name=stone_wall size=square"]
+    },
+    {
+      "name": "asset.generate_local_png",
+      "aliases": ["asset.local_png", "asset.icon"],
+      "domain": "shared",
+      "category": "asset",
+      "description_key": "commands.asset_generate_local_png.desc",
+      "parameters": [
+        {"name": "prompt", "kind": "string", "required": true, "description_key": "commands.param.prompt"},
+        {"name": "name", "kind": "string", "required": true, "description_key": "commands.param.name"},
+        {"name": "style", "kind": "enum", "required": false, "default": "icon", "description_key": "commands.param.local_png_style"},
+        {"name": "size", "kind": "enum", "required": false, "default": "square", "description_key": "commands.param.image_size"},
+        {"name": "transparent", "kind": "bool", "required": false, "default": "true", "description_key": "commands.param.transparent"}
+      ],
+      "examples": ["/asset.generate_local_png prompt=\"orange electronics folder icon\" name=electronics_folder style=icon"]
+    },
+    {
+      "name": "asset.image_status",
+      "aliases": [],
+      "domain": "shared",
+      "category": "asset",
+      "description_key": "commands.asset_image_status.desc",
+      "parameters": [
+        {"name": "job", "kind": "string", "required": true, "description_key": "commands.param.job"}
+      ],
+      "examples": ["/asset.image_status job=<uuid>"]
+    },
+    {
+      "name": "asset.cancel_image",
+      "aliases": [],
+      "domain": "shared",
+      "category": "asset",
+      "description_key": "commands.asset_cancel_image.desc",
+      "parameters": [
+        {"name": "job", "kind": "string", "required": true, "description_key": "commands.param.job"}
+      ],
+      "examples": ["/asset.cancel_image job=<uuid>"]
     }
   ]
 }
