@@ -101,4 +101,13 @@ Documentation note:
 
 ## License
 
-Soon...
+AuraRafi Core is open source under **MIT OR Apache-2.0**, at your option.
+The dual license covers the engine core, editor, tools, and repository
+documentation unless a path states otherwise. See [LICENSE](LICENSE),
+[LICENSE-MIT](LICENSE-MIT), and [LICENSE-APACHE](LICENSE-APACHE).
+
+Games made with AuraRafi are separate works: their code, assets, story,
+characters, music, branding, and commercial terms remain with their authors
+unless those authors explicitly publish them under another license.
+
+For a fast technical entry point, read [AI Context Map](docs/AI_CONTEXT.md).
