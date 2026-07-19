@@ -148,4 +148,13 @@ If the issue is documentation drift, mention exactly which file is stale and whi
 ## License
 
 By contributing, you agree that your contributions will be dual-licensed
-under the MIT and Apache 2.0 licenses, matching the project license.
+under the MIT and Apache-2.0 licenses, matching AuraRafi Core. You keep the
+copyright to your contribution; this gives the project and its users the
+permissions needed to distribute and evolve the public core.
+
+Only submit material that you have the right to contribute. Do not submit a
+private game's source, assets, story, secrets, or third-party content unless
+its rights holder has explicitly authorized its inclusion in AuraRafi Core.
+
+The engine licenses do not claim ownership of games made with AuraRafi. Their
+authors choose the licenses and commercial terms for those independent works.
