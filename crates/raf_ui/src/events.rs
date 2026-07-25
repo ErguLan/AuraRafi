@@ -33,6 +33,22 @@ pub enum UiAction {
     ToggleState {
         key: String,
     },
+    SetToggle {
+        key: String,
+        value: bool,
+    },
+    SetRange {
+        key: String,
+        value: f32,
+    },
+    SetText {
+        key: String,
+        value: String,
+    },
+    ScrollTo {
+        id: String,
+        offset: [f32; 2],
+    },
     FocusNode {
         id: String,
     },

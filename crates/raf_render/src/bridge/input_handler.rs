@@ -274,7 +274,7 @@ impl ViewportEditSession {
             if !node.visible || node.name.is_empty() {
                 continue;
             }
-            if matches!(node.primitive, Primitive::Empty | Primitive::Sprite2D) {
+            if matches!(node.primitive, Primitive::Empty) {
                 continue;
             }
 
@@ -340,7 +340,7 @@ impl ViewportEditSession {
             .entry(id)
             .or_insert_with(|| match node.primitive {
                 Primitive::Cube => EditableMesh::cube(),
-                Primitive::Plane | Primitive::Sprite2D => EditableMesh::plane(),
+                Primitive::Plane => EditableMesh::plane(),
                 Primitive::Cylinder => EditableMesh::cylinder(16),
                 Primitive::Sphere => EditableMesh::sphere(8, 12),
                 Primitive::Empty => EditableMesh::cube(),
@@ -376,7 +376,7 @@ fn primitive_mesh_data(primitive: Primitive) -> &'static MeshData {
         Primitive::Cube | Primitive::Empty => CUBE.get_or_init(|| primitives::cube(1)),
         Primitive::Cylinder => CYLINDER.get_or_init(|| primitives::cylinder(16)),
         Primitive::Sphere => SPHERE.get_or_init(|| primitives::sphere(8, 12)),
-        Primitive::Plane | Primitive::Sprite2D => PLANE.get_or_init(|| primitives::plane(1)),
+        Primitive::Plane => PLANE.get_or_init(|| primitives::plane(1)),
     }
 }
 

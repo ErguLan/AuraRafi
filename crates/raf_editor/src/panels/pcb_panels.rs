@@ -111,14 +111,6 @@ pub fn show_pcb_hierarchy(ui: &mut Ui, view: &mut PcbViewPanel, lang: Language) 
 pub fn show_pcb_properties(ui: &mut Ui, view: &mut PcbViewPanel, lang: Language) -> bool {
     let mut changed = false;
 
-    ui.label(
-        egui::RichText::new(t("app.properties", lang))
-            .size(11.0)
-            .strong()
-            .color(electronics_palette(ui.visuals().dark_mode).text_dim),
-    );
-    ui.add_space(6.0);
-
     egui::ScrollArea::vertical().show(ui, |ui| match view.selection() {
         PcbSelection::Component(idx) => {
             if idx >= view.layout.components.len() {

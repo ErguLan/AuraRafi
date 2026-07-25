@@ -573,11 +573,28 @@
         {"name": "id", "kind": "string", "required": true, "description_key": "commands.param.ui_node_id"},
         {"name": "kind", "kind": "enum", "required": true, "description_key": "commands.param.ui_node_kind"},
         {"name": "parent", "kind": "string", "required": false, "default": "root", "description_key": "commands.param.ui_parent"},
-        {"name": "text_key", "kind": "string", "required": false, "description_key": "commands.param.text_key"},
-        {"name": "interactive", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.interactive"},
-        {"name": "focusable", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.focusable"}
-      ],
-      "examples": ["/ui.node.add id=start_button kind=button parent=root text_key=game.start interactive=true"]
+         {"name": "text_key", "kind": "string", "required": false, "description_key": "commands.param.text_key"},
+         {"name": "interactive", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.interactive"},
+         {"name": "focusable", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.focusable"},
+         {"name": "source", "kind": "string", "required": false, "description_key": "commands.param.ui_source"},
+         {"name": "value_key", "kind": "string", "required": false, "description_key": "commands.param.ui_value_key"},
+         {"name": "axis", "kind": "enum", "required": false, "description_key": "commands.param.ui_axis"},
+         {"name": "flow", "kind": "enum", "required": false, "description_key": "commands.param.ui_flow"},
+         {"name": "width", "kind": "number", "required": false, "description_key": "commands.param.ui_width"},
+         {"name": "height", "kind": "number", "required": false, "description_key": "commands.param.ui_height"},
+         {"name": "gap", "kind": "number", "required": false, "description_key": "commands.param.ui_gap"},
+         {"name": "justify", "kind": "enum", "required": false, "description_key": "commands.param.ui_justify"},
+         {"name": "align", "kind": "enum", "required": false, "description_key": "commands.param.ui_align"},
+         {"name": "compact", "kind": "enum", "required": false, "description_key": "commands.param.ui_compact"},
+         {"name": "columns", "kind": "number", "required": false, "description_key": "commands.param.ui_columns"},
+         {"name": "responsive_max_width", "kind": "number", "required": false, "description_key": "commands.param.ui_responsive_max_width"},
+         {"name": "responsive_flow", "kind": "enum", "required": false, "description_key": "commands.param.ui_responsive_flow"}
+       ],
+       "examples": [
+         "/ui.node.add id=start_button kind=button parent=root text_key=game.start interactive=true",
+         "/ui.node.add id=inventory kind=grid parent=root min_column_width=180 responsive_max_width=640 responsive_flow=column",
+         "/ui.node.add id=search kind=input parent=root value_key=ui.search placeholder_key=ui.search_placeholder width=260"
+       ]
     },
     {
       "name": "ui.node.remove",
@@ -620,6 +637,22 @@
       "description_key": "commands.ui_document_clear_camera.desc",
       "parameters": [],
       "examples": ["/ui.document.clear_camera"]
+    },
+    {
+      "name": "rafui.studio.preview",
+      "aliases": ["rafui.preview"],
+      "domain": "shared",
+      "category": "ui",
+      "description_key": "commands.rafui_studio_preview.desc",
+      "parameters": [
+        {"name": "format", "kind": "enum", "required": false, "default": "text", "description_key": "commands.param.rafui_preview_format"},
+        {"name": "dpi", "kind": "number", "required": false, "default": "1.0", "description_key": "commands.param.rafui_preview_dpi"},
+        {"name": "theme", "kind": "enum", "required": false, "default": "dark", "description_key": "commands.param.rafui_preview_theme"}
+      ],
+      "examples": [
+        "/rafui.studio.preview",
+        "/rafui.studio.preview format=json dpi=1.25 theme=dark"
+      ]
     },
     {
       "name": "session.list",

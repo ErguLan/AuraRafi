@@ -287,6 +287,7 @@ fn record_object(
             CadObjectKind::Airwire => 1.25,
             _ => options.wire_width,
         };
+        let line_color = object_line_color(object);
         for segment in object.points.windows(2) {
             record_line(
                 commands,
@@ -294,7 +295,7 @@ fn record_object(
                 segment[1],
                 z - 0.02,
                 width,
-                object.color_rgba,
+                line_color,
             );
         }
     }
@@ -441,6 +442,15 @@ fn object_fill(object: &CadObject) -> [u8; 4] {
     }
 }
 
+fn object_line_color(object: &CadObject) -> [u8; 4] {
+    match object.kind {
+        CadObjectKind::Wire => [112, 224, 136, 255],
+        CadObjectKind::Trace => [212, 119, 26, 255],
+        CadObjectKind::Airwire => [245, 245, 246, 180],
+        _ => object.color_rgba,
+    }
+}
+
 fn object_border(object: &CadObject) -> [u8; 4] {
     match object.kind {
         CadObjectKind::Component => [245, 245, 246, 180],
@@ -559,6 +569,15 @@ mod tests {
             Some(resistor_id_text.as_str())
         );
         assert!(frame.frame.commands.commands().len() > scene.objects.len());
+        assert!(frame.frame.commands.commands().iter().any(|command| {
+            matches!(
+                command,
+                crate::api_graphic_basic::command_list::GraphicCommand::DrawLineBatch {
+                    lines,
+                    ..
+                } if lines.iter().any(|line| line.color == [112, 224, 136, 255])
+            )
+        }));
 
         let selected_frame = build_cad_surface_frame(
             &scene,
@@ -569,8 +588,19 @@ mod tests {
                 ..CadSurfaceOptions::default()
             },
         );
-        assert!(
-            selected_frame.frame.commands.commands().len() > frame.frame.commands.commands().len()
-        );
+        assert!(selected_frame
+            .frame
+            .commands
+            .commands()
+            .iter()
+            .any(|command| {
+                matches!(
+                    command,
+                    crate::api_graphic_basic::command_list::GraphicCommand::DrawLineBatch {
+                        lines,
+                        ..
+                    } if lines.iter().any(|line| line.color == [255, 172, 64, 255])
+                )
+            }));
     }
 }

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::environment::UiColorMode;
 use crate::focus::UiFocusState;
 use crate::node::{UiNode, UiNodeKind};
 
@@ -197,28 +198,192 @@ pub enum StudioUiPalette {
     PaperLight,
 }
 
+/// Named, serializable theme configuration. The engine ships the RafUI dark
+/// and light defaults, but a project or user can replace every semantic token
+/// without touching any panel code.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiTheme {
+    pub name: String,
+    #[serde(default)]
+    pub preferred_mode: UiColorMode,
+    pub dark: UiTokens,
+    pub light: UiTokens,
+    #[serde(default)]
+    pub metrics: UiThemeMetrics,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct UiThemeMetrics {
+    /// User scale applied by the host before a surface is laid out.
+    #[serde(default = "default_theme_scale")]
+    pub scale: f32,
+    #[serde(default = "default_control_height")]
+    pub control_height: f32,
+    #[serde(default = "default_corner_radius")]
+    pub corner_radius: f32,
+    #[serde(default = "default_spacing")]
+    pub spacing: f32,
+}
+
+fn default_theme_scale() -> f32 {
+    1.0
+}
+
+fn default_control_height() -> f32 {
+    28.0
+}
+
+fn default_corner_radius() -> f32 {
+    5.0
+}
+
+fn default_spacing() -> f32 {
+    8.0
+}
+
+impl Default for UiThemeMetrics {
+    fn default() -> Self {
+        Self {
+            scale: default_theme_scale(),
+            control_height: default_control_height(),
+            corner_radius: default_corner_radius(),
+            spacing: default_spacing(),
+        }
+    }
+}
+
+impl UiTheme {
+    pub fn raf_ui() -> Self {
+        Self {
+            name: "RafUI".to_string(),
+            preferred_mode: UiColorMode::System,
+            dark: StudioUiPalette::IndustrialDark.tokens(),
+            light: StudioUiPalette::PaperLight.tokens(),
+            metrics: UiThemeMetrics::default(),
+        }
+    }
+
+    pub fn tokens_for(&self, mode: UiColorMode, system_dark: bool) -> UiTokens {
+        match mode {
+            UiColorMode::Dark => self.dark,
+            UiColorMode::Light => self.light,
+            UiColorMode::System => {
+                if system_dark {
+                    self.dark
+                } else {
+                    self.light
+                }
+            }
+        }
+    }
+
+    pub fn with_dark_tokens(mut self, tokens: UiTokens) -> Self {
+        self.dark = tokens;
+        self
+    }
+
+    pub fn with_light_tokens(mut self, tokens: UiTokens) -> Self {
+        self.light = tokens;
+        self
+    }
+
+    pub fn root_style(&self, mode: UiColorMode, system_dark: bool) -> UiStyle {
+        let tokens = self.tokens_for(mode, system_dark);
+        UiStyle {
+            fill: tokens.background,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 0.0,
+            radius: 0.0,
+            opacity: 1.0,
+        }
+    }
+
+    pub fn panel_style(&self, mode: UiColorMode, system_dark: bool) -> UiStyle {
+        let tokens = self.tokens_for(mode, system_dark);
+        UiStyle {
+            fill: tokens.surface,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: self.metrics.corner_radius.max(0.0),
+            opacity: 1.0,
+        }
+    }
+
+    pub fn input_style(&self, mode: UiColorMode, system_dark: bool) -> UiStyle {
+        let tokens = self.tokens_for(mode, system_dark);
+        UiStyle {
+            fill: tokens.surface_raised,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: self.metrics.corner_radius.max(0.0),
+            opacity: 1.0,
+        }
+    }
+
+    pub fn accent_style(&self, mode: UiColorMode, system_dark: bool) -> UiStyle {
+        let tokens = self.tokens_for(mode, system_dark);
+        UiStyle {
+            fill: tokens.accent,
+            border: tokens.accent_hot,
+            text: if system_dark || mode == UiColorMode::Dark {
+                [18, 18, 20, 255]
+            } else {
+                [255, 255, 255, 255]
+            },
+            border_width: 1.0,
+            radius: self.metrics.corner_radius.max(0.0),
+            opacity: 1.0,
+        }
+    }
+}
+
+impl Default for UiTheme {
+    fn default() -> Self {
+        Self::raf_ui()
+    }
+}
+
 impl StudioUiPalette {
     pub fn tokens(self) -> UiTokens {
         match self {
             Self::IndustrialDark => UiTokens {
-                background: [8, 8, 8, 255],
-                surface: [17, 17, 17, 248],
-                surface_alt: [28, 28, 28, 248],
-                border: [52, 52, 52, 255],
-                text: [238, 238, 238, 255],
-                text_muted: [162, 162, 162, 255],
-                accent: [224, 116, 24, 255],
-                accent_hot: [255, 151, 46, 255],
+                background: [8, 11, 15, 255],
+                surface: [13, 17, 22, 255],
+                surface_alt: [18, 23, 29, 255],
+                surface_raised: [25, 31, 38, 255],
+                canvas: [9, 12, 16, 255],
+                border: [38, 45, 54, 255],
+                text: [237, 239, 242, 255],
+                text_muted: [151, 159, 170, 255],
+                accent: [232, 133, 28, 255],
+                accent_hot: [255, 166, 61, 255],
+                focus: [255, 166, 61, 255],
+                selection: [232, 133, 28, 72],
+                positive: [78, 162, 102, 255],
+                warning: [224, 160, 42, 255],
+                danger: [203, 73, 73, 255],
+                skeleton: [48, 48, 48, 255],
             },
             Self::PaperLight => UiTokens {
                 background: [250, 250, 250, 255],
                 surface: [255, 255, 255, 250],
                 surface_alt: [238, 238, 238, 255],
+                surface_raised: [255, 255, 255, 255],
+                canvas: [247, 247, 247, 255],
                 border: [210, 210, 210, 255],
                 text: [28, 28, 30, 255],
                 text_muted: [96, 96, 100, 255],
                 accent: [224, 116, 24, 255],
                 accent_hot: [178, 82, 16, 255],
+                focus: [178, 82, 16, 255],
+                selection: [224, 116, 24, 58],
+                positive: [53, 126, 74, 255],
+                warning: [170, 111, 19, 255],
+                danger: [177, 57, 57, 255],
+                skeleton: [222, 222, 222, 255],
             },
         }
     }
@@ -304,11 +469,19 @@ pub struct UiTokens {
     pub background: [u8; 4],
     pub surface: [u8; 4],
     pub surface_alt: [u8; 4],
+    pub surface_raised: [u8; 4],
+    pub canvas: [u8; 4],
     pub border: [u8; 4],
     pub text: [u8; 4],
     pub text_muted: [u8; 4],
     pub accent: [u8; 4],
     pub accent_hot: [u8; 4],
+    pub focus: [u8; 4],
+    pub selection: [u8; 4],
+    pub positive: [u8; 4],
+    pub warning: [u8; 4],
+    pub danger: [u8; 4],
+    pub skeleton: [u8; 4],
 }
 
 #[cfg(test)]

@@ -24,11 +24,10 @@ pub enum Primitive {
     /// Unit sphere.
     Sphere,
     /// Flat plane on XZ.
+    #[serde(alias = "Sprite2D", alias = "sprite2d")]
     Plane,
     /// Cylinder along Y axis.
     Cylinder,
-    /// 2D sprite (for 2D mode).
-    Sprite2D,
 }
 
 impl Default for Primitive {
@@ -46,7 +45,6 @@ impl Primitive {
             Self::Sphere => "Sphere",
             Self::Plane => "Plane",
             Self::Cylinder => "Cylinder",
-            Self::Sprite2D => "Sprite2D",
         }
     }
 
@@ -58,7 +56,6 @@ impl Primitive {
             Self::Sphere => "Esfera",
             Self::Plane => "Plano",
             Self::Cylinder => "Cilindro",
-            Self::Sprite2D => "Sprite2D",
         }
     }
 }
@@ -89,7 +86,6 @@ impl NodeColor {
             Primitive::Sphere => Self::rgb(236, 236, 236),
             Primitive::Plane => Self::rgb(150, 150, 150),
             Primitive::Cylinder => Self::rgb(58, 58, 58),
-            Primitive::Sprite2D => Self::rgb(220, 200, 80),
         }
     }
 }
@@ -719,7 +715,6 @@ fn primitive_fingerprint(primitive: Primitive) -> u64 {
         Primitive::Sphere => 2,
         Primitive::Plane => 3,
         Primitive::Cylinder => 4,
-        Primitive::Sprite2D => 5,
     }
 }
 
@@ -783,5 +778,11 @@ mod tests {
 
         graph.get_mut(node).unwrap().position.x = 4.0;
         assert_ne!(graph.render_fingerprint(), initial);
+    }
+
+    #[test]
+    fn legacy_sprite_primitive_deserializes_as_plane() {
+        let primitive: Primitive = ron::from_str("Sprite2D").expect("legacy primitive alias");
+        assert_eq!(primitive, Primitive::Plane);
     }
 }

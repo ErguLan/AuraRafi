@@ -11,6 +11,7 @@ use std::fs::ReadDir;
 use std::path::PathBuf;
 
 use crate::script_support::{asset_relative_path, is_script_file, open_script_in_external_editor};
+use crate::theme;
 use crate::ui_icons::UiIconAtlas;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -79,67 +80,80 @@ impl Default for AssetBrowserPanel {
 impl AssetBrowserPanel {
     /// Draw the asset browser panel.
     pub fn show(&mut self, ui: &mut Ui, lang: Language, icons: &UiIconAtlas) {
+        let palette = theme::palette_for_visuals(ui.visuals().dark_mode, 0.0);
         // --- Top bar: search + filter + action buttons ---
-        ui.horizontal(|ui| {
-            ui.label(t("app.search", lang));
-            ui.add(egui::TextEdit::singleline(&mut self.search_query).desired_width(120.0));
+        egui::Frame::none()
+            .fill(palette.panel)
+            .stroke(egui::Stroke::new(1.0, palette.border))
+            .inner_margin(egui::Margin::same(8.0))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(
+                        egui::RichText::new(t("app.search", lang))
+                            .size(11.0)
+                            .color(palette.text_dim),
+                    );
+                    ui.add(egui::TextEdit::singleline(&mut self.search_query).desired_width(220.0));
 
-            ui.separator();
+                    ui.separator();
 
-            // Filter buttons.
-            let all_active = self.selected_filter.is_none();
-            if ui
-                .selectable_label(all_active, t("app.all", lang))
-                .clicked()
-            {
-                self.selected_filter = None;
-            }
-            let img_active = self.selected_filter == Some(AssetType::Image);
-            if ui
-                .selectable_label(img_active, t("app.images", lang))
-                .clicked()
-            {
-                self.selected_filter = Some(AssetType::Image);
-            }
-            let mdl_active = self.selected_filter == Some(AssetType::Model3D);
-            if ui
-                .selectable_label(mdl_active, t("app.models", lang))
-                .clicked()
-            {
-                self.selected_filter = Some(AssetType::Model3D);
-            }
-            let aud_active = self.selected_filter == Some(AssetType::Audio);
-            if ui
-                .selectable_label(aud_active, t("app.audio", lang))
-                .clicked()
-            {
-                self.selected_filter = Some(AssetType::Audio);
-            }
-            let scr_active = self.selected_filter == Some(AssetType::Scene);
-            if ui
-                .selectable_label(scr_active, t("app.scripts_filter", lang))
-                .clicked()
-            {
-                self.selected_filter = Some(AssetType::Scene);
-            }
+                    // Filter buttons.
+                    let all_active = self.selected_filter.is_none();
+                    if ui
+                        .selectable_label(all_active, t("app.all", lang))
+                        .clicked()
+                    {
+                        self.selected_filter = None;
+                    }
+                    let img_active = self.selected_filter == Some(AssetType::Image);
+                    if ui
+                        .selectable_label(img_active, t("app.images", lang))
+                        .clicked()
+                    {
+                        self.selected_filter = Some(AssetType::Image);
+                    }
+                    let mdl_active = self.selected_filter == Some(AssetType::Model3D);
+                    if ui
+                        .selectable_label(mdl_active, t("app.models", lang))
+                        .clicked()
+                    {
+                        self.selected_filter = Some(AssetType::Model3D);
+                    }
+                    let aud_active = self.selected_filter == Some(AssetType::Audio);
+                    if ui
+                        .selectable_label(aud_active, t("app.audio", lang))
+                        .clicked()
+                    {
+                        self.selected_filter = Some(AssetType::Audio);
+                    }
+                    let scr_active = self.selected_filter == Some(AssetType::Scene);
+                    if ui
+                        .selectable_label(scr_active, t("app.scripts_filter", lang))
+                        .clicked()
+                    {
+                        self.selected_filter = Some(AssetType::Scene);
+                    }
 
-            ui.separator();
+                    ui.separator();
 
-            // Action buttons.
-            if ui.button(t("app.add_entity", lang)).clicked() {
-                self.add_entity_clicked = true;
-            }
-            ui.separator();
-            if ui.button(t("app.open_folder", lang)).clicked() {
-                self.open_assets_folder();
-            }
-            if ui.button(t("app.create_script", lang)).clicked() {
-                self.show_script_menu = true;
-            }
-            if ui.button(t("app.refresh_assets", lang)).clicked() {
-                self.scan_project_folder();
-            }
-        });
+                    // Action buttons.
+                    if ui.button(t("app.add_entity", lang)).clicked() {
+                        self.add_entity_clicked = true;
+                    }
+                    ui.separator();
+                    if ui.button(t("app.open_folder", lang)).clicked() {
+                        self.open_assets_folder();
+                    }
+                    if ui.button(t("app.create_script", lang)).clicked() {
+                        self.show_script_menu = true;
+                    }
+                    if ui.button(t("app.refresh_assets", lang)).clicked() {
+                        self.scan_project_folder();
+                    }
+                });
+            });
+
+        ui.add_space(6.0);
 
         if self.show_script_menu {
             self.draw_script_template_menu(ui, lang);
@@ -170,95 +184,99 @@ impl AssetBrowserPanel {
         }
 
         // --- Asset grid ---
-        egui::ScrollArea::horizontal().show(ui, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                let filtered: Vec<&AssetEntry> = self
-                    .entries
-                    .iter()
-                    .filter(|e| {
-                        if let Some(filter) = &self.selected_filter {
-                            if e.asset_type != *filter {
-                                return false;
-                            }
-                        }
-                        if !self.search_query.is_empty() {
-                            return e
-                                .name
-                                .to_lowercase()
-                                .contains(&self.search_query.to_lowercase());
-                        }
-                        true
-                    })
-                    .collect();
-
-                if filtered.is_empty() {
-                    ui.vertical_centered(|ui| {
-                        ui.add_space(12.0);
-                        ui.label(
-                            egui::RichText::new(t("app.no_assets", lang))
-                                .size(11.0)
-                                .color(egui::Color32::from_rgb(100, 100, 110)),
-                        );
-                        ui.add_space(4.0);
-                        ui.label(
-                            egui::RichText::new(t("app.drag_drop_hint", lang))
-                                .size(10.0)
-                                .color(egui::Color32::from_rgb(80, 80, 90)),
-                        );
-                    });
-                } else {
-                    for entry in filtered {
-                        let type_icon = icon_for_asset(icons, &entry.asset_type);
-                        let response = ui.group(|ui| {
-                            ui.set_min_width(70.0);
-                            ui.set_max_width(80.0);
-                            ui.vertical_centered(|ui| {
-                                if let Some(icon) = type_icon {
-                                    ui.add(
-                                        egui::Image::new(icon)
-                                            .fit_to_exact_size(egui::Vec2::new(20.0, 20.0)),
-                                    );
-                                } else {
-                                    let (fallback_icon, fallback_color) =
-                                        asset_type_visual(&entry.asset_type);
-                                    ui.label(
-                                        egui::RichText::new(fallback_icon)
-                                            .size(20.0)
-                                            .color(fallback_color),
-                                    );
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = egui::vec2(10.0, 10.0);
+                    let filtered: Vec<&AssetEntry> = self
+                        .entries
+                        .iter()
+                        .filter(|e| {
+                            if let Some(filter) = &self.selected_filter {
+                                if e.asset_type != *filter {
+                                    return false;
                                 }
-                                ui.label(
-                                    egui::RichText::new(&entry.name)
-                                        .size(9.0)
-                                        .color(egui::Color32::from_rgb(190, 190, 195)),
-                                );
-                                ui.label(
-                                    egui::RichText::new(&entry.size_display)
-                                        .size(8.0)
-                                        .color(egui::Color32::from_rgb(100, 100, 110)),
-                                );
-                            });
+                            }
+                            if !self.search_query.is_empty() {
+                                return e
+                                    .name
+                                    .to_lowercase()
+                                    .contains(&self.search_query.to_lowercase());
+                            }
+                            true
+                        })
+                        .collect();
+
+                    if filtered.is_empty() {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new(t("app.no_assets", lang))
+                                    .size(11.0)
+                                    .color(egui::Color32::from_rgb(100, 100, 110)),
+                            );
+                            ui.add_space(4.0);
+                            ui.label(
+                                egui::RichText::new(t("app.drag_drop_hint", lang))
+                                    .size(10.0)
+                                    .color(egui::Color32::from_rgb(80, 80, 90)),
+                            );
                         });
-                        // Double-click: open script IDE dialog or do nothing for other types.
-                        if response.response.double_clicked() {
-                            if is_script_file(&entry.name) {
-                                self.show_ide_dialog = true;
-                                self.ide_dialog_path = entry.full_path.clone();
-                                self.ide_dialog_file = entry
-                                    .full_path
-                                    .as_ref()
-                                    .and_then(|full_path| {
-                                        self.project_assets_path
-                                            .as_ref()
-                                            .map(|root| asset_relative_path(root, full_path))
-                                    })
-                                    .unwrap_or_else(|| entry.name.clone());
+                    } else {
+                        for entry in filtered {
+                            let type_icon = icon_for_asset(icons, &entry.asset_type);
+                            let response = ui.group(|ui| {
+                                ui.set_min_width(132.0);
+                                ui.set_max_width(160.0);
+                                ui.set_min_height(92.0);
+                                ui.vertical_centered(|ui| {
+                                    if let Some(icon) = type_icon {
+                                        ui.add(
+                                            egui::Image::new(icon)
+                                                .fit_to_exact_size(egui::Vec2::new(32.0, 32.0)),
+                                        );
+                                    } else {
+                                        let (fallback_icon, fallback_color) =
+                                            asset_type_visual(&entry.asset_type);
+                                        ui.label(
+                                            egui::RichText::new(fallback_icon)
+                                                .size(20.0)
+                                                .color(fallback_color),
+                                        );
+                                    }
+                                    ui.label(
+                                        egui::RichText::new(&entry.name)
+                                            .size(11.0)
+                                            .color(palette.text),
+                                    );
+                                    ui.label(
+                                        egui::RichText::new(&entry.size_display)
+                                            .size(10.0)
+                                            .color(palette.text_dim),
+                                    );
+                                });
+                            });
+                            // Double-click: open script IDE dialog or do nothing for other types.
+                            if response.response.double_clicked() {
+                                if is_script_file(&entry.name) {
+                                    self.show_ide_dialog = true;
+                                    self.ide_dialog_path = entry.full_path.clone();
+                                    self.ide_dialog_file = entry
+                                        .full_path
+                                        .as_ref()
+                                        .and_then(|full_path| {
+                                            self.project_assets_path
+                                                .as_ref()
+                                                .map(|root| asset_relative_path(root, full_path))
+                                        })
+                                        .unwrap_or_else(|| entry.name.clone());
+                                }
                             }
                         }
                     }
-                }
+                });
             });
-        });
 
         // --- IDE recommendation dialog ---
         if self.show_ide_dialog {
@@ -267,7 +285,7 @@ impl AssetBrowserPanel {
     }
 
     /// Open the assets folder in the OS file explorer.
-    fn open_assets_folder(&self) {
+    pub fn open_assets_folder(&self) {
         if let Some(path) = &self.project_assets_path {
             let _ = std::fs::create_dir_all(path);
             #[cfg(target_os = "windows")]
@@ -322,6 +340,17 @@ impl AssetBrowserPanel {
         }
     }
 
+    /// Create a script from a retained UI command.
+    pub fn create_script_from_kind(&mut self, lang: Language, kind: &str) {
+        let template = match kind {
+            "rust" => ScriptTemplateKind::Rust,
+            "cpp" => ScriptTemplateKind::Cpp,
+            "rhai" => ScriptTemplateKind::Rhai,
+            _ => return,
+        };
+        self.create_new_script(lang, template);
+    }
+
     fn draw_script_template_menu(&mut self, ui: &mut Ui, lang: Language) {
         egui::Window::new(t("app.create_script", lang))
             .collapsible(false)
@@ -352,7 +381,7 @@ impl AssetBrowserPanel {
     }
 
     /// Handle files dropped onto the asset browser.
-    fn handle_dropped_files(&mut self, files: &[egui::DroppedFile], lang: Language) {
+    pub fn handle_dropped_files(&mut self, files: &[egui::DroppedFile], lang: Language) {
         if let Some(base) = &self.project_assets_path.clone() {
             let _ = std::fs::create_dir_all(base);
             let mut count = 0;
@@ -440,6 +469,58 @@ impl AssetBrowserPanel {
                 processed += 1;
             }
         }
+    }
+
+    pub fn open_script_entry(&mut self, index: usize) {
+        let Some(entry) = self.entries.get(index) else {
+            return;
+        };
+        if !is_script_file(&entry.name) {
+            return;
+        }
+        self.show_ide_dialog = true;
+        self.ide_dialog_path = entry.full_path.clone();
+        self.ide_dialog_file = entry
+            .full_path
+            .as_ref()
+            .and_then(|full_path| {
+                self.project_assets_path
+                    .as_ref()
+                    .map(|root| asset_relative_path(root, full_path))
+            })
+            .unwrap_or_else(|| entry.name.clone());
+    }
+
+    pub fn ide_dialog_open(&self) -> bool {
+        self.show_ide_dialog
+    }
+
+    pub fn ide_dialog_file(&self) -> &str {
+        &self.ide_dialog_file
+    }
+
+    pub fn status_message(&self) -> Option<&str> {
+        self.status_message.as_deref()
+    }
+
+    pub fn close_ide_dialog(&mut self) {
+        self.show_ide_dialog = false;
+    }
+
+    pub fn open_ide_yoll(&mut self) {
+        let _ = open_url("https://www.yoll.site/#documentation/IDEYoll");
+        self.close_ide_dialog();
+    }
+
+    pub fn open_ide_vscode(&mut self) {
+        if let Some(path) = &self.ide_dialog_path {
+            let _ = open_script_in_external_editor(path);
+        } else if let Some(base) = &self.project_assets_path {
+            let _ = std::process::Command::new("code")
+                .arg(base.as_os_str())
+                .spawn();
+        }
+        self.close_ide_dialog();
     }
 
     /// Draw the IDE recommendation dialog.

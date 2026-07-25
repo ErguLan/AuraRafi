@@ -106,14 +106,6 @@ pub fn show_schematic_properties(
     let mut changed = false;
     let mut pending_anchor_snapshot: Option<ElectronicComponent> = None;
 
-    ui.label(
-        egui::RichText::new(t("app.properties", lang))
-            .size(11.0)
-            .strong()
-            .color(electronics_palette(ui.visuals().dark_mode).text_dim),
-    );
-    ui.separator();
-
     egui::ScrollArea::vertical().show(ui, |ui| match view.selection() {
         SchematicSelection::Component(idx) => {
             if idx >= view.schematic.components.len() {

@@ -2,7 +2,219 @@
 
 Fecha: 2026-07-05
 
+## Actualizacion 2026-07-22 - RafUI physical-density correction
+
+- Se corrigio la mezcla de coordenadas logicas y fisicas del compositor GPU:
+  solids, texto e imagenes ahora convierten sus vertices al target fisico antes
+  de NDC, y el target fisico forma parte de la clave de geometria.
+- `UiEnvironment::raster_scale()` ahora coincide con `pixels_per_point`; no
+  supersamplea un atlas 2x dentro de una textura 1x.
+- Las superficies retained usan muestreo nearest cuando las dimensiones fisicas
+  de origen y destino coinciden, incluso con DPI fraccional redondeado; linear
+  queda reservado para un reescalado real. Viewport y CAD conservan su politica
+  linear.
+- Los iconos retained se cargan con mipmaps CPU alpha-correctos y reduccion
+  premultiplicada; el sampler elige un mip completo en vez de mezclar dos,
+  evitando texture shimmering, bleeding y el aspecto lavado en iconos 64px
+  mostrados en celdas pequenas.
+- Verificacion: `raf_ui` 38 pruebas, `raf_render` 147 pruebas, `raf_editor`
+  74 pruebas y `cargo check -p raf_ui -p raf_render -p raf_editor` pasan.
+
+## Actualizacion 2026-07-22 - Games workbench visual pass
+
+- El toolbar de Game conserva solo herramientas existentes de edicion. Scene
+  y FPS siguen siendo un unico estado dinamico al extremo derecho, sin
+  duplicados ni controles globales inventados.
+- El viewport queda compuesto por dos overlays retained RafUI independientes:
+  arriba a la izquierda, 2D/3D y el modo de render real; abajo a la derecha,
+  foco, grid, reset de vista y el historial real de Undo/Redo. No se agrego
+  Play/Run porque ese runtime no pertenece a esta superficie.
+- Cada overlay usa su propio `RafUiSurfaceBridge`; barra superior, overlay
+  superior y overlay inferior no comparten textura, atlas, input ni tooltip.
+  Sus dos rectangulos se registran como zonas bloqueadas para que orbit, pan
+  o manipulacion del mundo nunca empiecen bajo un control flotante.
+- `undo.png` y `redo.png` son assets separados de alta densidad, generados
+  como flechas direccionales opuestas. La accion deshace/rehace los snapshots
+  existentes de la app; no son iconos decorativos ni comandos vacios.
+- El texto retained tiene un contrato separado de la geometria: el target de
+  paneles e iconos sigue 1:1 con el output fisico, mientras que el atlas de
+  texto usa un piso de 1.25x y aplica peso semantico (regular/medium/bold) a
+  la cobertura vectorial. Esto evita volver a suavizar todo el surface para
+  mejorar solo etiquetas pequenas.
+- No se agrego Play/Run al boceto porque el runtime de Game sigue fuera del
+  contrato disponible en esta superficie.
+- Hierarchy reorganizo su header en dos niveles: titulo/conteo y controles de
+  busqueda/carpeta. Las filas conservan seleccion, expansion, visibilidad,
+  menu contextual y tooltips, pero reducen peso visual e iconos saturados.
+- Inspector tabs, Properties, Sessions y bottom tabs adoptan el mismo peso de
+  icono: activo enfatizado, inactivo atenuado, sin cambiar sus acciones.
+
+## Actualizacion 2026-07-21 - RafUI Frontier Core
+
+- `raf_ui::overlays` establece el contrato de colocacion global para tooltips,
+  menus, popovers, modales y previews de drag. El overlay conserva el dueño
+  semantico, pero ya no queda atrapado por el clip de la superficie origen.
+- `UiSizeMode` agrega `FitContent`, `MinContent`, `MaxContent`, `Fixed`, `Fill`
+  y `Auto`. ApiGraphicBasic mide texto localizado desde el atlas antes de
+  generar el draw list final.
+- `UiInteractionState` conserva tiempo monotono de hover, transiciones enter/
+  leave y progreso de hover intent. `UiTween` sustituye pasos de opacidad por
+  motion dependiente de tiempo y compatible con reduced motion.
+- `raf_ui::components` centraliza recipes para icon buttons, panel headers,
+  tree rows y tooltips. El tooltip del editor vive en
+  `raf_ui_tooltip.rs`, separado del bridge de colocacion.
+- `UiEnvironment` centraliza layout logico, target fisico y raster scale. GPU y
+  CPU reciben la misma geometria retenida.
+- `UiSurfaceDiagnostics` expone conteos de cajas, clipping, hit regions,
+  text requests, nodos de tamaño cero y z-order para inspector y golden tests.
+- La migracion conserva el bridge eframe como compositor de texturas. No se
+  agrego dibujo de rectangulos, texto ni interaccion retenida desde egui.
+- Verificacion estructural de esta actualizacion: `cargo check -p raf_ui
+  -p raf_render -p raf_editor` pasa. La validacion visual manual queda abierta
+  hasta reiniciar el engine y revisar dark/light, compacto, HiDPI, GPU y CPU.
+
+## Actualizacion 2026-07-19 - Integridad del viewport y batching ligero
+
+- El viewport ahora registra la entrada de gizmo/vertex antes de construir el
+  frame. La vista deja de mostrar un estado atrasado un frame durante un drag.
+- La clave de cache ya no se invalida en cada frame de Vertex Edit: solo cambia
+  cuando una edicion modifica la malla. La camara y la escena siguen siendo
+  entradas explicitas de la clave.
+- El target de escena respeta `pixels_per_point` de egui, por lo que el render
+  usa pixeles fisicos y los overlays conservan geometria logica.
+- Las lineas contiguas se registran como `DrawLineBatch`; GPU y CPU comparten
+  ancho, color y depth bias. El GPU expande cada linea a un quad de seis
+  vertices en una sola llamada por batch; el CPU usa el mismo ancho visible.
+- Los meshes persistentes se deduplican por frame y el cache GPU tiene limite
+  de entradas. Los overrides de Vertex Edit son transitorios y no contaminan
+  el cache persistente.
+- El culling y el foco usan escala del transform mundial, corrigiendo hijos
+  escalados por un padre. La geometria visible ya no depende de que el nodo
+  tenga nombre.
+- `Sprite2D` deja de ser una primitiva activa. Escenas RON y comandos antiguos
+  se aceptan como alias de `Plane`; el 2D de juego queda definido como escena
+  3D con camara ortografica. UI/overlays siguen siendo RafUI.
+- No se habilitaron sombras, postprocesado, PBR, particulas ni animacion
+  esqueletica; siguen fuera del alcance de estabilizacion.
+- Crash de arranque corregido: el shader de lineas ya no asigna swizzles WGSL
+  (`clip.xy`/`clip.z`), una forma rechazada por wgpu 23 antes de abrir proyectos.
+  `shaders::tests::basic_scene_shader_parses_with_wgpu_naga` protege el contrato.
+- Verificacion: `cargo check -p raf_render -p raf_editor` pasa;
+  `cargo test -p raf_render --lib` (139), `cargo test -p raf_editor --lib`
+  (67) y `cargo test -p raf_core --lib` (34) pasan.
+
+## Actualizacion 2026-07-18 - RafUI compilation and native menu boundary
+
+- RafUI no longer creates a UI `BasicCommandList` plus a separate direct draw
+  list. `UiSurfaceFrame` now carries only layout, hit regions, and text
+  requests; `UiSurfaceDrawList` is the single retained paint payload consumed
+  by GPU presentation and CPU recovery.
+- `UiSurfaceCompilationCache` reuses unchanged layout, hit testing, resolved
+  text, and paint data. The GPU compositor retains vertex buffers, avoids
+  duplicate image uploads, and merges compatible adjacent paint runs without
+  changing the visual stacking order. Metrics expose cache hits, upload bytes,
+  paint runs, and draw calls for real before/after measurements.
+- `UiApplicationMenu` is the canonical File/Edit/View/Project/Help command
+  tree. The current eframe bar renders that shared model as a fallback, while
+  `NativeApplicationMenuAdapter` gives the native Winit shell the same command
+  IDs later. Platform adapters return activations only; they never mutate
+  scene, CAD, project, or persistence state.
+- A literal operating-system menu is not claimed while eframe owns the window
+  and event loop. That migration has an explicit native-host boundary instead
+  of a hidden platform-specific fork.
+
+## Actualizacion 2026-07-18 - Contratos RafUI y ApiGraphicBasic
+
+- Documentacion RafUI: `docs/RAF_UI_AUTHORING.md` define la propiedad de cada
+  capa, el ciclo de una superficie retained, layout responsivo, docking, foco,
+  scroll, accesibilidad, checklist y el patron exacto de menus con trigger,
+  overlay, cierre por Escape/click externo y acciones tipadas.
+- Regla visual: `DESIGN.md` y las reglas de `.ai` son obligatorias para toda
+  nueva superficie. Tokens semanticos, i18n, contraste, escala logica/fisica,
+  no inventar datos, no usar decoracion costosa y no crear un segundo sistema
+  de widgets son requisitos, no sugerencias.
+- CAD: Schematic y PCB siguen siendo superficies ApiGraphicBasic. El minimapa,
+  rutas, seleccion y bounds visibles deben consumir el mismo documento CAD.
+  Un overlay temporal y limitado solo es valido para preservar visibilidad
+  autoritativa mientras exista una diferencia de paridad GPU/CPU.
+- ApiGraphicBasic: `docs/APIGRAPHICBASIC.md` fija que Scene, CAD, RafUI y
+  assets pasan por contratos y handles propios. `raf_assets` descubre y
+  decodifica; ApiGraphicBasic asigna, sube, presupuesta y libera recursos GPU.
+  WGPU continua como backend privado actual y no puede filtrarse hacia
+  documentos, paneles o modelos de dominio.
+- Estado de migracion: Hub, Settings y partes del shell/CAD ya ejercen RafUI;
+  los cuerpos que aun usan adaptadores Egui siguen siendo transitorios. La
+  documentacion no declara terminada la sustitucion visual ni la validacion
+  manual completa del editor.
+
 Este documento resume que ya esta resuelto en codigo, que ya venia funcionando, que sigue pendiente y en que fase cae cada bloque. La idea es tener una sola fuente de verdad mientras cerramos la estabilizacion antes de testear a fondo.
+
+## Actualizacion 2026-07-18 - Hibrido Controlado ApiGraphicBasic/WGPU
+
+- Decision: `ApiGraphicBasic` es el dueño permanente del sistema grafico. WGPU
+  sigue siendo el adaptador GPU activo y backend de compatibilidad mientras la
+  API propia gana responsabilidades. No se hara un reemplazo total de golpe.
+- Organizacion: la migracion no se manejara como niveles desechables. Cada
+  update puede mover una responsabilidad completa hacia contratos propios:
+  handles, capabilities, device/queue/surface, recursos persistentes, uploads,
+  memoria y residencia, comandos, pipelines, sincronizacion, frame graph,
+  assets, diagnostico o recuperacion.
+- Estado hibrido: viewport, CAD y RafUI conservan una sola ruta superior. WGPU
+  y los futuros backends DX12/Vulkan/Metal existen debajo de ApiGraphicBasic;
+  no se duplican documentos, escenas, paneles ni command models.
+- Fundacion inmediata cuando se autorice programacion: ocultar tipos `wgpu::*`
+  de las capas superiores, introducir handles propios, definir un solo dueño de
+  device, capabilities y presupuestos, medir el hot path y mejorar batching y
+  reuso sin retirar todavia el backend WGPU.
+- Retiro lento: un backend nativo puede coexistir con WGPU, convertirse en
+  default al pasar paridad y mediciones, y dejar WGPU como fallback. WGPU solo
+  sale del producto cuando pasan las pruebas de Scene, Schematic, PCB, RafUI,
+  memoria, idle, pacing, resize, perdida de device y hardware integrado/dedicado.
+- Alcance de esta actualizacion: solo documentacion y reglas. No se modifico el
+  renderer, no se inicio DX12/Vulkan/Metal y no se elimino ninguna dependencia.
+
+Regla autoritativa: [ApiGraphicBasic Controlled Hybrid Rule](../.ai/APIGRAPHICBASIC.md).
+
+## Actualizacion 2026-07-18 - Fundacion 1 Implementada
+
+- ApiGraphicBasic ahora expone handles generacionales propios para buffers,
+  texturas, samplers, pipelines, meshes, materiales y surfaces. Estos ids no
+  contienen punteros ni tipos de WGPU.
+- Se agregaron `GraphicsCapabilities`, `GraphicsMemoryBudget` y preferencia de
+  adaptador. `Auto` conserva presupuesto potato y preferencia low-power;
+  `GpuPreferred` conserva la ruta de alto rendimiento.
+- `BasicDevice` y `RenderRuntimeSnapshot` reportan backend, capabilities y
+  presupuesto sin obligar a viewport, CAD o RafUI a conocer la API nativa.
+- `SharedGraphicsContext` reemplaza el nombre WGPU en la frontera del runtime.
+  `SharedWgpuContext` queda solamente como alias transitorio para compatibilidad.
+- `SceneFrameOutput` encapsula la vista GPU en `GpuTextureView` con handle Rafi.
+  `from_wgpu` y `as_wgpu` sobreviven solo para el puente Egui/native actual.
+- Verificacion: `cargo test -p raf_render --lib` (134) y
+  `cargo test -p raf_editor --lib` (66) pasan; `cargo check -p aura_rafi_editor`
+  tambien termina correctamente.
+- Todavia pendiente: registry real con eviction, enforcement de budgets,
+  batching estructural, unificacion completa de DeviceHub entre hosts nativos,
+  frame graph y backends DX12/Vulkan/Metal. WGPU sigue siendo el ejecutor GPU.
+
+## Actualizacion 2026-07-17 - Shell CAD Electronics
+
+- Electronics: Schematic y PCB ahora usan el shell compartido con selector
+  contextual RafUI, navegador CAD a la izquierda, inspector a la derecha y
+  dock inferior fijo. Los documentos, seleccion, cross-probe y sincronizacion
+  PCB siguen en sus modulos existentes; no se creo una segunda escena CAD.
+- Canvas: `ElectronicsCadSurfaceHost` sigue siendo el propietario de la
+  presentacion ApiGraphicBasic GPU-first y del fallback CPU. Schematic y PCB
+  agregan minimapa, estado de zoom y recursos PNG de mayor densidad sin
+  depender de iconos escalados de baja resolucion.
+- Biblioteca: el catalogo de schematic conserva busqueda y colocacion, ahora
+  con clipping, scroll de contenido correcto y barra de posicion para escalar
+  a bibliotecas mas grandes.
+- Analisis: DRC y Simulacion dejaron de reenviar al usuario a Console. Cada
+  una abre una pestana propia del dock con el reporte estructurado real y una
+  accion para ejecutar de nuevo. Cualquier edicion invalida esos resultados.
+- Recursos: `tools/generate_electronics_ui_icons.ps1` genera assets PNG locales
+  de alta resolucion solo durante desarrollo. No forma parte del loop ni del
+  paquete en ejecucion.
 
 ## Actualizacion 2026-07-12
 
@@ -35,7 +247,118 @@ Este documento resume que ya esta resuelto en codigo, que ya venia funcionando, 
 Pendiente de cierre: compilacion completa, pruebas de crates y recorrido manual
 del viewport, chat, Sessions y CAD sobre la app nativa.
 
-## Decision GPU/WGPU Antes De Runtime
+## Actualizacion 2026-07-13 - Hub RafUI
+
+- Hub: la ruta activa despues de Loading sigue siendo RafUI/ApiGraphicBasic. La
+  primera presentacion bitmap se reemplazo por un atlas de fuente vectorial
+  cacheado; deja de mostrar el texto pixelado provisional.
+- Jerarquia del Hub: bienvenida, proyecto reciente, proyectos reales,
+  creacion de Game/Electronics, actividad reciente y selector Dark/Light/System
+  son datos reales. No se agregaron templates, marketplace, IA ni estados de
+  build ficticios.
+- Proyecto reciente: clic izquierdo abre. Clic derecho abre un menu retained en
+  la posicion del cursor con Abrir, Duplicar y Quitar de recientes.
+- Presentacion: el Hub ya no llama `request_repaint()` en reposo. Solo solicita
+  un frame de seguimiento al cambiar estado por una interaccion, eliminando un
+  bucle de presentacion evitable que podia amplificar avisos de frame
+  `Suboptimal` durante el launcher.
+- Verificacion automatica: `cargo check -p raf_editor`, `cargo test -p raf_ui`
+  (24), `cargo test -p raf_render` (126) y `cargo test -p raf_editor` (32)
+  pasan en esta actualizacion.
+
+Pendiente manual: relanzar el editor, revisar legibilidad de la nueva fuente,
+probar el menu secundario, los tres temas, resize de ventana y confirmar que
+los avisos `Suboptimal` ya no se repiten en reposo. Si quedara alguno tras un
+resize real, debe rastrearse como evento de swapchain de la ventana, no
+silenciarse en logs.
+
+## Actualizacion 2026-07-14 - Fundacion Del Shell Compartido
+
+- RafUI: `DockLayout` ahora guarda politica de panel (`Movable` o `Fixed`) y
+  lados permitidos. Un dock no puede escapar a una zona que no acepta su tipo.
+- Shell: cada proyecto puede persistir `editor_shell.ron`. Hierarchy,
+  Properties y Sessions son paneles auxiliares movibles; Bottom es fijo y
+  Center es el slot exclusivo para viewport o CAD.
+- Compatibilidad: archivos inexistentes, antiguos o incompletos se reparan al
+  abrir el proyecto. Se conserva toda dimension valida del usuario y se
+  restaura infraestructura fija si se hubiera guardado en una posicion invalida.
+- Adaptador temporal: el editor actual ya usa esas dimensiones persistidas para
+  sus paneles laterales e inferior y las guarda solo despues de terminar un
+  arrastre sobre el borde. Un resize de ventana no pisa la preferencia del
+  usuario. Todavia no se afirma que los cuerpos de esos paneles dejaron Egui:
+  esa es la siguiente migracion, ahora con una sola fuente de verdad de layout.
+- Documento retained: `editor_shell_surface.rs` define el shell comun de Game
+  y Electronics con intents tipados. Viewport, Schematic y PCB quedan como
+  superficies de renderer, no como widgets genericos.
+- Migracion visible inicial: los tabs inferiores y el selector
+  Properties/Sessions ya se componen con RafUI/ApiGraphicBasic. Console,
+  Assets, Agent, Properties y Sessions conservan sus cuerpos actuales mientras
+  se mueve cada uno a una superficie propia.
+- Electronics: el selector Schematic/PCB tambien es retained. El cambio de
+  modo sigue ejecutando sincronizacion PCB y cross-probe en la frontera de la
+  aplicacion, no dentro del renderer ni del documento de UI.
+
+## Actualizacion 2026-07-14 - Composicion Del Hub RafUI
+
+- Layout: el Hub deja de meter el contenido principal y el rail derecho dentro
+  del mismo `ScrollView`. Ahora tiene tres regiones retained independientes:
+  navegacion, `hub.content` y `hub.side-scroll`. El rail derecho conserva un
+  ancho de escritorio real hasta que el contenido ya no cabe y entonces apila
+  de forma responsiva.
+- Paneles: Create new y Recent activity tienen tracks de altura declarados.
+  Antes un panel `auto` en columna se resolvia a altura cero y sus controles
+  se sobreponian; ahora cada accion y actividad ocupa su propia region.
+- Tema: Dark, Light y System siguen usando los tokens semanticos de RafUI. La
+  direccion por defecto en oscuro es negro, blancos/neutros y naranja; no se
+  agrega azul de marca.
+- Recursos: se reutilizan los PNG existentes de marca, settings, game y
+  electronics. No se agrego generacion decorativa ni una dependencia de
+  imagenes en el loop del editor.
+- QA visual: se reviso el Hub en ventana nativa con escalado DPI 120. La
+  captura correcta debe usar coordenadas fisicas de ventana en Windows; una
+  captura virtualizada puede recortar el rail derecho y dar un falso positivo.
+- Pruebas locales focalizadas: `studio_surface::tests` verifica el rail a un
+  ancho de escritorio compacto y que Create/Activity no compartan una altura
+  cero. `hub_surface_host` verifica que una solicitud contextual conserve la
+  ruta del proyecto.
+
+## Actualizacion 2026-07-14 - Nitidez Y Scroll Del Hub RafUI
+
+- Scroll: la adaptacion Egui -> RafUI invierte el signo de la rueda al entrar
+  al contrato de offsets retained. Wheel-down ahora muestra contenido mas bajo
+  y wheel-up regresa hacia el inicio. Se comprobo en la ventana nativa.
+- HiDPI: `HubSurfaceHost` conserva layout e input en puntos logicos, pero crea
+  el target de ApiGraphicBasic usando `pixels_per_point`. El atlas de texto se
+  rasteriza a esa escala, el compositor GPU transforma clips al viewport fisico
+  y el fallback CPU usa la misma geometria fisica.
+- Recursos: `tools/ui_assets/generate_editor_icons.py` genera previews PNG de
+  640x360 para Game y Electronics. Son visuales neutrales, sin texto incrustado
+  para no romper i18n, y reemplazan iconos de 64 px estirados dentro de cards.
+- Muestreo: atlas e imagenes usan filtrado lineal para no amplificar aliasing
+  al redimensionar. El color y la composicion siguen usando el mismo renderer
+  GPU-first y el mismo limite de recursos.
+- Verificacion: `cargo test -p raf_ui` (25), `cargo test -p raf_render` (129),
+  `cargo test -p raf_editor` (37), `cargo fmt --all -- --check` y
+  `cargo build -p aura_rafi_editor` terminaron correctamente. La ventana
+  nativa se reviso a escala fisica y la rueda se probo en ambos sentidos.
+
+## Actualizacion 2026-07-14 - Refinamiento Visual Del Hub RafUI
+
+- Composicion: el rail de proyecto y la columna de acciones se compactaron
+  para priorizar el area de trabajo. La tarjeta destacada usa un preview mas
+  amplio, contenido centrado y una accion primaria alineada al borde inferior.
+- Jerarquia: el rail derecho ahora agrupa las acciones reales bajo Quick
+  actions. Recent activity incluye el tipo de proyecto como icono y las cards
+  separan nombre, tipo y ultima apertura para lectura rapida.
+- Contexto: cada card muestra un control de tres puntos que abre el mismo menu
+  retained de Abrir, Duplicar y Quitar de recientes que ya exponia el clic
+  derecho. No se agregaron acciones ficticias.
+- QA: se verifico el layout en la ventana nativa con DPI 120 y los estados
+  neutrales y hover de la tarjeta destacada. `cargo test -p raf_editor` (37),
+  `cargo fmt --all -- --check` y `cargo build -p aura_rafi_editor` terminaron
+  correctamente.
+
+## Direccion Grafica Propia Antes De Runtime
 
 La ruta de trabajo definida para el editor y el engine es GPU nativa. CPU queda
 para recuperacion, pruebas, ejecucion sin adaptador valido y equipos
@@ -43,25 +366,64 @@ incompatibles; no es el modo visual objetivo de un proyecto normal. Un perfil
 ligero reduce resolucion, draw calls y memoria en una GPU integrada, no degrada
 automaticamente al rasterizador CPU.
 
-`wgpu` se conserva como backend intercambiable de `ApiGraphicBasic`, no como
-una dependencia de interfaz. El cuello actual no es que WGPU renderice un
-viewport: la ventana y la composicion siguen cruzando Eframe/Egui. La migracion
-ya tiene UI retenida, atlas de texto local, compositor WGPU directo, input
-Winit y host de ventana nativo sin Egui.
+`ApiGraphicBasic` pasa a ser la tecnologia grafica dueña de Rafi: define los
+frames, recursos, pipelines, capacidades, superficies, importacion de assets,
+residencia en GPU y presentacion. WGPU es el adaptador GPU actual, no el techo
+ni el propietario de esa arquitectura. La meta es que Rafi pueda seleccionar
+backends propios por plataforma o area de trabajo, incluyendo rutas directas
+cuando aporten mejor control, sin reescribir viewport, CAD, RafUI, escenas,
+documentos o comandos.
+
+RafUI no depende de WGPU en su modelo: arbol retained, layout, temas, foco,
+input y documentos viven en Rust puro. Hoy el compositor de ApiGraphicBasic usa
+WGPU para dibujar la lista de quads y texto, pero ese compositor esta debajo de
+la interfaz y se puede sustituir por un backend propio sin repetir la migracion
+de cada pantalla.
+
+### Proceso Continuo Del Hibrido
+
+No se interpreta como una secuencia de niveles que obligue a parar el engine.
+Se interpreta como una lista de responsabilidades que iran faltando hasta que
+ApiGraphicBasic pueda vivir sin WGPU:
+
+| Responsabilidad | Estado durante el hibrido | Destino |
+| --- | --- | --- |
+| API publica | ApiGraphicBasic existe, pero aun hay tipos/ownership WGPU en la implementacion | Solo handles y descriptores Rafi visibles arriba |
+| Ejecucion GPU | WGPU ejecuta la ruta activa | Backend propio elegido por plataforma |
+| Recursos | Hay reuso parcial, caches y slots, pero falta un registry con presupuesto completo | Recursos persistentes, generaciones, residency y eviction propios |
+| Comandos | Scene/CAD/RafUI ya producen datos de render compartidos, con granularidad aun mejorable | Encoder Rafi con batching, render/copy y compute futuro |
+| Surface/device | Existen hosts y contextos activos, todavia ligados a WGPU/host transitorio | Un DeviceHub y lifecycle propio por adaptador/surface |
+| Shaders/pipelines | WGPU/WGSL sostienen la ruta actual y hay features preparadas | Paquetes y caches por backend bajo layouts Rafi |
+| Sincronizacion | La resuelve principalmente el adaptador actual | Estados, fences, recovery y diagnostico propiedad de Rafi |
+| Features futuras | PBR, shadows, post, particles y skeletal siguen preparadas/inactivas | Frame graph y presupuestos comunes antes de activarlas |
+| Compatibilidad | WGPU y CPU preservan cobertura mientras nace lo nativo | WGPU opcional y finalmente removible; CPU queda recovery |
+
+Durante la coexistencia se selecciona un backend por ruta de device/surface. No
+se mezclan recursos WGPU y DX12/Vulkan/Metal dentro del mismo frame salvo que
+exista un contrato de interop deliberado y medido; las copias cross-API
+accidentales violan el objetivo potato-first.
 
 Antes de runtime se debe decidir con evidencia:
 
-- El workspace usa WGPU 23 y necesita una auditoria de upgrade antes de adoptar
-  APIs avanzadas de largo plazo.
-- Vulkan, DX12 y Metal no exponen las mismas capabilities. Las funciones
-  futuras deben estar por tier y conservar alternativas ligeras.
-- ApiGraphicBasic ya evita el piso WebGL2 en su inicializacion propia, pero
-  faltan mediciones de adaptador, memoria y frame pacing antes de elegir
-  politicas definitivas.
+- El workspace usa WGPU 23 como adaptador actual. ApiGraphicBasic necesita
+  completar su capa de backend propia con contratos de device, cola, swapchain,
+  shaders, recursos, sincronizacion y diagnostico por plataforma.
+- El nuevo asset ingress de ApiGraphicBasic sera responsable de importar y
+  preparar assets para el backend activo: clasificacion, decode/transcode,
+  thumbnails, cache y residencia GPU. `raf_assets` conserva el catalogo y los
+  archivos de proyecto; ApiGraphicBasic decide como los recursos llegan a GPU.
+- Vulkan, DX12 y Metal se exponen detras de la misma API de Rafi. Los tiers
+  ligeros siguen siendo una eleccion de presupuesto, no una limitacion de la
+  arquitectura ni una dependencia de una sola capa externa.
+- ApiGraphicBasic ya evita el piso WebGL2 en su inicializacion propia. Faltan
+  mediciones de adaptador, memoria y frame pacing para ordenar el trabajo de
+  los backends propios y priorizar cada plataforma.
 - PBR, sombras, postprocesado, particulas, animacion esqueletica y picking GPU
   no se activan en esta estabilizacion. Solo se preservan sus fronteras limpias.
-- Si WGPU no cumple las mediciones, se sustituye su backend bajo
-  ApiGraphicBasic; no se reescriben UI, escenas, documentos ni comandos.
+- La evolucion busca que ninguna dependencia externa sea obligatoria para el
+  producto final: WGPU puede coexistir como backend mientras ApiGraphicBasic
+  gana rutas propias. Ninguna de esas decisiones obliga a reescribir UI,
+  escenas, documentos ni comandos.
 
 Validacion obligatoria antes de runtime: GPU integrada y dedicada, resize
 sostenido, perdida/restauracion de device, Linux, macOS, frame pacing y memoria.
@@ -363,7 +725,9 @@ Se instaura el sistema de unidades canonico del engine. Sin fisica, sin runtime,
 - Settings generales: limit FPS corregido (Unlimited ahora funciona via fps_limit=0), scroll bug corregido (botones Save/Cancel ya no quedan fuera). `Esc` como salida rapida ya existia.
 - Guardado lineal por proyecto: pendiente de diseno/implementacion como modo opt-in para quien priorice cero perdida ante crash aunque cueste rendimiento.
 - Renderer activo: el corte documental canonico ya empezo, pero todavia falta congelar por completo el path oficial entre docs, codigo y surfaces activas.
-- Hot path grafico: el backend GPU activo todavia crea buffers por draw y por frame; eso merece optimizacion estructural antes de empezar una guerra de micro-optimizaciones por todo el engine.
+- Hot path grafico: el backend GPU activo ya reutiliza buffers de meshes
+  persistentes y slots de lineas; aun paga uniforms por draw y uploads de
+  overrides transitorios, por lo que falta una medicion estructural completa.
 - Medicion del hot path: falta una linea base reproducible con escenas de referencia para validar mejoras reales de renderer con antes/despues, no por intuicion, incluyendo una prueba seria de resize y policy `Auto`.
 - Contrato CPU fallback/GPU activo: falta dejar por escrito que paridad minima se mantiene mientras se consolida el path canonico, para no optimizar rompiendo la ruta potato.
 - Optimizacion global del engine: no conviene abrirla aun; primero hay que congelar que renderer/runtime grafico es el camino oficial.
@@ -495,7 +859,9 @@ Ya justificado para esta fase:
 - Scene, Schematic y PCB ya comparten una ruta moderna de runtime grafico.
 - El viewport ya usa mediciones reales de render/upload y escala adaptativa.
 - Sigue habiendo mezcla de verdad documental y tecnica sobre si el renderer debe leerse como CPU-first, GPU-first o ruta hibrida en transicion.
-- El backend GPU activo todavia paga costo estructural creando buffers por draw/per-frame en el camino caliente.
+- El backend GPU activo ya tiene cache de meshes persistentes, slots de lineas
+  reutilizables y batches contiguos; quedan uniforms por draw y batching
+  cross-surface para otra iteracion medida.
 - El fallback CPU sigue formando parte del contrato del engine y no conviene degradarlo mientras se congela el camino oficial.
 
 Ya cubierto en esta fase:

@@ -212,7 +212,6 @@ impl PropertiesPanel {
                                 Primitive::Sphere,
                                 Primitive::Plane,
                                 Primitive::Cylinder,
-                                Primitive::Sprite2D,
                                 Primitive::Empty,
                             ];
                             for prim in primitives {
@@ -632,7 +631,6 @@ fn rigid_body_type_label(kind: RigidBodyType, lang: Language) -> &'static str {
 fn primitive_collider_points(primitive: Primitive) -> Vec<Vec3> {
     match primitive {
         Primitive::Plane => vec![Vec3::new(-0.5, -0.05, -0.5), Vec3::new(0.5, 0.05, 0.5)],
-        Primitive::Sprite2D => vec![Vec3::new(-0.5, -0.5, -0.05), Vec3::new(0.5, 0.5, 0.05)],
         _ => vec![Vec3::splat(-0.5), Vec3::splat(0.5)],
     }
 }

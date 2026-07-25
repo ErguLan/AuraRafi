@@ -43,10 +43,7 @@ fn generate_image(command: &ParsedCommand, ctx: &mut AssetCommandContext<'_>) ->
     start_generation(ctx, request, "Generate image")
 }
 
-fn generate_local_png(
-    command: &ParsedCommand,
-    ctx: &mut AssetCommandContext<'_>,
-) -> CommandOutput {
+fn generate_local_png(command: &ParsedCommand, ctx: &mut AssetCommandContext<'_>) -> CommandOutput {
     let style = match command.arg("style") {
         Some("icon") | None => AssetLocalPngStyle::Icon,
         Some("badge") => AssetLocalPngStyle::Badge,
@@ -134,10 +131,7 @@ fn start_generation(
             vec![
                 format!("job_id: {job_id}"),
                 "status: queued".to_string(),
-                format!(
-                    "source: {}",
-                    if is_local { "local_png" } else { "remote" }
-                ),
+                format!("source: {}", if is_local { "local_png" } else { "remote" }),
                 "output: assets/generated/<name>.png".to_string(),
             ],
             json!({"ok": true, "job_id": job_id, "status": "queued"}),

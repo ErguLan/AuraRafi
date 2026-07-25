@@ -73,48 +73,44 @@ AuraRafi is a tool for building scenes, logic, electronics, and future runtime s
 - **Do not create giant always-on panels** that keep expensive content live when hidden.
 - **Startup matters:** The first editor experience should load quickly and avoid front-loading non-essential systems.
 
-## 9. Egui Implementation Patterns
+## 9. RafUI Implementation Patterns
 
-### Tabs
-Preferred pattern:
-```rust
-let text_color = if active { app_theme::ACCENT } else { MUTED_GRAY };
-let btn = egui::Button::new(
-  egui::RichText::new("Tab").color(text_color).size(13.0)
-)
-.fill(egui::Color32::TRANSPARENT)
-.frame(false);
-let response = ui.add(btn);
-if active {
-  ui.painter().line_segment([left_bottom, right_bottom], Stroke::new(2.0, app_theme::ACCENT));
-}
-```
+### Structure
 
-### Standard Buttons
-Preferred pattern:
-```rust
-let btn = egui::Button::new(
-  egui::RichText::new("Refresh").size(11.0).color(MUTED_TEXT)
-)
-.fill(egui::Color32::from_rgb(34, 34, 38))
-.stroke(egui::Stroke::new(1.0, BORDER))
-.rounding(4.0);
-```
+- Build a stable `UiDocument` from `UiNode`, `UiLayout`, semantic classes, and
+  translation keys. Do not build persistent editor chrome from immediate-mode
+  widget calls.
+- Keep the visual tree declarative. The host carries focus, hover, scroll,
+  text buffers, hit regions, menu placement, and typed action dispatch.
+- Use one structural root, then explicit rails, command rows, canvas slots,
+  inspectors, docks, and overlays. Do not nest empty cards merely to create
+  spacing.
 
-### Inspector Cards
-Preferred pattern:
-```rust
-egui::Frame::none()
-  .fill(PANEL_FILL)
-  .stroke(egui::Stroke::new(1.0, BORDER))
-  .rounding(8.0)
-  .inner_margin(12.0)
-  .show(ui, |ui| {
-    ui.label(egui::RichText::new("TRANSFORM").size(12.0).strong().color(MUTED_HEADER));
-    ui.add_space(8.0);
-    // Controls...
-  });
-```
+### Tabs, Buttons, And Inspector Sections
+
+- Tabs are focusable buttons with a semantic active class. Use the active edge
+  and focus token; do not enlarge the tab or recolor the whole workspace.
+- Standard buttons have a fixed logical height, a stable icon/text layout,
+  `4px` radius, and a semantic role. Only one primary action may use filled
+  orange in a local command group.
+- Inspector sections are grouped by domain data, not decorative cards.
+  Structure the labels, controls, descriptions, and reset actions in a bounded
+  grid that stacks on compact width.
+
+### Menus
+
+- A trigger emits `UiAction::OpenMenu`; the menu is `UiNodeKind::Menu` with an
+  elevated z-index. Its host owns open state and keyboard focus.
+- Close on Escape, outside primary/secondary click, accepted command, or a
+  rebuild that removes the target. Clamp to surface bounds.
+- Use a three-dot trigger only for a repeated item's local actions. Global
+  commands belong in the shared command row.
+
+### Transitional Egui Rule
+
+Egui may bridge a remaining panel body while it migrates, but it must not gain
+new permanent navigation, context-menu, canvas, docking, or renderer-ownership
+logic. Move those responsibilities to RafUI/ApiGraphicBasic first.
 
 ## 10. Rules for Agents
 If asked to modernize or clean the engine UI:
@@ -125,3 +121,42 @@ If asked to modernize or clean the engine UI:
 4. Prefer inline/contextual workflows over blocking modal flows.
 5. Make panels, gizmos, and layout behavior match what the user visually expects.
 6. Improve professional feel through structure, contrast hierarchy, spacing, and consistency, not through flashy decoration.
+7. Read `docs/RAF_UI_AUTHORING.md` for every retained surface and
+   `docs/APIGRAPHICBASIC.md` for every renderer/asset surface change.
+8. Never fake CAD/scene content in a minimap, overlay, status metric, or
+   preview. Derive it from the real document and active transform.
+
+## 11. RafUI Frontier Quality Gate
+
+The following are now core review gates, not optional panel polish:
+
+1. Tooltips, menus, popovers, drag previews, and modals use a global RafUI
+   overlay layer and never escape their owner surface by enlarging or abusing
+   its clip rectangle.
+2. Localized content uses `UiSizeMode::FitContent` or explicit min/max bounds;
+   translated text is measured through the retained atlas before final paint.
+3. Hover entry/exit is session state with monotonic time. Transitions use
+   `UiTween`, are motivated, and stop requesting frames when settled.
+4. Repeated visual language comes from `raf_ui::components`, not copied style
+   literals in panel builders.
+5. Logical layout and pointer coordinates remain stable across DPI. Physical
+   target size and bounded raster scale come from `UiEnvironment`.
+6. GPU and CPU hosts expose equivalent `UiSurfaceDiagnostics` so layout issues
+   can be diagnosed without relying on a screenshot alone.
+
+The design pre-flight remains locked to the technical/utilitarian RafUI
+identity in `.ulpi/design/DESIGN.md`: active orange edge, restrained neutral
+surfaces, no gradients, no glow, no decorative animation, and no fake product
+data.
+
+## 12. AuraRafi quality charter
+
+The heart of AuraRafi UI is crispness, stability, hierarchy, truth, and
+restraint. A visual defect that appears as sparkling points, crawling edges,
+or changing icon silhouettes is classified as a rendering problem first:
+pixel shimmer, subpixel jitter, temporal aliasing, texture bleeding, or
+resampling blur. It is not solved by inflating controls or adding decoration.
+
+Before approving a RafUI surface, compare static and interactive frames at
+100%, 125%, 150%, and 200% DPI. Verify physical target allocation, pixel
+snapping, sampling mode, atlas guard pixels, cache identity, and GPU/CPU parity.

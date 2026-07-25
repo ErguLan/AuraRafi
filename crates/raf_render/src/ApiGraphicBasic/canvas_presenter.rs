@@ -150,7 +150,7 @@ impl DirectCanvasPresenter {
         clear_color: [u8; 4],
     ) {
         let source = match output {
-            SceneFrameOutput::GpuTexture { view, .. } => Some(view),
+            SceneFrameOutput::GpuTexture { view, .. } => Some(view.arc()),
             SceneFrameOutput::CpuPixels(pixels) => {
                 self.upload_cpu_pixels(device, queue, &pixels, source_size)
             }

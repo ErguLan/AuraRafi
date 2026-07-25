@@ -1,7 +1,7 @@
 //! Winit input adapter for retained UI surfaces.
 
 use raf_ui::UiInputState;
-use winit::event::{ElementState, Ime, MouseButton, WindowEvent};
+use winit::event::{ElementState, Ime, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::keyboard::Key;
 
 #[derive(Debug, Clone, Default)]
@@ -15,6 +15,7 @@ impl NativeUiInputBridge {
         self.state.pointer_pressed_buttons.clear();
         self.state.pointer_released_buttons.clear();
         self.state.pointer_delta = [0.0, 0.0];
+        self.state.scroll_delta = [0.0, 0.0];
         self.state.text_input.clear();
     }
 
@@ -60,6 +61,15 @@ impl NativeUiInputBridge {
                     .state
                     .pointer_buttons_down
                     .contains(&raf_ui::UiPointerButton::Primary);
+                true
+            }
+            WindowEvent::MouseWheel { delta, .. } => {
+                let delta = match delta {
+                    MouseScrollDelta::LineDelta(x, y) => [-x * 24.0, -y * 24.0],
+                    MouseScrollDelta::PixelDelta(delta) => [-delta.x as f32, -delta.y as f32],
+                };
+                self.state.scroll_delta[0] += delta[0];
+                self.state.scroll_delta[1] += delta[1];
                 true
             }
             WindowEvent::KeyboardInput { event, .. } if event.state == ElementState::Pressed => {

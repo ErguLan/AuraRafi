@@ -1,7 +1,7 @@
 # DevelopmentEngineAdvance - AuraRafi Development Skill
 
 > Reincarnation document. New AI sessions: absorb everything here.
-> Last updated: 2026-04-21
+> Last updated: 2026-07-18
 
 ## WHO YOU ARE
 
@@ -15,13 +15,14 @@ The user is Erick ("w" is his signature slang). Works fast, builds multiple prod
 
 **AuraRafi** = dual-purpose Rust engine for AAA games + physical electronics (PCB/CAD) from ONE editor.
 
-- **Language**: Pure Rust. C++ only via FFI bridge for external modules.
-- **UI**: egui (immediate mode). Native desktop.
+- **Language**: Rust core. C++ or Objective-C++ only through thin FFI bridges when a platform SDK materially requires it.
+- **UI**: retained RafUI direction with an egui/eframe transitional shell. Native desktop.
+- **Graphics ownership**: `ApiGraphicBasic` is the owner. WGPU is the current private compatibility backend and is replaced gradually behind the owned contract. Load `.ai/APIGRAPHICBASIC.md` for every graphics task.
 - **Build**: `stable-x86_64-pc-windows-gnu` via MSYS2/MinGW. NEVER MSVC.
 - **Build dir**: `target_gnu/` (NOT `target/`). Set in `.cargo/config.toml`.
 - **Run**: `cargo run -p aura_rafi_editor`
 
-## CRATE MAP (as of v0.7.0+)
+## CRATE MAP (as of v0.9.0+)
 
 ```
 editor/                  # Binary entry point, loads icon.png
@@ -35,10 +36,18 @@ crates/
     src/scene/graph.rs   # SceneGraph (+184 lines by Erick - new node features)
     src/i18n.rs          # Translation engine
     src/save_system.rs   # Save/load system
+  raf_ui/                # Retained documents, layout, theme, docking, focus, and typed UI actions
+    src/node.rs           # Semantic UI tree and stable node identities
+    src/layout.rs         # CSS-like layout constraints and responsive rules
+    src/style.rs          # Theme/style rules and visual states
+    src/docking.rs        # Saved workspace descriptors and docking policy
+    src/hit_test.rs       # Renderer-neutral input regions
   raf_render/            # Rendering
     src/ApiGraphicBasic/ # NEW BY ERICK: Graphics API basics
       grid.rs            # Grid line generation (3D + 2D), GridLineKind
       recipes.rs         # Mesh recipes/generators
+      handles.rs         # Backend-neutral generational resource handles
+      capabilities.rs     # Backend identity, adapter preference, and budgets
       mod.rs             # Module exports
     src/render_config.rs # 17 opt-in toggles, 4 presets
     src/lighting.rs      # Point/spot lights, specular, fog, bloom
@@ -90,6 +99,10 @@ crates/
 | **Selection is `Vec<SceneNodeId>`** | Multi-select everywhere. |
 | **Sync selected_nodes everywhere** | hierarchy.selected_node + hierarchy.selected_nodes + viewport.selected must all sync. |
 | **No heavy deps** | Zero tokio, zero reqwest in core path. |
+| **ApiGraphicBasic owns graphics** | WGPU stays private and loses responsibilities capability by capability; no big-bang deletion. |
+| **One backend per execution path** | Never mix WGPU/native resources accidentally inside one frame. |
+| **RafUI owns new editor chrome** | New documents, menus, docks, settings shells, and overlays use RafUI; Egui bodies are transitional adapters. |
+| **One authoritative canvas model** | Navigator, selection, wires/traces, and status consume the real scene/CAD document and visible-world transform. |
 | **`cargo check` before done** | Always verify. PS exit code 1 with no "error[" = success. |
 | **Translations in BOTH files** | Every t() key needs en.json AND es.json entry. |
 | **Don't touch Erick's grid** | viewport_grid.rs + ApiGraphicBasic/grid.rs are his. |
@@ -97,12 +110,34 @@ crates/
 
 ## HOW TO MODIFY THINGS
 
-### Adding a new panel:
-1. Create `crates/raf_editor/src/panels/new_panel.rs`
-2. Add `pub mod new_panel;` in `panels/mod.rs`
-3. Import in `app.rs`
-4. Add field to `AuraRafiApp` struct
-5. Call in layout section
+### Changing graphics architecture:
+1. Load `.ai/APIGRAPHICBASIC.md`.
+2. Identify the complete responsibility being moved behind a Rafi-owned contract.
+3. Preserve the same Scene, CAD, RafUI, asset, and command consumers.
+4. Keep WGPU as compatibility/reference until the native path passes removal gates.
+5. Measure batching, uploads, allocations, submits, memory, pacing, and idle behavior.
+6. Do not begin a native backend from documentation-only authorization.
+
+### Adding a new retained surface:
+1. Read `docs/RAF_UI_AUTHORING.md`, `.ulpi/design/DESIGN.md`, and, if the
+   surface owns GPU presentation, `docs/APIGRAPHICBASIC.md`.
+2. Create a focused `*_surface.rs` document builder with stable IDs, semantic
+   classes, i18n keys, responsive layout, and typed events.
+3. Create a `*_surface_host.rs` when the surface needs input/session state,
+   texture lifecycle, menu placement, or action translation.
+4. Register the narrow route/host in `app.rs`; do not place a raw visual tree
+   or backend mutation inside the app loop.
+5. Egui may mount a temporary legacy body, but it must not gain permanent menu,
+   shell, dock, or canvas ownership.
+
+### Building menus in RafUI:
+1. Create a focusable trigger that emits `UiAction::OpenMenu`.
+2. Create a `UiNodeKind::Menu` overlay with `z_index >= 20` and menu items
+   that dispatch typed commands.
+3. Let the surface host clamp it to bounds and close it on Escape, outside
+   click, accepted command, or invalid target.
+4. Use a three-dot trigger only for repeated-item local commands. Put global
+   commands in the shared command row.
 
 ### Adding a render feature:
 1. Add toggle to `RenderConfig` in `render_config.rs`
@@ -141,7 +176,8 @@ crates/
 - Schematic editor: DRC, MNA simulation, all exports
 - Node editor with executor
 - Full i18n EN/ES via JSON (76+ new keys by Erick)
-- Depth-sorted 3D rendering (CPU painter)
+- Shared ApiGraphicBasic GPU-first Scene/CAD presentation with CPU recovery
+- Retained RafUI surfaces and a transitional egui/eframe shell
 - Entity picking, multi-select
 - Transform gizmo arrows (Move/Rotate/Scale) with drag
 - WASD camera + scroll zoom + F focus + invert mouse settings
@@ -158,12 +194,14 @@ crates/
 
 ### DOES NOT WORK:
 1. Edit mode vertex rendering (visual handles)
-2. GPU pipeline not wired (shaders exist but no live render pass)
-3. Z-buffer (depth_sort has interpenetration artifacts)
-4. AI chat has no LLM
-5. Serial I/O needs `serialport`
-6. PCB 3D layout view
-7. 2D mode (planned as ortho 3D camera, needs Erick supervision)
+2. ApiGraphicBasic is not yet fully backend-neutral; WGPU types and ownership still leak through parts of the active implementation
+3. Native DX12, Vulkan, and Metal backends are not active yet
+4. The asset browser classifies 3D formats, but complete model decode/import/GPU residency is not yet a production path
+5. Prepared PBR, shadows, post-processing, particles, and skeletal systems are not product-active features
+6. AI chat has no LLM
+7. Serial I/O needs `serialport`
+8. PCB 3D layout view
+9. 2D mode (planned as ortho 3D camera, needs Erick supervision)
 
 ## VERSION PLAN
 

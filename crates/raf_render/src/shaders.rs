@@ -213,6 +213,7 @@ pub const BASIC_SCENE_WGSL: &str = r#"
 struct MeshUniforms {
     mvp: mat4x4<f32>,
     model: mat4x4<f32>,
+    normal_matrix: mat4x4<f32>,
     color: vec4<f32>,
     light_dir: vec4<f32>,
     params: vec4<f32>,
@@ -234,7 +235,7 @@ struct MeshVertexOutput {
 fn mesh_vs(input: MeshVertexInput) -> MeshVertexOutput {
     var output: MeshVertexOutput;
     output.clip_position = mesh_uniforms.mvp * vec4<f32>(input.position, 1.0);
-    output.world_normal = normalize((mesh_uniforms.model * vec4<f32>(input.normal, 0.0)).xyz);
+    output.world_normal = normalize((mesh_uniforms.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz);
     return output;
 }
 
@@ -253,12 +254,16 @@ fn mesh_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
 
 struct LineUniforms {
     mvp: mat4x4<f32>,
-    color: vec4<f32>,
-    params: vec4<f32>,
+    viewport: vec2<f32>,
+    _padding: vec2<f32>,
 };
 
 struct LineVertexInput {
-    @location(0) position: vec3<f32>,
+    @location(0) start: vec3<f32>,
+    @location(1) end: vec3<f32>,
+    @location(2) color: vec4<f32>,
+    @location(3) width: f32,
+    @location(4) depth_bias: f32,
 };
 
 struct LineVertexOutput {
@@ -269,12 +274,31 @@ struct LineVertexOutput {
 @group(0) @binding(0) var<uniform> line_uniforms: LineUniforms;
 
 @vertex
-fn line_vs(input: LineVertexInput) -> LineVertexOutput {
+fn line_vs(input: LineVertexInput, @builtin(vertex_index) vertex_index: u32) -> LineVertexOutput {
     var output: LineVertexOutput;
-    var clip = line_uniforms.mvp * vec4<f32>(input.position, 1.0);
-    clip.z = clip.z + line_uniforms.params.x * clip.w;
+    let start_clip = line_uniforms.mvp * vec4<f32>(input.start, 1.0);
+    let end_clip = line_uniforms.mvp * vec4<f32>(input.end, 1.0);
+    let start_ndc = start_clip.xy / max(start_clip.w, 0.0001);
+    let end_ndc = end_clip.xy / max(end_clip.w, 0.0001);
+    let direction_px = (end_ndc - start_ndc) * line_uniforms.viewport * 0.5;
+    let direction_length = max(length(direction_px), 0.0001);
+    let perpendicular = vec2<f32>(-direction_px.y, direction_px.x) / direction_length;
+    let half_width_ndc = perpendicular * (2.0 * max(input.width, 1.0) / max(line_uniforms.viewport, vec2<f32>(1.0)));
+    let at_end = vertex_index == 2u || vertex_index == 4u;
+    let positive_side = vertex_index == 1u || vertex_index == 2u || vertex_index == 4u;
+    let base_clip = select(start_clip, end_clip, at_end);
+    let offset_xy = select(-half_width_ndc, half_width_ndc, positive_side) * base_clip.w;
+    // WGSL does not allow assignment to a vector swizzle (`clip.xy = ...`).
+    // Rebuild the vector explicitly so wgpu 23 validates the shader before
+    // the editor opens a project.
+    let clip = vec4<f32>(
+        base_clip.x + offset_xy.x,
+        base_clip.y + offset_xy.y,
+        base_clip.z + input.depth_bias * base_clip.w,
+        base_clip.w,
+    );
     output.clip_position = clip;
-    output.color = line_uniforms.color;
+    output.color = input.color;
     return output;
 }
 
@@ -283,3 +307,14 @@ fn line_fs(input: LineVertexOutput) -> @location(0) vec4<f32> {
     return input.color;
 }
 "#;
+
+#[cfg(test)]
+mod tests {
+    use super::BASIC_SCENE_WGSL;
+
+    #[test]
+    fn basic_scene_shader_parses_with_wgpu_naga() {
+        wgpu::naga::front::wgsl::parse_str(BASIC_SCENE_WGSL)
+            .expect("ApiGraphicBasic scene WGSL must parse before GPU startup");
+    }
+}

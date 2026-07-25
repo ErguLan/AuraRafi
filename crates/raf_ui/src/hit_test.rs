@@ -14,6 +14,7 @@ pub struct UiHitRegion {
     pub id: String,
     pub kind: UiNodeKind,
     pub rect: UiRect,
+    pub clip_rect: UiRect,
     pub z_index: i16,
     pub interactive: bool,
     pub focusable: bool,
@@ -37,7 +38,7 @@ pub fn hit_test(
     let mut best: Option<(usize, &UiHitRegion)> = None;
 
     for (index, region) in regions.iter().enumerate() {
-        if region.disabled || !region.rect.contains(point) {
+        if region.disabled || !region.rect.contains(point) || !region.clip_rect.contains(point) {
             continue;
         }
         if mode == UiHitTestMode::InteractiveOnly && !region.interactive {
@@ -77,6 +78,7 @@ mod tests {
                 id: "base".to_string(),
                 kind: UiNodeKind::Panel,
                 rect: UiRect::new(0.0, 0.0, 100.0, 100.0),
+                clip_rect: UiRect::new(0.0, 0.0, 100.0, 100.0),
                 z_index: 0,
                 interactive: true,
                 focusable: false,
@@ -86,6 +88,7 @@ mod tests {
                 id: "menu".to_string(),
                 kind: UiNodeKind::Menu,
                 rect: UiRect::new(10.0, 10.0, 80.0, 80.0),
+                clip_rect: UiRect::new(10.0, 10.0, 80.0, 80.0),
                 z_index: 10,
                 interactive: true,
                 focusable: true,
@@ -104,6 +107,7 @@ mod tests {
             id: "button".to_string(),
             kind: UiNodeKind::Button,
             rect: UiRect::new(0.0, 0.0, 100.0, 40.0),
+            clip_rect: UiRect::new(0.0, 0.0, 100.0, 40.0),
             z_index: 0,
             interactive: true,
             focusable: true,

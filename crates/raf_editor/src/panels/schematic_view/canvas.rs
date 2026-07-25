@@ -28,6 +28,9 @@ use crate::theme;
 
 const GPU_DETAIL_COMPONENT_LIMIT: usize = 96;
 const GPU_DETAIL_ZOOM_THRESHOLD: f32 = 1.15;
+// The CAD command stream remains the scalable path, while this overlay keeps editable
+// nets authoritative until every GPU backend renders wire segments identically.
+const GPU_WIRE_OVERLAY_LIMIT: usize = 4_096;
 
 impl SchematicViewPanel {
     /// Renders and handles interaction events for the schematic canvas container.
@@ -109,6 +112,11 @@ impl SchematicViewPanel {
             let hovered_wires = hovered_wire
                 .map(|idx| self.wire_group_indices(idx))
                 .unwrap_or_default();
+            // Keep the authoritative wire overlay for normal-sized schematics.
+            // It preserves editor selection/hover feedback even when the GPU
+            // backdrop is cached, while the CAD surface remains the scalable
+            // path for larger documents.
+            let draw_wire_overlay = self.schematic.wires.len() <= GPU_WIRE_OVERLAY_LIMIT;
 
             for (idx, wire) in self.schematic.wires.iter().enumerate() {
                 let start = self.world_to_screen(Pos2::new(wire.start.x, wire.start.y), rect);
@@ -134,8 +142,14 @@ impl SchematicViewPanel {
                     (2.0 * self.zoom).max(1.5)
                 };
 
-                if !gpu_backdrop_ready {
-                    painter.line_segment([start, end], Stroke::new(wire_width, wire_color));
+                if draw_wire_overlay {
+                    let route = orthogonal_route_points(start, end);
+                    for segment in route.windows(2) {
+                        painter.line_segment(
+                            [segment[0], segment[1]],
+                            Stroke::new(wire_width, wire_color),
+                        );
+                    }
                 }
 
                 if is_selected || is_hovered || matches!(self.placement, PlacementMode::Wire) {
@@ -326,6 +340,9 @@ impl SchematicViewPanel {
                 egui::FontId::proportional(10.0),
                 palette.text_muted,
             );
+
+            self.draw_minimap(&painter, rect);
+            self.draw_canvas_status(&painter, rect);
         }
 
         if !self.show_export_menu && matches!(self.placement, PlacementMode::None) {
@@ -758,6 +775,176 @@ impl SchematicViewPanel {
         }
 
         changed
+    }
+
+    fn draw_minimap(&self, painter: &egui::Painter, canvas: Rect) {
+        let palette = electronics_palette(self.canvas_dark_mode);
+        let size = Vec2::new(148.0, 94.0);
+        let rect = Rect::from_min_size(
+            Pos2::new(canvas.left() + 14.0, canvas.bottom() - size.y - 14.0),
+            size,
+        );
+        painter.rect_filled(rect, 4.0, palette.overlay_bg);
+        painter.rect_stroke(
+            rect,
+            4.0,
+            Stroke::new(1.0, Color32::from_rgba_premultiplied(212, 119, 26, 220)),
+        );
+        let header =
+            Rect::from_min_max(rect.left_top(), Pos2::new(rect.right(), rect.top() + 22.0));
+        painter.rect_filled(header, 4.0, palette.card_bg);
+        painter.line_segment(
+            [header.left_bottom(), header.right_bottom()],
+            Stroke::new(1.0, palette.border),
+        );
+        painter.text(
+            Pos2::new(header.left() + 9.0, header.center().y),
+            egui::Align2::LEFT_CENTER,
+            t("app.electronics_minimap", self.lang),
+            egui::FontId::proportional(9.0),
+            palette.text,
+        );
+
+        let mut points = self
+            .schematic
+            .components
+            .iter()
+            .map(|component| component.position)
+            .collect::<Vec<_>>();
+        for wire in &self.schematic.wires {
+            points.push(wire.start);
+            points.push(wire.end);
+        }
+        let Some(&first) = points.first() else {
+            painter.text(
+                Pos2::new(rect.center().x, rect.center().y + 10.0),
+                egui::Align2::CENTER_CENTER,
+                t("app.schematic_empty", self.lang),
+                egui::FontId::proportional(9.0),
+                palette.text_muted,
+            );
+            return;
+        };
+        let mut min = first;
+        let mut max = first;
+        for point in points {
+            min = min.min(point);
+            max = max.max(point);
+        }
+
+        for component in &self.schematic.components {
+            let half_body = glam::Vec2::new(COMP_BODY_W * 0.5, COMP_BODY_H * 0.5);
+            min = min.min(component.position - half_body);
+            max = max.max(component.position + half_body);
+        }
+
+        let margin = glam::Vec2::splat(28.0);
+        min -= margin;
+        max += margin;
+        let span = (max - min).max(glam::Vec2::splat(1.0));
+        let content = Rect::from_min_max(
+            Pos2::new(rect.left() + 9.0, rect.top() + 30.0),
+            Pos2::new(rect.right() - 9.0, rect.bottom() - 9.0),
+        );
+        let scale = (content.width() / span.x)
+            .min(content.height() / span.y)
+            .max(0.001);
+        let fitted_size = span * scale;
+        let fitted_origin = Pos2::new(
+            content.center().x - fitted_size.x * 0.5,
+            content.center().y - fitted_size.y * 0.5,
+        );
+        let project = |world: glam::Vec2| {
+            Pos2::new(
+                fitted_origin.x + (world.x - min.x) * scale,
+                fitted_origin.y + (world.y - min.y) * scale,
+            )
+        };
+
+        let selected_wires = self.selected_wire_indices();
+        for wire in &self.schematic.wires {
+            let color = if selected_wires.iter().any(|idx| {
+                self.schematic
+                    .wires
+                    .get(*idx)
+                    .map(|selected| selected.id == wire.id)
+                    .unwrap_or(false)
+            }) {
+                theme::ACCENT
+            } else {
+                Color32::from_rgb(112, 224, 136)
+            };
+            painter.line_segment(
+                [project(wire.start), project(wire.end)],
+                Stroke::new(1.5, color),
+            );
+        }
+        for component in &self.schematic.components {
+            let center = project(component.position);
+            let footprint = Vec2::new(
+                (COMP_BODY_W * scale).clamp(5.0, 12.0),
+                (COMP_BODY_H * scale).clamp(4.0, 9.0),
+            );
+            painter.rect_filled(
+                Rect::from_center_size(center, footprint),
+                1.5,
+                if self.is_component_selected(
+                    self.schematic
+                        .components
+                        .iter()
+                        .position(|candidate| candidate.id == component.id)
+                        .unwrap_or(usize::MAX),
+                ) {
+                    Color32::from_rgb(255, 172, 64)
+                } else {
+                    Color32::from_rgb(224, 229, 236)
+                },
+            );
+            painter.rect_stroke(
+                Rect::from_center_size(center, footprint),
+                1.5,
+                Stroke::new(1.0, palette.border),
+            );
+        }
+
+        let (left, right, top, bottom) = self.visible_world_bounds(canvas.width(), canvas.height());
+        let visible_rect = Rect::from_two_pos(
+            project(glam::Vec2::new(left, top)),
+            project(glam::Vec2::new(right, bottom)),
+        )
+        .intersect(content);
+        if visible_rect.width() > 1.0 && visible_rect.height() > 1.0 {
+            painter.rect_stroke(
+                visible_rect,
+                2.0,
+                Stroke::new(1.0, Color32::from_rgba_premultiplied(255, 172, 64, 220)),
+            );
+        }
+    }
+
+    fn draw_canvas_status(&self, painter: &egui::Painter, canvas: Rect) {
+        let palette = electronics_palette(self.canvas_dark_mode);
+        let text = format!(
+            "{}: {:.0} mm  |  {}: {}",
+            t("app.electronics_grid_status", self.lang),
+            GRID_STEP,
+            t("app.electronics_snap_status", self.lang),
+            t("app.electronics_snap_enabled", self.lang),
+        );
+        let anchor = Pos2::new(canvas.right() - 12.0, canvas.bottom() - 12.0);
+        let estimated_width = (text.len() as f32 * 5.8 + 18.0).min(canvas.width() - 24.0);
+        let background = Rect::from_min_size(
+            Pos2::new(anchor.x - estimated_width, anchor.y - 24.0),
+            Vec2::new(estimated_width, 20.0),
+        );
+        painter.rect_filled(background, 4.0, palette.overlay_bg);
+        painter.text(
+            anchor,
+            egui::Align2::RIGHT_BOTTOM,
+            text,
+            egui::FontId::proportional(9.0),
+            palette.text_dim,
+        );
     }
 
     /// Computes the visible coordinate boundaries in world space.

@@ -5,7 +5,10 @@ This file contains the definitive technical registry of AuraRafi. AI agents must
 ## 1. Core Architectural Pillars
 AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Graphs and CAD PCB Design Topologies inside a lightweight structural core.
 
-* **GPU Hardware Driver Priority**: Uses high-performance GPU hardware rendering (via private `wgpu` integration mapped to host `eframe` context) as the primary execution path, automatically fallback-routing to CPU software rasterization only on low-spec potato devices.
+* **ApiGraphicBasic Graphics Ownership**: `ApiGraphicBasic` is the sole public graphics owner. WGPU is the current private adapter/compatibility backend while owned DX12, Vulkan, and Metal backends mature behind the same contract. The authoritative migration rule is `.ai/APIGRAPHICBASIC.md`.
+* **GPU Hardware Driver Priority**: Uses available GPU hardware as the normal execution path, including integrated GPUs for potato profiles. CPU software rasterization is recovery, headless, testing, or incompatibility; it is not the automatic definition of low-spec mode.
+* **Controlled Hybrid Migration**: Responsibilities move from WGPU-facing implementation into Rafi-owned contracts capability by capability. Upper layers never fork into separate WGPU/native versions, and WGPU is removed only after parity and validation gates pass.
+* **Viewport Integrity Baseline (2026-07-19)**: View2D is an orthographic view of the shared 3D scene. The active scene path batches adjacent lines, bounds persistent mesh reuse, renders physical pixels for high-DPI targets, and uses world-transform scale for culling/focus. `Sprite2D` is a legacy alias to `Plane`, not an active primitive.
 * **Unified Event & Mutator Layers**: High-level commands flow through the `CommandBus` to support transaction replays, Undo/Redo historical stacks, and AI Tool Calling.
 * **No MSVC Tooling Assumptions**: Always compiled via `stable-x86_64-pc-windows-gnu` using MinGW/MSYS2 toolchains on Windows. All compiled outputs are routed to `target_gnu/`.
 * **Canonical Unit System**: 1 world unit = 1 meter (games viewport 3D). 1 schematic unit = 1 millimeter (schematic/PCB canvas). All internal calculations in SI. `DisplayUnit` enum only changes UI display, never computation. Constants in `raf_core::units`.
@@ -17,7 +20,10 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 
 ### Main Entry Points
 * **`editor/`**: Binary wrapping crate.
-  * `src/main.rs`: Entry point. Prepares the viewport window, boots `eframe` context, allocates custom icon textures (`icon.png`), and mounts `AuraRafiApp`.
+  * `src/main.rs`: Entry point. Prepares the desktop window and transitional
+    `eframe` context, allocates custom icon textures (`icon.png`), and mounts
+    `AuraRafiApp`. RafUI native-host work remains behind the same application
+    boundary.
 
 ### Crates Directory (`crates/`)
 
@@ -39,7 +45,7 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 * `src/theme.rs`: Solid color tokens and warm orange accent configurations (`#D4771A`).
 * `src/ui_icons.rs`: Load-budgeted asynchronous icon atlas dispatcher.
 * `src/script_support.rs`: Code checking, hot-reload notifications, and routing scripts to external IDEs.
-* `src/panels/viewport.rs`: Central 2D/3D work canvas, containing camera orbit matrices and gizmo hit testing.
+* `src/panels/viewport.rs`: Transitional egui-hosted central canvas shell. Renderer ownership, camera/edit state, frame caching, and presentation must continue moving behind renderer-side hosts rather than growing this panel.
 * `src/panels/viewport_grid.rs`: Draws infinite 3D coordinate grids on the canvas.
 * `src/panels/viewport_edit.rs`: Vertex/face subquery editing drawing routines.
 * `src/panels/schematic_view.rs`: Interactive electrical wiring workspace.
@@ -50,17 +56,45 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 * `src/panels/console.rs`: Panel supporting debugging and manual console input line.
 * `src/panels/ai_chat.rs`: Multi-provider LLM interface (supports OpenClaw).
 
-#### 3. `raf_render` (Graphics Runtime)
-* `src/renderer.rs`: Main interface for GPU `wgpu` pipelines and CPU Painters.
+#### 3. `raf_ui` (Retained UI Model)
+* `src/node.rs`, `src/layout.rs`, `src/style.rs`: Serializable retained nodes,
+  CSS-like layout data, semantic classes, theme-aware style rules, and text
+  keys.
+* `src/docking.rs`: Persistable dock descriptors and workspace policy.
+* `src/hit_test.rs`, `src/focus.rs`, `src/events.rs`: Renderer-neutral pointer,
+  keyboard, focus, and typed action contracts.
+* `src/text.rs`: Bounded text-atlas request metadata. Rasterization and GPU
+  uploads stay in ApiGraphicBasic.
+* `src/overlays.rs`: Window-coordinate overlay placement with flip/shift
+  behavior for menus, popovers, tooltips, drag previews, and modals.
+* `src/motion.rs`: Time-based tween/easing primitives shared by GPU and CPU
+  retained hosts.
+* `src/components.rs`: Semantic recipes for icon buttons, panel headers, tree
+  rows, and compact tooltip nodes.
+* `src/environment.rs`: Logical/physical density conversion and bounded
+  raster-scale policy.
+* `docs/RAF_UI_AUTHORING.md`: Required practical authoring contract.
+
+#### 4. `raf_render` (Graphics Runtime)
+* `src/bridge/render_runtime.rs`: Canonical shared runtime and surface/backend state for Scene, CAD, and renderer-owned surfaces.
 * `src/render_config.rs`: Houses quality configuration structures and GPU capabilities tags.
-* `src/ApiGraphicBasic/`: Holds mesh recipe generators, line arrays, and grid parameters.
+* `src/ApiGraphicBasic/`: Rafi-owned graphics contract, devices, command lists, resources, Scene/CAD/RafUI surface presentation, WGPU adapter implementation, and CPU recovery. It must not expose WGPU types to upper layers long-term.
+  * `handles.rs`: Generational backend-neutral resource and surface handles.
+  * `capabilities.rs`: Backend identity, adapter preference, and potato/desktop budgets.
+  * `command_list.rs`: Backend-neutral meshes and `DrawLineBatch`; adjacent line
+    commands are merged without reordering.
+* `src/ApiGraphicBasic/ui_surface/`: Compositors and hosts for retained RafUI draw data. RafUI documents remain backend-neutral.
+  * `diagnostics.rs`: Data-only frame inspection for layout, clipping, hit regions, text requests, zero-size nodes, and z-order.
+  * `render.rs`: Intrinsic-size aware layout boxes, shared hit regions, and paint input.
+  * `compilation.rs`: Separate layout/paint invalidation keyed by controls, focus, raster density, motion, and resolved text.
+* `.ai/APIGRAPHICBASIC.md`: Mandatory controlled-hybrid and native-backend migration rule.
 * `src/projection.rs`: Projects 3D vectors onto the 2D egui coordinate plane.
 * `src/camera.rs`: Matrix calculation for camera orientation, zoom, Orbit, and flyover.
 * `src/depth_sort.rs`: Quick-Sort implementation sorting polygons back-to-front (Painter's algorithm).
 * `src/post_process.rs`: CPU shaders for bloom, saturation, vignette, tone-mapping, and FXAA.
 * `src/picking.rs`: Traces mouse rays against entity bounds for precise item selection.
 
-#### 4. `raf_electronics` (Electronic Core)
+#### 5. `raf_electronics` (Electronic Core)
 * `src/component.rs`: Defines properties, pins, and simulation models (`SimModel`).
 * `src/library.rs`: Hardcoded base component models.
 * `src/schematic.rs`: Contains schematic state, active wire list, and connection intersections.
@@ -69,11 +103,11 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 * `src/simulation.rs`: Modified Nodal Analysis (MNA), solving DC node voltages.
 * `src/pcb/layout.rs`: Tracks footprint offsets, layers, drill holes, and routes airwires.
 
-#### 5. `raf_nodes` (Visual Scripting)
+#### 6. `raf_nodes` (Visual Scripting)
 * `src/node.rs`: Struct definition for pins and parameters.
 * `src/compiler.rs` & `src/executor.rs`: Compiles graphs and runs visual scripting flows.
 
-#### 6. `raf_script` (Scripting Runtime + Host API)
+#### 7. `raf_script` (Scripting Runtime + Host API)
 * `src/host_api.rs`: `ScriptContext`, `InputSnapshot`, `AudioCommandQueue`, `TimeInfo`. The single entry point for all script execution.
 * `src/node_handle.rs`: `NodeHandle` opaque entity reference. Roblox-style API (`set_position`, `set_color`, `move_by`). `HOST_API_VERSION = 1`.
 * `src/value.rs`: `ScriptValue` dynamic type (Bool/Int/Float/String/Vec3/Color/Handle/List).
@@ -82,7 +116,7 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 * `src/backends/node_backend.rs`: Tier 3. Bridges `raf_nodes` executor to Host API.
 * `src/host/`: Operation modules (scene, transform, property, audio, input, time, interop).
 
-#### 7. `raf_hardware` (IoT Systems Interface)
+#### 8. `raf_hardware` (IoT Systems Interface)
 * `src/serial.rs`: Handles serial port interfaces and device connections (ESP32/Arduino).
 * `src/ml.rs`: Extracts model metrics for sensor-based neural network tasks.
 * `src/robot.rs`: High-level system descriptions tracking actuator telemetry.
@@ -92,12 +126,25 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 ## 3. Crucial Workflows & Systems
 
 ### A. UI Modification Protocol
-* **No UI in `app.rs`**: Keep `app.rs` slim. It acts solely as an orchestrator.
-* **Creating a New Panel**:
-  1. Add source file inside `crates/raf_editor/src/panels/`.
-  2. Implement `show(&mut self, ui: &mut egui::Ui)` on a custom struct implementing `Default`.
-  3. Register inside `crates/raf_editor/src/panels/mod.rs`.
-  4. Mount as a field on `AuraRafiApp` in `src/app.rs`.
+* **No retained tree in `app.rs`**: Keep `app.rs` as route coordinator,
+  application-state owner, command/persistence boundary, and autosave owner.
+* **Creating a RafUI surface**:
+  1. Add a focused `*_surface.rs` document builder under the owning editor
+     module or `panels/`.
+  2. Add a `*_surface_host.rs` host when the surface needs texture lifecycle,
+     input dispatch, session state, or action translation.
+  3. Build `UiDocument` from stable IDs, classes, layout constraints, i18n
+     keys, and typed event bindings.
+  4. Map `UiAction` values to existing command, validation, undo, and
+     persistence boundaries. Do not mutate models inside the document builder.
+  5. Register the route/host in `app.rs` without embedding raw visual trees.
+* **Transitional Egui**: Existing `show(&mut self, ui: &mut egui::Ui)` bodies
+  are temporary adapters. New menus, rails, fixed dock chrome, and renderer
+  canvas ownership must use RafUI/ApiGraphicBasic contracts instead.
+* **Authoring source of truth**: Read `docs/RAF_UI_AUTHORING.md`,
+  `docs/APIGRAPHICBASIC.md`, and `.ulpi/design/DESIGN.md` before UI or surface
+  changes. They define exact menu, theme, canvas, resource, and ownership
+  behavior.
 
 ### B. Command Console Loop
 * Manual commands typed with `/` in the Console flow to `parse_console_input` in `app.rs`.

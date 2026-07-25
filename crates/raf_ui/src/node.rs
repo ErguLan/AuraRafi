@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+use crate::controls::{
+    UiControl, UiImage, UiRange, UiScrollAxis, UiSkeleton, UiTextInput, UiToggle,
+};
 use crate::events::UiEventBinding;
 use crate::layout::UiLayout;
 use crate::style::UiStyle;
@@ -19,6 +22,11 @@ pub enum UiNodeKind {
     FloatingPanel,
     Menu,
     Tooltip,
+    Image,
+    TextInput,
+    ScrollView,
+    Grid,
+    Skeleton,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -44,6 +52,8 @@ pub struct UiNode {
     pub text_style: Option<UiTextStyle>,
     #[serde(default)]
     pub event_handlers: Vec<UiEventBinding>,
+    #[serde(default)]
+    pub control: UiControl,
 }
 
 impl UiNode {
@@ -63,7 +73,36 @@ impl UiNode {
             accessibility_label_key: None,
             text_style: None,
             event_handlers: Vec::new(),
+            control: UiControl::None,
         }
+    }
+
+    pub fn image(id: impl Into<String>, image: UiImage) -> Self {
+        Self::new(id, UiNodeKind::Image).with_control(UiControl::Image(image))
+    }
+
+    pub fn text_input(id: impl Into<String>, input: UiTextInput) -> Self {
+        Self::new(id, UiNodeKind::TextInput).with_control(UiControl::TextInput(input))
+    }
+
+    pub fn toggle(id: impl Into<String>, toggle: UiToggle) -> Self {
+        Self::new(id, UiNodeKind::Panel).with_control(UiControl::Toggle(toggle))
+    }
+
+    pub fn range(id: impl Into<String>, range: UiRange) -> Self {
+        Self::new(id, UiNodeKind::Panel).with_control(UiControl::Range(range))
+    }
+
+    pub fn scroll_view(id: impl Into<String>, axis: UiScrollAxis) -> Self {
+        Self::new(id, UiNodeKind::ScrollView).with_control(UiControl::ScrollView { axis })
+    }
+
+    pub fn grid(id: impl Into<String>) -> Self {
+        Self::new(id, UiNodeKind::Grid).with_control(UiControl::Grid)
+    }
+
+    pub fn skeleton(id: impl Into<String>, skeleton: UiSkeleton) -> Self {
+        Self::new(id, UiNodeKind::Skeleton).with_control(UiControl::Skeleton(skeleton))
     }
 
     pub fn with_text_key(mut self, text_key: impl Into<String>) -> Self {
@@ -123,6 +162,24 @@ impl UiNode {
     pub fn with_event(mut self, binding: UiEventBinding) -> Self {
         self.event_handlers.push(binding);
         self.interactive = true;
+        self
+    }
+
+    pub fn with_control(mut self, control: UiControl) -> Self {
+        self.control = control;
+        match &self.control {
+            UiControl::TextInput(_)
+            | UiControl::Toggle(_)
+            | UiControl::Range(_)
+            | UiControl::ScrollView { .. } => {
+                self.focusable = matches!(
+                    &self.control,
+                    UiControl::TextInput(_) | UiControl::Toggle(_) | UiControl::Range(_)
+                );
+                self.interactive = true;
+            }
+            _ => {}
+        }
         self
     }
 

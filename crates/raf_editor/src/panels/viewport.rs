@@ -121,6 +121,8 @@ pub struct ViewportPanel {
     pub solid_show_surface_edges: bool,
     pub solid_xray_mode: bool,
     pub solid_face_tonality: bool,
+    retained_toolbar_active: bool,
+    retained_overlay_rects: [Option<Rect>; 2],
 
     drag_ongoing: bool,
     free_drag_active: bool,
@@ -150,6 +152,8 @@ pub struct ViewportPanel {
     interaction_linger_s: f32,
     cached_grid_scene_fingerprint: Option<u64>,
     cached_grid_y: f32,
+    /// Invalidates the viewport cache only when vertex-edit topology changes.
+    /// Camera motion and ordinary scene edits already participate in the key.
     viewport_frame_epoch: u64,
 }
 
@@ -187,6 +191,8 @@ impl Default for ViewportPanel {
             solid_show_surface_edges: false,
             solid_xray_mode: false,
             solid_face_tonality: true,
+            retained_toolbar_active: false,
+            retained_overlay_rects: [None, None],
 
             drag_ongoing: false,
             free_drag_active: false,
@@ -230,6 +236,56 @@ impl ViewportPanel {
         lang: Language,
         icons: &UiIconAtlas,
     ) -> bool {
+        self.show_internal(
+            ctx,
+            ui,
+            wgpu_render_state,
+            render_runtime,
+            scene,
+            is_dark,
+            lang,
+            icons,
+            true,
+        )
+    }
+
+    pub fn show_with_retained_toolbar(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
+        scene: &mut SceneGraph,
+        is_dark: bool,
+        lang: Language,
+        icons: &UiIconAtlas,
+    ) -> bool {
+        self.show_internal(
+            ctx,
+            ui,
+            wgpu_render_state,
+            render_runtime,
+            scene,
+            is_dark,
+            lang,
+            icons,
+            false,
+        )
+    }
+
+    fn show_internal(
+        &mut self,
+        ctx: &egui::Context,
+        ui: &mut egui::Ui,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
+        scene: &mut SceneGraph,
+        is_dark: bool,
+        lang: Language,
+        icons: &UiIconAtlas,
+        draw_hud_toolbar: bool,
+    ) -> bool {
+        self.retained_toolbar_active = !draw_hud_toolbar;
         self.bridge
             .set_picking_policy(PickingPolicy::for_render_config(&self.render_cfg));
         let rect = ui.available_rect_before_wrap();
@@ -273,8 +329,15 @@ impl ViewportPanel {
 
         let pointer_delta = ctx.input(|i| i.pointer.delta());
         let scroll_delta_y = ctx.input(|i| i.smooth_scroll_delta.y);
+        let retained_overlay_hovered = self.retained_toolbar_active
+            && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|pos| {
+                self.retained_overlay_rects
+                    .iter()
+                    .flatten()
+                    .any(|rect| rect.contains(pos))
+            });
         // Ctrl+Scroll adjusts WASD speed at runtime.
-        if response.hovered() && scroll_delta_y.abs() > 0.01 {
+        if response.hovered() && !retained_overlay_hovered && scroll_delta_y.abs() > 0.01 {
             let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
             if ctrl {
                 self.wasd_speed_boost =
@@ -282,10 +345,12 @@ impl ViewportPanel {
             }
         }
 
-        let camera_interacting = response.dragged_by(egui::PointerButton::Secondary)
-            || response.dragged_by(egui::PointerButton::Middle)
-            || (response.hovered() && scroll_delta_y.abs() > 0.01);
-        let viewport_interacting = camera_interacting || response.dragged();
+        let camera_interacting = !retained_overlay_hovered
+            && (response.dragged_by(egui::PointerButton::Secondary)
+                || response.dragged_by(egui::PointerButton::Middle)
+                || (response.hovered() && scroll_delta_y.abs() > 0.01));
+        let viewport_interacting =
+            !retained_overlay_hovered && (camera_interacting || response.dragged());
 
         // Focus lock: WASD offsets the editor camera relative to the focused
         // target. The offset only returns after every navigation key is
@@ -329,10 +394,14 @@ impl ViewportPanel {
         self.bridge.handle_camera_input(
             ViewportPointerInput {
                 pointer_delta: [pointer_delta.x, pointer_delta.y],
-                scroll_delta_y: scroll_delta_y,
+                scroll_delta_y: if retained_overlay_hovered {
+                    0.0
+                } else {
+                    scroll_delta_y
+                },
                 drag_secondary: response.dragged_by(egui::PointerButton::Secondary),
                 drag_middle: response.dragged_by(egui::PointerButton::Middle),
-                hovered: response.hovered(),
+                hovered: response.hovered() && !retained_overlay_hovered,
                 move_forward: move_fwd,
                 move_right: move_rgt,
                 move_up: move_up,
@@ -349,7 +418,28 @@ impl ViewportPanel {
         );
         self.bridge.update_camera(self.mode == ViewportMode::View2D);
 
+        // Resolve input mutations before recording the frame. This removes
+        // the old one-frame lag where a gizmo drag was rendered one frame
+        // behind the scene state. Vertex edits also invalidate the frame key
+        // only when they actually changed the mesh, preserving idle reuse.
+        let view_proj = self.bridge.view_projection(vp_w, vp_h);
+        let pre_render_changed = if self.edit_mode == EditMode::Vertex {
+            self.handle_edit_mode_input(&response, scene, &view_proj, rect, vp_w, vp_h)
+        } else {
+            self.handle_object_mode_input(&response, scene, &view_proj, rect, vp_w, vp_h)
+        };
+        if self.edit_mode == EditMode::Vertex && pre_render_changed {
+            self.viewport_frame_epoch = self.viewport_frame_epoch.wrapping_add(1);
+        }
+
+        if self.bridge.update_smooth_focus() {
+            self.schedule_viewport_repaint(ctx);
+        }
+
         // --- Render scene ---
+        // Keep the scene/sky clear color aligned with the previous editor
+        // presentation. The shell may stay dark while the document canvas
+        // remains light, preserving the renderer's established contrast.
         let bg = [240, 240, 242, 255];
 
         let light_dir = Vec3::new(0.4, 0.8, 0.6).normalize();
@@ -406,15 +496,16 @@ impl ViewportPanel {
         } else {
             requested_scale
         };
-        let render_w = (vp_w * render_scale).round().max(1.0);
-        let render_h = (vp_h * render_scale).round().max(1.0);
+        // Scene targets are physical pixels; egui rectangles are logical
+        // points. Respecting the scale factor keeps the viewport sharp on
+        // high-DPI displays without changing the logical camera geometry.
+        let pixels_per_point = ctx.pixels_per_point().clamp(1.0, 4.0);
+        let render_w = (vp_w * render_scale * pixels_per_point).round().max(1.0);
+        let render_h = (vp_h * render_scale * pixels_per_point).round().max(1.0);
 
         let w = render_w as u32;
         let h = render_h as u32;
         let vertex_edit_enabled = self.edit_mode == EditMode::Vertex;
-        if vertex_edit_enabled {
-            self.viewport_frame_epoch = self.viewport_frame_epoch.wrapping_add(1);
-        }
         let frame_key = ViewportFrameKey::new(
             scene_fingerprint,
             self.bridge.camera(),
@@ -477,7 +568,6 @@ impl ViewportPanel {
         self.surface_host.paint(&painter, rect);
 
         // --- Grid overlay (drawn via egui painter, reuses existing grid math) ---
-        let view_proj = self.bridge.view_projection(vp_w, vp_h);
         match self.mode {
             ViewportMode::View2D => self.draw_2d_grid(&painter, rect, is_dark),
             ViewportMode::View3D => {}
@@ -560,28 +650,28 @@ impl ViewportPanel {
             }
         }
 
-        self.draw_hud(&painter, rect, is_dark, icons, lang);
-
-        // Advance smooth camera focus animation (Lerp towards target).
-        if self.bridge.update_smooth_focus() {
-            self.schedule_viewport_repaint(ctx);
+        if draw_hud_toolbar {
+            self.draw_hud(&painter, rect, is_dark, icons, lang);
+        } else {
+            self.draw_hud_without_toolbar(&painter, rect, is_dark, lang);
         }
 
-        let mut changed = self.handle_hud_click(&response, rect, scene);
+        let mut changed = pre_render_changed;
+        changed |= if draw_hud_toolbar {
+            self.handle_hud_click(&response, rect, scene)
+        } else {
+            self.handle_retained_hud_click(&response, rect)
+        };
 
         self.apply_object_shortcuts(ctx, scene);
 
         if self.edit_mode == EditMode::Vertex {
-            changed |= self.handle_edit_mode_input(&response, scene, &view_proj, rect, vp_w, vp_h);
-
             if response.dragged() {
                 self.schedule_viewport_repaint(ctx);
             }
 
             return changed;
         }
-
-        changed |= self.handle_object_mode_input(&response, scene, &view_proj, rect, vp_w, vp_h);
 
         // Keep the selected object's center as the stable focus base. The
         // transient WASD offset is applied after it, avoiding the old rebound
@@ -629,12 +719,12 @@ impl ViewportPanel {
             let Some(selected_id) = self.selected.first().copied() else {
                 return (self.cached_grid_y, false);
             };
-            let Some(node) = scene.get(selected_id) else {
+            let Some(_node) = scene.get(selected_id) else {
                 return (self.cached_grid_y, false);
             };
             let model = scene.world_matrix(selected_id);
             let world_pos = model.col(3).truncate();
-            let half_height = 0.5 * node.scale.y.abs();
+            let half_height = 0.5 * model.y_axis.truncate().length();
             return (world_pos.y - half_height - GRID_CLEARANCE, true);
         }
 
@@ -646,10 +736,7 @@ impl ViewportPanel {
         let mut min_y = 0.0_f32;
         let mut has_blocks = false;
         for (id, node) in scene.iter() {
-            if !node.visible
-                || node.name.is_empty()
-                || matches!(node.primitive, Primitive::Empty | Primitive::Sprite2D)
-            {
+            if !node.visible || matches!(node.primitive, Primitive::Empty) {
                 continue;
             }
 
@@ -657,7 +744,8 @@ impl ViewportPanel {
                 .world_matrix(id)
                 .unwrap_or_else(|| node.local_matrix());
             let world_pos = model.col(3).truncate();
-            let bottom_y = world_pos.y - 0.5 * node.scale.y.abs();
+            let world_half_height = 0.5 * model.y_axis.truncate().length();
+            let bottom_y = world_pos.y - world_half_height;
             min_y = if has_blocks {
                 min_y.min(bottom_y)
             } else {
@@ -702,6 +790,48 @@ impl ViewportPanel {
 
     pub fn is_gizmo_active(&self) -> bool {
         self.bridge.active_drag_axis() != GizmoAxis::None
+    }
+
+    pub fn gizmo_mode(&self) -> GizmoMode {
+        self.bridge.gizmo().mode
+    }
+
+    pub fn edit_mode(&self) -> EditMode {
+        self.edit_mode
+    }
+
+    pub fn toggle_edit_mode_from_ui(&mut self, scene: &SceneGraph) {
+        self.toggle_edit_mode(scene);
+    }
+
+    pub fn set_gizmo_mode_from_ui(&mut self, mode: GizmoMode) {
+        self.select_mode = false;
+        self.bridge.gizmo_mut().visible = true;
+        self.bridge.set_gizmo_mode(mode);
+    }
+
+    pub fn toggle_select_mode_from_ui(&mut self) {
+        self.select_mode = !self.select_mode;
+        self.bridge.gizmo_mut().visible = !self.select_mode;
+    }
+
+    pub fn toggle_focus_lock_from_ui(&mut self, scene: &SceneGraph) {
+        if self.focus_lock_enabled {
+            self.set_focus_lock(scene, !self.focus_locked);
+        }
+    }
+
+    pub fn reset_view_from_ui(&mut self) {
+        self.bridge.reset_isometric_view();
+        self.focus_locked = false;
+        self.focus_strafe_offset = Vec3::ZERO;
+    }
+
+    /// Stores the screen-space hit regions occupied by RafUI controls inside
+    /// the viewport. The renderer still owns the world surface, but
+    /// camera/gizmo input must not begin beneath either floating control bank.
+    pub fn set_retained_overlay_rects(&mut self, rects: [Option<Rect>; 2]) {
+        self.retained_overlay_rects = rects;
     }
 
     pub fn focus_selected_entity(&mut self, scene: &SceneGraph, selected: Option<SceneNodeId>) {

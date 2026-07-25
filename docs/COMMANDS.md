@@ -3,6 +3,10 @@
 The Console is a manual command runner that uses the same domain handlers as
 the AI tool-calling pipeline.
 
+For the reusable UI authoring and quality contract behind these commands, see
+[RafUI Studio](../.ulpi/design/rafui-studio.md). Its preview command can run
+inside the editor Console or as a read-only process from Windows CMD.
+
 ## Activation
 
 Commands require two switches:
@@ -41,6 +45,7 @@ history. `/` alone maps to `/help`.
 | `/ui.node.remove id=<id>` | Removes a non-root UI node. |
 | `/ui.document.set_space space=screen|world|camera` | Chooses where that user UI renders. |
 | `/ui.document.bind_camera camera=<key>` | Links a document to a camera by reference, not hierarchy ownership. |
+| `/rafui.studio.preview format=text|json dpi=1.0|1.25|1.5|2.0 theme=dark|light` | Prints the RafUI Studio recipe, density, and diagnostic preview. |
 | `/asset.generate_image prompt="..." name=<asset> size=square|landscape|portrait transparent=true|false` | Starts the isolated remote image worker with `gpt-image-2` by default. |
 | `/asset.generate_local_png prompt="..." name=<asset> style=icon|badge|sprite|texture` | Starts the inexpensive local procedural PNG worker; no API key or network required. |
 | `/asset.image_status job=<uuid>` | Reads an image generation job. |
@@ -155,3 +160,25 @@ Limits:
 Do not put new command logic directly into the Console UI. The Console should
 collect input and render output; command behavior belongs in the command
 modules so agents and external callers can reuse the same path later.
+
+## RafUI Studio from Windows CMD
+
+The editor executable exposes the same read-only preview without opening the
+window:
+
+```powershell
+cargo run -p aura_rafi_editor -- --rafui-studio-preview
+cargo run -p aura_rafi_editor -- --rafui-studio-preview format=json dpi=1.25 theme=dark
+cargo run -p aura_rafi_editor -- --rafui-command "/rafui.studio.preview format=text dpi=2 theme=light"
+tools\rafui-studio.cmd format=text dpi=1.25 theme=dark
+```
+
+For a built executable, replace `cargo run -p aura_rafi_editor --` with the
+path to `aura_rafi_editor.exe`. The process prints the title, human-readable
+preview lines, and the machine-readable JSON payload, then exits.
+
+The current external path is intentionally read-only because a second process
+does not own the live editor session. A future mutation bridge must add an
+explicit IPC/session endpoint, command authentication, undo ownership, and
+atomic persistence before allowing external writes. Internal Console commands
+already use the same canonical command names and typed handlers.

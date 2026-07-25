@@ -273,7 +273,7 @@ impl ViewportSurfaceHost {
         stats
     }
 
-    pub fn paint(&self, painter: &egui::Painter, rect: egui::Rect) {
+    pub fn paint(&mut self, painter: &egui::Painter, rect: egui::Rect) {
         self.canvas.paint(painter, rect);
     }
 

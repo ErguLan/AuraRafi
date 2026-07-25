@@ -17,6 +17,31 @@ backend.
 
 Design axiom: scene in, camera in, frame out, then present through the shared graphics runtime.
 
+## Viewport integrity and light batching (active)
+
+The current stabilization path deliberately improves the existing renderer
+without enabling advanced effects:
+
+- input mutations are applied before frame recording, avoiding a one-frame drag
+  lag; cache invalidation is tied to real edits rather than idle Vertex Edit
+  frames;
+- render targets use physical pixels while camera and RafUI overlays remain in
+  logical points, so high-DPI viewports stay sharp;
+- adjacent grid/edge lines become one `DrawLineBatch`. GPU expands instances to
+  screen-space quads and CPU rasterization uses the same width/depth semantics;
+- persistent meshes are deduplicated within a frame and the GPU cache is bounded
+  by the potato/desktop memory budget. Vertex-edit overrides are transient;
+- culling/focus use world transform scale, and unnamed visible geometry is still
+  renderable.
+- The startup shader is parsed by the wgpu 23/Naga test path; vector outputs are
+  rebuilt explicitly instead of assigning WGSL swizzles, preventing a pre-project
+  validation panic.
+
+Game 2D is an orthographic 3D scene. `Sprite2D` is no longer an active
+primitive; old serialized/command spellings are accepted as `Plane`. Shadows,
+post-processing, PBR, particles, and skeletal animation remain future,
+budget-gated work and are not part of this stabilization change.
+
 ## Canonical Active Path
 
 Today the active editor surfaces follow one graphics contract:
@@ -54,8 +79,34 @@ Phase 7 freezes one minimum contract for the active editor surfaces:
   fallback behavior diverge.
 - Transient tooling paths such as editable mesh overrides may stay uncached,
   but they must still execute through the same runtime contract.
-- Retained UI surfaces must record through `BasicCommandList` and keep text as
-  i18n keys until the text atlas resolves the active language.
+- Retained UI surfaces must keep text as i18n keys until the text atlas
+  resolves the active language, then compile one cacheable `UiSurfaceDrawList`
+  for both GPU presentation and CPU recovery.
+
+## RafUI And Asset Boundary
+
+RafUI and imported assets use ApiGraphicBasic through Rafi-owned descriptors,
+commands, and handles. The retained document owns layout, interaction, and
+semantic paint data; the graphics layer owns text/image uploads, resource
+budgets, and presentation. `raf_assets` may decode content, but it cannot hand
+raw WGPU resources to a panel or document.
+
+### Controlled Hybrid Foundation
+
+The first ApiGraphicBasic foundation is implemented while WGPU remains the
+active adapter. Backend-neutral generational handles, capabilities, adapter
+preference, memory budgets, `SharedGraphicsContext`, and `GpuTextureView` are
+now part of the runtime contract. The current presentation bridge may still
+use an explicit WGPU escape hatch; that bridge is transitional and does not
+define the upper-layer API.
+
+Resource registries with eviction, structural batching, complete DeviceHub
+ownership, frame graph, and native DX12/Vulkan/Metal backends are later
+capability migrations. They must preserve this same scene/CAD/RafUI contract.
+
+The complete graphics contract is [ApiGraphicBasic](APIGRAPHICBASIC.md). The
+RafUI surface and menu construction contract is
+[RafUI Authoring Guide](RAF_UI_AUTHORING.md).
 
 ## Viewport Surface Host
 
@@ -94,12 +145,12 @@ explicit project gates still decide what actually runs.
 ## Studio UI Surface
 
 `raf_ui` is the first retained, non-egui UI data model for editor chrome and
-canvas overlays. `ApiGraphicBasic::ui_surface` is the render adapter that turns
-that data into `BasicCommandList` geometry.
+canvas overlays. `ApiGraphicBasic::ui_surface` compiles it into a dedicated
+`UiSurfaceDrawList`; this avoids creating a synthetic `SceneRenderFrame` or a
+second `BasicCommandList` for the same retained controls.
 
-The surface produces a `SceneRenderFrame` backed by `BasicCommandList`, which
-means it can be executed by the same GPU-first and CPU-fallback path as scene,
-schematic, and PCB surfaces. The initial implementation supports panels,
+The draw list is consumed by the direct GPU compositor or the matching CPU
+recovery compositor. The initial implementation supports panels,
 toolbars, buttons, labels, overlays, canvas regions, row/column layout,
 absolute layout, hit testing, focus state, input snapshots, docking z-order,
 and text atlas requests. Text is still metadata at this layer; a later atlas

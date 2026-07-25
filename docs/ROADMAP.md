@@ -15,6 +15,7 @@ The engine foundation is in place and several vertical slices have already moved
 - [x] Configuration system with RON persistence
 - [x] Temporary editor shell with panels (egui/eframe)
 - [x] Rust-native retained UI foundation (`raf_ui` + ApiGraphicBasic direct host)
+- [x] RafUI authoring contract for surface ownership, menus, themes, docking, and canvas fidelity
 - [x] Theme system (dark/light + orange accent)
 - [x] Visual node editor with connections
 - [x] Schematic editor with component library (Resistor, Capacitor, LED, Magnet)
@@ -156,7 +157,9 @@ Prepared rendering goals in this phase also include:
 - [ ] PBR, shadows, post-processing, particle systems, skeletal animation,
   advanced lighting, and ray tracing are intentionally not product-enabled
   while the renderer and editor are stabilized.
-- [ ] 2D sprite rendering (textured quads in 2D mode)
+- [x] 2D game view uses the shared 3D scene renderer with an orthographic
+      camera; legacy `Sprite2D` data is loaded as `Plane` (textured assets
+      remain future)
 
 ## v0.8.0 - Game Runtime (Prepared, Not Product-Active)
 
@@ -264,6 +267,32 @@ The 0.9.0 target establishes the editor IDE as the native "home" for the AI agen
 
 ## v0.11.0 - Cloud & Streaming
 
+- [x] ApiGraphicBasic contract foundation: backend-neutral generational handles,
+  capabilities, adapter preference, memory budgets, neutral shared context, and
+  GPU output encapsulation while WGPU remains the active adapter.
+- [x] RafUI retained compilation: one cacheable layout/input frame and one
+  shared CPU/GPU paint list, retained GPU buffers, deduplicated image uploads,
+  adjacent paint-run batching, and a native application-menu adapter boundary.
+- [x] RafUI Frontier Core: window-level overlay placement with flip/shift,
+  intrinsic content sizing, time-based hover/focus state, shared motion with
+  reduced-motion behavior, semantic component recipes, bounded HiDPI density,
+  and shared GPU/CPU diagnostics.
+- [x] RafUI tooltip migration: compact tooltip content is authored and
+  rendered by a dedicated transparent RafUI surface; the transitional Egui
+  bridge only composites its completed texture and never paints tooltip text
+  or rectangles.
+- [ ] ApiGraphicBasic owned graphics evolution: complete the resource registry,
+  eviction, upload enforcement, frame graph, synchronization, and presentation
+  lifecycle so backends can be selected per platform without coupling editor
+  surfaces to WGPU.
+- [ ] ApiGraphicBasic asset ingress: move render-facing asset import,
+  decode/transcode policy, GPU residency, thumbnails, and resource lifetime
+  behind the engine graphics API. Project files remain portable while the
+  renderer owns how each asset reaches the selected GPU backend.
+- [ ] Native graphics backend lanes: add direct backend implementations under
+  ApiGraphicBasic for the platforms Rafi targets. WGPU remains available as an
+  adapter during the build-out, but it is not the permanent owner of Rafi's
+  graphics architecture.
 - [ ] Headless rendering mode (--headless flag)
 - [ ] Low-latency input pipeline for cloud streaming
 - [ ] Linux native build (CI target)

@@ -7,7 +7,11 @@ use bytemuck::{Pod, Zeroable};
 use raf_core::config::RenderExecutionPolicy;
 use wgpu::util::DeviceExt;
 
+use crate::api_graphic_basic::capabilities::{
+    GraphicsAdapterPreference, GraphicsBackendId, GraphicsCapabilities, GraphicsMemoryBudget,
+};
 use crate::api_graphic_basic::command_list::GraphicCommand;
+use crate::api_graphic_basic::handles::TextureHandle;
 use crate::api_graphic_basic::mesh::BasicMesh;
 use crate::api_graphic_basic::pipeline::BasicPipelineKind;
 use crate::render_pipeline::framebuffer::Framebuffer;
@@ -17,19 +21,58 @@ use crate::shaders::BASIC_SCENE_WGSL;
 /// Supported execution backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum BasicBackendType {
-    /// High-performance GPU hardware rendering (using our private wgpu layer).
+    /// GPU hardware rendering through the current private WGPU adapter.
     GpuHardware,
-    /// Fallback CPU software rasterized rendering (for low-spec potato PCs).
+    /// CPU recovery/software rendering.
     CpuSoftware,
+}
+
+impl BasicBackendType {
+    pub const fn id(self) -> GraphicsBackendId {
+        match self {
+            Self::GpuHardware => GraphicsBackendId::Wgpu,
+            Self::CpuSoftware => GraphicsBackendId::CpuSoftware,
+        }
+    }
 }
 
 pub enum SceneFrameOutput {
     CpuPixels(Vec<u8>),
     GpuTexture {
-        view: Arc<wgpu::TextureView>,
+        view: GpuTextureView,
         width: u32,
         height: u32,
     },
+}
+
+/// A backend-neutral scene texture result with a transitional WGPU view
+/// escape hatch for the current egui/native presentation bridge.
+#[derive(Clone)]
+pub struct GpuTextureView {
+    view: Arc<wgpu::TextureView>,
+    handle: TextureHandle,
+}
+
+impl GpuTextureView {
+    /// Transitional constructor for existing egui/native presentation hosts.
+    /// New backend code should create this from its own texture registry.
+    pub fn from_wgpu(view: Arc<wgpu::TextureView>, handle: TextureHandle) -> Self {
+        Self { view, handle }
+    }
+
+    pub fn handle(&self) -> TextureHandle {
+        self.handle
+    }
+
+    /// Transitional bridge for eframe/egui presentation. New renderer code
+    /// must consume the backend-neutral handle instead.
+    pub fn as_wgpu(&self) -> &wgpu::TextureView {
+        self.view.as_ref()
+    }
+
+    pub(crate) fn arc(&self) -> Arc<wgpu::TextureView> {
+        self.view.clone()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -48,10 +91,29 @@ pub struct SceneFrameMetrics {
 }
 
 #[derive(Debug, Clone)]
-pub struct SharedWgpuContext {
-    pub device: Arc<wgpu::Device>,
-    pub queue: Arc<wgpu::Queue>,
+pub struct SharedGraphicsContext {
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
 }
+
+impl SharedGraphicsContext {
+    /// Explicit adapter boundary for the current eframe/WGPU host.
+    pub fn from_host(device: Arc<wgpu::Device>, queue: Arc<wgpu::Queue>) -> Self {
+        Self { device, queue }
+    }
+
+    fn device(&self) -> Arc<wgpu::Device> {
+        self.device.clone()
+    }
+
+    fn queue(&self) -> Arc<wgpu::Queue> {
+        self.queue.clone()
+    }
+}
+
+/// Transitional name retained for callers that have not migrated to the
+/// backend-neutral context name yet.
+pub type SharedWgpuContext = SharedGraphicsContext;
 
 /// Configuration settings for device initialization.
 #[derive(Debug, Clone)]
@@ -61,7 +123,11 @@ pub struct BasicDeviceConfig {
     /// Force CPU software rendering regardless of GPU availability.
     pub force_cpu: bool,
     /// Optional shared wgpu context supplied by the host editor.
-    pub shared_wgpu_context: Option<SharedWgpuContext>,
+    pub shared_graphics_context: Option<SharedGraphicsContext>,
+    /// Backend-neutral memory and frame budget.
+    pub memory_budget: GraphicsMemoryBudget,
+    /// Adapter preference used only when ApiGraphicBasic creates the adapter.
+    pub adapter_preference: GraphicsAdapterPreference,
 }
 
 impl Default for BasicDeviceConfig {
@@ -69,7 +135,9 @@ impl Default for BasicDeviceConfig {
         Self {
             allow_gpu: true,
             force_cpu: false,
-            shared_wgpu_context: None,
+            shared_graphics_context: None,
+            memory_budget: GraphicsMemoryBudget::default(),
+            adapter_preference: GraphicsAdapterPreference::default(),
         }
     }
 }
@@ -81,12 +149,24 @@ impl BasicDeviceConfig {
             RenderExecutionPolicy::Auto | RenderExecutionPolicy::GpuPreferred => Self {
                 allow_gpu: true,
                 force_cpu: false,
-                shared_wgpu_context: None,
+                shared_graphics_context: None,
+                memory_budget: if matches!(policy, RenderExecutionPolicy::GpuPreferred) {
+                    GraphicsMemoryBudget::desktop()
+                } else {
+                    GraphicsMemoryBudget::potato()
+                },
+                adapter_preference: if matches!(policy, RenderExecutionPolicy::GpuPreferred) {
+                    GraphicsAdapterPreference::HighPerformance
+                } else {
+                    GraphicsAdapterPreference::LowPower
+                },
             },
             RenderExecutionPolicy::CpuOnly => Self {
                 allow_gpu: false,
                 force_cpu: true,
-                shared_wgpu_context: None,
+                shared_graphics_context: None,
+                memory_budget: GraphicsMemoryBudget::potato(),
+                adapter_preference: GraphicsAdapterPreference::LowPower,
             },
         }
     }
@@ -97,6 +177,8 @@ impl BasicDeviceConfig {
 #[allow(dead_code)]
 pub struct BasicDevice {
     backend: BasicBackendType,
+    capabilities: GraphicsCapabilities,
+    memory_budget: GraphicsMemoryBudget,
     framebuffer: Framebuffer,
     gpu_scene: Option<GpuSceneState>,
     last_frame_metrics: SceneFrameMetrics,
@@ -111,19 +193,30 @@ impl BasicDevice {
     /// Initialize the basic graphics device, attempting to use the GPU backend if possible.
     pub fn new(config: BasicDeviceConfig) -> Self {
         if !config.force_cpu && config.allow_gpu {
-            if let Some(shared_wgpu_context) = config.shared_wgpu_context {
+            if let Some(shared_graphics_context) = config.shared_graphics_context {
                 tracing::info!(
                     "ApiGraphicBasic initialized GPU Hardware backend using shared eframe wgpu device."
                 );
                 return Self {
                     backend: BasicBackendType::GpuHardware,
                     framebuffer: Framebuffer::new(1, 1),
-                    gpu_scene: Some(GpuSceneState::new(shared_wgpu_context.device.as_ref())),
+                    capabilities: GraphicsCapabilities::wgpu(
+                        shared_graphics_context
+                            .device()
+                            .limits()
+                            .max_texture_dimension_2d,
+                        shared_graphics_context.device().limits().max_buffer_size,
+                    ),
+                    memory_budget: config.memory_budget,
+                    gpu_scene: Some(GpuSceneState::new(
+                        shared_graphics_context.device().as_ref(),
+                        config.memory_budget.mesh_cache_entries as usize,
+                    )),
                     last_frame_metrics: SceneFrameMetrics::default(),
                     wgpu_instance: None,
                     wgpu_adapter: None,
-                    wgpu_device: Some(shared_wgpu_context.device),
-                    wgpu_queue: Some(shared_wgpu_context.queue),
+                    wgpu_device: Some(shared_graphics_context.device()),
+                    wgpu_queue: Some(shared_graphics_context.queue()),
                 };
             }
         }
@@ -132,14 +225,19 @@ impl BasicDevice {
             // The primary path is native GPU rendering. CPU remains a fallback;
             // compatibility limits should not silently force the renderer down
             // to a WebGL2-era feature floor on desktop hardware.
-            if let Some(gpu_state) = Self::try_init_gpu() {
+            if let Some(gpu_state) = Self::try_init_gpu(config.adapter_preference) {
                 tracing::info!(
                     "ApiGraphicBasic successfully initialized GPU Hardware backend (wgpu)."
                 );
                 return Self {
                     backend: BasicBackendType::GpuHardware,
+                    capabilities: gpu_state.capabilities,
+                    memory_budget: config.memory_budget,
                     framebuffer: Framebuffer::new(1, 1),
-                    gpu_scene: Some(GpuSceneState::new(&gpu_state.device)),
+                    gpu_scene: Some(GpuSceneState::new(
+                        &gpu_state.device,
+                        config.memory_budget.mesh_cache_entries as usize,
+                    )),
                     last_frame_metrics: SceneFrameMetrics::default(),
                     wgpu_instance: Some(gpu_state.instance),
                     wgpu_adapter: Some(gpu_state.adapter),
@@ -155,6 +253,8 @@ impl BasicDevice {
         tracing::info!("ApiGraphicBasic initialized CPU Software backend.");
         Self {
             backend: BasicBackendType::CpuSoftware,
+            capabilities: GraphicsCapabilities::cpu(),
+            memory_budget: config.memory_budget,
             framebuffer: Framebuffer::new(1, 1),
             gpu_scene: None,
             last_frame_metrics: SceneFrameMetrics::default(),
@@ -168,6 +268,14 @@ impl BasicDevice {
     /// Retrieve the currently active backend.
     pub fn backend(&self) -> BasicBackendType {
         self.backend
+    }
+
+    pub fn capabilities(&self) -> GraphicsCapabilities {
+        self.capabilities
+    }
+
+    pub fn memory_budget(&self) -> GraphicsMemoryBudget {
+        self.memory_budget
     }
 
     pub fn last_frame_metrics(&self) -> SceneFrameMetrics {
@@ -259,15 +367,19 @@ impl BasicDevice {
     /// Helper to attempt creating a wgpu device with generous compatibility parameters.
     /// Prioritizes Integrated GPUs and Low-Power options for maximum hardware reach,
     /// falling back to software/GL drivers if direct hardware context is missing.
-    fn try_init_gpu() -> Option<GpuState> {
+    fn try_init_gpu(preference: GraphicsAdapterPreference) -> Option<GpuState> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..Default::default()
         });
 
         // Request adapter using block_on for async initialization (run inside a lightweight runtime wrapper)
+        let power_preference = match preference {
+            GraphicsAdapterPreference::LowPower => wgpu::PowerPreference::LowPower,
+            GraphicsAdapterPreference::HighPerformance => wgpu::PowerPreference::HighPerformance,
+        };
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
+            power_preference,
             compatible_surface: None,
             force_fallback_adapter: false, // Fallback is requested if direct hardware creation fails
         }))?;
@@ -284,11 +396,16 @@ impl BasicDevice {
         ))
         .ok()?;
 
+        let limits = adapter.limits();
         Some(GpuState {
             instance,
             adapter,
             device,
             queue,
+            capabilities: GraphicsCapabilities::wgpu(
+                limits.max_texture_dimension_2d,
+                limits.max_buffer_size,
+            ),
         })
     }
 }
@@ -298,6 +415,7 @@ struct GpuState {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
+    capabilities: GraphicsCapabilities,
 }
 
 struct GpuSceneTarget {
@@ -328,6 +446,7 @@ struct GpuUniformSlot {
 struct GpuLineSlot {
     vertex_buffer: Arc<wgpu::Buffer>,
     uniform: GpuUniformSlot,
+    capacity: usize,
 }
 
 #[repr(C)]
@@ -353,16 +472,29 @@ impl GpuMeshVertex {
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct GpuLineVertex {
-    position: [f32; 3],
+    start: [f32; 3],
+    _start_padding: f32,
+    end: [f32; 3],
+    _end_padding: f32,
+    color: [f32; 4],
+    width: f32,
+    depth_bias: f32,
+    _padding: [f32; 2],
 }
 
 impl GpuLineVertex {
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
-        const ATTRS: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![0 => Float32x3];
+        const ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
+            0 => Float32x3,
+            1 => Float32x3,
+            2 => Float32x4,
+            3 => Float32,
+            4 => Float32,
+        ];
 
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GpuLineVertex>() as wgpu::BufferAddress,
-            step_mode: wgpu::VertexStepMode::Vertex,
+            step_mode: wgpu::VertexStepMode::Instance,
             attributes: &ATTRS,
         }
     }
@@ -373,6 +505,7 @@ impl GpuLineVertex {
 struct MeshUniforms {
     mvp: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
+    normal_matrix: [[f32; 4]; 4],
     color: [f32; 4],
     light_dir: [f32; 4],
     params: [f32; 4],
@@ -382,8 +515,8 @@ struct MeshUniforms {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct LineUniforms {
     mvp: [[f32; 4]; 4],
-    color: [f32; 4],
-    params: [f32; 4],
+    viewport: [f32; 2],
+    _padding: [f32; 2],
 }
 
 struct GpuSceneState {
@@ -394,13 +527,15 @@ struct GpuSceneState {
     line_pipeline_depth: wgpu::RenderPipeline,
     line_pipeline_xray: wgpu::RenderPipeline,
     mesh_cache: HashMap<usize, GpuMeshBuffers>,
+    mesh_cache_limit: usize,
     mesh_uniform_slots: Vec<GpuUniformSlot>,
     line_slots: Vec<GpuLineSlot>,
     target: Option<GpuSceneTarget>,
+    target_generation: u32,
 }
 
 impl GpuSceneState {
-    fn new(device: &wgpu::Device) -> Self {
+    fn new(device: &wgpu::Device, mesh_cache_limit: usize) -> Self {
         let color_format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ApiGraphicBasic.SceneShader"),
@@ -506,7 +641,7 @@ impl GpuSceneState {
                 })],
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
                 cull_mode: None,
@@ -545,7 +680,7 @@ impl GpuSceneState {
                 })],
             }),
             primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
+                topology: wgpu::PrimitiveTopology::TriangleList,
                 strip_index_format: None,
                 front_face: wgpu::FrontFace::Ccw,
                 cull_mode: None,
@@ -573,9 +708,11 @@ impl GpuSceneState {
             line_pipeline_depth,
             line_pipeline_xray,
             mesh_cache: HashMap::new(),
+            mesh_cache_limit,
             mesh_uniform_slots: Vec::new(),
             line_slots: Vec::new(),
             target: None,
+            target_generation: 0,
         }
     }
 
@@ -625,27 +762,31 @@ impl GpuSceneState {
             });
 
             let mut current_pipeline = BasicPipelineKind::FlatColor;
-            for command in frame.commands.commands().iter().cloned() {
+            // Borrow commands for the duration of the pass. This avoids
+            // cloning every line batch's Vec on potato machines.
+            for command in frame.commands.commands() {
                 match command {
                     GraphicCommand::Clear { .. } => {}
-                    GraphicCommand::SetPipeline(pipeline) => current_pipeline = pipeline,
+                    GraphicCommand::SetPipeline(pipeline) => current_pipeline = *pipeline,
                     GraphicCommand::DrawMesh {
                         mesh_id,
                         transform,
                         color,
                     } => {
-                        let Some(mesh) = frame.commands.mesh_arc(mesh_id) else {
+                        let Some(mesh) = frame.commands.mesh_arc(*mesh_id) else {
                             continue;
                         };
+                        let cacheable = frame.commands.mesh_cacheable(*mesh_id);
                         self.draw_mesh(
                             device,
                             queue,
                             &mut pass,
                             mesh,
-                            transform,
+                            *transform,
                             frame,
-                            color,
+                            *color,
                             matches!(current_pipeline, BasicPipelineKind::PbrLit),
+                            cacheable,
                             mesh_draw_index,
                             &mut metrics,
                         );
@@ -655,20 +796,39 @@ impl GpuSceneState {
                         start,
                         end,
                         color,
+                        width,
                         no_depth_test,
                         depth_bias,
-                        ..
                     } => {
-                        self.draw_line(
+                        self.draw_line_batch(
                             device,
                             queue,
                             &mut pass,
-                            start,
-                            end,
+                            &[crate::api_graphic_basic::command_list::BasicLine {
+                                start: *start,
+                                end: *end,
+                                color: *color,
+                                width: *width,
+                                depth_bias: *depth_bias,
+                            }],
                             frame,
-                            color,
-                            no_depth_test,
-                            depth_bias,
+                            *no_depth_test,
+                            line_draw_index,
+                            &mut metrics,
+                        );
+                        line_draw_index += 1;
+                    }
+                    GraphicCommand::DrawLineBatch {
+                        lines,
+                        no_depth_test,
+                    } => {
+                        self.draw_line_batch(
+                            device,
+                            queue,
+                            &mut pass,
+                            lines,
+                            frame,
+                            *no_depth_test,
                             line_draw_index,
                             &mut metrics,
                         );
@@ -684,7 +844,10 @@ impl GpuSceneState {
         metrics.frame_cpu_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         Some((
             SceneFrameOutput::GpuTexture {
-                view: color_view,
+                view: GpuTextureView::from_wgpu(
+                    color_view,
+                    TextureHandle::new(0, self.target_generation),
+                ),
                 width: frame.width,
                 height: frame.height,
             },
@@ -744,6 +907,7 @@ impl GpuSceneState {
             _depth_texture: depth_texture,
             depth_view,
         });
+        self.target_generation = self.target_generation.wrapping_add(1).max(1);
 
         true
     }
@@ -758,6 +922,7 @@ impl GpuSceneState {
         frame: &SceneRenderFrame,
         color: [u8; 4],
         lit: bool,
+        cacheable: bool,
         draw_index: usize,
         metrics: &mut SceneFrameMetrics,
     ) {
@@ -766,8 +931,16 @@ impl GpuSceneState {
         }
 
         let mesh_key = Arc::as_ptr(mesh) as usize;
-        let allow_cache = Arc::strong_count(mesh) > 1;
+        let allow_cache = cacheable && self.mesh_cache_limit > 0;
         let cached_buffers = if allow_cache {
+            if !self.mesh_cache.contains_key(&mesh_key)
+                && self.mesh_cache.len() >= self.mesh_cache_limit
+            {
+                // The cache is intentionally bounded for low-memory
+                // machines. A clear keeps eviction predictable and
+                // avoids adding an LRU allocation to the hot path.
+                self.mesh_cache.clear();
+            }
             match self.mesh_cache.entry(mesh_key) {
                 std::collections::hash_map::Entry::Occupied(entry) => {
                     metrics.mesh_cache_hits += 1;
@@ -801,6 +974,7 @@ impl GpuSceneState {
         let uniforms = MeshUniforms {
             mvp: (frame.view_proj * transform).to_cols_array_2d(),
             model: transform.to_cols_array_2d(),
+            normal_matrix: gpu_normal_matrix(transform),
             color: rgba8_to_f32(color),
             light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
             params: [if lit { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
@@ -819,41 +993,52 @@ impl GpuSceneState {
         pass.draw_indexed(0..cached_buffers.index_count, 0, 0..1);
     }
 
-    fn draw_line(
+    fn draw_line_batch(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pass: &mut wgpu::RenderPass<'_>,
-        start: glam::Vec3,
-        end: glam::Vec3,
+        lines: &[crate::api_graphic_basic::command_list::BasicLine],
         frame: &SceneRenderFrame,
-        color: [u8; 4],
         no_depth_test: bool,
-        depth_bias: f32,
-        draw_index: usize,
+        batch_index: usize,
         metrics: &mut SceneFrameMetrics,
     ) {
-        if start.distance_squared(end) <= f32::EPSILON {
+        if lines.is_empty() {
             return;
         }
 
-        let line_slot = self.ensure_line_slot(device, draw_index, metrics);
-        let vertices = [
-            GpuLineVertex {
-                position: start.to_array(),
-            },
-            GpuLineVertex {
-                position: end.to_array(),
-            },
-        ];
+        let visible_lines: Vec<GpuLineVertex> = lines
+            .iter()
+            .filter(|line| line.start.distance_squared(line.end) > f32::EPSILON)
+            .map(|line| GpuLineVertex {
+                start: line.start.to_array(),
+                _start_padding: 0.0,
+                end: line.end.to_array(),
+                _end_padding: 0.0,
+                color: rgba8_to_f32(line.color),
+                width: line.width.max(1.0),
+                depth_bias: line.depth_bias,
+                _padding: [0.0, 0.0],
+            })
+            .collect();
+        if visible_lines.is_empty() {
+            return;
+        }
+
+        let line_slot = self.ensure_line_slot(device, batch_index, visible_lines.len(), metrics);
         let uniforms = LineUniforms {
             mvp: frame.view_proj.to_cols_array_2d(),
-            color: rgba8_to_f32(color),
-            params: [depth_bias, 0.0, 0.0, 0.0],
+            viewport: [frame.width as f32, frame.height as f32],
+            _padding: [0.0, 0.0],
         };
-        queue.write_buffer(&line_slot.vertex_buffer, 0, bytemuck::cast_slice(&vertices));
+        queue.write_buffer(
+            &line_slot.vertex_buffer,
+            0,
+            bytemuck::cast_slice(visible_lines.as_slice()),
+        );
         queue.write_buffer(&line_slot.uniform.buffer, 0, bytemuck::bytes_of(&uniforms));
-        metrics.line_upload_bytes += std::mem::size_of_val(&vertices) as u64;
+        metrics.line_upload_bytes += std::mem::size_of_val(visible_lines.as_slice()) as u64;
         metrics.uniform_upload_bytes += std::mem::size_of::<LineUniforms>() as u64;
         metrics.line_draw_calls += 1;
 
@@ -864,7 +1049,7 @@ impl GpuSceneState {
         });
         pass.set_bind_group(0, line_slot.uniform.bind_group.as_ref(), &[]);
         pass.set_vertex_buffer(0, line_slot.vertex_buffer.slice(..));
-        pass.draw(0..2, 0..1);
+        pass.draw(0..6, 0..visible_lines.len() as u32);
     }
 
     fn draw_transient_mesh(
@@ -904,6 +1089,7 @@ impl GpuSceneState {
         let uniforms = MeshUniforms {
             mvp: (frame.view_proj * transform).to_cols_array_2d(),
             model: transform.to_cols_array_2d(),
+            normal_matrix: gpu_normal_matrix(transform),
             color: rgba8_to_f32(color),
             light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
             params: [if lit { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
@@ -944,13 +1130,14 @@ impl GpuSceneState {
         &mut self,
         device: &wgpu::Device,
         draw_index: usize,
+        required_capacity: usize,
         metrics: &mut SceneFrameMetrics,
     ) -> GpuLineSlot {
         while self.line_slots.len() <= draw_index {
             self.line_slots.push(GpuLineSlot {
                 vertex_buffer: Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("ApiGraphicBasic.LineVertexBuffer"),
-                    size: std::mem::size_of::<[GpuLineVertex; 2]>() as u64,
+                    label: Some("ApiGraphicBasic.LineInstanceBuffer"),
+                    size: (std::mem::size_of::<GpuLineVertex>() * required_capacity.max(1)) as u64,
                     usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 })),
@@ -961,8 +1148,20 @@ impl GpuSceneState {
                     "ApiGraphicBasic.LineUniformBuffer",
                     "ApiGraphicBasic.LineBindGroup",
                 ),
+                capacity: required_capacity.max(1),
             });
             metrics.line_slot_creations += 1;
+        }
+
+        if self.line_slots[draw_index].capacity < required_capacity {
+            self.line_slots[draw_index].vertex_buffer =
+                Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("ApiGraphicBasic.LineInstanceBufferGrow"),
+                    size: (std::mem::size_of::<GpuLineVertex>() * required_capacity) as u64,
+                    usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            self.line_slots[draw_index].capacity = required_capacity;
         }
 
         self.line_slots[draw_index].clone()
@@ -1004,6 +1203,10 @@ fn create_gpu_mesh_buffers(device: &wgpu::Device, mesh: &BasicMesh) -> GpuMeshBu
     }
 }
 
+fn gpu_normal_matrix(model: glam::Mat4) -> [[f32; 4]; 4] {
+    crate::math::transform::normal_matrix(&model).to_cols_array_2d()
+}
+
 fn create_uniform_slot(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
@@ -1034,9 +1237,9 @@ fn extract_clear_color(commands: &[GraphicCommand]) -> wgpu::Color {
     for command in commands {
         if let GraphicCommand::Clear { r, g, b, a } = command {
             color = wgpu::Color {
-                r: *r as f64 / 255.0,
-                g: *g as f64 / 255.0,
-                b: *b as f64 / 255.0,
+                r: f64::from(crate::post_process::srgb_to_linear(*r as f32 / 255.0)),
+                g: f64::from(crate::post_process::srgb_to_linear(*g as f32 / 255.0)),
+                b: f64::from(crate::post_process::srgb_to_linear(*b as f32 / 255.0)),
                 a: *a as f64 / 255.0,
             };
         }
@@ -1046,9 +1249,9 @@ fn extract_clear_color(commands: &[GraphicCommand]) -> wgpu::Color {
 
 fn rgba8_to_f32(color: [u8; 4]) -> [f32; 4] {
     [
-        color[0] as f32 / 255.0,
-        color[1] as f32 / 255.0,
-        color[2] as f32 / 255.0,
+        crate::post_process::srgb_to_linear(color[0] as f32 / 255.0),
+        crate::post_process::srgb_to_linear(color[1] as f32 / 255.0),
+        crate::post_process::srgb_to_linear(color[2] as f32 / 255.0),
         color[3] as f32 / 255.0,
     ]
 }
@@ -1076,7 +1279,8 @@ mod tests {
         let mut device = BasicDevice::new(BasicDeviceConfig {
             allow_gpu: false,
             force_cpu: true,
-            shared_wgpu_context: None,
+            shared_graphics_context: None,
+            ..BasicDeviceConfig::default()
         });
         let output = device.execute_scene_frame(&frame);
         let SceneFrameOutput::CpuPixels(pixels) = output else {
@@ -1088,5 +1292,25 @@ mod tests {
         assert_eq!(pixels[1], 34);
         assert_eq!(pixels[2], 56);
         assert_eq!(pixels[3], 255);
+        assert_eq!(
+            device.capabilities().backend,
+            GraphicsBackendId::CpuSoftware
+        );
+        assert_eq!(device.memory_budget(), GraphicsMemoryBudget::potato());
+    }
+
+    #[test]
+    fn gpu_scene_colors_are_linearized_for_srgb_targets() {
+        let color = rgba8_to_f32([9, 12, 16, 255]);
+        assert!(color[0] < 9.0 / 255.0);
+        assert!(color[1] < 12.0 / 255.0);
+        assert!(color[2] < 16.0 / 255.0);
+
+        let mut commands = BasicCommandList::new();
+        commands.clear([9, 12, 16, 255]);
+        let clear = extract_clear_color(commands.commands());
+        assert!((clear.r - f64::from(color[0])).abs() < f64::EPSILON);
+        assert!((clear.g - f64::from(color[1])).abs() < f64::EPSILON);
+        assert!((clear.b - f64::from(color[2])).abs() < f64::EPSILON);
     }
 }

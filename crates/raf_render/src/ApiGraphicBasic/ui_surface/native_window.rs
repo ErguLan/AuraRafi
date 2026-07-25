@@ -7,12 +7,16 @@ use std::sync::Arc;
 
 use winit::window::Window;
 
-use super::{CpuUiSurfaceHost, DirectUiSurfaceFrame, DirectUiSurfaceHost, UiSurfaceCpuMetrics};
+use super::{
+    CpuUiSurfaceHost, DirectUiSurfaceFrame, DirectUiSurfaceHost, NativeApplicationMenuAdapter,
+    UiSurfaceCpuMetrics,
+};
 use crate::api_graphic_basic::canvas_presenter::DirectCanvasPresenter;
 use crate::api_graphic_basic::canvas_presenter::DirectSceneSurfaceHost;
 use crate::api_graphic_basic::device::BasicDevice;
 use crate::api_graphic_basic::device::SceneFrameOutput;
 use crate::scene_renderer::SceneRenderFrame;
+use raf_ui::UiApplicationMenu;
 
 pub struct NativeUiWindowHost {
     window: Arc<Window>,
@@ -115,6 +119,32 @@ impl NativeUiWindowHost {
 
     pub fn color_format(&self) -> wgpu::TextureFormat {
         self.configuration.format
+    }
+
+    /// Installs the shared application command tree through a platform-owned
+    /// menu adapter. The native event loop later drains stable command IDs and
+    /// dispatches them at the application boundary.
+    pub fn install_application_menu<A>(
+        &self,
+        adapter: &mut A,
+        menu: &UiApplicationMenu,
+    ) -> Result<(), String>
+    where
+        A: NativeApplicationMenuAdapter,
+    {
+        adapter.install(self.window.as_ref(), menu)
+    }
+
+    pub fn install_application_menu_localized<A>(
+        &self,
+        adapter: &mut A,
+        menu: &UiApplicationMenu,
+        resolve: &mut dyn FnMut(&str) -> String,
+    ) -> Result<(), String>
+    where
+        A: NativeApplicationMenuAdapter,
+    {
+        adapter.install_localized(self.window.as_ref(), menu, resolve)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {

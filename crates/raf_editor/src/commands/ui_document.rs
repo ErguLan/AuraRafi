@@ -1,6 +1,10 @@
 //! Declarative commands for user-authored `UiDocument` data.
 
-use raf_ui::{UiDocument, UiDocumentSpace, UiNode, UiNodeKind};
+use raf_ui::{
+    RafUiStudio, UiAlign, UiColorMode, UiCompactMode, UiDocument, UiDocumentSpace, UiEnvironment,
+    UiFlow, UiImage, UiImageSource, UiJustify, UiNode, UiNodeKind, UiResponsiveRule, UiScrollAxis,
+    UiSkeleton, UiSkeletonShape, UiTextInput,
+};
 use serde_json::json;
 
 use crate::commands::output::CommandOutput;
@@ -22,8 +26,55 @@ pub fn execute(
         "ui.document.set_space" => set_space(command, ctx),
         "ui.document.bind_camera" => bind_camera(command, ctx),
         "ui.document.clear_camera" => clear_camera(ctx),
+        "rafui.studio.preview" => studio_preview(command, ctx),
         _ => CommandOutput::error("UI document", format!("Unknown command: {name}")),
     }
+}
+
+/// Executes the read-only RafUI Studio preview against a standalone blank
+/// document. The editor binary uses this same path for CMD calls, so the
+/// external and internal command contracts cannot drift.
+pub fn standalone_studio_preview(command: &ParsedCommand) -> CommandOutput {
+    let mut document = UiDocument::default();
+    let mut context = UiDocumentCommandContext {
+        document: &mut document,
+    };
+    studio_preview(command, &mut context)
+}
+
+fn studio_preview(command: &ParsedCommand, ctx: &UiDocumentCommandContext<'_>) -> CommandOutput {
+    let scale_factor = command
+        .arg("dpi")
+        .or_else(|| command.arg("scale"))
+        .and_then(|value| value.parse::<f32>().ok())
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .unwrap_or(1.0)
+        .clamp(1.0, 4.0);
+    let color_mode = command
+        .arg("theme")
+        .or_else(|| command.arg("mode"))
+        .and_then(parse_color_mode)
+        .unwrap_or(UiColorMode::Dark);
+    let format = command.arg("format").unwrap_or("text").to_ascii_lowercase();
+    let environment = UiEnvironment {
+        viewport_size: [1280.0, 720.0],
+        scale_factor,
+        color_mode,
+        ..UiEnvironment::default()
+    };
+    let preview = RafUiStudio::new([1280, 720]).text_preview(ctx.document, environment);
+    let json_value = serde_json::to_value(&preview).unwrap_or_else(|_| {
+        serde_json::json!({
+            "ok": false,
+            "error": "Unable to serialize RafUI Studio preview."
+        })
+    });
+    let lines = if format == "json" {
+        vec![serde_json::to_string_pretty(&json_value).unwrap_or_else(|_| json_value.to_string())]
+    } else {
+        preview.lines()
+    };
+    CommandOutput::info("RafUI Studio preview", lines, json_value)
 }
 
 fn describe(ctx: &UiDocumentCommandContext<'_>) -> CommandOutput {
@@ -53,7 +104,55 @@ fn add_node(command: &ParsedCommand, ctx: &mut UiDocumentCommandContext<'_>) -> 
         return CommandOutput::error("Add UI node", "Missing or invalid kind=<node-kind>.");
     };
     let parent = command.arg("parent").unwrap_or("root");
-    let mut node = UiNode::new(id, kind);
+    let mut node = match kind {
+        UiNodeKind::Image => {
+            let Some(source) = command.arg("source") else {
+                return CommandOutput::error(
+                    "Add UI node",
+                    "Image nodes require source=<resource-key>.",
+                );
+            };
+            UiNode::image(
+                id,
+                UiImage {
+                    source: UiImageSource::new(source),
+                    fit: command
+                        .arg("fit")
+                        .and_then(parse_image_fit)
+                        .unwrap_or_default(),
+                    tint: None,
+                },
+            )
+        }
+        UiNodeKind::TextInput => {
+            let value_key = command.arg("value_key").unwrap_or(id);
+            let mut input = UiTextInput::new(value_key);
+            input.placeholder_key = command.arg("placeholder_key").map(str::to_string);
+            input.multiline = command.bool_arg("multiline");
+            input.password = command.bool_arg("password");
+            input.submit_command = command.arg("submit_command").map(str::to_string);
+            UiNode::text_input(id, input)
+        }
+        UiNodeKind::ScrollView => UiNode::scroll_view(
+            id,
+            command
+                .arg("axis")
+                .and_then(parse_scroll_axis)
+                .unwrap_or_default(),
+        ),
+        UiNodeKind::Grid => UiNode::grid(id),
+        UiNodeKind::Skeleton => UiNode::skeleton(
+            id,
+            UiSkeleton {
+                shape: command
+                    .arg("shape")
+                    .and_then(parse_skeleton_shape)
+                    .unwrap_or_default(),
+                ..UiSkeleton::default()
+            },
+        ),
+        _ => UiNode::new(id, kind),
+    };
     if let Some(text_key) = command.arg("text_key") {
         node.text_key = Some(text_key.to_string());
     }
@@ -64,6 +163,7 @@ fn add_node(command: &ParsedCommand, ctx: &mut UiDocumentCommandContext<'_>) -> 
         node.focusable = true;
         node.interactive = true;
     }
+    apply_layout_args(command, &mut node);
     match ctx.document.add_node(parent, node) {
         Ok(()) => CommandOutput::changed(
             "Add UI node",
@@ -139,6 +239,154 @@ fn parse_kind(raw: &str) -> Option<UiNodeKind> {
         "floating_panel" => Some(UiNodeKind::FloatingPanel),
         "menu" => Some(UiNodeKind::Menu),
         "tooltip" => Some(UiNodeKind::Tooltip),
+        "image" => Some(UiNodeKind::Image),
+        "text_input" | "input" => Some(UiNodeKind::TextInput),
+        "scroll_view" | "scroll" => Some(UiNodeKind::ScrollView),
+        "grid" => Some(UiNodeKind::Grid),
+        "skeleton" => Some(UiNodeKind::Skeleton),
+        _ => None,
+    }
+}
+
+fn apply_layout_args(command: &ParsedCommand, node: &mut UiNode) {
+    if let Some(flow) = command.arg("flow").and_then(parse_flow) {
+        node.layout.flow = flow;
+    }
+    if node.kind == UiNodeKind::Grid {
+        node.layout.flow = UiFlow::Grid;
+    }
+    if let Some(value) = command
+        .arg("grow")
+        .and_then(|value| value.parse::<f32>().ok())
+    {
+        node.layout.grow = value.max(0.0);
+    }
+    if let Some(value) = command
+        .arg("width")
+        .and_then(|value| value.parse::<f32>().ok())
+    {
+        node.layout.basis[0] = value.max(0.0);
+    }
+    if let Some(value) = command
+        .arg("height")
+        .and_then(|value| value.parse::<f32>().ok())
+    {
+        node.layout.basis[1] = value.max(0.0);
+    }
+    if let Some(value) = command
+        .arg("gap")
+        .and_then(|value| value.parse::<f32>().ok())
+    {
+        node.layout.gap = value.max(0.0);
+    }
+    if let Some(value) = command.arg("justify").and_then(parse_justify) {
+        node.layout.justify_content = value;
+    }
+    if let Some(value) = command.arg("align").and_then(parse_align) {
+        node.layout.align_items = value;
+    }
+    if let Some(value) = command.arg("compact").and_then(parse_compact) {
+        node.layout.compact = value;
+    }
+    if let Some(value) = command
+        .arg("columns")
+        .and_then(|value| value.parse::<u16>().ok())
+    {
+        node.layout.grid.columns = value;
+    }
+    if let Some(value) = command
+        .arg("min_column_width")
+        .and_then(|value| value.parse::<f32>().ok())
+    {
+        node.layout.grid.min_column_width = value.max(1.0);
+    }
+    if let Some(max_width) = command
+        .arg("responsive_max_width")
+        .and_then(|value| value.parse::<f32>().ok())
+    {
+        node.layout.responsive.push(UiResponsiveRule {
+            max_width: max_width.max(1.0),
+            flow: command.arg("responsive_flow").and_then(parse_flow),
+            basis: None,
+            padding: None,
+            gap: None,
+            compact: command.arg("responsive_compact").and_then(parse_compact),
+            grid_columns: command
+                .arg("responsive_columns")
+                .and_then(|value| value.parse::<u16>().ok()),
+        });
+        node.layout
+            .responsive
+            .sort_by(|left, right| left.max_width.total_cmp(&right.max_width));
+    }
+}
+
+fn parse_flow(raw: &str) -> Option<UiFlow> {
+    match raw.to_ascii_lowercase().as_str() {
+        "none" => Some(UiFlow::None),
+        "row" | "flex_row" => Some(UiFlow::Row),
+        "column" | "flex_column" => Some(UiFlow::Column),
+        "wrap" | "row_wrap" => Some(UiFlow::RowWrap),
+        "grid" => Some(UiFlow::Grid),
+        _ => None,
+    }
+}
+
+fn parse_justify(raw: &str) -> Option<UiJustify> {
+    match raw.to_ascii_lowercase().as_str() {
+        "start" => Some(UiJustify::Start),
+        "center" | "middle" => Some(UiJustify::Center),
+        "end" => Some(UiJustify::End),
+        "between" | "space_between" => Some(UiJustify::SpaceBetween),
+        "around" | "space_around" => Some(UiJustify::SpaceAround),
+        "evenly" | "space_evenly" => Some(UiJustify::SpaceEvenly),
+        _ => None,
+    }
+}
+
+fn parse_align(raw: &str) -> Option<UiAlign> {
+    match raw.to_ascii_lowercase().as_str() {
+        "start" => Some(UiAlign::Start),
+        "center" | "middle" => Some(UiAlign::Center),
+        "end" => Some(UiAlign::End),
+        "stretch" => Some(UiAlign::Stretch),
+        _ => None,
+    }
+}
+
+fn parse_compact(raw: &str) -> Option<UiCompactMode> {
+    match raw.to_ascii_lowercase().as_str() {
+        "none" => Some(UiCompactMode::None),
+        "wrap" => Some(UiCompactMode::Wrap),
+        "stack" => Some(UiCompactMode::Stack),
+        "auto" => Some(UiCompactMode::Auto),
+        _ => None,
+    }
+}
+
+fn parse_scroll_axis(raw: &str) -> Option<UiScrollAxis> {
+    match raw.to_ascii_lowercase().as_str() {
+        "vertical" | "y" => Some(UiScrollAxis::Vertical),
+        "horizontal" | "x" => Some(UiScrollAxis::Horizontal),
+        "both" | "xy" => Some(UiScrollAxis::Both),
+        _ => None,
+    }
+}
+
+fn parse_image_fit(raw: &str) -> Option<raf_ui::UiImageFit> {
+    match raw.to_ascii_lowercase().as_str() {
+        "contain" => Some(raf_ui::UiImageFit::Contain),
+        "cover" => Some(raf_ui::UiImageFit::Cover),
+        "stretch" => Some(raf_ui::UiImageFit::Stretch),
+        _ => None,
+    }
+}
+
+fn parse_skeleton_shape(raw: &str) -> Option<UiSkeletonShape> {
+    match raw.to_ascii_lowercase().as_str() {
+        "text" => Some(UiSkeletonShape::Text),
+        "rectangle" | "rect" => Some(UiSkeletonShape::Rectangle),
+        "circle" => Some(UiSkeletonShape::Circle),
         _ => None,
     }
 }
@@ -148,6 +396,15 @@ fn parse_space(raw: &str) -> Option<UiDocumentSpace> {
         "screen" => Some(UiDocumentSpace::Screen),
         "world" => Some(UiDocumentSpace::World),
         "camera" => Some(UiDocumentSpace::Camera),
+        _ => None,
+    }
+}
+
+fn parse_color_mode(raw: &str) -> Option<UiColorMode> {
+    match raw.to_ascii_lowercase().as_str() {
+        "system" => Some(UiColorMode::System),
+        "dark" => Some(UiColorMode::Dark),
+        "light" => Some(UiColorMode::Light),
         _ => None,
     }
 }
@@ -174,5 +431,22 @@ mod tests {
         };
         assert!(execute("ui.node.add", &command, &mut context).changed);
         assert_eq!(document.root.children.len(), 1);
+    }
+
+    #[test]
+    fn studio_preview_uses_the_same_internal_command_for_text_and_json() {
+        let ParsedInput::Command(command) =
+            parse_console_input("/rafui.studio.preview format=json dpi=1.25").unwrap()
+        else {
+            panic!("expected command");
+        };
+        let output = standalone_studio_preview(&command);
+        assert_eq!(output.title, "RafUI Studio preview");
+        assert!(output.lines[0].contains("RafUI Studio"));
+        assert_eq!(output.json["recipe_version"], 1);
+        assert_eq!(
+            output.json["selected_density"]["contract"]["geometry_scale"],
+            1.25
+        );
     }
 }

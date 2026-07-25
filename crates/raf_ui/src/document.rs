@@ -6,9 +6,9 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{UiNode, UiNodeKind, UiStyle};
+use crate::{UiNode, UiNodeKind, UiStyle, UiTheme};
 
-pub const UI_DOCUMENT_VERSION: u32 = 1;
+pub const UI_DOCUMENT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UiDocumentId(pub Uuid);
@@ -57,6 +57,8 @@ pub struct UiDocument {
     pub space: UiDocumentSpace,
     #[serde(default)]
     pub camera_binding: Option<UiCameraBinding>,
+    #[serde(default)]
+    pub theme: UiTheme,
     pub root: UiNode,
 }
 
@@ -68,6 +70,7 @@ impl UiDocument {
             name: name.into(),
             space: UiDocumentSpace::Screen,
             camera_binding: None,
+            theme: UiTheme::raf_ui(),
             root: UiNode::new("root", UiNodeKind::Root).with_style(UiStyle::transparent()),
         }
     }
@@ -89,6 +92,13 @@ impl UiDocument {
 
     pub fn find_node(&self, id: &str) -> Option<&UiNode> {
         find_node(&self.root, id)
+    }
+
+    /// Mutable counterpart used by controlled authoring tools such as RafUI
+    /// Studio. Domain state still belongs to the application boundary; this
+    /// only edits the retained UI document itself.
+    pub fn find_node_mut(&mut self, id: &str) -> Option<&mut UiNode> {
+        find_node_mut(&mut self.root, id)
     }
 
     pub fn add_node(&mut self, parent_id: &str, node: UiNode) -> Result<(), String> {

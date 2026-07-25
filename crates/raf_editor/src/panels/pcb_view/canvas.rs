@@ -260,8 +260,74 @@ impl PcbViewPanel {
             egui::FontId::proportional(11.0),
             palette.text_muted,
         );
+        self.draw_minimap(&painter, rect);
 
         changed
+    }
+
+    fn draw_minimap(&self, painter: &egui::Painter, canvas: Rect) {
+        let palette = electronics_palette(self.canvas_dark_mode);
+        let size = egui::Vec2::new(126.0, 92.0);
+        let rect = Rect::from_min_size(
+            Pos2::new(canvas.left() + 14.0, canvas.bottom() - size.y - 14.0),
+            size,
+        );
+        painter.rect_filled(rect, 5.0, palette.overlay_bg);
+        painter.rect_stroke(rect, 5.0, Stroke::new(1.0, theme::ACCENT));
+
+        let mut points = self.layout.board_outline.points.clone();
+        points.extend(
+            self.layout
+                .components
+                .iter()
+                .map(|component| component.position),
+        );
+        for trace in &self.layout.traces {
+            points.extend(trace.points.iter().copied());
+        }
+        if points.is_empty() {
+            painter.text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                t("app.electronics_minimap", self.lang),
+                egui::FontId::proportional(9.0),
+                palette.text_muted,
+            );
+            return;
+        }
+
+        let mut min = points[0];
+        let mut max = points[0];
+        for point in points.iter().copied() {
+            min = min.min(point);
+            max = max.max(point);
+        }
+        min -= Vec2::splat(24.0);
+        max += Vec2::splat(24.0);
+        let span = (max - min).max(Vec2::splat(1.0));
+        let content = rect.shrink2(egui::Vec2::splat(8.0));
+        let project = |world: Vec2| {
+            Pos2::new(
+                content.left() + (world.x - min.x) / span.x * content.width(),
+                content.bottom() - (world.y - min.y) / span.y * content.height(),
+            )
+        };
+
+        for trace in &self.layout.traces {
+            for segment in trace.points.windows(2) {
+                painter.line_segment(
+                    [project(segment[0]), project(segment[1])],
+                    Stroke::new(1.0, Color32::from_rgb(92, 208, 116)),
+                );
+            }
+        }
+        for component in &self.layout.components {
+            painter.rect_filled(
+                Rect::from_center_size(project(component.position), egui::Vec2::splat(4.0)),
+                1.5,
+                theme::ACCENT,
+            );
+        }
     }
 
     fn component_index_from_cad_region(&self, region: &CadSurfaceHitRegion) -> Option<usize> {

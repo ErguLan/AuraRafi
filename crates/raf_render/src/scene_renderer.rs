@@ -266,10 +266,10 @@ impl SceneRenderer {
         let mut jobs: Vec<RenderJob> = Vec::new();
 
         for (id, node) in scene.iter() {
-            if !node.visible || node.name.is_empty() {
+            if !node.visible {
                 continue;
             }
-            if matches!(node.primitive, Primitive::Empty | Primitive::Sprite2D) {
+            if matches!(node.primitive, Primitive::Empty) {
                 continue;
             }
 
@@ -294,13 +294,7 @@ impl SceneRenderer {
                 _ => cube_radius,
             };
 
-            let bounding_r = mesh_radius
-                * node
-                    .scale
-                    .x
-                    .abs()
-                    .max(node.scale.y.abs())
-                    .max(node.scale.z.abs());
+            let bounding_r = mesh_radius * world_max_scale(model);
 
             if !frustum.intersects_sphere(world_pos, bounding_r) {
                 continue;
@@ -576,10 +570,10 @@ impl SceneRenderer {
         let mut jobs: Vec<RenderJob> = Vec::new();
 
         for (id, node) in scene.iter() {
-            if !node.visible || node.name.is_empty() {
+            if !node.visible {
                 continue;
             }
-            if matches!(node.primitive, Primitive::Empty | Primitive::Sprite2D) {
+            if matches!(node.primitive, Primitive::Empty) {
                 continue;
             }
 
@@ -603,13 +597,7 @@ impl SceneRenderer {
                 _ => cube_radius,
             };
 
-            let bounding_r = mesh_radius
-                * node
-                    .scale
-                    .x
-                    .abs()
-                    .max(node.scale.y.abs())
-                    .max(node.scale.z.abs());
+            let bounding_r = mesh_radius * world_max_scale(model);
 
             if !frustum.intersects_sphere(world_pos, bounding_r) {
                 continue;
@@ -728,7 +716,11 @@ impl SceneRenderer {
                 } else {
                     BasicPipelineKind::FlatColor
                 });
-                let mesh_id = commands.register_mesh(basic_mesh);
+                let mesh_id = if override_mesh.is_some() {
+                    commands.register_transient_mesh(basic_mesh)
+                } else {
+                    commands.register_mesh(basic_mesh)
+                };
                 commands.draw_mesh(mesh_id, job.model, color);
                 stats.triangles_rendered += mesh.triangle_count() as u32;
             }
@@ -792,25 +784,27 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
     let vp_h = frame.height as f32;
     let mut current_pipeline = BasicPipelineKind::FlatColor;
 
-    for command in frame.commands.commands().iter().cloned() {
+    // Keep the frame command list borrowed; cloning a line batch here would
+    // allocate on every CPU fallback frame.
+    for command in frame.commands.commands() {
         match command {
-            GraphicCommand::Clear { r, g, b, a } => framebuffer.clear(r, g, b, a),
-            GraphicCommand::SetPipeline(pipeline) => current_pipeline = pipeline,
+            GraphicCommand::Clear { r, g, b, a } => framebuffer.clear(*r, *g, *b, *a),
+            GraphicCommand::SetPipeline(pipeline) => current_pipeline = *pipeline,
             GraphicCommand::DrawMesh {
                 mesh_id,
                 transform,
                 color,
             } => {
-                let Some(mesh) = frame.commands.mesh(mesh_id) else {
+                let Some(mesh) = frame.commands.mesh(*mesh_id) else {
                     continue;
                 };
                 rasterize_mesh_command(
                     framebuffer,
                     mesh,
                     &frame.view_proj,
-                    &transform,
+                    transform,
                     frame.light_dir,
-                    color,
+                    *color,
                     current_pipeline,
                     vp_w,
                     vp_h,
@@ -820,21 +814,41 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
                 start,
                 end,
                 color,
+                width,
                 no_depth_test,
                 depth_bias,
-                ..
             } => {
                 rasterize_world_line_command(
                     framebuffer,
                     &frame.view_proj,
-                    start,
-                    end,
+                    *start,
+                    *end,
                     vp_w,
                     vp_h,
-                    color,
-                    depth_bias,
-                    no_depth_test,
+                    *color,
+                    *width,
+                    *depth_bias,
+                    *no_depth_test,
                 );
+            }
+            GraphicCommand::DrawLineBatch {
+                lines,
+                no_depth_test,
+            } => {
+                for line in lines {
+                    rasterize_world_line_command(
+                        framebuffer,
+                        &frame.view_proj,
+                        line.start,
+                        line.end,
+                        vp_w,
+                        vp_h,
+                        line.color,
+                        line.width,
+                        line.depth_bias,
+                        *no_depth_test,
+                    );
+                }
             }
             GraphicCommand::DrawGrid { .. } => {}
         }
@@ -866,8 +880,20 @@ fn primitive_triangle_count(
         Primitive::Cylinder => cylinder.triangle_count() as u32,
         Primitive::Sphere => sphere.triangle_count() as u32,
         Primitive::Plane => plane.triangle_count() as u32,
-        Primitive::Empty | Primitive::Sprite2D => 0,
+        Primitive::Empty => 0,
     }
+}
+
+/// Conservative world-space radius multiplier. Using the model basis here
+/// keeps culling correct when a parent applies scale to a child.
+fn world_max_scale(model: Mat4) -> f32 {
+    model
+        .x_axis
+        .truncate()
+        .length()
+        .max(model.y_axis.truncate().length())
+        .max(model.z_axis.truncate().length())
+        .max(1.0e-4)
 }
 
 fn within_world_stream_radius(world_pos: Vec3, camera_pos: Vec3, options: RenderOptions) -> bool {
@@ -1151,6 +1177,7 @@ fn rasterize_world_line_command(
     vp_w: f32,
     vp_h: f32,
     color: [u8; 4],
+    width: f32,
     depth_bias: f32,
     no_depth_test: bool,
 ) {
@@ -1175,12 +1202,12 @@ fn rasterize_world_line_command(
     let z1 = ((c1.z / c1.w + 1.0) * 0.5 + depth_bias).min(0.9995);
 
     if no_depth_test {
-        rasterizer::rasterize_line_no_depth(
-            fb, x0, y0, x1, y1, color[0], color[1], color[2], color[3],
+        rasterizer::rasterize_line_no_depth_width(
+            fb, x0, y0, x1, y1, color[0], color[1], color[2], color[3], width,
         );
     } else {
-        rasterizer::rasterize_line(
-            fb, x0, y0, z0, x1, y1, z1, color[0], color[1], color[2], color[3],
+        rasterizer::rasterize_line_width(
+            fb, x0, y0, z0, x1, y1, z1, color[0], color[1], color[2], color[3], width,
         );
     }
 }

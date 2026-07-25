@@ -105,7 +105,7 @@ fn primitive_asset_source(primitive: Primitive) -> Option<&'static str> {
         Primitive::Sphere => Some("builtin://primitive/sphere"),
         Primitive::Cylinder => Some("builtin://primitive/cylinder"),
         Primitive::Plane => Some("builtin://primitive/plane"),
-        Primitive::Empty | Primitive::Sprite2D => None,
+        Primitive::Empty => None,
     }
 }
 
@@ -522,7 +522,8 @@ fn primitive_arg(command: &ParsedCommand) -> Option<Primitive> {
         "sphere" | "ball" => Some(Primitive::Sphere),
         "plane" | "floor" => Some(Primitive::Plane),
         "cylinder" => Some(Primitive::Cylinder),
-        "sprite" | "sprite2d" => Some(Primitive::Sprite2D),
+        // Keep command compatibility while using the orthographic 3D plane.
+        "sprite" | "sprite2d" => Some(Primitive::Plane),
         _ => None,
     }
 }
@@ -612,7 +613,7 @@ fn local_vertex_lines(primitive: Primitive, scale: Vec3) -> Vec<String> {
             .map(|(index, vertex)| format_vec3(&format!("local_vertex_{index}"), *vertex))
             .collect()
         }
-        Primitive::Plane | Primitive::Sprite2D => {
+        Primitive::Plane => {
             let sx = scale.x * 0.5;
             let sz = scale.z * 0.5;
             [
@@ -646,7 +647,7 @@ fn mesh_vertex_count(primitive: Primitive) -> usize {
         Primitive::Empty => 0,
         Primitive::Cube => 24,
         Primitive::Sphere => 425,
-        Primitive::Plane | Primitive::Sprite2D => 4,
+        Primitive::Plane => 4,
         Primitive::Cylinder => 68,
     }
 }
@@ -656,7 +657,7 @@ fn mesh_index_count(primitive: Primitive) -> usize {
         Primitive::Empty => 0,
         Primitive::Cube => 36,
         Primitive::Sphere => 2304,
-        Primitive::Plane | Primitive::Sprite2D => 6,
+        Primitive::Plane => 6,
         Primitive::Cylinder => 192,
     }
 }

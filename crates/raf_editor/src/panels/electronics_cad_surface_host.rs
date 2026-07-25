@@ -148,7 +148,7 @@ impl ElectronicsCadSurfaceHost {
             .expect("CAD surface cache must contain the current frame")
     }
 
-    pub fn paint(&self, painter: &egui::Painter, rect: egui::Rect) {
+    pub fn paint(&mut self, painter: &egui::Painter, rect: egui::Rect) {
         self.canvas.paint(painter, rect);
     }
 
@@ -211,11 +211,11 @@ fn cad_surface_options(
 ) -> CadSurfaceOptions {
     if dark_mode {
         CadSurfaceOptions {
-            clear_color: [10, 10, 11, 255],
+            clear_color: [9, 12, 16, 255],
             world_bounds: Some(world_bounds),
-            grid_color: [180, 186, 200, 14],
-            major_grid_color: [220, 226, 240, 30],
-            axis_color: [212, 119, 26, 46],
+            grid_color: [104, 119, 136, 9],
+            major_grid_color: [136, 150, 166, 18],
+            axis_color: [212, 119, 26, 34],
             selected_object_ids: selection.object_ids.clone(),
             selected_source_ids: selection.source_ids.clone(),
             ..CadSurfaceOptions::default()

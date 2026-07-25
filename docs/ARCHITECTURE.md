@@ -34,6 +34,44 @@ Game UI is stored as an empty `raf_ui::UiDocument`, not as camera children. A
 camera can opt into a document reference only when the author selects Camera
 space.
 
+RafUI documents, their session state, and their platform hosts have separate
+ownership. A document declares layout, styles, semantic text keys, and typed
+actions; a surface host maps those actions to existing backend operations; the
+application routes typed intents and owns persistence. The precise authoring
+contract, including menus and responsive layout, is maintained in
+[RafUI Authoring Guide](RAF_UI_AUTHORING.md).
+
+### RafUI Frontier Core Ownership
+
+The retained UI core is split by responsibility instead of growing one
+bridge-shaped file:
+
+| Responsibility | Owner |
+| --- | --- |
+| Semantic document tree and component recipes | `crates/raf_ui/src/node.rs`, `components.rs` |
+| Axis sizing and responsive layout data | `crates/raf_ui/src/layout.rs` |
+| Overlay placement and edge flipping | `crates/raf_ui/src/overlays.rs` |
+| Pointer, focus, hover intent, and typed actions | `crates/raf_ui/src/interaction.rs`, `focus.rs` |
+| Time-based transitions | `crates/raf_ui/src/motion.rs` |
+| Logical/physical density contract | `crates/raf_ui/src/environment.rs` |
+| Layout, text measurement, and shared paint payload | `crates/raf_render/src/ApiGraphicBasic/ui_surface/` |
+| Window placement compatibility | `crates/raf_editor/src/panels/raf_ui_surface_bridge.rs` |
+| Tooltip document recipe | `crates/raf_editor/src/panels/raf_ui_tooltip.rs` |
+
+An overlay is logically owned by its source surface but rendered in a global
+window layer. This is the required boundary for tooltips, menus, popovers,
+drag previews, and future modals. Owner clipping and overlay clipping are
+different contracts and must not be conflated.
+
+`UiSizeMode::FitContent` is resolved after semantic text localization and
+atlas synchronization. The first layout may reserve a safe bound, but the
+final draw list uses measured text dimensions. This keeps translated labels
+from being solved with per-panel magic widths.
+
+`UiSurfaceDiagnostics` is the data-only inspection boundary for layout boxes,
+hit regions, clipping, zero-size nodes, text requests, and z-order. It is
+available to GPU and CPU hosts and is suitable for golden layout tests.
+
 ## Workspace Layout
 
 ```
@@ -42,8 +80,8 @@ AuraRafi/
   crates/
     raf_core/         Core systems: ECS, scene graph, commands, events, config
     raf_ui/           Rust-native retained UI model, docking, style, events
-    raf_render/       Shared graphics runtime, CPU fallback path, and prepared render abstraction
-    raf_editor/       Visual editor UI built on egui/eframe
+    raf_render/       ApiGraphicBasic runtime, WGPU adapter, CPU recovery, and native-backend direction
+    raf_editor/       Retained RafUI direction with an egui/eframe transitional shell
     raf_assets/       Asset importing, browsing, JSON primitive manifests
     raf_electronics/  Electronic design: schematics, PCBs, simulation, DRC, export
     raf_nodes/        Visual scripting (no-code) node system + executor
@@ -71,7 +109,7 @@ editor (binary)
 
 raf_editor -> raf_core, raf_render, raf_assets, raf_electronics, raf_nodes, raf_script, raf_ai, raf_net
 raf_render -> raf_core, raf_ui
-raf_ui -> serde, serde_json
+raf_ui -> serde, serde_json, ab_glyph, epaint_default_fonts (text atlas only)
 raf_assets -> raf_core
 raf_electronics -> raf_core
 raf_nodes -> raf_core
@@ -288,16 +326,73 @@ Notes:
 
 - The scene viewport builds its scene frame through `viewport_bridge.rs` and `scene_renderer.rs` before delegating execution to `RenderRuntime`.
 - The schematic and PCB canvases feed the same shared graphics runtime, so all three surfaces now live under one graphics-device policy and one fallback contract.
-- `raf_ui` provides the retained, non-egui UI data model for chrome, docking, floating panels, events, palette, and i18n text keys. `ApiGraphicBasic::ui_surface` records that data into `BasicCommandList`.
+- `raf_ui` provides the retained, non-egui UI data model for chrome, docking, floating panels, events, palette, i18n text keys, and the application-menu command tree. `ApiGraphicBasic::ui_surface` compiles that data into one cacheable `UiSurfaceDrawList` consumed by either GPU presentation or CPU recovery; it does not build a second scene `BasicCommandList` for UI.
 - `SelectionIdBuffer` defines the pixel-perfect picking contract for future GPU readback and CPU-neutral selection tests, with layer/priority policy controlled by `PickingPolicy`.
 - `RenderBackendTrait`, `scene_data`, `world_stream`, ray tracing, and other advanced rendering modules remain prepared infrastructure rather than the primary active path today.
 
+### ApiGraphicBasic Controlled Hybrid Direction
+
+`ApiGraphicBasic` is the permanent graphics owner. WGPU is the current private
+GPU adapter and compatibility implementation below it. The migration does not
+create WGPU and native versions of the viewport, CAD, RafUI, scenes, or assets.
+Those consumers keep one Rafi-owned contract while backend implementations
+change underneath.
+
+The migration is capability-based rather than a numbered renderer rewrite.
+Over long-lived updates, ApiGraphicBasic must progressively own public handles,
+adapter capabilities, device/queue/surface lifecycle, persistent resources,
+uploads, memory budgets, command encoding, pipelines, synchronization, frame
+graphs, asset residency, diagnostics, and device recovery. WGPU may execute any
+capability that has not yet moved behind a complete owned contract.
+
+The engine can remain useful through several hybrid states:
+
+- **WGPU-backed ownership**: ApiGraphicBasic owns the public direction while
+  WGPU still executes the active GPU path.
+- **Encapsulated WGPU**: no upper layer imports WGPU; it exists only as a
+  compatibility backend.
+- **Native coexistence**: a native platform backend reaches parity while WGPU
+  stays available as fallback and reference.
+- **Native default**: a validated native backend becomes the default for its
+  platform, with WGPU optional for unsupported hardware.
+- **WGPU retired**: WGPU leaves the shipping dependency graph only after
+  parity, recovery, memory, pacing, idle, and hardware gates pass.
+
+One backend is selected per device/surface execution path. Cross-API resource
+mixing inside a frame is forbidden unless an explicit and measured interop
+contract is designed. The complete rule and removal gates live in
+[ApiGraphicBasic Controlled Hybrid Rule](../.ai/APIGRAPHICBASIC.md).
+
+#### Foundation 1 (implemented 2026-07-18)
+
+The first hybrid foundation is active while WGPU still executes GPU work:
+
+- `ApiGraphicBasic` owns generational resource handles instead of exposing
+  native resource pointers as the default vocabulary.
+- `BasicDevice` carries backend-neutral capabilities, adapter preference, and
+  explicit potato/desktop memory budgets.
+- `RenderRuntimeSnapshot` reports backend identity and the active contract data.
+- The host context is named `SharedGraphicsContext`; the old WGPU name remains
+  only as a compatibility alias.
+- `SceneFrameOutput` wraps its GPU view in `GpuTextureView` and gives the
+  current egui/native bridge an explicit transitional escape hatch.
+
+The resource registry/eviction implementation, structural batching, complete
+DeviceHub unification, frame graph, and native DX12/Vulkan/Metal implementations
+remain future capabilities. This is deliberate hybrid progress, not a claim
+that WGPU has already been removed.
+
 ### Scene Viewport Rendering Path (v0.9.0)
+
+The viewport is a 3D scene view in both modes: View2D selects an orthographic
+camera rather than a separate sprite renderer. `Primitive::Sprite2D` is retired
+and legacy data is read as `Primitive::Plane`; interface chrome and overlays are
+owned by RafUI.
 
 The scene viewport path was restructured into three clean layers:
 
 **Layer 1 — Editor Shell** (`raf_editor::panels::viewport`)
-- `viewport.rs`: Thin ~302 line egui panel shell. Allocates rect, delegates camera input, calls render, uploads image, dispatches overlays.
+- `viewport.rs`: Transitional egui panel shell. It still coordinates rect allocation, input, render requests, presentation, and overlays; those responsibilities must continue shrinking toward renderer-side hosts instead of growing here.
 - `viewport_hud.rs`: Toolbar (G/R/S/F buttons), 2D/3D toggle, OBJ/VTX mode badge, info pill, axis gizmo corner widget.
 - `viewport_interaction.rs`: Object mode input (gizmo drag, entity pick, shift-select), edit mode input (vertex click/drag), keyboard shortcuts (G/R/S/F/Tab).
 - `viewport_overlay.rs`: Entity labels, gizmo arrows/arrowheads/rotation rings/scale cubes, vertex edit dots/edges.
@@ -309,7 +404,7 @@ The scene viewport path was restructured into three clean layers:
 - `transform_controller.rs`: `ViewportTransformController` with gizmo state and drag lifecycle (translate/rotate/scale). Projects mouse delta onto active axis in screen space, scales to world units via orbit distance.
 
 **Layer 3 — Pixel Production** (`raf_render::scene_renderer`)
-- `scene_renderer.rs`: Full render pipeline orchestrator. Scene in → frustum cull → collect RenderJobs → sort (opaques front-to-back, transparents back-to-front) → per-triangle MVP transform → near-plane clip → perspective divide → flat shade → scanline rasterize with Z-buffer → wireframe overlay → pixels out.
+- `scene_renderer.rs`: Builds the backend-neutral scene frame and `BasicCommandList` after culling, job collection, sorting, budgeting, and overlay recording. `BasicDevice` executes the active GPU path; the software rasterizer remains the CPU recovery path.
 - `geometry/`: `MeshData` (indexed triangle mesh with positions + normals + indices), primitive constructors (cube, cylinder, sphere, plane).
 - `math/`: `transform.rs` (MVP, project_point, screen_to_world_ray), `frustum.rs` (6-plane culling), `ray.rs` (Ray struct, ray_sphere, ray_triangle).
 - `render_pipeline/`: `framebuffer.rs` (RGBA + f32 depth buffer, blend_pixel for alpha compositing), `rasterizer.rs` (scanline fill, line draw, blended variant).
@@ -336,8 +431,8 @@ The scene viewport path was restructured into three clean layers:
 Architecture: `SceneGraph -> SceneRenderData -> RenderBackendTrait -> Backend`
 
 - `abstraction`: Core trait `RenderBackendTrait` - all backends implement this (init/render_frame/resize/shutdown)
-- `ActiveBackend`: 4 tiers - Wgpu (GPU, priority), CpuPainter (CPU software fallback), SoftwareRT (CPU ray tracing), HardwareRT (RTX)
-- `ApiGraphicBasic`: Unified graphics API wrapper providing simple device, command list, custom meshes, and pipeline abstractions. Runs GPU hardware rendering by default (via private wgpu context) with auto-detection fallback to CPU software rasterization on low-end potato devices. Both game views and electronics views route drawings through this API.
+- `ActiveBackend`: legacy/prepared backend categorization. It must not be treated as the canonical active backend contract until consolidated under ApiGraphicBasic.
+- `ApiGraphicBasic`: Rafi-owned graphics contract for devices, command lists, resources, surfaces, Scene/CAD/RafUI presentation, and CPU recovery. WGPU is its current private GPU adapter, not its permanent public identity. Available GPU hardware remains the normal path, including integrated GPUs under potato budgets.
 - `scene_data`: Bridge between SceneGraph and render backend
   - `SceneRenderData`: complete frame package (meshes, lights, camera, environment, stats)
   - `RenderMesh`: flat GPU-ready arrays (positions, normals, UVs, indices), shadow/instance flags
@@ -384,12 +479,14 @@ Architecture: `SceneGraph -> SceneRenderData -> RenderBackendTrait -> Backend`
 
 ## Editor (raf_editor)
 
-Visual editor built on `egui`/`eframe`:
+Visual editor with an `egui`/`eframe` transitional shell and retained RafUI
+surfaces:
 
 ### Application Flow
 
 1. **Loading Screen** - Brief branding splash with progress bar
-2. **Project Hub** - Recent projects list + create new (Game or Electronics)
+2. **Project Hub** - Active RafUI surface for recent projects, search, filters,
+   create, settings, open, duplicate, and forget actions
 3. **Main Editor** - Full panel layout with viewport, hierarchy, properties
 
 ### Panel Layout
@@ -409,7 +506,7 @@ Visual editor built on `egui`/`eframe`:
 
 ### Panels
 
-- **Viewport**: Modular 2D/3D editor shell (`viewport.rs` ~302 lines) delegating to `raf_render::bridge`. Z-buffered CPU rendering with Solid/Wireframe/Preview modes. Orbit camera, 3D projected grid, entity labels, transform gizmos (G/R/S), vertex edit mode (Tab toggle), HUD toolbar with 2D/3D toggle + OBJ/VTX badge + info pill + axis gizmo. Sub-modules: `viewport_hud.rs`, `viewport_interaction.rs`, `viewport_overlay.rs`, `viewport_grid.rs`.
+- **Viewport**: Modular orthographic-2D/perspective-3D editor shell (`viewport.rs`) delegating to `raf_render::bridge`. Z-buffered CPU rendering with Solid/Wireframe/Preview modes, shared CPU/GPU line batching, bounded mesh reuse, projected grid, entity labels, transform gizmos (G/R/S), vertex edit mode, and RafUI-compatible overlays. Sub-modules: `viewport_hud.rs`, `viewport_interaction.rs`, `viewport_overlay.rs`, `viewport_grid.rs`.
 - **Hierarchy**: Scene tree with selection and collapsible groups
 - **Properties**: Transform editing, RGB color picker with 7 presets, primitive type dropdown, visibility toggle
 - **Console**: Log output with severity filters and auto-scroll
@@ -423,7 +520,7 @@ Visual editor built on `egui`/`eframe`:
 
 - `AssetImporter`: Copies files into project, detects type by extension
 - `AssetBrowser`: Scans directories, filters by type/search
-- `Primitive3D`: Editable primitives (Cube, Sphere, Cylinder, Plane)
+- `Primitive3D`: Editable primitives (Cube, Sphere, Cylinder, Plane). Game 2D uses a Plane plus an orthographic camera; there is no active Sprite2D primitive.
 - Supported types: Image, Model3D, Audio, Scene, Unknown
 
 ## Electronics (raf_electronics)

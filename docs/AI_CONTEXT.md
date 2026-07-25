@@ -33,6 +33,10 @@ files before changing behavior across the editor, UI, renderer, or engine:
 - **Low-end hardware is a product requirement.** Prefer retained state,
   bounded caches, incremental work, profiling, and explicit fallbacks over
   always-on heavy systems.
+- **Viewport baseline (2026-07-19).** The active scene path has CPU/GPU line
+  batching, bounded persistent mesh reuse, physical-pixel targets, world-scale
+  culling, and orthographic 3D View2D. `Sprite2D` is only a legacy alias to
+  `Plane`; advanced effects remain disabled during stabilization.
 
 ## Change routing
 

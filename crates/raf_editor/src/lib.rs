@@ -10,15 +10,21 @@
 
 pub mod agent_executor;
 pub mod app;
+pub mod application_menu;
 pub mod commands;
+pub mod console_surface;
+pub mod editor_shell;
+pub mod editor_shell_surface;
 pub mod electronics_assets;
 mod frame_timing;
 pub mod game_runtime;
 pub mod panels;
 pub mod pcb_document;
+pub mod project_settings_surface;
 pub mod schematic_document;
 pub mod script_support;
 pub mod session_document;
+pub mod settings_surface;
 pub mod studio_surface;
 pub mod theme;
 pub mod ui_icons;

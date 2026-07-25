@@ -72,6 +72,18 @@ impl UiIconAtlas {
             .or_else(|| self.textures.get(FALLBACK_ICON))
     }
 
+    /// Counts requested icons that are ready to draw or known to be unavailable.
+    /// Startup uses this to keep the loading progress tied to actual resource work.
+    pub fn ready_or_failed_count(&self, icon_names: &[&'static str]) -> usize {
+        icon_names
+            .iter()
+            .filter(|icon_name| {
+                let icon_name = *icon_name;
+                self.textures.contains_key(icon_name) || self.failed.contains(icon_name)
+            })
+            .count()
+    }
+
     pub fn paint(
         &self,
         painter: &egui::Painter,

@@ -217,7 +217,7 @@ impl AuraRafiApp {
         })
     }
 
-    fn duplicate_project_from_hub(&mut self, path: &Path) {
+    pub(super) fn duplicate_project_from_hub(&mut self, path: &Path) {
         let Some(parent_dir) = path.parent() else {
             self.console.log(
                 LogLevel::Error,
@@ -289,7 +289,7 @@ impl AuraRafiApp {
 // Filtering and sorting
 // ---------------------------------------------------------------------------
 
-fn filtered_recent_projects(
+pub(super) fn filtered_recent_projects(
     projects: &[RecentProjectEntry],
     filter: HubProjectFilter,
     query: &str,

@@ -8,8 +8,9 @@ use raf_core::config::RenderExecutionPolicy;
 
 use crate::api_graphic_basic::device::{
     BasicBackendType, BasicDevice, BasicDeviceConfig, SceneFrameMetrics, SceneFrameOutput,
-    SharedWgpuContext,
+    SharedGraphicsContext,
 };
+use crate::api_graphic_basic::{GraphicsBackendId, GraphicsCapabilities, GraphicsMemoryBudget};
 use crate::scene_renderer::SceneRenderFrame;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,6 +38,9 @@ pub struct RenderRuntimeSnapshot {
     pub surface: GraphicsSurfaceKind,
     pub policy: RenderExecutionPolicy,
     pub active_backend: Option<BasicBackendType>,
+    pub backend_id: Option<GraphicsBackendId>,
+    pub capabilities: Option<GraphicsCapabilities>,
+    pub memory_budget: GraphicsMemoryBudget,
     /// Changes whenever the backing ApiGraphicBasic device is recreated.
     pub device_generation: u64,
     pub advanced_gpu_features_allowed: bool,
@@ -49,6 +53,9 @@ impl Default for RenderRuntimeSnapshot {
             surface: GraphicsSurfaceKind::None,
             policy: RenderExecutionPolicy::Auto,
             active_backend: None,
+            backend_id: None,
+            capabilities: None,
+            memory_budget: GraphicsMemoryBudget::default(),
             device_generation: 0,
             advanced_gpu_features_allowed: false,
             last_frame_metrics: SceneFrameMetrics::default(),
@@ -77,7 +84,7 @@ impl RenderRuntimeSnapshot {
 pub struct RenderRuntime {
     policy: RenderExecutionPolicy,
     advanced_gpu_features_allowed: bool,
-    shared_wgpu_context: Option<SharedWgpuContext>,
+    shared_graphics_context: Option<SharedGraphicsContext>,
     surface: GraphicsSurfaceKind,
     device: Option<BasicDevice>,
     device_generation: u64,
@@ -88,7 +95,7 @@ impl Default for RenderRuntime {
         Self {
             policy: RenderExecutionPolicy::Auto,
             advanced_gpu_features_allowed: false,
-            shared_wgpu_context: None,
+            shared_graphics_context: None,
             surface: GraphicsSurfaceKind::None,
             device: None,
             device_generation: 0,
@@ -113,8 +120,11 @@ impl RenderRuntime {
         self.device = None;
     }
 
-    pub fn set_shared_wgpu_context(&mut self, shared_wgpu_context: Option<SharedWgpuContext>) {
-        self.shared_wgpu_context = shared_wgpu_context;
+    pub fn set_shared_graphics_context(
+        &mut self,
+        shared_graphics_context: Option<SharedGraphicsContext>,
+    ) {
+        self.shared_graphics_context = shared_graphics_context;
         self.device = None;
     }
 
@@ -141,6 +151,16 @@ impl RenderRuntime {
             surface: self.surface,
             policy: self.policy,
             active_backend: self.device.as_ref().map(|device| device.backend()),
+            backend_id: self
+                .device
+                .as_ref()
+                .map(|device| device.capabilities().backend),
+            capabilities: self.device.as_ref().map(|device| device.capabilities()),
+            memory_budget: self
+                .device
+                .as_ref()
+                .map(|device| device.memory_budget())
+                .unwrap_or_default(),
             device_generation: self.device_generation,
             advanced_gpu_features_allowed: self.advanced_gpu_features_allowed,
             last_frame_metrics: self
@@ -162,7 +182,7 @@ impl RenderRuntime {
     fn ensure_device(&mut self) {
         if self.device.is_none() {
             let mut config = BasicDeviceConfig::from_render_policy(self.policy);
-            config.shared_wgpu_context = self.shared_wgpu_context.clone();
+            config.shared_graphics_context = self.shared_graphics_context.clone();
             self.device = Some(BasicDevice::new(config));
             self.device_generation = self.device_generation.wrapping_add(1);
         }
@@ -205,7 +225,7 @@ mod tests {
         runtime.activate_surface(GraphicsSurfaceKind::SchematicCanvas);
         let first_generation = runtime.snapshot().device_generation;
 
-        runtime.set_shared_wgpu_context(None);
+        runtime.set_shared_graphics_context(None);
         runtime.activate_surface(GraphicsSurfaceKind::SchematicCanvas);
 
         assert!(runtime.snapshot().device_generation > first_generation);

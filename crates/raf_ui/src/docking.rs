@@ -18,6 +18,30 @@ pub enum DockSide {
     Center,
 }
 
+/// Persistence policy for a dock. Fixed docks remain part of the workspace
+/// structure; movable docks may be relocated or floated by the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum DockPanelPolicy {
+    #[default]
+    Movable,
+    Fixed,
+}
+
+impl DockPanelPolicy {
+    pub fn is_movable(self) -> bool {
+        matches!(self, Self::Movable)
+    }
+}
+
+fn default_allowed_dock_sides() -> Vec<DockSide> {
+    vec![
+        DockSide::Left,
+        DockSide::Right,
+        DockSide::Top,
+        DockSide::Bottom,
+    ]
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DockPanel {
     pub id: String,
@@ -26,6 +50,10 @@ pub struct DockPanel {
     pub min_size: [f32; 2],
     pub preferred_size: [f32; 2],
     pub visible: bool,
+    #[serde(default)]
+    pub policy: DockPanelPolicy,
+    #[serde(default = "default_allowed_dock_sides")]
+    pub allowed_dock_sides: Vec<DockSide>,
 }
 
 impl DockPanel {
@@ -37,7 +65,23 @@ impl DockPanel {
             min_size: [180.0, 120.0],
             preferred_size: [260.0, 320.0],
             visible: true,
+            policy: DockPanelPolicy::Movable,
+            allowed_dock_sides: default_allowed_dock_sides(),
         }
+    }
+
+    pub fn with_policy(mut self, policy: DockPanelPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+
+    pub fn with_allowed_dock_sides(mut self, sides: impl IntoIterator<Item = DockSide>) -> Self {
+        self.allowed_dock_sides = sides.into_iter().collect();
+        self
+    }
+
+    pub fn accepts_side(&self, side: DockSide) -> bool {
+        self.allowed_dock_sides.contains(&side)
     }
 }
 
@@ -49,6 +93,10 @@ pub struct FloatingPanel {
     pub min_size: [f32; 2],
     pub visible: bool,
     pub z_index: i16,
+    #[serde(default)]
+    pub policy: DockPanelPolicy,
+    #[serde(default = "default_allowed_dock_sides")]
+    pub allowed_dock_sides: Vec<DockSide>,
 }
 
 impl FloatingPanel {
@@ -60,6 +108,8 @@ impl FloatingPanel {
             min_size: [180.0, 120.0],
             visible: true,
             z_index: 0,
+            policy: DockPanelPolicy::Movable,
+            allowed_dock_sides: default_allowed_dock_sides(),
         }
     }
 
@@ -217,9 +267,14 @@ impl DockLayout {
         let Some(index) = self.panels.iter().position(|panel| panel.id == id) else {
             return false;
         };
+        if !self.panels[index].policy.is_movable() {
+            return false;
+        }
         let panel = self.panels.remove(index);
         let mut floating = FloatingPanel::new(panel.id, panel.title_key, rect.clamp_inside(bounds));
         floating.min_size = panel.min_size;
+        floating.policy = panel.policy;
+        floating.allowed_dock_sides = panel.allowed_dock_sides;
         floating.z_index = self
             .floating
             .iter()
@@ -238,6 +293,11 @@ impl DockLayout {
         let Some(index) = self.floating.iter().position(|panel| panel.id == id) else {
             return false;
         };
+        if !self.floating[index].policy.is_movable()
+            || !self.floating[index].allowed_dock_sides.contains(&side)
+        {
+            return false;
+        }
         let floating = self.floating.remove(index);
         self.panels.push(DockPanel {
             id: floating.id,
@@ -246,8 +306,28 @@ impl DockLayout {
             min_size: floating.min_size,
             preferred_size: [floating.rect.width, floating.rect.height],
             visible: floating.visible,
+            policy: floating.policy,
+            allowed_dock_sides: floating.allowed_dock_sides,
         });
         true
+    }
+
+    /// Moves a docked panel between permitted tracks without changing its
+    /// identity or stored dimensions. Fixed infrastructure such as the bottom
+    /// work dock intentionally rejects this operation.
+    pub fn move_panel_to(&mut self, id: &str, side: DockSide) -> bool {
+        if side == DockSide::Center {
+            return false;
+        }
+        let Some(panel) = self.panels.iter_mut().find(|panel| panel.id == id) else {
+            return false;
+        };
+        if !panel.policy.is_movable() || !panel.accepts_side(side) {
+            return false;
+        }
+        let changed = panel.side != side;
+        panel.side = side;
+        changed
     }
 
     /// Changes the persisted preferred dimension for one docked panel. The
@@ -770,6 +850,43 @@ mod tests {
         assert_eq!(floating.min_size, [240.0, 160.0]);
         assert!(floating.rect.right() <= workspace.right());
         assert!(floating.rect.bottom() <= workspace.bottom());
+    }
+
+    #[test]
+    fn fixed_panels_reject_undock_and_side_changes() {
+        let workspace = UiRect::new(0.0, 0.0, 640.0, 480.0);
+        let mut panel = DockPanel::new("bottom", "panel.bottom", DockSide::Bottom)
+            .with_policy(DockPanelPolicy::Fixed)
+            .with_allowed_dock_sides([DockSide::Bottom]);
+        panel.preferred_size = [420.0, 180.0];
+        let mut layout = DockLayout {
+            panels: vec![panel],
+            floating: Vec::new(),
+        };
+
+        assert!(!layout.undock_panel("bottom", UiRect::new(80.0, 80.0, 240.0, 160.0), workspace,));
+        assert!(!layout.move_panel_to("bottom", DockSide::Left));
+        assert_eq!(layout.panels[0].side, DockSide::Bottom);
+    }
+
+    #[test]
+    fn movable_panel_retains_allowed_sides_after_float_round_trip() {
+        let workspace = UiRect::new(0.0, 0.0, 640.0, 480.0);
+        let panel = DockPanel::new("hierarchy", "panel.hierarchy", DockSide::Left)
+            .with_allowed_dock_sides([DockSide::Left, DockSide::Right]);
+        let mut layout = DockLayout {
+            panels: vec![panel],
+            floating: Vec::new(),
+        };
+
+        assert!(layout.undock_panel(
+            "hierarchy",
+            UiRect::new(120.0, 60.0, 220.0, 320.0),
+            workspace,
+        ));
+        assert!(!layout.dock_floating("hierarchy", DockSide::Top));
+        assert!(layout.dock_floating("hierarchy", DockSide::Right));
+        assert_eq!(layout.panels[0].side, DockSide::Right);
     }
 
     #[test]

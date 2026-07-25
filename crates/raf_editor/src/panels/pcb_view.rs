@@ -73,12 +73,44 @@ impl PcbViewPanel {
         wgpu_render_state: Option<&egui_wgpu::RenderState>,
         render_runtime: &mut RenderRuntime,
     ) -> bool {
+        self.show_surface(ui, wgpu_render_state, render_runtime, true)
+    }
+
+    /// Symmetric entry point with the schematic CAD surface. The PCB shell
+    /// owns project/navigation docks while this panel retains its canvas,
+    /// selection, routing and GPU presentation logic.
+    pub fn show_canvas_only(
+        &mut self,
+        ui: &mut Ui,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
+    ) -> bool {
+        self.show_surface(ui, wgpu_render_state, render_runtime, true)
+    }
+
+    pub fn show_canvas_only_without_toolbar(
+        &mut self,
+        ui: &mut Ui,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
+    ) -> bool {
+        self.show_surface(ui, wgpu_render_state, render_runtime, false)
+    }
+
+    fn show_surface(
+        &mut self,
+        ui: &mut Ui,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
+        draw_toolbar: bool,
+    ) -> bool {
         let mut changed = false;
         self.canvas_dark_mode = ui.visuals().dark_mode;
         self.asset_atlas.request_assets(PCB_ASSETS);
         self.asset_atlas.process(ui.ctx());
-        changed |= self.draw_toolbar(ui);
-        self.draw_tool_status_hint(ui);
+        if draw_toolbar {
+            changed |= self.draw_toolbar(ui);
+        }
         let available = ui.available_rect_before_wrap();
         changed |= self.draw_canvas(ui, available, wgpu_render_state, render_runtime);
         changed
@@ -101,6 +133,61 @@ impl PcbViewPanel {
 
     pub fn clear_selection(&mut self) {
         self.selection = PcbSelection::None;
+    }
+
+    pub fn set_select_tool_from_ui(&mut self) {
+        self.tool = PcbTool::Select;
+    }
+
+    pub fn set_route_tool_from_ui(&mut self) {
+        self.tool = PcbTool::Route;
+    }
+
+    pub fn set_outline_tool_from_ui(&mut self) {
+        self.tool = PcbTool::Outline;
+    }
+
+    pub fn toggle_airwires_from_ui(&mut self) {
+        self.show_airwires = !self.show_airwires;
+    }
+
+    pub fn route_tool_active(&self) -> bool {
+        self.tool == PcbTool::Route
+    }
+
+    pub fn outline_tool_active(&self) -> bool {
+        self.tool == PcbTool::Outline
+    }
+
+    pub fn airwires_visible(&self) -> bool {
+        self.show_airwires
+    }
+
+    pub fn fit_view_from_ui(&mut self, width: f32, height: f32) {
+        self.fit_board_to_view(width, height);
+    }
+
+    pub fn clear_outline_draft_from_ui(&mut self) {
+        self.outline_draft.clear();
+    }
+
+    pub fn route_selected_airwire_from_ui(&mut self) -> bool {
+        let Some(index) = self.selected_airwire_index() else {
+            return false;
+        };
+        let changed = self.layout.route_airwire(index);
+        if changed {
+            self.selection = PcbSelection::None;
+        }
+        changed
+    }
+
+    pub fn zoom_in_from_ui(&mut self) {
+        self.zoom = (self.zoom * 1.15).clamp(0.35, 4.0);
+    }
+
+    pub fn zoom_out_from_ui(&mut self) {
+        self.zoom = (self.zoom / 1.15).clamp(0.35, 4.0);
     }
 
     pub fn select_component(&mut self, idx: usize) {
@@ -298,84 +385,34 @@ impl PcbViewPanel {
                         }
                     }
 
-                    let outline_color = if self.layout.outline_is_closed() {
-                        Color32::from_rgb(92, 214, 142)
-                    } else {
-                        Color32::from_rgb(255, 180, 95)
-                    };
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "{}: {}",
-                            t("app.pcb_outline_status", self.lang),
-                            if self.layout.outline_is_closed() {
-                                t("app.pcb_outline_closed", self.lang)
-                            } else {
-                                t("app.pcb_outline_open", self.lang)
-                            }
-                        ))
-                        .size(11.0)
-                        .color(outline_color),
-                    );
-
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let cache = self.cad_surface_host.cache_stats();
-                        if cache.frame_builds > 0 {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} {}/{}",
-                                    t("app.cad_surface_cache", self.lang),
-                                    cache.frame_cache_hits,
-                                    cache.frame_builds + cache.frame_cache_hits
-                                ))
-                                .size(10.0)
-                                .color(
-                                    if cache.last_frame_reused {
-                                        theme::ACCENT
-                                    } else {
-                                        palette.text_muted
-                                    },
-                                ),
-                            );
+                        if self
+                            .toolbar_icon_button(
+                                ui,
+                                "toolbar/zoom-in.png",
+                                false,
+                                t("app.electronics_zoom_in", self.lang),
+                            )
+                            .clicked()
+                        {
+                            self.zoom = (self.zoom * 1.15).clamp(0.35, 4.0);
                         }
-
-                        ui.label(
-                            egui::RichText::new(self.render_runtime.status_badge())
-                                .size(10.0)
-                                .color(if self.render_runtime.is_gpu_active() {
-                                    theme::ACCENT
-                                } else {
-                                    palette.text_muted
-                                }),
-                        );
-
-                        let summary = format!(
-                            "{} {} | {} {} | {} {}",
-                            t("app.pcb_components", self.lang),
-                            self.layout.components.len(),
-                            t("app.pcb_traces", self.lang),
-                            self.layout.traces.len(),
-                            t("app.pcb_airwires", self.lang),
-                            self.layout.airwires.len()
-                        );
-                        ui.label(
-                            egui::RichText::new(summary)
-                                .size(11.0)
-                                .color(palette.text_muted),
-                        );
-
-                        if let Some(sync) = &self.last_sync {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "+{} ~{} -{}",
-                                    sync.added_components,
-                                    sync.updated_components,
-                                    sync.removed_components
-                                ))
-                                .size(10.0)
-                                .color(palette.text_muted),
-                            );
+                        if self
+                            .toolbar_icon_button(
+                                ui,
+                                "toolbar/zoom-out.png",
+                                false,
+                                t("app.electronics_zoom_out", self.lang),
+                            )
+                            .clicked()
+                        {
+                            self.zoom = (self.zoom / 1.15).clamp(0.35, 4.0);
                         }
+                        ui.label(
+                            egui::RichText::new(format!("{:.0}%", self.zoom * 100.0))
+                                .size(10.0)
+                                .color(palette.text_dim),
+                        );
                     });
                 });
             },
@@ -383,24 +420,6 @@ impl PcbViewPanel {
 
         ui.allocate_space(Vec2::new(rect.width(), 42.0));
         changed
-    }
-
-    fn draw_tool_status_hint(&mut self, ui: &mut Ui) {
-        let hint = match self.tool {
-            PcbTool::Select if self.selected_airwire_index().is_some() => {
-                t("app.pcb_route_selected_hint", self.lang)
-            }
-            PcbTool::Select => t("pcb_hint_select", self.lang),
-            PcbTool::Route => t("pcb_hint_route", self.lang),
-            PcbTool::Outline => t("pcb_hint_outline", self.lang),
-        };
-        ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new(hint)
-                .size(10.0)
-                .color(egui::Color32::from_rgb(130, 130, 140)),
-        );
-        ui.add_space(4.0);
     }
 
     fn toolbar_icon_button(
@@ -463,6 +482,8 @@ const PCB_ASSETS: &[&str] = &[
     "toolbar/outline.png",
     "toolbar/airwire.png",
     "toolbar/fit.png",
+    "toolbar/zoom-in.png",
+    "toolbar/zoom-out.png",
     "toolbar/layers.png",
     "footprints/0805.png",
     "footprints/magnet-10x5.png",

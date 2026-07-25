@@ -832,7 +832,6 @@ fn primitive_icon_name(prim: Primitive, is_folder: bool) -> &'static str {
         Primitive::Sphere => "sphere.png",
         Primitive::Plane => "plane.png",
         Primitive::Cylinder => "cylinder.png",
-        Primitive::Sprite2D => "sprite.png",
         Primitive::Empty => "empty.png",
     }
 }
@@ -847,7 +846,6 @@ fn primitive_icon_fallback(prim: Primitive, is_folder: bool) -> &'static str {
         Primitive::Sphere => "\u{25CB}",
         Primitive::Plane => "\u{25AD}",
         Primitive::Cylinder => "\u{25AE}",
-        Primitive::Sprite2D => "\u{25C8}",
         Primitive::Empty => "\u{25CC}",
     }
 }

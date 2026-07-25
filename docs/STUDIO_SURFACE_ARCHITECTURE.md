@@ -1,5 +1,10 @@
 # Studio Surface Architecture
 
+For the current retained layout, themes, controls, image resources, and
+platform-host contracts, see [RafUI](RAF_UI.md).
+Surface authors must also follow the [RafUI Authoring Guide](RAF_UI_AUTHORING.md)
+for ownership boundaries, menus, and validation.
+
 This document records the lightweight UI and primitive-model direction for the
 editor. The goal is a professional canvas-first interface that can grow away
 from egui without making the engine heavy.
@@ -20,9 +25,9 @@ Rust-native and stores nodes, styles, layout, docking, text keys, and event
 bindings as serializable data.
 
 `crates/raf_render/src/ApiGraphicBasic/ui_surface/` is the render adapter. It
-records `raf_ui` geometry into the same `BasicCommandList` used by the
-renderer, rasterizes a bounded bitmap text atlas, and can compose retained UI
-directly into a caller-owned WGPU texture view.
+compiles `raf_ui` layout into one cacheable `UiSurfaceDrawList`, rasterizes a
+bounded vector-font alpha atlas, and composes retained UI directly into a
+caller-owned WGPU texture view or CPU recovery buffer.
 
 | Module | Responsibility |
 |---|---|
@@ -33,7 +38,7 @@ directly into a caller-owned WGPU texture view.
 | `raf_ui::hit_test` | Renderer-neutral hit regions and z-index-aware hit testing |
 | `raf_ui::focus` | Focus state, input snapshot, tab-order policy |
 | `raf_ui::style` | Industrial dark and paper-light palettes |
-| `ApiGraphicBasic::ui_surface` | Layout traversal and command-list recording |
+| `ApiGraphicBasic::ui_surface` | Layout/input compilation, text atlas, retained paint composition |
 
 `DirectUiSurfaceHost` owns retained interaction state and `UiSurfaceGpuRenderer`
 without Eframe. `CpuUiSurfaceHost` consumes the same retained draw list and
@@ -43,10 +48,31 @@ and `NativeUiInputBridge` maps Winit input into the same renderer-neutral focus
 and action system. Existing Egui panels remain temporary adapters while editor
 chrome migrates; new data surfaces do not need Egui ownership.
 
+The first active editor route is the project Hub. `HubSurfaceHost` maps the
+current eframe input snapshot to `UiInputState`, builds `HubSurfaceModel` from
+real recent projects, and renders the retained document to an off-screen WGPU
+texture. The eframe adapter only places that final texture while the native
+window shell remains a later step. The Hub uses a welcome/featured-project
+center column, a real create/activity side column, and a bottom theme selector
+without inventing project types or status data. Search, filters, theme changes,
+secondary-click project menus, project actions, and the GPU-to-CPU recovery
+path are all exercised through the same retained surface. The host remains
+idle after presentation and requests one additional frame only when retained
+interaction changes state.
+
 `UiDocument` is per-session and starts as an empty root. It can use Screen,
 World or Camera space. A camera may reference the document but never owns its
 nodes in the scene hierarchy, so users create their own UI without injected HUD
 templates or copied camera trees.
+
+### CAD Fidelity During Migration
+
+The schematic and PCB canvas remain renderer-owned surfaces. Their retained
+chrome may migrate independently, but the canvas, selection geometry, visible
+world bounds, wire routes, component extents, and navigator must derive from the
+same active CAD document. A temporary bounded overlay is valid when it preserves
+authoritative wire visibility during a GPU parity gap; it is not permission to
+duplicate or invent document state in the UI layer.
 
 The current frame flow is:
 
@@ -54,18 +80,17 @@ The current frame flow is:
 UiSurface
   -> layout boxes
   -> hit regions + text atlas requests
-  -> BasicCommandList
-  -> SceneRenderFrame
-  -> BasicDevice
+  -> UiSurfaceDrawList
+  -> GPU compositor or CPU recovery compositor
   -> GPU texture or CPU RGBA pixels
 ```
 
-`UiTextAtlas` now owns a fixed-size logical atlas with stable slots and a
-bounded shelf allocator. `UiSurfaceSession` synchronizes frame text requests,
-focus, hit regions, and input dispatch. A CPU or GPU presentation backend can
-rasterize resolved glyphs into those slots without changing retained layout or
-localization data. The atlas is intentionally separate from font rasterization
-so the base editor does not pay for a heavyweight text stack on every surface.
+`UiTextAtlas` owns a fixed-size logical atlas with stable slots and a bounded
+shelf allocator. `UiSurfaceSession` synchronizes frame text requests, focus,
+hit regions, and input dispatch. A CPU or GPU presentation backend can
+rasterize resolved vector glyphs into those slots without changing retained
+layout or localization data. The atlas is intentionally compact and cached, so
+the base editor does not pay for a heavyweight text stack on every surface.
 
 `DockWorkspaceController` is the transient interaction counterpart of the
 serializable `DockLayout`. It supports title-bar dragging, lower-right resize,
@@ -270,8 +295,8 @@ path for saved/imported model manifests later.
 
 ## Migration Plan
 
-1. Keep egui as the temporary editor shell while `raf_ui` proves layout, hit
-   testing, style cascade, input, text, palette, and CPU/GPU presentation.
+1. Keep egui as the temporary editor shell for panels that have not migrated;
+   the active Project Hub already renders through RafUI's GPU-first host.
 2. Move canvas overlays and HUD primitives to `UiSurface` where it reduces
    egui painter work, after the text-atlas rasterizer can draw localized text
    without falling back to the shell.

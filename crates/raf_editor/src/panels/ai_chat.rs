@@ -35,17 +35,17 @@ pub struct AgentPanel {
     pub tool_name_map: HashMap<String, String>,
     loaded_project_path: Option<std::path::PathBuf>,
     tools_language: Option<Language>,
-    selected_model: String,
+    pub(crate) selected_model: String,
     last_runtime_config: Option<OpenAiConfig>,
-    new_model_label: String,
-    new_model_id: String,
+    pub(crate) new_model_label: String,
+    pub(crate) new_model_id: String,
     pub settings_changed: bool,
-    sidebar_open: bool,
-    pending_delete_session: Option<usize>,
+    pub(crate) sidebar_open: bool,
+    pub(crate) pending_delete_session: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AgentReadiness {
+pub(crate) enum AgentReadiness {
     Ready,
     ProviderDisabled,
     ModelMissing,
@@ -78,6 +78,131 @@ impl Default for AgentPanel {
 }
 
 impl AgentPanel {
+    pub(crate) fn prepare_retained_surface(
+        &mut self,
+        settings: &mut EngineSettings,
+        project: Option<&Project>,
+        catalog: &CommandCatalog,
+        executor: &mut AgentToolExecutor<'_>,
+    ) -> AgentReadiness {
+        self.lang = settings.language;
+        self.ensure_tools(catalog, self.lang);
+        self.ensure_model_registry(settings);
+        self.ensure_project_history(project);
+        self.ensure_runtime_config(settings);
+
+        let provider_config = settings
+            .ai_providers
+            .iter()
+            .find(|config| config.provider == settings.default_ai_provider)
+            .cloned()
+            .unwrap_or_default();
+        let effective_model_id = self
+            .model_registry
+            .resolve_model_id(&self.selected_model, provider_config.provider)
+            .unwrap_or_else(|| provider_config.model.clone());
+
+        let _ = self.runtime.poll(Some(executor));
+        if self.flush_runtime_events() {
+            self.save_history();
+        }
+
+        agent_readiness(&provider_config, &effective_model_id)
+    }
+
+    pub(crate) fn apply_retained_action(
+        &mut self,
+        action: crate::panels::agent_surface::AgentSurfaceAction,
+        settings: &mut EngineSettings,
+        project: Option<&Project>,
+        executor: &mut AgentToolExecutor<'_>,
+    ) -> bool {
+        use crate::panels::agent_surface::AgentSurfaceAction;
+
+        match action {
+            AgentSurfaceAction::SetInput(value) => self.chat.input_text = value,
+            AgentSurfaceAction::SetModelLabel(value) => self.new_model_label = value,
+            AgentSurfaceAction::SetModelId(value) => self.new_model_id = value,
+            AgentSurfaceAction::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
+            AgentSurfaceAction::CloseSidebar => self.sidebar_open = false,
+            AgentSurfaceAction::NewChat => self.start_new_chat(project),
+            AgentSurfaceAction::SelectSession(index) => self.select_session(index),
+            AgentSurfaceAction::DeleteSession(index) => self.delete_session(index),
+            AgentSurfaceAction::CancelDelete => self.pending_delete_session = None,
+            AgentSurfaceAction::SelectModel(index) => {
+                if let Some(label) = self.model_registry.selector_labels().get(index) {
+                    self.selected_model = label.clone();
+                }
+            }
+            AgentSurfaceAction::SetMode(mode) => {
+                if settings.agent_mode != mode {
+                    settings.agent_mode = mode;
+                    self.settings_changed = true;
+                }
+            }
+            AgentSurfaceAction::AddModel => {
+                if self.model_registry.add(
+                    self.new_model_label.clone(),
+                    settings.default_ai_provider,
+                    self.new_model_id.clone(),
+                ) {
+                    settings.agent_model_shortcuts = self.model_registry.shortcuts.clone();
+                    self.settings_changed = true;
+                    self.new_model_label.clear();
+                    self.new_model_id.clear();
+                }
+            }
+            AgentSurfaceAction::OpenSettings => self.open_settings_requested = true,
+            AgentSurfaceAction::Submit => {
+                let input = self.chat.input_text.trim().to_string();
+                if !input.is_empty() && !self.runtime.status.blocks_input() {
+                    self.chat.input_text.clear();
+                    self.submit(input, settings.agent_mode == AgentMode::Active);
+                }
+            }
+            AgentSurfaceAction::Approve => self.approve_all(executor),
+            AgentSurfaceAction::Deny => {
+                self.deny_all(t("app.agent_denied_by_user", self.lang), executor)
+            }
+            AgentSurfaceAction::UseSuggestion(value) => self.chat.input_text = value,
+        }
+
+        self.open_settings_requested
+    }
+
+    fn select_session(&mut self, index: usize) {
+        if let Some(session) = self.history.sessions.get(index) {
+            self.runtime.clear();
+            self.runtime.messages = session.messages.clone();
+            self.runtime
+                .set_system_prompt(build_agent_prompt(&self.tools));
+            self.history.active_index = Some(index);
+            self.chat = welcome_chat_panel();
+            for message in &self.runtime.messages {
+                self.chat.messages.push(message.clone());
+            }
+        }
+    }
+
+    fn delete_session(&mut self, index: usize) {
+        if index >= self.history.sessions.len() {
+            self.pending_delete_session = None;
+            return;
+        }
+        self.history.sessions.remove(index);
+        self.history.active_index = self.history.active_index.and_then(|active| {
+            if active == index {
+                None
+            } else {
+                Some(active.min(self.history.sessions.len().saturating_sub(1)))
+            }
+        });
+        self.pending_delete_session = None;
+        if let Some(path) = self.loaded_project_path.as_ref() {
+            let _ = self.history.save(path);
+        }
+    }
+
     pub fn show(
         &mut self,
         ui: &mut Ui,

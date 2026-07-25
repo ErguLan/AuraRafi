@@ -259,7 +259,8 @@ fn parse_primitive(name: &str) -> raf_core::scene::Primitive {
         "sphere" | "ball" => Primitive::Sphere,
         "plane" | "ground" => Primitive::Plane,
         "cylinder" | "tube" => Primitive::Cylinder,
-        "sprite" | "sprite2d" | "billboard" => Primitive::Sprite2D,
+        // Sprite2D was retired: 2D game content is an orthographic 3D plane.
+        "sprite" | "sprite2d" | "billboard" => Primitive::Plane,
         _ => Primitive::Empty,
     }
 }

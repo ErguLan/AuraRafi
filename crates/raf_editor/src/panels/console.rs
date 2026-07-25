@@ -132,6 +132,37 @@ impl ConsolePanel {
             .collect()
     }
 
+    /// Text owned by the console model. Retained surface hosts mirror it into
+    /// transient UI state instead of storing user input in a UI document.
+    pub fn input(&self) -> &str {
+        &self.input
+    }
+
+    pub fn set_input(&mut self, value: String) {
+        self.input = value;
+    }
+
+    pub fn submit_input(&mut self) -> Option<ConsoleSubmission> {
+        let text = self.input.trim().to_string();
+        if text.is_empty() {
+            return None;
+        }
+        self.input.clear();
+        Some(ConsoleSubmission { text })
+    }
+
+    pub fn autocomplete_command(&mut self, command_names: &[String]) {
+        self.autocomplete(command_names);
+    }
+
+    pub fn select_previous_history(&mut self) {
+        self.history_previous();
+    }
+
+    pub fn select_next_history(&mut self) {
+        self.history_next();
+    }
+
     pub fn show(
         &mut self,
         ui: &mut Ui,

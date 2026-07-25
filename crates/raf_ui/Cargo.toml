@@ -9,3 +9,5 @@ description = "Lightweight retained UI data model for AuraRafi"
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
+ab_glyph = { workspace = true }
+epaint_default_fonts = { workspace = true }

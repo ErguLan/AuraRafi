@@ -50,6 +50,42 @@ impl ViewportPanel {
         self.draw_hud_tooltips(painter, rect, lang);
     }
 
+    pub(super) fn draw_hud_without_toolbar(
+        &self,
+        painter: &egui::Painter,
+        rect: Rect,
+        is_dark: bool,
+        lang: Language,
+    ) {
+        self.draw_info_overlay(painter, rect, is_dark);
+        if self.mode == ViewportMode::View3D {
+            self.draw_axis_gizmo(painter, rect, is_dark);
+        }
+        let _ = lang;
+    }
+
+    pub(super) fn handle_retained_hud_click(
+        &mut self,
+        response: &egui::Response,
+        rect: Rect,
+    ) -> bool {
+        if !response.clicked() || self.mode != ViewportMode::View3D {
+            return false;
+        }
+        let Some(pos) = response.interact_pointer_pos() else {
+            return false;
+        };
+        if let Some(action) = self.axis_gizmo_action_at(rect, pos) {
+            match action {
+                HudAction::SnapAxis(axis) => self.bridge.snap_view_to_axis(axis),
+                HudAction::ResetView => self.bridge.reset_isometric_view(),
+                _ => return false,
+            }
+            return true;
+        }
+        false
+    }
+
     pub(super) fn handle_hud_click(
         &mut self,
         response: &egui::Response,
@@ -119,6 +155,15 @@ impl ViewportPanel {
     }
 
     pub(super) fn overlay_blocks_world_input(&self, rect: Rect, pos: Pos2) -> bool {
+        if self.retained_toolbar_active {
+            return self
+                .retained_overlay_rects
+                .iter()
+                .flatten()
+                .any(|overlay| overlay.contains(pos))
+                || self.info_rect(rect).contains(pos)
+                || (self.mode == ViewportMode::View3D && self.axis_gizmo_rect(rect).contains(pos));
+        }
         self.toolbar_group_rect(rect).contains(pos)
             || self.mode_toggle_group_rect(rect).contains(pos)
             || self.edit_mode_badge_rect(rect).contains(pos)

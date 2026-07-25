@@ -10,39 +10,83 @@ use chrono::Utc;
 use eframe::egui;
 use eframe::egui_wgpu;
 use raf_assets::PrimitiveModelManifest;
-use raf_core::config::{EngineSettings, Theme};
+use raf_core::config::{EngineSettings, Language, Theme};
 use raf_core::i18n::t;
 use raf_core::project::{Project, ProjectType, RecentProjects};
 use raf_core::scene::graph::Primitive;
 use raf_core::scene::SceneGraph;
 use raf_core::session::ProjectSessionRegistry;
-use raf_render::api_graphic_basic::device::SharedWgpuContext;
+use raf_render::api_graphic_basic::device::SharedGraphicsContext;
+use raf_render::api_graphic_basic::ui_surface::{
+    NativeApplicationMenuAdapter, NativeWindowApplicationMenuAdapter,
+};
 use raf_render::bridge::{GraphicsSurfaceKind, RenderRuntime, RenderRuntimeSnapshot};
 use raf_render::render_config::RenderConfig;
 use raf_render::WorldStreamConfig;
+use raw_window_handle::HasWindowHandle;
+use std::time::Duration;
 
 #[path = "panels/hub.rs"]
 mod hub;
 
 use crate::agent_executor::AgentEditorAction;
+use crate::application_menu::{
+    build_editor_application_menu, command as application_menu_command,
+    show_eframe_application_menu, EditorApplicationMenuState,
+};
 use crate::commands::sessions::SessionCommandEvent;
 use crate::commands::{parse_console_input, CommandCatalog, CommandOutput, ParsedInput};
+use crate::editor_shell::{EditorShellLayout, PANEL_BOTTOM, PANEL_HIERARCHY, PANEL_PROPERTIES};
+use crate::editor_shell_surface::{EditorBottomDockTab, EditorCenterSurface, EditorInspectorTab};
 use crate::frame_timing::FrameTiming;
 use crate::game_runtime::GameRuntimeState;
+use crate::panels::agent_surface::AgentSurfaceHost;
 use crate::panels::ai_chat::AgentPanel;
 use crate::panels::asset_browser::AssetBrowserPanel;
+use crate::panels::asset_browser_surface::{
+    AssetBrowserAction, AssetBrowserSurfaceHost, AssetDialogAction,
+};
+use crate::panels::common_dialog_surface::{CommonDialogAction, CommonDialogSurfaceHost};
 use crate::panels::console::{ConsolePanel, LogLevel};
+use crate::panels::console_surface_host::ConsoleSurfaceHost;
+use crate::panels::editor_bottom_chrome_surface::{
+    EditorBottomChromeAction, EditorBottomChromeSurfaceHost,
+};
+use crate::panels::editor_bottom_tabs_host::EditorBottomTabsHost;
+use crate::panels::editor_context_actions_surface::{
+    EditorContextAction, EditorContextActionsSurfaceHost,
+};
+use crate::panels::editor_context_tabs_host::EditorContextTabsHost;
+use crate::panels::editor_inspector_tabs_host::EditorInspectorTabsHost;
+use crate::panels::editor_status_surface::EditorStatusSurfaceHost;
+use crate::panels::electronics_inspector_surface::{
+    ElectronicsInspectorAction, ElectronicsInspectorSurfaceHost,
+};
+use crate::panels::electronics_navigator_surface::{
+    ElectronicsNavigatorAction, ElectronicsNavigatorSurfaceHost,
+};
+use crate::panels::electronics_surface::{
+    ElectronicsAnalysisSurfaceAction, ElectronicsAnalysisSurfaceHost,
+};
+use crate::panels::electronics_toolbar_surface::{
+    ElectronicsToolbarAction, ElectronicsToolbarSurfaceHost,
+};
+use crate::panels::game_surface::{
+    GameHierarchyAction, GameHierarchySurfaceHost, GamePropertiesAction, GamePropertiesSurfaceHost,
+};
+use crate::panels::game_viewport_surface::{GameViewportSurfaceAction, GameViewportSurfaceHost};
 use crate::panels::hierarchy::HierarchyPanel;
+use crate::panels::hub_surface_host::{HubSurfaceHost, HubSurfaceIntent};
+use crate::panels::loading_surface::LoadingSurfaceHost;
+use crate::panels::new_project_surface::{NewProjectSurfaceAction, NewProjectSurfaceHost};
 use crate::panels::node_editor::NodeEditorDocument;
 use crate::panels::node_editor::NodeEditorPanel;
-use crate::panels::pcb_panels;
-use crate::panels::pcb_view::PcbViewPanel;
-use crate::panels::project_settings;
-use crate::panels::properties::PropertiesPanel;
-use crate::panels::schematic_panels;
-use crate::panels::schematic_view::SchematicViewPanel;
-use crate::panels::sessions::{SessionPanelAction, SessionsPanel};
-use crate::panels::settings_panel;
+use crate::panels::pcb_view::{PcbSelection, PcbViewPanel};
+use crate::panels::project_settings_surface_host::ProjectSettingsSurfaceHost;
+use crate::panels::raf_ui_studio_surface::RafUiStudioSurfaceHost;
+use crate::panels::schematic_view::{SchematicSelection, SchematicViewPanel};
+use crate::panels::sessions_surface::{SessionsSurfaceAction, SessionsSurfaceHost};
+use crate::panels::settings_surface_host::{SettingsSurfaceHost, SettingsSurfaceIntent};
 use crate::panels::viewport::ViewportPanel;
 use crate::pcb_document::{load_pcb_document, save_pcb_document};
 use crate::schematic_document::{load_schematic_document, save_schematic_document};
@@ -50,7 +94,7 @@ use crate::session_document::{load_game_session, load_ui_document, save_game_ses
 use crate::theme as app_theme;
 use crate::ui_icons::UiIconAtlas;
 use raf_ai::{AgentStatus, AssetImageGenerationQueue, AssetImageJobStatus};
-use raf_ui::UiDocument;
+use raf_ui::{StudioUiPalette, UiDocument, UiRect};
 
 // ---------------------------------------------------------------------------
 // Application state machine
@@ -73,6 +117,8 @@ enum AppScreen {
     Editor,
     /// Settings screen (overlay).
     Settings,
+    /// RafUI Studio authoring workspace.
+    RafUiStudio,
 }
 
 /// Bottom panel tab selection in the editor.
@@ -80,6 +126,8 @@ enum AppScreen {
 enum BottomTab {
     Assets,
     Console,
+    Drc,
+    Simulation,
     AiChat,
     NodeEditor,
     ProjectSettings,
@@ -99,6 +147,13 @@ enum ViewportMode {
     Scene,
     Schematic,
     Pcb,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellResizeEdge {
+    Left,
+    Right,
+    Top,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +224,10 @@ const HUB_UI_ICONS: &[&str] = &[
     "project_electronics.png",
 ];
 
+const SPLASH_MIN_DURATION_SECONDS: f64 = 2.4;
+const SPLASH_MAX_DURATION_SECONDS: f64 = 6.0;
+const SPLASH_ICON_UPLOAD_BUDGET: usize = 12;
+
 // ---------------------------------------------------------------------------
 // Main app
 // ---------------------------------------------------------------------------
@@ -192,14 +251,25 @@ pub struct AuraRafiApp {
     // Editor panels
     viewport: ViewportPanel,
     hierarchy: HierarchyPanel,
-    properties: PropertiesPanel,
-    sessions_panel: SessionsPanel,
+    game_hierarchy_surface: GameHierarchySurfaceHost,
+    game_properties_surface: GamePropertiesSurfaceHost,
+    game_viewport_surface: GameViewportSurfaceHost,
+    sessions_surface: SessionsSurfaceHost,
     asset_browser: AssetBrowserPanel,
+    asset_browser_surface: AssetBrowserSurfaceHost,
     console: ConsolePanel,
+    console_surface: ConsoleSurfaceHost,
     ai_chat: AgentPanel,
+    agent_surface: AgentSurfaceHost,
     node_editor: NodeEditorPanel,
     schematic_view: SchematicViewPanel,
     pcb_view: PcbViewPanel,
+    electronics_navigator_surface: ElectronicsNavigatorSurfaceHost,
+    electronics_inspector_surface: ElectronicsInspectorSurfaceHost,
+    electronics_toolbar_surface: ElectronicsToolbarSurfaceHost,
+    electronics_analysis_surface: ElectronicsAnalysisSurfaceHost,
+    electronics_drc_report: Option<raf_electronics::drc::DrcReport>,
+    electronics_simulation_results: Option<raf_electronics::simulation::SimulationResults>,
 
     // Editor state
     bottom_tab: BottomTab,
@@ -233,7 +303,25 @@ pub struct AuraRafiApp {
     /// Project logo texture.
     logo_texture: Option<egui::TextureHandle>,
     egui_wgpu_render_state: Option<egui_wgpu::RenderState>,
+    native_application_menu: Option<NativeWindowApplicationMenuAdapter>,
+    native_menu_bound_to_frame: bool,
     ui_icons: UiIconAtlas,
+    hub_surface: HubSurfaceHost,
+    new_project_surface: NewProjectSurfaceHost,
+    loading_surface: LoadingSurfaceHost,
+    settings_surface: SettingsSurfaceHost,
+    raf_ui_studio_surface: RafUiStudioSurfaceHost,
+    project_settings_surface: ProjectSettingsSurfaceHost,
+    bottom_tabs_surface: EditorBottomTabsHost,
+    bottom_chrome_surface: EditorBottomChromeSurfaceHost,
+    context_tabs_surface: EditorContextTabsHost,
+    context_actions_surface: EditorContextActionsSurfaceHost,
+    status_surface: EditorStatusSurfaceHost,
+    inspector_tabs_surface: EditorInspectorTabsHost,
+    common_dialog_surface: CommonDialogSurfaceHost,
+    editor_shell: EditorShellLayout,
+    editor_shell_dirty: bool,
+    editor_shell_resize_panel: Option<&'static str>,
     hub_search_query: String,
     hub_filter: HubProjectFilter,
     pending_exit_action: Option<PendingExitAction>,
@@ -271,12 +359,13 @@ impl AuraRafiApp {
         cc.egui_ctx.set_style(style);
 
         let egui_wgpu_render_state = cc.wgpu_render_state.clone();
+        let native_application_menu = Some(NativeWindowApplicationMenuAdapter::default());
         let mut graphics_runtime = RenderRuntime::default();
         if let Some(render_state) = &egui_wgpu_render_state {
-            graphics_runtime.set_shared_wgpu_context(Some(SharedWgpuContext {
-                device: render_state.device.clone(),
-                queue: render_state.queue.clone(),
-            }));
+            graphics_runtime.set_shared_graphics_context(Some(SharedGraphicsContext::from_host(
+                render_state.device.clone(),
+                render_state.queue.clone(),
+            )));
         }
 
         Self {
@@ -295,14 +384,25 @@ impl AuraRafiApp {
             runtime: None,
             viewport: ViewportPanel::default(),
             hierarchy: HierarchyPanel::default(),
-            properties: PropertiesPanel::default(),
-            sessions_panel: SessionsPanel::default(),
+            game_hierarchy_surface: GameHierarchySurfaceHost::default(),
+            game_properties_surface: GamePropertiesSurfaceHost::default(),
+            game_viewport_surface: GameViewportSurfaceHost::default(),
+            sessions_surface: SessionsSurfaceHost::default(),
             asset_browser: AssetBrowserPanel::default(),
+            asset_browser_surface: AssetBrowserSurfaceHost::default(),
             console: ConsolePanel::default(),
+            console_surface: ConsoleSurfaceHost::default(),
             ai_chat: AgentPanel::default(),
+            agent_surface: AgentSurfaceHost::default(),
             node_editor: NodeEditorPanel::default(),
             schematic_view: SchematicViewPanel::default(),
             pcb_view: PcbViewPanel::default(),
+            electronics_navigator_surface: ElectronicsNavigatorSurfaceHost::default(),
+            electronics_inspector_surface: ElectronicsInspectorSurfaceHost::default(),
+            electronics_toolbar_surface: ElectronicsToolbarSurfaceHost::default(),
+            electronics_analysis_surface: ElectronicsAnalysisSurfaceHost::default(),
+            electronics_drc_report: None,
+            electronics_simulation_results: None,
 
             command_catalog: CommandCatalog::builtin(),
             complement_registry: raf_core::complement::ComplementRegistry::new(),
@@ -324,7 +424,25 @@ impl AuraRafiApp {
             pending_history_snapshot: None,
             logo_texture: None,
             egui_wgpu_render_state,
+            native_application_menu,
+            native_menu_bound_to_frame: false,
             ui_icons: UiIconAtlas::default(),
+            hub_surface: HubSurfaceHost::default(),
+            new_project_surface: NewProjectSurfaceHost::default(),
+            loading_surface: LoadingSurfaceHost::default(),
+            settings_surface: SettingsSurfaceHost::default(),
+            raf_ui_studio_surface: RafUiStudioSurfaceHost::default(),
+            project_settings_surface: ProjectSettingsSurfaceHost::default(),
+            bottom_tabs_surface: EditorBottomTabsHost::default(),
+            bottom_chrome_surface: EditorBottomChromeSurfaceHost::default(),
+            context_tabs_surface: EditorContextTabsHost::default(),
+            context_actions_surface: EditorContextActionsSurfaceHost::default(),
+            status_surface: EditorStatusSurfaceHost::default(),
+            inspector_tabs_surface: EditorInspectorTabsHost::default(),
+            common_dialog_surface: CommonDialogSurfaceHost::default(),
+            editor_shell: EditorShellLayout::default(),
+            editor_shell_dirty: false,
+            editor_shell_resize_panel: None,
             hub_search_query: String::new(),
             hub_filter: HubProjectFilter::All,
             pending_exit_action: None,
@@ -341,8 +459,23 @@ impl AuraRafiApp {
 }
 
 impl eframe::App for AuraRafiApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn clear_color(&self, visuals: &egui::Visuals) -> [f32; 4] {
+        if matches!(self.screen, AppScreen::Loading { .. }) {
+            [0.0, 0.0, 0.0, 0.0]
+        } else {
+            let _ = visuals;
+            [8.0 / 255.0, 11.0 / 255.0, 15.0 / 255.0, 1.0]
+        }
+    }
+
+    fn update(&mut self, ctx: &egui::Context, frame: &mut eframe::Frame) {
         self.frame_count += 1;
+        let loading_screen = matches!(self.screen, AppScreen::Loading { .. });
+        if !loading_screen {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(false));
+            self.bind_native_application_menu_to_frame(frame);
+            self.poll_native_application_menu();
+        }
         self.poll_image_generation();
 
         // Auto-detect system DPI once at startup when auto_ui_scale is enabled.
@@ -390,7 +523,7 @@ impl eframe::App for AuraRafiApp {
                 self.show_loading(ctx, progress, start_time);
             }
             AppScreen::ProjectHub => {
-                self.show_project_hub(ctx);
+                self.show_project_hub_raf_ui(ctx);
             }
             AppScreen::NewProject {
                 name,
@@ -405,9 +538,15 @@ impl eframe::App for AuraRafiApp {
             AppScreen::Settings => {
                 self.show_settings_screen(ctx);
             }
+            AppScreen::RafUiStudio => {
+                self.show_rafui_studio_screen(ctx);
+            }
         }
 
         self.show_unsaved_changes_dialog(ctx);
+        if !matches!(self.screen, AppScreen::Loading { .. }) {
+            self.sync_native_application_menu();
+        }
     }
 }
 
@@ -417,6 +556,83 @@ impl AuraRafiApp {
             self.settings_draft.as_ref().unwrap_or(&self.settings)
         } else {
             &self.settings
+        }
+    }
+
+    /// Active retained project Hub. The legacy egui implementation remains
+    /// compiled as a recovery path while the editor shell itself migrates.
+    fn show_project_hub_raf_ui(&mut self, ctx: &egui::Context) {
+        let lang = self.settings.language;
+        let palette = if ctx.style().visuals.dark_mode {
+            StudioUiPalette::IndustrialDark
+        } else {
+            StudioUiPalette::PaperLight
+        };
+        let surface_filter = match self.hub_filter {
+            HubProjectFilter::All => crate::studio_surface::HubSurfaceFilter::All,
+            HubProjectFilter::Game => crate::studio_surface::HubSurfaceFilter::Game,
+            HubProjectFilter::Electronics => crate::studio_surface::HubSurfaceFilter::Electronics,
+        };
+        let visible_projects = hub::filtered_recent_projects(
+            &self.recent_projects.projects,
+            self.hub_filter,
+            &self.hub_search_query,
+        );
+        let mut intents = Vec::new();
+
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                intents = self.hub_surface.show(
+                    ui,
+                    self.egui_wgpu_render_state.as_ref(),
+                    palette,
+                    lang,
+                    self.settings.theme,
+                    surface_filter,
+                    &self.recent_projects.projects,
+                    &visible_projects,
+                    &self.hub_search_query,
+                );
+            });
+
+        for intent in intents {
+            self.apply_hub_surface_intent(intent);
+        }
+    }
+
+    fn apply_hub_surface_intent(&mut self, intent: HubSurfaceIntent) {
+        match intent {
+            HubSurfaceIntent::Open(path) => self.open_project(&path),
+            HubSurfaceIntent::Duplicate(path) => self.duplicate_project_from_hub(&path),
+            HubSurfaceIntent::Forget(path) => {
+                self.recent_projects
+                    .projects
+                    .retain(|entry| entry.path != path);
+                let _ = self.recent_projects.save(&dirs_config_dir());
+            }
+            HubSurfaceIntent::NewProject(project_type) => {
+                self.screen = AppScreen::NewProject {
+                    name: String::new(),
+                    path: default_projects_dir(),
+                    project_type,
+                };
+            }
+            HubSurfaceIntent::OpenSettings => self.open_settings_screen(AppScreen::ProjectHub),
+            HubSurfaceIntent::SetSearch(query) => self.hub_search_query = query,
+            HubSurfaceIntent::SetFilter(filter) => {
+                self.hub_filter = match filter {
+                    crate::studio_surface::HubSurfaceFilter::All => HubProjectFilter::All,
+                    crate::studio_surface::HubSurfaceFilter::Game => HubProjectFilter::Game,
+                    crate::studio_surface::HubSurfaceFilter::Electronics => {
+                        HubProjectFilter::Electronics
+                    }
+                };
+            }
+            HubSurfaceIntent::SetTheme(theme) => {
+                self.settings.theme = theme;
+                let _ = self.settings.save(&dirs_config_dir());
+            }
         }
     }
 
@@ -451,100 +667,69 @@ impl AuraRafiApp {
     fn show_loading(&mut self, ctx: &egui::Context, _progress: f32, start_time: f64) {
         let time = ctx.input(|i| i.time);
         let start = if start_time == 0.0 { time } else { start_time };
-        let palette = app_theme::palette_for(self.settings.theme, self.settings.theme_experimental);
+        let elapsed = (time - start).max(0.0);
 
+        // Warm the icons used by the Hub and editor while the splash is
+        // visible. The splash progress therefore represents actual startup
+        // work instead of only a fixed visual delay.
+        self.ui_icons.request_icons(HUB_UI_ICONS);
+        self.ui_icons.request_icons(EDITOR_UI_ICONS);
+        self.ui_icons
+            .process_load_budget(ctx, SPLASH_ICON_UPLOAD_BUDGET);
+        let loaded_icons = self.ui_icons.ready_or_failed_count(HUB_UI_ICONS)
+            + self.ui_icons.ready_or_failed_count(EDITOR_UI_ICONS);
+        let icon_total = HUB_UI_ICONS.len() + EDITOR_UI_ICONS.len();
+        let icon_progress = if icon_total == 0 {
+            1.0
+        } else {
+            loaded_icons as f32 / icon_total as f32
+        };
+        let time_progress = (elapsed / SPLASH_MIN_DURATION_SECONDS).clamp(0.0, 1.0) as f32;
+        let startup_ready = loaded_icons >= icon_total;
+        let timed_out = elapsed >= SPLASH_MAX_DURATION_SECONDS;
+        let ready_to_enter = (startup_ready && elapsed >= SPLASH_MIN_DURATION_SECONDS) || timed_out;
+        let new_progress = if ready_to_enter {
+            1.0
+        } else {
+            (icon_progress * 0.82 + time_progress * 0.18).min(0.96)
+        };
+
+        if self.frame_count == 1 {
+            if let Some(command) = egui::ViewportCommand::center_on_screen(ctx) {
+                ctx.send_viewport_cmd(command);
+            }
+        }
         egui::CentralPanel::default()
-            .frame(egui::Frame::default().fill(palette.bg))
+            .frame(egui::Frame::none())
             .show(ctx, |ui| {
-                let available = ui.available_rect_before_wrap();
-                let center = available.center();
-
-                // Brand name with subtle glow effect.
-                ui.painter().text(
-                    egui::pos2(center.x, center.y - 50.0),
-                    egui::Align2::CENTER_CENTER,
-                    "Proyecto Rafi",
-                    egui::FontId::proportional(52.0),
-                    app_theme::ACCENT,
+                self.loading_surface.show(
+                    ui,
+                    self.egui_wgpu_render_state.as_ref(),
+                    StudioUiPalette::IndustrialDark,
+                    new_progress,
+                    self.settings.language,
                 );
-
-                // Tagline.
-                let tagline = t("app.develop_your_own_project", self.settings.language);
-                ui.painter().text(
-                    egui::pos2(center.x, center.y),
-                    egui::Align2::CENTER_CENTER,
-                    tagline,
-                    egui::FontId::proportional(16.0),
-                    palette.text_dim,
-                );
-
-                // Progress bar.
-                let bar_width = 320.0;
-                let bar_height = 3.0;
-                let bar_rect = egui::Rect::from_center_size(
-                    egui::pos2(center.x, center.y + 50.0),
-                    egui::vec2(bar_width, bar_height),
-                );
-
-                // Background track.
-                ui.painter()
-                    .rect_filled(bar_rect, bar_height / 2.0, palette.widget);
-
-                // Fill.
-                let new_progress = ((time - start) / 1.5).min(1.0) as f32;
-                let fill_rect = egui::Rect::from_min_size(
-                    bar_rect.min,
-                    egui::vec2(bar_width * new_progress, bar_height),
-                );
-                ui.painter()
-                    .rect_filled(fill_rect, bar_height / 2.0, app_theme::ACCENT);
-
-                // Loading text.
-                let loading_text = t("app.loading", self.settings.language);
-                ui.painter().text(
-                    egui::pos2(center.x, center.y + 68.0),
-                    egui::Align2::CENTER_CENTER,
-                    loading_text,
-                    egui::FontId::proportional(12.0),
-                    palette.text_dim,
-                );
-
-                // --- Subtle Yoll credit at the bottom ---
-                ui.painter().text(
-                    egui::pos2(center.x, available.bottom() - 36.0),
-                    egui::Align2::CENTER_CENTER,
-                    "A project by Yoll",
-                    egui::FontId::proportional(11.0),
-                    palette.text_dim,
-                );
-                ui.painter().text(
-                    egui::pos2(center.x, available.bottom() - 20.0),
-                    egui::Align2::CENTER_CENTER,
-                    "yoll.site",
-                    egui::FontId::proportional(10.0),
-                    palette.border,
-                );
-
-                // Version (small, corner).
-                ui.painter().text(
-                    egui::pos2(available.right() - 10.0, available.bottom() - 10.0),
-                    egui::Align2::RIGHT_BOTTOM,
-                    format!("v{}", env!("CARGO_PKG_VERSION")),
-                    egui::FontId::proportional(9.0),
-                    palette.separator,
-                );
-
-                // Transition after loading completes.
-                if new_progress >= 1.0 {
-                    self.screen = AppScreen::ProjectHub;
-                } else {
-                    self.screen = AppScreen::Loading {
-                        progress: new_progress,
-                        start_time: start,
-                    };
-                    ctx.request_repaint();
-                }
             });
+        if ready_to_enter {
+            self.expand_window_after_loading(ctx);
+            self.screen = AppScreen::ProjectHub;
+        } else {
+            self.screen = AppScreen::Loading {
+                progress: new_progress,
+                start_time: start,
+            };
+            ctx.request_repaint_after(Duration::from_millis(16));
+        }
+    }
+
+    fn expand_window_after_loading(&self, ctx: &egui::Context) {
+        ctx.send_viewport_cmd(egui::ViewportCommand::Transparent(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Decorations(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Resizable(true));
+        ctx.send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+            800.0, 500.0,
+        )));
+        ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(1280.0, 720.0)));
     }
 
     // -----------------------------------------------------------------------
@@ -558,149 +743,694 @@ impl AuraRafiApp {
         mut path: String,
         project_type: ProjectType,
     ) {
-        let _lang = self.settings.language;
-        let palette = app_theme::palette_for_visuals(
-            ctx.style().visuals.dark_mode,
-            self.settings.theme_experimental,
-        );
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(50.0);
-            ui.vertical_centered(|ui| {
-                let title = match project_type {
-                    ProjectType::Game => t("app.new_game_project", self.settings.language),
-                    ProjectType::Electronics => {
-                        t("app.new_electronics_project", self.settings.language)
-                    }
-                };
-                ui.heading(
-                    egui::RichText::new(title)
-                        .size(28.0)
-                        .color(app_theme::ACCENT),
-                );
-                ui.add_space(24.0);
-            });
-
-            // Centered form.
-            ui.vertical_centered(|ui| {
-                ui.set_max_width(500.0);
-
-                ui.group(|ui| {
-                    ui.set_min_width(460.0);
-                    ui.add_space(8.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(t("app.project_name", _lang)).strong());
-                        ui.add_sized(
-                            [300.0, 24.0],
-                            egui::TextEdit::singleline(&mut name).hint_text("My Awesome Project"),
-                        );
-                    });
-
-                    ui.add_space(6.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(t("app.location", _lang)).strong());
-                        ui.add_sized([300.0, 24.0], egui::TextEdit::singleline(&mut path));
-                    });
-
-                    ui.add_space(6.0);
-
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(t("app.type", _lang)).strong());
-                        ui.label(
-                            egui::RichText::new(project_type.display_name())
-                                .color(app_theme::ACCENT),
-                        );
-                    });
-
-                    ui.add_space(8.0);
-                });
-
-                ui.add_space(20.0);
-
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_sized([120.0, 30.0], egui::Button::new(t("app.cancel", _lang)))
-                        .clicked()
-                    {
-                        self.screen = AppScreen::ProjectHub;
-                        return;
-                    }
-
-                    ui.add_space(12.0);
-
-                    let can_create = !name.is_empty() && !path.is_empty();
-                    let _create_btn = egui::Button::new(
-                        egui::RichText::new(t("app.create_project", _lang))
-                            .color(egui::Color32::WHITE),
-                    )
-                    .fill(if can_create {
-                        app_theme::ACCENT
-                    } else {
-                        palette.widget
-                    });
-
-                    if ui
-                        .add_enabled(
-                            can_create,
-                            egui::Button::new(
-                                egui::RichText::new(t("app.create_project", _lang))
-                                    .color(egui::Color32::WHITE)
-                                    .strong(),
-                            ),
-                        )
-                        .clicked()
-                    {
-                        let project_path = std::path::PathBuf::from(&path);
-                        match Project::create(&name, project_type, &project_path) {
-                            Ok(project) => {
-                                self.console.log(
-                                    LogLevel::Info,
-                                    &format!("Project '{}' created", project.name),
-                                );
-                                let config_dir = dirs_config_dir();
-                                self.recent_projects.add(&project);
-                                let _ = self.recent_projects.save(&config_dir);
-                                self.current_project = Some(project.clone());
-                                self.sessions = ProjectSessionRegistry::load_or_legacy(
-                                    &project.path,
-                                    project_type,
-                                );
-                                // Wire assets path to browser.
-                                let assets_dir =
-                                    std::path::PathBuf::from(&project.path).join("assets");
-                                self.asset_browser.project_assets_path = Some(assets_dir);
-                                self.asset_browser.scan_project_folder();
-                                if let Err(error) = self.load_active_session_documents(&project) {
-                                    self.console.log(LogLevel::Error, &error);
-                                }
-                                self.screen = AppScreen::Editor;
-                            }
-                            Err(e) => {
-                                self.console.log(
-                                    LogLevel::Error,
-                                    &format!("Failed to create project: {}", e),
-                                );
-                            }
-                        }
-                    }
-                });
-            });
-
-            // Update the screen state with edited fields.
-            if self.screen != AppScreen::ProjectHub && self.screen != AppScreen::Editor {
-                self.screen = AppScreen::NewProject {
-                    name,
-                    path,
+        let palette = if ctx.style().visuals.dark_mode {
+            StudioUiPalette::IndustrialDark
+        } else {
+            StudioUiPalette::PaperLight
+        };
+        let render_state = self.egui_wgpu_render_state.as_ref();
+        let mut actions = Vec::new();
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                actions = self.new_project_surface.show(
+                    ui,
+                    render_state,
+                    palette,
+                    &name,
+                    &path,
                     project_type,
-                };
+                    self.settings.language,
+                );
+            });
+
+        let mut create = false;
+        for action in actions {
+            match action {
+                NewProjectSurfaceAction::SetName(value) => name = value,
+                NewProjectSurfaceAction::SetPath(value) => path = value,
+                NewProjectSurfaceAction::Cancel => {
+                    self.screen = AppScreen::ProjectHub;
+                    return;
+                }
+                NewProjectSurfaceAction::Create => create = true,
             }
-        });
+        }
+
+        if create && !name.trim().is_empty() && !path.trim().is_empty() {
+            let project_path = std::path::PathBuf::from(path.trim());
+            match Project::create(name.trim(), project_type, &project_path) {
+                Ok(project) => {
+                    self.console.log(
+                        LogLevel::Info,
+                        &format!("Project '{}' created", project.name),
+                    );
+                    let config_dir = dirs_config_dir();
+                    self.recent_projects.add(&project);
+                    let _ = self.recent_projects.save(&config_dir);
+                    self.current_project = Some(project.clone());
+                    self.editor_shell = EditorShellLayout::load(&project.path);
+                    self.editor_shell_dirty = false;
+                    self.editor_shell_resize_panel = None;
+                    self.sessions =
+                        ProjectSessionRegistry::load_or_legacy(&project.path, project_type);
+                    let assets_dir = std::path::PathBuf::from(&project.path).join("assets");
+                    self.asset_browser.project_assets_path = Some(assets_dir);
+                    self.asset_browser.scan_project_folder();
+                    if let Err(error) = self.load_active_session_documents(&project) {
+                        self.console.log(LogLevel::Error, &error);
+                    }
+                    self.screen = AppScreen::Editor;
+                    return;
+                }
+                Err(error) => {
+                    self.console.log(
+                        LogLevel::Error,
+                        &format!("Failed to create project: {error}"),
+                    );
+                }
+            }
+        }
+
+        if self.screen != AppScreen::ProjectHub && self.screen != AppScreen::Editor {
+            self.screen = AppScreen::NewProject {
+                name,
+                path,
+                project_type,
+            };
+        }
     }
 
     // -----------------------------------------------------------------------
     // Main Editor
     // -----------------------------------------------------------------------
+
+    fn apply_game_hierarchy_surface_actions(&mut self, actions: Vec<GameHierarchyAction>) {
+        for action in actions {
+            match action {
+                GameHierarchyAction::Select(id) => {
+                    if self.scene.get(id).is_some() {
+                        self.hierarchy.selected_node = Some(id);
+                        self.hierarchy.selected_nodes = vec![id];
+                        self.viewport.selected = vec![id];
+                    }
+                }
+                GameHierarchyAction::ToggleVisibility(id) => {
+                    self.push_undo_snapshot();
+                    let toggled_name = if let Some(node) = self.scene.get_mut(id) {
+                        node.visible = !node.visible;
+                        Some(node.name.clone())
+                    } else {
+                        None
+                    };
+                    if let Some(name) = toggled_name {
+                        let msg = format!(
+                            "{} {}",
+                            t("app.visibility_toggled", self.settings.language),
+                            name
+                        );
+                        self.last_action = msg.clone();
+                        self.console.log(LogLevel::Info, &msg);
+                        self.mark_scene_modified();
+                    }
+                }
+                GameHierarchyAction::Delete(id) => {
+                    self.push_undo_snapshot();
+                    let name = self
+                        .scene
+                        .get(id)
+                        .map(|node| node.name.clone())
+                        .unwrap_or_default();
+                    if self.scene.remove_node(id) {
+                        self.hierarchy.selected_node = None;
+                        self.hierarchy.selected_nodes.clear();
+                        self.viewport.selected.clear();
+                        let msg =
+                            format!("{} {}", t("app.deleted_msg", self.settings.language), name);
+                        self.last_action = msg.clone();
+                        self.console.log(LogLevel::Info, &msg);
+                        self.mark_scene_modified();
+                    }
+                }
+                GameHierarchyAction::Duplicate(id) => {
+                    self.push_undo_snapshot();
+                    if let Some(new_id) = self.scene.duplicate_node(id) {
+                        self.hierarchy.selected_node = Some(new_id);
+                        self.hierarchy.selected_nodes = vec![new_id];
+                        self.viewport.selected = vec![new_id];
+                        let name = self
+                            .scene
+                            .get(new_id)
+                            .map(|node| node.name.clone())
+                            .unwrap_or_default();
+                        let msg = format!(
+                            "{} {}",
+                            t("app.duplicated_msg", self.settings.language),
+                            name
+                        );
+                        self.last_action = msg.clone();
+                        self.console.log(LogLevel::Info, &msg);
+                        self.mark_scene_modified();
+                    }
+                }
+                GameHierarchyAction::AddFolder(parent) => {
+                    self.push_undo_snapshot();
+                    let new_id = if let Some(parent_id) = parent {
+                        self.scene.add_child_folder(parent_id, "Folder")
+                    } else {
+                        self.scene.add_root_folder("Folder")
+                    };
+                    self.hierarchy.selected_node = Some(new_id);
+                    self.hierarchy.selected_nodes = vec![new_id];
+                    self.viewport.selected = vec![new_id];
+                    let msg = t("app.folder_created", self.settings.language);
+                    self.last_action = msg.clone();
+                    self.console.log(LogLevel::Info, &msg);
+                    self.mark_scene_modified();
+                }
+                GameHierarchyAction::Ungroup(id) => {
+                    self.push_undo_snapshot();
+                    if self.scene.ungroup_node(id) {
+                        self.hierarchy.selected_node = None;
+                        self.hierarchy.selected_nodes.clear();
+                        self.viewport.selected.clear();
+                        let msg = t("app.ungrouped_msg", self.settings.language);
+                        self.last_action = msg.clone();
+                        self.console.log(LogLevel::Info, &msg);
+                        self.mark_scene_modified();
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_game_properties_surface_actions(&mut self, actions: Vec<GamePropertiesAction>) {
+        let Some(selected) = self.hierarchy.selected_node else {
+            return;
+        };
+
+        for action in actions {
+            match action {
+                GamePropertiesAction::SetName(name) => {
+                    let trimmed = name.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let changed = self
+                        .scene
+                        .get(selected)
+                        .map(|node| node.name != trimmed)
+                        .unwrap_or(false);
+                    if changed {
+                        if let Some(node) = self.scene.get_mut(selected) {
+                            node.name = trimmed.to_string();
+                        }
+                        self.mark_scene_modified();
+                    }
+                }
+                GamePropertiesAction::SetVisible(value) => {
+                    for id in self.hierarchy.selected_nodes.clone() {
+                        if let Some(node) = self.scene.get_mut(id) {
+                            node.visible = value;
+                        }
+                    }
+                    self.mark_scene_modified();
+                }
+                GamePropertiesAction::SetRange { key, value } => {
+                    let Some((group, axis)) = key
+                        .strip_prefix("game.properties.")
+                        .and_then(|value| value.split_once('.'))
+                    else {
+                        continue;
+                    };
+                    if self.scene.get(selected).is_none() {
+                        continue;
+                    }
+                    let Some(node) = self.scene.get_mut(selected) else {
+                        continue;
+                    };
+                    let target = match group {
+                        "position" => &mut node.position,
+                        "rotation" => &mut node.rotation,
+                        "scale" => &mut node.scale,
+                        _ => continue,
+                    };
+                    match axis {
+                        "x" => target.x = value,
+                        "y" => target.y = value,
+                        "z" => target.z = value,
+                        _ => continue,
+                    }
+                    self.mark_scene_modified();
+                }
+                GamePropertiesAction::SetPrimitive(primitive) => {
+                    if self.scene.get(selected).is_some() {
+                        if let Some(node) = self.scene.get_mut(selected) {
+                            node.primitive = primitive;
+                            node.color =
+                                raf_core::scene::graph::NodeColor::for_primitive(primitive);
+                        }
+                        self.mark_scene_modified();
+                    }
+                }
+                GamePropertiesAction::ResetTransform => {
+                    if self.scene.get(selected).is_some() {
+                        if let Some(node) = self.scene.get_mut(selected) {
+                            node.position = glam::Vec3::ZERO;
+                            node.rotation = glam::Vec3::ZERO;
+                            node.scale = glam::Vec3::ONE;
+                        }
+                        self.mark_scene_modified();
+                    }
+                }
+                GamePropertiesAction::ResetAll => {
+                    if self.scene.get(selected).is_some() {
+                        if let Some(node) = self.scene.get_mut(selected) {
+                            node.position = glam::Vec3::ZERO;
+                            node.rotation = glam::Vec3::ZERO;
+                            node.scale = glam::Vec3::ONE;
+                            node.color =
+                                raf_core::scene::graph::NodeColor::for_primitive(node.primitive);
+                            node.visible = true;
+                        }
+                        self.mark_scene_modified();
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_game_viewport_surface_actions(&mut self, actions: Vec<GameViewportSurfaceAction>) {
+        for action in actions {
+            match action {
+                GameViewportSurfaceAction::SetGizmo(mode) => {
+                    self.viewport.set_gizmo_mode_from_ui(mode);
+                }
+                GameViewportSurfaceAction::ToggleSelect => {
+                    self.viewport.toggle_select_mode_from_ui();
+                }
+                GameViewportSurfaceAction::SetMode(mode) => {
+                    self.viewport.mode = mode;
+                }
+                GameViewportSurfaceAction::ToggleGrid => {
+                    self.viewport.grid_visible = !self.viewport.grid_visible;
+                }
+                GameViewportSurfaceAction::ToggleLabels => {
+                    self.viewport.show_labels = !self.viewport.show_labels;
+                }
+                GameViewportSurfaceAction::ToggleFocusLock => {
+                    self.viewport.toggle_focus_lock_from_ui(&self.scene);
+                }
+                GameViewportSurfaceAction::ToggleEditMode => {
+                    self.viewport.toggle_edit_mode_from_ui(&self.scene);
+                }
+                GameViewportSurfaceAction::SetRenderStyle(style) => {
+                    self.settings.viewport_render_mode = match style {
+                        crate::panels::viewport::RenderStyle::Solid => {
+                            raf_core::config::ViewportRenderMode::Solid
+                        }
+                        crate::panels::viewport::RenderStyle::Wireframe => {
+                            raf_core::config::ViewportRenderMode::Wireframe
+                        }
+                        crate::panels::viewport::RenderStyle::Preview => {
+                            raf_core::config::ViewportRenderMode::Preview
+                        }
+                    };
+                    self.viewport.render_style = style;
+                }
+                GameViewportSurfaceAction::ResetView => {
+                    self.viewport.reset_view_from_ui();
+                }
+                GameViewportSurfaceAction::Undo => self.do_undo(),
+                GameViewportSurfaceAction::Redo => self.do_redo(),
+            }
+        }
+    }
+
+    fn apply_electronics_navigator_actions(&mut self, actions: Vec<ElectronicsNavigatorAction>) {
+        for action in actions {
+            match action {
+                ElectronicsNavigatorAction::SchematicRoot => {
+                    self.schematic_view.clear_selection();
+                }
+                ElectronicsNavigatorAction::SchematicComponent(index) => {
+                    self.schematic_view.select_component(index);
+                }
+                ElectronicsNavigatorAction::SchematicWire(index) => {
+                    self.schematic_view.select_wire(index);
+                }
+                ElectronicsNavigatorAction::PlaceComponent(index) => {
+                    self.schematic_view.begin_component_placement(index);
+                }
+                ElectronicsNavigatorAction::PcbRoot => {
+                    self.pcb_view.clear_selection();
+                }
+                ElectronicsNavigatorAction::PcbComponent(index) => {
+                    self.pcb_view.select_component(index);
+                }
+                ElectronicsNavigatorAction::PcbTrace(index) => {
+                    self.pcb_view.select_trace(index);
+                }
+                ElectronicsNavigatorAction::PcbAirwire(index) => {
+                    self.pcb_view.select_airwire(index);
+                }
+            }
+        }
+    }
+
+    fn add_primitive_to_scene(&mut self, primitive: Primitive) {
+        self.push_undo_snapshot();
+        let name = format!("{} {}", primitive.label(), self.scene.len() + 1);
+        let source_asset = match primitive {
+            Primitive::Cube => Some("builtin://primitive/cube"),
+            Primitive::Sphere => Some("builtin://primitive/sphere"),
+            Primitive::Plane => Some("builtin://primitive/plane"),
+            Primitive::Cylinder => Some("builtin://primitive/cylinder"),
+            Primitive::Empty => None,
+        };
+        match PrimitiveModelManifest::builtin_for_primitive(primitive) {
+            Ok(Some(manifest)) => match manifest.instantiate_single_root_into_scene(
+                &mut self.scene,
+                Some(&name),
+                source_asset,
+            ) {
+                Ok(id) => {
+                    self.hierarchy.selected_node = Some(id);
+                    self.hierarchy.selected_nodes = vec![id];
+                    self.viewport.selected = vec![id];
+                    self.mark_scene_modified();
+                    let message = format!("Added: {name}");
+                    self.last_action = message.clone();
+                    self.console.log(LogLevel::Info, &message);
+                }
+                Err(error) => self.console.log(
+                    LogLevel::Error,
+                    &format!("Could not import primitive asset {name}: {error}"),
+                ),
+            },
+            Ok(None) => self
+                .console
+                .log(LogLevel::Error, "This primitive has no asset manifest."),
+            Err(error) => self.console.log(
+                LogLevel::Error,
+                &format!("Could not load primitive asset manifest: {error}"),
+            ),
+        }
+    }
+
+    fn apply_asset_browser_actions(&mut self, actions: Vec<AssetBrowserAction>) {
+        let lang = self.settings.language;
+        for action in actions {
+            match action {
+                AssetBrowserAction::SetSearch(value) => {
+                    self.asset_browser.search_query = value;
+                }
+                AssetBrowserAction::SetFilter(filter) => {
+                    self.asset_browser.selected_filter = filter;
+                }
+                AssetBrowserAction::OpenFolder => self.asset_browser.open_assets_folder(),
+                AssetBrowserAction::Refresh => self.asset_browser.scan_project_folder(),
+                AssetBrowserAction::CreateScript(kind) => {
+                    self.asset_browser.create_script_from_kind(lang, &kind);
+                }
+                AssetBrowserAction::AddPrimitive(primitive) => {
+                    self.add_primitive_to_scene(primitive);
+                }
+                AssetBrowserAction::OpenScript(index) => {
+                    self.asset_browser.open_script_entry(index);
+                }
+            }
+        }
+    }
+
+    fn apply_sessions_surface_actions(&mut self, actions: Vec<SessionsSurfaceAction>) {
+        for action in actions {
+            match action {
+                SessionsSurfaceAction::Activate(id) => {
+                    if let Err(error) = self.activate_session(id) {
+                        self.console.log(LogLevel::Error, &error);
+                    }
+                }
+                SessionsSurfaceAction::Create { name, kind } => {
+                    if let Err(error) = self.create_and_activate_session(name, kind) {
+                        self.console.log(LogLevel::Error, &error);
+                    }
+                }
+            }
+        }
+    }
+
+    fn apply_schematic_inspector_actions(
+        &mut self,
+        actions: Vec<ElectronicsInspectorAction>,
+    ) -> bool {
+        let selection = self.schematic_view.selection();
+        let mut changed = false;
+        for action in actions {
+            match action {
+                ElectronicsInspectorAction::Text { field, value } => match field.as_str() {
+                    "electronics.schematic.reference" => {
+                        if let SchematicSelection::Component(index) = selection {
+                            if let Some(component) =
+                                self.schematic_view.schematic.components.get_mut(index)
+                            {
+                                if component.designator != value {
+                                    component.designator = value;
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    "electronics.schematic.value" => {
+                        if let SchematicSelection::Component(index) = selection {
+                            if let Some(component) =
+                                self.schematic_view.schematic.components.get_mut(index)
+                            {
+                                if component.value != value {
+                                    component.value = value;
+                                    component.sync_sim_model_from_value();
+                                    changed = true;
+                                }
+                            }
+                        }
+                    }
+                    "electronics.schematic.net" => {
+                        if let SchematicSelection::Wire(index) = selection {
+                            let indices = self.schematic_view.selected_wire_indices();
+                            let targets = if indices.is_empty() {
+                                vec![index]
+                            } else {
+                                indices
+                            };
+                            for wire_index in targets {
+                                if let Some(wire) =
+                                    self.schematic_view.schematic.wires.get_mut(wire_index)
+                                {
+                                    if wire.net != value {
+                                        wire.net = value.clone();
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                ElectronicsInspectorAction::Range { field, value } => {
+                    let before = match selection {
+                        SchematicSelection::Component(index) => {
+                            self.schematic_view.schematic.components.get(index).cloned()
+                        }
+                        _ => None,
+                    };
+                    if let SchematicSelection::Component(index) = selection {
+                        if let Some(component) =
+                            self.schematic_view.schematic.components.get_mut(index)
+                        {
+                            match field.as_str() {
+                                "electronics.schematic.position.x" => component.position.x = value,
+                                "electronics.schematic.position.y" => component.position.y = value,
+                                "electronics.schematic.rotation" => component.rotation = value,
+                                _ => continue,
+                            }
+                            changed = true;
+                        }
+                    }
+                    if let Some(before) = before {
+                        self.schematic_view
+                            .ensure_wire_anchors_for_component_snapshot(&before);
+                    }
+                }
+                ElectronicsInspectorAction::Toggle { field, value } => {
+                    if let SchematicSelection::Component(index) = selection {
+                        if let Some(component) =
+                            self.schematic_view.schematic.components.get_mut(index)
+                        {
+                            match field.as_str() {
+                                "electronics.schematic.visible" => component.visible = value,
+                                "electronics.schematic.locked" => component.locked = value,
+                                _ => continue,
+                            }
+                            changed = true;
+                        }
+                    }
+                }
+                ElectronicsInspectorAction::Layer { .. } => {}
+            }
+        }
+        changed
+    }
+
+    fn apply_pcb_inspector_actions(&mut self, actions: Vec<ElectronicsInspectorAction>) -> bool {
+        let selection = self.pcb_view.selection();
+        let mut changed = false;
+        for action in actions {
+            match action {
+                ElectronicsInspectorAction::Text { field, value } => {
+                    if let PcbSelection::Component(index) = selection {
+                        if let Some(component) = self.pcb_view.layout.components.get_mut(index) {
+                            match field.as_str() {
+                                "electronics.pcb.reference" => {
+                                    if component.designator != value {
+                                        component.designator = value;
+                                        changed = true;
+                                    }
+                                }
+                                "electronics.pcb.value" => {
+                                    if component.value != value {
+                                        component.value = value;
+                                        changed = true;
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+                ElectronicsInspectorAction::Range { field, value } => match selection {
+                    PcbSelection::Component(index) => {
+                        if let Some(component) = self.pcb_view.layout.components.get_mut(index) {
+                            match field.as_str() {
+                                "electronics.pcb.position.x" => component.position.x = value,
+                                "electronics.pcb.position.y" => component.position.y = value,
+                                "electronics.pcb.rotation" => component.rotation = value,
+                                _ => continue,
+                            }
+                            changed = true;
+                        }
+                    }
+                    PcbSelection::Trace(index) => {
+                        if field == "electronics.pcb.trace.width" {
+                            if let Some(trace) = self.pcb_view.layout.traces.get_mut(index) {
+                                trace.width = value;
+                                changed = true;
+                            }
+                        }
+                    }
+                    _ => {}
+                },
+                ElectronicsInspectorAction::Toggle { field, value } => {
+                    if let PcbSelection::Component(index) = selection {
+                        if field == "electronics.pcb.locked" {
+                            if let Some(component) = self.pcb_view.layout.components.get_mut(index)
+                            {
+                                component.locked = value;
+                                changed = true;
+                            }
+                        }
+                    }
+                }
+                ElectronicsInspectorAction::Layer { field, value } => match selection {
+                    PcbSelection::Component(index) if field == "electronics.pcb.layer" => {
+                        if let Some(component) = self.pcb_view.layout.components.get_mut(index) {
+                            component.layer = value;
+                            changed = true;
+                        }
+                    }
+                    PcbSelection::Trace(index) if field == "electronics.pcb.trace.layer" => {
+                        if let Some(trace) = self.pcb_view.layout.traces.get_mut(index) {
+                            trace.layer = value;
+                            changed = true;
+                        }
+                    }
+                    _ => {}
+                },
+            }
+        }
+        if changed {
+            self.pcb_view.layout.rebuild_airwires();
+        }
+        changed
+    }
+
+    fn apply_electronics_toolbar_actions(
+        &mut self,
+        actions: Vec<ElectronicsToolbarAction>,
+        canvas_width: f32,
+        canvas_height: f32,
+    ) -> bool {
+        let mut changed = false;
+        for action in actions {
+            match action {
+                ElectronicsToolbarAction::SchematicSelect => {
+                    self.schematic_view.set_select_tool_from_ui();
+                }
+                ElectronicsToolbarAction::SchematicWire => {
+                    self.schematic_view.set_wire_tool_from_ui();
+                }
+                ElectronicsToolbarAction::SchematicRotate => {
+                    self.schematic_view.rotate_placement_from_ui();
+                }
+                ElectronicsToolbarAction::SchematicFit => {
+                    self.schematic_view.fit_view_from_ui();
+                }
+                ElectronicsToolbarAction::SchematicLibrary => {
+                    self.schematic_view.toggle_library_from_ui();
+                }
+                ElectronicsToolbarAction::SchematicTest => {
+                    self.schematic_view.run_electrical_test_from_ui();
+                }
+                ElectronicsToolbarAction::SchematicDelete => {
+                    changed |= self.schematic_view.delete_selection();
+                }
+                ElectronicsToolbarAction::SchematicZoomIn => {
+                    self.schematic_view.zoom_in_from_ui();
+                }
+                ElectronicsToolbarAction::SchematicZoomOut => {
+                    self.schematic_view.zoom_out_from_ui();
+                }
+                ElectronicsToolbarAction::PcbSelect => {
+                    self.pcb_view.set_select_tool_from_ui();
+                }
+                ElectronicsToolbarAction::PcbRoute => {
+                    self.pcb_view.set_route_tool_from_ui();
+                }
+                ElectronicsToolbarAction::PcbOutline => {
+                    self.pcb_view.set_outline_tool_from_ui();
+                }
+                ElectronicsToolbarAction::PcbAirwires => {
+                    self.pcb_view.toggle_airwires_from_ui();
+                }
+                ElectronicsToolbarAction::PcbFit => {
+                    self.pcb_view.fit_view_from_ui(canvas_width, canvas_height);
+                }
+                ElectronicsToolbarAction::PcbNewOutline => {
+                    self.pcb_view.clear_outline_draft_from_ui();
+                    self.pcb_view.set_outline_tool_from_ui();
+                }
+                ElectronicsToolbarAction::PcbRouteSelected => {
+                    changed |= self.pcb_view.route_selected_airwire_from_ui();
+                }
+                ElectronicsToolbarAction::PcbZoomIn => {
+                    self.pcb_view.zoom_in_from_ui();
+                }
+                ElectronicsToolbarAction::PcbZoomOut => {
+                    self.pcb_view.zoom_out_from_ui();
+                }
+            }
+        }
+        changed
+    }
 
     fn show_editor(&mut self, ctx: &egui::Context) {
         self.frame_timing.tick();
@@ -719,345 +1449,111 @@ impl AuraRafiApp {
         // --- Auto-save ---
         self.handle_auto_save(ctx);
 
-        // Top menu bar.
-        egui::TopBottomPanel::top("menu_bar")
-            .frame(
-                egui::Frame::default()
-                    .fill(palette.faint_bg)
-                    .stroke(egui::Stroke::new(1.0, palette.separator)),
-            )
-            .show(ctx, |ui| {
-                egui::menu::bar(ui, |ui| {
-                    // -- File --
-                    ui.menu_button(t("app.file", _lang), |ui| {
-                        if ui.button(t("app.new_project", _lang)).clicked() {
-                            self.request_exit_action(PendingExitAction::ToHub, None);
-                            ui.close_menu();
-                        }
-                        if ui.button(t("app.save_menu", _lang)).clicked() {
-                            self.do_save();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button(t("app.settings_menu", _lang)).clicked() {
-                            self.open_settings_screen(AppScreen::Editor);
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button(t("app.exit_to_hub", _lang)).clicked() {
-                            self.request_exit_action(PendingExitAction::ToHub, None);
-                            ui.close_menu();
-                        }
-                    });
+        // The window title bar is provided by the native desktop host. Keep
+        // branding out of the workbench and expose one compact command row;
+        // the contextual strip lives next to Schematic/PCB below.
 
-                    // -- Edit --
-                    ui.menu_button(t("app.edit_menu", _lang), |ui| {
-                        let undo_label =
-                            format!("{}  [{}]", t("app.undo_menu", _lang), self.undo_stack.len());
-                        if ui
-                            .add_enabled(!self.undo_stack.is_empty(), egui::Button::new(undo_label))
-                            .clicked()
-                        {
-                            self.do_undo();
-                            ui.close_menu();
-                        }
-                        let redo_label =
-                            format!("{}  [{}]", t("app.redo_menu", _lang), self.redo_stack.len());
-                        if ui
-                            .add_enabled(!self.redo_stack.is_empty(), egui::Button::new(redo_label))
-                            .clicked()
-                        {
-                            self.do_redo();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button(t("app.duplicate_menu", _lang)).clicked() {
-                            self.do_duplicate();
-                            ui.close_menu();
-                        }
-                        if ui.button(t("app.delete_menu", _lang)).clicked() {
-                            self.do_delete();
-                            ui.close_menu();
-                        }
-                        ui.separator();
-                        if ui.button(t("app.select_all_menu", _lang)).clicked() {
-                            self.do_select_all();
-                            ui.close_menu();
-                        }
-                    });
-
-                    // -- View --
-                    ui.menu_button(t("app.view_menu", _lang), |ui| {
-                        ui.checkbox(&mut self.settings.grid_visible, t("app.grid_menu", _lang));
-                        ui.separator();
-                        match self
-                            .current_project
-                            .as_ref()
-                            .map(|project| project.project_type)
-                        {
-                            Some(ProjectType::Electronics) => {
-                                if ui
-                                    .selectable_label(
-                                        self.viewport_mode == ViewportMode::Schematic,
-                                        t("app.schematic_view", _lang),
-                                    )
-                                    .clicked()
-                                {
-                                    self.viewport_mode = ViewportMode::Schematic;
-                                    ui.close_menu();
-                                }
-                                if ui
-                                    .selectable_label(
-                                        self.viewport_mode == ViewportMode::Pcb,
-                                        t("app.pcb_view", _lang),
-                                    )
-                                    .clicked()
-                                {
-                                    self.sync_pcb_from_schematic();
-                                    self.viewport_mode = ViewportMode::Pcb;
-                                    ui.close_menu();
-                                }
-                            }
-                            _ => {
-                                if ui
-                                    .selectable_label(
-                                        self.viewport_mode == ViewportMode::Scene,
-                                        t("app.scene_view", _lang),
-                                    )
-                                    .clicked()
-                                {
-                                    self.viewport_mode = ViewportMode::Scene;
-                                    ui.close_menu();
-                                }
-                            }
-                        }
-                    });
-
-                    // -- Project --
-                    ui.menu_button(t("app.project_menu", _lang), |ui| {
-                        if let Some(project) = &self.current_project {
-                            ui.label(
-                                egui::RichText::new(&project.name)
-                                    .color(app_theme::ACCENT)
-                                    .strong(),
-                            );
-                            ui.label(project.project_type.display_name());
-                            ui.separator();
-                            ui.label(
-                                egui::RichText::new(project.path.display().to_string())
-                                    .small()
-                                    .color(palette.text_dim),
-                            );
-                            ui.separator();
-                            if ui.button(t("app.open_folder", _lang)).clicked() {
-                                #[cfg(target_os = "windows")]
-                                {
-                                    let _ = std::process::Command::new("explorer")
-                                        .arg(project.path.as_os_str())
-                                        .spawn();
-                                }
-                                ui.close_menu();
-                            }
-                        }
-                        if ui.button(t("app.close_project", _lang)).clicked() {
-                            self.request_exit_action(PendingExitAction::ToHub, None);
-                            ui.close_menu();
-                        }
-                    });
-
-                    // -- Help --
-                    ui.menu_button(t("app.help_menu", _lang), |ui| {
-                        ui.label(egui::RichText::new(t("app.keyboard_shortcuts", _lang)).strong());
-                        ui.label(t("app.shortcut_undo_redo_context", _lang));
-                        ui.label(t("app.save_menu", _lang));
-                        ui.label(t("app.undo_menu", _lang));
-                        ui.label(t("app.redo_menu", _lang));
-                        ui.label(t("app.duplicate_menu", _lang));
-                        ui.label(t("app.select_all_menu", _lang));
-                        ui.label(t("app.delete_menu", _lang));
-                        ui.label(t("app.shortcut_multi_select", _lang));
-                        ui.label(t("app.shortcut_tools", _lang));
-                        ui.label(t("app.shortcut_orbit_camera", _lang));
-                        ui.label(t("app.shortcut_alt_orbit_camera", _lang));
-                        ui.label(t("app.shortcut_pan_camera", _lang));
-                        ui.label(t("app.shortcut_zoom_camera", _lang));
-                        ui.label(t("app.shortcut_fly_camera", _lang));
-                        ui.label(t("app.shortcut_focus_selected", _lang));
-                        ui.label(t("app.shortcut_toggle_edit_mode", _lang));
-                        ui.label(t("app.shortcut_reset_view", _lang));
-                        ui.label(t("app.shortcut_customization_experimental", _lang));
-                        ui.separator();
-                        ui.label(format!("Proyecto Rafi v{}", env!("CARGO_PKG_VERSION")));
-                        // No unconditional ui.close_menu() -- keeps menu open.
-                    });
-
-                    // Right side: mode indicator | FPS | Build/Run.
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Build/Run button - integrated into toolbar, not a floating badge.
-                        let build_text = if let Some(project) = &self.current_project {
-                            match project.project_type {
-                                ProjectType::Game => {
-                                    t("app.runtime_temporarily_disabled_btn", _lang)
-                                }
-                                ProjectType::Electronics => t("app.electrical_test_btn", _lang),
-                            }
-                        } else {
-                            t("app.build_btn", _lang).to_string()
-                        };
-
-                        let build_btn = egui::Button::new(
-                            egui::RichText::new(build_text)
-                                .color(egui::Color32::WHITE)
-                                .size(12.0),
-                        )
-                        .fill(app_theme::ACCENT)
-                        .rounding(4.0);
-
-                        if ui.add(build_btn).clicked() {
-                            self.handle_build();
-                        }
-
-                        if self.settings.show_fps_counter {
-                            ui.separator();
-
-                            let fps = self.frame_timing.fps();
-                            ui.label(
-                                egui::RichText::new(format!("{} FPS", fps))
-                                    .size(11.0)
-                                    .color(palette.text_dim),
-                            );
-                        }
-
-                        // Viewport mode indicator.
-                        ui.separator();
-                        let mode_text = match self.viewport_mode {
-                            ViewportMode::Scene => t("app.scene_view", _lang),
-                            ViewportMode::Schematic => t("app.schematic_view", _lang),
-                            ViewportMode::Pcb => t("app.pcb_view", _lang),
-                        };
-                        ui.label(
-                            egui::RichText::new(mode_text)
-                                .size(11.0)
-                                .color(app_theme::ACCENT),
-                        );
-                    });
+        let native_menu_installed = self
+            .native_application_menu
+            .as_ref()
+            .is_some_and(NativeWindowApplicationMenuAdapter::is_installed);
+        if !native_menu_installed {
+            egui::TopBottomPanel::top("app_command_bar")
+                .frame(
+                    egui::Frame::default()
+                        .fill(palette.faint_bg)
+                        .stroke(egui::Stroke::new(1.0, palette.separator)),
+                )
+                .max_height(32.0)
+                .show(ctx, |ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(430.0, 30.0),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |menu_ui| self.show_editor_menu_items(menu_ui),
+                    );
                 });
-            });
+        }
 
-        // Status bar at bottom.
+        let project_status = self.current_project.as_ref().map(|project| {
+            let modified = if self.scene_modified { " *" } else { "" };
+            (
+                format!("{}{}", project.name, modified),
+                match project.project_type {
+                    ProjectType::Game => t("app.game_project", _lang),
+                    ProjectType::Electronics => t("app.electronics_project", _lang),
+                },
+            )
+        });
+        let (status_counts, status_color) = match self.viewport_mode {
+            ViewportMode::Scene => (
+                format!(
+                    "{} {}",
+                    t("app.entities_count", _lang),
+                    self.scene.all_valid_ids().len()
+                ),
+                [205, 208, 214, 255],
+            ),
+            ViewportMode::Schematic => {
+                let comp_count = self.schematic_view.schematic.components.len();
+                let wire_count = self.schematic_view.schematic.wires.len();
+                let drc_report = raf_electronics::drc::run_drc(&self.schematic_view.schematic);
+                let drc_errors = drc_report.errors.len();
+                let drc_label = if drc_errors > 0 {
+                    format!("DRC: {} {}", drc_errors, t("app.drc_errors", _lang))
+                } else {
+                    t("app.drc_ok", _lang).to_string()
+                };
+                (
+                    format!(
+                        "{} {} | {} {} | {}",
+                        t("app.schematic_components", _lang),
+                        comp_count,
+                        t("app.schematic_wires", _lang),
+                        wire_count,
+                        drc_label,
+                    ),
+                    if drc_errors > 0 {
+                        [220, 80, 80, 255]
+                    } else {
+                        [205, 208, 214, 255]
+                    },
+                )
+            }
+            ViewportMode::Pcb => (
+                format!(
+                    "{} {} | {} {} | {} {}",
+                    t("app.pcb_components", _lang),
+                    self.pcb_view.layout.components.len(),
+                    t("app.pcb_traces", _lang),
+                    self.pcb_view.layout.traces.len(),
+                    t("app.pcb_airwires", _lang),
+                    self.pcb_view.layout.airwires.len()
+                ),
+                [205, 208, 214, 255],
+            ),
+        };
+        let status_palette = if ctx.style().visuals.dark_mode {
+            StudioUiPalette::IndustrialDark
+        } else {
+            StudioUiPalette::PaperLight
+        };
         egui::TopBottomPanel::bottom("status_bar")
-            .frame(
-                egui::Frame::default()
-                    .fill(palette.faint_bg)
-                    .stroke(egui::Stroke::new(1.0, palette.separator)),
-            )
-            .max_height(22.0)
+            .frame(egui::Frame::none())
+            .max_height(24.0)
             .show(ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if let Some(project) = &self.current_project {
-                        let modified = if self.scene_modified { " *" } else { "" };
-                        ui.label(
-                            egui::RichText::new(format!("{}{}", project.name, modified))
-                                .size(11.0)
-                                .color(app_theme::ACCENT),
-                        );
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new(project.project_type.display_name())
-                                .size(11.0)
-                                .color(palette.text_dim),
-                        );
-                    }
-                    ui.separator();
-                    let (status_counts, status_color) = match self.viewport_mode {
-                        ViewportMode::Scene => {
-                            let text = format!(
-                                "{} {}",
-                                t("app.entities_count", _lang),
-                                self.scene.all_valid_ids().len()
-                            );
-                            (text, palette.text)
-                        }
-                        ViewportMode::Schematic => {
-                            let comp_count = self.schematic_view.schematic.components.len();
-                            let wire_count = self.schematic_view.schematic.wires.len();
-                            // Live DRC: run check and show error count badge.
-                            let drc_report =
-                                raf_electronics::drc::run_drc(&self.schematic_view.schematic);
-                            let drc_errors = drc_report.errors.len();
-                            let drc_label = if drc_errors > 0 {
-                                format!("DRC: {} {}", drc_errors, t("app.drc_errors", _lang))
-                            } else {
-                                t("app.drc_ok", _lang).to_string()
-                            };
-                            let text = format!(
-                                "{} {} | {} {} | {}",
-                                t("app.schematic_components", _lang),
-                                comp_count,
-                                t("app.schematic_wires", _lang),
-                                wire_count,
-                                drc_label,
-                            );
-                            let color = if drc_errors > 0 {
-                                egui::Color32::from_rgb(220, 80, 80)
-                            } else {
-                                palette.text
-                            };
-                            (text, color)
-                        }
-                        ViewportMode::Pcb => {
-                            let text = format!(
-                                "{} {} | {} {} | {} {}",
-                                t("app.pcb_components", _lang),
-                                self.pcb_view.layout.components.len(),
-                                t("app.pcb_traces", _lang),
-                                self.pcb_view.layout.traces.len(),
-                                t("app.pcb_airwires", _lang),
-                                self.pcb_view.layout.airwires.len()
-                            );
-                            (text, palette.text)
-                        }
-                    };
-                    ui.label(
-                        egui::RichText::new(status_counts)
-                            .size(11.0)
-                            .color(status_color),
-                    );
-                    ui.separator();
-                    ui.label(
-                        egui::RichText::new(format!(
-                            "U:{} R:{}",
-                            self.undo_stack.len(),
-                            self.redo_stack.len()
-                        ))
-                        .size(11.0)
-                        .color(palette.text_dim),
-                    );
-                    if !self.last_action.is_empty() {
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new(&self.last_action)
-                                .size(11.0)
-                                .color(palette.text),
-                        );
-                    }
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let theme_name = match self.settings.theme {
-                            Theme::Dark => "Dark",
-                            Theme::Light => "Light",
-                            Theme::System => "System",
-                        };
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} | {}",
-                                self.settings.language.display_name(),
-                                theme_name
-                            ))
-                            .size(11.0)
-                            .color(palette.text_dim),
-                        );
-                    });
-                });
+                self.status_surface.show(
+                    ui,
+                    self.egui_wgpu_render_state.as_ref(),
+                    status_palette,
+                    project_status.clone(),
+                    status_counts.clone(),
+                    status_color,
+                    self.undo_stack.len(),
+                    self.redo_stack.len(),
+                    &self.last_action,
+                    self.settings.language,
+                    self.settings.theme,
+                );
             });
 
         let (show_hierarchy_panel, show_properties_panel, complements_enabled) = self
@@ -1076,6 +1572,22 @@ impl AuraRafiApp {
             self.bottom_tab = BottomTab::ProjectSettings;
         }
 
+        self.editor_shell
+            .sync_legacy_visibility(show_hierarchy_panel, show_properties_panel);
+        let shell_available = ctx.available_rect();
+        let shell_workspace = UiRect::new(
+            shell_available.min.x,
+            shell_available.min.y,
+            shell_available.width(),
+            shell_available.height(),
+        );
+        let shell_palette = if ctx.style().visuals.dark_mode {
+            StudioUiPalette::IndustrialDark
+        } else {
+            StudioUiPalette::PaperLight
+        };
+        let shell_bottom_height = self.editor_shell.preferred_height(PANEL_BOTTOM, 200.0);
+
         let mut bottom_panel = egui::TopBottomPanel::bottom("bottom_panel");
         bottom_panel = if let Some(height) = self.bottom_panel_snap_height {
             bottom_panel
@@ -1086,165 +1598,169 @@ impl AuraRafiApp {
             bottom_panel
                 .resizable(true)
                 .min_height(90.0)
-                .default_height(200.0)
+                .default_height(shell_bottom_height)
         };
 
-        bottom_panel.show(ctx, |ui| {
+        let bottom_complements: Vec<(String, String)> = if complements_enabled {
+            self.complement_registry
+                .complements
+                .iter()
+                .map(|complement| (complement.id().to_string(), complement.name().to_string()))
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let bottom_response = bottom_panel.show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let mut tabs = vec![
-                    (BottomTab::Console, "Console".to_string()),
-                    (BottomTab::Assets, "Assets".to_string()),
-                    (
-                        BottomTab::ProjectSettings,
-                        t("app.project_settings_tab", _lang),
-                    ),
-                    (BottomTab::NodeEditor, "Node Editor".to_string()),
-                    (BottomTab::AiChat, t("app.agent_tab", _lang)),
-                ];
-                if complements_enabled {
-                    for comp in &self.complement_registry.complements {
-                        tabs.push((
-                            BottomTab::Complement(comp.id().to_string()),
-                            comp.name().to_string(),
-                        ));
-                    }
-                }
+                let mut selected_shell_tab = None;
+                let active_shell_tab = bottom_tab_to_shell(&self.bottom_tab);
+                let render_state = self.egui_wgpu_render_state.as_ref();
+                let project_type = self
+                    .current_project
+                    .as_ref()
+                    .map(|project| project.project_type)
+                    .unwrap_or(ProjectType::Game);
+                let tabs_width = (ui.available_width() - 260.0).max(180.0);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(tabs_width, 28.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |tabs_ui| {
+                        selected_shell_tab = self.bottom_tabs_surface.show(
+                            tabs_ui,
+                            render_state,
+                            shell_palette,
+                            _lang,
+                            project_type,
+                            active_shell_tab,
+                        );
+                    },
+                );
 
-                let mut tab_changed = None;
-                for (tab, label) in tabs {
-                    let is_active = self.bottom_tab == tab;
-                    let response = draw_bottom_tab_button(
-                        ui,
-                        &self.ui_icons,
-                        bottom_tab_icon(&tab),
-                        &label,
-                        is_active,
-                    );
-
-                    if response.clicked() {
-                        tab_changed = Some(tab);
-                    }
-
-                    ui.add_space(16.0);
-                }
-
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    for (height, label) in [
-                        (None, "F"),
-                        (Some(340.0), "L"),
-                        (Some(220.0), "M"),
-                        (Some(110.0), "S"),
-                    ] {
-                        let is_active = self.bottom_panel_snap_height == height;
-                        let button = egui::Button::new(
-                            egui::RichText::new(label).size(10.0).color(if is_active {
-                                egui::Color32::WHITE
-                            } else {
-                                egui::Color32::from_rgb(150, 150, 160)
-                            }),
-                        )
-                        .fill(if is_active {
-                            egui::Color32::from_rgb(70, 70, 76)
-                        } else {
-                            egui::Color32::TRANSPARENT
-                        })
-                        .rounding(4.0)
-                        .min_size(egui::Vec2::new(22.0, 18.0));
-
-                        if ui.add(button).clicked() {
+                let chrome_actions = self.bottom_chrome_surface.show(
+                    ui,
+                    render_state,
+                    shell_palette,
+                    _lang,
+                    self.bottom_panel_snap_height,
+                    &bottom_complements,
+                    match &self.bottom_tab {
+                        BottomTab::Complement(id) => Some(id.as_str()),
+                        _ => None,
+                    },
+                );
+                for action in chrome_actions {
+                    match action {
+                        EditorBottomChromeAction::SetSnap(height) => {
                             self.bottom_panel_snap_height = height;
                         }
+                        EditorBottomChromeAction::SelectComplement(id) => {
+                            if bottom_complements
+                                .iter()
+                                .any(|(candidate, _)| candidate == &id)
+                            {
+                                self.bottom_tab = BottomTab::Complement(id);
+                            }
+                        }
                     }
-                });
+                }
 
-                if let Some(t) = tab_changed {
-                    self.bottom_tab = t;
+                if let Some(tab) = selected_shell_tab {
+                    match tab {
+                        EditorBottomDockTab::Drc => {
+                            self.run_electronics_drc();
+                            self.bottom_tab = BottomTab::Drc;
+                        }
+                        EditorBottomDockTab::Simulation => {
+                            self.handle_build();
+                            self.bottom_tab = BottomTab::Simulation;
+                        }
+                        tab => self.bottom_tab = bottom_tab_from_shell(tab),
+                    }
                 }
             });
             ui.separator();
 
             match &self.bottom_tab {
+                BottomTab::Drc => {
+                    if matches!(
+                        self.electronics_analysis_surface.show_drc(
+                            ui,
+                            self.egui_wgpu_render_state.as_ref(),
+                            shell_palette,
+                            self.electronics_drc_report.as_ref(),
+                            self.settings.language,
+                        ),
+                        Some(ElectronicsAnalysisSurfaceAction::RunDrc)
+                    ) {
+                        self.run_electronics_drc();
+                    }
+                }
+                BottomTab::Simulation => {
+                    if matches!(
+                        self.electronics_analysis_surface.show_simulation(
+                            ui,
+                            self.egui_wgpu_render_state.as_ref(),
+                            shell_palette,
+                            &self.schematic_view.schematic,
+                            self.electronics_simulation_results.as_ref(),
+                            self.settings.language,
+                        ),
+                        Some(ElectronicsAnalysisSurfaceAction::RunSimulation)
+                    ) {
+                        self.handle_build();
+                    }
+                }
                 BottomTab::Assets => {
                     self.asset_browser.process_scan_budget(96);
-                    self.asset_browser
-                        .show(ui, self.settings.language, &self.ui_icons);
-                    // Handle "Add Entity" from asset browser.
-                    if self.asset_browser.add_entity_clicked {
-                        self.asset_browser.add_entity_clicked = false;
-                        ui.memory_mut(|m| m.toggle_popup(egui::Id::new("add_entity_popup")));
-                    }
-                    let add_popup_id = egui::Id::new("add_entity_popup");
-                    let fake_resp = ui.make_persistent_id("add_entity_anchor");
-                    let anchor = ui.interact(ui.max_rect(), fake_resp, egui::Sense::hover());
-                    egui::popup_above_or_below_widget(
+                    let actions = self.asset_browser_surface.show(
                         ui,
-                        add_popup_id,
-                        &anchor,
-                        egui::AboveOrBelow::Above,
-                        egui::PopupCloseBehavior::CloseOnClickOutside,
-                        |ui| {
-                            ui.label(
-                                egui::RichText::new(t("app.add_entity", self.settings.language))
-                                    .size(11.0)
-                                    .strong(),
-                            );
-                            ui.separator();
-                            let primitives = [
-                                Primitive::Cube,
-                                Primitive::Sphere,
-                                Primitive::Plane,
-                                Primitive::Cylinder,
-                            ];
-                            for prim in primitives {
-                                if ui.button(prim.label()).clicked() {
-                                    self.push_undo_snapshot();
-                                    let name = format!("{} {}", prim.label(), self.scene.len() + 1);
-                                    let source_asset = match prim {
-                                        Primitive::Cube => Some("builtin://primitive/cube"),
-                                        Primitive::Sphere => Some("builtin://primitive/sphere"),
-                                        Primitive::Plane => Some("builtin://primitive/plane"),
-                                        Primitive::Cylinder => Some("builtin://primitive/cylinder"),
-                                        Primitive::Empty | Primitive::Sprite2D => None,
-                                    };
-                                    match PrimitiveModelManifest::builtin_for_primitive(prim) {
-                                        Ok(Some(manifest)) => match manifest
-                                            .instantiate_single_root_into_scene(
-                                                &mut self.scene,
-                                                Some(&name),
-                                                source_asset,
-                                            )
-                                        {
-                                            Ok(id) => {
-                                                self.hierarchy.selected_node = Some(id);
-                                                self.hierarchy.selected_nodes = vec![id];
-                                                self.viewport.selected = vec![id];
-                                                let add_msg = format!("Added: {}", name);
-                                                self.last_action = add_msg.clone();
-                                                self.console.log(LogLevel::Info, &add_msg);
-                                                ui.close_menu();
-                                            }
-                                            Err(error) => self.console.log(
-                                                LogLevel::Error,
-                                                &format!(
-                                                    "Could not import primitive asset {name}: {error}"
-                                                ),
-                                            ),
-                                        },
-                                        Ok(None) => self.console.log(
-                                            LogLevel::Error,
-                                            "This primitive has no asset manifest.",
-                                        ),
-                                        Err(error) => self.console.log(
-                                            LogLevel::Error,
-                                            &format!(
-                                                "Could not load primitive asset manifest: {error}"
-                                            ),
-                                        ),
-                                    }
-                                }
-                            }
-                        },
+                        self.egui_wgpu_render_state.as_ref(),
+                        shell_palette,
+                        &self.asset_browser.entries,
+                        &self.asset_browser.search_query,
+                        self.asset_browser.selected_filter,
+                        self.asset_browser.scan_in_progress,
+                        self.asset_browser.status_message(),
+                        self.settings.language,
                     );
+                    self.apply_asset_browser_actions(actions);
+
+                    let dropped = ui.input(|input| input.raw.dropped_files.clone());
+                    if !dropped.is_empty() {
+                        self.asset_browser
+                            .handle_dropped_files(&dropped, self.settings.language);
+                    }
+
+                    if self.asset_browser.ide_dialog_open() {
+                        let mut dialog_action = None;
+                        egui::Window::new(t("app.ide_dialog_title", self.settings.language))
+                            .collapsible(false)
+                            .resizable(false)
+                            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                            .show(ctx, |dialog_ui| {
+                                dialog_ui.set_min_width(440.0);
+                                dialog_action = self.asset_browser_surface.show_ide_dialog(
+                                    dialog_ui,
+                                    self.egui_wgpu_render_state.as_ref(),
+                                    shell_palette,
+                                    self.asset_browser.ide_dialog_file(),
+                                    self.settings.language,
+                                );
+                            });
+                        match dialog_action {
+                            Some(AssetDialogAction::OpenYoll) => {
+                                self.asset_browser.open_ide_yoll();
+                            }
+                            Some(AssetDialogAction::OpenVscode) => {
+                                self.asset_browser.open_ide_vscode();
+                            }
+                            Some(AssetDialogAction::Cancel) => {
+                                self.asset_browser.close_ide_dialog();
+                            }
+                            None => {}
+                        }
+                    }
                 }
                 BottomTab::Console => {
                     let cmds = self.command_catalog.command_names();
@@ -1254,19 +1770,30 @@ impl AuraRafiApp {
                             .as_ref()
                             .map(|project| project.settings.enable_console_commands)
                             .unwrap_or(false);
-                    let submissions = self
-                        .console
-                        .show(ui, self.settings.language, input_enabled, &cmds);
+                    let render_state = self.egui_wgpu_render_state.as_ref();
+                    let submissions = self.console_surface.show(
+                        ui,
+                        render_state,
+                        shell_palette,
+                        &mut self.console,
+                        input_enabled,
+                        &cmds,
+                        self.settings.language,
+                    );
                     self.process_console_submissions(submissions);
                 }
                 BottomTab::ProjectSettings => {
                     let before_global_console_commands = self.settings.command_console_enabled;
+                    let language = self.settings.language;
+                    let render_state = self.egui_wgpu_render_state.as_ref();
                     let changed = if let Some(project) = self.current_project.as_mut() {
-                        project_settings::show_project_settings(
+                        self.project_settings_surface.show(
                             ui,
+                            render_state,
+                            shell_palette,
                             project,
-                            self.settings.language,
                             &mut self.settings.command_console_enabled,
+                            language,
                         )
                     } else {
                         ui.label(
@@ -1297,13 +1824,12 @@ impl AuraRafiApp {
                     let catalog = &self.command_catalog;
                     // The agent runtime executes at most one tool per poll. Capture only
                     // that frame so normal chat does not serialize editor documents.
-                    let before_agent_tool = if self.ai_chat.runtime.status
-                        == AgentStatus::ExecutingTools
-                    {
-                        self.all_history_snapshots()
-                    } else {
-                        Vec::new()
-                    };
+                    let before_agent_tool =
+                        if self.ai_chat.runtime.status == AgentStatus::ExecutingTools {
+                            self.all_history_snapshots()
+                        } else {
+                            Vec::new()
+                        };
                     let open_settings_requested = {
                         let tool_name_map = self.ai_chat.tool_name_map.clone();
                         let ai_chat = &mut self.ai_chat;
@@ -1323,14 +1849,31 @@ impl AuraRafiApp {
                             ui_document: &mut self.ui_document,
                             tool_name_map: &tool_name_map,
                         };
-                        ai_chat.show(
-                            ui,
+                        let readiness = ai_chat.prepare_retained_surface(
                             &mut self.settings,
                             project.as_ref(),
                             catalog,
                             &mut executor,
                         );
-                        ai_chat.open_settings_requested
+                        let actions = self.agent_surface.show(
+                            ui,
+                            self.egui_wgpu_render_state.as_ref(),
+                            shell_palette,
+                            ai_chat,
+                            &self.settings,
+                            project.as_ref(),
+                            readiness,
+                        );
+                        let mut open_settings = false;
+                        for action in actions {
+                            open_settings |= ai_chat.apply_retained_action(
+                                action,
+                                &mut self.settings,
+                                project.as_ref(),
+                                &mut executor,
+                            );
+                        }
+                        open_settings || ai_chat.open_settings_requested
                     };
                     if open_settings_requested {
                         self.ai_chat.open_settings_requested = false;
@@ -1346,20 +1889,55 @@ impl AuraRafiApp {
                     }
                 }
                 BottomTab::NodeEditor => {
-                    self.node_editor.show(ui, self.settings.language);
+                    self.node_editor.show(
+                        ui,
+                        self.egui_wgpu_render_state.as_ref(),
+                        shell_palette,
+                        self.settings.language,
+                    );
                 }
                 BottomTab::Complement(_) => {
                     ui.label("Complement tab");
                 }
             }
         });
+        let bottom_rect = bottom_response.response.rect;
+        self.track_editor_shell_resize(
+            ctx,
+            PANEL_BOTTOM,
+            UiRect::new(
+                bottom_rect.min.x,
+                bottom_rect.min.y,
+                bottom_rect.width(),
+                bottom_rect.height(),
+            ),
+            shell_workspace,
+            ShellResizeEdge::Top,
+        );
 
         // Left panel: Hierarchy.
         if show_hierarchy_panel {
-            egui::SidePanel::left("hierarchy_panel")
+            let is_electronics_project = self
+                .current_project
+                .as_ref()
+                .map(|project| project.project_type == ProjectType::Electronics)
+                .unwrap_or(false);
+            let hierarchy_default_width = if is_electronics_project {
+                self.editor_shell
+                    .preferred_width(PANEL_HIERARCHY, 284.0)
+                    .clamp(260.0, 360.0)
+            } else {
+                self.editor_shell
+                    .preferred_width(PANEL_HIERARCHY, 224.0)
+                    .clamp(196.0, 320.0)
+            };
+            let hierarchy_min_width = if is_electronics_project { 230.0 } else { 196.0 };
+            let hierarchy_max_width = if is_electronics_project { 360.0 } else { 320.0 };
+            let hierarchy_response = egui::SidePanel::left("hierarchy_panel")
                 .resizable(true)
-                .default_width(200.0)
-                .min_width(150.0)
+                .default_width(hierarchy_default_width)
+                .min_width(hierarchy_min_width)
+                .max_width(hierarchy_max_width)
                 .show(ctx, |ui| match self.viewport_mode {
                     ViewportMode::Scene => {
                         if self.runtime.is_some() {
@@ -1375,6 +1953,30 @@ impl AuraRafiApp {
                         }
 
                         let prev_hier_vec = self.hierarchy.selected_nodes.clone();
+                        let retained_actions = self.game_hierarchy_surface.show(
+                            ui,
+                            self.egui_wgpu_render_state.as_ref(),
+                            shell_palette,
+                            &self.scene,
+                            &self.hierarchy.selected_nodes,
+                            self.settings.language,
+                        );
+                        self.apply_game_hierarchy_surface_actions(retained_actions);
+
+                        if self.hierarchy.selected_nodes != prev_hier_vec {
+                            self.viewport.selected = self.hierarchy.selected_nodes.clone();
+                        }
+
+                        if self.viewport.selected != self.hierarchy.selected_nodes {
+                            self.hierarchy.selected_nodes = self.viewport.selected.clone();
+                            self.hierarchy.selected_node = self.viewport.selected.first().copied();
+                        }
+                        return;
+
+                        /* Legacy Egui hierarchy action path retained below as a
+                         * recovery reference while the RafUI scene tree settles.
+                         */
+                        /*
                         self.hierarchy.show(
                             ui,
                             &mut self.scene,
@@ -1494,63 +2096,92 @@ impl AuraRafiApp {
                             self.hierarchy.selected_nodes = self.viewport.selected.clone();
                             self.hierarchy.selected_node = self.viewport.selected.first().copied();
                         }
+                        */
                     }
                     ViewportMode::Schematic => {
-                        let _ = schematic_panels::show_schematic_hierarchy(
+                        let actions = self.electronics_navigator_surface.show_schematic(
                             ui,
-                            &mut self.schematic_view,
+                            self.egui_wgpu_render_state.as_ref(),
+                            shell_palette,
+                            &self.schematic_view,
                             self.settings.language,
                         );
+                        self.apply_electronics_navigator_actions(actions);
                     }
                     ViewportMode::Pcb => {
-                        let _ = pcb_panels::show_pcb_hierarchy(
+                        let actions = self.electronics_navigator_surface.show_pcb(
                             ui,
-                            &mut self.pcb_view,
+                            self.egui_wgpu_render_state.as_ref(),
+                            shell_palette,
+                            &self.pcb_view,
                             self.settings.language,
                         );
+                        self.apply_electronics_navigator_actions(actions);
                     }
                 });
+            let hierarchy_rect = hierarchy_response.response.rect;
+            self.track_editor_shell_resize(
+                ctx,
+                PANEL_HIERARCHY,
+                UiRect::new(
+                    hierarchy_rect.min.x,
+                    hierarchy_rect.min.y,
+                    hierarchy_rect.width(),
+                    hierarchy_rect.height(),
+                ),
+                shell_workspace,
+                ShellResizeEdge::Right,
+            );
         }
 
         // Right panel: Properties.
         if show_properties_panel {
-            egui::SidePanel::right("properties_panel")
+            let properties_response = egui::SidePanel::right("properties_panel")
                 .resizable(true)
-                .default_width(300.0)
-                .min_width(220.0)
+                .frame(
+                    egui::Frame::none()
+                        .stroke(egui::Stroke::new(1.0, palette.border))
+                        .inner_margin(egui::Margin::same(2.0)),
+                )
+                .default_width(
+                    self.editor_shell
+                        .preferred_width(PANEL_PROPERTIES, 320.0)
+                        .clamp(260.0, 380.0),
+                )
+                .min_width(260.0)
+                .max_width(380.0)
                 .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(
-                            &mut self.inspector_tab,
-                            InspectorTab::Properties,
-                            t("app.properties", self.settings.language),
-                        );
-                        ui.selectable_value(
-                            &mut self.inspector_tab,
-                            InspectorTab::Sessions,
-                            t("app.sessions", self.settings.language),
-                        );
-                    });
+                    let mut selected_shell_tab = None;
+                    let active_shell_tab = inspector_tab_to_shell(self.inspector_tab);
+                    let render_state = self.egui_wgpu_render_state.as_ref();
+                    let tabs_width = ui.available_width();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(tabs_width, 28.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |tabs_ui| {
+                            selected_shell_tab = self.inspector_tabs_surface.show(
+                                tabs_ui,
+                                render_state,
+                                shell_palette,
+                                self.settings.language,
+                                active_shell_tab,
+                            );
+                        },
+                    );
+                    if let Some(tab) = selected_shell_tab {
+                        self.inspector_tab = inspector_tab_from_shell(tab);
+                    }
                     ui.separator();
 
                     if self.inspector_tab == InspectorTab::Sessions {
-                        let action =
-                            self.sessions_panel
-                                .show(ui, &self.sessions, self.settings.language);
-                        match action {
-                            Some(SessionPanelAction::Activate(id)) => {
-                                if let Err(error) = self.activate_session(id) {
-                                    self.console.log(LogLevel::Error, &error);
-                                }
-                            }
-                            Some(SessionPanelAction::Create(kind)) => {
-                                let name = self.sessions_panel.take_new_name();
-                                if let Err(error) = self.create_and_activate_session(name, kind) {
-                                    self.console.log(LogLevel::Error, &error);
-                                }
-                            }
-                            None => {}
-                        }
+                        let actions = self.sessions_surface.show(
+                            ui,
+                            self.egui_wgpu_render_state.as_ref(),
+                            shell_palette,
+                            &self.sessions,
+                            self.settings.language,
+                        );
+                        self.apply_sessions_surface_actions(actions);
                         return;
                     }
 
@@ -1569,45 +2200,63 @@ impl AuraRafiApp {
                             }
 
                             let before_snapshot = self.current_history_snapshot();
-                            self.properties.set_display_unit(self.settings.display_unit);
-                            let properties_changed = self.properties.show(
+                            let retained_actions = self.game_properties_surface.show(
                                 ui,
-                                &mut self.scene,
+                                self.egui_wgpu_render_state.as_ref(),
+                                shell_palette,
+                                &self.scene,
                                 self.hierarchy.selected_node,
-                                &self.hierarchy.selected_nodes,
                                 self.settings.language,
-                                &self.ui_icons,
-                                self.asset_browser.project_assets_path.as_deref(),
                             );
-                            if properties_changed {
+                            self.apply_game_properties_surface_actions(retained_actions);
+                            if self.current_history_snapshot() != before_snapshot {
                                 document_changed_this_frame |=
                                     self.record_document_change(before_snapshot);
                             }
                         }
                         ViewportMode::Schematic => {
                             let before_snapshot = self.current_history_snapshot();
-                            if schematic_panels::show_schematic_properties(
+                            let actions = self.electronics_inspector_surface.show_schematic(
                                 ui,
-                                &mut self.schematic_view,
+                                self.egui_wgpu_render_state.as_ref(),
+                                shell_palette,
+                                &self.schematic_view,
                                 self.settings.language,
-                            ) {
+                            );
+                            if self.apply_schematic_inspector_actions(actions) {
                                 document_changed_this_frame |=
                                     self.record_document_change(before_snapshot);
                             }
                         }
                         ViewportMode::Pcb => {
                             let before_snapshot = self.current_history_snapshot();
-                            if pcb_panels::show_pcb_properties(
+                            let actions = self.electronics_inspector_surface.show_pcb(
                                 ui,
-                                &mut self.pcb_view,
+                                self.egui_wgpu_render_state.as_ref(),
+                                shell_palette,
+                                &self.pcb_view,
                                 self.settings.language,
-                            ) {
+                            );
+                            if self.apply_pcb_inspector_actions(actions) {
                                 document_changed_this_frame |=
                                     self.record_document_change(before_snapshot);
                             }
                         }
                     }
                 });
+            let properties_rect = properties_response.response.rect;
+            self.track_editor_shell_resize(
+                ctx,
+                PANEL_PROPERTIES,
+                UiRect::new(
+                    properties_rect.min.x,
+                    properties_rect.min.y,
+                    properties_rect.width(),
+                    properties_rect.height(),
+                ),
+                shell_workspace,
+                ShellResizeEdge::Left,
+            );
         }
 
         // Central panel: Viewport or Schematic.
@@ -1618,14 +2267,40 @@ impl AuraRafiApp {
                 .map(|project| project.project_type == ProjectType::Electronics)
                 .unwrap_or(false)
             {
-                ui.horizontal(|ui| {
-                    if ui
-                        .selectable_label(
-                            self.viewport_mode == ViewportMode::Schematic,
-                            t("app.schematic_view", self.settings.language),
-                        )
-                        .clicked()
-                    {
+                let mut selected_surface = None;
+                let active_surface = viewport_mode_to_shell(self.viewport_mode);
+                let row_width = ui.available_width();
+                let tabs_width = 236.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(row_width, 42.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |row_ui| {
+                        row_ui.spacing_mut().item_spacing.x = 0.0;
+                        row_ui.allocate_ui_with_layout(
+                            egui::vec2(tabs_width, 42.0),
+                            egui::Layout::left_to_right(egui::Align::Center),
+                            |tabs_ui| {
+                                selected_surface = self.context_tabs_surface.show(
+                                    tabs_ui,
+                                    self.egui_wgpu_render_state.as_ref(),
+                                    shell_palette,
+                                    self.settings.language,
+                                    ProjectType::Electronics,
+                                    active_surface,
+                                );
+                            },
+                        );
+
+                        row_ui.with_layout(
+                            egui::Layout::right_to_left(egui::Align::Center),
+                            |actions_ui| {
+                                self.show_editor_context_actions(actions_ui, &palette, _lang);
+                            },
+                        );
+                    },
+                );
+                match selected_surface {
+                    Some(EditorCenterSurface::Schematic) => {
                         // Cross-probe: if coming from PCB, try to select the
                         // same component in schematic by designator.
                         if let Some(designator) = self.cross_probe_designator.take() {
@@ -1633,13 +2308,7 @@ impl AuraRafiApp {
                         }
                         self.viewport_mode = ViewportMode::Schematic;
                     }
-                    if ui
-                        .selectable_label(
-                            self.viewport_mode == ViewportMode::Pcb,
-                            t("app.pcb_view", self.settings.language),
-                        )
-                        .clicked()
-                    {
+                    Some(EditorCenterSurface::Pcb) => {
                         self.sync_pcb_from_schematic();
                         // Cross-probe: if coming from schematic, try to select
                         // the same component in PCB by designator.
@@ -1648,7 +2317,8 @@ impl AuraRafiApp {
                         }
                         self.viewport_mode = ViewportMode::Pcb;
                     }
-                });
+                    Some(EditorCenterSurface::Scene) | None => {}
+                }
                 ui.add_space(8.0);
             }
 
@@ -1702,17 +2372,115 @@ impl AuraRafiApp {
                         }
                     };
                     self.viewport.show_labels = self.settings.show_viewport_labels;
-                    let before_snapshot = self.current_history_snapshot();
-                    let viewport_changed = self.viewport.show(
-                        ctx,
-                        ui,
-                        self.egui_wgpu_render_state.as_ref(),
-                        &mut self.graphics_runtime,
-                        &mut self.scene,
-                        self.settings.theme != Theme::Light,
-                        self.settings.language,
-                        &self.ui_icons,
+                    let mut viewport_toolbar_actions = Vec::new();
+                    let mut viewport_overlay_actions = Vec::new();
+                    let toolbar_width = ui.available_width();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(toolbar_width, 38.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |toolbar_ui| {
+                            let status_width = 220.0_f32.min((toolbar_width - 260.0).max(0.0));
+                            let viewport_width = (toolbar_width - status_width).max(260.0);
+                            toolbar_ui.allocate_ui_with_layout(
+                                egui::vec2(viewport_width, 38.0),
+                                egui::Layout::left_to_right(egui::Align::Center),
+                                |viewport_toolbar_ui| {
+                                    viewport_toolbar_actions = self.game_viewport_surface.show(
+                                        viewport_toolbar_ui,
+                                        self.egui_wgpu_render_state.as_ref(),
+                                        shell_palette,
+                                        &self.viewport,
+                                        self.settings.language,
+                                    );
+                                },
+                            );
+                            if status_width > 0.0 {
+                                toolbar_ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |status_ui| {
+                                        self.context_actions_surface.show_game_status(
+                                            status_ui,
+                                            self.egui_wgpu_render_state.as_ref(),
+                                            shell_palette,
+                                            self.settings.language,
+                                            self.active_session_name().to_string(),
+                                            self.settings.show_fps_counter,
+                                            self.frame_timing.fps(),
+                                        );
+                                    },
+                                );
+                            }
+                        },
                     );
+                    self.apply_game_viewport_surface_actions(viewport_toolbar_actions);
+                    ui.add_space(3.0);
+                    let before_snapshot = self.current_history_snapshot();
+                    let viewport_frame = egui::Frame::none()
+                        .outer_margin(egui::Margin::same(2.0))
+                        .inner_margin(egui::Margin::same(1.0))
+                        .stroke(egui::Stroke::new(1.0, palette.border));
+                    let viewport_changed = viewport_frame
+                        .show(ui, |viewport_ui| {
+                            let viewport_rect = viewport_ui.available_rect_before_wrap();
+                            let top_overlay_rect = egui::Rect::from_min_size(
+                                viewport_rect.min + egui::vec2(10.0, 10.0),
+                                egui::vec2(156.0, 36.0),
+                            );
+                            let bottom_overlay_rect = egui::Rect::from_min_size(
+                                egui::pos2(
+                                    (viewport_rect.right() - 166.0)
+                                        .max(viewport_rect.left() + 10.0),
+                                    (viewport_rect.bottom() - 42.0).max(viewport_rect.top() + 10.0),
+                                ),
+                                egui::vec2(156.0, 36.0),
+                            );
+                            self.viewport.set_retained_overlay_rects([
+                                Some(top_overlay_rect),
+                                Some(bottom_overlay_rect),
+                            ]);
+
+                            let changed = self.viewport.show_with_retained_toolbar(
+                                ctx,
+                                viewport_ui,
+                                self.egui_wgpu_render_state.as_ref(),
+                                &mut self.graphics_runtime,
+                                &mut self.scene,
+                                self.settings.theme != Theme::Light,
+                                self.settings.language,
+                                &self.ui_icons,
+                            );
+
+                            viewport_ui.allocate_new_ui(
+                                egui::UiBuilder::new().max_rect(top_overlay_rect),
+                                |overlay_ui| {
+                                    viewport_overlay_actions =
+                                        self.game_viewport_surface.show_top_overlay(
+                                            overlay_ui,
+                                            self.egui_wgpu_render_state.as_ref(),
+                                            shell_palette,
+                                            &self.viewport,
+                                            self.settings.language,
+                                        );
+                                },
+                            );
+                            viewport_ui.allocate_new_ui(
+                                egui::UiBuilder::new().max_rect(bottom_overlay_rect),
+                                |overlay_ui| {
+                                    viewport_overlay_actions.extend(
+                                        self.game_viewport_surface.show_bottom_overlay(
+                                            overlay_ui,
+                                            self.egui_wgpu_render_state.as_ref(),
+                                            shell_palette,
+                                            &self.viewport,
+                                            self.settings.language,
+                                        ),
+                                    );
+                                },
+                            );
+                            changed
+                        })
+                        .inner;
+                    self.apply_game_viewport_surface_actions(viewport_overlay_actions);
                     if viewport_changed {
                         document_changed_this_frame |= self.record_document_change(before_snapshot);
                     }
@@ -1720,10 +2488,35 @@ impl AuraRafiApp {
                 ViewportMode::Schematic => {
                     let runtime_snapshot =
                         self.prepare_graphics_surface(GraphicsSurfaceKind::SchematicCanvas);
-                    let before_snapshot = self.current_history_snapshot();
                     self.schematic_view.lang = self.settings.language;
                     self.schematic_view.set_render_runtime(runtime_snapshot);
-                    if self.schematic_view.show(
+                    let toolbar_width = ui.available_width();
+                    let mut toolbar_actions = Vec::new();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(toolbar_width, 38.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |toolbar_ui| {
+                            toolbar_actions = self.electronics_toolbar_surface.show_schematic(
+                                toolbar_ui,
+                                self.egui_wgpu_render_state.as_ref(),
+                                shell_palette,
+                                &self.schematic_view,
+                                self.settings.language,
+                            );
+                        },
+                    );
+                    let before_snapshot = self.current_history_snapshot();
+                    let toolbar_changed = self.apply_electronics_toolbar_actions(
+                        toolbar_actions,
+                        toolbar_width,
+                        ui.available_height(),
+                    );
+                    if toolbar_changed {
+                        document_changed_this_frame |= self.record_document_change(before_snapshot);
+                    }
+                    ui.add_space(3.0);
+                    let before_snapshot = self.current_history_snapshot();
+                    if self.schematic_view.show_canvas_only_without_toolbar(
                         ui,
                         self.egui_wgpu_render_state.as_ref(),
                         &mut self.graphics_runtime,
@@ -1738,10 +2531,35 @@ impl AuraRafiApp {
                 ViewportMode::Pcb => {
                     let runtime_snapshot =
                         self.prepare_graphics_surface(GraphicsSurfaceKind::PcbCanvas);
-                    let before_snapshot = self.current_history_snapshot();
                     self.pcb_view.lang = self.settings.language;
                     self.pcb_view.set_render_runtime(runtime_snapshot);
-                    if self.pcb_view.show(
+                    let toolbar_width = ui.available_width();
+                    let mut toolbar_actions = Vec::new();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(toolbar_width, 38.0),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |toolbar_ui| {
+                            toolbar_actions = self.electronics_toolbar_surface.show_pcb(
+                                toolbar_ui,
+                                self.egui_wgpu_render_state.as_ref(),
+                                shell_palette,
+                                &self.pcb_view,
+                                self.settings.language,
+                            );
+                        },
+                    );
+                    let before_snapshot = self.current_history_snapshot();
+                    let toolbar_changed = self.apply_electronics_toolbar_actions(
+                        toolbar_actions,
+                        toolbar_width,
+                        ui.available_height(),
+                    );
+                    if toolbar_changed {
+                        document_changed_this_frame |= self.record_document_change(before_snapshot);
+                    }
+                    ui.add_space(3.0);
+                    let before_snapshot = self.current_history_snapshot();
+                    if self.pcb_view.show_canvas_only_without_toolbar(
                         ui,
                         self.egui_wgpu_render_state.as_ref(),
                         &mut self.graphics_runtime,
@@ -1755,6 +2573,19 @@ impl AuraRafiApp {
                 }
             }
         });
+
+        if document_changed_this_frame
+            && self
+                .current_project
+                .as_ref()
+                .map(|project| project.project_type == ProjectType::Electronics)
+                .unwrap_or(false)
+        {
+            self.electronics_drc_report = None;
+            self.electronics_simulation_results = None;
+        }
+
+        self.persist_editor_shell_if_idle(ctx);
 
         if !document_changed_this_frame {
             self.finalize_pending_history_snapshot();
@@ -1783,23 +2614,9 @@ impl AuraRafiApp {
             self.settings_draft = Some(self.settings.clone());
         }
 
-        // Compare the current draft against the live settings BEFORE taking a
-        // mutable borrow. This detects changes made in previous frames, which
-        // is what the Esc key needs (Esc fires before the UI runs this frame).
         let draft_changed_before_ui = self.settings_draft.as_ref() != Some(&self.settings);
-
-        let draft = self
-            .settings_draft
-            .as_mut()
-            .expect("settings draft initialized");
-        let lang = draft.language;
-        let palette =
-            app_theme::palette_for_visuals(ctx.style().visuals.dark_mode, draft.theme_experimental);
-
         let mut close = false;
         let mut save = false;
-        // Cancel button is clicked inside the UI closure; we defer the decision
-        // until after the mutable borrow on `draft` ends.
         let mut cancel_clicked = false;
 
         let keyboard_save =
@@ -1818,81 +2635,31 @@ impl AuraRafiApp {
             }
         }
 
+        let render_state = self.egui_wgpu_render_state.as_ref();
+        let palette = if ctx.style().visuals.dark_mode {
+            StudioUiPalette::IndustrialDark
+        } else {
+            StudioUiPalette::PaperLight
+        };
+        let mut surface_intents = Vec::new();
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(20.0);
-            ui.horizontal_centered(|ui| {
-                ui.set_max_width(620.0);
-                ui.vertical(|ui| {
-                    ui.set_width(ui.available_width().min(620.0));
-                    ui.label(
-                        egui::RichText::new(t("app.engine_settings_title", lang))
-                            .size(16.0)
-                            .color(palette.text_dim),
-                    );
-
-                    ui.add_space(14.0);
-                    ui.separator();
-                    ui.add_space(12.0);
-
-                    // Reserve space for the Save/Cancel bar so the ScrollArea
-                    // never pushes it off-screen (#12). 80px covers the button
-                    // row plus its surrounding spacing.
-                    let scroll_max_height = (ui.available_height() - 80.0).max(160.0);
-                    egui::ScrollArea::vertical()
-                        .auto_shrink([false, false])
-                        .max_height(scroll_max_height)
-                        .show(ui, |ui| {
-                            let frame = egui::Frame::none()
-                                .fill(palette.panel)
-                                .rounding(8.0)
-                                .inner_margin(24.0)
-                                .stroke(egui::Stroke::new(1.0, palette.border));
-
-                            frame.show(ui, |ui| {
-                                settings_panel::show_settings(ui, draft);
-                            });
-                        });
-
-                    ui.add_space(14.0);
-
-                    ui.horizontal(|ui| {
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            let save_btn = egui::Button::new(
-                                egui::RichText::new(t("app.save_and_close", lang))
-                                    .size(13.0)
-                                    .color(egui::Color32::WHITE),
-                            )
-                            .fill(app_theme::ACCENT)
-                            .rounding(4.0);
-
-                            if ui.add_sized([120.0, 32.0], save_btn).clicked() {
-                                save = true;
-                                close = true;
-                            }
-
-                            ui.add_space(12.0);
-
-                            let cancel_btn = egui::Button::new(
-                                egui::RichText::new(t("app.cancel", lang)).size(13.0),
-                            )
-                            .rounding(4.0);
-
-                            if ui.add_sized([90.0, 32.0], cancel_btn).clicked() {
-                                // Cancel mirrors Esc: prompt if there are unsaved
-                                // changes, otherwise close without prompting.
-                                // The change check runs after this closure ends
-                                // so we can borrow self.settings_draft again.
-                                cancel_clicked = true;
-                            }
-                        });
-                    });
-                });
-            });
+            let draft = self
+                .settings_draft
+                .as_mut()
+                .expect("settings draft initialized");
+            surface_intents = self.settings_surface.show(ui, render_state, palette, draft);
         });
 
-        // Recompute the change flag AFTER the UI ran, so the Cancel button
-        // sees edits made in this frame too. The mutable borrow on `draft`
-        // has ended by now, so we can borrow self.settings_draft again.
+        for intent in surface_intents {
+            match intent {
+                SettingsSurfaceIntent::Save => {
+                    save = true;
+                    close = true;
+                }
+                SettingsSurfaceIntent::Cancel => cancel_clicked = true,
+            }
+        }
+
         let draft_changed = self.settings_draft.as_ref() != Some(&self.settings);
         if cancel_clicked {
             if draft_changed {
@@ -1905,32 +2672,40 @@ impl AuraRafiApp {
         // Settings close confirmation dialog.
         if self.show_settings_close_dialog {
             let lang = self.settings.language;
+            let palette = if ctx.style().visuals.dark_mode {
+                StudioUiPalette::IndustrialDark
+            } else {
+                StudioUiPalette::PaperLight
+            };
+            let mut dialog_action = None;
             egui::Window::new(t("app.unsaved_changes_title", lang))
                 .collapsible(false)
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
                 .show(ctx, |ui| {
-                    ui.set_min_width(300.0);
-                    ui.label("Save changes to settings before closing?");
-                    ui.add_space(14.0);
-                    ui.horizontal(|ui| {
-                        if ui.button(t("app.cancel", lang)).clicked() {
-                            self.show_settings_close_dialog = false;
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if ui.button(t("app.discard_changes", lang)).clicked() {
-                                self.show_settings_close_dialog = false;
-                                close = true;
-                            }
-                            ui.add_space(8.0);
-                            if ui.button(t("app.save_and_close", lang)).clicked() {
-                                self.show_settings_close_dialog = false;
-                                save = true;
-                                close = true;
-                            }
-                        });
-                    });
+                    ui.set_min_width(430.0);
+                    dialog_action = self.common_dialog_surface.show_unsaved(
+                        ui,
+                        self.egui_wgpu_render_state.as_ref(),
+                        palette,
+                        "app.unsaved_changes_title",
+                        "app.unsaved_changes_message",
+                        lang,
+                    );
                 });
+            match dialog_action {
+                Some(CommonDialogAction::Cancel) => self.show_settings_close_dialog = false,
+                Some(CommonDialogAction::Discard) => {
+                    self.show_settings_close_dialog = false;
+                    close = true;
+                }
+                Some(CommonDialogAction::Save) => {
+                    self.show_settings_close_dialog = false;
+                    save = true;
+                    close = true;
+                }
+                None => {}
+            }
             if self.show_settings_close_dialog {
                 return;
             }
@@ -1950,6 +2725,33 @@ impl AuraRafiApp {
             }
             self.screen = next_screen;
         }
+    }
+
+    fn show_rafui_studio_screen(&mut self, ctx: &egui::Context) {
+        if ctx.input(|input| input.key_pressed(egui::Key::Escape)) {
+            self.screen = AppScreen::Editor;
+            return;
+        }
+        let palette = if ctx.style().visuals.dark_mode {
+            StudioUiPalette::IndustrialDark
+        } else {
+            StudioUiPalette::PaperLight
+        };
+        egui::CentralPanel::default()
+            .frame(egui::Frame::none())
+            .show(ctx, |ui| {
+                let close = self.raf_ui_studio_surface.show(
+                    ui,
+                    self.egui_wgpu_render_state.as_ref(),
+                    palette,
+                    &self.ui_document,
+                    self.settings.language,
+                    ctx.pixels_per_point().clamp(1.0, 4.0),
+                );
+                if close {
+                    self.screen = AppScreen::Editor;
+                }
+            });
     }
 
     fn handle_window_close_request(&mut self, ctx: &egui::Context) {
@@ -1973,36 +2775,46 @@ impl AuraRafiApp {
 
         let mut perform_action = None;
         let lang = self.settings.language;
+        let palette = if ctx.style().visuals.dark_mode {
+            StudioUiPalette::IndustrialDark
+        } else {
+            StudioUiPalette::PaperLight
+        };
+        let mut dialog_action = None;
 
         egui::Window::new(t("app.unsaved_changes_title", lang))
             .collapsible(false)
             .resizable(false)
             .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
             .show(ctx, |ui| {
-                ui.set_min_width(360.0);
-                ui.label(t("app.unsaved_changes_message", lang));
-                ui.add_space(12.0);
-                ui.horizontal(|ui| {
-                    if ui.button(t("app.cancel", lang)).clicked() {
-                        self.pending_exit_action = None;
-                        self.allow_app_close = false;
-                    }
-
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.button(t("app.discard_changes", lang)).clicked() {
-                            self.pending_exit_action = None;
-                            perform_action = Some(action);
-                        }
-
-                        if ui.button(t("app.save_changes", lang)).clicked() {
-                            if self.do_save() {
-                                self.pending_exit_action = None;
-                                perform_action = Some(action);
-                            }
-                        }
-                    });
-                });
+                ui.set_min_width(430.0);
+                dialog_action = self.common_dialog_surface.show_unsaved(
+                    ui,
+                    self.egui_wgpu_render_state.as_ref(),
+                    palette,
+                    "app.unsaved_changes_title",
+                    "app.unsaved_changes_message",
+                    lang,
+                );
             });
+
+        match dialog_action {
+            Some(CommonDialogAction::Cancel) => {
+                self.pending_exit_action = None;
+                self.allow_app_close = false;
+            }
+            Some(CommonDialogAction::Discard) => {
+                self.pending_exit_action = None;
+                perform_action = Some(action);
+            }
+            Some(CommonDialogAction::Save) => {
+                if self.do_save() {
+                    self.pending_exit_action = None;
+                    perform_action = Some(action);
+                }
+            }
+            None => {}
+        }
 
         if let Some(action) = perform_action {
             self.perform_exit_action(action, ctx);
@@ -2058,7 +2870,68 @@ impl AuraRafiApp {
         self.auto_save_last_tick = None;
         self.pending_exit_action = None;
         self.allow_app_close = false;
+        self.editor_shell = EditorShellLayout::default();
+        self.editor_shell_dirty = false;
+        self.editor_shell_resize_panel = None;
         self.screen = AppScreen::ProjectHub;
+    }
+
+    fn persist_editor_shell_if_idle(&mut self, ctx: &egui::Context) {
+        if !self.editor_shell_dirty || ctx.input(|input| input.pointer.primary_down()) {
+            return;
+        }
+        let Some(project_path) = self
+            .current_project
+            .as_ref()
+            .map(|project| project.path.clone())
+        else {
+            self.editor_shell_dirty = false;
+            return;
+        };
+
+        self.editor_shell_dirty = false;
+        if let Err(error) = self.editor_shell.save(&project_path) {
+            self.console.log(LogLevel::Error, &error);
+        }
+    }
+
+    fn track_editor_shell_resize(
+        &mut self,
+        ctx: &egui::Context,
+        panel: &'static str,
+        rect: UiRect,
+        workspace: UiRect,
+        edge: ShellResizeEdge,
+    ) {
+        let (pointer, pressed, down, released) = ctx.input(|input| {
+            (
+                input.pointer.interact_pos(),
+                input.pointer.button_pressed(egui::PointerButton::Primary),
+                input.pointer.primary_down(),
+                input.pointer.button_released(egui::PointerButton::Primary),
+            )
+        });
+        let near_resize_edge = pointer
+            .map(|pointer| match edge {
+                ShellResizeEdge::Left => (pointer.x - rect.x).abs() <= 8.0,
+                ShellResizeEdge::Right => (pointer.x - rect.right()).abs() <= 8.0,
+                ShellResizeEdge::Top => (pointer.y - rect.y).abs() <= 8.0,
+            })
+            .unwrap_or(false);
+
+        if pressed && near_resize_edge {
+            self.editor_shell_resize_panel = Some(panel);
+        }
+        if self.editor_shell_resize_panel != Some(panel) {
+            return;
+        }
+
+        if down || released {
+            self.editor_shell_dirty |= self.editor_shell.observe_host_rect(panel, rect, workspace);
+        }
+        if released {
+            self.editor_shell_resize_panel = None;
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -2450,6 +3323,197 @@ impl AuraRafiApp {
         self.console.log(LogLevel::Info, &msg);
     }
 
+    fn show_editor_context_actions(
+        &mut self,
+        ui: &mut egui::Ui,
+        _palette: &app_theme::ThemePalette,
+        lang: Language,
+    ) {
+        let is_electronics_project = self
+            .current_project
+            .as_ref()
+            .map(|project| project.project_type == ProjectType::Electronics)
+            .unwrap_or(false);
+        let mode_text = match self.viewport_mode {
+            ViewportMode::Scene => t("app.scene_view", lang),
+            ViewportMode::Schematic => t("app.schematic_view", lang),
+            ViewportMode::Pcb => t("app.pcb_view", lang),
+        };
+        let palette = if ui.visuals().dark_mode {
+            StudioUiPalette::IndustrialDark
+        } else {
+            StudioUiPalette::PaperLight
+        };
+        let actions = self.context_actions_surface.show(
+            ui,
+            self.egui_wgpu_render_state.as_ref(),
+            palette,
+            lang,
+            is_electronics_project,
+            !self.undo_stack.is_empty(),
+            !self.redo_stack.is_empty(),
+            self.settings.show_fps_counter,
+            self.frame_timing.fps(),
+            !self.scene_modified,
+            mode_text,
+        );
+        for action in actions {
+            match action {
+                EditorContextAction::Build => self.handle_build(),
+                EditorContextAction::Undo => self.do_undo(),
+                EditorContextAction::Redo => self.do_redo(),
+            }
+        }
+    }
+
+    /// Renders the shared command tree inside eframe while it remains the
+    /// temporary window shell. A native host consumes the exact same model.
+    fn show_editor_menu_items(&mut self, ui: &mut egui::Ui) {
+        let state = self.editor_application_menu_state();
+        let menu = build_editor_application_menu(state);
+        let language = self.settings.language;
+        show_eframe_application_menu(ui, &menu, language, state, &mut |command_id| {
+            self.dispatch_application_menu_command(command_id);
+        });
+    }
+
+    fn editor_application_menu_state(&self) -> EditorApplicationMenuState {
+        let electronics_project = self
+            .current_project
+            .as_ref()
+            .is_some_and(|project| project.project_type == ProjectType::Electronics);
+        EditorApplicationMenuState {
+            electronics_project,
+            project_open: self.current_project.is_some(),
+            can_undo: !self.undo_stack.is_empty(),
+            can_redo: !self.redo_stack.is_empty(),
+            grid_visible: self.settings.grid_visible,
+            scene_active: self.viewport_mode == ViewportMode::Scene,
+            schematic_active: self.viewport_mode == ViewportMode::Schematic,
+            pcb_active: self.viewport_mode == ViewportMode::Pcb,
+            undo_count: self.undo_stack.len(),
+            redo_count: self.redo_stack.len(),
+        }
+    }
+
+    fn poll_native_application_menu(&mut self) {
+        let activations = self
+            .native_application_menu
+            .as_mut()
+            .map(NativeWindowApplicationMenuAdapter::drain_activations)
+            .unwrap_or_default();
+        for activation in activations {
+            self.dispatch_application_menu_command(&activation.command_id);
+        }
+    }
+
+    fn bind_native_application_menu_to_frame(&mut self, frame: &eframe::Frame) {
+        if self.native_menu_bound_to_frame {
+            return;
+        }
+        self.native_menu_bound_to_frame = true;
+
+        let Ok(window_handle) = frame.window_handle() else {
+            tracing::warn!("native application menu frame handle unavailable");
+            return;
+        };
+        tracing::info!(handle = ?window_handle.as_raw(), "binding native application menu to frame");
+        let menu = build_editor_application_menu(self.editor_application_menu_state());
+        let language = self.settings.language;
+        let Some(adapter) = self.native_application_menu.as_mut() else {
+            return;
+        };
+        if let Err(error) =
+            adapter.install_raw_window_handle(window_handle.as_raw(), &menu, |key| {
+                t(key, language).to_string()
+            })
+        {
+            tracing::warn!(error = %error, "native application menu unavailable");
+        }
+    }
+
+    fn sync_native_application_menu(&mut self) {
+        let state = self.editor_application_menu_state();
+        let menu = build_editor_application_menu(state);
+        let language = self.settings.language;
+        let Some(adapter) = self.native_application_menu.as_mut() else {
+            return;
+        };
+        if !adapter.is_installed() {
+            return;
+        }
+        if let Err(error) = adapter.sync(&menu, |key| t(key, language).to_string()) {
+            tracing::debug!(error = %error, "native application menu sync failed");
+        }
+    }
+
+    fn dispatch_application_menu_command(&mut self, command_id: &str) {
+        match command_id {
+            application_menu_command::PROJECT_NEW
+            | application_menu_command::PROJECT_EXIT_TO_HUB
+            | application_menu_command::PROJECT_CLOSE => {
+                self.request_exit_action(PendingExitAction::ToHub, None);
+            }
+            application_menu_command::PROJECT_SAVE => {
+                self.do_save();
+            }
+            application_menu_command::EDITOR_SETTINGS => {
+                self.open_settings_screen(AppScreen::Editor);
+            }
+            application_menu_command::EDIT_UNDO => self.do_undo(),
+            application_menu_command::EDIT_REDO => self.do_redo(),
+            application_menu_command::EDIT_DUPLICATE => self.do_duplicate(),
+            application_menu_command::EDIT_DELETE => self.do_delete(),
+            application_menu_command::EDIT_SELECT_ALL => self.do_select_all(),
+            application_menu_command::VIEW_GRID => {
+                self.settings.grid_visible = !self.settings.grid_visible;
+            }
+            application_menu_command::VIEW_SCENE => {
+                self.viewport_mode = ViewportMode::Scene;
+            }
+            application_menu_command::VIEW_SCHEMATIC => {
+                self.viewport_mode = ViewportMode::Schematic;
+            }
+            application_menu_command::VIEW_PCB => {
+                self.sync_pcb_from_schematic();
+                self.viewport_mode = ViewportMode::Pcb;
+            }
+            application_menu_command::PROJECT_OPEN_FOLDER => {
+                #[cfg(target_os = "windows")]
+                if let Some(project) = &self.current_project {
+                    let _ = std::process::Command::new("explorer")
+                        .arg(project.path.as_os_str())
+                        .spawn();
+                }
+            }
+            application_menu_command::RAFUI_STUDIO_PREVIEW => {
+                self.screen = AppScreen::RafUiStudio;
+                let project = self.current_project.clone();
+                let output = match parse_console_input("/rafui.studio.preview") {
+                    Ok(ParsedInput::Command(command)) => self.execute_shared_console_command(
+                        "rafui.studio.preview",
+                        &command,
+                        project.as_ref(),
+                    ),
+                    _ => CommandOutput::error("RafUI Studio", "Unable to build preview command."),
+                };
+                self.console
+                    .log_user("RafUI Studio", "/rafui.studio.preview");
+                self.console.log_command_output(output);
+                self.bottom_tab = BottomTab::Console;
+                self.last_action = "RafUI Studio preview generated".to_string();
+            }
+            application_menu_command::HELP_KEYBOARD_SHORTCUTS => {
+                self.last_action = format!(
+                    "{} v{}",
+                    t("app.editor_brand", self.settings.language),
+                    env!("CARGO_PKG_VERSION")
+                );
+            }
+            _ => {}
+        }
+    }
+
     fn do_save(&mut self) -> bool {
         match self.save_current_project() {
             Ok(()) => {
@@ -2515,6 +3579,8 @@ impl AuraRafiApp {
         }
 
         self.sessions.save(&project.path)?;
+        self.editor_shell.save(&project.path)?;
+        self.editor_shell_dirty = false;
 
         project
             .save()
@@ -2787,26 +3853,77 @@ impl AuraRafiApp {
                     if sim_results.converged {
                         self.console
                             .log(LogLevel::Info, "Simulation converged successfully.");
-                        for (ci, current) in sim_results.component_currents {
-                            let comp = &self.schematic_view.schematic.components[ci];
-                            let msg =
-                                format!("Component [{}]: Current = {:.5} A", comp.id, current);
+                        for (ci, current) in &sim_results.component_currents {
+                            let component_label = self
+                                .schematic_view
+                                .schematic
+                                .components
+                                .get(*ci)
+                                .map(|component| component.designator.clone())
+                                .unwrap_or_else(|| format!("#{ci}"));
+                            let msg = format!(
+                                "Component [{component_label}]: Current = {:.5} A",
+                                current
+                            );
                             self.console.log(LogLevel::Info, &msg);
                         }
-                        for (net_id, voltage) in sim_results.node_voltages {
-                            let msg = format!("Net [N{:03}]: Voltage = {:.2} V", net_id, voltage);
+                        for (net_id, voltage) in &sim_results.node_voltages {
+                            let msg = format!("Net [N{net_id:03}]: Voltage = {voltage:.2} V");
                             self.console.log(LogLevel::Info, &msg);
                         }
                     } else {
                         self.console
                             .log(LogLevel::Error, "Simulation failed to converge.");
-                        for err in sim_results.messages {
+                        for err in &sim_results.messages {
                             self.console.log(LogLevel::Error, &err);
                         }
                     }
+                    self.electronics_simulation_results = Some(sim_results);
                 }
             }
         }
+    }
+
+    fn run_electronics_drc(&mut self) {
+        let Some(project) = self.current_project.as_ref() else {
+            return;
+        };
+        if project.project_type != ProjectType::Electronics {
+            return;
+        }
+
+        let report = raf_electronics::drc::run_drc(&self.schematic_view.schematic);
+        let summary = if report.passed() {
+            t("app.drc_ok", self.settings.language)
+        } else {
+            format!(
+                "DRC: {} {}",
+                report.total(),
+                t("app.drc_errors", self.settings.language)
+            )
+        };
+        self.last_action = summary.clone();
+        self.console.log(
+            if report.passed() {
+                LogLevel::Info
+            } else {
+                LogLevel::Warning
+            },
+            &summary,
+        );
+        for issue in report.to_string_list() {
+            self.console.log(
+                if issue.starts_with("[ERROR]") {
+                    LogLevel::Error
+                } else if issue.starts_with("[WARNING]") {
+                    LogLevel::Warning
+                } else {
+                    LogLevel::Info
+                },
+                &issue,
+            );
+        }
+        self.electronics_drc_report = Some(report);
     }
 
     fn sync_pcb_from_schematic(&mut self) {
@@ -2992,7 +4109,8 @@ impl AuraRafiApp {
             | "ui.node.remove"
             | "ui.document.set_space"
             | "ui.document.bind_camera"
-            | "ui.document.clear_camera" => {
+            | "ui.document.clear_camera"
+            | "rafui.studio.preview" => {
                 let mut context = crate::commands::ui_document::UiDocumentCommandContext {
                     document: &mut self.ui_document,
                 };
@@ -3214,6 +4332,9 @@ impl AuraRafiApp {
                 self.last_action.clear();
 
                 self.current_project = Some(project.clone());
+                self.editor_shell = EditorShellLayout::load(&project.path);
+                self.editor_shell_dirty = false;
+                self.editor_shell_resize_panel = None;
                 // Wire assets path to browser.
                 let assets_dir = std::path::PathBuf::from(&project.path).join("assets");
                 self.asset_browser.project_assets_path = Some(assets_dir);
@@ -3232,6 +4353,8 @@ impl AuraRafiApp {
 
     fn init_scene_for_type(&mut self, project_type: ProjectType) {
         self.scene = SceneGraph::new();
+        self.electronics_drc_report = None;
+        self.electronics_simulation_results = None;
         match project_type {
             ProjectType::Game => {
                 let root = self.scene.add_root("Scene Root");
@@ -3277,74 +4400,105 @@ fn default_projects_dir() -> String {
         .to_string()
 }
 
-fn bottom_tab_icon(tab: &BottomTab) -> Option<&'static str> {
+fn bottom_tab_to_shell(tab: &BottomTab) -> EditorBottomDockTab {
     match tab {
-        BottomTab::Assets => Some("assets.png"),
-        BottomTab::Console => Some("console.png"),
-        BottomTab::AiChat => Some("ai_chat.png"),
-        BottomTab::NodeEditor => Some("node_editor.png"),
-        BottomTab::ProjectSettings => Some("project_settings.png"),
-        BottomTab::Complement(_) => Some("complement.png"),
+        BottomTab::Assets => EditorBottomDockTab::Assets,
+        BottomTab::Console => EditorBottomDockTab::Console,
+        BottomTab::Drc => EditorBottomDockTab::Drc,
+        BottomTab::Simulation => EditorBottomDockTab::Simulation,
+        BottomTab::AiChat => EditorBottomDockTab::Agent,
+        BottomTab::NodeEditor => EditorBottomDockTab::NodeEditor,
+        BottomTab::ProjectSettings | BottomTab::Complement(_) => {
+            EditorBottomDockTab::ProjectSettings
+        }
     }
 }
 
-fn draw_bottom_tab_button(
-    ui: &mut egui::Ui,
-    icons: &UiIconAtlas,
-    icon_name: Option<&'static str>,
-    label: &str,
-    is_active: bool,
-) -> egui::Response {
-    let width = (52.0 + (label.chars().count() as f32 * 7.0)).max(92.0);
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 24.0), egui::Sense::click());
-    let painter = ui.painter();
+fn viewport_mode_to_shell(mode: ViewportMode) -> EditorCenterSurface {
+    match mode {
+        ViewportMode::Scene => EditorCenterSurface::Scene,
+        ViewportMode::Schematic => EditorCenterSurface::Schematic,
+        ViewportMode::Pcb => EditorCenterSurface::Pcb,
+    }
+}
 
-    if is_active {
-        painter.rect_filled(
-            rect.expand2(egui::vec2(0.0, 1.0)),
-            6.0,
-            egui::Color32::from_rgba_premultiplied(212, 119, 26, 18),
-        );
-    } else if response.hovered() {
-        painter.rect_filled(
-            rect.expand2(egui::vec2(0.0, 1.0)),
-            6.0,
-            egui::Color32::from_rgba_premultiplied(255, 255, 255, 10),
+fn bottom_tab_from_shell(tab: EditorBottomDockTab) -> BottomTab {
+    match tab {
+        EditorBottomDockTab::Assets => BottomTab::Assets,
+        EditorBottomDockTab::Console => BottomTab::Console,
+        EditorBottomDockTab::Drc => BottomTab::Drc,
+        EditorBottomDockTab::Simulation => BottomTab::Simulation,
+        EditorBottomDockTab::ProjectSettings => BottomTab::ProjectSettings,
+        EditorBottomDockTab::NodeEditor => BottomTab::NodeEditor,
+        EditorBottomDockTab::Agent => BottomTab::AiChat,
+    }
+}
+
+fn inspector_tab_to_shell(tab: InspectorTab) -> EditorInspectorTab {
+    match tab {
+        InspectorTab::Properties => EditorInspectorTab::Properties,
+        InspectorTab::Sessions => EditorInspectorTab::Sessions,
+    }
+}
+
+fn inspector_tab_from_shell(tab: EditorInspectorTab) -> InspectorTab {
+    match tab {
+        EditorInspectorTab::Properties => InspectorTab::Properties,
+        EditorInspectorTab::Sessions => InspectorTab::Sessions,
+    }
+}
+
+#[cfg(test)]
+mod shell_adapter_tests {
+    use super::*;
+
+    #[test]
+    fn retained_bottom_tabs_preserve_existing_editor_destinations() {
+        for tab in [
+            BottomTab::Console,
+            BottomTab::Drc,
+            BottomTab::Simulation,
+            BottomTab::Assets,
+            BottomTab::ProjectSettings,
+            BottomTab::NodeEditor,
+            BottomTab::AiChat,
+        ] {
+            let shell = bottom_tab_to_shell(&tab);
+            assert_eq!(bottom_tab_from_shell(shell), tab);
+        }
+    }
+
+    #[test]
+    fn complement_tab_falls_back_to_project_settings_in_the_shared_strip() {
+        assert_eq!(
+            bottom_tab_to_shell(&BottomTab::Complement("custom".to_string())),
+            EditorBottomDockTab::ProjectSettings
         );
     }
 
-    if let Some(icon_name) = icon_name {
-        let icon_rect = egui::Rect::from_center_size(
-            egui::pos2(rect.left() + 14.0, rect.center().y),
-            egui::vec2(16.0, 16.0),
-        );
-        let _ = icons.paint(ui.painter(), icon_name, icon_rect, egui::Color32::WHITE);
+    #[test]
+    fn retained_inspector_tabs_preserve_properties_and_sessions() {
+        for tab in [InspectorTab::Properties, InspectorTab::Sessions] {
+            assert_eq!(inspector_tab_from_shell(inspector_tab_to_shell(tab)), tab);
+        }
     }
 
-    let text_color = if is_active {
-        app_theme::ACCENT
-    } else {
-        egui::Color32::from_rgb(150, 150, 160)
-    };
-    painter.text(
-        egui::pos2(rect.left() + 28.0, rect.center().y),
-        egui::Align2::LEFT_CENTER,
-        label,
-        egui::FontId::proportional(13.0),
-        text_color,
-    );
-
-    if is_active {
-        painter.line_segment(
-            [
-                egui::Pos2::new(rect.left() + 2.0, rect.bottom() + 3.0),
-                egui::Pos2::new(rect.right() - 2.0, rect.bottom() + 3.0),
-            ],
-            egui::Stroke::new(2.0, app_theme::ACCENT),
-        );
+    #[test]
+    fn retained_context_tabs_preserve_every_center_surface() {
+        for mode in [
+            ViewportMode::Scene,
+            ViewportMode::Schematic,
+            ViewportMode::Pcb,
+        ] {
+            let shell = viewport_mode_to_shell(mode);
+            let round_trip = match shell {
+                EditorCenterSurface::Scene => ViewportMode::Scene,
+                EditorCenterSurface::Schematic => ViewportMode::Schematic,
+                EditorCenterSurface::Pcb => ViewportMode::Pcb,
+            };
+            assert_eq!(round_trip, mode);
+        }
     }
-
-    response
 }
 
 fn ui_icon_budget(ctx: &egui::Context) -> usize {

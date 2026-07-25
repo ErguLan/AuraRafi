@@ -120,7 +120,7 @@ impl PrimitiveModelManifest {
             Primitive::Sphere => "sphere",
             Primitive::Cylinder => "cylinder",
             Primitive::Plane => "plane",
-            Primitive::Empty | Primitive::Sprite2D => return Ok(None),
+            Primitive::Empty => return Ok(None),
         };
         Self::builtin(kind)
     }

@@ -430,12 +430,32 @@ pub fn rasterize_line(
     b: u8,
     a: u8,
 ) {
+    rasterize_line_width(fb, x0, y0, z0, x1, y1, z1, r, g, b, a, 1.0);
+}
+
+/// Rasterize an edge with a pixel width shared by the CPU and GPU paths.
+pub fn rasterize_line_width(
+    fb: &mut Framebuffer,
+    x0: f32,
+    y0: f32,
+    z0: f32,
+    x1: f32,
+    y1: f32,
+    z1: f32,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+    line_width: f32,
+) {
     let dx = (x1 - x0).abs();
     let dy = (y1 - y0).abs();
     let steps = dx.max(dy).ceil() as u32;
+    let radius = (line_width.max(1.0) * 0.5).max(0.5);
+    let radius_i = radius.ceil() as i32;
 
     if steps == 0 {
-        fb.write_pixel(x0 as u32, y0 as u32, z0, r, g, b, a);
+        write_thick_pixel(fb, x0, y0, z0, radius, radius_i, r, g, b, a);
         return;
     }
 
@@ -445,9 +465,7 @@ pub fn rasterize_line(
         let x = x0 + (x1 - x0) * t;
         let y = y0 + (y1 - y0) * t;
         let z = z0 + (z1 - z0) * t;
-        let xi = x as u32;
-        let yi = y as u32;
-        fb.write_pixel(xi, yi, z, r, g, b, a);
+        write_thick_pixel(fb, x, y, z, radius, radius_i, r, g, b, a);
     }
 }
 
@@ -462,12 +480,30 @@ pub fn rasterize_line_no_depth(
     b: u8,
     a: u8,
 ) {
+    rasterize_line_no_depth_width(fb, x0, y0, x1, y1, r, g, b, a, 1.0);
+}
+
+/// Rasterize a line over existing depth using a pixel width.
+pub fn rasterize_line_no_depth_width(
+    fb: &mut Framebuffer,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+    line_width: f32,
+) {
     let dx = (x1 - x0).abs();
     let dy = (y1 - y0).abs();
     let steps = dx.max(dy).ceil() as u32;
+    let radius = (line_width.max(1.0) * 0.5).max(0.5);
+    let radius_i = radius.ceil() as i32;
 
     if steps == 0 {
-        let _ = fb.write_pixel_no_depth(x0 as u32, y0 as u32, r, g, b, a);
+        write_thick_pixel_no_depth(fb, x0, y0, radius, radius_i, r, g, b, a);
         return;
     }
 
@@ -476,9 +512,76 @@ pub fn rasterize_line_no_depth(
         let t = i as f32 * inv_steps;
         let x = x0 + (x1 - x0) * t;
         let y = y0 + (y1 - y0) * t;
-        let xi = x as u32;
-        let yi = y as u32;
-        let _ = fb.write_pixel_no_depth(xi, yi, r, g, b, a);
+        write_thick_pixel_no_depth(fb, x, y, radius, radius_i, r, g, b, a);
+    }
+}
+
+fn write_thick_pixel(
+    fb: &mut Framebuffer,
+    x: f32,
+    y: f32,
+    z: f32,
+    radius: f32,
+    radius_i: i32,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+) {
+    let center_x = x.round() as i32;
+    let center_y = y.round() as i32;
+    if radius <= 0.5 {
+        if center_x >= 0 && center_y >= 0 {
+            fb.write_pixel(center_x as u32, center_y as u32, z, r, g, b, a);
+        }
+        return;
+    }
+    let radius_squared = radius * radius;
+    for offset_y in -radius_i..=radius_i {
+        for offset_x in -radius_i..=radius_i {
+            if (offset_x * offset_x + offset_y * offset_y) as f32 > radius_squared {
+                continue;
+            }
+            let px = center_x + offset_x;
+            let py = center_y + offset_y;
+            if px >= 0 && py >= 0 {
+                fb.write_pixel(px as u32, py as u32, z, r, g, b, a);
+            }
+        }
+    }
+}
+
+fn write_thick_pixel_no_depth(
+    fb: &mut Framebuffer,
+    x: f32,
+    y: f32,
+    radius: f32,
+    radius_i: i32,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+) {
+    let center_x = x.round() as i32;
+    let center_y = y.round() as i32;
+    if radius <= 0.5 {
+        if center_x >= 0 && center_y >= 0 {
+            let _ = fb.write_pixel_no_depth(center_x as u32, center_y as u32, r, g, b, a);
+        }
+        return;
+    }
+    let radius_squared = radius * radius;
+    for offset_y in -radius_i..=radius_i {
+        for offset_x in -radius_i..=radius_i {
+            if (offset_x * offset_x + offset_y * offset_y) as f32 > radius_squared {
+                continue;
+            }
+            let px = center_x + offset_x;
+            let py = center_y + offset_y;
+            if px >= 0 && py >= 0 {
+                let _ = fb.write_pixel_no_depth(px as u32, py as u32, r, g, b, a);
+            }
+        }
     }
 }
 

@@ -44,6 +44,13 @@ impl UiFocusState {
 pub struct UiInputState {
     pub pointer_position: Option<[f32; 2]>,
     pub pointer_delta: [f32; 2],
+    /// Monotonic host time in seconds. It is optional in spirit and defaults
+    /// to zero for deterministic/headless callers.
+    #[serde(default)]
+    pub time_seconds: f64,
+    /// Positive Y means the content should move down, matching the retained
+    /// surface coordinate system rather than a particular platform event API.
+    pub scroll_delta: [f32; 2],
     /// Legacy primary-button state retained for simple embedders.
     pub pointer_down: bool,
     pub pointer_buttons_down: Vec<UiPointerButton>,
@@ -72,6 +79,10 @@ impl UiInputState {
 
     pub fn button_released(&self, button: UiPointerButton) -> bool {
         self.pointer_released_buttons.contains(&button)
+    }
+
+    pub fn delta_seconds_since(&self, previous: f64) -> f32 {
+        (self.time_seconds - previous).max(0.0).min(0.25) as f32
     }
 }
 

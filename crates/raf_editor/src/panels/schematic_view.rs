@@ -43,9 +43,9 @@ pub(crate) struct ElectronicsPalette {
 pub(crate) fn electronics_palette(is_dark: bool) -> ElectronicsPalette {
     if is_dark {
         ElectronicsPalette {
-            canvas_bg: Color32::from_rgb(13, 14, 18),
-            panel_bg: Color32::from_rgb(13, 16, 20),
-            toolbar_bg: Color32::from_rgb(13, 16, 20),
+            canvas_bg: Color32::from_rgb(9, 12, 16),
+            panel_bg: Color32::from_rgb(13, 17, 22),
+            toolbar_bg: Color32::from_rgb(13, 17, 22),
             card_bg: Color32::from_rgb(18, 22, 28),
             card_hover: Color32::from_rgb(25, 30, 37),
             card_active: Color32::from_rgb(44, 36, 24),
@@ -54,7 +54,7 @@ pub(crate) fn electronics_palette(is_dark: bool) -> ElectronicsPalette {
             text: Color32::from_rgb(224, 226, 232),
             text_dim: Color32::from_rgb(150, 156, 168),
             text_muted: Color32::from_rgb(118, 122, 132),
-            node_bg: Color32::from_rgb(13, 14, 18),
+            node_bg: Color32::from_rgb(9, 12, 16),
             overlay_bg: Color32::from_rgba_premultiplied(10, 13, 17, 242),
         }
     } else {
@@ -148,6 +148,7 @@ pub struct SchematicViewPanel {
     wire_start: Option<ConnectionCandidate>,
     show_library: bool,
     library_search: String,
+    library_scroll: f32,
     quick_search_open: bool,
     quick_search_query: String,
     quick_search_selected: usize,
@@ -193,6 +194,7 @@ impl Default for SchematicViewPanel {
             wire_start: None,
             show_library: true,
             library_search: String::new(),
+            library_scroll: 0.0,
             quick_search_open: false,
             quick_search_query: String::new(),
             quick_search_selected: 0,
@@ -229,15 +231,130 @@ impl SchematicViewPanel {
         wgpu_render_state: Option<&egui_wgpu::RenderState>,
         render_runtime: &mut RenderRuntime,
     ) -> bool {
+        self.show_surface(
+            ui,
+            wgpu_render_state,
+            render_runtime,
+            self.show_library,
+            true,
+        )
+    }
+
+    /// Presents only the CAD workspace. The project navigator and component
+    /// library can then live in a structural editor dock instead of consuming
+    /// canvas width. This is the Electronics shell migration boundary.
+    pub fn show_canvas_only(
+        &mut self,
+        ui: &mut Ui,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
+    ) -> bool {
+        self.show_surface(ui, wgpu_render_state, render_runtime, false, true)
+    }
+
+    pub fn show_canvas_only_without_toolbar(
+        &mut self,
+        ui: &mut Ui,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
+    ) -> bool {
+        self.show_surface(ui, wgpu_render_state, render_runtime, false, false)
+    }
+
+    /// Draws the existing component library inside the shared left dock.
+    /// The library remains owned by the schematic document so search and
+    /// placement state stay intact while the shell changes around it.
+    pub fn show_library_panel(&mut self, ui: &mut Ui) {
+        self.asset_atlas.request_assets(ELECTRONICS_ASSETS);
+        self.asset_atlas.process(ui.ctx());
+        if self.show_library {
+            let rect = ui.available_rect_before_wrap();
+            self.draw_library(ui, rect);
+            ui.allocate_rect(rect, egui::Sense::hover());
+        }
+    }
+
+    pub fn library_visible(&self) -> bool {
+        self.show_library
+    }
+
+    /// Starts the same component placement flow used by the legacy library
+    /// cards. Retained navigator surfaces call this instead of duplicating
+    /// placement state.
+    pub fn begin_component_placement(&mut self, index: usize) {
+        if index < self.library.components.len() {
+            self.placement = PlacementMode::Component(index);
+            self.placement_rotation = 0.0;
+            self.wire_start = None;
+        }
+    }
+
+    pub fn set_select_tool_from_ui(&mut self) {
+        self.placement = PlacementMode::None;
+        self.wire_start = None;
+    }
+
+    pub fn set_wire_tool_from_ui(&mut self) {
+        self.placement = PlacementMode::Wire;
+        self.wire_start = None;
+    }
+
+    pub fn rotate_placement_from_ui(&mut self) {
+        self.rotate_placement_preview();
+    }
+
+    pub fn fit_view_from_ui(&mut self) {
+        self.offset = Vec2::new(260.0, 150.0);
+        self.zoom = 1.2;
+    }
+
+    pub fn toggle_library_from_ui(&mut self) {
+        self.show_library = !self.show_library;
+    }
+
+    pub fn wire_tool_active(&self) -> bool {
+        matches!(self.placement, PlacementMode::Wire)
+    }
+
+    pub fn select_tool_active(&self) -> bool {
+        matches!(self.placement, PlacementMode::None)
+    }
+
+    pub fn library_is_visible(&self) -> bool {
+        self.show_library
+    }
+
+    pub fn run_electrical_test_from_ui(&mut self) {
+        self.test_results = self.schematic.electrical_test();
+        self.show_test_results = true;
+    }
+
+    pub fn zoom_in_from_ui(&mut self) {
+        self.zoom = (self.zoom * 1.15).clamp(0.3, 4.0);
+    }
+
+    pub fn zoom_out_from_ui(&mut self) {
+        self.zoom = (self.zoom / 1.15).clamp(0.3, 4.0);
+    }
+
+    fn show_surface(
+        &mut self,
+        ui: &mut Ui,
+        wgpu_render_state: Option<&egui_wgpu::RenderState>,
+        render_runtime: &mut RenderRuntime,
+        show_embedded_library: bool,
+        draw_toolbar: bool,
+    ) -> bool {
         let mut changed = false;
 
         self.asset_atlas.request_assets(ELECTRONICS_ASSETS);
         self.asset_atlas.process(ui.ctx());
-        self.draw_toolbar(ui);
-        self.draw_tool_status_hint(ui);
+        if draw_toolbar {
+            changed |= self.draw_toolbar(ui);
+        }
 
         let available = ui.available_rect_before_wrap();
-        if self.show_library {
+        if show_embedded_library {
             let lib_width = 242.0;
             let lib_rect = Rect::from_min_size(
                 available.left_top(),
@@ -554,7 +671,8 @@ impl SchematicViewPanel {
         group
     }
 
-    fn draw_toolbar(&mut self, ui: &mut Ui) {
+    fn draw_toolbar(&mut self, ui: &mut Ui) -> bool {
+        let mut changed = false;
         let palette = electronics_palette(ui.visuals().dark_mode);
         let rect = ui.available_rect_before_wrap();
         let toolbar_rect = Rect::from_min_size(rect.left_top(), Vec2::new(rect.width(), 42.0));
@@ -587,6 +705,19 @@ impl SchematicViewPanel {
                     if self
                         .toolbar_icon_button(
                             ui,
+                            "toolbar/wire.png",
+                            matches!(self.placement, PlacementMode::Wire),
+                            t("app.wire_mode", self.lang),
+                        )
+                        .clicked()
+                    {
+                        self.placement = PlacementMode::Wire;
+                        self.wire_start = None;
+                    }
+
+                    if self
+                        .toolbar_icon_button(
+                            ui,
                             "toolbar/rotate.png",
                             false,
                             t("app.rotate_r", self.lang),
@@ -612,7 +743,7 @@ impl SchematicViewPanel {
                     if self
                         .toolbar_icon_button(
                             ui,
-                            "toolbar/grid.png",
+                            "toolbar/library.png",
                             self.show_library,
                             t("app.electronics_toggle_library", self.lang),
                         )
@@ -649,70 +780,45 @@ impl SchematicViewPanel {
                         self.context_menu = None;
                     }
 
-                    ui.add_space(10.0);
-
-                    ui.label(
-                        egui::RichText::new("2D")
-                            .size(11.0)
-                            .strong()
-                            .color(theme::ACCENT),
-                    );
-                    ui.label(
-                        egui::RichText::new("3D")
-                            .size(11.0)
-                            .color(palette.text_muted),
-                    );
+                    if self
+                        .toolbar_icon_button(
+                            ui,
+                            "toolbar/delete.png",
+                            false,
+                            t("app.delete_del", self.lang),
+                        )
+                        .clicked()
+                    {
+                        changed |= self.delete_selection();
+                    }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(message) = &self.export_message {
-                            ui.label(
-                                egui::RichText::new(message)
-                                    .size(10.0)
-                                    .color(palette.text_muted),
-                            );
+                        if self
+                            .toolbar_icon_button(
+                                ui,
+                                "toolbar/zoom-in.png",
+                                false,
+                                t("app.electronics_zoom_in", self.lang),
+                            )
+                            .clicked()
+                        {
+                            self.zoom = (self.zoom * 1.15).clamp(0.3, 4.0);
                         }
-
-                        let cache = self.cad_surface_host.cache_stats();
-                        if cache.frame_builds > 0 {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} {}/{}",
-                                    t("app.cad_surface_cache", self.lang),
-                                    cache.frame_cache_hits,
-                                    cache.frame_builds + cache.frame_cache_hits
-                                ))
-                                .size(10.0)
-                                .color(
-                                    if cache.last_frame_reused {
-                                        theme::ACCENT
-                                    } else {
-                                        palette.text_muted
-                                    },
-                                ),
-                            );
+                        if self
+                            .toolbar_icon_button(
+                                ui,
+                                "toolbar/zoom-out.png",
+                                false,
+                                t("app.electronics_zoom_out", self.lang),
+                            )
+                            .clicked()
+                        {
+                            self.zoom = (self.zoom / 1.15).clamp(0.3, 4.0);
                         }
-
                         ui.label(
-                            egui::RichText::new(self.render_runtime.status_badge())
+                            egui::RichText::new(format!("{:.0}%", self.zoom * 100.0))
                                 .size(10.0)
-                                .color(if self.render_runtime.is_gpu_active() {
-                                    theme::ACCENT
-                                } else {
-                                    palette.text_muted
-                                }),
-                        );
-
-                        let summary = format!(
-                            "{} {} | {} {}",
-                            t("app.schematic_components", self.lang),
-                            self.schematic.components.len(),
-                            t("app.schematic_wires", self.lang),
-                            self.schematic.wires.len()
-                        );
-                        ui.label(
-                            egui::RichText::new(summary)
-                                .size(11.0)
-                                .color(palette.text_muted),
+                                .color(palette.text_dim),
                         );
                     });
                 });
@@ -748,28 +854,8 @@ impl SchematicViewPanel {
                     .color(theme::ACCENT),
             );
         }
-    }
 
-    fn draw_tool_status_hint(&mut self, ui: &mut Ui) {
-        let hint = match &self.placement {
-            PlacementMode::None => {
-                if self.selection != SchematicSelection::None {
-                    t("schematic_hint_select_active", self.lang)
-                } else {
-                    t("schematic_hint_select", self.lang)
-                }
-            }
-            PlacementMode::Component(_) => t("schematic_hint_place", self.lang),
-            PlacementMode::Clipboard(_) => t("schematic_hint_paste", self.lang),
-            PlacementMode::Wire => t("schematic_hint_wire", self.lang),
-        };
-        ui.add_space(2.0);
-        ui.label(
-            egui::RichText::new(hint)
-                .size(10.0)
-                .color(egui::Color32::from_rgb(130, 130, 140)),
-        );
-        ui.add_space(4.0);
+        changed
     }
 
     fn draw_library(&mut self, ui: &mut Ui, rect: Rect) {
@@ -801,31 +887,64 @@ impl SchematicViewPanel {
             );
         });
 
-        let mut y = rect.top() + 76.0;
+        let list_rect = Rect::from_min_max(
+            Pos2::new(rect.left(), rect.top() + 70.0),
+            Pos2::new(rect.right(), rect.bottom() - 4.0),
+        );
         let query = self.library_search.trim().to_lowercase();
-        let mut last_category = String::new();
-        for idx in 0..self.library.components.len() {
-            let template = &self.library.components[idx];
-            if !query.is_empty()
-                && !template.name.to_lowercase().contains(&query)
-                && !template.category.to_lowercase().contains(&query)
-                && !template
-                    .keywords
-                    .iter()
-                    .any(|keyword| keyword.to_lowercase().contains(&query))
-            {
-                continue;
+        let filtered_indices: Vec<usize> = self
+            .library
+            .components
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, template)| {
+                let matches_query = query.is_empty()
+                    || template.name.to_lowercase().contains(&query)
+                    || template.category.to_lowercase().contains(&query)
+                    || template
+                        .keywords
+                        .iter()
+                        .any(|keyword| keyword.to_lowercase().contains(&query));
+                matches_query.then_some(idx)
+            })
+            .collect();
+        let mut categories = 0usize;
+        let mut last_category = "";
+        for index in &filtered_indices {
+            let category = self.library.components[*index].category.as_str();
+            if category != last_category {
+                categories += 1;
+                last_category = category;
             }
+        }
+        let content_height = categories as f32 * 16.0 + filtered_indices.len() as f32 * 44.0;
+        let max_scroll = (content_height - list_rect.height()).max(0.0);
+        let list_response = ui.allocate_rect(list_rect, egui::Sense::hover());
+        if list_response.hovered() {
+            let scroll = ui.input(|input| input.smooth_scroll_delta.y);
+            if scroll.abs() > f32::EPSILON {
+                self.library_scroll = (self.library_scroll - scroll * 0.65).clamp(0.0, max_scroll);
+            }
+        } else {
+            self.library_scroll = self.library_scroll.min(max_scroll);
+        }
 
+        let list_painter = painter.with_clip_rect(list_rect);
+        let mut y = list_rect.top() + 8.0 - self.library_scroll;
+        let mut last_category = String::new();
+        for idx in filtered_indices {
+            let template = &self.library.components[idx];
             if template.category != last_category {
                 last_category = template.category.clone();
-                painter.text(
-                    Pos2::new(rect.left() + 12.0, y),
-                    egui::Align2::LEFT_CENTER,
-                    last_category.to_uppercase(),
-                    egui::FontId::proportional(9.0),
-                    palette.text_muted,
-                );
+                if y >= list_rect.top() - 12.0 && y <= list_rect.bottom() + 12.0 {
+                    list_painter.text(
+                        Pos2::new(rect.left() + 12.0, y),
+                        egui::Align2::LEFT_CENTER,
+                        last_category.to_uppercase(),
+                        egui::FontId::proportional(9.0),
+                        palette.text_muted,
+                    );
+                }
                 y += 16.0;
             }
 
@@ -833,6 +952,10 @@ impl SchematicViewPanel {
                 Pos2::new(rect.left() + 10.0, y),
                 Vec2::new(rect.width() - 20.0, 38.0),
             );
+            if !item_rect.intersects(list_rect) {
+                y += 44.0;
+                continue;
+            }
             let response = ui.allocate_rect(item_rect, egui::Sense::click());
             let is_active =
                 matches!(self.placement, PlacementMode::Component(active_idx) if active_idx == idx);
@@ -844,8 +967,8 @@ impl SchematicViewPanel {
                 palette.card_bg
             };
 
-            painter.rect_filled(item_rect, 4.0, fill);
-            painter.rect_stroke(item_rect, 4.0, Stroke::new(1.0, palette.border));
+            list_painter.rect_filled(item_rect, 4.0, fill);
+            list_painter.rect_stroke(item_rect, 4.0, Stroke::new(1.0, palette.border));
 
             if let Some(icon) = template.icon_asset {
                 let icon_rect = Rect::from_center_size(
@@ -854,10 +977,10 @@ impl SchematicViewPanel {
                 );
                 let _ = self
                     .asset_atlas
-                    .paint(&painter, icon, icon_rect, Color32::WHITE);
+                    .paint(&list_painter, icon, icon_rect, Color32::WHITE);
             }
 
-            painter.text(
+            list_painter.text(
                 Pos2::new(item_rect.left() + 40.0, item_rect.top() + 12.0),
                 egui::Align2::LEFT_CENTER,
                 &template.name,
@@ -865,7 +988,7 @@ impl SchematicViewPanel {
                 palette.text,
             );
 
-            painter.text(
+            list_painter.text(
                 Pos2::new(item_rect.left() + 40.0, item_rect.top() + 27.0),
                 egui::Align2::LEFT_CENTER,
                 &template.description,
@@ -880,9 +1003,26 @@ impl SchematicViewPanel {
             }
 
             y += 44.0;
-            if y > rect.bottom() - 42.0 {
-                break;
-            }
+        }
+
+        if max_scroll > 0.0 {
+            let track = Rect::from_min_size(
+                Pos2::new(list_rect.right() - 5.0, list_rect.top() + 4.0),
+                Vec2::new(2.0, (list_rect.height() - 8.0).max(8.0)),
+            );
+            let thumb_height =
+                (track.height() * list_rect.height() / content_height).clamp(16.0, track.height());
+            let thumb_y =
+                track.top() + (track.height() - thumb_height) * (self.library_scroll / max_scroll);
+            painter.rect_filled(track, 1.0, palette.border);
+            painter.rect_filled(
+                Rect::from_min_size(
+                    Pos2::new(track.left(), thumb_y),
+                    Vec2::new(track.width(), thumb_height),
+                ),
+                1.0,
+                palette.text_muted,
+            );
         }
     }
 
@@ -925,11 +1065,16 @@ impl SchematicViewPanel {
 
 const ELECTRONICS_ASSETS: &[&str] = &[
     "toolbar/select.png",
+    "toolbar/wire.png",
     "toolbar/rotate.png",
     "toolbar/fit.png",
     "toolbar/grid.png",
+    "toolbar/library.png",
     "toolbar/play.png",
     "toolbar/export.png",
+    "toolbar/delete.png",
+    "toolbar/zoom-in.png",
+    "toolbar/zoom-out.png",
     "library/resistor.png",
     "library/capacitor.png",
     "library/led.png",

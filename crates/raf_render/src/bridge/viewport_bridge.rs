@@ -532,18 +532,19 @@ impl ViewportBridge {
         let Some(id) = selected else {
             return;
         };
-        let Some(node) = scene.get(id) else {
+        let Some(_node) = scene.get(id) else {
             return;
         };
 
         let world = scene.world_matrix(id);
         let center = world.col(3).truncate();
-        let max_extent = node
-            .scale
-            .x
-            .abs()
-            .max(node.scale.y.abs())
-            .max(node.scale.z.abs());
+        let max_extent = world
+            .x_axis
+            .truncate()
+            .length()
+            .max(world.y_axis.truncate().length())
+            .max(world.z_axis.truncate().length())
+            .max(0.0001);
 
         if is_2d {
             self.offset_2d = [center.x, center.y];

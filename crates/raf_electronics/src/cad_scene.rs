@@ -197,7 +197,7 @@ impl CadScene {
                 CadLayerKind::Schematic,
                 CadPickPriority::Wire,
                 vec![wire.start, wire.end],
-                [212, 119, 26, 255],
+                [112, 224, 136, 255],
             );
             object.net = Some(wire.net.clone());
             scene.objects.push(object);
