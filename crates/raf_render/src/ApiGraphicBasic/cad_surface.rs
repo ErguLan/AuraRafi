@@ -18,6 +18,7 @@ pub struct CadSurfaceOptions {
     pub grid_color: [u8; 4],
     pub major_grid_color: [u8; 4],
     pub axis_color: [u8; 4],
+    pub symbol_color: [u8; 4],
     pub trace_width: f32,
     pub wire_width: f32,
     /// Explicit render-object identities, for objects without a model UUID.
@@ -40,6 +41,7 @@ impl Default for CadSurfaceOptions {
             grid_color: [180, 186, 200, 14],
             major_grid_color: [220, 226, 240, 30],
             axis_color: [212, 119, 26, 46],
+            symbol_color: [245, 245, 246, 255],
             trace_width: 3.0,
             wire_width: 2.0,
             selected_object_ids: Vec::new(),
@@ -114,8 +116,19 @@ pub fn build_cad_surface_frame(
     let mut sorted = scene.objects.iter().collect::<Vec<_>>();
     sorted.sort_by_key(|object| (layer_order(object.layer), object.pick_priority));
 
+    let mut visible_entities = 0u32;
     for object in sorted {
-        record_object(object, quad_id, &options, &mut commands);
+        if !cad_object_intersects_bounds(object, bounds) {
+            continue;
+        }
+        visible_entities = visible_entities.saturating_add(1);
+        record_object(
+            object,
+            quad_id,
+            &options,
+            &mut commands,
+            scene.surface == raf_electronics::CadSurfaceKind::Schematic,
+        );
         if object_is_selected(object, &options) {
             record_selection_outline(object, &options, &mut commands);
         }
@@ -143,7 +156,7 @@ pub fn build_cad_surface_frame(
             height,
             stats: FrameStats {
                 total_entities: scene.objects.len() as u32,
-                visible_entities: scene.objects.len() as u32,
+                visible_entities,
                 triangles_rendered: 0,
                 triangles_culled: 0,
                 ..FrameStats::default()
@@ -152,6 +165,56 @@ pub fn build_cad_surface_frame(
         objects,
         hit_regions,
     }
+}
+
+/// Reject CAD objects that cannot contribute to the current presentation.
+///
+/// Schematic and PCB documents can contain many off-screen objects. Keeping
+/// them in the model is required for editing, but recording their geometry and
+/// hit regions every frame is wasted work on low-end machines. The test is
+/// intentionally conservative: a polyline uses its full bounds, so a cable
+/// crossing the viewport is never culled accidentally.
+fn cad_object_intersects_bounds(object: &CadObject, bounds: [f32; 4]) -> bool {
+    let [left, right, top, bottom] = bounds;
+    if right <= left || bottom <= top {
+        return false;
+    }
+
+    let mut bounds: Option<(glam::Vec2, glam::Vec2)> = object.rect.map(|rect| {
+        let half = rect.size.abs() * 0.5;
+        (rect.center - half, rect.center + half)
+    });
+
+    let mut include_point = |point: glam::Vec2| {
+        if let Some((min, max)) = &mut bounds {
+            *min = min.min(point);
+            *max = max.max(point);
+        } else {
+            bounds = Some((point, point));
+        }
+    };
+    for point in &object.points {
+        include_point(*point);
+    }
+    for path in &object.line_paths {
+        for point in path {
+            include_point(*point);
+        }
+    }
+
+    let Some((mut min, mut max)) = bounds else {
+        return false;
+    };
+
+    let pad = match object.kind {
+        CadObjectKind::Trace => 3.0,
+        CadObjectKind::Airwire => 6.0,
+        CadObjectKind::Pin | CadObjectKind::Pad => 6.0,
+        _ => 2.0,
+    };
+    min -= glam::Vec2::splat(pad);
+    max += glam::Vec2::splat(pad);
+    max.x >= left && min.x <= right && max.y >= top && min.y <= bottom
 }
 
 fn object_is_selected(object: &CadObject, options: &CadSurfaceOptions) -> bool {
@@ -263,22 +326,30 @@ fn record_object(
     quad_id: usize,
     options: &CadSurfaceOptions,
     commands: &mut BasicCommandList,
+    schematic: bool,
 ) {
     if object.kind == CadObjectKind::DrcMarker && !options.show_drc_markers {
         return;
     }
 
     let z = object_z(object);
-    if let Some(rect) = object.rect {
-        let fill = object_fill(object);
-        record_rect(commands, quad_id, rect, z, fill);
-        record_border(
-            commands,
-            rect,
-            z - 0.01,
-            object_border_width(object),
-            object_border(object),
-        );
+    if !schematic
+        || !matches!(
+            object.kind,
+            CadObjectKind::Component | CadObjectKind::Pin | CadObjectKind::NetLabel
+        )
+    {
+        if let Some(rect) = object.rect {
+            let fill = object_fill(object);
+            record_rect(commands, quad_id, rect, z, fill);
+            record_border(
+                commands,
+                rect,
+                z - 0.01,
+                object_border_width(object),
+                object_border(object),
+            );
+        }
     }
 
     if object.points.len() >= 2 {
@@ -300,7 +371,30 @@ fn record_object(
         }
     }
 
-    if options.show_labels {
+    // Schematic symbols are independent strokes, not one connected path.
+    // Keep them in the same backend-neutral line stream as wires so AGB/WGPU
+    // can batch them without the editor repainting the static geometry.
+    for path in &object.line_paths {
+        for segment in path.windows(2) {
+            record_line(
+                commands,
+                segment[0],
+                segment[1],
+                z - 0.015,
+                2.0,
+                if schematic {
+                    options.symbol_color
+                } else {
+                    object_line_color(object)
+                },
+            );
+        }
+    }
+
+    // Text is supplied by the retained editor overlay for schematics. AGB
+    // keeps the CAD scene geometry here; drawing opaque placeholder rectangles
+    // for labels made the schematic look like a stack of cards and hid text.
+    if !schematic && options.show_labels {
         record_label_placeholder(object, quad_id, commands, z - 0.03);
     }
 }
@@ -471,7 +565,12 @@ fn object_border_width(object: &CadObject) -> f32 {
 }
 
 fn object_z(object: &CadObject) -> f32 {
-    -0.01 * layer_order(object.layer) as f32 - 0.001 * object.pick_priority as i32 as f32
+    // The CAD canvas uses an orthographic projection with a clip-space depth
+    // range of 0..=1. Negative z values are clipped before the line shader
+    // runs, which made GPU symbols disappear while the egui hover overlay
+    // still made them look intermittently present.
+    (0.82 - 0.05 * layer_order(object.layer) as f32 - 0.0005 * object.pick_priority as i32 as f32)
+        .clamp(0.05, 0.95)
 }
 
 fn layer_order(layer: CadLayerKind) -> u8 {
@@ -568,7 +667,16 @@ mod tests {
                 .and_then(|region| region.source_id.as_deref()),
             Some(resistor_id_text.as_str())
         );
-        assert!(frame.frame.commands.commands().len() > scene.objects.len());
+        assert!(!frame.frame.commands.commands().is_empty());
+        assert!(frame.frame.commands.commands().iter().any(|command| {
+            matches!(
+                command,
+                crate::api_graphic_basic::command_list::GraphicCommand::DrawLineBatch {
+                    lines,
+                    ..
+                } if lines.len() >= 8
+            )
+        }));
         assert!(frame.frame.commands.commands().iter().any(|command| {
             matches!(
                 command,
@@ -602,5 +710,112 @@ mod tests {
                     } if lines.iter().any(|line| line.color == [255, 172, 64, 255])
                 )
             }));
+    }
+
+    #[test]
+    fn cad_surface_culls_offscreen_objects_before_recording_geometry() {
+        let mut schematic = Schematic::new("CAD Culling");
+        let mut visible = ElectronicComponent::resistor("10k");
+        visible.position = Vec2::new(40.0, 40.0);
+        let mut offscreen = ElectronicComponent::resistor("1M");
+        offscreen.position = Vec2::new(900.0, 900.0);
+        schematic.add_component(visible);
+        schematic.add_component(offscreen);
+
+        let scene = CadScene::from_schematic(&schematic);
+        let frame = build_cad_surface_frame(
+            &scene,
+            160,
+            120,
+            CadSurfaceOptions {
+                world_bounds: Some([0.0, 160.0, 0.0, 120.0]),
+                ..CadSurfaceOptions::default()
+            },
+        );
+
+        assert!(frame.objects.iter().all(|object| object
+            .rect
+            .map(|rect| rect.center.x < 200.0)
+            .unwrap_or(true)));
+        assert_eq!(frame.frame.stats.visible_entities, 3);
+    }
+
+    #[test]
+    fn cad_surface_keeps_every_visible_schematic_wire_in_the_line_stream() {
+        let mut schematic = Schematic::new("Wire visibility");
+        schematic.add_wire(Vec2::new(10.0, 10.0), Vec2::new(90.0, 10.0), "N1");
+        schematic.add_wire(Vec2::new(20.0, 20.0), Vec2::new(90.0, 70.0), "N2");
+        schematic.add_wire(Vec2::new(30.0, 90.0), Vec2::new(110.0, 90.0), "N3");
+
+        let scene = CadScene::from_schematic(&schematic);
+        let frame = build_cad_surface_frame(
+            &scene,
+            160,
+            120,
+            CadSurfaceOptions {
+                world_bounds: Some([0.0, 160.0, 0.0, 120.0]),
+                ..CadSurfaceOptions::default()
+            },
+        );
+
+        let wire_segments = frame
+            .frame
+            .commands
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                crate::api_graphic_basic::command_list::GraphicCommand::DrawLineBatch {
+                    lines,
+                    ..
+                } => Some(lines),
+                _ => None,
+            })
+            .flatten()
+            .filter(|line| line.color == [112, 224, 136, 255])
+            .count();
+
+        // The diagonal wire is represented by the same deterministic elbow
+        // route used by the editor, so it contributes two GPU segments.
+        assert_eq!(wire_segments, 4);
+    }
+
+    #[test]
+    fn cad_surface_keeps_schematic_symbols_in_visible_depth_range() {
+        let mut schematic = Schematic::new("Symbol depth");
+        let mut resistor = ElectronicComponent::resistor("10k");
+        resistor.position = Vec2::new(80.0, 60.0);
+        schematic.add_component(resistor);
+
+        let scene = CadScene::from_schematic(&schematic);
+        let frame = build_cad_surface_frame(
+            &scene,
+            160,
+            120,
+            CadSurfaceOptions {
+                world_bounds: Some([0.0, 160.0, 0.0, 120.0]),
+                ..CadSurfaceOptions::default()
+            },
+        );
+
+        let symbol_lines = frame
+            .frame
+            .commands
+            .commands()
+            .iter()
+            .filter_map(|command| match command {
+                crate::api_graphic_basic::command_list::GraphicCommand::DrawLineBatch {
+                    lines,
+                    ..
+                } => Some(lines),
+                _ => None,
+            })
+            .flatten()
+            .filter(|line| line.color == [245, 245, 246, 255])
+            .collect::<Vec<_>>();
+
+        assert_eq!(symbol_lines.len(), 8);
+        assert!(symbol_lines.iter().all(|line| {
+            (0.0..=1.0).contains(&line.start.z) && (0.0..=1.0).contains(&line.end.z)
+        }));
     }
 }

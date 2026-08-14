@@ -484,12 +484,36 @@ struct GpuLineVertex {
 
 impl GpuLineVertex {
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
-        const ATTRS: [wgpu::VertexAttribute; 5] = wgpu::vertex_attr_array![
-            0 => Float32x3,
-            1 => Float32x3,
-            2 => Float32x4,
-            3 => Float32,
-            4 => Float32,
+        // `GpuLineVertex` deliberately pads each vec3 to a 16-byte boundary.
+        // `vertex_attr_array!` packs attributes back-to-back and therefore
+        // cannot describe this struct: it would read color bytes as width and
+        // alpha as depth bias, clipping every opaque CAD line on the GPU.
+        const ATTRS: [wgpu::VertexAttribute; 5] = [
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 0,
+                shader_location: 0,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x3,
+                offset: 16,
+                shader_location: 1,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 32,
+                shader_location: 2,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32,
+                offset: 48,
+                shader_location: 3,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32,
+                offset: 52,
+                shader_location: 4,
+            },
         ];
 
         wgpu::VertexBufferLayout {
@@ -1312,5 +1336,22 @@ mod tests {
         assert!((clear.r - f64::from(color[0])).abs() < f64::EPSILON);
         assert!((clear.g - f64::from(color[1])).abs() < f64::EPSILON);
         assert!((clear.b - f64::from(color[2])).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn line_vertex_layout_matches_the_padded_gpu_struct() {
+        let layout = GpuLineVertex::desc();
+        let offsets = layout
+            .attributes
+            .iter()
+            .map(|attribute| attribute.offset)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            layout.array_stride,
+            std::mem::size_of::<GpuLineVertex>() as u64
+        );
+        assert_eq!(offsets, vec![0, 16, 32, 48, 52]);
+        assert_eq!(layout.attributes[4].shader_location, 4);
     }
 }

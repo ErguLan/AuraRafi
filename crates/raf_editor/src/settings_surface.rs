@@ -1,25 +1,28 @@
-//! Retained RafUI document for global engine settings.
+//! RafUI presentation for engine-wide settings.
 //!
-//! This module defines presentation and typed control keys only. Persistence,
-//! validation, and side effects stay in `SettingsSurfaceHost` and the app.
+//! This module deliberately owns only composition. Draft state, validation and
+//! persistence stay in SettingsSurfaceHost.
 
-use raf_core::ai::{AgentMode, AiProvider, AiProviderConfig};
+use raf_core::ai::{AgentMode, AiProvider};
 use raf_core::config::{
     EngineSettings, Language, RenderExecutionPolicy, RenderQuality, ScriptLanguage, TargetPlatform,
-    Theme, ViewportRenderMode,
+    Theme, ViewportRenderMode, AGENT_MESSAGE_PAGE_SIZE_MAX, AGENT_MESSAGE_PAGE_SIZE_MIN,
 };
-use raf_core::i18n::t;
-use raf_core::units::DisplayUnit;
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAction, UiAlign, UiCompactMode, UiEventBinding, UiEventKind, UiFlow,
-    UiJustify, UiLayout, UiNode, UiNodeKind, UiOverflow, UiRange, UiResponsiveRule, UiScrollAxis,
+    UiJustify, UiLayout, UiNode, UiNodeKind, UiOverflow, UiRange, UiScrollAxis, UiSizeMode,
     UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet,
     UiSurface, UiTextInput, UiTextStyle, UiToggle,
 };
 
-const CONTROL_HEIGHT: f32 = 34.0;
-const RANGE_WIDTH: f32 = 244.0;
-const SELECTED_TEXT_ORANGE: [u8; 4] = [232, 133, 28, 255];
+const CONTROL_WIDTH: f32 = 232.0;
+const SEGMENT_MIN_WIDTH: f32 = 76.0;
+const ACCENT: [u8; 4] = [232, 133, 28, 255];
+const AI_CARD_GAP: f32 = 10.0;
+const AI_SUMMARY_CARD_HEIGHT: f32 = 310.0;
+const AI_PROVIDER_CARD_HEIGHT: f32 = 286.0;
+const AI_SHORTCUT_HEADER_HEIGHT: f32 = 52.0;
+const AI_SHORTCUT_ROW_HEIGHT: f32 = 38.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
@@ -49,7 +52,7 @@ impl SettingsSection {
         Self::Platform,
     ];
 
-    pub fn command(self) -> &'static str {
+    pub const fn command(self) -> &'static str {
         match self {
             Self::Appearance => "settings.section.appearance",
             Self::Performance => "settings.section.performance",
@@ -61,7 +64,7 @@ impl SettingsSection {
         }
     }
 
-    pub fn key(self) -> &'static str {
+    pub const fn key(self) -> &'static str {
         match self {
             Self::Appearance => "settings.appearance",
             Self::Performance => "settings.performance",
@@ -70,6 +73,18 @@ impl SettingsSection {
             Self::Scripting => "settings.scripting",
             Self::Ai => "settings.ai_providers",
             Self::Platform => "settings.target_platform",
+        }
+    }
+
+    pub const fn help_key(self) -> &'static str {
+        match self {
+            Self::Appearance => "settings.surface.help.appearance",
+            Self::Performance => "settings.surface.help.performance",
+            Self::Editor => "settings.surface.help.editor",
+            Self::Viewport => "settings.surface.help.viewport",
+            Self::Scripting => "settings.surface.help.scripting",
+            Self::Ai => "settings.surface.help.ai",
+            Self::Platform => "settings.surface.help.platform",
         }
     }
 
@@ -90,29 +105,25 @@ pub fn provider_id(provider: AiProvider) -> &'static str {
     }
 }
 
-pub fn provider_from_id(id: &str) -> Option<AiProvider> {
-    match id {
-        "puerto" => Some(AiProvider::Puerto),
-        "openrouter" => Some(AiProvider::OpenRouter),
-        "openai" => Some(AiProvider::OpenAI),
-        "genai" => Some(AiProvider::GenAI),
-        "claude" => Some(AiProvider::Claude),
-        _ => None,
-    }
-}
-
 pub fn build_settings_surface(
     palette: StudioUiPalette,
     settings: &EngineSettings,
     section: SettingsSection,
-    visible_api_keys: &[AiProvider],
 ) -> UiSurface {
-    let tokens = palette.tokens();
+    build_settings_surface_with_api_keys(palette, settings, section, &[])
+}
+
+pub fn build_settings_surface_with_api_keys(
+    palette: StudioUiPalette,
+    settings: &EngineSettings,
+    section: SettingsSection,
+    revealed_api_keys: &[AiProvider],
+) -> UiSurface {
     let root = UiNode::new("settings.root", UiNodeKind::Root)
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             compact: UiCompactMode::Stack,
-            responsive: vec![UiResponsiveRule {
+            responsive: vec![raf_ui::UiResponsiveRule {
                 max_width: 760.0,
                 flow: Some(UiFlow::Column),
                 basis: None,
@@ -124,181 +135,179 @@ pub fn build_settings_surface(
             ..UiLayout::fill(UiFlow::Row)
         })
         .with_style(palette.root_style())
-        .with_child(settings_navigation(palette, section))
-        .with_child(settings_workspace(
-            palette,
-            settings,
-            section,
-            visible_api_keys,
-        ));
+        .with_child(navigation(palette, section))
+        .with_child(workspace(palette, settings, section, revealed_api_keys));
 
-    let mut surface = UiSurface::new("studio.settings", palette, root);
-    surface.style_sheet = settings_style_sheet(palette, tokens);
+    let mut surface = UiSurface::new("editor.engine-settings", palette, root);
+    surface.style_sheet = settings_style_sheet(palette);
     surface
 }
 
-fn settings_navigation(palette: StudioUiPalette, active: SettingsSection) -> UiNode {
+fn navigation(palette: StudioUiPalette, active: SettingsSection) -> UiNode {
     let tokens = palette.tokens();
-    let mut navigation = UiNode::new("settings.navigation", UiNodeKind::Panel)
+    let mut node = UiNode::new("settings.navigation", UiNodeKind::Panel)
         .with_class("settings-navigation")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             basis: [224.0, 0.0],
-            min_size: [204.0, 0.0],
+            min_size: [0.0, 0.0],
             padding: UiSpacing::same(16.0),
             gap: 4.0,
             overflow: UiOverflow::Clip,
-            responsive: vec![UiResponsiveRule {
+            responsive: vec![raf_ui::UiResponsiveRule {
                 max_width: 760.0,
-                flow: Some(UiFlow::RowWrap),
-                basis: Some([0.0, 154.0]),
+                flow: Some(UiFlow::Column),
+                basis: Some([0.0, 0.0]),
                 padding: Some(UiSpacing::same(12.0)),
-                gap: Some(5.0),
-                compact: Some(UiCompactMode::Wrap),
+                gap: Some(4.0),
+                compact: Some(UiCompactMode::Stack),
                 grid_columns: None,
             }],
             ..UiLayout::default()
         })
         .with_child(
-            UiNode::new("settings.brand", UiNodeKind::Label)
+            UiNode::new("settings.navigation.title", UiNodeKind::Label)
                 .with_text_key("app.engine_settings_title")
                 .with_text_style(UiTextStyle::panel_title(tokens.text))
                 .with_layout(UiLayout::fixed(0.0, 26.0)),
         )
         .with_child(
-            UiNode::new("settings.brand-detail", UiNodeKind::Label)
+            UiNode::new("settings.navigation.subtitle", UiNodeKind::Label)
                 .with_text_key("settings.surface.subtitle")
                 .with_text_style(UiTextStyle::body(tokens.text_muted))
-                .with_layout(UiLayout::fixed(0.0, 42.0)),
+                .with_layout(UiLayout::fixed(0.0, 34.0)),
         )
         .with_child(
-            UiNode::new("settings.navigation-divider", UiNodeKind::Separator)
+            UiNode::new("settings.navigation.divider", UiNodeKind::Separator)
                 .with_layout(UiLayout::fixed(0.0, 1.0)),
         );
 
-    for section in SettingsSection::ALL {
-        let class = if section == active {
-            "settings-nav-active"
-        } else {
-            "settings-nav-button"
-        };
-        navigation = navigation.with_child(
+    for item in SettingsSection::ALL {
+        node = node.with_child(
             UiNode::new(
-                format!("settings.nav.{}", section.key()),
+                format!("settings.navigation.{}", item.key()),
                 UiNodeKind::Button,
             )
-            .with_text_key(section.key())
-            .with_text_style(UiTextStyle::button(if section == active {
-                SELECTED_TEXT_ORANGE
+            .with_class(if item == active {
+                "settings-nav-active"
             } else {
-                tokens.text
+                "settings-nav-button"
+            })
+            .with_layout(UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill))
+            .with_text_key(item.key())
+            .with_text_style(UiTextStyle::button(if item == active {
+                ACCENT
+            } else {
+                tokens.text_muted
             }))
-            .with_class(class)
-            .with_layout(UiLayout::fixed(0.0, 34.0))
             .focusable()
-            .with_event(UiEventBinding::command(
-                UiEventKind::Click,
-                section.command(),
-            )),
+            .with_event(UiEventBinding::command(UiEventKind::Click, item.command())),
         );
     }
 
-    navigation
-        .with_child(
-            UiNode::new("settings.navigation-spacer", UiNodeKind::Panel)
-                .with_layout(UiLayout {
-                    grow: 1.0,
-                    ..UiLayout::default()
-                })
-                .with_style(UiStyle::transparent()),
-        )
-        .with_child(
-            UiNode::new("settings.navigation-hint", UiNodeKind::Label)
-                .with_text_key("settings.surface.draft_hint")
-                .with_text_style(UiTextStyle::body(tokens.text_muted))
-                .with_layout(UiLayout::fixed(0.0, 40.0)),
-        )
+    node.with_child(
+        UiNode::new("settings.navigation.spacer", UiNodeKind::Panel).with_layout(UiLayout {
+            grow: 1.0,
+            ..UiLayout::default()
+        }),
+    )
 }
 
-fn settings_workspace(
+fn workspace(
     palette: StudioUiPalette,
     settings: &EngineSettings,
     section: SettingsSection,
-    visible_api_keys: &[AiProvider],
+    revealed_api_keys: &[AiProvider],
 ) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new("settings.workspace", UiNodeKind::Panel)
         .with_class("settings-workspace")
-        .with_layout(UiLayout {
-            flow: UiFlow::Column,
-            grow: 1.0,
-            ..UiLayout::fill(UiFlow::Column)
-        })
+        .with_layout(UiLayout::fill(UiFlow::Column))
         .with_child(
-            UiNode::new("settings.header", UiNodeKind::Toolbar)
-                .with_class("settings-header")
+            UiNode::new("settings.workspace.header", UiNodeKind::Toolbar)
                 .with_layout(UiLayout {
                     flow: UiFlow::Column,
-                    padding: UiSpacing::xy(28.0, 15.0),
                     gap: 3.0,
-                    ..UiLayout::fixed(0.0, 76.0)
+                    padding: UiSpacing::xy(28.0, 15.0),
+                    responsive: vec![raf_ui::UiResponsiveRule {
+                        max_width: 760.0,
+                        flow: Some(UiFlow::Column),
+                        basis: Some([0.0, 76.0]),
+                        padding: Some(UiSpacing::xy(12.0, 12.0)),
+                        gap: Some(3.0),
+                        compact: Some(UiCompactMode::Stack),
+                        grid_columns: None,
+                    }],
+                    ..UiLayout::fixed(0.0, 76.0).with_width_mode(UiSizeMode::Fill)
                 })
                 .with_child(
-                    UiNode::new("settings.header-title", UiNodeKind::Label)
+                    UiNode::new("settings.workspace.title", UiNodeKind::Label)
                         .with_text_key(section.key())
                         .with_text_style(UiTextStyle::panel_title(tokens.text))
                         .with_layout(UiLayout::fixed(0.0, 22.0)),
                 )
                 .with_child(
-                    UiNode::new("settings.header-help", UiNodeKind::Label)
-                        .with_text_key(section_help_key(section))
+                    UiNode::new("settings.workspace.help", UiNodeKind::Label)
+                        .with_text_key(section.help_key())
                         .with_text_style(UiTextStyle::body(tokens.text_muted))
                         .with_layout(UiLayout::fixed(0.0, 18.0)),
                 ),
         )
         .with_child(
-            UiNode::scroll_view("settings.content", UiScrollAxis::Vertical)
+            UiNode::scroll_view("settings.workspace.scroll", UiScrollAxis::Vertical)
                 .with_layout(UiLayout {
                     flow: UiFlow::Column,
                     grow: 1.0,
-                    padding: UiSpacing::xy(30.0, 24.0),
+                    padding: UiSpacing::xy(28.0, 22.0),
                     overflow: UiOverflow::ScrollY,
+                    responsive: vec![raf_ui::UiResponsiveRule {
+                        max_width: 760.0,
+                        flow: Some(UiFlow::Column),
+                        basis: Some([0.0, 0.0]),
+                        padding: Some(UiSpacing::xy(12.0, 14.0)),
+                        gap: Some(10.0),
+                        compact: Some(UiCompactMode::Stack),
+                        grid_columns: None,
+                    }],
                     ..UiLayout::fill(UiFlow::Column)
                 })
-                .with_style(UiStyle::transparent())
                 .with_child(section_content(
                     palette,
                     settings,
                     section,
-                    visible_api_keys,
+                    revealed_api_keys,
                 )),
         )
         .with_child(
-            UiNode::new("settings.footer", UiNodeKind::Toolbar)
-                .with_class("settings-footer")
+            UiNode::new("settings.workspace.footer", UiNodeKind::Toolbar)
                 .with_layout(UiLayout {
                     flow: UiFlow::Row,
                     justify_content: UiJustify::End,
                     align_items: UiAlign::Center,
-                    padding: UiSpacing::xy(28.0, 0.0),
                     gap: 8.0,
-                    ..UiLayout::fixed(0.0, 62.0)
+                    padding: UiSpacing::xy(28.0, 0.0),
+                    responsive: vec![raf_ui::UiResponsiveRule {
+                        max_width: 760.0,
+                        flow: Some(UiFlow::Row),
+                        basis: Some([0.0, 58.0]),
+                        padding: Some(UiSpacing::xy(12.0, 0.0)),
+                        gap: Some(6.0),
+                        compact: Some(UiCompactMode::Wrap),
+                        grid_columns: None,
+                    }],
+                    ..UiLayout::fixed(0.0, 62.0).with_width_mode(UiSizeMode::Fill)
                 })
-                .with_child(command_button(
+                .with_child(action_button(
                     "settings.cancel",
                     "app.cancel",
                     "settings.cancel",
-                    94.0,
-                    "settings-secondary-button",
-                    tokens.text,
+                    false,
                 ))
-                .with_child(command_button(
+                .with_child(action_button(
                     "settings.save",
                     "app.save_and_close",
                     "settings.save",
-                    134.0,
-                    "settings-primary-button",
-                    SELECTED_TEXT_ORANGE,
+                    true,
                 )),
         )
 }
@@ -307,89 +316,79 @@ fn section_content(
     palette: StudioUiPalette,
     settings: &EngineSettings,
     section: SettingsSection,
-    visible_api_keys: &[AiProvider],
+    revealed_api_keys: &[AiProvider],
 ) -> UiNode {
     match section {
-        SettingsSection::Appearance => appearance_section(palette, settings),
-        SettingsSection::Performance => performance_section(palette, settings),
-        SettingsSection::Editor => editor_section(palette, settings),
-        SettingsSection::Viewport => viewport_section(palette, settings),
-        SettingsSection::Scripting => scripting_section(palette, settings),
-        SettingsSection::Ai => ai_section(palette, settings, visible_api_keys),
-        SettingsSection::Platform => platform_section(palette, settings),
+        SettingsSection::Appearance => appearance(palette, settings),
+        SettingsSection::Performance => performance(palette, settings),
+        SettingsSection::Editor => editor(palette, settings),
+        SettingsSection::Viewport => viewport(palette, settings),
+        SettingsSection::Scripting => scripting(palette, settings),
+        SettingsSection::Ai => ai(palette, settings, revealed_api_keys),
+        SettingsSection::Platform => platform(palette, settings),
     }
 }
 
-fn appearance_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
-    let tokens = palette.tokens();
-    section_frame(palette, "settings.appearance")
+fn appearance(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
+    card(palette, "settings.appearance")
         .with_child(toggle_row(
             palette,
             "settings.simple-mode",
             "settings.simple_mode",
-            Some("settings.simple_mode_desc"),
-            "settings.simple-mode",
             settings.simple_mode,
         ))
         .with_child(segment_row(
             palette,
             "settings.theme",
-            None,
+            "settings.theme",
             &[
-                segment(
-                    "settings.theme.dark",
+                (
                     "settings.value.dark",
+                    "settings.theme.dark",
                     settings.theme == Theme::Dark,
                 ),
-                segment(
-                    "settings.theme.light",
+                (
                     "settings.value.light",
+                    "settings.theme.light",
                     settings.theme == Theme::Light,
                 ),
-                segment(
-                    "settings.theme.system",
+                (
                     "settings.value.system",
+                    "settings.theme.system",
                     settings.theme == Theme::System,
                 ),
             ],
         ))
         .with_child(range_row(
             palette,
-            "settings.theme_experimental",
-            Some("settings.theme_experimental_desc"),
             "settings.theme-experimental",
+            "settings.theme_experimental",
             settings.theme_experimental,
             0.0,
             100.0,
             1.0,
             format!("{:.0}%", settings.theme_experimental),
-            false,
         ))
         .with_child(range_row(
             palette,
             "settings.font_size",
-            None,
-            "settings.font-size",
+            "settings.font_size",
             settings.font_size,
             10.0,
             24.0,
             1.0,
             format!("{:.0} px", settings.font_size),
-            false,
         ))
         .with_child(toggle_row(
             palette,
             "settings.auto-ui-scale",
             "settings.auto_ui_scale",
-            Some("settings.auto_ui_scale_desc"),
-            "settings.auto-ui-scale",
             settings.auto_ui_scale,
         ))
-        .with_child(range_row(
+        .with_child(range_row_disabled(
             palette,
             "settings.ui_scale",
-            None,
-            "settings.ui-scale",
+            "settings.ui_scale",
             settings.ui_scale,
             0.5,
             3.0,
@@ -400,53 +399,47 @@ fn appearance_section(palette: StudioUiPalette, settings: &EngineSettings) -> Ui
         .with_child(segment_row(
             palette,
             "settings.language",
-            None,
+            "settings.language",
             &[
-                segment(
-                    "settings.language.english",
+                (
                     "settings.value.english",
+                    "settings.language.english",
                     settings.language == Language::English,
                 ),
-                segment(
-                    "settings.language.spanish",
+                (
                     "settings.value.spanish",
+                    "settings.language.spanish",
                     settings.language == Language::Spanish,
                 ),
             ],
         ))
-        .with_child(
-            UiNode::new("settings.appearance-footnote", UiNodeKind::Label)
-                .with_text_key("settings.surface.theme_preview")
-                .with_text_style(UiTextStyle::body(tokens.text_muted))
-                .with_layout(UiLayout::fixed(0.0, 26.0)),
-        )
 }
 
-fn performance_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
-    section_frame(palette, "settings.performance")
+fn performance(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
+    card(palette, "settings.performance")
         .with_child(segment_row(
             palette,
             "settings.quality",
-            None,
+            "settings.quality",
             &[
-                segment(
-                    "settings.quality.potato",
+                (
                     "settings.value.potato",
+                    "settings.quality.potato",
                     settings.render_quality == RenderQuality::Potato,
                 ),
-                segment(
-                    "settings.quality.low",
+                (
                     "settings.value.low",
+                    "settings.quality.low",
                     settings.render_quality == RenderQuality::Low,
                 ),
-                segment(
-                    "settings.quality.medium",
+                (
                     "settings.value.medium",
+                    "settings.quality.medium",
                     settings.render_quality == RenderQuality::Medium,
                 ),
-                segment(
-                    "settings.quality.high",
+                (
                     "settings.value.high",
+                    "settings.quality.high",
                     settings.render_quality == RenderQuality::High,
                 ),
             ],
@@ -454,62 +447,28 @@ fn performance_section(palette: StudioUiPalette, settings: &EngineSettings) -> U
         .with_child(segment_row(
             palette,
             "settings.render_execution_policy",
-            Some("settings.render_execution_policy_desc"),
+            "settings.render_execution_policy",
             &[
-                segment(
-                    "settings.policy.auto",
+                (
                     "settings.render_execution_policy.auto",
+                    "settings.policy.auto",
                     settings.render_execution_policy == RenderExecutionPolicy::Auto,
                 ),
-                segment(
-                    "settings.policy.cpu",
+                (
                     "settings.render_execution_policy.cpu_only",
+                    "settings.policy.cpu_only",
                     settings.render_execution_policy == RenderExecutionPolicy::CpuOnly,
                 ),
-                segment(
-                    "settings.policy.gpu",
+                (
                     "settings.render_execution_policy.gpu_preferred",
+                    "settings.policy.gpu_preferred",
                     settings.render_execution_policy == RenderExecutionPolicy::GpuPreferred,
                 ),
             ],
         ))
         .with_child(toggle_row(
             palette,
-            "settings.fps-unlimited",
-            "settings.fps_unlimited",
-            None,
-            "settings.fps-unlimited",
-            settings.fps_limit == 0,
-        ))
-        .with_child(range_row(
-            palette,
-            "settings.fps_limit",
-            None,
-            "settings.fps-limit",
-            settings.fps_limit.max(15) as f32,
-            15.0,
-            240.0,
-            1.0,
-            if settings.fps_limit == 0 {
-                t("settings.fps_unlimited", settings.language)
-            } else {
-                format!("{} fps", settings.fps_limit)
-            },
-            settings.fps_limit == 0,
-        ))
-        .with_child(toggle_row(
-            palette,
-            "settings.show-fps-counter",
-            "settings.show_fps_counter",
-            None,
-            "settings.show-fps-counter",
-            settings.show_fps_counter,
-        ))
-        .with_child(toggle_row(
-            palette,
             "settings.vsync",
-            "settings.vsync",
-            None,
             "settings.vsync",
             settings.vsync,
         ))
@@ -517,35 +476,51 @@ fn performance_section(palette: StudioUiPalette, settings: &EngineSettings) -> U
             palette,
             "settings.multithreading",
             "settings.multithreading",
-            None,
-            "settings.multithreading",
             settings.multithreading,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.show-fps-counter",
+            "settings.show_fps_counter",
+            settings.show_fps_counter,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.fps-unlimited",
+            "settings.fps_unlimited",
+            settings.fps_limit == 0,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "settings.fps_limit",
+            "settings.fps_limit",
+            settings.fps_limit.max(15) as f32,
+            15.0,
+            240.0,
+            1.0,
+            format!("{} fps", settings.fps_limit),
+            settings.fps_limit == 0,
         ))
 }
 
-fn editor_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
-    section_frame(palette, "settings.editor")
+fn editor(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
+    card(palette, "settings.editor")
         .with_child(toggle_row(
             palette,
             "settings.show-grid",
             "settings.show_grid",
-            None,
-            "settings.show-grid",
             settings.grid_visible,
         ))
         .with_child(toggle_row(
             palette,
             "settings.snap-grid",
             "settings.snap_to_grid",
-            None,
-            "settings.snap-grid",
             settings.snap_to_grid,
         ))
-        .with_child(range_row(
+        .with_child(range_row_disabled(
             palette,
             "settings.grid_size",
-            None,
-            "settings.grid-size",
+            "settings.grid_size",
             settings.grid_size,
             0.1,
             10.0,
@@ -553,11 +528,10 @@ fn editor_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode
             format!("{:.1} m", settings.grid_size),
             settings.simple_mode,
         ))
-        .with_child(range_row(
+        .with_child(range_row_disabled(
             palette,
             "settings.grid_load_distance",
-            None,
-            "settings.grid-load-distance",
+            "settings.grid_load_distance",
             settings.grid_load_distance,
             0.0,
             500.0,
@@ -565,11 +539,10 @@ fn editor_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode
             format!("{:.1} m", settings.grid_load_distance),
             settings.simple_mode,
         ))
-        .with_child(range_row(
+        .with_child(range_row_disabled(
             palette,
-            "settings.auto_save",
-            None,
             "settings.auto-save",
+            "settings.auto_save",
             settings.auto_save_interval_seconds as f32,
             30.0,
             600.0,
@@ -580,22 +553,17 @@ fn editor_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode
         .with_child(segment_row(
             palette,
             "settings.units",
-            None,
+            "settings.units",
             &[
-                segment(
-                    "settings.units.metric",
+                (
                     "settings.metric",
-                    settings.display_unit == DisplayUnit::Metric,
+                    "settings.units.metric",
+                    settings.display_unit == raf_core::units::DisplayUnit::Metric,
                 ),
-                segment(
-                    "settings.units.imperial",
+                (
                     "settings.imperial",
-                    settings.display_unit == DisplayUnit::Imperial,
-                ),
-                segment(
-                    "settings.units.game",
-                    "settings.value.game_units",
-                    settings.display_unit == DisplayUnit::Game,
+                    "settings.units.imperial",
+                    settings.display_unit == raf_core::units::DisplayUnit::Imperial,
                 ),
             ],
         ))
@@ -603,31 +571,103 @@ fn editor_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode
             palette,
             "settings.command-console",
             "settings.command_console_enabled",
-            Some("settings.command_console_enabled_desc"),
-            "settings.command-console",
             settings.command_console_enabled,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.hierarchy-icons",
+            "settings.hierarchy_show_icons",
+            settings.hierarchy_show_icons,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.hierarchy-visibility",
+            "settings.hierarchy_show_visibility",
+            settings.hierarchy_show_visibility,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.hierarchy-locked",
+            "settings.hierarchy_show_locked",
+            settings.hierarchy_show_locked,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.hierarchy-hidden",
+            "settings.hierarchy_show_hidden",
+            settings.hierarchy_show_hidden,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.hierarchy-auto-reveal",
+            "settings.hierarchy_auto_reveal_selection",
+            settings.hierarchy_auto_reveal_selection,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.hierarchy-expand-selection",
+            "settings.hierarchy_expand_on_select",
+            settings.hierarchy_expand_on_select,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.hierarchy-animations",
+            "settings.hierarchy_animations",
+            settings.hierarchy_animations,
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.hierarchy-row-height",
+            "settings.hierarchy_row_height",
+            settings.hierarchy_row_height,
+            20.0,
+            36.0,
+            1.0,
+            format!("{} px", settings.hierarchy_row_height.round()),
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.hierarchy-indent-width",
+            "settings.hierarchy_indent_width",
+            settings.hierarchy_indent_width,
+            8.0,
+            28.0,
+            1.0,
+            format!("{} px", settings.hierarchy_indent_width.round()),
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.electronics-minimap",
+            "settings.electronics_show_minimap",
+            settings.electronics_show_minimap,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.electronics-status",
+            "settings.electronics_show_status",
+            settings.electronics_show_status,
         ))
 }
 
-fn viewport_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
-    section_frame(palette, "settings.viewport")
+fn viewport(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
+    card(palette, "settings.viewport")
         .with_child(segment_row(
             palette,
+            "settings.viewport-render-mode",
             "settings.viewport_render_mode",
-            None,
             &[
-                segment(
-                    "settings.viewport.solid",
+                (
+                    "settings.viewport_render_mode.solid",
                     "settings.viewport_render_mode.solid",
                     settings.viewport_render_mode == ViewportRenderMode::Solid,
                 ),
-                segment(
-                    "settings.viewport.wireframe",
+                (
+                    "settings.viewport_render_mode.wireframe",
                     "settings.viewport_render_mode.wireframe",
                     settings.viewport_render_mode == ViewportRenderMode::Wireframe,
                 ),
-                segment(
-                    "settings.viewport.preview",
+                (
+                    "settings.viewport_render_mode.preview",
                     "settings.viewport_render_mode.preview",
                     settings.viewport_render_mode == ViewportRenderMode::Preview,
                 ),
@@ -637,168 +677,134 @@ fn viewport_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiNo
             palette,
             "settings.viewport-labels",
             "settings.show_viewport_labels",
-            None,
-            "settings.viewport-labels",
             settings.show_viewport_labels,
         ))
         .with_child(toggle_row(
             palette,
-            "settings.focus-lock",
-            "settings.focus_lock_enabled",
-            Some("settings.focus_lock_enabled_desc"),
-            "settings.focus-lock",
-            settings.focus_lock_enabled,
-        ))
-        .with_child(toggle_row(
-            palette,
-            "settings.solid-edges",
+            "settings.surface-edges",
             "settings.solid_show_surface_edges",
-            None,
-            "settings.solid-edges",
             settings.solid_show_surface_edges,
         ))
         .with_child(toggle_row(
             palette,
-            "settings.solid-xray",
+            "settings.xray",
             "settings.solid_xray_mode",
-            None,
-            "settings.solid-xray",
             settings.solid_xray_mode,
         ))
         .with_child(toggle_row(
             palette,
-            "settings.solid-tonality",
+            "settings.face-tonality",
             "settings.solid_face_tonality",
-            None,
-            "settings.solid-tonality",
             settings.solid_face_tonality,
         ))
-        .with_child(section_divider(palette, "settings.viewport-input-divider"))
-        .with_child(section_label(palette, "settings.surface.input"))
         .with_child(toggle_row(
             palette,
             "settings.invert-x",
             "settings.invert_mouse_x",
-            None,
-            "settings.invert-x",
             settings.invert_mouse_x,
         ))
         .with_child(toggle_row(
             palette,
             "settings.invert-y",
             "settings.invert_mouse_y",
-            None,
-            "settings.invert-y",
             settings.invert_mouse_y,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.focus-lock",
+            "settings.focus_lock_enabled",
+            settings.focus_lock_enabled,
         ))
         .with_child(toggle_row(
             palette,
             "settings.invert-ws",
             "settings.invert_ws",
-            None,
-            "settings.invert-ws",
             settings.invert_ws,
         ))
         .with_child(range_row(
             palette,
-            "settings.wasd_speed",
-            None,
             "settings.wasd-speed",
+            "settings.wasd_speed",
             settings.wasd_speed,
             0.5,
             5.0,
             0.1,
-            format!("{:.1}x", settings.wasd_speed),
-            false,
-        ))
-        .with_child(section_divider(palette, "settings.viewport-gizmo-divider"))
-        .with_child(section_label(palette, "settings.gizmo_controls"))
-        .with_child(range_row(
-            palette,
-            "settings.move_sensitivity",
-            None,
-            "settings.move-sensitivity",
-            settings.move_gizmo_sensitivity,
-            0.25,
-            4.0,
-            0.05,
-            format!("{:.2}x", settings.move_gizmo_sensitivity),
-            false,
-        ))
-        .with_child(range_row(
-            palette,
-            "settings.rotate_sensitivity",
-            None,
-            "settings.rotate-sensitivity",
-            settings.rotate_gizmo_sensitivity,
-            0.25,
-            4.0,
-            0.05,
-            format!("{:.2}x", settings.rotate_gizmo_sensitivity),
-            false,
-        ))
-        .with_child(range_row(
-            palette,
-            "settings.scale_sensitivity",
-            None,
-            "settings.scale-sensitivity",
-            settings.scale_gizmo_sensitivity,
-            0.25,
-            4.0,
-            0.05,
-            format!("{:.2}x", settings.scale_gizmo_sensitivity),
-            false,
+            format!("{:.2}x", settings.wasd_speed),
         ))
         .with_child(toggle_row(
             palette,
             "settings.uniform-scale",
             "settings.uniform_scale_by_default",
-            None,
-            "settings.uniform-scale",
             settings.uniform_scale_by_default,
         ))
         .with_child(range_row(
             palette,
-            "settings.gizmo_growth_scale",
-            None,
             "settings.gizmo-growth",
+            "settings.gizmo_growth_scale",
             settings.gizmo_growth_scale,
             0.0,
             100.0,
             1.0,
             format!("{:.0}%", settings.gizmo_growth_scale),
-            false,
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.move-sensitivity",
+            "settings.move_sensitivity",
+            settings.move_gizmo_sensitivity,
+            0.25,
+            4.0,
+            0.05,
+            format!("{:.1}", settings.move_gizmo_sensitivity),
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.rotate-sensitivity",
+            "settings.rotate_sensitivity",
+            settings.rotate_gizmo_sensitivity,
+            0.25,
+            4.0,
+            0.05,
+            format!("{:.1}", settings.rotate_gizmo_sensitivity),
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.scale-sensitivity",
+            "settings.scale_sensitivity",
+            settings.scale_gizmo_sensitivity,
+            0.25,
+            4.0,
+            0.05,
+            format!("{:.1}", settings.scale_gizmo_sensitivity),
         ))
 }
 
-fn scripting_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
-    section_frame(palette, "settings.scripting")
+fn scripting(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
+    card(palette, "settings.scripting")
         .with_child(toggle_row(
             palette,
             "settings.script-runtime",
             "settings.script_runtime_enabled",
-            Some("settings.script_runtime_enabled_desc"),
-            "settings.script-runtime",
             settings.script_runtime_enabled,
         ))
         .with_child(segment_row(
             palette,
+            "settings.script-language",
             "settings.default_script_language",
-            None,
             &[
-                segment(
-                    "settings.script-language.rhai",
-                    "settings.value.rhai",
+                (
+                    "app.project_script_language_rhai",
+                    "settings.script_language.rhai",
                     settings.default_script_language == ScriptLanguage::Rhai,
                 ),
-                segment(
-                    "settings.script-language.cpp",
-                    "settings.value.cpp_wasm",
+                (
+                    "app.project_script_language_cpp",
+                    "settings.script_language.cpp",
                     settings.default_script_language == ScriptLanguage::Cpp,
                 ),
-                segment(
-                    "settings.script-language.nodes",
-                    "settings.value.visual_nodes",
+                (
+                    "app.project_script_language_nodes",
+                    "settings.script_language.nodes",
                     settings.default_script_language == ScriptLanguage::Nodes,
                 ),
             ],
@@ -807,895 +813,957 @@ fn scripting_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiN
             palette,
             "settings.script-hot-reload",
             "settings.script_hot_reload",
-            None,
-            "settings.script-hot-reload",
             settings.script_hot_reload,
         ))
         .with_child(range_row(
             palette,
-            "settings.script_timeout_ms",
-            None,
             "settings.script-timeout",
+            "settings.script_timeout_ms",
             settings.script_timeout_ms as f32,
             10.0,
-            1_000.0,
+            1000.0,
             1.0,
             format!("{} ms", settings.script_timeout_ms),
-            false,
         ))
-        .with_child(text_input_row(
+        .with_child(text_row(
             palette,
+            "settings.script-editor",
             "settings.script_external_editor",
-            None,
-            "settings.script-external-editor",
-            false,
-            false,
         ))
 }
 
-fn ai_section(
+fn ai(
     palette: StudioUiPalette,
     settings: &EngineSettings,
-    visible_api_keys: &[AiProvider],
+    revealed_api_keys: &[AiProvider],
 ) -> UiNode {
-    let mut section = section_frame(palette, "settings.ai_providers")
+    let provider_count = AiProvider::editor_supported()
+        .iter()
+        .filter(|provider| {
+            settings
+                .ai_providers
+                .iter()
+                .any(|config| config.provider == **provider)
+        })
+        .count();
+    let shortcut_height = if settings.agent_model_shortcuts.is_empty() {
+        78.0
+    } else {
+        AI_SHORTCUT_HEADER_HEIGHT
+            + settings.agent_model_shortcuts.len() as f32 * AI_SHORTCUT_ROW_HEIGHT
+    };
+    let card_count = provider_count + 2;
+    let content_height = AI_SUMMARY_CARD_HEIGHT
+        + provider_count as f32 * AI_PROVIDER_CARD_HEIGHT
+        + shortcut_height
+        + AI_CARD_GAP * (card_count.saturating_sub(1) as f32);
+    let mut root = UiNode::new("settings.ai.workspace", UiNodeKind::Panel).with_layout(UiLayout {
+        flow: UiFlow::Column,
+        gap: AI_CARD_GAP,
+        ..UiLayout::fixed(0.0, content_height).with_width_mode(UiSizeMode::Fill)
+    });
+
+    let summary_card = card(palette, "settings.ai_providers")
+        .with_child(provider_default_row(palette, settings))
         .with_child(segment_row(
             palette,
-            "settings.ai_provider_default",
-            None,
-            &[
-                segment(
-                    "settings.default-provider.openrouter",
-                    "settings.value.openrouter",
-                    settings.default_ai_provider == AiProvider::OpenRouter,
-                ),
-                segment(
-                    "settings.default-provider.openai",
-                    "settings.value.openai",
-                    settings.default_ai_provider == AiProvider::OpenAI,
-                ),
-            ],
-        ))
-        .with_child(segment_row(
-            palette,
+            "settings.agent-mode",
             "settings.agent_mode",
-            Some("settings.agent_mode_desc"),
             &[
-                segment(
-                    "settings.agent-mode.passive",
+                (
                     "settings.agent_mode_passive",
+                    "settings.agent_mode.passive",
                     settings.agent_mode == AgentMode::Passive,
                 ),
-                segment(
-                    "settings.agent-mode.active",
+                (
                     "settings.agent_mode_active",
+                    "settings.agent_mode.active",
                     settings.agent_mode == AgentMode::Active,
                 ),
             ],
-        ));
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.command-console-ai",
+            "settings.command_console_enabled",
+            settings.command_console_enabled,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.agent-streaming",
+            "settings.agent_streaming_enabled",
+            settings.agent_streaming_enabled,
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.agent-message-page-size",
+            "settings.agent_message_page_size",
+            settings.agent_message_page_size as f32,
+            AGENT_MESSAGE_PAGE_SIZE_MIN as f32,
+            AGENT_MESSAGE_PAGE_SIZE_MAX as f32,
+            4.0,
+            settings.agent_message_page_size.to_string(),
+        ))
+        .with_layout(fixed_card_layout(AI_SUMMARY_CARD_HEIGHT));
+    root = root.with_child(summary_card);
 
-    if settings.agent_mode == AgentMode::Active {
-        section = section.with_child(
-            UiNode::new("settings.agent-warning", UiNodeKind::Panel)
-                .with_class("settings-warning")
-                .with_layout(UiLayout {
-                    padding: UiSpacing::same(10.0),
-                    ..UiLayout::fixed(0.0, 42.0)
-                })
-                .with_child(
-                    UiNode::new("settings.agent-warning-copy", UiNodeKind::Label)
-                        .with_text_key("app.agent_active_mode_warning")
-                        .with_text_style(UiTextStyle::body(palette.tokens().text))
-                        .with_layout(UiLayout::fixed(0.0, 20.0)),
-                ),
-        );
-    }
-
-    section = section
-        .with_child(section_divider(palette, "settings.ai-shortcuts-divider"))
-        .with_child(section_label(palette, "settings.ai_models_title"));
-    if settings.agent_model_shortcuts.is_empty() {
-        section = section.with_child(
-            UiNode::new("settings.ai-shortcuts-empty", UiNodeKind::Label)
-                .with_text_key("settings.surface.shortcuts_empty")
-                .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
-                .with_layout(UiLayout::fixed(0.0, 24.0)),
-        );
-    } else {
-        for (index, shortcut) in settings.agent_model_shortcuts.iter().enumerate() {
-            let label = format!(
-                "{} | {} | {}",
-                shortcut.label,
-                shortcut.model_id,
-                shortcut.provider.display_name()
-            );
-            section = section.with_child(
-                UiNode::new(format!("settings.shortcut.{index}"), UiNodeKind::Panel)
-                    .with_class("settings-shortcut")
-                    .with_layout(UiLayout {
-                        flow: UiFlow::Row,
-                        align_items: UiAlign::Center,
-                        padding: UiSpacing::xy(10.0, 0.0),
-                        gap: 8.0,
-                        ..UiLayout::fixed(0.0, 36.0)
-                    })
-                    .with_child(
-                        UiNode::new(
-                            format!("settings.shortcut.{index}.label"),
-                            UiNodeKind::Label,
-                        )
-                        .with_text_key(label)
-                        .with_text_style(UiTextStyle::body(palette.tokens().text))
-                        .with_layout(UiLayout {
-                            grow: 1.0,
-                            ..UiLayout::default()
-                        }),
-                    )
-                    .with_child(command_button(
-                        format!("settings.shortcut.{index}.remove"),
-                        "settings.surface.remove",
-                        format!("settings.shortcut.remove.{index}"),
-                        74.0,
-                        "settings-secondary-button",
-                        palette.tokens().text,
-                    )),
-            );
+    for provider in AiProvider::editor_supported() {
+        if let Some(config) = settings
+            .ai_providers
+            .iter()
+            .find(|config| config.provider == *provider)
+        {
+            root = root.with_child(provider_card(
+                palette,
+                config,
+                revealed_api_keys.contains(provider),
+            ));
         }
     }
 
-    let providers: Vec<AiProvider> = if settings.simple_mode {
-        vec![settings.default_ai_provider]
-    } else {
-        AiProvider::editor_supported().to_vec()
-    };
-    for provider in providers {
-        let config = settings
-            .ai_providers
-            .iter()
-            .find(|config| config.provider == provider)
-            .cloned()
-            .unwrap_or_else(|| AiProviderConfig::for_provider(provider));
-        section = section.with_child(ai_provider_card(
-            palette,
-            settings.language,
-            config,
-            visible_api_keys.contains(&provider),
-            settings.default_ai_provider == provider,
-        ));
-    }
-    section
+    root.with_child(model_shortcuts_card(palette, settings))
 }
 
-fn platform_section(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
-    let platform_help = match settings.target_platform {
-        TargetPlatform::Desktop => "settings.platform.desktop",
-        TargetPlatform::Mobile => "settings.platform.mobile",
-        TargetPlatform::Web => "settings.platform.web",
-        TargetPlatform::Cloud => "settings.platform.cloud",
-        TargetPlatform::Console => "settings.platform.console",
-    };
-    section_frame(palette, "settings.target_platform")
+fn provider_default_row(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
+    let tokens = palette.tokens();
+    let mut options = UiNode::new("settings.ai_provider.default.control", UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            gap: 4.0,
+            ..UiLayout::fixed(CONTROL_WIDTH, 30.0)
+        });
+    for provider in AiProvider::editor_supported() {
+        let id = provider_id(*provider);
+        let selected = settings.default_ai_provider == *provider;
+        options = options.with_child(
+            UiNode::new(
+                format!("settings.ai_provider.default.{id}"),
+                UiNodeKind::Button,
+            )
+            .with_class(if selected {
+                "settings-segment-active"
+            } else {
+                "settings-segment"
+            })
+            .with_layout(UiLayout {
+                padding: UiSpacing::xy(8.0, 0.0),
+                ..UiLayout::fixed(112.0, 30.0)
+            })
+            .with_text_value(provider.display_name())
+            .with_text_style(UiTextStyle::button(if selected {
+                ACCENT
+            } else {
+                tokens.text_muted
+            }))
+            .with_accessibility_label_key("settings.ai_provider_default")
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                format!("settings.ai_provider.default.{id}"),
+            )),
+        );
+    }
+    row(
+        palette,
+        "settings.ai_provider.default".to_string(),
+        "settings.ai_provider_default".to_string(),
+        None,
+        options,
+    )
+}
+
+fn provider_card(
+    palette: StudioUiPalette,
+    config: &raf_core::ai::AiProviderConfig,
+    revealed: bool,
+) -> UiNode {
+    let id = provider_id(config.provider);
+    let panel = UiNode::new(format!("settings.ai_provider.{id}.card"), UiNodeKind::Panel)
+        .with_class("settings-provider-card")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 4.0,
+            padding: UiSpacing::same(10.0),
+            ..UiLayout::fixed(0.0, AI_PROVIDER_CARD_HEIGHT).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new(
+                format!("settings.ai_provider.{id}.title"),
+                UiNodeKind::Label,
+            )
+            .with_text_value(config.provider.display_name())
+            .with_text_style(UiTextStyle::panel_title(palette.tokens().text))
+            .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(toggle_row_with_key(
+            palette,
+            format!("settings.ai_provider.{id}.enabled"),
+            "settings.ai_provider_enabled",
+            format!("settings.ai_provider.{id}"),
+            config.enabled,
+        ))
+        .with_child(ai_text_row(
+            palette,
+            &format!("settings.ai_provider.{id}.base_url"),
+            "settings.ai_provider_base_url",
+            &config.base_url,
+            false,
+            None,
+        ))
+        .with_child(ai_text_row(
+            palette,
+            &format!("settings.ai_provider.{id}.model"),
+            "settings.ai_provider_model",
+            &config.model,
+            false,
+            None,
+        ))
+        .with_child(ai_text_row(
+            palette,
+            &format!("settings.ai_provider.{id}.api_key"),
+            "settings.ai_provider_api_key",
+            &config.api_key,
+            !revealed,
+            Some(&format!("settings.ai_provider.reveal.{id}")),
+        ))
+        .with_child(command_button(
+            palette,
+            &format!("settings.ai_provider.set-default.{id}"),
+            "settings.ai_provider_set_default",
+            &format!("settings.ai_provider.default.{id}"),
+            "settings-secondary-button",
+            136.0,
+        ));
+    panel
+}
+
+fn ai_text_row(
+    palette: StudioUiPalette,
+    id: &str,
+    label_key: &str,
+    _value: &str,
+    password: bool,
+    reveal_command: Option<&str>,
+) -> UiNode {
+    let mut control = UiNode::new(format!("{id}.control"), UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 5.0,
+            ..UiLayout::fixed(CONTROL_WIDTH + 58.0, 30.0)
+        })
+        .with_child(
+            UiNode::text_input(
+                format!("{id}.input"),
+                UiTextInput {
+                    value_key: id.to_string(),
+                    placeholder_key: Some("settings.surface.input".to_string()),
+                    max_length: 512,
+                    multiline: false,
+                    password,
+                    submit_command: None,
+                },
+            )
+            .with_class("settings-text-input")
+            .with_layout(UiLayout::fixed(CONTROL_WIDTH, 30.0)),
+        );
+    if let Some(command) = reveal_command {
+        control = control.with_child(command_button(
+            palette,
+            &format!("{id}.reveal"),
+            if password {
+                "settings.ai_provider_show"
+            } else {
+                "settings.ai_provider_hide"
+            },
+            command,
+            "settings-secondary-button",
+            54.0,
+        ));
+    }
+    row(
+        palette,
+        id.to_string(),
+        label_key.to_string(),
+        None,
+        control,
+    )
+}
+
+fn model_shortcuts_card(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
+    let tokens = palette.tokens();
+    let mut panel = card(palette, "settings.ai_models_title").with_layout(fixed_card_layout(
+        if settings.agent_model_shortcuts.is_empty() {
+            78.0
+        } else {
+            AI_SHORTCUT_HEADER_HEIGHT
+                + settings.agent_model_shortcuts.len() as f32 * AI_SHORTCUT_ROW_HEIGHT
+        },
+    ));
+    if settings.agent_model_shortcuts.is_empty() {
+        return panel.with_child(
+            UiNode::new("settings.ai_models.empty", UiNodeKind::Label)
+                .with_text_key("settings.surface.shortcuts_empty")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        );
+    }
+    for (index, shortcut) in settings.agent_model_shortcuts.iter().enumerate() {
+        let selected = shortcut.label == settings.default_agent_model;
+        let mut shortcut_row = UiNode::new(
+            format!("settings.ai_models.row.{index}"),
+            UiNodeKind::Toolbar,
+        )
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 6.0,
+            ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new(format!("settings.ai_models.{index}"), UiNodeKind::Label)
+                .with_text_value(format!(
+                    "{} | {} | {}",
+                    shortcut.label,
+                    shortcut.provider.display_name(),
+                    shortcut.model_id
+                ))
+                .with_text_style(UiTextStyle::body(if selected {
+                    ACCENT
+                } else {
+                    tokens.text
+                }))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fit_content()
+                }),
+        );
+        shortcut_row = shortcut_row.with_child(command_button(
+            palette,
+            &format!("settings.ai_models.use.{index}"),
+            "settings.ai_model_use",
+            &format!("settings.ai_model.default:{index}"),
+            "settings-secondary-button",
+            72.0,
+        ));
+        shortcut_row = shortcut_row.with_child(command_button(
+            palette,
+            &format!("settings.ai_models.remove.{index}"),
+            "settings.surface.remove",
+            &format!("settings.ai_model.remove:{index}"),
+            "settings-secondary-button",
+            72.0,
+        ));
+        panel = panel.with_child(shortcut_row);
+    }
+    panel
+}
+
+fn command_button(
+    palette: StudioUiPalette,
+    id: &str,
+    label_key: &str,
+    command: &str,
+    class: &str,
+    width: f32,
+) -> UiNode {
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class(class)
+        .with_layout(UiLayout::fixed(width, 30.0))
+        .with_text_key(label_key)
+        .with_text_style(UiTextStyle::button(palette.tokens().text))
+        .with_accessibility_label_key(label_key)
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
+}
+
+fn platform(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
+    card(palette, "settings.target_platform")
         .with_child(segment_row(
             palette,
             "settings.platform",
-            Some(platform_help),
+            "settings.platform",
             &[
-                segment(
-                    "settings.platform.desktop",
+                (
                     "settings.value.desktop",
+                    "settings.platform.desktop",
                     settings.target_platform == TargetPlatform::Desktop,
                 ),
-                segment(
-                    "settings.platform.mobile",
+                (
                     "settings.value.mobile",
+                    "settings.platform.mobile",
                     settings.target_platform == TargetPlatform::Mobile,
                 ),
-                segment(
-                    "settings.platform.web",
+                (
                     "settings.value.web",
+                    "settings.platform.web",
                     settings.target_platform == TargetPlatform::Web,
                 ),
-                segment(
-                    "settings.platform.cloud",
+                (
                     "settings.value.cloud",
+                    "settings.platform.cloud",
                     settings.target_platform == TargetPlatform::Cloud,
                 ),
-                segment(
-                    "settings.platform.console",
+                (
                     "settings.value.console",
+                    "settings.platform.console",
                     settings.target_platform == TargetPlatform::Console,
                 ),
             ],
         ))
         .with_child(toggle_row(
             palette,
-            "settings.responsive-layout",
+            "settings.responsive",
             "settings.responsive_layout",
-            None,
-            "settings.responsive-layout",
             settings.responsive_layout,
         ))
         .with_child(toggle_row(
             palette,
             "settings.headless",
             "settings.headless",
-            None,
-            "settings.headless",
             settings.headless,
         ))
 }
 
-fn ai_provider_card(
-    palette: StudioUiPalette,
-    lang: Language,
-    config: AiProviderConfig,
-    show_key: bool,
-    is_default: bool,
-) -> UiNode {
-    let provider = provider_id(config.provider);
-    let mut card = UiNode::new(format!("settings.provider.{provider}"), UiNodeKind::Panel)
-        .with_class(if is_default {
-            "settings-provider-default"
-        } else {
-            "settings-provider"
-        })
+fn card(palette: StudioUiPalette, title_key: &str) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new(title_key, UiNodeKind::Panel)
+        .with_class("settings-card")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
+            gap: 6.0,
             padding: UiSpacing::same(14.0),
-            gap: 8.0,
-            ..UiLayout::fixed(0.0, 306.0)
-        })
-        .with_child(
-            UiNode::new(
-                format!("settings.provider.{provider}.head"),
-                UiNodeKind::Panel,
-            )
-            .with_layout(UiLayout {
-                flow: UiFlow::Row,
-                align_items: UiAlign::Center,
-                ..UiLayout::fixed(0.0, 22.0)
-            })
-            .with_style(UiStyle::transparent())
-            .with_child(
-                UiNode::new(
-                    format!("settings.provider.{provider}.name"),
-                    UiNodeKind::Label,
-                )
-                .with_text_key(config.provider.display_name())
-                .with_text_style(UiTextStyle::panel_title(palette.tokens().text))
-                .with_layout(UiLayout {
-                    grow: 1.0,
-                    ..UiLayout::default()
-                }),
-            )
-            .with_child(toggle_control(
-                palette,
-                format!("settings.provider.{provider}.enabled"),
-                format!("settings.ai.{provider}.enabled"),
-                config.enabled,
-                false,
-            )),
-        )
-        .with_child(
-            UiNode::new(
-                format!("settings.provider.{provider}.description"),
-                UiNodeKind::Label,
-            )
-            .with_text_key(if lang == Language::Spanish {
-                config.provider.description_es()
-            } else {
-                config.provider.description()
-            })
-            .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
-            .with_layout(UiLayout::fixed(0.0, 20.0)),
-        )
-        .with_child(text_input_row(
-            palette,
-            "settings.ai_provider_base_url",
-            None,
-            format!("settings.ai.{provider}.base-url"),
-            false,
-            false,
-        ))
-        .with_child(text_input_row(
-            palette,
-            "settings.ai_provider_model",
-            None,
-            format!("settings.ai.{provider}.model"),
-            false,
-            false,
-        ))
-        .with_child(form_row_with_id(
-            palette,
-            &format!("settings.provider.{provider}.api-key"),
-            "settings.ai_provider_api_key",
-            None,
-            UiNode::new(
-                format!("settings.provider.{provider}.key-control"),
-                UiNodeKind::Panel,
-            )
-            .with_layout(UiLayout {
-                flow: UiFlow::Row,
-                align_items: UiAlign::Center,
-                gap: 6.0,
-                ..UiLayout::fixed(0.0, CONTROL_HEIGHT)
-            })
-            .with_style(UiStyle::transparent())
-            .with_child(text_input_control(
-                palette,
-                format!("settings.ai.{provider}.api-key"),
-                !show_key,
-                false,
-            ))
-            .with_child(command_button(
-                format!("settings.provider.{provider}.key-visibility"),
-                if show_key {
-                    "settings.ai_provider_hide"
-                } else {
-                    "settings.ai_provider_show"
-                },
-                format!("settings.provider.toggle-key.{provider}"),
-                68.0,
-                "settings-secondary-button",
-                palette.tokens().text,
-            )),
-        ));
-    if !is_default {
-        card = card.with_child(command_button(
-            format!("settings.provider.{provider}.default"),
-            "settings.ai_provider_set_default",
-            format!("settings.provider.default.{provider}"),
-            148.0,
-            "settings-secondary-button",
-            palette.tokens().text,
-        ));
-    }
-    card
-}
-
-fn section_frame(_palette: StudioUiPalette, id: &str) -> UiNode {
-    UiNode::new(id, UiNodeKind::Panel)
-        .with_class("settings-section")
-        .with_layout(UiLayout {
-            flow: UiFlow::Column,
-            gap: 10.0,
-            padding: UiSpacing::ZERO,
-            ..UiLayout::default()
-        })
-        .with_style(UiStyle::transparent())
-}
-
-fn section_divider(palette: StudioUiPalette, id: &str) -> UiNode {
-    UiNode::new(id, UiNodeKind::Separator)
-        .with_layout(UiLayout {
-            basis: [0.0, 1.0],
-            ..UiLayout::default()
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         })
         .with_style(UiStyle {
-            fill: palette.tokens().border,
-            border: [0, 0, 0, 0],
-            text: palette.tokens().text,
-            border_width: 0.0,
-            radius: 0.0,
+            fill: tokens.surface,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: 3.0,
             opacity: 1.0,
         })
+        .with_child(
+            UiNode::new(format!("{title_key}.title"), UiNodeKind::Label)
+                .with_text_key(title_key)
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_layout(UiLayout::fixed(0.0, 24.0)),
+        )
 }
 
-fn section_label(palette: StudioUiPalette, label_key: &str) -> UiNode {
-    UiNode::new(format!("settings.label.{label_key}"), UiNodeKind::Label)
-        .with_text_key(label_key)
-        .with_text_style(UiTextStyle::panel_title(palette.tokens().text))
-        .with_layout(UiLayout::fixed(0.0, 22.0))
+fn fixed_card_layout(height: f32) -> UiLayout {
+    UiLayout {
+        flow: UiFlow::Column,
+        gap: 6.0,
+        padding: UiSpacing::same(14.0),
+        ..UiLayout::fixed(0.0, height).with_width_mode(UiSizeMode::Fill)
+    }
 }
 
-fn form_row(
+fn toggle_row(
     palette: StudioUiPalette,
-    label_key: &str,
-    help_key: Option<&str>,
-    control: UiNode,
+    id: impl Into<String>,
+    label_key: impl Into<String>,
+    value: bool,
 ) -> UiNode {
-    form_row_with_id(palette, label_key, label_key, help_key, control)
+    let label_key = label_key.into();
+    toggle_row_with_key(palette, id, label_key.clone(), label_key, value)
 }
 
-fn form_row_with_id(
+fn toggle_row_with_key(
     palette: StudioUiPalette,
-    id: &str,
-    label_key: &str,
-    help_key: Option<&str>,
+    id: impl Into<String>,
+    label_key: impl Into<String>,
+    value_key: impl Into<String>,
+    value: bool,
+) -> UiNode {
+    let id = id.into();
+    let label_key = label_key.into();
+    let value_key = value_key.into();
+    let toggle = UiNode::toggle(
+        format!("{id}.control"),
+        UiToggle::new(value_key.clone(), value),
+    )
+    .with_class("settings-toggle")
+    .with_layout(UiLayout::fixed(48.0, 28.0));
+    row(palette, id, label_key, None, toggle).with_event(UiEventBinding {
+        event: UiEventKind::Click,
+        action: UiAction::SetToggle {
+            key: value_key,
+            value: !value,
+        },
+    })
+}
+
+fn range_row(
+    palette: StudioUiPalette,
+    id: impl Into<String>,
+    label_key: impl Into<String>,
+    value: f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    display: String,
+) -> UiNode {
+    range_row_disabled(
+        palette, id, label_key, value, min, max, step, display, false,
+    )
+}
+
+fn range_row_disabled(
+    palette: StudioUiPalette,
+    id: impl Into<String>,
+    label_key: impl Into<String>,
+    value: f32,
+    min: f32,
+    max: f32,
+    step: f32,
+    display: String,
+    disabled: bool,
+) -> UiNode {
+    let id = id.into();
+    let label_key = label_key.into();
+    let numeric_key = format!("{label_key}.text");
+    let percentage = range_percentage(value, min, max);
+    let display = format!("{display}  |  {percentage:.0}%");
+    let control = UiNode::new(format!("{id}.control"), UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 6.0,
+            responsive: vec![raf_ui::UiResponsiveRule {
+                max_width: 360.0,
+                flow: Some(UiFlow::Column),
+                basis: Some([0.0, 60.0]),
+                padding: None,
+                gap: Some(4.0),
+                compact: Some(UiCompactMode::Stack),
+                grid_columns: None,
+            }],
+            ..UiLayout::fixed(CONTROL_WIDTH + 78.0, 30.0)
+        })
+        .with_child(
+            UiNode::range(
+                format!("{id}.slider"),
+                UiRange::new(label_key.clone(), value, min, max, step),
+            )
+            .with_class("settings-range")
+            .with_layout(UiLayout {
+                grow: 1.0,
+                responsive: vec![raf_ui::UiResponsiveRule {
+                    max_width: 360.0,
+                    flow: Some(UiFlow::None),
+                    basis: Some([0.0, 28.0]),
+                    padding: None,
+                    gap: None,
+                    compact: None,
+                    grid_columns: None,
+                }],
+                ..UiLayout::fixed(CONTROL_WIDTH - 84.0, 28.0)
+            })
+            .disabled(disabled),
+        )
+        .with_child(
+            UiNode::text_input(
+                format!("{id}.value"),
+                UiTextInput {
+                    value_key: numeric_key,
+                    placeholder_key: Some("settings.surface.input".to_string()),
+                    max_length: 32,
+                    multiline: false,
+                    password: false,
+                    submit_command: Some(format!("settings.commit_numeric:{label_key}")),
+                },
+            )
+            .with_class("settings-numeric-input")
+            .with_layout(UiLayout::fixed(78.0, 28.0))
+            .disabled(disabled),
+        );
+    let row = row(palette, id, label_key, Some(display), control);
+    if disabled {
+        row.with_class("settings-row-disabled")
+    } else {
+        row
+    }
+}
+
+fn range_percentage(value: f32, min: f32, max: f32) -> f32 {
+    if max <= min {
+        0.0
+    } else {
+        ((value - min) / (max - min) * 100.0).clamp(0.0, 100.0)
+    }
+}
+
+fn text_row(
+    palette: StudioUiPalette,
+    id: impl Into<String>,
+    label_key: impl Into<String>,
+) -> UiNode {
+    let id = id.into();
+    let label_key = label_key.into();
+    row(
+        palette,
+        id.clone(),
+        label_key.clone(),
+        None,
+        UiNode::text_input(
+            format!("{id}.control"),
+            UiTextInput {
+                value_key: label_key,
+                placeholder_key: Some("settings.surface.input".to_string()),
+                max_length: 256,
+                multiline: false,
+                password: false,
+                submit_command: None,
+            },
+        )
+        .with_class("settings-text-input")
+        .with_layout(UiLayout {
+            responsive: vec![raf_ui::UiResponsiveRule {
+                max_width: 360.0,
+                flow: Some(UiFlow::None),
+                basis: Some([0.0, 30.0]),
+                padding: None,
+                gap: None,
+                compact: None,
+                grid_columns: None,
+            }],
+            ..UiLayout::fixed(CONTROL_WIDTH, 30.0)
+        }),
+    )
+}
+
+fn segment_row(
+    palette: StudioUiPalette,
+    id: impl Into<String>,
+    label_key: impl Into<String>,
+    values: &[(&str, &str, bool)],
+) -> UiNode {
+    let id = id.into();
+    let label_key = label_key.into();
+    let tokens = palette.tokens();
+    let count = values.len().max(1) as f32;
+    let gap = 2.0;
+    let segment_width = ((CONTROL_WIDTH - gap * (count - 1.0)) / count).max(SEGMENT_MIN_WIDTH);
+    let toolbar_width = segment_width * count + gap * (count - 1.0);
+    let mut toolbar = UiNode::new(format!("{id}.control"), UiNodeKind::Toolbar)
+        .with_class("settings-segments")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap,
+            responsive: vec![raf_ui::UiResponsiveRule {
+                max_width: 480.0,
+                flow: Some(UiFlow::RowWrap),
+                basis: Some([0.0, 90.0]),
+                padding: None,
+                gap: Some(4.0),
+                compact: Some(UiCompactMode::Wrap),
+                grid_columns: None,
+            }],
+            ..UiLayout::fixed(toolbar_width, 30.0)
+        });
+    for (value_key, command, selected) in values {
+        toolbar = toolbar.with_child(
+            UiNode::new(format!("{id}.{command}"), UiNodeKind::Button)
+                .with_class(if *selected {
+                    "settings-segment-active"
+                } else {
+                    "settings-segment"
+                })
+                .with_layout(UiLayout {
+                    padding: UiSpacing::xy(8.0, 0.0),
+                    ..UiLayout::fixed(segment_width, 30.0)
+                })
+                .with_text_key(*value_key)
+                .with_text_style(UiTextStyle::button(if *selected {
+                    ACCENT
+                } else {
+                    tokens.text_muted
+                }))
+                .focusable()
+                .with_event(UiEventBinding::command(UiEventKind::Click, *command)),
+        );
+    }
+    row(palette, id, label_key, None, toolbar)
+}
+
+fn row(
+    palette: StudioUiPalette,
+    id: String,
+    label_key: String,
+    value: Option<String>,
     control: UiNode,
 ) -> UiNode {
     let tokens = palette.tokens();
-    let row_height = if help_key.is_some() { 66.0 } else { 46.0 };
-    let compact_height = if help_key.is_some() { 106.0 } else { 70.0 };
-    let mut label = UiNode::new(format!("{id}.copy"), UiNodeKind::Panel)
+    let mut copy = UiNode::new(format!("{id}.copy"), UiNodeKind::Panel)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            basis: [280.0, 0.0],
-            min_size: [200.0, 0.0],
+            grow: 1.0,
             gap: 2.0,
             ..UiLayout::default()
         })
-        .with_style(UiStyle::transparent())
         .with_child(
             UiNode::new(format!("{id}.label"), UiNodeKind::Label)
                 .with_text_key(label_key)
                 .with_text_style(UiTextStyle::body(tokens.text))
-                .with_layout(UiLayout::fixed(0.0, 18.0)),
+                .with_layout(UiLayout::fit_content()),
         );
-    if let Some(help_key) = help_key {
-        label = label.with_child(
-            UiNode::new(format!("{id}.help"), UiNodeKind::Label)
-                .with_text_key(help_key)
+    if let Some(value) = value {
+        copy = copy.with_child(
+            UiNode::new(format!("{id}.display"), UiNodeKind::Label)
+                .with_text_value(value)
                 .with_text_style(UiTextStyle::body(tokens.text_muted))
-                .with_layout(UiLayout::fixed(0.0, 34.0)),
+                .with_layout(UiLayout::fit_content()),
         );
     }
     UiNode::new(format!("{id}.row"), UiNodeKind::Panel)
         .with_class("settings-row")
         .with_layout(UiLayout {
             flow: UiFlow::Row,
-            basis: [0.0, row_height],
-            min_size: [0.0, row_height],
-            align_items: UiAlign::Center,
-            gap: 24.0,
-            padding: UiSpacing::xy(0.0, 6.0),
             compact: UiCompactMode::Stack,
-            responsive: vec![UiResponsiveRule {
+            align_items: UiAlign::Center,
+            gap: 14.0,
+            padding: UiSpacing::xy(4.0, 4.0),
+            responsive: vec![raf_ui::UiResponsiveRule {
                 max_width: 720.0,
                 flow: Some(UiFlow::Column),
-                basis: Some([0.0, compact_height]),
-                padding: None,
+                basis: Some([0.0, 78.0]),
+                padding: Some(UiSpacing::xy(4.0, 6.0)),
                 gap: Some(6.0),
                 compact: Some(UiCompactMode::Stack),
                 grid_columns: None,
             }],
-            ..UiLayout::default()
+            ..UiLayout::fixed(0.0, 44.0).with_width_mode(UiSizeMode::Fill)
         })
-        .with_style(UiStyle::transparent())
-        .with_child(label)
-        .with_child(
-            UiNode::new(format!("{id}.control"), UiNodeKind::Panel)
-                .with_layout(UiLayout {
-                    grow: 1.0,
-                    flow: UiFlow::Row,
-                    align_items: UiAlign::Center,
-                    ..UiLayout::default()
-                })
-                .with_style(UiStyle::transparent())
-                .with_child(control),
-        )
+        .with_child(copy)
+        .with_child(control)
 }
 
-fn toggle_row(
-    palette: StudioUiPalette,
-    id: &str,
-    label_key: &str,
-    help_key: Option<&str>,
-    value_key: &str,
-    value: bool,
-) -> UiNode {
-    form_row(
-        palette,
-        label_key,
-        help_key,
-        toggle_control(palette, id, value_key, value, false),
-    )
-}
-
-fn toggle_control(
-    palette: StudioUiPalette,
-    id: impl Into<String>,
-    value_key: impl Into<String>,
-    value: bool,
-    disabled: bool,
-) -> UiNode {
-    let id = id.into();
-    let tokens = palette.tokens();
-    UiNode::toggle(id.clone(), UiToggle::new(value_key, value))
-        .with_class(if value {
-            "settings-toggle-on"
-        } else {
-            "settings-toggle"
-        })
-        .disabled(disabled)
-        .with_layout(UiLayout {
-            flow: UiFlow::None,
-            ..UiLayout::fixed(42.0, 24.0)
-        })
-        .with_child(
-            UiNode::new(format!("{id}.knob"), UiNodeKind::Panel)
-                .with_layout(UiLayout::absolute(
-                    raf_render::api_graphic_basic::ui_surface::UiRect::new(
-                        if value { 21.0 } else { 3.0 },
-                        3.0,
-                        18.0,
-                        18.0,
-                    ),
-                ))
-                .with_style(UiStyle {
-                    fill: if value {
-                        [255, 255, 255, 255]
-                    } else {
-                        tokens.text_muted
-                    },
-                    border: [0, 0, 0, 0],
-                    text: tokens.text,
-                    border_width: 0.0,
-                    radius: 9.0,
-                    opacity: 1.0,
-                }),
-        )
-}
-
-fn range_row(
-    palette: StudioUiPalette,
-    label_key: &str,
-    help_key: Option<&str>,
-    value_key: &str,
-    value: f32,
-    min: f32,
-    max: f32,
-    step: f32,
-    value_label: String,
-    disabled: bool,
-) -> UiNode {
-    let control = UiNode::new(format!("{value_key}.range-control"), UiNodeKind::Panel)
-        .with_layout(UiLayout {
-            flow: UiFlow::Row,
-            grow: 1.0,
-            basis: [0.0, CONTROL_HEIGHT],
-            min_size: [RANGE_WIDTH + 86.0, CONTROL_HEIGHT],
-            align_items: UiAlign::Center,
-            gap: 12.0,
-            ..UiLayout::default()
-        })
-        .with_style(UiStyle::transparent())
-        .with_child(range_control(
-            palette, value_key, value, min, max, step, disabled,
-        ))
-        .with_child(
-            UiNode::new(format!("{value_key}.value"), UiNodeKind::Label)
-                .with_text_key(value_label)
-                .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
-                .with_layout(UiLayout::fixed(74.0, 20.0)),
-        );
-    form_row(palette, label_key, help_key, control)
-}
-
-fn range_control(
-    palette: StudioUiPalette,
-    value_key: &str,
-    value: f32,
-    min: f32,
-    max: f32,
-    step: f32,
-    disabled: bool,
-) -> UiNode {
-    let tokens = palette.tokens();
-    let range = UiRange::new(value_key, value, min, max, step);
-    let fraction = range.fraction();
-    let track_width = RANGE_WIDTH - 14.0;
-    let fill_width = (track_width * fraction).max(2.0);
-    let thumb_x = (track_width * fraction).clamp(0.0, track_width) + 3.0;
-    UiNode::range(format!("{value_key}.range"), range)
-        .with_class("settings-range")
-        .disabled(disabled)
-        .with_layout(UiLayout {
-            flow: UiFlow::None,
-            ..UiLayout::fixed(RANGE_WIDTH, CONTROL_HEIGHT)
-        })
-        .with_child(
-            UiNode::new(format!("{value_key}.track"), UiNodeKind::Panel)
-                .with_layout(UiLayout::absolute(
-                    raf_render::api_graphic_basic::ui_surface::UiRect::new(
-                        4.0,
-                        15.0,
-                        track_width,
-                        4.0,
-                    ),
-                ))
-                .with_class("settings-range-track"),
-        )
-        .with_child(
-            UiNode::new(format!("{value_key}.fill"), UiNodeKind::Panel)
-                .with_layout(UiLayout::absolute(
-                    raf_render::api_graphic_basic::ui_surface::UiRect::new(
-                        4.0, 15.0, fill_width, 4.0,
-                    ),
-                ))
-                .with_class("settings-range-fill"),
-        )
-        .with_child(
-            UiNode::new(format!("{value_key}.thumb"), UiNodeKind::Panel)
-                .with_layout(UiLayout::absolute(
-                    raf_render::api_graphic_basic::ui_surface::UiRect::new(
-                        thumb_x, 9.0, 16.0, 16.0,
-                    ),
-                ))
-                .with_style(UiStyle {
-                    fill: [255, 255, 255, 255],
-                    border: tokens.border,
-                    text: tokens.text,
-                    border_width: 1.0,
-                    radius: 8.0,
-                    opacity: 1.0,
-                }),
-        )
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Segment<'a> {
-    command: &'a str,
-    label_key: &'a str,
-    selected: bool,
-}
-
-fn segment<'a>(command: &'a str, label_key: &'a str, selected: bool) -> Segment<'a> {
-    Segment {
-        command,
-        label_key,
-        selected,
-    }
-}
-
-fn segment_row(
-    palette: StudioUiPalette,
-    label_key: &str,
-    help_key: Option<&str>,
-    segments: &[Segment<'_>],
-) -> UiNode {
-    let tokens = palette.tokens();
-    let mut control = UiNode::new(format!("{label_key}.segments"), UiNodeKind::Toolbar)
-        .with_layout(UiLayout {
-            flow: UiFlow::RowWrap,
-            grow: 1.0,
-            min_size: [0.0, CONTROL_HEIGHT],
-            align_items: UiAlign::Center,
-            gap: 6.0,
-            compact: UiCompactMode::Wrap,
-            ..UiLayout::default()
-        })
-        .with_style(UiStyle::transparent());
-    for segment in segments {
-        control = control.with_child(command_button(
-            format!("{label_key}.{}", segment.command),
-            segment.label_key,
-            segment.command,
-            0.0,
-            if segment.selected {
-                "settings-segment-active"
-            } else {
-                "settings-segment"
-            },
-            if segment.selected {
-                SELECTED_TEXT_ORANGE
-            } else {
-                tokens.text
-            },
-        ));
-    }
-    form_row(palette, label_key, help_key, control)
-}
-
-fn text_input_row(
-    palette: StudioUiPalette,
-    label_key: &str,
-    help_key: Option<&str>,
-    value_key: impl Into<String>,
-    password: bool,
-    disabled: bool,
-) -> UiNode {
-    let value_key = value_key.into();
-    form_row_with_id(
-        palette,
-        &value_key,
-        label_key,
-        help_key,
-        text_input_control(palette, value_key.clone(), password, disabled),
-    )
-}
-
-fn text_input_control(
-    palette: StudioUiPalette,
-    value_key: impl Into<String>,
-    password: bool,
-    disabled: bool,
-) -> UiNode {
-    let value_key = value_key.into();
-    UiNode::text_input(
-        format!("{value_key}.input"),
-        UiTextInput {
-            value_key,
-            placeholder_key: None,
-            max_length: 2_048,
-            multiline: false,
-            password,
-            submit_command: None,
-        },
-    )
-    .with_class("settings-input")
-    .disabled(disabled)
-    .with_layout(UiLayout::fixed(248.0, CONTROL_HEIGHT))
-    .with_style(palette.subtle_panel_style())
-}
-
-fn command_button(
-    id: impl Into<String>,
-    label_key: &str,
-    command: impl Into<String>,
-    width: f32,
-    class: &str,
-    color: [u8; 4],
-) -> UiNode {
+fn action_button(id: &str, text_key: &str, command: &str, primary: bool) -> UiNode {
     UiNode::new(id, UiNodeKind::Button)
-        .with_text_key(label_key)
-        .with_text_style(UiTextStyle::button(color))
-        .with_class(class)
-        .with_layout(UiLayout {
-            basis: [width, CONTROL_HEIGHT],
-            min_size: [if width > 0.0 { width } else { 70.0 }, CONTROL_HEIGHT],
-            padding: UiSpacing::xy(10.0, 0.0),
-            ..UiLayout::default()
+        .with_class(if primary {
+            "settings-primary-button"
+        } else {
+            "settings-secondary-button"
         })
+        .with_layout(UiLayout::fixed(if primary { 136.0 } else { 94.0 }, 30.0))
+        .with_text_key(text_key)
         .focusable()
-        .with_event(UiEventBinding {
-            event: UiEventKind::Click,
-            action: UiAction::Command {
-                name: command.into(),
-            },
-        })
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
-fn section_help_key(section: SettingsSection) -> &'static str {
-    match section {
-        SettingsSection::Appearance => "settings.surface.help.appearance",
-        SettingsSection::Performance => "settings.surface.help.performance",
-        SettingsSection::Editor => "settings.surface.help.editor",
-        SettingsSection::Viewport => "settings.surface.help.viewport",
-        SettingsSection::Scripting => "settings.surface.help.scripting",
-        SettingsSection::Ai => "settings.surface.help.ai",
-        SettingsSection::Platform => "settings.surface.help.platform",
-    }
-}
-
-fn settings_style_sheet(
-    palette: StudioUiPalette,
-    tokens: raf_render::api_graphic_basic::ui_surface::UiTokens,
-) -> UiStyleSheet {
-    let toggle_fill = match palette {
-        StudioUiPalette::IndustrialDark => [58, 67, 77, 255],
-        StudioUiPalette::PaperLight => [190, 194, 198, 255],
-    };
+fn settings_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
+    let tokens = palette.tokens();
     UiStyleSheet {
         rules: vec![
-            style_rule(
-                "settings-navigation",
-                tokens.surface,
-                tokens.border,
-                1.0,
-                0.0,
-            ),
-            style_rule(
-                "settings-workspace",
-                tokens.background,
-                [0, 0, 0, 0],
-                0.0,
-                0.0,
-            ),
-            style_rule("settings-header", tokens.surface, tokens.border, 1.0, 0.0),
-            style_rule("settings-footer", tokens.surface, tokens.border, 1.0, 0.0),
-            style_rule("settings-nav-button", [0, 0, 0, 0], [0, 0, 0, 0], 0.0, 4.0),
-            style_rule(
-                "settings-nav-active",
-                tokens.selection,
-                tokens.accent,
-                1.0,
-                4.0,
-            ),
-            style_rule(
-                "settings-primary-button",
-                tokens.accent,
-                tokens.accent_hot,
-                1.0,
-                4.0,
-            ),
-            style_rule(
-                "settings-secondary-button",
-                tokens.surface_alt,
-                tokens.border,
-                1.0,
-                4.0,
-            ),
-            style_rule(
-                "settings-segment",
-                tokens.surface_alt,
-                tokens.border,
-                1.0,
-                4.0,
-            ),
-            style_rule(
-                "settings-segment-active",
-                tokens.accent,
-                tokens.accent_hot,
-                1.0,
-                4.0,
-            ),
-            style_rule(
-                "settings-input",
-                tokens.surface_raised,
-                tokens.border,
-                1.0,
-                4.0,
-            ),
-            style_rule("settings-toggle", toggle_fill, tokens.border, 1.0, 12.0),
-            style_rule(
-                "settings-toggle-on",
-                tokens.accent,
-                tokens.accent_hot,
-                1.0,
-                12.0,
-            ),
-            style_rule(
-                "settings-range-track",
-                tokens.surface_alt,
-                [0, 0, 0, 0],
-                0.0,
-                2.0,
-            ),
-            style_rule(
-                "settings-range-fill",
-                [255, 255, 255, 255],
-                [0, 0, 0, 0],
-                0.0,
-                2.0,
-            ),
-            style_rule("settings-provider", tokens.surface, tokens.border, 1.0, 6.0),
-            style_rule(
-                "settings-provider-default",
-                tokens.surface,
-                tokens.accent,
-                1.0,
-                6.0,
-            ),
-            style_rule(
-                "settings-shortcut",
-                tokens.surface_alt,
-                tokens.border,
-                1.0,
-                4.0,
-            ),
-            style_rule(
-                "settings-warning",
-                tokens.surface_alt,
-                tokens.warning,
-                1.0,
-                4.0,
-            ),
             UiStyleRule::new(
                 UiStyleSelector::Class("settings-nav-button".to_string()),
                 UiStylePatch {
                     fill: Some(tokens.surface_alt),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
+                    text: Some(tokens.text_muted),
                     ..UiStylePatch::default()
                 },
             )
-            .when(UiStyleRuleState::Hovered),
+            .when(UiStyleRuleState::Always),
             UiStyleRule::new(
-                UiStyleSelector::Class("settings-secondary-button".to_string()),
+                UiStyleSelector::Class("settings-nav-active".to_string()),
                 UiStylePatch {
+                    fill: Some(tokens.surface_raised),
                     border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-nav-button".to_string()),
+                UiStylePatch {
                     fill: Some(tokens.surface_raised),
                     ..UiStylePatch::default()
                 },
             )
             .when(UiStyleRuleState::Hovered),
             UiStyleRule::new(
+                UiStyleSelector::Class("settings-row".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-row-disabled".to_string()),
+                UiStylePatch {
+                    opacity: Some(0.55),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-segments".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-segment".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-segment-active".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-segment".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-segment-active".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some([255, 171, 54, 255]),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-segment".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-segment-active".to_string()),
+                UiStylePatch {
+                    border: Some([255, 171, 54, 255]),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
+            UiStyleRule::new(
                 UiStyleSelector::Class("settings-range".to_string()),
                 UiStylePatch {
-                    border: Some(tokens.focus),
+                    border: Some(tokens.border),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-range".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent),
+                    text: Some([255, 255, 255, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-primary-button".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent),
+                    border: Some(tokens.accent),
+                    text: Some([255, 255, 255, 255]),
                     border_width: Some(1.0),
-                    radius: Some(4.0),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-secondary-button".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    text: Some(tokens.text),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-text-input".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    text: Some(tokens.text),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-numeric-input".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    text: Some(tokens.text),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-toggle".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.border),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-toggle".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent),
+                    text: Some([255, 255, 255, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-toggle".to_string()),
+                UiStylePatch {
+                    border: Some([255, 171, 54, 255]),
+                    text: Some([255, 255, 255, 255]),
                     ..UiStylePatch::default()
                 },
             )
@@ -1704,29 +1772,10 @@ fn settings_style_sheet(
     }
 }
 
-fn style_rule(
-    class: &str,
-    fill: [u8; 4],
-    border: [u8; 4],
-    border_width: f32,
-    radius: f32,
-) -> UiStyleRule {
-    UiStyleRule::new(
-        UiStyleSelector::Class(class.to_string()),
-        UiStylePatch {
-            fill: Some(fill),
-            border: Some(border),
-            border_width: Some(border_width),
-            radius: Some(radius),
-            ..UiStylePatch::default()
-        },
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raf_render::api_graphic_basic::ui_surface::UiControl;
+    use raf_render::api_graphic_basic::ui_surface::UiSurfaceSession;
 
     fn find_node<'a>(node: &'a UiNode, id: &str) -> Option<&'a UiNode> {
         if node.id == id {
@@ -1736,152 +1785,154 @@ mod tests {
     }
 
     #[test]
-    fn settings_surface_keeps_navigation_and_draft_controls_retained() {
-        let settings = EngineSettings::default();
+    fn settings_surface_keeps_all_legacy_sections_in_a_single_navigation_contract() {
+        assert_eq!(SettingsSection::ALL.len(), 7);
+        assert_eq!(
+            SettingsSection::from_command("settings.section.viewport"),
+            Some(SettingsSection::Viewport)
+        );
+    }
+
+    #[test]
+    fn settings_surface_uses_intrinsic_rows_without_vertical_text_columns() {
+        let surface = build_settings_surface(
+            StudioUiPalette::IndustrialDark,
+            &EngineSettings::default(),
+            SettingsSection::Appearance,
+        );
+        assert_eq!(surface.root.layout.width_mode, UiSizeMode::Fill);
+        assert!(surface.root.children.len() >= 2);
+    }
+
+    #[test]
+    fn settings_toggle_row_is_clickable_outside_the_switch() {
+        let surface = build_settings_surface(
+            StudioUiPalette::IndustrialDark,
+            &EngineSettings::default(),
+            SettingsSection::Editor,
+        );
+        let row = find_node(&surface.root, "settings.show-grid.row").expect("toggle row");
+
+        assert!(row.interactive);
+        assert!(row.event_handlers.iter().any(|binding| matches!(
+            &binding.action,
+            UiAction::SetToggle { key, value }
+                if key == "settings.show_grid" && !value
+        )));
+    }
+
+    #[test]
+    fn settings_range_values_are_literal_text_with_a_percentage_indicator() {
+        let surface = build_settings_surface(
+            StudioUiPalette::IndustrialDark,
+            &EngineSettings::default(),
+            SettingsSection::Editor,
+        );
+        let value = find_node(&surface.root, "settings.grid_size.display").expect("range value");
+
+        assert!(value.text_key.is_none());
+        assert!(value
+            .text_value
+            .as_deref()
+            .is_some_and(|text| text.ends_with('%')));
+    }
+
+    #[test]
+    fn settings_segments_have_stable_padded_hitboxes() {
+        let surface = build_settings_surface(
+            StudioUiPalette::IndustrialDark,
+            &EngineSettings::default(),
+            SettingsSection::Editor,
+        );
+        let segments = find_node(&surface.root, "settings.units.control").expect("segments");
+
+        assert!(segments.children.iter().all(|segment| {
+            segment.layout.width_mode == UiSizeMode::Fixed
+                && segment.layout.height_mode == UiSizeMode::Fixed
+                && segment.layout.padding.left >= 8.0
+                && segment.layout.padding.right >= 8.0
+        }));
+    }
+
+    #[test]
+    fn automatic_ui_scale_disables_manual_range_input() {
+        let mut settings = EngineSettings::default();
+        settings.auto_ui_scale = true;
         let surface = build_settings_surface(
             StudioUiPalette::IndustrialDark,
             &settings,
             SettingsSection::Appearance,
-            &[],
         );
+        let slider = find_node(&surface.root, "settings.ui_scale.slider").expect("ui scale slider");
+        let input = find_node(&surface.root, "settings.ui_scale.value").expect("ui scale input");
 
-        assert!(find_node(&surface.root, "settings.navigation").is_some());
-        assert!(find_node(&surface.root, "settings.content").is_some());
-        assert!(matches!(
-            find_node(&surface.root, "settings.simple-mode")
-                .expect("simple mode toggle")
-                .control,
-            UiControl::Toggle(_)
-        ));
-        assert!(
-            find_node(&surface.root, "settings.ui-scale.range")
-                .expect("manual scale range")
-                .disabled
-        );
+        assert!(slider.disabled);
+        assert!(input.disabled);
     }
 
     #[test]
-    fn settings_surface_preserves_the_legacy_engine_setting_controls() {
-        let settings = EngineSettings::default();
-        let cases: &[(SettingsSection, &[&str])] = &[
-            (
-                SettingsSection::Appearance,
-                &[
-                    "settings.simple-mode",
-                    "settings.theme-experimental.range",
-                    "settings.font-size.range",
-                    "settings.ui-scale.range",
-                ],
-            ),
-            (
-                SettingsSection::Performance,
-                &[
-                    "settings.fps-unlimited",
-                    "settings.fps-limit.range",
-                    "settings.show-fps-counter",
-                    "settings.vsync",
-                    "settings.multithreading",
-                ],
-            ),
-            (
-                SettingsSection::Editor,
-                &[
-                    "settings.show-grid",
-                    "settings.snap-grid",
-                    "settings.grid-size.range",
-                    "settings.grid-load-distance.range",
-                    "settings.auto-save.range",
-                    "settings.command-console",
-                ],
-            ),
-            (
-                SettingsSection::Viewport,
-                &[
-                    "settings.viewport-labels",
-                    "settings.focus-lock",
-                    "settings.solid-edges",
-                    "settings.solid-xray",
-                    "settings.solid-tonality",
-                    "settings.invert-x",
-                    "settings.invert-y",
-                    "settings.invert-ws",
-                    "settings.wasd-speed.range",
-                    "settings.move-sensitivity.range",
-                    "settings.rotate-sensitivity.range",
-                    "settings.scale-sensitivity.range",
-                    "settings.uniform-scale",
-                    "settings.gizmo-growth.range",
-                ],
-            ),
-            (
-                SettingsSection::Scripting,
-                &[
-                    "settings.script-runtime",
-                    "settings.script-hot-reload",
-                    "settings.script-timeout.range",
-                    "settings.script-external-editor.input",
-                ],
-            ),
-            (
-                SettingsSection::Ai,
-                &[
-                    "settings.ai_provider_default.settings.default-provider.openrouter",
-                    "settings.ai_provider_default.settings.default-provider.openai",
-                    "settings.agent_mode.settings.agent-mode.passive",
-                    "settings.agent_mode.settings.agent-mode.active",
-                    "settings.provider.openrouter.enabled",
-                    "settings.provider.openai.enabled",
-                ],
-            ),
-            (
-                SettingsSection::Platform,
-                &[
-                    "settings.responsive-layout",
-                    "settings.headless",
-                    "settings.platform.settings.platform.desktop",
-                    "settings.platform.settings.platform.mobile",
-                    "settings.platform.settings.platform.web",
-                    "settings.platform.settings.platform.cloud",
-                    "settings.platform.settings.platform.console",
-                ],
-            ),
-        ];
+    fn ai_surface_reserves_vertical_tracks_for_provider_cards() {
+        let surface = build_settings_surface(
+            StudioUiPalette::IndustrialDark,
+            &EngineSettings::default(),
+            SettingsSection::Ai,
+        );
+        let workspace = find_node(&surface.root, "settings.ai.workspace").expect("AI workspace");
+        assert_eq!(workspace.layout.height_mode, UiSizeMode::Fixed);
+        assert!(workspace.layout.basis[1] >= AI_SUMMARY_CARD_HEIGHT);
+        let page_size = find_node(&surface.root, "settings.agent-message-page-size.slider")
+            .expect("Agent page-size slider");
+        assert!(matches!(&page_size.control, raf_ui::UiControl::Range(_)));
 
-        for (section, expected_ids) in cases {
-            let surface =
-                build_settings_surface(StudioUiPalette::IndustrialDark, &settings, *section, &[]);
-            for id in *expected_ids {
-                assert!(
-                    find_node(&surface.root, id).is_some(),
-                    "missing retained Settings control {id} in {section:?}"
-                );
-            }
+        for provider in AiProvider::editor_supported() {
+            let id = provider_id(*provider);
+            let card = find_node(&surface.root, &format!("settings.ai_provider.{id}.card"))
+                .expect("provider card");
+            assert_eq!(card.layout.height_mode, UiSizeMode::Fixed);
+            assert_eq!(card.layout.basis[1], AI_PROVIDER_CARD_HEIGHT);
         }
     }
 
     #[test]
-    fn composite_setting_controls_reserve_the_available_form_column() {
-        let settings = EngineSettings::default();
-        let performance = build_settings_surface(
+    fn ai_summary_and_shortcut_cards_keep_vertical_flow_when_fixed() {
+        let surface = build_settings_surface(
             StudioUiPalette::IndustrialDark,
-            &settings,
-            SettingsSection::Performance,
-            &[],
+            &EngineSettings::default(),
+            SettingsSection::Ai,
         );
-        let appearance = build_settings_surface(
-            StudioUiPalette::IndustrialDark,
-            &settings,
-            SettingsSection::Appearance,
-            &[],
-        );
+        let mut session = UiSurfaceSession::default();
+        let frame = session.build_layout_frame_at_scale(&surface, 1600, 1200, [0, 0, 0, 255], 1.0);
+        let ids = [
+            "settings.ai_providers.title",
+            "settings.ai_provider.default.row",
+            "settings.agent-mode.row",
+            "settings.command-console-ai.row",
+            "settings.agent-streaming.row",
+            "settings.agent-message-page-size.row",
+        ];
+        let rects = ids
+            .iter()
+            .map(|id| {
+                frame
+                    .layout_boxes
+                    .iter()
+                    .find(|layout| layout.id == *id)
+                    .unwrap_or_else(|| panic!("missing layout box {id}"))
+                    .rect
+            })
+            .collect::<Vec<_>>();
+        assert!(rects.windows(2).all(|pair| pair[0].y < pair[1].y));
 
-        let range = find_node(&performance.root, "settings.fps-limit.range-control")
-            .expect("FPS slider control exists");
-        let segments =
-            find_node(&appearance.root, "settings.theme.segments").expect("theme segments exist");
-
-        assert_eq!(range.layout.grow, 1.0);
-        assert!(range.layout.min_size[0] >= RANGE_WIDTH);
-        assert_eq!(segments.layout.grow, 1.0);
+        let shortcut = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "settings.ai_models_title")
+            .expect("shortcut card title");
+        let shortcut_empty = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "settings.ai_models.empty")
+            .expect("shortcut empty state");
+        assert!(shortcut.rect.y < shortcut_empty.rect.y);
     }
 }

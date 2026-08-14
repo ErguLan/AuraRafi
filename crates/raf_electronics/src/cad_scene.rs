@@ -6,6 +6,7 @@ use crate::component::ElectronicComponent;
 use crate::drc::{DrcIssue, DrcReport, DrcSeverity};
 use crate::pcb::{footprint_definition, PcbLayer, PcbLayout};
 use crate::schematic::{component_pin_world_position, Schematic};
+use crate::schematic_symbols::{schematic_symbol_recipe, symbol_kind_for_component};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CadSurfaceKind {
@@ -77,6 +78,13 @@ pub struct CadObject {
     pub pick_priority: CadPickPriority,
     pub rect: Option<CadRect>,
     pub points: Vec<Vec2>,
+    /// Additional independent line paths used by schematic symbols.
+    ///
+    /// `points` remains the canonical polyline for wires/traces. Symbol paths
+    /// are kept separate so adjacent strokes are never joined accidentally
+    /// when the renderer batches them.
+    #[serde(default)]
+    pub line_paths: Vec<Vec<Vec2>>,
     pub label: Option<String>,
     pub net: Option<String>,
     pub color_rgba: [u8; 4],
@@ -100,6 +108,7 @@ impl CadObject {
             pick_priority: priority,
             rect: Some(rect),
             points: Vec::new(),
+            line_paths: Vec::new(),
             label: None,
             net: None,
             color_rgba,
@@ -123,6 +132,7 @@ impl CadObject {
             pick_priority: priority,
             rect: None,
             points,
+            line_paths: Vec::new(),
             label: None,
             net: None,
             color_rgba,
@@ -171,6 +181,13 @@ impl CadScene {
             for point in &object.points {
                 hash.write_vec2(*point);
             }
+            hash.write_usize(object.line_paths.len());
+            for path in &object.line_paths {
+                hash.write_usize(path.len());
+                for point in path {
+                    hash.write_vec2(*point);
+                }
+            }
             hash.write_option_str(object.label.as_deref());
             hash.write_option_str(object.net.as_deref());
             hash.write_bytes(&object.color_rgba);
@@ -196,7 +213,7 @@ impl CadScene {
                 CadObjectKind::Wire,
                 CadLayerKind::Schematic,
                 CadPickPriority::Wire,
-                vec![wire.start, wire.end],
+                orthogonal_wire_points(wire.start, wire.end),
                 [112, 224, 136, 255],
             );
             object.net = Some(wire.net.clone());
@@ -386,6 +403,9 @@ impl CadFingerprint {
 }
 
 fn push_schematic_component(objects: &mut Vec<CadObject>, component: &ElectronicComponent) {
+    if !component.visible {
+        return;
+    }
     let body_size = schematic_component_body_size(component);
     let mut body = CadObject::rect(
         format!("component:{}", component.id),
@@ -396,6 +416,7 @@ fn push_schematic_component(objects: &mut Vec<CadObject>, component: &Electronic
         CadRect::new(component.position, body_size),
         component.appearance.color,
     );
+    body.line_paths = schematic_symbol_paths(component);
     body.label = Some(format!("{} {}", component.designator, component.value));
     objects.push(body);
 
@@ -418,6 +439,21 @@ fn push_schematic_component(objects: &mut Vec<CadObject>, component: &Electronic
         }
         objects.push(object);
     }
+}
+
+fn schematic_symbol_paths(component: &ElectronicComponent) -> Vec<Vec<Vec2>> {
+    let recipe = schematic_symbol_recipe(symbol_kind_for_component(component));
+
+    recipe
+        .segments
+        .iter()
+        .map(|segment| {
+            vec![
+                component.position + rotate_vec2(Vec2::from(segment[0]), component.rotation),
+                component.position + rotate_vec2(Vec2::from(segment[1]), component.rotation),
+            ]
+        })
+        .collect()
 }
 
 fn schematic_component_body_size(component: &ElectronicComponent) -> Vec2 {
@@ -465,6 +501,19 @@ fn rotate_vec2(value: Vec2, degrees: f32) -> Vec2 {
         value.x * cos_r - value.y * sin_r,
         value.x * sin_r + value.y * cos_r,
     )
+}
+
+/// Keeps the authoritative CAD representation aligned with the editor's wire-routing rule.
+///
+/// Persisted wires currently store their endpoints, so the elbow is derived deterministically
+/// instead of being duplicated as another piece of scene state. This makes AGB/WGPU, overlays,
+/// snapping and hit regions agree without requiring a second wire geometry format.
+pub fn orthogonal_wire_points(start: Vec2, end: Vec2) -> Vec<Vec2> {
+    if (start.x - end.x).abs() < 0.01 || (start.y - end.y).abs() < 0.01 {
+        vec![start, end]
+    } else {
+        vec![start, Vec2::new(end.x, start.y), end]
+    }
 }
 
 fn pcb_layer_to_cad(layer: PcbLayer) -> CadLayerKind {
@@ -522,6 +571,35 @@ mod tests {
     }
 
     #[test]
+    fn schematic_component_scene_contains_rotated_symbol_paths() {
+        let mut schematic = Schematic::new("Symbol geometry");
+        let mut resistor = ElectronicComponent::resistor("10k");
+        resistor.position = Vec2::new(100.0, 80.0);
+        resistor.rotation = 90.0;
+        schematic.add_component(resistor);
+
+        let scene = CadScene::from_schematic(&schematic);
+        let component = scene
+            .objects
+            .iter()
+            .find(|object| object.kind == CadObjectKind::Component)
+            .expect("component CAD object");
+
+        assert_eq!(component.line_paths.len(), 8);
+        assert!(component.line_paths.iter().all(|path| path.len() == 2));
+        assert!(component
+            .line_paths
+            .iter()
+            .flatten()
+            .any(|point| point.x < 100.0));
+        assert!(component
+            .line_paths
+            .iter()
+            .flatten()
+            .any(|point| point.x > 100.0));
+    }
+
+    #[test]
     fn pcb_scene_exports_board_component_and_pads() {
         let mut layout = PcbLayout::new("Cad PCB");
         layout.components.push(crate::pcb::PcbComponentPlacement {
@@ -560,5 +638,27 @@ mod tests {
         let mut changed = scene.clone();
         changed.objects[0].color_rgba[0] ^= 0xff;
         assert_ne!(first, changed.stable_fingerprint());
+    }
+
+    #[test]
+    fn schematic_wires_use_deterministic_orthogonal_geometry() {
+        let mut schematic = Schematic::new("Orthogonal CAD");
+        schematic.add_wire(Vec2::new(10.0, 20.0), Vec2::new(80.0, 90.0), "N001");
+
+        let scene = CadScene::from_schematic(&schematic);
+        let wire = scene
+            .objects
+            .iter()
+            .find(|object| object.kind == CadObjectKind::Wire)
+            .expect("schematic wire should be exported");
+
+        assert_eq!(
+            wire.points,
+            vec![
+                Vec2::new(10.0, 20.0),
+                Vec2::new(80.0, 20.0),
+                Vec2::new(80.0, 90.0),
+            ]
+        );
     }
 }

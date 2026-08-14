@@ -7,8 +7,8 @@ This guide explains how to activate and use the AuraRafi Agent panel.
 The Agent is a conversational AI interface inside the editor. It can read the
 active project, create and modify scene objects, build electronic schematics,
 run simulations, and manage scripts by calling the same slash commands that the
-Console uses. The agent uses chain-of-thought reasoning: it plans, executes step
-by step, and explains results in natural language.
+Console uses. It follows a bounded plan, executes through the shared command
+kernel, and reports observable results without exposing private reasoning.
 
 ## Panel Layout
 
@@ -42,13 +42,11 @@ The sidebar can be toggled open/closed with the `<` / `>` button.
 ## How tool calls work
 
 When the model decides to act, it calls one or more tools. Each tool maps to an
-AuraRafi command. The engine executes the command and returns the output to the
-model, which then decides the next step. Every command output is also logged to
-the Console panel so you can inspect it.
-
-The agent shows its thinking: before each tool call it explains what it is about
-to do, and after execution it summarizes the result in natural language instead
-of dumping raw JSON.
+AuraRafi command in the canonical catalog. The engine executes the command and
+returns structured output with `changed`, revision, diff, warnings and (when
+available) an undo token. The Agent may use that evidence to choose the next
+step. Every command output is also logged to the Console panel so you can
+inspect it or revert it through the host.
 
 ## Approval flow (Passive mode)
 

@@ -6,6 +6,7 @@
 use eframe::{egui, egui_wgpu};
 use raf_core::config::Language;
 use raf_core::i18n::t;
+use raf_core::session::{ProjectSessionRegistry, SessionId};
 use raf_electronics::{PcbLayer, Schematic};
 use raf_render::api_graphic_basic::ui_surface::UiSurface;
 use raf_ui::{
@@ -13,6 +14,8 @@ use raf_ui::{
     UiNodeKind, UiOverflow, UiRange, UiScrollAxis, UiSpacing, UiStylePatch, UiStyleRule,
     UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiTextInput, UiTextStyle, UiToggle,
 };
+use std::hash::{Hash, Hasher};
+use uuid::Uuid;
 
 use super::pcb_view::{PcbSelection, PcbViewPanel};
 use super::raf_ui_surface_bridge::RafUiSurfaceBridge;
@@ -24,11 +27,29 @@ pub enum ElectronicsInspectorAction {
     Range { field: String, value: f32 },
     Toggle { field: String, value: bool },
     Layer { field: String, value: PcbLayer },
+    SwitchTab(ElectronicsInspectorTab),
+    SessionCreate { name: String },
+    SessionOpen(SessionId),
+    SessionDuplicate { source: SessionId, name: String },
+    SessionRemove(SessionId),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ElectronicsInspectorTab {
+    Properties,
+    Sessions,
 }
 
 pub struct ElectronicsInspectorSurfaceHost {
     schematic_bridge: RafUiSurfaceBridge,
     pcb_bridge: RafUiSurfaceBridge,
+    schematic_surface_key: Option<u64>,
+    schematic_surface: Option<UiSurface>,
+    schematic_surface_revision: u64,
+    pcb_surface_key: Option<u64>,
+    pcb_surface: Option<UiSurface>,
+    pcb_surface_revision: u64,
+    tab: ElectronicsInspectorTab,
 }
 
 impl Default for ElectronicsInspectorSurfaceHost {
@@ -36,6 +57,13 @@ impl Default for ElectronicsInspectorSurfaceHost {
         Self {
             schematic_bridge: RafUiSurfaceBridge::new("raf_ui_electronics_schematic_inspector"),
             pcb_bridge: RafUiSurfaceBridge::new("raf_ui_electronics_pcb_inspector"),
+            schematic_surface_key: None,
+            schematic_surface: None,
+            schematic_surface_revision: 0,
+            pcb_surface_key: None,
+            pcb_surface: None,
+            pcb_surface_revision: 0,
+            tab: ElectronicsInspectorTab::Properties,
         }
     }
 }
@@ -47,10 +75,27 @@ impl ElectronicsInspectorSurfaceHost {
         render_state: Option<&egui_wgpu::RenderState>,
         palette: StudioUiPalette,
         view: &SchematicViewPanel,
+        sessions: &ProjectSessionRegistry,
         lang: Language,
     ) -> Vec<ElectronicsInspectorAction> {
         let selected = view.selection();
-        let surface = build_schematic_surface(palette, &view.schematic, selected, lang);
+        let key = inspector_schematic_key(palette, view, &selected, sessions, lang, self.tab);
+        if self.schematic_surface_key != Some(key) {
+            self.schematic_surface_revision =
+                self.schematic_surface_revision.wrapping_add(1).max(1);
+            self.schematic_surface = Some(build_schematic_surface(
+                palette,
+                &view.schematic,
+                selected,
+                lang,
+                sessions,
+                self.tab,
+            ));
+            self.schematic_surface_key = Some(key);
+        }
+        let Some(surface) = self.schematic_surface.as_ref() else {
+            return Vec::new();
+        };
         let (reference, value, net) = match view.selection() {
             SchematicSelection::Component(index) => view
                 .schematic
@@ -75,11 +120,12 @@ impl ElectronicsInspectorSurfaceHost {
             ),
             _ => (String::new(), String::new(), String::new()),
         };
-        let dispatched = self.schematic_bridge.show_with_control_state(
+        let dispatched = self.schematic_bridge.show_with_control_state_ref_revision(
             ui,
             render_state,
             palette,
             surface,
+            self.schematic_surface_revision,
             |controls| {
                 controls.set_text("electronics.schematic.reference", reference.clone(), 48);
                 controls.set_text("electronics.schematic.value", value.clone(), 128);
@@ -87,7 +133,14 @@ impl ElectronicsInspectorSurfaceHost {
             },
             |key| t(key, lang),
         );
-        Self::collect(dispatched)
+        let session_name = self
+            .schematic_bridge
+            .with_control_state_read(|controls| {
+                controls.text("inspector.session.new_name").to_string()
+            })
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        Self::collect(dispatched, sessions, session_name)
     }
 
     pub fn show_pcb(
@@ -96,9 +149,18 @@ impl ElectronicsInspectorSurfaceHost {
         render_state: Option<&egui_wgpu::RenderState>,
         palette: StudioUiPalette,
         view: &PcbViewPanel,
+        sessions: &ProjectSessionRegistry,
         lang: Language,
     ) -> Vec<ElectronicsInspectorAction> {
-        let surface = build_pcb_surface(palette, view, lang);
+        let key = inspector_pcb_key(palette, view, sessions, lang, self.tab);
+        if self.pcb_surface_key != Some(key) {
+            self.pcb_surface_revision = self.pcb_surface_revision.wrapping_add(1).max(1);
+            self.pcb_surface = Some(build_pcb_surface(palette, view, lang, sessions, self.tab));
+            self.pcb_surface_key = Some(key);
+        }
+        let Some(surface) = self.pcb_surface.as_ref() else {
+            return Vec::new();
+        };
         let (reference, value) = match view.selection() {
             PcbSelection::Component(index) => view
                 .layout
@@ -108,21 +170,33 @@ impl ElectronicsInspectorSurfaceHost {
                 .unwrap_or_default(),
             _ => (String::new(), String::new()),
         };
-        let dispatched = self.pcb_bridge.show_with_control_state(
+        let dispatched = self.pcb_bridge.show_with_control_state_ref_revision(
             ui,
             render_state,
             palette,
             surface,
+            self.pcb_surface_revision,
             |controls| {
                 controls.set_text("electronics.pcb.reference", reference.clone(), 48);
                 controls.set_text("electronics.pcb.value", value.clone(), 128);
             },
             |key| t(key, lang),
         );
-        Self::collect(dispatched)
+        let session_name = self
+            .pcb_bridge
+            .with_control_state_read(|controls| {
+                controls.text("inspector.session.new_name").to_string()
+            })
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        Self::collect(dispatched, sessions, session_name)
     }
 
-    fn collect(actions: Vec<raf_ui::UiDispatchedAction>) -> Vec<ElectronicsInspectorAction> {
+    fn collect(
+        actions: Vec<raf_ui::UiDispatchedAction>,
+        sessions: &ProjectSessionRegistry,
+        session_name: Option<String>,
+    ) -> Vec<ElectronicsInspectorAction> {
         actions
             .into_iter()
             .filter_map(|dispatched| match dispatched.action {
@@ -135,11 +209,88 @@ impl ElectronicsInspectorSurfaceHost {
                 UiAction::SetToggle { key, value } => {
                     Some(ElectronicsInspectorAction::Toggle { field: key, value })
                 }
-                UiAction::Command { name } => parse_layer_command(&name),
+                UiAction::Command { name } => parse_layer_command(&name)
+                    .or_else(|| parse_tab_command(&name))
+                    .or_else(|| parse_session_command(&name, sessions, session_name.as_deref())),
                 _ => None,
             })
             .collect()
     }
+
+    pub fn set_tab(&mut self, tab: ElectronicsInspectorTab) {
+        if self.tab != tab {
+            self.tab = tab;
+            self.schematic_surface_key = None;
+            self.pcb_surface_key = None;
+        }
+    }
+}
+
+fn inspector_schematic_key(
+    palette: StudioUiPalette,
+    view: &SchematicViewPanel,
+    selection: &SchematicSelection,
+    sessions: &ProjectSessionRegistry,
+    lang: Language,
+    tab: ElectronicsInspectorTab,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    matches!(palette, StudioUiPalette::IndustrialDark).hash(&mut hasher);
+    lang.locale_id().hash(&mut hasher);
+    tab.hash(&mut hasher);
+    session_registry_hash(sessions).hash(&mut hasher);
+    format!("{selection:?}").hash(&mut hasher);
+    view.surface_revision_hint().hash(&mut hasher);
+    view.schematic.components.len().hash(&mut hasher);
+    view.schematic.wires.len().hash(&mut hasher);
+    if let SchematicSelection::Component(index) = selection {
+        if let Some(component) = view.schematic.components.get(*index) {
+            component.designator.hash(&mut hasher);
+            component.value.hash(&mut hasher);
+            component.position.x.to_bits().hash(&mut hasher);
+            component.position.y.to_bits().hash(&mut hasher);
+            component.rotation.to_bits().hash(&mut hasher);
+            component.locked.hash(&mut hasher);
+        }
+    }
+    if let SchematicSelection::Wire(index) = selection {
+        if let Some(wire) = view.schematic.wires.get(*index) {
+            wire.net.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn inspector_pcb_key(
+    palette: StudioUiPalette,
+    view: &PcbViewPanel,
+    sessions: &ProjectSessionRegistry,
+    lang: Language,
+    tab: ElectronicsInspectorTab,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    matches!(palette, StudioUiPalette::IndustrialDark).hash(&mut hasher);
+    lang.locale_id().hash(&mut hasher);
+    tab.hash(&mut hasher);
+    session_registry_hash(sessions).hash(&mut hasher);
+    format!("{:?}", view.selection()).hash(&mut hasher);
+    view.surface_revision_hint().hash(&mut hasher);
+    view.layout.components.len().hash(&mut hasher);
+    view.layout.traces.len().hash(&mut hasher);
+    view.layout.airwires.len().hash(&mut hasher);
+    if let Some(index) = view.selected_component_index() {
+        if let Some(component) = view.layout.components.get(index) {
+            component.designator.hash(&mut hasher);
+            component.value.hash(&mut hasher);
+            component.footprint.hash(&mut hasher);
+            component.position.x.to_bits().hash(&mut hasher);
+            component.position.y.to_bits().hash(&mut hasher);
+            component.rotation.to_bits().hash(&mut hasher);
+            component.locked.hash(&mut hasher);
+            component.layer.display_name().hash(&mut hasher);
+        }
+    }
+    hasher.finish()
 }
 
 fn build_schematic_surface(
@@ -147,7 +298,12 @@ fn build_schematic_surface(
     schematic: &Schematic,
     selection: SchematicSelection,
     lang: Language,
+    sessions: &ProjectSessionRegistry,
+    tab: ElectronicsInspectorTab,
 ) -> UiSurface {
+    if tab == ElectronicsInspectorTab::Sessions {
+        return build_sessions_surface(palette, "electronics-schematic-sessions", sessions);
+    }
     let mut content = base_content(palette, "electronics.schematic.scroll");
     match selection {
         SchematicSelection::Component(index) => {
@@ -251,29 +407,38 @@ fn build_schematic_surface(
             }
         }
         SchematicSelection::None => {
-            content = content
-                .with_child(section_label(palette, "app.schematic_properties_root"))
-                .with_child(info_line(
-                    palette,
-                    format!(
-                        "{} {} | {} {} | {} {}",
-                        t("app.schematic_components", lang),
-                        schematic.components.len(),
-                        t("app.schematic_wires", lang),
-                        schematic.wires.len(),
-                        t("app.schematic_nets", lang),
-                        schematic.netlist().nets.len()
-                    ),
-                ));
+            content = content.with_child(summary_card(
+                palette,
+                "app.schematic_properties_root",
+                format!(
+                    "{} {} | {} {} | {} {}",
+                    t("app.schematic_components", lang),
+                    schematic.components.len(),
+                    t("app.schematic_wires", lang),
+                    schematic.wires.len(),
+                    t("app.schematic_nets", lang),
+                    schematic.netlist().nets.len()
+                ),
+                "app.electronics_inspector_select_hint",
+            ));
         }
     }
-    let root = root_with_header(palette, "app.electronics_inspector", content);
+    let root = root_with_header(palette, "app.electronics_inspector", content, tab);
     let mut surface = UiSurface::new("electronics-schematic-inspector", palette, root);
     surface.style_sheet = inspector_style_sheet(palette);
     surface
 }
 
-fn build_pcb_surface(palette: StudioUiPalette, view: &PcbViewPanel, lang: Language) -> UiSurface {
+fn build_pcb_surface(
+    palette: StudioUiPalette,
+    view: &PcbViewPanel,
+    lang: Language,
+    sessions: &ProjectSessionRegistry,
+    tab: ElectronicsInspectorTab,
+) -> UiSurface {
+    if tab == ElectronicsInspectorTab::Sessions {
+        return build_sessions_surface(palette, "electronics-pcb-sessions", sessions);
+    }
     let mut content = base_content(palette, "electronics.pcb.scroll");
     match view.selection() {
         PcbSelection::Component(index) => {
@@ -389,9 +554,9 @@ fn build_pcb_surface(palette: StudioUiPalette, view: &PcbViewPanel, lang: Langua
         PcbSelection::None => {
             let size = view.layout.board_size();
             content = content
-                .with_child(section_label(palette, "app.pcb_board_root"))
-                .with_child(info_line(
+                .with_child(summary_card(
                     palette,
+                    "app.pcb_board_root",
                     format!(
                         "{} {} | {} {} | {} {}",
                         t("app.pcb_components", lang),
@@ -401,6 +566,7 @@ fn build_pcb_surface(palette: StudioUiPalette, view: &PcbViewPanel, lang: Langua
                         t("app.pcb_airwires", lang),
                         view.layout.airwires.len()
                     ),
+                    "app.electronics_inspector_select_hint",
                 ))
                 .with_child(info_line(
                     palette,
@@ -413,32 +579,48 @@ fn build_pcb_surface(palette: StudioUiPalette, view: &PcbViewPanel, lang: Langua
                 ));
         }
     }
-    let root = root_with_header(palette, "app.electronics_inspector", content);
+    let root = root_with_header(palette, "app.electronics_inspector", content, tab);
     let mut surface = UiSurface::new("electronics-pcb-inspector", palette, root);
     surface.style_sheet = inspector_style_sheet(palette);
     surface
 }
 
-fn base_content(palette: StudioUiPalette, id: &str) -> UiNode {
+fn base_content(_palette: StudioUiPalette, id: &str) -> UiNode {
     UiNode::scroll_view(id, UiScrollAxis::Vertical)
         .with_class("electronics-inspector-scroll")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             grow: 1.0,
-            gap: 7.0,
-            padding: UiSpacing::xy(12.0, 10.0),
+            gap: 5.0,
+            padding: UiSpacing::xy(10.0, 8.0),
             overflow: UiOverflow::ScrollY,
             ..UiLayout::fill(UiFlow::Column)
         })
-        .with_child(
-            UiNode::new(format!("{id}.hint"), UiNodeKind::Label)
-                .with_text_key("app.electronics_inspector")
-                .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
-                .with_layout(UiLayout::fixed(0.0, 20.0)),
-        )
 }
 
-fn root_with_header(palette: StudioUiPalette, title_key: &str, content: UiNode) -> UiNode {
+fn build_sessions_surface(
+    palette: StudioUiPalette,
+    id: &str,
+    sessions: &ProjectSessionRegistry,
+) -> UiSurface {
+    let content = super::inspector_surface::sessions_content(palette, sessions);
+    let root = root_with_header(
+        palette,
+        "app.electronics_inspector",
+        content,
+        ElectronicsInspectorTab::Sessions,
+    );
+    let mut surface = UiSurface::new(id, palette, root);
+    surface.style_sheet = inspector_style_sheet(palette);
+    surface
+}
+
+fn root_with_header(
+    palette: StudioUiPalette,
+    title_key: &str,
+    content: UiNode,
+    tab: ElectronicsInspectorTab,
+) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new("electronics.inspector.root", UiNodeKind::Root)
         .with_layout(UiLayout {
@@ -452,16 +634,55 @@ fn root_with_header(palette: StudioUiPalette, title_key: &str, content: UiNode) 
                 .with_layout(UiLayout {
                     flow: UiFlow::Row,
                     align_items: UiAlign::Center,
-                    padding: UiSpacing::xy(12.0, 0.0),
-                    ..UiLayout::fixed(0.0, 38.0)
+                    padding: UiSpacing::xy(10.0, 0.0),
+                    ..UiLayout::fixed(0.0, 32.0)
                 })
                 .with_child(
                     UiNode::new("electronics.inspector.title", UiNodeKind::Label)
                         .with_text_key(title_key)
-                        .with_text_style(UiTextStyle::panel_title(tokens.text)),
-                ),
+                        .with_text_style(UiTextStyle::panel_title(tokens.text))
+                        .with_layout(UiLayout {
+                            grow: 1.0,
+                            ..UiLayout::default()
+                        }),
+                )
+                .with_child(inspector_tab_button(
+                    "electronics.inspector.properties-tab",
+                    "app.properties",
+                    "electronics.inspector.tab:properties",
+                    tab == ElectronicsInspectorTab::Properties,
+                    palette,
+                ))
+                .with_child(inspector_tab_button(
+                    "electronics.inspector.sessions-tab",
+                    "app.sessions",
+                    "electronics.inspector.tab:sessions",
+                    tab == ElectronicsInspectorTab::Sessions,
+                    palette,
+                )),
         )
         .with_child(content)
+}
+
+fn inspector_tab_button(
+    id: &str,
+    label_key: &str,
+    command: &str,
+    active: bool,
+    palette: StudioUiPalette,
+) -> UiNode {
+    command_button(
+        id.to_string(),
+        label_key,
+        command.to_string(),
+        active,
+        palette,
+    )
+    .with_layout(UiLayout {
+        min_size: [74.0, 26.0],
+        padding: UiSpacing::xy(6.0, 3.0),
+        ..UiLayout::default()
+    })
 }
 
 fn section_label(palette: StudioUiPalette, key: &str) -> UiNode {
@@ -471,7 +692,7 @@ fn section_label(palette: StudioUiPalette, key: &str) -> UiNode {
     )
     .with_text_key(key)
     .with_text_style(UiTextStyle::panel_title(palette.tokens().text_muted))
-    .with_layout(UiLayout::fixed(0.0, 22.0))
+    .with_layout(UiLayout::fixed(0.0, 20.0))
 }
 
 fn info_line(palette: StudioUiPalette, value: String) -> UiNode {
@@ -482,6 +703,44 @@ fn info_line(palette: StudioUiPalette, value: String) -> UiNode {
     .with_text_key(value)
     .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
     .with_layout(UiLayout::fixed(0.0, 20.0))
+}
+
+fn summary_card(
+    palette: StudioUiPalette,
+    title_key: &str,
+    value: String,
+    hint_key: &str,
+) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new(
+        format!("electronics.inspector.summary.{}", stable_id(title_key)),
+        UiNodeKind::Panel,
+    )
+    .with_class("electronics-inspector-summary")
+    .with_layout(UiLayout {
+        flow: UiFlow::Column,
+        gap: 1.0,
+        padding: UiSpacing::xy(9.0, 5.0),
+        ..UiLayout::fixed(0.0, 66.0)
+    })
+    .with_child(
+        UiNode::new("electronics.inspector.summary.title", UiNodeKind::Label)
+            .with_text_key(title_key)
+            .with_text_style(UiTextStyle::panel_title(tokens.text))
+            .with_layout(UiLayout::fixed(0.0, 17.0)),
+    )
+    .with_child(
+        UiNode::new("electronics.inspector.summary.value", UiNodeKind::Label)
+            .with_text_key(value)
+            .with_text_style(UiTextStyle::body(tokens.text))
+            .with_layout(UiLayout::fixed(0.0, 17.0)),
+    )
+    .with_child(
+        UiNode::new("electronics.inspector.summary.hint", UiNodeKind::Label)
+            .with_text_key(hint_key)
+            .with_text_style(UiTextStyle::body(tokens.text_muted))
+            .with_layout(UiLayout::fixed(0.0, 17.0)),
+    )
 }
 
 fn text_field(palette: StudioUiPalette, label_key: &str, key: &str, id: &str) -> UiNode {
@@ -659,6 +918,85 @@ fn parse_layer_command(name: &str) -> Option<ElectronicsInspectorAction> {
     Some(ElectronicsInspectorAction::Layer { field, value })
 }
 
+fn parse_tab_command(name: &str) -> Option<ElectronicsInspectorAction> {
+    match name {
+        "electronics.inspector.tab:properties" => Some(ElectronicsInspectorAction::SwitchTab(
+            ElectronicsInspectorTab::Properties,
+        )),
+        "electronics.inspector.tab:sessions" => Some(ElectronicsInspectorAction::SwitchTab(
+            ElectronicsInspectorTab::Sessions,
+        )),
+        _ => None,
+    }
+}
+
+fn parse_session_command(
+    name: &str,
+    sessions: &ProjectSessionRegistry,
+    session_name: Option<&str>,
+) -> Option<ElectronicsInspectorAction> {
+    if name == "inspector.session.create" {
+        let name = session_name
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| next_session_name(sessions));
+        return Some(ElectronicsInspectorAction::SessionCreate { name });
+    }
+    if let Some(value) = name.strip_prefix("inspector.session.create:") {
+        return (!value.trim().is_empty()).then(|| ElectronicsInspectorAction::SessionCreate {
+            name: value.trim().to_string(),
+        });
+    }
+    if let Some(id) = name
+        .strip_prefix("inspector.session.open:")
+        .and_then(parse_session_id)
+    {
+        return Some(ElectronicsInspectorAction::SessionOpen(id));
+    }
+    if let Some(id) = name
+        .strip_prefix("inspector.session.duplicate:")
+        .and_then(parse_session_id)
+    {
+        return Some(ElectronicsInspectorAction::SessionDuplicate {
+            source: id,
+            name: next_session_name(sessions),
+        });
+    }
+    name.strip_prefix("inspector.session.remove:")
+        .and_then(parse_session_id)
+        .map(ElectronicsInspectorAction::SessionRemove)
+}
+
+fn parse_session_id(value: &str) -> Option<SessionId> {
+    Uuid::parse_str(value).ok().map(SessionId)
+}
+
+fn next_session_name(registry: &ProjectSessionRegistry) -> String {
+    let mut index = registry.sessions.len() + 1;
+    loop {
+        let candidate = format!("Session_{index}");
+        if !registry
+            .sessions
+            .iter()
+            .any(|session| session.name.eq_ignore_ascii_case(&candidate))
+        {
+            return candidate;
+        }
+        index += 1;
+    }
+}
+
+fn session_registry_hash(registry: &ProjectSessionRegistry) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    registry.active_session.hash(&mut hasher);
+    for session in &registry.sessions {
+        session.id.hash(&mut hasher);
+        session.name.hash(&mut hasher);
+        format!("{:?}", session.kind).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
 fn format_point(point: glam::Vec2) -> String {
     format!("({:.1}, {:.1})", point.x, point.y)
 }
@@ -666,21 +1004,17 @@ fn format_point(point: glam::Vec2) -> String {
 fn pin_direction_label(
     direction: raf_electronics::component::PinDirection,
     lang: Language,
-) -> &'static str {
-    match (lang, direction) {
-        (Language::Spanish, raf_electronics::component::PinDirection::Input) => "Entrada",
-        (Language::Spanish, raf_electronics::component::PinDirection::Output) => "Salida",
-        (Language::Spanish, raf_electronics::component::PinDirection::Bidirectional) => {
-            "Bidireccional"
+) -> String {
+    let key = match direction {
+        raf_electronics::component::PinDirection::Input => "app.electronics_pin_input",
+        raf_electronics::component::PinDirection::Output => "app.electronics_pin_output",
+        raf_electronics::component::PinDirection::Bidirectional => {
+            "app.electronics_pin_bidirectional"
         }
-        (Language::Spanish, raf_electronics::component::PinDirection::Power) => "Energia",
-        (Language::Spanish, raf_electronics::component::PinDirection::Ground) => "Tierra",
-        (_, raf_electronics::component::PinDirection::Input) => "Input",
-        (_, raf_electronics::component::PinDirection::Output) => "Output",
-        (_, raf_electronics::component::PinDirection::Bidirectional) => "Bidirectional",
-        (_, raf_electronics::component::PinDirection::Power) => "Power",
-        (_, raf_electronics::component::PinDirection::Ground) => "Ground",
-    }
+        raf_electronics::component::PinDirection::Power => "app.electronics_pin_power",
+        raf_electronics::component::PinDirection::Ground => "app.electronics_pin_ground",
+    };
+    t(key, lang)
 }
 
 fn stable_id(value: &str) -> String {
@@ -717,7 +1051,7 @@ fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                     fill: Some(tokens.surface_raised),
                     border: Some(tokens.border),
                     border_width: Some(1.0),
-                    radius: Some(4.0),
+                    radius: Some(0.0),
                     ..UiStylePatch::default()
                 },
             ),
@@ -729,12 +1063,22 @@ fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 },
             ),
             UiStyleRule::new(
+                UiStyleSelector::Class("electronics-inspector-summary".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(0.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
                 UiStyleSelector::Class("electronics-inspector-range".to_string()),
                 UiStylePatch {
                     fill: Some(tokens.surface_raised),
                     border: Some(tokens.border),
                     border_width: Some(1.0),
-                    radius: Some(4.0),
+                    radius: Some(0.0),
                     ..UiStylePatch::default()
                 },
             ),
@@ -744,7 +1088,7 @@ fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                     fill: Some(tokens.surface_raised),
                     border: Some(tokens.border),
                     border_width: Some(1.0),
-                    radius: Some(4.0),
+                    radius: Some(0.0),
                     ..UiStylePatch::default()
                 },
             ),
@@ -754,22 +1098,56 @@ fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                     fill: Some(tokens.surface_raised),
                     border: Some(tokens.border),
                     border_width: Some(1.0),
-                    radius: Some(4.0),
+                    radius: Some(0.0),
                     ..UiStylePatch::default()
                 },
             ),
             UiStyleRule::new(
                 UiStyleSelector::Class("electronics-inspector-button-active".to_string()),
                 UiStylePatch {
-                    fill: Some(tokens.accent),
-                    border: Some(tokens.accent_hot),
+                    fill: Some(tokens.selection),
+                    border: Some(tokens.accent),
                     border_width: Some(1.0),
-                    radius: Some(4.0),
-                    text: Some([18, 18, 20, 255]),
+                    radius: Some(0.0),
+                    text: Some(tokens.accent_hot),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("electronics-inspector-button".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
                     ..UiStylePatch::default()
                 },
             )
             .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-content".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.background),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-row".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-active".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            ),
         ],
     }
 }

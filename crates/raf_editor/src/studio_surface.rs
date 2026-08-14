@@ -351,6 +351,34 @@ pub fn build_hub_surface_with_model(
             )
             .when(UiStyleRuleState::Hovered),
             UiStyleRule::new(
+                UiStyleSelector::Class("hub-window-button".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
+                    border: Some(tokens.surface),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-window-button".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-window-close".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.danger),
+                    border: Some(tokens.danger),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
                 UiStyleSelector::Class("hub-primary-button".to_string()),
                 UiStylePatch {
                     fill: Some(tokens.accent),
@@ -630,6 +658,32 @@ fn hub_topbar_surface() -> UiNode {
             "hub.settings-top",
             "hub.settings",
             "editor.hub.settings",
+        ))
+        .with_child(
+            UiNode::new("hub.window-drag", UiNodeKind::Panel)
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::default()
+                })
+                .with_event(UiEventBinding::command(
+                    UiEventKind::DragStart,
+                    "window.drag",
+                )),
+        )
+        .with_child(hub_window_button(
+            "hub.minimize",
+            "window.minimize",
+            "editor.hub.minimize",
+        ))
+        .with_child(hub_window_button(
+            "hub.maximize",
+            "window.maximize",
+            "editor.hub.maximize",
+        ))
+        .with_child(hub_window_button(
+            "hub.close",
+            "window.close",
+            "editor.hub.close",
         ))
 }
 
@@ -1599,6 +1653,37 @@ fn hub_icon_command_button(id: &str, command: &str, image_key: &str) -> UiNode {
                 },
             )
             .with_layout(UiLayout::fixed(18.0, 18.0)),
+        )
+}
+
+fn hub_window_button(id: &str, command: &str, image_key: &str) -> UiNode {
+    let tooltip_key = match command {
+        "window.minimize" => "app.window.minimize",
+        "window.maximize" => "app.window.maximize",
+        "window.close" => "app.window.close",
+        _ => "app.window.close",
+    };
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class(if command == "window.close" {
+            "hub-window-button hub-window-close"
+        } else {
+            "hub-window-button"
+        })
+        .with_layout(UiLayout::fixed(34.0, 34.0))
+        .with_tooltip_key(tooltip_key)
+        .with_accessibility_label_key(tooltip_key)
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
+        .with_child(
+            UiNode::image(
+                format!("{id}.icon"),
+                UiImage {
+                    source: UiImageSource::new(image_key),
+                    fit: UiImageFit::Contain,
+                    tint: None,
+                },
+            )
+            .with_layout(UiLayout::fixed(14.0, 14.0)),
         )
 }
 

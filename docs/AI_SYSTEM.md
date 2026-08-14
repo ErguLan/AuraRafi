@@ -5,6 +5,16 @@ typing a message to the engine executing commands and returning results.
 
 ## Architecture Overview
 
+The internal Agent, external CLI, and MCP expansion share one command kernel.
+The game-first attached-mode direction, safety boundary, initial toolpack, and
+v0.12 target are specified in
+[`AGENT_CLI_MCP_EXPANSION.md`](AGENT_CLI_MCP_EXPANSION.md).
+
+Human connection steps are in [`CLI_MCP_QUICKSTART.md`](CLI_MCP_QUICKSTART.md).
+The reusable AI workflow is the project skill at
+`.ai/skills/raf-game-authoring/SKILL.md`; it keeps scene and scripting work
+attached, reversible, budgeted, and outside Play/Runtime.
+
 ```
 User types message
   -> AgentPanel (ai_chat.rs)                         UI layer
@@ -25,7 +35,8 @@ User types message
 |------|------|
 | `src/panels/ai_chat.rs` | AgentPanel UI: left sidebar with sessions, message bubbles, model/mode selectors, input area |
 | `src/agent_executor.rs` | AgentToolExecutor: converts tool calls to engine commands, builds tool definitions from catalog, sanitizes tool names |
-| `src/app.rs` | Constructs the executor each frame (lines 1185-1217), wires AgentPanel + Settings panel |
+| `src/editor_viewport_app.rs` | Owns the active editor document, session, history and attached command queue |
+| `src/attached.rs` | Token-scoped loopback endpoint; queues external CLI/MCP requests onto the editor thread |
 
 ### AI Crate (`crates/raf_ai/`)
 
@@ -63,6 +74,48 @@ The Agent panel is split into two areas:
   right-click to delete. "New chat" starts a fresh session.
 - **Right content**: header with model selector and mode toggle, scrollable
   message area, quick suggestion chips, and text input.
+
+### Agent history rendering and pagination
+
+The Agent runtime keeps the conversation available for the next model request,
+but the retained UI does not build every message card at once. It renders one
+page of non-system messages, controlled by `settings.agent_message_page_size`
+(default `8`, configurable from **Settings > AI**, bounded to `4..32`). This
+limits layout, text-atlas, and paint work when a chat opens.
+
+`Load older messages` moves the retained view toward earlier pages; `Back to
+latest` returns to the newest page. These controls are UI pagination, not
+network loading and not a second history store. A smaller page is safer for
+long tool-result chats. A larger page is more convenient but increases the
+one-time render cost when opening or changing pages.
+
+#### 2026-08-06 Agent FPS incident
+
+The severe Agent-only FPS drop was caused by the retained bridge's GPU path:
+it rendered a surface but failed to record the logical and physical sizes of
+that completed presentation. The next frame therefore believed its target was
+new and rebuilt/presented the Agent again, even while idle. Other tabs looked
+stable because they did not execute that Agent bridge. The fix records both
+sizes after a successful GPU render; resize, surface replacement, and actual
+input still invalidate normally.
+
+The page/session transition also resets retained scroll, focus, hover, and
+pointer capture state. This prevents a previous chat's transient interaction
+from being applied to the next document. Do not replace this with a full
+history rebuild on every frame, clear the text atlas during idle presentation,
+or move history persistence into the render loop.
+
+Retained surfaces also have explicit pointer ownership. A press that started
+in the 3D viewport must not become an Agent drag merely because the cursor
+crossed the Agent rectangle while the button remains held. The bridge filters
+foreign button activity and only accepts a gesture that started inside the
+surface or is already captured by that surface. This boundary is required for
+camera orbit, pan, and other cross-surface drags.
+
+The Agent surface key fingerprints only the visible portion of the newest
+message card (900 characters plus the truncation boundary). It must not hash or
+serialize an entire tool result every frame; full history remains available to
+the runtime without making idle Agent frames proportional to stored output.
 
 ### 2. Non-blocking Runtime
 
@@ -127,6 +180,20 @@ generation settings change. Project history restores the saved active session
 instead of creating a replacement session on every project open. System prompts
 remain runtime-only: they are sent to the model but hidden from the visible
 conversation and omitted from persisted history.
+
+### Streaming responses
+
+`Settings > AI > Stream assistant responses` controls the OpenAI-compatible
+Server-Sent Events path and defaults to enabled. With it enabled, text deltas
+are forwarded from the `agent-api-call` thread to the editor and the visible
+assistant card grows while the provider is generating. Disabling it keeps the
+same background request and waits for one complete response.
+
+Streaming does not bypass tools. Tool-call fragments are accumulated by the
+client until the response finishes, then converted into the same normal tool
+calls used by passive approvals and active execution. This is important because
+executing a partially received JSON argument would be unsafe. Providers that
+do not support `stream: true` can be used with the toggle disabled.
 
 ### Provider Transport Boundary
 

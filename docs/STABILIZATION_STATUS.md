@@ -2,6 +2,137 @@
 
 Fecha: 2026-07-05
 
+## Actualizacion 2026-08-13 - Beta de authoring Agent/CLI/MCP
+
+- El editor abierto es el modo beta recomendado para crear escenarios 3D y
+  trabajar scripting: `raf attach` y `raf mcp serve --attach` llegan al mismo
+  endpoint local que conserva la escena, la sesion, el guardado y el historial
+  real de `SceneHistory`.
+- Las mutaciones adjuntas devuelven revision, diff estructurado (creados,
+  modificados y eliminados), verificaciones, metricas y un `undo_token` real.
+  `transaction.undo` solo acepta el token en el mismo proyecto, sesion y
+  revision; cualquier edicion posterior lo invalida.
+- La CLI headless cerrada permanece deliberadamente limitada a inspeccion,
+  capacidades, proyecto y workspace. No simula mutaciones de escena que no
+  hayan pasado por un executor de documentos.
+- Queda documentado para v0.12 un host core opcional y manual para trabajar con
+  el editor cerrado: sin RafUI, Egui ni renderer, con lock de proyecto,
+  presupuestos de recursos, endpoint local efimero y apagado explicito. No se
+  convertira en un servicio residente por defecto para proteger equipos
+  potato.
+- Onboarding: `docs/CLI_MCP_QUICKSTART.md` para humanos y
+  `.ai/skills/raf-game-authoring/` para agentes. Play, Stop y Runtime siguen
+  fuera de esta estabilizacion.
+
+## Actualizacion 2026-08-06 - Agent FPS, historial retained y paginacion
+
+- Se identifico la causa raiz del lag severo al abrir Agent: la ruta GPU de
+  `RafUiSurfaceBridge` no guardaba el tamano logico/fisico despues de renderizar
+  una presentacion. `render_needed` quedaba verdadero en todos los frames,
+  incluyendo idle. Al cambiar de tab el bridge dejaba de ejecutarse y por eso
+  el engine parecia estabilizarse.
+- La ruta GPU ahora marca ambos tamanos despues de una presentacion exitosa.
+  Resize, cambio de superficie, scroll e interaccion real siguen invalidando;
+  un Agent quieto ya no debe recomponerse continuamente.
+- El historial visible continua paginado: el runtime conserva los mensajes
+  para contexto, pero la superficie retained construye solo una pagina de
+  mensajes no-system. `Load older messages` y `Back to latest` son navegacion
+  local, no descargas del backend ni una segunda persistencia.
+- `Settings > AI` expone `Agent messages per page`, con rango 4..32 y default 8.
+  Valores pequenos priorizan FPS al abrir chats largos; valores grandes reducen
+  clics pero aumentan el costo de layout/atlas/pintura de cada pagina.
+- Al cambiar de chat o pagina se limpian scroll, foco, hover y pointer capture
+  retenidos para que el documento anterior no contamine la nueva superficie.
+- Regla para futuras regresiones: cualquier bridge retained debe actualizar sus
+  marcas de ultimo target presentado en las rutas GPU y CPU, y toda animacion o
+  cambio de documento debe medirse con `render_needed`, cache hits, uploads del
+  atlas y tiempo de presentacion. Nunca usar un contador de FPS aislado como
+  prueba de idle-zero-work.
+- Se corrigio la fuga de input entre superficies: un RMB iniciado en el
+  viewport 3D ya no se entrega al Agent al cruzar su rectangulo durante el
+  orbitado. El bridge conserva el gesto solo si nacio dentro de la superficie
+  o si RafUI ya tenia pointer capture.
+- La huella del ultimo mensaje quedo acotada a los 900 caracteres visibles de
+  la tarjeta. Tool results largos siguen en runtime, pero no se recorren ni se
+  serializan completos para decidir si una superficie retained cambio.
+- No se movio la carga de historial a un hilo artificial: la sesion observada
+  mas grande tenia 101 mensajes y aproximadamente 64 KB de texto serializado;
+  el costo dominante era la presentacion repetida del bridge, no la lectura de
+  ese archivo. Si una futura medicion demuestra una sesion mucho mayor, se
+  debe amortizar por paginas antes de agregar concurrencia.
+
+## Actualizacion 2026-08-04 - Shell retained, menus, dock motion y controles de ventana
+
+- La barra superior recupero el modelo compartido historico de
+  `File | Edit | View | Project | Help`. Cada menu abre debajo de su trigger
+  como una superficie retained elevada, cierra por Escape/click externo o
+  comando aceptado y conserva comandos estables; las acciones Edit que aun no
+  tienen backend permanecen visibles pero deshabilitadas.
+- El downbar ya no comparte una sola textura mutable entre grupos. Cada
+  `group_id` tiene su propio `RafUiSurfaceBridge`, por lo que al crear un split
+  las tiras de los grupos anteriores conservan sus iconos, etiquetas y estado.
+- El drag del downbar actualiza el destino con el puntero global, mantiene el
+  nodo fuente capturable y anima el slot de insercion con `UiTween`. La creacion
+  o eliminacion de tracks interpola la geometria con `UiMotionSpec::layout()`;
+  el resize manual sigue inmediato para conservar precision del puntero.
+- Hub y editor exponen minimizar, maximizar, cerrar y arrastre mediante
+  `UiWindowCommand`; el host ejecuta la accion y la superficie solo emite el
+  intent.
+- Regla vigente para agentes: las transiciones funcionales son prioridad en
+  menus, seleccion, drag/reorder, docking, creacion/remocion de paneles y
+  cambios de layout. Se deben usar tweens compartidos, respetar reduced motion
+  y evitar animacion decorativa permanente.
+- Pendiente de estabilizacion: revisar el rendimiento de estas transiciones en
+  GPU y fallback CPU. Hay que medir frame time durante idle/hover/drag/split,
+  allocations, uploads de textura/atlas, repaints solicitados y comportamiento
+  en DPI alto y hardware integrado. Con esas mediciones se decide si el costo
+  actual ya es aceptable o si se optimizan invalidacion, cache, frecuencia o
+  composicion antes de marcar motion como cerrado.
+- Verificacion de esta actualizacion: `cargo fmt --all -- --check`,
+  `git diff --check`, `cargo test -p raf_ui --lib` (57),
+  `cargo test -p raf_editor --lib` (58), `cargo check -p raf_editor` y
+  `cargo build -p aura_rafi_editor` pasan. La captura visual compartida del
+  ejecutable confirma la barra completa, el downbar por grupos y el shell de ventana;
+  la medicion comparativa de rendimiento queda abierta como tarea explicita.
+
+## Actualizacion 2026-07-27 - RafUI Foundation Integrity y command bridge
+
+- Se cerro el primer bloque de integridad del nucleo retained sin reconstruir
+  interfaces visuales: RowWrap/Grid, medicion intrinsic localizada con
+  reflow, scroll con limites reales, rango virtualizable, drag con umbral,
+  caret/seleccion basica, Shift+Tab, modificadores y validacion/migracion de
+  documentos.
+- El atlas de texto deja de depender del ID del nodo para compartir cadenas,
+  recupera el espacio cuando se llena y reporta una region sucia para que el
+  GPU no suba toda la textura en cada edicion. El compositor tambien libera
+  texturas de imagen que abandonan el draw list.
+- Iconos con texto usan una composicion leading/label y tintado semantico;
+  estilos agregan estados Selected/Open/Invalid y pueden heredar color del
+  tema. Esto queda en el nucleo, no en una pantalla egui.
+- `ViewportPanel::navigation_status()` prepara el modelo de la futura franja
+  `Move | World | Snap | Camera | Focus Lock`. No se agrego una interfaz ni se
+  duplico el manejo del viewport.
+- Se definio una fase futura de Settings para `selection_mode`,
+  `free_drag_enabled`, `drag_threshold_px`, `gizmo_only_transform`, snap y
+  confirmacion de transformaciones masivas. No se monta ahora porque el shell
+  visual esta decommissioned.
+- `raf_core::command_protocol` y `raf_editor::commands::gateway` separan el
+  kernel de comandos de cualquier consola o ventana. El mismo JSONL acotado
+  puede viajar por stdio, TCP, Unix socket o named pipe; queda preparado para
+  CLI y MCP de agentes sin activar un runtime jugable. El protocolo valida
+  version y nombre antes de ejecutar.
+- TextField agrega seleccion total Ctrl/Cmd+A, preedit IME en el contrato
+  nativo y libera capturas al perder foco de ventana. El host directo puede
+  aplicar `prefers_reduced_motion` sin acoplar RafUI a Winit.
+- Se preserva la regla critica: no tocar Play, Stop, Runtime ni simulacion en
+  esta fase. Tampoco se agregan sombras, PBR, particulas o animacion
+  esqueletica.
+- Verificacion de esta actualizacion: `raf_ui` 42 pruebas, `raf_render` 155
+  pruebas, `raf_core` 37 pruebas, `raf_editor` 39 pruebas y `cargo check`
+  del workspace pasan; `cargo fmt --all -- --check` tambien pasa. La QA visual
+  manual en 100%, 125%, 150% y 200% DPI sigue pendiente hasta que exista una
+  superficie nuevamente montada.
+
 ## Actualizacion 2026-07-22 - RafUI physical-density correction
 
 - Se corrigio la mezcla de coordenadas logicas y fisicas del compositor GPU:
@@ -125,7 +256,7 @@ Fecha: 2026-07-05
 
 ## Actualizacion 2026-07-18 - Contratos RafUI y ApiGraphicBasic
 
-- Documentacion RafUI: `docs/RAF_UI_AUTHORING.md` define la propiedad de cada
+- Documentacion RafUI: `docs/RAF_UI.md` y `docs/EDITOR_RAFUI.md` definen la propiedad de cada
   capa, el ciclo de una superficie retained, layout responsivo, docking, foco,
   scroll, accesibilidad, checklist y el patron exacto de menus con trigger,
   overlay, cierre por Escape/click externo y acciones tipadas.
@@ -148,6 +279,28 @@ Fecha: 2026-07-05
   manual completa del editor.
 
 Este documento resume que ya esta resuelto en codigo, que ya venia funcionando, que sigue pendiente y en que fase cae cada bloque. La idea es tener una sola fuente de verdad mientras cerramos la estabilizacion antes de testear a fondo.
+
+## Actualizacion 2026-07-30 - Downbar y controles RafUI estabilizados
+
+- El downbar inicia con un solo grupo ordenado. Las pestanas se pueden mover
+  entre grupos o dividir por los bordes hasta un maximo de tres; al sacar la
+  ultima pestana, el grupo fuente desaparece y las columnas se reacomodan.
+- El acomodo del downbar se guarda por proyecto en
+  `.aura_rafi/editor_downbar.ron`, separado de `project.ron`. El cargador
+  normaliza versiones, grupos vacios, duplicados y pestanas no soportadas.
+- Console, Assets, Project y Project Settings son las pestanas activas. El
+  Project consume el filesystem real; no agrega escenas, sesiones, Node Editor
+  ni Agent simulados.
+- Project Settings vive dentro del downbar. Settings global permanece en la
+  barra superior. Toggles y ranges ya tienen geometria retenida en RafUI y
+  los ranges tienen campo numerico editable con parseo y clamp en el host.
+- La busqueda Ctrl+K ahora es un textbox real; su ejecucion queda fuera hasta
+  conectar el backend de comandos. No se agregaron Build, Play ni estados de
+  runtime.
+- Verificacion: `cargo fmt --all -- --check`, `git diff --check`,
+  `cargo check -p raf_editor -p aura_rafi_editor`, `raf_ui` 54 pruebas,
+  `raf_render` 161 pruebas y `raf_editor` 55 pruebas pasan. La QA visual de
+  arrastre, recarga por proyecto y DPI aun requiere abrir el ejecutable.
 
 ## Actualizacion 2026-07-18 - Hibrido Controlado ApiGraphicBasic/WGPU
 
@@ -848,7 +1001,7 @@ Objetivo: dejar claro que existe, que no existe y que botones prometen de mas.
 
 Documento temporal de referencia creado en:
 
-- `docs/TEMP_PHASE6_RUNTIME_TRUTH_PASS.md`
+- `docs/archive/TEMP_PHASE6_RUNTIME_TRUTH_PASS.md`
 
 ### Fase 7: Renderer canonico y hot path grafico
 
@@ -1484,3 +1637,26 @@ Sesion enfocada en bugs de movimiento reportados por el CEO y mejoras de UX chic
 - `/script.run` usa la misma sesion Rhai para ejecutar `on_start` una vez contra una escena clonada, sin mutar el documento editable.
 - `SelectionIdBuffer` define el contrato de seleccion pixel-perfect: ID por pixel, prioridad por capa y desempate por profundidad. `IdBufferSpec::scaled_extent` deja listo el sizing por tier.
 - Play mode del producto sigue guardado en `app.rs`; el harness Rhai ya compila y tiene tests, pero falta reactivar el flujo completo con consola, estado visible, nodes, physics y scene locking validados juntos.
+
+## Actualizacion 2026-08-12 - Electronics hybrid workbench
+
+- Corregido el layout de vertices de lineas de ApiGraphicBasic. El padding de
+  `GpuLineVertex` no coincidia con los offsets declarados y el shader recibia el
+  alpha como depth bias; por eso grid, cables y simbolos desaparecian hasta que
+  otra ruta visual los resaltaba.
+- Electronics reduce el peso visual: biblioteca plegable, tarjetas y gaps mas
+  compactos, botones secundarios neutros, naranja reservado para estado/accion
+  y paneles laterales con rangos que protegen el canvas.
+- Inspector elimina el titulo duplicado y estabiliza Properties/Sessions como
+  tabs RafUI.
+- El menu contextual del schematic fue migrado de un popup Egui a una superficie
+  RafUI contextual con cierre por Escape, clic exterior o accion.
+- El downbar de Electronics migra a `workspace + analysis`; Game conserva un
+  solo downbar a todo el ancho. Las tabs tienen menu RafUI de clic derecho para
+  dividir o restaurar paneles.
+- Contrato completo documentado en `docs/EDITOR_RAFUI.md`.
+- Validacion tecnica: `cargo check -p raf_editor`, build del ejecutable, 68 tests
+  de `raf_ui` y pruebas focalizadas de AGB, shader, menu contextual y aislamiento
+  de layout Game/Electronics.
+- Revision visual automatizada pendiente: el servicio nativo de Computer Use no
+  estuvo disponible en dos intentos; no se declara aceptacion visual final.

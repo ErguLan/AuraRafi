@@ -6,7 +6,10 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use super::{UiControl, UiImageFit, UiRect, UiSkeletonShape, UiStyle, UiSurfaceFrame, UiTextAtlas};
+use super::{
+    images::builtin_icon_key, UiControl, UiImageFit, UiRect, UiSkeletonShape, UiStyle,
+    UiSurfaceFrame, UiTextAtlas, UiTextRole,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiSurfaceQuad {
@@ -178,6 +181,24 @@ impl UiSurfaceDrawList {
                 sequence = sequence.wrapping_add(1);
             }
 
+            let first_control_solid = solids.len();
+            append_control_quads(
+                &mut solids,
+                layout.content_rect,
+                layout.clip_rect,
+                &layout.control,
+                &layout.style,
+                layout.z_index.saturating_add(1),
+            );
+            for index in first_control_solid..solids.len() {
+                paint_order.push(UiSurfacePaintCommand::Solid {
+                    index,
+                    z_index: solids[index].z_index,
+                    sequence,
+                });
+                sequence = sequence.wrapping_add(1);
+            }
+
             if let UiControl::Image(image) = &layout.control {
                 let index = images.len();
                 images.push(UiSurfaceImageQuad {
@@ -196,6 +217,46 @@ impl UiSurfaceDrawList {
                 sequence = sequence.wrapping_add(1);
             }
 
+            let has_text = frame
+                .text_requests
+                .iter()
+                .any(|request| request.node_id == layout.id);
+            let content_rect = layout.content_rect;
+            let content_clip = layout.clip_rect.intersection(content_rect);
+            if let Some(icon) = layout.icon {
+                let icon_size = f32::from(icon.size.logical_pixels());
+                let icon_x = if has_text {
+                    content_rect.x
+                } else {
+                    content_rect.x + ((content_rect.width - icon_size) * 0.5).max(0.0)
+                };
+                let icon_rect = UiRect::new(
+                    icon_x,
+                    content_rect.y + ((content_rect.height - icon_size) * 0.5).max(0.0),
+                    icon_size.min(content_rect.width),
+                    icon_size.min(content_rect.height),
+                );
+                let index = images.len();
+                images.push(UiSurfaceImageQuad {
+                    rect: icon_rect,
+                    clip_rect: content_clip,
+                    source_key: builtin_icon_key(icon.id),
+                    fit: UiImageFit::Contain,
+                    tint: icon.tint.unwrap_or_else(|| {
+                        let mut tint = layout.style.text;
+                        tint[3] = ((f32::from(tint[3]) * layout.style.opacity).round()) as u8;
+                        tint
+                    }),
+                    z_index: layout.z_index.saturating_add(1),
+                });
+                paint_order.push(UiSurfacePaintCommand::Image {
+                    index,
+                    z_index: layout.z_index.saturating_add(1),
+                    sequence,
+                });
+                sequence = sequence.wrapping_add(1);
+            }
+
             let Some(&request_index) = text_request_index.get(layout.id.as_str()) else {
                 continue;
             };
@@ -206,36 +267,135 @@ impl UiSurfaceDrawList {
             else {
                 continue;
             };
-            let Some(slot) = atlas.slot_for(request, resolved.as_str()) else {
-                continue;
-            };
-            let text_width = f32::from(slot.rect.width) / raster_scale;
-            let text_height = f32::from(slot.rect.height) / raster_scale;
-            let text_rect = UiRect::new(
-                layout.rect.x + 4.0,
-                layout.rect.y + ((layout.rect.height - text_height) * 0.5).max(2.0),
-                text_width,
-                text_height,
-            );
-            let index = text.len();
-            text.push(UiSurfaceTextQuad {
-                rect: text_rect,
-                clip_rect: layout.clip_rect,
-                atlas_rect: UiRect::new(
-                    f32::from(slot.rect.x),
-                    f32::from(slot.rect.y),
-                    f32::from(slot.rect.width),
-                    f32::from(slot.rect.height),
-                ),
-                color: request.style.color,
-                z_index: layout.z_index,
-            });
-            paint_order.push(UiSurfacePaintCommand::Text {
-                index,
-                z_index: layout.z_index,
-                sequence,
-            });
-            sequence = sequence.wrapping_add(1);
+            if let Some(slot) = atlas.slot_for(request, resolved.as_str()) {
+                let text_width = f32::from(slot.rect.width) / raster_scale;
+                let text_height = f32::from(slot.rect.height) / raster_scale;
+                let symbol_button = request.style.role == UiTextRole::Button
+                    && resolved.chars().count() <= 2
+                    && layout.icon.is_none();
+                let text_origin_x = if symbol_button {
+                    content_rect.x + ((content_rect.width - text_width) * 0.5).max(0.0)
+                } else {
+                    content_rect.x
+                        + if has_text && layout.icon.is_some() {
+                            6.0 + f32::from(
+                                layout.icon.expect("icon checked").size.logical_pixels(),
+                            ) + 6.0
+                        } else {
+                            0.0
+                        }
+                };
+                let text_rect = UiRect::new(
+                    text_origin_x,
+                    content_rect.y + ((content_rect.height - text_height) * 0.5).max(0.0),
+                    text_width,
+                    text_height,
+                );
+                if let Some(edit) = layout.text_edit {
+                    let selection = edit.selection();
+                    if selection.start < selection.end {
+                        let start_x = text_origin_x
+                            + atlas.measure_prefix_width(request, resolved, selection.start)
+                                / raster_scale;
+                        let end_x = text_origin_x
+                            + atlas.measure_prefix_width(request, resolved, selection.end)
+                                / raster_scale;
+                        let selection_rect = UiRect::new(
+                            start_x.min(end_x),
+                            text_rect.y,
+                            (end_x - start_x).abs(),
+                            text_rect.height,
+                        )
+                        .intersection(content_clip);
+                        if !selection_rect.is_empty() {
+                            let selection_color =
+                                apply_opacity([58, 121, 226, 150], layout.style.opacity);
+                            let index = solids.len();
+                            solids.push(UiSurfaceQuad {
+                                rect: selection_rect,
+                                clip_rect: content_clip,
+                                color: selection_color,
+                                // Keep the highlight in the text layer: it is
+                                // emitted after the input fill and before the
+                                // glyph command below.
+                                z_index: layout.z_index,
+                                radius: 1.0,
+                            });
+                            paint_order.push(UiSurfacePaintCommand::Solid {
+                                index,
+                                z_index: layout.z_index,
+                                sequence,
+                            });
+                            sequence = sequence.wrapping_add(1);
+                        }
+                    }
+                }
+                let index = text.len();
+                text.push(UiSurfaceTextQuad {
+                    rect: text_rect,
+                    clip_rect: content_clip,
+                    atlas_rect: UiRect::new(
+                        f32::from(slot.rect.x),
+                        f32::from(slot.rect.y),
+                        f32::from(slot.rect.width),
+                        f32::from(slot.rect.height),
+                    ),
+                    color: request.style.color,
+                    z_index: layout.z_index,
+                });
+                paint_order.push(UiSurfacePaintCommand::Text {
+                    index,
+                    z_index: layout.z_index,
+                    sequence,
+                });
+                sequence = sequence.wrapping_add(1);
+            }
+
+            if let Some(edit) = layout.text_edit {
+                let prefix_width =
+                    atlas.measure_prefix_width(request, resolved, edit.cursor) / raster_scale;
+                let text_origin_x = content_rect.x
+                    + if has_text && layout.icon.is_some() {
+                        6.0 + f32::from(layout.icon.expect("icon checked").size.logical_pixels())
+                            + 6.0
+                    } else {
+                        0.0
+                    };
+                let caret_width = 1.0;
+                let caret_x = (text_origin_x + prefix_width).clamp(
+                    content_rect.x,
+                    (content_rect.right() - caret_width).max(content_rect.x),
+                );
+                let caret_rect = UiRect::new(
+                    caret_x,
+                    (content_rect.y + 2.0).min(content_rect.bottom()),
+                    caret_width.min(content_rect.width),
+                    (content_rect.height - 4.0)
+                        .max(1.0)
+                        .min(content_rect.height),
+                );
+                if !content_clip.is_empty() && !caret_rect.is_empty() {
+                    let mut caret_color = layout.style.border;
+                    if caret_color[3] == 0 {
+                        caret_color = layout.style.text;
+                    }
+                    caret_color = apply_opacity(caret_color, layout.style.opacity);
+                    let index = solids.len();
+                    solids.push(UiSurfaceQuad {
+                        rect: caret_rect,
+                        clip_rect: content_clip,
+                        color: caret_color,
+                        z_index: layout.z_index.saturating_add(2),
+                        radius: 0.0,
+                    });
+                    paint_order.push(UiSurfacePaintCommand::Solid {
+                        index,
+                        z_index: layout.z_index.saturating_add(2),
+                        sequence,
+                    });
+                    sequence = sequence.wrapping_add(1);
+                }
+            }
         }
         paint_order.sort_by_key(|command| (command.z_index(), command.sequence()));
 
@@ -367,6 +527,125 @@ fn skeleton_style(control: &UiControl, style: &UiStyle, rect: UiRect) -> UiStyle
     }
 }
 
+/// Paints the visual body of retained controls that are not ordinary buttons.
+/// The interaction layer already emits their typed actions; keeping their
+/// geometry here means every host gets the same toggle/range affordance on
+/// GPU and CPU without asking each settings surface to fake it with offsets.
+fn append_control_quads(
+    solids: &mut Vec<UiSurfaceQuad>,
+    rect: UiRect,
+    clip_rect: UiRect,
+    control: &UiControl,
+    style: &UiStyle,
+    z_index: i16,
+) {
+    const ACCENT: [u8; 4] = [232, 133, 28, 255];
+    const TRACK: [u8; 4] = [48, 55, 66, 255];
+    const THUMB: [u8; 4] = [232, 236, 242, 255];
+
+    if rect.width <= 0.0 || rect.height <= 0.0 || style.opacity <= 0.0 {
+        return;
+    }
+
+    let border = if style.border[3] == 0 {
+        TRACK
+    } else {
+        style.border
+    };
+    let text = if style.text[3] == 0 {
+        THUMB
+    } else {
+        style.text
+    };
+    let color = |value: [u8; 4]| apply_opacity(value, style.opacity);
+
+    match control {
+        UiControl::Toggle(toggle) => {
+            let width = rect.width.min(44.0).max(28.0);
+            let height = rect.height.min(20.0).max(16.0);
+            let track_rect = UiRect::new(
+                rect.x + (rect.width - width).max(0.0),
+                rect.y + (rect.height - height) * 0.5,
+                width,
+                height,
+            );
+            let track_color = if toggle.value { ACCENT } else { border };
+            solids.push(UiSurfaceQuad {
+                rect: track_rect,
+                clip_rect,
+                color: color(track_color),
+                z_index,
+                radius: height * 0.5,
+            });
+            let thumb_size = (height - 4.0).max(8.0);
+            let thumb_x = if toggle.value {
+                track_rect.right() - thumb_size - 2.0
+            } else {
+                track_rect.x + 2.0
+            };
+            solids.push(UiSurfaceQuad {
+                rect: UiRect::new(
+                    thumb_x,
+                    track_rect.y + (height - thumb_size) * 0.5,
+                    thumb_size,
+                    thumb_size,
+                ),
+                clip_rect,
+                color: color(text),
+                z_index: z_index.saturating_add(1),
+                radius: thumb_size * 0.5,
+            });
+        }
+        UiControl::Range(range) => {
+            let track_height = 4.0_f32.min(rect.height).max(2.0);
+            let track_rect = UiRect::new(
+                rect.x,
+                rect.y + (rect.height - track_height) * 0.5,
+                rect.width,
+                track_height,
+            );
+            solids.push(UiSurfaceQuad {
+                rect: track_rect,
+                clip_rect,
+                color: color(border),
+                z_index,
+                radius: track_height * 0.5,
+            });
+            let progress = UiRect::new(
+                track_rect.x,
+                track_rect.y,
+                track_rect.width * range.fraction(),
+                track_rect.height,
+            );
+            if progress.width > 0.0 {
+                solids.push(UiSurfaceQuad {
+                    rect: progress,
+                    clip_rect,
+                    color: color(ACCENT),
+                    z_index: z_index.saturating_add(1),
+                    radius: track_height * 0.5,
+                });
+            }
+            let thumb_size = rect.height.min(14.0).max(8.0);
+            let thumb_x = (track_rect.x + track_rect.width * range.fraction() - thumb_size * 0.5)
+                .clamp(track_rect.x, track_rect.right() - thumb_size);
+            solids.push(UiSurfaceQuad {
+                rect: UiRect::new(
+                    thumb_x,
+                    rect.y + (rect.height - thumb_size) * 0.5,
+                    thumb_size,
+                    thumb_size,
+                ),
+                clip_rect,
+                color: color(text),
+                z_index: z_index.saturating_add(2),
+                radius: thumb_size * 0.5,
+            });
+        }
+        _ => {}
+    }
+}
+
 fn append_style_quads(
     solids: &mut Vec<UiSurfaceQuad>,
     rect: UiRect,
@@ -476,7 +755,10 @@ fn apply_opacity(mut color: [u8; 4], opacity: f32) -> [u8; 4] {
 mod tests {
     use super::*;
     use crate::api_graphic_basic::ui_surface::UiSurface;
-    use raf_ui::{StudioUiPalette, UiNode, UiNodeKind, UiTextStyle};
+    use raf_ui::{
+        StudioUiPalette, UiFlow, UiLayout, UiNode, UiNodeKind, UiRange, UiSpacing, UiTextInput,
+        UiTextStyle, UiToggle,
+    };
 
     #[test]
     fn draw_list_contains_rasterized_text_quad() {
@@ -501,6 +783,218 @@ mod tests {
 
         assert!(!list.solids.is_empty());
         assert_eq!(list.text.len(), 1);
+    }
+
+    #[test]
+    fn nested_text_rows_honor_padding_and_keep_text_inside_their_tracks() {
+        let palette = StudioUiPalette::IndustrialDark;
+        let root = UiNode::new("root", UiNodeKind::Root)
+            .with_layout(UiLayout {
+                flow: UiFlow::Column,
+                padding: UiSpacing::same(8.0),
+                gap: 2.0,
+                ..UiLayout::fill(UiFlow::Column)
+            })
+            .with_child(
+                UiNode::new("row", UiNodeKind::Toolbar)
+                    .with_layout(UiLayout {
+                        flow: UiFlow::Row,
+                        gap: 6.0,
+                        padding: UiSpacing::xy(4.0, 2.0),
+                        ..UiLayout::fixed(0.0, 24.0)
+                    })
+                    .with_child(
+                        UiNode::new("timestamp", UiNodeKind::Label)
+                            .with_text_key("timestamp")
+                            .with_layout(UiLayout::fixed(58.0, 18.0)),
+                    )
+                    .with_child(
+                        UiNode::new("message", UiNodeKind::Label)
+                            .with_text_key("message")
+                            .with_layout(UiLayout {
+                                grow: 1.0,
+                                min_size: [1.0, 18.0],
+                                ..UiLayout::fixed(0.0, 18.0)
+                            }),
+                    ),
+            );
+        let surface = UiSurface::new("nested-text", palette, root);
+        let mut session = super::super::UiSurfaceSession::default();
+        let frame = session
+            .build_frame_with_resolved_text(&surface, 320, 80, [0; 4], |key| key.to_string());
+        let row = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "row")
+            .unwrap();
+        let timestamp = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "timestamp")
+            .unwrap();
+        let message = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "message")
+            .unwrap();
+
+        assert_eq!(row.content_rect.x, row.rect.x + 4.0);
+        assert!(timestamp.rect.x >= row.content_rect.x);
+        assert!(timestamp.rect.right() <= message.rect.x);
+
+        let list = UiSurfaceDrawList::build_with_resolved_text_values(
+            &frame,
+            &session.text_atlas,
+            &["timestamp".to_string(), "message".to_string()],
+        );
+        let timestamp_text = list
+            .text
+            .iter()
+            .find(|quad| quad.rect.width > 0.0 && quad.rect.x >= timestamp.content_rect.x)
+            .unwrap();
+        assert!(timestamp_text.rect.x >= timestamp.content_rect.x);
+    }
+
+    #[test]
+    fn short_symbol_buttons_center_text_inside_the_safe_area() {
+        let palette = StudioUiPalette::IndustrialDark;
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(
+            UiNode::new("back", UiNodeKind::Button)
+                .with_text_value("<")
+                .with_text_style(UiTextStyle::button([255, 255, 255, 255]))
+                .with_layout(UiLayout::fixed(28.0, 30.0)),
+        );
+        let surface = UiSurface::new("symbol-button", palette, root);
+        let mut session = super::super::UiSurfaceSession::default();
+        let frame =
+            session.build_frame_with_resolved_text(&surface, 80, 48, [0, 0, 0, 255], |key| {
+                key.to_string()
+            });
+        let button = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "back")
+            .expect("symbol button");
+        let list = UiSurfaceDrawList::build_with_resolved_text_values(
+            &frame,
+            &session.text_atlas,
+            &["<".to_string()],
+        );
+        let text = list.text.first().expect("symbol text quad");
+        let text_center = text.rect.x + text.rect.width * 0.5;
+        let content_center = button.content_rect.x + button.content_rect.width * 0.5;
+
+        assert!((text_center - content_center).abs() < 1.0);
+    }
+
+    #[test]
+    fn retained_toggle_and_range_controls_emit_visual_geometry() {
+        let palette = StudioUiPalette::IndustrialDark;
+        let root = UiNode::new("root", UiNodeKind::Root)
+            .with_layout(UiLayout::fill(UiFlow::Column))
+            .with_child(
+                UiNode::toggle("toggle", UiToggle::new("toggle.value", true))
+                    .with_layout(UiLayout::fixed(48.0, 28.0)),
+            )
+            .with_child(
+                UiNode::range("range", UiRange::new("range.value", 0.5, 0.0, 1.0, 0.1))
+                    .with_layout(UiLayout::fixed(180.0, 28.0)),
+            );
+        let surface = UiSurface::new("control-geometry", palette, root);
+        let mut session = super::super::UiSurfaceSession::default();
+        let frame = session.build_frame(&surface, 240, 100, [0; 4]);
+        let list = UiSurfaceDrawList::build(&frame, &session.text_atlas, |key| key.to_string());
+
+        assert!(list.solids.iter().any(|quad| quad.radius >= 8.0));
+        assert!(list.solids.iter().any(|quad| quad.rect.width > 80.0));
+    }
+
+    #[test]
+    fn focused_text_input_emits_a_visible_caret_quad() {
+        let palette = StudioUiPalette::IndustrialDark;
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(
+            UiNode::text_input("query", UiTextInput::new("query.value"))
+                .with_layout(UiLayout::fixed(180.0, 28.0))
+                .focusable(),
+        );
+        let surface = UiSurface::new("caret", palette, root);
+        let mut session = super::super::UiSurfaceSession::default();
+        session
+            .interaction
+            .controls
+            .set_text("query.value", "raf", 64);
+        session.interaction.focus.request_focus("query");
+        let frame = session
+            .build_frame_with_resolved_text(&surface, 240, 80, [0; 4], |key| key.to_string());
+        let input = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "query")
+            .unwrap();
+        assert_eq!(input.text_edit.unwrap().cursor, 3);
+
+        let list = UiSurfaceDrawList::build_with_resolved_text_values(
+            &frame,
+            &session.text_atlas,
+            &["raf".to_string()],
+        );
+        assert!(list.solids.iter().any(|quad| {
+            quad.rect.width <= 1.0
+                && quad.rect.height >= 14.0
+                && quad.rect.x > input.content_rect.x
+                && quad.clip_rect == input.content_rect
+        }));
+    }
+
+    #[test]
+    fn focused_text_input_emits_a_blue_selection_quad_before_glyphs() {
+        let palette = StudioUiPalette::IndustrialDark;
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(
+            UiNode::text_input("query", UiTextInput::new("query.value"))
+                .with_layout(UiLayout::fixed(180.0, 28.0))
+                .focusable(),
+        );
+        let surface = UiSurface::new("selection", palette, root);
+        let mut session = super::super::UiSurfaceSession::default();
+        session
+            .interaction
+            .controls
+            .set_text("query.value", "rafui", 64);
+        session
+            .interaction
+            .controls
+            .set_selection("query.value", 1, 4);
+        session.interaction.focus.request_focus("query");
+        let frame = session
+            .build_frame_with_resolved_text(&surface, 240, 80, [0; 4], |key| key.to_string());
+        let list = UiSurfaceDrawList::build_with_resolved_text_values(
+            &frame,
+            &session.text_atlas,
+            &["rafui".to_string()],
+        );
+
+        let selection_index = list
+            .solids
+            .iter()
+            .position(|quad| quad.color == [58, 121, 226, 150])
+            .expect("blue text selection quad");
+        assert!(list.solids[selection_index].rect.width > 0.0);
+        let selection_order = list
+            .paint_order
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    UiSurfacePaintCommand::Solid { index, .. } if *index == selection_index
+                )
+            })
+            .expect("selection paint command");
+        let text_order = list
+            .paint_order
+            .iter()
+            .position(|command| matches!(command, UiSurfacePaintCommand::Text { .. }))
+            .expect("text paint command");
+        assert!(selection_order < text_order);
     }
 
     #[test]

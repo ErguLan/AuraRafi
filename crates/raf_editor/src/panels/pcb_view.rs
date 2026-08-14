@@ -32,6 +32,8 @@ pub struct PcbViewPanel {
     pub layout: PcbLayout,
     pub offset: Vec2,
     pub zoom: f32,
+    pub show_minimap: bool,
+    pub show_status: bool,
     selection: PcbSelection,
     tool: PcbTool,
     drag_state: Option<(usize, glam::Vec2)>,
@@ -41,8 +43,11 @@ pub struct PcbViewPanel {
     last_sync: Option<PcbSyncSummary>,
     render_runtime: RenderRuntimeSnapshot,
     cad_surface_host: ElectronicsCadSurfaceHost,
+    pub(super) cad_scene_cache: Option<(u64, raf_electronics::CadScene)>,
     asset_atlas: ElectronicsAssetAtlas,
     canvas_dark_mode: bool,
+    auto_fit_pending: bool,
+    document_epoch: u64,
 }
 
 impl Default for PcbViewPanel {
@@ -51,6 +56,8 @@ impl Default for PcbViewPanel {
             layout: PcbLayout::new("Untitled PCB"),
             offset: Vec2::new(120.0, 80.0),
             zoom: 1.0,
+            show_minimap: true,
+            show_status: true,
             selection: PcbSelection::None,
             tool: PcbTool::Select,
             drag_state: None,
@@ -60,8 +67,11 @@ impl Default for PcbViewPanel {
             last_sync: None,
             render_runtime: RenderRuntimeSnapshot::default(),
             cad_surface_host: ElectronicsCadSurfaceHost::new("pcb_canvas_render"),
+            cad_scene_cache: None,
             asset_atlas: ElectronicsAssetAtlas::default(),
             canvas_dark_mode: true,
+            auto_fit_pending: true,
+            document_epoch: 0,
         }
     }
 }
@@ -106,12 +116,21 @@ impl PcbViewPanel {
     ) -> bool {
         let mut changed = false;
         self.canvas_dark_mode = ui.visuals().dark_mode;
-        self.asset_atlas.request_assets(PCB_ASSETS);
-        self.asset_atlas.process(ui.ctx());
+        // The active Electronics shell uses the retained navigator. Keep the
+        // old raster atlas dormant unless this panel is explicitly rendering
+        // its embedded legacy chrome.
+        if draw_toolbar {
+            self.asset_atlas.request_assets(PCB_ASSETS);
+            self.asset_atlas.process(ui.ctx());
+        }
         if draw_toolbar {
             changed |= self.draw_toolbar(ui);
         }
         let available = ui.available_rect_before_wrap();
+        if self.auto_fit_pending {
+            self.fit_board_to_view(available.width(), available.height());
+            self.auto_fit_pending = false;
+        }
         changed |= self.draw_canvas(ui, available, wgpu_render_state, render_runtime);
         changed
     }
@@ -120,6 +139,9 @@ impl PcbViewPanel {
         let summary = self.layout.sync_from_schematic(schematic);
         self.last_sync = Some(summary.clone());
         self.selection = PcbSelection::None;
+        self.cad_scene_cache = None;
+        self.auto_fit_pending = true;
+        self.document_epoch = self.document_epoch.wrapping_add(1);
         summary
     }
 
@@ -149,6 +171,8 @@ impl PcbViewPanel {
 
     pub fn toggle_airwires_from_ui(&mut self) {
         self.show_airwires = !self.show_airwires;
+        self.cad_scene_cache = None;
+        self.document_epoch = self.document_epoch.wrapping_add(1);
     }
 
     pub fn route_tool_active(&self) -> bool {
@@ -188,6 +212,41 @@ impl PcbViewPanel {
 
     pub fn zoom_out_from_ui(&mut self) {
         self.zoom = (self.zoom / 1.15).clamp(0.35, 4.0);
+    }
+
+    pub fn set_minimap_visible(&mut self, visible: bool) {
+        self.show_minimap = visible;
+    }
+
+    pub fn set_status_visible(&mut self, visible: bool) {
+        self.show_status = visible;
+    }
+
+    pub fn set_layout(&mut self, layout: PcbLayout) {
+        self.layout = layout;
+        self.document_epoch = self.document_epoch.wrapping_add(1);
+        self.selection = PcbSelection::None;
+        self.tool = PcbTool::Select;
+        self.drag_state = None;
+        self.outline_draft.clear();
+        self.cad_scene_cache = None;
+        self.auto_fit_pending = true;
+    }
+
+    /// Cheap revision hint for retained side panels; the CAD cache owns the
+    /// full structural fingerprint and is refreshed by the canvas path.
+    pub(crate) fn surface_revision_hint(&self) -> (u64, u64) {
+        (
+            self.document_epoch,
+            self.cad_scene_cache
+                .as_ref()
+                .map(|(fingerprint, _)| *fingerprint)
+                .unwrap_or_default(),
+        )
+    }
+
+    pub(crate) fn mark_document_changed(&mut self) {
+        self.document_epoch = self.document_epoch.wrapping_add(1);
     }
 
     pub fn select_component(&mut self, idx: usize) {

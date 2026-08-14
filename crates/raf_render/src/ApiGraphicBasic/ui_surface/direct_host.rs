@@ -12,9 +12,11 @@ use super::{
     UiSurfaceFrame, UiSurfaceGpuMetrics, UiSurfaceGpuRenderer, UiSurfaceImageStore,
     UiSurfaceSession,
 };
+use raf_ui::UiEnvironment;
 
 pub struct DirectUiSurfaceHost {
     surface: UiSurface,
+    surface_revision: u64,
     session: UiSurfaceSession,
     compositor: UiSurfaceGpuRenderer,
     images: UiSurfaceImageStore,
@@ -31,6 +33,7 @@ impl DirectUiSurfaceHost {
     ) -> Self {
         Self {
             surface,
+            surface_revision: 0,
             session: UiSurfaceSession::default(),
             compositor: UiSurfaceGpuRenderer::new(device, color_format),
             images: UiSurfaceImageStore::default(),
@@ -44,7 +47,15 @@ impl DirectUiSurfaceHost {
     }
 
     pub fn surface_mut(&mut self) -> &mut UiSurface {
+        self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
         &mut self.surface
+    }
+
+    pub fn set_surface(&mut self, surface: UiSurface) {
+        if self.surface != surface {
+            self.surface = surface;
+            self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
+        }
     }
 
     pub fn session(&self) -> &UiSurfaceSession {
@@ -56,6 +67,15 @@ impl DirectUiSurfaceHost {
     /// values after a renderer or surface transition.
     pub fn session_mut(&mut self) -> &mut UiSurfaceSession {
         &mut self.session
+    }
+
+    pub fn layout_rect(&self, id: &str) -> Option<raf_ui::UiRect> {
+        self.compilation.layout_rect(id)
+    }
+
+    pub fn set_environment(&mut self, environment: UiEnvironment) {
+        self.session
+            .set_reduced_motion(environment.prefers_reduced_motion);
     }
 
     pub fn images(&self) -> &UiSurfaceImageStore {
@@ -107,6 +127,7 @@ impl DirectUiSurfaceHost {
         let frame = self.compilation.layout(
             &self.surface,
             &mut self.session,
+            self.surface_revision,
             size,
             raster_scale,
             self.clear_color,
@@ -148,11 +169,15 @@ impl DirectUiSurfaceHost {
         let compiled = self.compilation.compile(
             &self.surface,
             &mut self.session,
+            self.surface_revision,
             logical_size,
             raster_scale,
             self.clear_color,
             |key| resolve(key),
         );
+        for quad in &compiled.draw_list.images {
+            self.images.ensure_builtin_key(&quad.source_key);
+        }
         let metrics = self.compositor.render_at_scale(
             device,
             queue,

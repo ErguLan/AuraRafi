@@ -26,17 +26,61 @@ pub enum ElectronicsAnalysisSurfaceAction {
 
 pub struct ElectronicsAnalysisSurfaceHost {
     bridge: RafUiSurfaceBridge,
+    surface: Option<UiSurface>,
+    surface_key: Option<AnalysisSurfaceKey>,
+    surface_revision: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnalysisSurfaceKind {
+    Unavailable,
+    Drc,
+    Simulation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AnalysisSurfaceKey {
+    kind: AnalysisSurfaceKind,
+    palette: StudioUiPalette,
+    lang: Language,
+    data_ptr: usize,
+    secondary_ptr: usize,
+    item_count: usize,
+    secondary_count: usize,
 }
 
 impl Default for ElectronicsAnalysisSurfaceHost {
     fn default() -> Self {
         Self {
             bridge: RafUiSurfaceBridge::new("raf_ui_electronics_analysis"),
+            surface: None,
+            surface_key: None,
+            surface_revision: 0,
         }
     }
 }
 
 impl ElectronicsAnalysisSurfaceHost {
+    pub fn show_unavailable(
+        &mut self,
+        ui: &mut egui::Ui,
+        render_state: Option<&egui_wgpu::RenderState>,
+        palette: StudioUiPalette,
+        lang: Language,
+    ) {
+        let key = AnalysisSurfaceKey {
+            kind: AnalysisSurfaceKind::Unavailable,
+            palette,
+            lang,
+            data_ptr: 0,
+            secondary_ptr: 0,
+            item_count: 0,
+            secondary_count: 0,
+        };
+        self.ensure_surface(key, || build_unavailable_surface(palette, lang));
+        self.show_surface(ui, render_state, palette, lang, "");
+    }
+
     pub fn show_drc(
         &mut self,
         ui: &mut egui::Ui,
@@ -45,12 +89,20 @@ impl ElectronicsAnalysisSurfaceHost {
         report: Option<&DrcReport>,
         lang: Language,
     ) -> Option<ElectronicsAnalysisSurfaceAction> {
-        let surface = build_drc_surface(palette, report, lang);
-        self.show(
+        let key = AnalysisSurfaceKey {
+            kind: AnalysisSurfaceKind::Drc,
+            palette,
+            lang,
+            data_ptr: report.map_or(0, |report| report as *const DrcReport as usize),
+            secondary_ptr: 0,
+            item_count: report.map_or(0, DrcReport::total),
+            secondary_count: report.map_or(0, |report| report.errors.len()),
+        };
+        self.ensure_surface(key, || build_drc_surface(palette, report, lang));
+        self.show_surface(
             ui,
             render_state,
             palette,
-            surface,
             lang,
             "electronics.analysis.run-drc",
         )
@@ -66,29 +118,57 @@ impl ElectronicsAnalysisSurfaceHost {
         results: Option<&SimulationResults>,
         lang: Language,
     ) -> Option<ElectronicsAnalysisSurfaceAction> {
-        let surface = build_simulation_surface(palette, schematic, results, lang);
-        self.show(
+        let key = AnalysisSurfaceKey {
+            kind: AnalysisSurfaceKind::Simulation,
+            palette,
+            lang,
+            data_ptr: results.map_or(0, |results| results as *const SimulationResults as usize),
+            secondary_ptr: schematic as *const Schematic as usize,
+            item_count: results.map_or(0, |results| results.messages.len()),
+            secondary_count: schematic.components.len(),
+        };
+        self.ensure_surface(key, || {
+            build_simulation_surface(palette, schematic, results, lang)
+        });
+        self.show_surface(
             ui,
             render_state,
             palette,
-            surface,
             lang,
             "electronics.analysis.run-simulation",
         )
         .then_some(ElectronicsAnalysisSurfaceAction::RunSimulation)
     }
 
-    fn show(
+    fn ensure_surface(&mut self, key: AnalysisSurfaceKey, build: impl FnOnce() -> UiSurface) {
+        if self.surface_key != Some(key) || self.surface.is_none() {
+            self.surface = Some(build());
+            self.surface_key = Some(key);
+            self.surface_revision = self.surface_revision.wrapping_add(1);
+        }
+    }
+
+    fn show_surface(
         &mut self,
         ui: &mut egui::Ui,
         render_state: Option<&egui_wgpu::RenderState>,
         palette: StudioUiPalette,
-        surface: UiSurface,
         lang: Language,
         run_command: &str,
     ) -> bool {
+        let Some(surface) = self.surface.as_ref() else {
+            return false;
+        };
         self.bridge
-            .show(ui, render_state, palette, surface, |key| t(key, lang))
+            .show_with_control_state_ref_revision(
+                ui,
+                render_state,
+                palette,
+                surface,
+                self.surface_revision,
+                |_| {},
+                |key| t(key, lang),
+            )
             .into_iter()
             .any(|action| {
                 matches!(
@@ -97,6 +177,32 @@ impl ElectronicsAnalysisSurfaceHost {
                 )
             })
     }
+}
+
+fn build_unavailable_surface(palette: StudioUiPalette, _lang: Language) -> UiSurface {
+    let content = UiNode::new(
+        "electronics.analysis.unavailable.content",
+        UiNodeKind::Panel,
+    )
+    .with_layout(UiLayout {
+        flow: UiFlow::Column,
+        align_items: UiAlign::Center,
+        justify_content: raf_ui::UiJustify::Center,
+        padding: UiSpacing::same(16.0),
+        ..UiLayout::fill(UiFlow::Column)
+    })
+    .with_child(state_line(
+        palette,
+        "electronics-analysis-empty",
+        "app.electronics_only_panel",
+    ));
+    build_analysis_surface(
+        palette,
+        "app.electronics_drc",
+        "app.electronics_run_drc",
+        "electronics.analysis.unavailable",
+        content,
+    )
 }
 
 fn build_drc_surface(

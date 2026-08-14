@@ -1,168 +1,188 @@
-//! Tool executor that routes Agent tool calls to the engine command handlers.
+//! UI-independent bridge between the Agent runtime and the current editor.
 //!
-//! The commands documented in `docs/COMMANDS.md` are the Agent's tools. Each
-//! tool call is converted to the slash-command string format, parsed, and
-//! dispatched to the matching domain handler.
+//! The historical executor knew about the deleted editor shell and several
+//! retired panels. This adapter keeps the useful command contract while
+//! accepting only the current domain ports. The Agent surface never receives
+//! this type; it only asks the controller to run a typed action.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
 
 use raf_ai::agent_runtime::ToolExecutor;
-use raf_ai::openai_client::OpenAiTool;
+use raf_ai::openai_client::{OpenAiFunction, OpenAiTool};
 use raf_core::i18n::t;
 use raf_core::project::{Project, ProjectType};
+use raf_core::scene::SceneGraph;
 use raf_core::Language;
 use serde_json::Value;
-use std::collections::HashMap;
 
 use crate::commands::{
-    assets::{self, AssetCommandContext},
     catalog::{CommandCatalog, CommandDefinition},
     electronics::{self, ElectronicsCommandContext},
-    game::{self, GameCommandContext},
+    game::{self, GameCommandContext, GameViewportPort, SceneSelectionState},
     output::CommandOutput,
     parser::{parse_console_input, ParsedInput},
     script::{self, ScriptCommandContext},
-    sessions::{self, SessionCommandContext, SessionCommandEvent},
-    ui_document::{self, UiDocumentCommandContext},
     workspace,
 };
-use crate::panels::console::ConsolePanel;
-use crate::panels::hierarchy::HierarchyPanel;
 use crate::panels::pcb_view::PcbViewPanel;
 use crate::panels::schematic_view::SchematicViewPanel;
 use crate::panels::viewport::ViewportPanel;
-use raf_ai::AssetImageGenerationQueue;
-use raf_core::scene::SceneGraph;
-use raf_core::session::ProjectSessionRegistry;
-use raf_ui::UiDocument;
 
-/// Editor-level actions are queued because tools execute while the app has
-/// temporary mutable borrows into documents and panels.
+/// The editor actions that are safe to queue after a tool has finished.
+/// Undo/redo are queued so the application boundary can apply them to its
+/// scene history after the Agent tool call returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentEditorAction {
     Undo,
     Redo,
 }
 
-/// Sanitize a command name for use as an OpenAI tool name.
-/// OpenAI tool names must match `^[a-zA-Z0-9_]+$` and cannot start with a digit.
+#[derive(Debug, Clone)]
+pub struct AgentProjectContext {
+    pub root: PathBuf,
+    pub project_type: ProjectType,
+}
+
+impl AgentProjectContext {
+    pub fn from_project(project: Option<&Project>) -> Option<Self> {
+        project.map(|project| Self {
+            root: project.path.clone(),
+            project_type: project.project_type,
+        })
+    }
+}
+
+/// OpenAI function names cannot contain dots, slashes, or spaces.
 pub fn sanitize_tool_name(name: &str) -> String {
     let sanitized: String = name
         .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == '_' {
-                c
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == '_' {
+                character
             } else {
                 '_'
             }
         })
         .collect();
-    if sanitized.starts_with(|c: char| c.is_ascii_digit()) {
-        format!("_{}", sanitized)
+    if sanitized
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_digit())
+    {
+        format!("_{sanitized}")
     } else {
         sanitized
     }
 }
 
-/// Build a map from sanitized tool name -> original command name.
+/// Build the sanitized-name lookup for commands available in the current
+/// editor. Retired UI-document and session commands remain in the catalog,
+/// but are not advertised until their current host exists.
 pub fn build_tool_name_map(catalog: &CommandCatalog) -> HashMap<String, String> {
     let mut map = HashMap::new();
-    for command in &catalog.commands {
-        let sanitized = sanitize_tool_name(&command.name);
-        map.insert(sanitized, command.name.clone());
+    for command in catalog
+        .commands
+        .iter()
+        .filter(|command| tool_supported(command))
+    {
+        map.insert(sanitize_tool_name(&command.name), command.name.clone());
         for alias in &command.aliases {
-            let sanitized = sanitize_tool_name(alias);
-            map.entry(sanitized).or_insert_with(|| command.name.clone());
+            map.entry(sanitize_tool_name(alias))
+                .or_insert_with(|| command.name.clone());
         }
     }
     map
 }
 
-/// Executor context for one Agent step.
+/// Current editor mutation context exposed to the runtime.
 pub struct AgentToolExecutor<'a> {
     pub scene: &'a mut SceneGraph,
-    pub hierarchy: &'a mut HierarchyPanel,
+    pub selection: &'a mut SceneSelectionState,
     pub viewport: &'a mut ViewportPanel,
     pub schematic_view: &'a mut SchematicViewPanel,
     pub pcb_view: &'a mut PcbViewPanel,
-    pub project: Option<&'a Project>,
+    pub project: Option<AgentProjectContext>,
     pub catalog: &'a CommandCatalog,
-    pub console: Option<&'a mut ConsolePanel>,
-    pub image_queue: &'a mut AssetImageGenerationQueue,
-    pub sessions: &'a mut ProjectSessionRegistry,
-    pub session_events: &'a mut Vec<SessionCommandEvent>,
+    pub tool_name_map: HashMap<String, String>,
     pub editor_actions: &'a mut Vec<AgentEditorAction>,
-    pub ui_document: &'a mut UiDocument,
-    /// Map from sanitized tool name -> original command name.
-    pub tool_name_map: &'a HashMap<String, String>,
 }
 
 impl<'a> AgentToolExecutor<'a> {
-    /// Convert the command catalog into OpenAI tool definitions using sanitized names.
     pub fn build_tools(catalog: &CommandCatalog, language: Language) -> Vec<OpenAiTool> {
         catalog
             .commands
             .iter()
+            .filter(|command| tool_supported(command))
             .map(|command| {
-                let sanitized = sanitize_tool_name(&command.name);
-                command_to_openai_tool(&sanitized, command, language)
+                let name = sanitize_tool_name(&command.name);
+                command_to_openai_tool(&name, command, language)
             })
             .collect()
     }
 }
 
-impl<'a> ToolExecutor for AgentToolExecutor<'a> {
+impl ToolExecutor for AgentToolExecutor<'_> {
     fn execute(&mut self, name: &str, arguments: Value) -> Result<String, String> {
-        // Resolve sanitized tool name back to original command name.
         let original_name = self
             .tool_name_map
             .get(name)
-            .map(|s| s.as_str())
+            .map(String::as_str)
             .unwrap_or(name);
         let definition = self
             .catalog
             .find(original_name)
-            .ok_or_else(|| format!("Unknown tool: {}", name))?;
-
-        if !domain_allowed(&definition.domain, self.project) {
+            .ok_or_else(|| format!("Unknown Agent tool: {name}"))?;
+        if !tool_supported(definition) {
+            return Err(format!(
+                "Tool '{}' is not available in this editor build.",
+                definition.name
+            ));
+        }
+        if !domain_allowed(&definition.domain, self.project.as_ref()) {
             return Err(format!(
                 "Command '{}' is not available for the active project type.",
-                name
+                definition.name
             ));
         }
 
-        let command_line = build_command_line(name, &arguments);
+        let command_line = build_command_line(&definition.name, &arguments);
         let parsed = match parse_console_input(&command_line) {
             Ok(ParsedInput::Command(command)) => command,
             Ok(ParsedInput::Message(_)) => {
-                return Err("Tool arguments did not form a valid command.".to_string())
+                return Err("Tool arguments did not form a command.".to_string())
             }
-            Err(error) => return Err(format!("Failed to parse command: {}", error)),
+            Err(error) => return Err(format!("Failed to parse Agent command: {error}")),
         };
 
         let output = match definition.domain.as_str() {
             "game" => {
-                let mut ctx = GameCommandContext {
+                let mut context = GameCommandContext {
                     scene: self.scene,
-                    hierarchy: self.hierarchy,
-                    viewport: self.viewport,
+                    selection: self.selection,
+                    viewport: self.viewport as &mut dyn GameViewportPort,
                 };
-                game::execute(&definition.name, &parsed, &mut ctx)
+                game::execute(&definition.name, &parsed, &mut context)
             }
             "electronics" => {
-                let mut ctx = ElectronicsCommandContext {
+                let mut context = ElectronicsCommandContext {
                     schematic_view: self.schematic_view,
                     pcb_view: self.pcb_view,
                 };
-                electronics::execute(&definition.name, &parsed, &mut ctx)
+                electronics::execute(&definition.name, &parsed, &mut context)
             }
-            "shared" => dispatch_shared_command(&definition.name, &parsed, self),
-            other => return Err(format!("Unsupported command domain: {}", other)),
+            "shared" => self.execute_shared(&definition.name, &parsed),
+            other => CommandOutput::error(
+                "Agent command",
+                format!("No current editor adapter exists for domain '{other}'."),
+            ),
         };
 
-        if let Some(console) = self.console.as_mut() {
-            console.log_command_output(output.clone());
+        if output.level == crate::commands::output::CommandLevel::Error {
+            Err(command_output_to_string(&output))
+        } else {
+            Ok(command_output_to_string(&output))
         }
-
-        Ok(command_output_to_string(&output))
     }
 
     fn describe(&self, name: &str) -> String {
@@ -174,135 +194,116 @@ impl<'a> ToolExecutor for AgentToolExecutor<'a> {
                     definition.name, definition.domain, definition.category
                 )
             })
-            .unwrap_or_else(|| format!("Execute {}", name))
+            .unwrap_or_else(|| format!("Execute {name}"))
     }
 }
 
-fn dispatch_shared_command(
-    name: &str,
-    parsed: &crate::commands::parser::ParsedCommand,
-    ctx: &mut AgentToolExecutor<'_>,
-) -> CommandOutput {
-    match name {
-        "help" | "commands" | "describe" | "history" | "clear" | "undo" | "redo"
-        | "project.info" => {
-            // Workspace / meta commands.
-            workspace_or_meta_command(name, parsed, ctx)
+impl AgentToolExecutor<'_> {
+    fn execute_shared(
+        &mut self,
+        command_name: &str,
+        command: &crate::commands::parser::ParsedCommand,
+    ) -> CommandOutput {
+        match command_name {
+            "workspace.read" => self
+                .project
+                .as_ref()
+                .map(|project| workspace::read_file(command, &project.root))
+                .unwrap_or_else(|| CommandOutput::error("Workspace read", "No active project.")),
+            "workspace.search" => self
+                .project
+                .as_ref()
+                .map(|project| workspace::search(command, &project.root))
+                .unwrap_or_else(|| CommandOutput::error("Workspace search", "No active project.")),
+            name if name.starts_with("script.") => {
+                let assets_root = self
+                    .project
+                    .as_ref()
+                    .map(|project| project.root.join("assets"));
+                let mut context = ScriptCommandContext {
+                    scene: self.scene,
+                    assets_root: assets_root.as_deref(),
+                };
+                script::execute(name, command, &mut context)
+            }
+            "project.info" => {
+                let lines = self
+                    .project
+                    .as_ref()
+                    .map(|project| {
+                        vec![
+                            format!("project_type: {:?}", project.project_type),
+                            format!("path: {}", project.root.display()),
+                        ]
+                    })
+                    .unwrap_or_else(|| vec!["No active project.".to_string()]);
+                CommandOutput::info("Project info", lines, serde_json::json!({"ok": true}))
+            }
+            "help" | "commands" | "describe" | "history" | "clear" => CommandOutput::info(
+                "Agent command",
+                vec![format!(
+                    "{command_name} is available through the command catalog."
+                )],
+                serde_json::json!({"ok": true, "command": command_name}),
+            ),
+            "undo" => {
+                self.editor_actions.push(AgentEditorAction::Undo);
+                CommandOutput::info(
+                    "Undo",
+                    vec!["Undo queued for the active editor history.".to_string()],
+                    serde_json::json!({"ok": true, "queued": true}),
+                )
+            }
+            "redo" => {
+                self.editor_actions.push(AgentEditorAction::Redo);
+                CommandOutput::info(
+                    "Redo",
+                    vec!["Redo queued for the active editor history.".to_string()],
+                    serde_json::json!({"ok": true, "queued": true}),
+                )
+            }
+            _ => CommandOutput::error(
+                "Agent command",
+                format!("Shared command '{command_name}' is not mounted."),
+            ),
         }
-        "workspace.read" | "workspace.search" => workspace_command(name, parsed, ctx),
-        "asset.generate_image"
-        | "asset.generate_local_png"
-        | "asset.image_status"
-        | "asset.cancel_image" => {
-            let project_root = ctx.project.map(|project| project.path.as_path());
-            let mut asset_ctx = AssetCommandContext {
-                project_root,
-                image_queue: ctx.image_queue,
-            };
-            assets::execute(name, parsed, &mut asset_ctx)
-        }
-        "session.list" | "session.create" | "session.open" | "session.duplicate"
-        | "session.remove" => {
-            let mut session_ctx = SessionCommandContext {
-                project: ctx.project,
-                registry: ctx.sessions,
-                events: ctx.session_events,
-            };
-            sessions::execute(name, parsed, &mut session_ctx)
-        }
-        "ui.document.describe"
-        | "ui.node.add"
-        | "ui.node.remove"
-        | "ui.document.set_space"
-        | "ui.document.bind_camera"
-        | "ui.document.clear_camera" => {
-            let mut document_ctx = UiDocumentCommandContext {
-                document: ctx.ui_document,
-            };
-            ui_document::execute(name, parsed, &mut document_ctx)
-        }
-        "script.create"
-        | "script.attach"
-        | "script.detach"
-        | "script.list"
-        | "script.validate"
-        | "script.run"
-        | "script.compile_nodes" => {
-            let assets_path = ctx.project.map(|project| project.path.join("assets"));
-            let assets_root = assets_path.as_deref();
-            let mut script_ctx = ScriptCommandContext {
-                scene: ctx.scene,
-                assets_root,
-            };
-            script::execute(name, parsed, &mut script_ctx)
-        }
-        _ => CommandOutput::error("Shared command", format!("Not routed: {}", name)),
     }
 }
 
-fn workspace_command(
-    name: &str,
-    parsed: &crate::commands::parser::ParsedCommand,
-    ctx: &AgentToolExecutor<'_>,
-) -> CommandOutput {
-    let Some(project) = ctx.project else {
-        return CommandOutput::error("Workspace command", "No active project.");
-    };
-    match name {
-        "workspace.read" => workspace::read_file(parsed, &project.path),
-        "workspace.search" => workspace::search(parsed, &project.path),
-        _ => CommandOutput::error("Workspace command", format!("Unknown: {}", name)),
-    }
-}
-
-fn workspace_or_meta_command(
-    name: &str,
-    _parsed: &crate::commands::parser::ParsedCommand,
-    ctx: &mut AgentToolExecutor<'_>,
-) -> CommandOutput {
-    match name {
-        "undo" => {
-            ctx.editor_actions.push(AgentEditorAction::Undo);
-            CommandOutput::info(
-                "Undo",
-                vec!["Undo queued for the editor history.".to_string()],
-                serde_json::json!({"ok": true, "status": "queued"}),
-            )
-        }
-        "redo" => {
-            ctx.editor_actions.push(AgentEditorAction::Redo);
-            CommandOutput::info(
-                "Redo",
-                vec!["Redo queued for the editor history.".to_string()],
-                serde_json::json!({"ok": true, "status": "queued"}),
-            )
-        }
-        "project.info" => {
-            let lines = if let Some(project) = ctx.project {
-                vec![
-                    format!("name: {}", project.name),
-                    format!("type: {:?}", project.project_type),
-                    format!("path: {}", project.path.display()),
-                ]
-            } else {
-                vec!["No active project.".to_string()]
-            };
-            CommandOutput::info("Project info", lines, serde_json::json!({"ok": true}))
-        }
-        "help" | "commands" | "describe" | "history" | "clear" => CommandOutput::info(
-            "Meta command",
-            vec![format!("{} is available in the Console panel.", name)],
-            serde_json::json!({"ok": true, "command": name}),
+fn tool_supported(command: &CommandDefinition) -> bool {
+    match command.domain.as_str() {
+        "game" | "electronics" => true,
+        "shared" => matches!(
+            command.name.as_str(),
+            "help"
+                | "commands"
+                | "describe"
+                | "history"
+                | "clear"
+                | "undo"
+                | "redo"
+                | "project.info"
+                | "workspace.read"
+                | "workspace.search"
+                | "script.create"
+                | "script.attach"
+                | "script.detach"
+                | "script.list"
+                | "script.validate"
+                | "script.run"
+                | "script.compile_nodes"
         ),
-        _ => CommandOutput::error("Meta command", format!("Unknown: {}", name)),
+        _ => false,
     }
 }
 
-fn domain_allowed(domain: &str, project: Option<&Project>) -> bool {
+fn domain_allowed(domain: &str, project: Option<&AgentProjectContext>) -> bool {
     match domain {
         "shared" => true,
-        "game" => project.map(|p| p.project_type) == Some(ProjectType::Game),
-        "electronics" => project.map(|p| p.project_type) == Some(ProjectType::Electronics),
+        "game" => project.is_some_and(|project| project.project_type == ProjectType::Game),
+        "electronics" => {
+            project.is_some_and(|project| project.project_type == ProjectType::Electronics)
+        }
         _ => false,
     }
 }
@@ -314,7 +315,6 @@ fn command_to_openai_tool(
 ) -> OpenAiTool {
     let mut properties = serde_json::Map::new();
     let mut required = Vec::new();
-
     for parameter in &command.parameters {
         let mut schema = serde_json::Map::new();
         schema.insert("type".to_string(), json_type_for_kind(&parameter.kind));
@@ -332,18 +332,15 @@ fn command_to_openai_tool(
             required.push(Value::String(parameter.name.clone()));
         }
     }
-
     OpenAiTool {
         tool_type: "function".to_string(),
-        function: raf_ai::openai_client::OpenAiFunction {
+        function: OpenAiFunction {
             name: sanitized_name.to_string(),
             description: Some(localized_tool_description(command, language)),
-            parameters: Value::Object({
-                let mut map = serde_json::Map::new();
-                map.insert("type".to_string(), Value::String("object".to_string()));
-                map.insert("properties".to_string(), Value::Object(properties));
-                map.insert("required".to_string(), Value::Array(required));
-                map
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": properties,
+                "required": required,
             }),
         },
     }
@@ -372,20 +369,18 @@ fn json_type_for_kind(kind: &str) -> Value {
 }
 
 fn build_command_line(name: &str, arguments: &Value) -> String {
-    let mut parts = vec![format!("/{}", name)];
+    let mut parts = vec![format!("/{name}")];
     if let Some(object) = arguments.as_object() {
         for (key, value) in object {
-            if key == "command" && value.is_string() {
-                // Special case for /describe command=<name>.
-                parts.push(format!("{}={}", key, value.as_str().unwrap_or("")));
-            } else if let Some(text) = value.as_str() {
-                if text.contains(' ') {
-                    parts.push(format!("{}=\"{}\"", key, text));
+            if let Some(text) = value.as_str() {
+                let escaped = text.replace('"', "\\\"");
+                if text.contains(char::is_whitespace) {
+                    parts.push(format!(r#"{key}=\"{escaped}\""#));
                 } else {
-                    parts.push(format!("{}={}", key, text));
+                    parts.push(format!("{key}={escaped}"));
                 }
             } else {
-                parts.push(format!("{}={}", key, value));
+                parts.push(format!("{key}={value}"));
             }
         }
     }
@@ -405,27 +400,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tool_contract_uses_localized_descriptions_and_examples() {
+    fn tool_names_are_safe_for_openai_function_calls() {
+        assert_eq!(sanitize_tool_name("game.add"), "game_add");
+        assert_eq!(sanitize_tool_name("1st.command"), "_1st_command");
+    }
+
+    #[test]
+    fn retired_ui_commands_are_not_advertised() {
         let catalog = CommandCatalog::builtin();
-        let tools = AgentToolExecutor::build_tools(&catalog, Language::Spanish);
-        let tool = tools
+        let tools = AgentToolExecutor::build_tools(&catalog, Language::English);
+        assert!(!tools
             .iter()
-            .find(|tool| tool.function.name == "game_add")
-            .expect("game.add tool");
-
-        let description = tool.function.description.as_deref().unwrap_or_default();
-        assert!(description.contains("Crea"));
-        assert!(description.contains("/game.add"));
-
-        let primitive_description = tool
-            .function
-            .parameters
-            .get("properties")
-            .and_then(|properties| properties.get("primitive"))
-            .and_then(|primitive| primitive.get("description"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        assert_ne!(primitive_description, "commands.param.primitive");
-        assert!(!primitive_description.is_empty());
+            .any(|tool| tool.function.name.starts_with("ui_")));
+        assert!(tools.iter().any(|tool| tool.function.name == "game_add"));
     }
 }

@@ -1,11 +1,8 @@
 # AuraRafi Manual Commands
 
-The Console is a manual command runner that uses the same domain handlers as
-the AI tool-calling pipeline.
-
-For the reusable UI authoring and quality contract behind these commands, see
-[RafUI Studio](../.ulpi/design/rafui-studio.md). Its preview command can run
-inside the editor Console or as a read-only process from Windows CMD.
+The command handlers remain documented as domain infrastructure. The editor
+Console is now mounted through the retained RafUI downbar; the former RafUI
+Studio authoring surface remains removed and is not a hidden dependency.
 
 ## Activation
 
@@ -17,6 +14,51 @@ Commands require two switches:
 When both are enabled, the Console shows a `User1` input row and a Send button.
 Normal text is logged as a user message. Text that starts with `/` is parsed as
 a command.
+
+## Command kernel and external agents
+
+The Console is not the owner of command behavior. RafUI, the Console, a CLI,
+and an MCP endpoint must produce the same `EngineCommandRequest` and receive
+an `EngineCommandResponse` with `changed`, data, warnings, diff, and undo
+state. The contract lives in `raf_core::command_protocol`; the editor
+boundary adapts it through `raf_editor::commands::gateway`.
+
+The initial transport is newline-delimited JSON over stdio with a 1 MiB frame
+limit. Attached editor mode currently uses a token-scoped loopback TCP stream;
+the same frames are ready for Unix sockets and Windows named pipes,
+so an agent can talk to an open interface or to a headless process without
+importing a Console screen. Real execution still requires a project and a
+domain executor; the protocol does not fake mutations.
+
+This surface does not activate Play, Stop, or Runtime. Scene, asset, and CAD
+commands remain document-editing operations and their responses must be able
+to enter the existing undo history.
+
+### Headless CLI and MCP adapters
+
+The `raf` binary is a UI-independent adapter over the same core protocol. It
+can be used by Codex, Claude Code, OpenCode or another local harness without
+starting Egui or WGPU:
+
+```text
+raf doctor --json
+raf status --json
+raf capabilities search terrain --json
+raf project create --name Demo --parent ./projects --type game --confirm --json
+raf project info ./projects/Demo --json
+raf serve                         # JSONL EngineCommandRequest/Response
+raf mcp serve                     # MCP JSON-RPC over stdio
+raf attach --project ./projects/Demo status --json
+raf attach --project ./projects/Demo command game.add --params '{"primitive":"cube"}' --confirm --json
+raf mcp serve --attach ./projects/Demo # MCP against the open editor
+```
+
+`--dry-run`, `--expected-revision`, `--idempotency-key` and `--confirm` are
+available on command requests where relevant. Mutations return a revision,
+diff, verification status and undo token when the host can provide one. The
+headless adapter currently exposes project/workspace/capability inspection and
+project creation/opening; domain mutation commands require an attached editor
+executor. Play, Stop and Runtime are deliberately not exposed.
 
 ## Syntax
 
@@ -38,6 +80,7 @@ history. `/` alone maps to `/help`.
 | `/session.list` | Lists the active project session registry. |
 | `/session.create name=<name> kind=world|interface|electronics` | Creates an isolated session. |
 | `/session.open session=<name-or-uuid>` | Activates a session after preserving dirty work. |
+| `/session.rename session=<name-or-uuid> name=<name>` | Renames a session without changing its storage identity. |
 | `/session.duplicate source=<name-or-uuid> name=<name>` | Copies session documents into a new session. |
 | `/session.remove session=<name-or-uuid>` | Removes a non-active registry entry and retains files for recovery. |
 | `/ui.document.describe` | Describes the active session's empty-or-authored UI document. |
@@ -45,7 +88,6 @@ history. `/` alone maps to `/help`.
 | `/ui.node.remove id=<id>` | Removes a non-root UI node. |
 | `/ui.document.set_space space=screen|world|camera` | Chooses where that user UI renders. |
 | `/ui.document.bind_camera camera=<key>` | Links a document to a camera by reference, not hierarchy ownership. |
-| `/rafui.studio.preview format=text|json dpi=1.0|1.25|1.5|2.0 theme=dark|light` | Prints the RafUI Studio recipe, density, and diagnostic preview. |
 | `/asset.generate_image prompt="..." name=<asset> size=square|landscape|portrait transparent=true|false` | Starts the isolated remote image worker with `gpt-image-2` by default. |
 | `/asset.generate_local_png prompt="..." name=<asset> style=icon|badge|sprite|texture` | Starts the inexpensive local procedural PNG worker; no API key or network required. |
 | `/asset.image_status job=<uuid>` | Reads an image generation job. |
@@ -70,7 +112,9 @@ Shared:
 - `/help`, `/commands`, `/describe`
 - `/history`, `/clear`
 - `/undo`, `/redo`
-- `/project.info`
+- `/transaction.undo token=<undo-token>` (attached CLI/MCP only; requires
+  `confirm=true` and the exact issuing revision)
+- `/project.info`, `/project.save`
 - `/workspace.read`, `/workspace.search`
 
 Games:
@@ -112,6 +156,10 @@ the editor document is not mutated.
 `/script.compile_nodes` is prepared for the future node-runtime connection and
 does not activate a product runtime.
 See `docs/SCRIPTING_SYSTEM.md` for the full scripting architecture.
+
+For external authoring setup and Windows examples, see
+`docs/CLI_MCP_QUICKSTART.md` and the reusable `.ai/skills/raf-game-authoring/`
+skill.
 
 ## Output Contract
 
@@ -161,24 +209,6 @@ Do not put new command logic directly into the Console UI. The Console should
 collect input and render output; command behavior belongs in the command
 modules so agents and external callers can reuse the same path later.
 
-## RafUI Studio from Windows CMD
-
-The editor executable exposes the same read-only preview without opening the
-window:
-
-```powershell
-cargo run -p aura_rafi_editor -- --rafui-studio-preview
-cargo run -p aura_rafi_editor -- --rafui-studio-preview format=json dpi=1.25 theme=dark
-cargo run -p aura_rafi_editor -- --rafui-command "/rafui.studio.preview format=text dpi=2 theme=light"
-tools\rafui-studio.cmd format=text dpi=1.25 theme=dark
-```
-
-For a built executable, replace `cargo run -p aura_rafi_editor --` with the
-path to `aura_rafi_editor.exe`. The process prints the title, human-readable
-preview lines, and the machine-readable JSON payload, then exits.
-
-The current external path is intentionally read-only because a second process
-does not own the live editor session. A future mutation bridge must add an
-explicit IPC/session endpoint, command authentication, undo ownership, and
-atomic persistence before allowing external writes. Internal Console commands
-already use the same canonical command names and typed handlers.
+The former RafUI Studio preview command was removed with the Studio surface.
+It will only return after the new authoring workflow is designed and connected
+again deliberately.

@@ -4,13 +4,45 @@ use raf_core::scene::graph::{NodeColor, Primitive, SceneGraph, SceneNodeId};
 
 use crate::commands::output::CommandOutput;
 use crate::commands::parser::ParsedCommand;
-use crate::panels::hierarchy::HierarchyPanel;
-use crate::panels::viewport::ViewportPanel;
+
+#[derive(Debug, Default)]
+pub struct SceneSelectionState {
+    pub selected_node: Option<SceneNodeId>,
+    pub selected_nodes: Vec<SceneNodeId>,
+}
+
+/// Narrow presentation port for game commands. The command kernel can run
+/// headless with a no-op implementation; a viewport is only one consumer.
+pub trait GameViewportPort {
+    fn selected_ids(&self) -> Vec<SceneNodeId>;
+    fn set_selected_ids(&mut self, ids: Vec<SceneNodeId>);
+    fn focus_entity(&mut self, scene: &SceneGraph, id: Option<SceneNodeId>);
+}
+
+#[derive(Debug, Default)]
+pub struct HeadlessGameViewportPort {
+    selected: Vec<SceneNodeId>,
+    pub focused: Option<SceneNodeId>,
+}
+
+impl GameViewportPort for HeadlessGameViewportPort {
+    fn selected_ids(&self) -> Vec<SceneNodeId> {
+        self.selected.clone()
+    }
+
+    fn set_selected_ids(&mut self, ids: Vec<SceneNodeId>) {
+        self.selected = ids;
+    }
+
+    fn focus_entity(&mut self, _scene: &SceneGraph, id: Option<SceneNodeId>) {
+        self.focused = id;
+    }
+}
 
 pub struct GameCommandContext<'a> {
     pub scene: &'a mut SceneGraph,
-    pub hierarchy: &'a mut HierarchyPanel,
-    pub viewport: &'a mut ViewportPanel,
+    pub selection: &'a mut SceneSelectionState,
+    pub viewport: &'a mut dyn GameViewportPort,
 }
 
 pub fn execute(
@@ -110,7 +142,7 @@ fn primitive_asset_source(primitive: Primitive) -> Option<&'static str> {
 }
 
 fn select_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
-    let Some(id) = resolve_target(command, ctx.scene, ctx.hierarchy) else {
+    let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Select entity", "Target not found.");
     };
     select_ids(ctx, vec![id]);
@@ -123,7 +155,7 @@ fn select_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> C
 }
 
 fn rename_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
-    let Some(id) = resolve_target(command, ctx.scene, ctx.hierarchy) else {
+    let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Rename entity", "Target not found.");
     };
     let Some(name) = command.arg("name") else {
@@ -142,7 +174,7 @@ fn rename_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> C
 }
 
 fn delete_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
-    let Some(id) = resolve_target(command, ctx.scene, ctx.hierarchy) else {
+    let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Delete entity", "Target not found.");
     };
     let name = ctx
@@ -168,7 +200,7 @@ fn delete_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> C
 }
 
 fn duplicate_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
-    let Some(id) = resolve_target(command, ctx.scene, ctx.hierarchy) else {
+    let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Duplicate entity", "Target not found.");
     };
     let Some(new_id) = ctx.scene.duplicate_node(id) else {
@@ -184,7 +216,7 @@ fn duplicate_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -
 }
 
 fn set_transform(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
-    let Some(id) = resolve_target(command, ctx.scene, ctx.hierarchy) else {
+    let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Set transform", "Target not found.");
     };
     if let Some(node) = ctx.scene.get_mut(id) {
@@ -226,7 +258,7 @@ fn set_transform(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> C
 }
 
 fn move_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
-    let Some(id) = resolve_target(command, ctx.scene, ctx.hierarchy) else {
+    let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Move entity", "Target not found.");
     };
     if let Some(node) = ctx.scene.get_mut(id) {
@@ -246,7 +278,7 @@ fn move_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> Com
 }
 
 fn rotate_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
-    let Some(id) = resolve_target(command, ctx.scene, ctx.hierarchy) else {
+    let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Rotate entity", "Target not found.");
     };
     if let Some(node) = ctx.scene.get_mut(id) {
@@ -266,7 +298,7 @@ fn rotate_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> C
 }
 
 fn scale_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
-    let Some(id) = resolve_target(command, ctx.scene, ctx.hierarchy) else {
+    let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Scale entity", "Target not found.");
     };
     if let Some(node) = ctx.scene.get_mut(id) {
@@ -288,7 +320,7 @@ fn scale_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> Co
 }
 
 fn color_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
-    let Some(id) = resolve_target(command, ctx.scene, ctx.hierarchy) else {
+    let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Color entity", "Target not found.");
     };
     let color = if let Some(color) = command.arg("color").and_then(parse_color) {
@@ -315,10 +347,11 @@ fn color_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> Co
 
 fn arrange_grid(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
     let spacing = f32_arg(command, "spacing", 2.0).max(0.1);
-    let ids = if ctx.viewport.selected.is_empty() {
+    let selected = ctx.viewport.selected_ids();
+    let ids = if selected.is_empty() {
         ctx.scene.all_valid_ids()
     } else {
-        ctx.viewport.selected.clone()
+        selected
     };
 
     if ids.is_empty() {
@@ -435,7 +468,7 @@ fn describe_scene(ctx: &mut GameCommandContext<'_>) -> CommandOutput {
     for (primitive, count) in &primitive_counts {
         lines.push(format!("{primitive}: {count}"));
     }
-    if let Some(id) = ctx.hierarchy.selected_node {
+    if let Some(id) = ctx.selection.selected_node {
         if let Some(node) = ctx.scene.get(id) {
             lines.push(format!("selected: {} ({})", node.name, id.0));
         }
@@ -447,17 +480,17 @@ fn describe_scene(ctx: &mut GameCommandContext<'_>) -> CommandOutput {
         serde_json::json!({
             "ok": true,
             "entities": ids.len(),
-            "selected": ctx.hierarchy.selected_node.map(|id| id.0)
+            "selected": ctx.selection.selected_node.map(|id| id.0)
         }),
     )
 }
 
 fn focus_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
-    let Some(id) = resolve_target(command, ctx.scene, ctx.hierarchy) else {
+    let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Focus entity", "Target not found.");
     };
     select_ids(ctx, vec![id]);
-    ctx.viewport.focus_selected_entity(ctx.scene, Some(id));
+    ctx.viewport.focus_entity(ctx.scene, Some(id));
     let node = ctx.scene.get(id).expect("valid node");
     CommandOutput::info(
         format!("Focused {}", node.name),
@@ -469,7 +502,7 @@ fn focus_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> Co
 fn resolve_target(
     command: &ParsedCommand,
     scene: &SceneGraph,
-    hierarchy: &HierarchyPanel,
+    selection: &SceneSelectionState,
 ) -> Option<SceneNodeId> {
     let target = command.arg("target").map(str::to_string).or_else(|| {
         if command.positional.is_empty() {
@@ -480,11 +513,11 @@ fn resolve_target(
     });
 
     let Some(target) = target else {
-        return hierarchy.selected_node;
+        return selection.selected_node;
     };
 
     if target.eq_ignore_ascii_case("selected") {
-        return hierarchy.selected_node;
+        return selection.selected_node;
     }
     if let Ok(index) = target.parse::<usize>() {
         let id = SceneNodeId(index);
@@ -505,9 +538,9 @@ fn resolve_target(
 }
 
 fn select_ids(ctx: &mut GameCommandContext<'_>, ids: Vec<SceneNodeId>) {
-    ctx.hierarchy.selected_node = ids.first().copied();
-    ctx.hierarchy.selected_nodes = ids.clone();
-    ctx.viewport.selected = ids;
+    ctx.selection.selected_node = ids.first().copied();
+    ctx.selection.selected_nodes = ids.clone();
+    ctx.viewport.set_selected_ids(ids);
 }
 
 fn primitive_arg(command: &ParsedCommand) -> Option<Primitive> {
@@ -717,11 +750,12 @@ mod tests {
     use super::*;
     use crate::commands::output::CommandLevel;
     use crate::commands::parser::{parse_console_input, ParsedInput};
+    use crate::panels::viewport::ViewportPanel;
 
     #[test]
     fn add_primitive_uses_builtin_asset_manifest() {
         let mut scene = SceneGraph::new();
-        let mut hierarchy = HierarchyPanel::default();
+        let mut selection = SceneSelectionState::default();
         let mut viewport = ViewportPanel::default();
         let ParsedInput::Command(command) =
             parse_console_input("/game.add primitive=cube name=Block x=1 y=2 z=3").unwrap()
@@ -730,7 +764,7 @@ mod tests {
         };
         let mut ctx = GameCommandContext {
             scene: &mut scene,
-            hierarchy: &mut hierarchy,
+            selection: &mut selection,
             viewport: &mut viewport,
         };
 
@@ -738,7 +772,7 @@ mod tests {
 
         assert_eq!(output.level, CommandLevel::Info);
         assert!(output.changed);
-        let selected = ctx.hierarchy.selected_node.expect("selected node");
+        let selected = ctx.selection.selected_node.expect("selected node");
         let node = ctx.scene.get(selected).expect("created node");
         assert_eq!(node.name, "Block");
         assert_eq!(node.primitive, Primitive::Cube);

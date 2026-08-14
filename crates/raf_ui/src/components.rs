@@ -5,7 +5,9 @@
 //! bindings without introducing a second widget system.
 
 use crate::events::{UiEventBinding, UiEventKind};
-use crate::layout::{UiAlign, UiFlow, UiLayout, UiSizeMode};
+use crate::geometry::UiSpacing;
+use crate::icons::{UiIcon, UiIconId, UiIconSize};
+use crate::layout::{UiAlign, UiFlow, UiJustify, UiLayout, UiSizeMode};
 use crate::node::{UiNode, UiNodeKind};
 use crate::style::{StudioUiPalette, UiStyle};
 use crate::text::{UiFontWeight, UiTextRole, UiTextStyle};
@@ -24,6 +26,17 @@ pub fn icon_button(
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
+/// Icon-button recipe with a semantic icon request. The icon stays data-only;
+/// ApiGraphicBasic owns its high-density rasterization and sampling policy.
+pub fn icon_button_with_icon(
+    id: impl Into<String>,
+    icon: UiIconId,
+    command: impl Into<String>,
+    tooltip_key: impl Into<String>,
+) -> UiNode {
+    icon_button(id, command, tooltip_key).with_icon(UiIcon::new(icon))
+}
+
 pub fn panel_header(id: impl Into<String>, text_key: impl Into<String>) -> UiNode {
     UiNode::new(id, UiNodeKind::Panel)
         .with_class("panel-header")
@@ -39,6 +52,7 @@ pub fn panel_header(id: impl Into<String>, text_key: impl Into<String>) -> UiNod
             line_height_px: 16.0,
             weight: UiFontWeight::Bold,
             color: [237, 239, 242, 255],
+            inherit_color: true,
         })
 }
 
@@ -48,6 +62,15 @@ pub fn tree_row(id: impl Into<String>, text_key: impl Into<String>) -> UiNode {
         .with_layout(UiLayout::fixed(0.0, 28.0))
         .with_text_key(text_key)
         .focusable()
+}
+
+/// Hierarchy row variant for documents that already know the entity kind.
+pub fn tree_row_with_icon(
+    id: impl Into<String>,
+    text_key: impl Into<String>,
+    icon: UiIconId,
+) -> UiNode {
+    tree_row(id, text_key).with_icon(UiIcon::new(icon).with_size(crate::icons::UiIconSize::Small))
 }
 
 /// Structural command row shared by viewport and editor shell surfaces.
@@ -72,7 +95,7 @@ pub fn segmented_option(
         .with_class("segmented-option")
         .with_layout(UiLayout::fit_content())
         .with_text_key(text_key)
-        .with_text_style(UiTextStyle::button([237, 239, 242, 255]))
+        .with_text_style(UiTextStyle::button([237, 239, 242, 255]).inherit_theme_color())
         .focusable()
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
@@ -91,7 +114,8 @@ pub fn floating_action_rail(id: impl Into<String>) -> UiNode {
 }
 
 /// Label/value container used by inspector sections. The value control is
-/// added by the surface so RafUI Studio can inspect it as an ordinary child.
+/// added by the owning surface so authoring tools can inspect it as an
+/// ordinary child.
 pub fn inspector_field(id: impl Into<String>, label_key: impl Into<String>) -> UiNode {
     UiNode::new(id, UiNodeKind::Panel)
         .with_class("inspector-field")
@@ -104,6 +128,154 @@ pub fn inspector_field(id: impl Into<String>, label_key: impl Into<String>) -> U
         .with_text_key(label_key)
 }
 
+/// Compact disclosure header used by retained Inspector sections.
+///
+/// The command remains owned by the surface host. Keeping expansion as a
+/// semantic command avoids coupling the shared recipe to editor state.
+pub fn disclosure_header(
+    id: impl Into<String>,
+    label_key: impl Into<String>,
+    icon: UiIconId,
+    expanded: bool,
+    command: impl Into<String>,
+    palette: StudioUiPalette,
+) -> UiNode {
+    let id = id.into();
+    let label_key = label_key.into();
+    let tokens = palette.tokens();
+    UiNode::new(id.clone(), UiNodeKind::Button)
+        .with_class("disclosure-header")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 5.0,
+            padding: UiSpacing::xy(6.0, 0.0),
+            ..UiLayout::fixed(0.0, 27.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new(format!("{id}.chevron"), UiNodeKind::Label)
+                .with_icon(
+                    UiIcon::new(if expanded {
+                        UiIconId::ChevronDown
+                    } else {
+                        UiIconId::ChevronRight
+                    })
+                    .with_size(UiIconSize::Small)
+                    .with_tint(tokens.text_muted),
+                )
+                .with_layout(UiLayout::fixed(14.0, 18.0)),
+        )
+        .with_child(
+            UiNode::new(format!("{id}.icon"), UiNodeKind::Label)
+                .with_icon(
+                    UiIcon::new(icon)
+                        .with_size(UiIconSize::Small)
+                        .with_tint(tokens.text_muted),
+                )
+                .with_layout(UiLayout::fixed(16.0, 18.0)),
+        )
+        .with_child(
+            UiNode::new(format!("{id}.label"), UiNodeKind::Label)
+                .with_text_key(label_key.clone())
+                .with_text_style(UiTextStyle::panel_title(tokens.text_muted))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fit_content().with_text_safe_area(true)
+                }),
+        )
+        .with_tooltip_key(label_key)
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
+}
+
+/// Retained combobox trigger. Options are authored as ordinary menu nodes by
+/// the owning surface, so dropdowns remain inspectable and backend-agnostic.
+pub fn dropdown_trigger(
+    id: impl Into<String>,
+    selected_label_key: impl Into<String>,
+    command: impl Into<String>,
+    expanded: bool,
+    palette: StudioUiPalette,
+) -> UiNode {
+    let id = id.into();
+    let selected_label_key = selected_label_key.into();
+    let command = command.into();
+    let tokens = palette.tokens();
+    let mut trigger = UiNode::new(id.clone(), UiNodeKind::Button)
+        .with_class("dropdown-trigger")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 5.0,
+            padding: UiSpacing::xy(8.0, 0.0),
+            ..UiLayout::fixed(0.0, 29.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new(format!("{id}.value"), UiNodeKind::Label)
+                .with_text_key(selected_label_key.clone())
+                .with_text_style(UiTextStyle::body(tokens.text))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fit_content().with_text_safe_area(true)
+                }),
+        )
+        .with_child(
+            UiNode::new(format!("{id}.chevron"), UiNodeKind::Label)
+                .with_icon(
+                    UiIcon::new(if expanded {
+                        UiIconId::ChevronDown
+                    } else {
+                        UiIconId::ChevronRight
+                    })
+                    .with_size(UiIconSize::Small)
+                    .with_tint(tokens.text_muted),
+                )
+                .with_layout(UiLayout::fixed(16.0, 18.0)),
+        )
+        .with_tooltip_key(selected_label_key)
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command.clone()));
+    if expanded {
+        trigger = trigger.with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("escape".to_string()),
+            command,
+        ));
+    }
+    trigger
+}
+
+/// One full-width option inside a retained dropdown menu.
+pub fn dropdown_option(
+    id: impl Into<String>,
+    label_key: impl Into<String>,
+    command: impl Into<String>,
+    selected: bool,
+    palette: StudioUiPalette,
+) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class(if selected {
+            "dropdown-option-selected"
+        } else {
+            "dropdown-option"
+        })
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            justify_content: UiJustify::Start,
+            padding: UiSpacing::xy(8.0, 0.0),
+            ..UiLayout::fixed(0.0, 27.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_text_key(label_key)
+        .with_text_style(UiTextStyle::body(if selected {
+            tokens.text
+        } else {
+            tokens.text_muted
+        }))
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
+}
+
 pub fn editor_tab(
     id: impl Into<String>,
     text_key: impl Into<String>,
@@ -113,7 +285,7 @@ pub fn editor_tab(
         .with_class("editor-tab")
         .with_layout(UiLayout::fit_content())
         .with_text_key(text_key)
-        .with_text_style(UiTextStyle::button([237, 239, 242, 255]))
+        .with_text_style(UiTextStyle::button([237, 239, 242, 255]).inherit_theme_color())
         .focusable()
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
@@ -172,6 +344,7 @@ pub fn tooltip_node(
             line_height_px: 14.0,
             weight: UiFontWeight::Regular,
             color: tokens.text,
+            inherit_color: false,
         })
 }
 
@@ -188,6 +361,43 @@ mod tests {
     }
 
     #[test]
+    fn semantic_icon_recipe_does_not_require_a_png_path() {
+        let button =
+            icon_button_with_icon("grid", UiIconId::Grid, "viewport.grid", "ui.tooltip.grid");
+        assert_eq!(button.icon.map(|icon| icon.id), Some(UiIconId::Grid));
+    }
+
+    #[test]
+    fn dropdown_trigger_exposes_selection_and_keyboard_escape() {
+        let trigger = dropdown_trigger(
+            "shape",
+            "app.primitive_cube",
+            "shape.toggle",
+            false,
+            StudioUiPalette::IndustrialDark,
+        );
+
+        assert!(trigger.focusable);
+        assert!(!trigger.event_handlers.iter().any(|binding| {
+            matches!(binding.event, UiEventKind::KeyPress(ref key) if key == "escape")
+        }));
+        let expanded = dropdown_trigger(
+            "shape.open",
+            "app.primitive_cube",
+            "shape.toggle",
+            true,
+            StudioUiPalette::IndustrialDark,
+        );
+        assert!(expanded.event_handlers.iter().any(|binding| {
+            matches!(binding.event, UiEventKind::KeyPress(ref key) if key == "escape")
+        }));
+        assert_eq!(
+            trigger.children[0].text_key.as_deref(),
+            Some("app.primitive_cube")
+        );
+    }
+
+    #[test]
     fn tooltip_recipe_is_intrinsic_and_compact() {
         let tooltip = tooltip_node(
             "tooltip",
@@ -199,5 +409,13 @@ mod tests {
         assert_eq!(tooltip.layout.width_mode, UiSizeMode::FitContent);
         assert_eq!(tooltip.layout.height_mode, UiSizeMode::FitContent);
         assert_eq!(tooltip.layout.basis, [0.0, 0.0]);
+    }
+
+    #[test]
+    fn literal_tooltip_value_is_kept_out_of_translation_keys() {
+        let node = UiNode::new("metadata", UiNodeKind::Label).with_tooltip_value("World_Rafi");
+
+        assert_eq!(node.tooltip_value.as_deref(), Some("World_Rafi"));
+        assert!(node.tooltip_key.is_none());
     }
 }

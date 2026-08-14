@@ -1,0 +1,4 @@
+interface:
+  display_name: "RafUI Interface Craft"
+  short_description: "Create and refine ProyectRaf retained editor interfaces"
+  default_prompt: "Use $raf-ui-interface-craft to build or refine a RafUI editor surface in ProyectRaf."

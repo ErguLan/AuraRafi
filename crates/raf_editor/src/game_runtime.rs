@@ -6,8 +6,6 @@ use raf_core::project::ProjectSettings;
 use raf_core::SceneGraph;
 use raf_script::{InputSnapshot, RhaiScriptRuntime, ScriptRuntimeOptions, ScriptRuntimeReport};
 
-use crate::panels::node_editor::NodeEditorDocument;
-
 #[derive(Debug, Clone, Default)]
 pub struct RuntimeInputState {
     pub snapshot: InputSnapshot,
@@ -72,7 +70,6 @@ pub struct GameRuntimeState {
 impl GameRuntimeState {
     pub fn start(
         source_scene: &SceneGraph,
-        _node_document: &NodeEditorDocument,
         assets_root: Option<PathBuf>,
         settings: &ProjectSettings,
     ) -> (Self, RuntimeReport) {
@@ -198,7 +195,6 @@ fn on_start() {
 
         let (runtime, report) = GameRuntimeState::start(
             &source_scene,
-            &NodeEditorDocument::default(),
             Some(project_root.join("assets")),
             &ProjectSettings::default(),
         );

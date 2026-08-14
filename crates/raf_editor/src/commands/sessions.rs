@@ -30,6 +30,7 @@ pub fn execute(
         "session.list" => list(ctx),
         "session.create" => create(command, ctx),
         "session.open" => open(command, ctx),
+        "session.rename" => rename(command, ctx),
         "session.duplicate" => duplicate(command, ctx),
         "session.remove" => remove(command, ctx),
         _ => CommandOutput::error("Session command", format!("Unknown command: {name}")),
@@ -108,6 +109,29 @@ fn open(command: &ParsedCommand, ctx: &mut SessionCommandContext<'_>) -> Command
             "status: scheduled".to_string(),
         ],
         json!({"ok": true, "session_id": id.0, "status": "scheduled"}),
+    )
+}
+
+fn rename(command: &ParsedCommand, ctx: &mut SessionCommandContext<'_>) -> CommandOutput {
+    let Some(project) = ctx.project else {
+        return CommandOutput::error("Rename session", "No active project.");
+    };
+    let Some(id) = find_session_id(command, ctx.registry) else {
+        return CommandOutput::error("Rename session", "Session was not found.");
+    };
+    let Some(name) = command.arg("name") else {
+        return CommandOutput::error("Rename session", "Missing name=<session-name>.");
+    };
+    if let Err(error) = ctx.registry.rename(id, name) {
+        return CommandOutput::error("Rename session", error);
+    }
+    if let Err(error) = ctx.registry.save(&project.path) {
+        return CommandOutput::error("Rename session", error);
+    }
+    CommandOutput::changed(
+        "Rename session",
+        vec![format!("session_id: {}", id.0), format!("name: {name}")],
+        json!({"ok": true, "session_id": id.0, "name": name}),
     )
 }
 

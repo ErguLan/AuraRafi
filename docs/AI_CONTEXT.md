@@ -12,8 +12,8 @@ files before changing behavior across the editor, UI, renderer, or engine:
 4. [`docs/STABILIZATION_STATUS.md`](STABILIZATION_STATUS.md): the current
    stabilization target, risks, and verification state.
 5. The domain document that matches the change:
-   [`APIGRAPHICBASIC.md`](APIGRAPHICBASIC.md),
-   [`RAF_UI.md`](RAF_UI.md), or [`RAF_UI_AUTHORING.md`](RAF_UI_AUTHORING.md).
+   [`APIGRAPHICBASIC.md`](APIGRAPHICBASIC.md), [`RENDERER.md`](RENDERER.md),
+   [`RAF_UI.md`](RAF_UI.md), or [`EDITOR_RAFUI.md`](EDITOR_RAFUI.md).
 
 ## Working model
 
@@ -43,7 +43,7 @@ files before changing behavior across the editor, UI, renderer, or engine:
 | If the change affects... | Start here | Then verify |
 | --- | --- | --- |
 | Renderer, viewport, WGPU, CPU fallback | `docs/APIGRAPHICBASIC.md` | `docs/RENDERER.md`, renderer tests |
-| RAFUI or editor shell | `docs/RAF_UI.md` | `docs/RAF_UI_AUTHORING.md`, focused UI/editor checks |
+| RAFUI core or editor shell | `docs/RAF_UI.md` | `docs/EDITOR_RAFUI.md`, focused UI/editor checks |
 | Project status or scope | `docs/STABILIZATION_STATUS.md` | `docs/ROADMAP.md` |
 | Cross-domain behavior | `docs/ARCHITECTURE.md` | update every contradicted domain document |
 

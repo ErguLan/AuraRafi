@@ -1,8 +1,13 @@
-use crate::events::{UiAction, UiEventKind, UiPointerButton};
-use crate::focus::{UiFocusPolicy, UiFocusState, UiInputState};
+use crate::events::{UiAction, UiCursorIcon, UiEventKind, UiPointerButton};
+use crate::focus::{UiFocusPolicy, UiFocusState, UiInputState, UiModifiers};
+use crate::geometry::UiRect;
 use crate::hit_test::{hit_test, UiHitRegion, UiHitTestMode};
-use crate::node::UiNode;
+use crate::node::{UiNode, UiNodeKind};
 use crate::state::UiControlState;
+
+const DRAG_THRESHOLD_PX: f32 = 4.0;
+const DOUBLE_CLICK_DISTANCE_PX: f32 = 6.0;
+const DOUBLE_CLICK_TIME_SECONDS: f64 = 0.45;
 
 /// A resolved UI action emitted by the retained interaction controller.
 #[derive(Debug, Clone, PartialEq)]
@@ -24,14 +29,87 @@ pub struct UiInteractionState {
     pub controls: UiControlState,
     pointer_was_down: bool,
     active_pointer_target: Option<String>,
+    active_drag_start_actions: Vec<UiAction>,
+    active_drag_move_actions: Vec<UiAction>,
+    active_drag_end_actions: Vec<UiAction>,
     drag_started: bool,
+    drag_origin: Option<[f32; 2]>,
     last_pointer_position: Option<[f32; 2]>,
     hovered_since_seconds: Option<f64>,
+    text_selection_target: Option<String>,
+    last_text_click: Option<UiTextClick>,
+    last_pointer_click: Option<UiPointerClick>,
+    last_modifiers: UiModifiers,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct UiTextClick {
+    target_id: String,
+    position: [f32; 2],
+    time_seconds: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct UiPointerClick {
+    target_id: String,
+    position: [f32; 2],
+    time_seconds: f64,
 }
 
 impl UiInteractionState {
+    /// Cancels a pointer gesture when its owning host resets or replaces the
+    /// retained surface. Hover state remains intact, but no stale drag can
+    /// leak into the next pointer press.
+    pub fn cancel_pointer_gesture(&mut self) {
+        self.pointer_was_down = false;
+        self.active_pointer_target = None;
+        self.active_drag_start_actions.clear();
+        self.active_drag_move_actions.clear();
+        self.active_drag_end_actions.clear();
+        self.drag_started = false;
+        self.drag_origin = None;
+        self.text_selection_target = None;
+        self.focus.set_active(None);
+    }
+
     pub fn pointer_position(&self) -> Option<[f32; 2]> {
         self.last_pointer_position
+    }
+
+    pub fn modifiers(&self) -> UiModifiers {
+        self.last_modifiers
+    }
+
+    /// Returns whether this surface owns an in-progress primary-pointer
+    /// gesture. Hosts can keep delivering a drag after the pointer leaves the
+    /// surface without treating another surface's drag as local input.
+    pub fn has_pointer_capture(&self) -> bool {
+        self.pointer_was_down || self.active_pointer_target.is_some()
+    }
+
+    /// Returns whether this retained surface currently owns keyboard focus.
+    /// The editor host uses this boundary to prevent viewport shortcuts from
+    /// interpreting text-entry keys intended for RafUI controls.
+    pub fn captures_keyboard_input(&self, root: &UiNode) -> bool {
+        self.focus
+            .focused
+            .as_deref()
+            .and_then(|id| find_node(root, id))
+            .is_some_and(|node| node.focusable && !node.disabled)
+    }
+
+    /// Clears pointer and focus state when the retained document changes
+    /// identity, preventing a previous page's hover or drag from leaking into
+    /// the next page.
+    pub fn reset_for_surface_change(&mut self) {
+        self.cancel_pointer_gesture();
+        self.focus.clear_focus();
+        self.focus.set_hovered(None);
+        self.last_pointer_position = None;
+        self.hovered_since_seconds = None;
+        self.last_text_click = None;
+        self.last_pointer_click = None;
+        self.last_modifiers = UiModifiers::default();
     }
 
     pub fn hover_elapsed_seconds(&self, now_seconds: f64) -> f32 {
@@ -47,6 +125,27 @@ impl UiInteractionState {
         (self.hover_elapsed_seconds(now_seconds) / delay_seconds).clamp(0.0, 1.0)
     }
 
+    /// Returns the semantic cursor for the currently hovered retained node.
+    /// Text fields get an I-beam; actionable controls get a pointing hand.
+    pub fn cursor_hint(&self, root: &UiNode) -> UiCursorIcon {
+        let Some(hovered_id) = self.focus.hovered.as_deref() else {
+            return UiCursorIcon::Default;
+        };
+        let Some(node) = find_node(root, hovered_id) else {
+            return UiCursorIcon::Default;
+        };
+        if node.disabled {
+            return UiCursorIcon::Default;
+        }
+        if node.control.text_input().is_some() {
+            return UiCursorIcon::Text;
+        }
+        if node.focusable || node.kind == UiNodeKind::Button || !node.event_handlers.is_empty() {
+            return UiCursorIcon::PointingHand;
+        }
+        UiCursorIcon::Default
+    }
+
     pub fn update(
         &mut self,
         root: &UiNode,
@@ -54,6 +153,25 @@ impl UiInteractionState {
         input: &UiInputState,
         focus_policy: &UiFocusPolicy,
     ) -> Vec<UiDispatchedAction> {
+        self.update_with_text_hit_test(root, hit_regions, input, focus_policy, |_, _, _| None)
+    }
+
+    /// Variant of [`Self::update`] that lets a presentation host provide an
+    /// exact character hit-test using its font metrics. The fallback path in
+    /// this module remains proportional, so headless/native callers still get
+    /// fully functional selection without depending on a renderer.
+    pub fn update_with_text_hit_test<F>(
+        &mut self,
+        root: &UiNode,
+        hit_regions: &[UiHitRegion],
+        input: &UiInputState,
+        focus_policy: &UiFocusPolicy,
+        mut text_hit_test: F,
+    ) -> Vec<UiDispatchedAction>
+    where
+        F: FnMut(&str, &str, [f32; 2]) -> Option<usize>,
+    {
+        self.last_modifiers = input.modifiers;
         let hovered = input
             .pointer_position
             .and_then(|point| hit_test(hit_regions, point, UiHitTestMode::InteractiveOnly));
@@ -61,6 +179,12 @@ impl UiInteractionState {
         let previous_hovered = self.focus.hovered.clone();
         let mut dispatched = Vec::new();
         let pointer_moved = input.pointer_position != self.last_pointer_position;
+
+        if input.pointer_pressed_outside && !self.has_pointer_capture() {
+            self.focus.clear_focus();
+            self.focus.set_active(None);
+            self.last_text_click = None;
+        }
 
         if previous_hovered != hovered_id {
             if let Some(id) = previous_hovered.as_deref() {
@@ -82,11 +206,55 @@ impl UiInteractionState {
         let primary_down = input.button_down(UiPointerButton::Primary);
         if primary_down && !self.pointer_was_down {
             self.active_pointer_target = hovered_id.clone();
+            self.active_drag_start_actions.clear();
+            self.active_drag_move_actions.clear();
+            self.active_drag_end_actions.clear();
             self.drag_started = false;
+            self.drag_origin = input.pointer_position;
+            self.text_selection_target = None;
             self.focus.set_active(hovered_id.clone());
             if let Some(hit) = hovered.as_ref() {
                 if hit.focusable {
                     self.focus.request_focus(hit.id.clone());
+                }
+                if let Some(text_input) =
+                    find_node(root, &hit.id).and_then(|node| node.control.text_input())
+                {
+                    if let Some(point) = input.pointer_position {
+                        let value_key = text_input.value_key.as_str();
+                        let text = self.controls.text(value_key).to_string();
+                        let index = text_hit_test(&hit.id, &text, point)
+                            .unwrap_or_else(|| proportional_text_index(&text, hit.rect, point));
+                        let is_double_click = self.last_text_click.as_ref().is_some_and(|last| {
+                            last.target_id == hit.id
+                                && input.time_seconds - last.time_seconds >= 0.0
+                                && input.time_seconds - last.time_seconds
+                                    <= DOUBLE_CLICK_TIME_SECONDS
+                                && distance_squared(last.position, point)
+                                    <= DOUBLE_CLICK_DISTANCE_PX * DOUBLE_CLICK_DISTANCE_PX
+                        });
+                        if is_double_click {
+                            let range = word_range_at(&text, index);
+                            self.controls
+                                .set_selection(value_key, range.start, range.end);
+                            self.text_selection_target = Some(hit.id.clone());
+                            // A third click starts a fresh click sequence rather
+                            // than being treated as another double click.
+                            self.last_text_click = None;
+                        } else {
+                            self.controls.set_cursor(value_key, index, false);
+                            self.text_selection_target = Some(hit.id.clone());
+                            self.last_text_click = Some(UiTextClick {
+                                target_id: hit.id.clone(),
+                                position: point,
+                                time_seconds: input.time_seconds,
+                            });
+                        }
+                    }
+                } else {
+                    // A click on another control breaks the double-click
+                    // sequence; returning to the field must start a new one.
+                    self.last_text_click = None;
                 }
                 dispatch(
                     root,
@@ -94,6 +262,12 @@ impl UiInteractionState {
                     UiEventKind::PointerDown(UiPointerButton::Primary),
                     &mut dispatched,
                 );
+                self.active_drag_start_actions =
+                    captured_actions(root, &hit.id, &UiEventKind::DragStart);
+                self.active_drag_move_actions =
+                    captured_actions(root, &hit.id, &UiEventKind::DragMove);
+                self.active_drag_end_actions =
+                    captured_actions(root, &hit.id, &UiEventKind::DragEnd);
                 dispatch_range_value(
                     root,
                     hit_regions,
@@ -104,20 +278,63 @@ impl UiInteractionState {
                 );
             }
         } else if primary_down && self.pointer_was_down && pointer_moved {
+            if let (Some(text_target), Some(point)) = (
+                self.text_selection_target.as_deref(),
+                input.pointer_position,
+            ) {
+                if let Some(text_input) =
+                    find_node(root, text_target).and_then(|node| node.control.text_input())
+                {
+                    let value_key = text_input.value_key.as_str();
+                    let text = self.controls.text(value_key).to_string();
+                    let index = text_hit_test(text_target, &text, point).or_else(|| {
+                        hit_regions
+                            .iter()
+                            .find(|region| region.id == text_target)
+                            .map(|region| proportional_text_index(&text, region.rect, point))
+                    });
+                    if let Some(index) = index {
+                        self.controls.set_cursor(value_key, index, true);
+                    }
+                }
+            }
             if let Some(id) = self.active_pointer_target.as_deref() {
-                if !self.drag_started {
-                    dispatch(root, id, UiEventKind::DragStart, &mut dispatched);
+                let moved_far_enough = self
+                    .drag_origin
+                    .zip(input.pointer_position)
+                    .map(|(origin, current)| {
+                        let dx = current[0] - origin[0];
+                        let dy = current[1] - origin[1];
+                        dx * dx + dy * dy >= DRAG_THRESHOLD_PX * DRAG_THRESHOLD_PX
+                    })
+                    .unwrap_or(false);
+                if !self.drag_started && moved_far_enough {
+                    dispatch_captured(
+                        root,
+                        id,
+                        UiEventKind::DragStart,
+                        &self.active_drag_start_actions,
+                        &mut dispatched,
+                    );
                     self.drag_started = true;
                 }
-                dispatch(root, id, UiEventKind::DragMove, &mut dispatched);
-                dispatch_range_value(
-                    root,
-                    hit_regions,
-                    id,
-                    input.pointer_position,
-                    UiEventKind::DragMove,
-                    &mut dispatched,
-                );
+                if self.drag_started {
+                    dispatch_captured(
+                        root,
+                        id,
+                        UiEventKind::DragMove,
+                        &self.active_drag_move_actions,
+                        &mut dispatched,
+                    );
+                    dispatch_range_value(
+                        root,
+                        hit_regions,
+                        id,
+                        input.pointer_position,
+                        UiEventKind::DragMove,
+                        &mut dispatched,
+                    );
+                }
             }
         } else if !primary_down && self.pointer_was_down {
             if let Some(id) = self.active_pointer_target.as_deref() {
@@ -128,15 +345,40 @@ impl UiInteractionState {
                     &mut dispatched,
                 );
                 if self.drag_started {
-                    dispatch(root, id, UiEventKind::DragEnd, &mut dispatched);
+                    dispatch_captured(
+                        root,
+                        id,
+                        UiEventKind::DragEnd,
+                        &self.active_drag_end_actions,
+                        &mut dispatched,
+                    );
                 } else if hovered_id.as_deref() == Some(id) {
                     dispatch(root, id, UiEventKind::Click, &mut dispatched);
+                    if let Some(point) = input.pointer_position {
+                        let is_double_click =
+                            self.last_pointer_click.as_ref().is_some_and(|last| {
+                                last.target_id == id
+                                    && input.time_seconds - last.time_seconds >= 0.0
+                                    && input.time_seconds - last.time_seconds
+                                        <= DOUBLE_CLICK_TIME_SECONDS
+                                    && distance_squared(last.position, point)
+                                        <= DOUBLE_CLICK_DISTANCE_PX * DOUBLE_CLICK_DISTANCE_PX
+                            });
+                        if is_double_click {
+                            dispatch(root, id, UiEventKind::DoubleClick, &mut dispatched);
+                            self.last_pointer_click = None;
+                        } else {
+                            self.last_pointer_click = Some(UiPointerClick {
+                                target_id: id.to_string(),
+                                position: point,
+                                time_seconds: input.time_seconds,
+                            });
+                        }
+                    }
                     dispatch_toggle_value(root, id, &mut dispatched);
                 }
             }
-            self.active_pointer_target = None;
-            self.focus.set_active(None);
-            self.drag_started = false;
+            self.cancel_pointer_gesture();
         }
 
         if input.button_pressed(UiPointerButton::Secondary) {
@@ -166,32 +408,43 @@ impl UiInteractionState {
             } else {
                 focus_policy
             };
-            if let Some(next) = effective_policy.next_after(self.focus.focused.as_deref()) {
+            let next = if input.modifiers.shift {
+                effective_policy.previous_before(self.focus.focused.as_deref())
+            } else {
+                effective_policy.next_after(self.focus.focused.as_deref())
+            };
+            if let Some(next) = next {
                 self.focus.request_focus(next);
             }
         }
 
-        if let Some(hovered_id) = hovered_id.as_deref() {
-            if input.scroll_delta != [0.0, 0.0] {
-                if let Some((scroll_id, axis)) = find_scroll_container(root, hovered_id) {
-                    let mut delta = input.scroll_delta;
-                    if !axis.scrolls_horizontally() {
-                        delta[0] = 0.0;
-                    }
-                    if !axis.scrolls_vertically() {
-                        delta[1] = 0.0;
-                    }
-                    if delta != [0.0, 0.0] {
-                        let offset = self.controls.scroll_by(scroll_id, delta);
-                        dispatched.push(UiDispatchedAction {
-                            target_id: scroll_id.to_string(),
-                            event: UiEventKind::PointerMove,
-                            action: UiAction::ScrollTo {
-                                id: scroll_id.to_string(),
-                                offset,
-                            },
-                        });
-                    }
+        if input.scroll_delta != [0.0, 0.0] {
+            let scroll_container = input
+                .pointer_position
+                .and_then(|point| find_scroll_container_at(root, hit_regions, point))
+                .or_else(|| {
+                    hovered_id
+                        .as_deref()
+                        .and_then(|id| find_scroll_container(root, id))
+                });
+            if let Some((scroll_id, axis)) = scroll_container {
+                let mut delta = input.scroll_delta;
+                if !axis.scrolls_horizontally() {
+                    delta[0] = 0.0;
+                }
+                if !axis.scrolls_vertically() {
+                    delta[1] = 0.0;
+                }
+                if delta != [0.0, 0.0] {
+                    let offset = self.controls.scroll_by(scroll_id, delta);
+                    dispatched.push(UiDispatchedAction {
+                        target_id: scroll_id.to_string(),
+                        event: UiEventKind::PointerMove,
+                        action: UiAction::ScrollTo {
+                            id: scroll_id.to_string(),
+                            offset,
+                        },
+                    });
                 }
             }
         }
@@ -201,10 +454,35 @@ impl UiInteractionState {
                 find_node(root, focused).and_then(|node| node.control.text_input())
             {
                 let value_key = input_control.value_key.as_str();
-                if input.key_pressed("backspace") && self.controls.backspace(value_key) {
+                let mut text_changed = false;
+                let mut text_event = None;
+                if (input.modifiers.control || input.modifiers.command) && input.key_pressed("a") {
+                    self.controls.select_all(value_key);
+                } else if input.key_pressed("backspace") && self.controls.backspace(value_key) {
+                    text_changed = true;
+                    text_event = Some("backspace".to_string());
+                } else if input.key_pressed("delete") && self.controls.delete_forward(value_key) {
+                    text_changed = true;
+                    text_event = Some("delete".to_string());
+                } else if input.key_pressed_any(&["arrowleft", "left"]) {
+                    self.controls
+                        .move_cursor(value_key, -1, input.modifiers.shift);
+                } else if input.key_pressed_any(&["arrowright", "right"]) {
+                    self.controls
+                        .move_cursor(value_key, 1, input.modifiers.shift);
+                } else if input.key_pressed("home") {
+                    self.controls
+                        .move_cursor_to_edge(value_key, false, input.modifiers.shift);
+                } else if input.key_pressed("end") {
+                    self.controls
+                        .move_cursor_to_edge(value_key, true, input.modifiers.shift);
+                }
+                if text_changed {
                     dispatched.push(UiDispatchedAction {
                         target_id: focused.to_string(),
-                        event: UiEventKind::KeyPress("backspace".to_string()),
+                        event: UiEventKind::KeyPress(
+                            text_event.unwrap_or_else(|| "text_edit".to_string()),
+                        ),
                         action: UiAction::SetText {
                             key: input_control.value_key.clone(),
                             value: self.controls.text(value_key).to_string(),
@@ -305,6 +583,40 @@ impl UiInteractionState {
     }
 }
 
+fn distance_squared(left: [f32; 2], right: [f32; 2]) -> f32 {
+    let dx = left[0] - right[0];
+    let dy = left[1] - right[1];
+    dx * dx + dy * dy
+}
+
+fn proportional_text_index(text: &str, rect: UiRect, point: [f32; 2]) -> usize {
+    let length = text.chars().count();
+    if length == 0 || rect.width <= f32::EPSILON {
+        return 0;
+    }
+    let progress = ((point[0] - rect.x) / rect.width).clamp(0.0, 1.0);
+    (progress * length as f32).round() as usize
+}
+
+fn word_range_at(text: &str, index: usize) -> std::ops::Range<usize> {
+    let chars = text.chars().collect::<Vec<_>>();
+    if chars.is_empty() {
+        return 0..0;
+    }
+    let index = index.min(chars.len() - 1);
+    let word_character = |character: char| character.is_alphanumeric() || character == '_';
+    let kind = word_character(chars[index]);
+    let mut start = index;
+    while start > 0 && word_character(chars[start - 1]) == kind {
+        start -= 1;
+    }
+    let mut end = index + 1;
+    while end < chars.len() && word_character(chars[end]) == kind {
+        end += 1;
+    }
+    start..end
+}
+
 fn dispatch_toggle_value(root: &UiNode, target_id: &str, dispatched: &mut Vec<UiDispatchedAction>) {
     let Some(toggle) = find_node(root, target_id).and_then(|node| node.control.toggle()) else {
         return;
@@ -381,6 +693,32 @@ fn find_scroll_container<'a>(
     visit(node, target_id, None)
 }
 
+/// Finds the deepest scroll view whose viewport contains the pointer.
+///
+/// Scrollable transcripts commonly contain only labels and passive panels.
+/// Those nodes intentionally are not interactive, but the scroll view must
+/// still receive the wheel while the pointer is over them. This lookup is
+/// separate from interactive hit testing so buttons inside a scroll view keep
+/// their normal click ownership.
+fn find_scroll_container_at<'a>(
+    node: &'a UiNode,
+    hit_regions: &[UiHitRegion],
+    point: [f32; 2],
+) -> Option<(&'a str, crate::UiScrollAxis)> {
+    if let Some(container) = node
+        .children
+        .iter()
+        .find_map(|child| find_scroll_container_at(child, hit_regions, point))
+    {
+        return Some(container);
+    }
+
+    let axis = node.control.scroll_axis()?;
+    let region = hit_regions.iter().find(|region| region.id == node.id)?;
+    (region.rect.contains(point) && region.clip_rect.contains(point))
+        .then_some((node.id.as_str(), axis))
+}
+
 fn dispatch(
     root: &UiNode,
     target_id: &str,
@@ -395,13 +733,49 @@ fn dispatch(
     }
 
     for binding in &node.event_handlers {
-        if binding.event == event {
+        if event_matches(&binding.event, &event) {
             dispatched.push(UiDispatchedAction {
                 target_id: target_id.to_string(),
                 event: event.clone(),
                 action: binding.action.clone(),
             });
         }
+    }
+}
+
+fn captured_actions(root: &UiNode, target_id: &str, event: &UiEventKind) -> Vec<UiAction> {
+    find_node(root, target_id)
+        .into_iter()
+        .flat_map(|node| node.event_handlers.iter())
+        .filter(|binding| event_matches(&binding.event, event))
+        .map(|binding| binding.action.clone())
+        .collect()
+}
+
+fn event_matches(binding: &UiEventKind, event: &UiEventKind) -> bool {
+    match (binding, event) {
+        (UiEventKind::KeyPress(left), UiEventKind::KeyPress(right)) => {
+            left.eq_ignore_ascii_case(right)
+        }
+        _ => binding == event,
+    }
+}
+
+fn dispatch_captured(
+    root: &UiNode,
+    target_id: &str,
+    event: UiEventKind,
+    captured: &[UiAction],
+    dispatched: &mut Vec<UiDispatchedAction>,
+) {
+    let before = dispatched.len();
+    dispatch(root, target_id, event.clone(), dispatched);
+    if dispatched.len() == before {
+        dispatched.extend(captured.iter().cloned().map(|action| UiDispatchedAction {
+            target_id: target_id.to_string(),
+            event: event.clone(),
+            action,
+        }));
     }
 }
 
@@ -432,6 +806,19 @@ mod tests {
             kind: UiNodeKind::Button,
             rect: UiRect::new(x, 0.0, 80.0, 30.0),
             clip_rect: UiRect::new(x, 0.0, 80.0, 30.0),
+            z_index: 1,
+            interactive: true,
+            focusable: true,
+            disabled: false,
+        }
+    }
+
+    fn text_region(id: &str, width: f32) -> UiHitRegion {
+        UiHitRegion {
+            id: id.to_string(),
+            kind: UiNodeKind::TextInput,
+            rect: UiRect::new(0.0, 0.0, width, 30.0),
+            clip_rect: UiRect::new(0.0, 0.0, width, 30.0),
             z_index: 1,
             interactive: true,
             focusable: true,
@@ -472,6 +859,53 @@ mod tests {
                 name: "file.save".to_string()
             }
         );
+    }
+
+    #[test]
+    fn repeated_pointer_release_dispatches_generic_double_click() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(
+            button("node", "node.select").with_event(UiEventBinding {
+                event: UiEventKind::DoubleClick,
+                action: UiAction::Command {
+                    name: "node.rename".to_string(),
+                },
+            }),
+        );
+        let regions = vec![region("node", 0.0)];
+        let policy = UiFocusPolicy::default();
+        let mut state = UiInteractionState::default();
+
+        for time in [1.0_f64, 1.2_f64] {
+            state.update(
+                &root,
+                &regions,
+                &UiInputState {
+                    pointer_position: Some([12.0, 12.0]),
+                    pointer_down: true,
+                    time_seconds: time,
+                    ..UiInputState::default()
+                },
+                &policy,
+            );
+            let actions = state.update(
+                &root,
+                &regions,
+                &UiInputState {
+                    pointer_position: Some([12.0, 12.0]),
+                    time_seconds: time + 0.01,
+                    ..UiInputState::default()
+                },
+                &policy,
+            );
+            if time > 1.0 {
+                assert!(actions.iter().any(|action| {
+                    action.action
+                        == UiAction::Command {
+                            name: "node.rename".to_string(),
+                        }
+                }));
+            }
+        }
     }
 
     #[test]
@@ -582,6 +1016,208 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_a_selects_all_text_in_the_focused_input() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::text_input(
+            "query",
+            crate::UiTextInput::new("query.value"),
+        ));
+        let mut state = UiInteractionState::default();
+        state.controls.set_text("query.value", "select me", 64);
+        state.focus.request_focus("query");
+
+        state.update(
+            &root,
+            &[text_region("query", 160.0)],
+            &UiInputState {
+                pressed_keys: vec!["A".to_string()],
+                modifiers: crate::UiModifiers {
+                    control: true,
+                    ..crate::UiModifiers::default()
+                },
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+
+        assert_eq!(state.controls.text_edit("query.value").selection(), 0..9);
+    }
+
+    #[test]
+    fn dragging_text_input_selects_between_pointer_positions() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::text_input(
+            "query",
+            crate::UiTextInput::new("query.value"),
+        ));
+        let regions = [text_region("query", 120.0)];
+        let mut state = UiInteractionState::default();
+        state.controls.set_text("query.value", "hello world", 64);
+
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                pointer_position: Some([0.0, 12.0]),
+                pointer_down: true,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                pointer_position: Some([110.0, 12.0]),
+                pointer_down: true,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+
+        assert!(state.controls.text_edit("query.value").has_selection());
+        assert_eq!(state.controls.text_edit("query.value").selection(), 0..10);
+    }
+
+    #[test]
+    fn double_click_selects_the_word_under_the_pointer() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::text_input(
+            "query",
+            crate::UiTextInput::new("query.value"),
+        ));
+        let regions = [text_region("query", 120.0)];
+        let mut state = UiInteractionState::default();
+        state.controls.set_text("query.value", "hello world", 64);
+
+        for (time_seconds, down) in [(0.0, true), (0.1, false), (0.25, true)] {
+            state.update(
+                &root,
+                &regions,
+                &UiInputState {
+                    pointer_position: Some([12.0, 12.0]),
+                    pointer_down: down,
+                    time_seconds,
+                    ..UiInputState::default()
+                },
+                &UiFocusPolicy::default(),
+            );
+        }
+
+        assert_eq!(state.controls.text_edit("query.value").selection(), 0..5);
+    }
+
+    #[test]
+    fn cursor_hint_distinguishes_textboxes_from_actionable_controls() {
+        let text_root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::text_input(
+            "query",
+            crate::UiTextInput::new("query.value"),
+        ));
+        let mut text_state = UiInteractionState::default();
+        text_state.focus.set_hovered(Some("query".to_string()));
+        assert_eq!(
+            text_state.cursor_hint(&text_root),
+            crate::UiCursorIcon::Text
+        );
+
+        let button_root = UiNode::new("root", UiNodeKind::Root).with_child(button("save", "save"));
+        let mut button_state = UiInteractionState::default();
+        button_state.focus.set_hovered(Some("save".to_string()));
+        assert_eq!(
+            button_state.cursor_hint(&button_root),
+            crate::UiCursorIcon::PointingHand
+        );
+    }
+
+    #[test]
+    fn focused_retained_control_captures_editor_keyboard_input() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::text_input(
+            "query",
+            crate::UiTextInput::new("query.value"),
+        ));
+        let mut state = UiInteractionState::default();
+        state.focus.request_focus("query");
+
+        assert!(state.captures_keyboard_input(&root));
+        state.focus.clear_focus();
+        assert!(!state.captures_keyboard_input(&root));
+    }
+
+    #[test]
+    fn outside_primary_press_releases_retained_keyboard_focus() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::text_input(
+            "query",
+            crate::UiTextInput::new("query.value"),
+        ));
+        let mut state = UiInteractionState::default();
+        state.focus.request_focus("query");
+
+        state.update(
+            &root,
+            &[],
+            &UiInputState {
+                pointer_pressed_outside: true,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+
+        assert!(!state.captures_keyboard_input(&root));
+    }
+
+    #[test]
+    fn drag_end_survives_when_the_source_node_is_rebuilt_away() {
+        let drag_root = UiNode::new("root", UiNodeKind::Root).with_child(
+            button("tab", "tab.click")
+                .with_event(UiEventBinding::command(UiEventKind::DragStart, "tab.start"))
+                .with_event(UiEventBinding::command(UiEventKind::DragMove, "tab.move"))
+                .with_event(UiEventBinding::command(UiEventKind::DragEnd, "tab.end")),
+        );
+        let empty_root = UiNode::new("root", UiNodeKind::Root);
+        let mut state = UiInteractionState::default();
+
+        state.update(
+            &drag_root,
+            &[region("tab", 0.0)],
+            &UiInputState {
+                pointer_position: Some([12.0, 12.0]),
+                pointer_down: true,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        let moving = state.update(
+            &empty_root,
+            &[],
+            &UiInputState {
+                pointer_position: Some([24.0, 12.0]),
+                pointer_down: true,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert!(moving.iter().any(|action| matches!(
+            action.action,
+            UiAction::Command { ref name } if name == "tab.start"
+        )));
+        assert!(moving.iter().any(|action| matches!(
+            action.action,
+            UiAction::Command { ref name } if name == "tab.move"
+        )));
+
+        let released = state.update(
+            &empty_root,
+            &[],
+            &UiInputState {
+                pointer_position: Some([24.0, 12.0]),
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert!(released.iter().any(|action| matches!(
+            action.action,
+            UiAction::Command { ref name } if name == "tab.end"
+        )));
+    }
+
+    #[test]
     fn scroll_view_moves_state_from_a_descendant_hit() {
         let root = UiNode::scroll_view("list", crate::UiScrollAxis::Vertical)
             .with_child(UiNode::new("list.item", UiNodeKind::Panel).interactive());
@@ -602,6 +1238,53 @@ mod tests {
         assert!(actions.iter().any(|action| matches!(
             action.action,
             UiAction::ScrollTo { ref id, offset } if id == "list" && offset == [0.0, 24.0]
+        )));
+    }
+
+    #[test]
+    fn scroll_view_accepts_wheel_over_passive_content() {
+        let root = UiNode::scroll_view("list", crate::UiScrollAxis::Vertical)
+            .with_child(UiNode::new("list.message", UiNodeKind::Panel));
+        let regions = vec![
+            UiHitRegion {
+                id: "list".to_string(),
+                kind: UiNodeKind::ScrollView,
+                rect: UiRect::new(0.0, 0.0, 240.0, 120.0),
+                clip_rect: UiRect::new(0.0, 0.0, 240.0, 120.0),
+                z_index: 0,
+                interactive: false,
+                focusable: false,
+                disabled: false,
+            },
+            UiHitRegion {
+                id: "list.message".to_string(),
+                kind: UiNodeKind::Panel,
+                rect: UiRect::new(0.0, 0.0, 240.0, 300.0),
+                clip_rect: UiRect::new(0.0, 0.0, 240.0, 120.0),
+                z_index: -1,
+                interactive: false,
+                focusable: false,
+                disabled: false,
+            },
+        ];
+        let mut state = UiInteractionState::default();
+        state.controls.set_scroll_metrics("list", [0.0, 180.0]);
+
+        let actions = state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                pointer_position: Some([120.0, 80.0]),
+                scroll_delta: [0.0, 48.0],
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+
+        assert_eq!(state.controls.scroll_offset("list"), [0.0, 48.0]);
+        assert!(actions.iter().any(|action| matches!(
+            action.action,
+            UiAction::ScrollTo { ref id, offset } if id == "list" && offset == [0.0, 48.0]
         )));
     }
 

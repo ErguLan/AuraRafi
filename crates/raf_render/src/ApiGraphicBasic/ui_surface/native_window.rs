@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use winit::window::Window;
+use winit::window::{ResizeDirection, Window};
 
 use super::{
     CpuUiSurfaceHost, DirectUiSurfaceFrame, DirectUiSurfaceHost, NativeApplicationMenuAdapter,
@@ -16,7 +16,16 @@ use crate::api_graphic_basic::canvas_presenter::DirectSceneSurfaceHost;
 use crate::api_graphic_basic::device::BasicDevice;
 use crate::api_graphic_basic::device::SceneFrameOutput;
 use crate::scene_renderer::SceneRenderFrame;
-use raf_ui::UiApplicationMenu;
+use raf_ui::{UiApplicationMenu, UiResizeEdge, UiWindowCommand};
+
+/// Result of a window command that needs to cross from RafUI into the native
+/// event loop instead of being executed directly on the Winit window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeWindowCommandResult {
+    Applied,
+    RequestClose,
+    ShowSystemMenu,
+}
 
 pub struct NativeUiWindowHost {
     window: Arc<Window>,
@@ -103,6 +112,42 @@ impl NativeUiWindowHost {
 
     pub fn window(&self) -> &Arc<Window> {
         &self.window
+    }
+
+    /// Executes the OS-owned part of RafUI's window contract.
+    ///
+    /// Dragging, resizing, minimizing and maximizing are safe to execute
+    /// immediately. Closing and opening the system menu remain event-loop
+    /// requests because Winit intentionally exposes those operations through
+    /// native events rather than a synthetic `Window` mutation.
+    pub fn execute_window_command(
+        &self,
+        command: UiWindowCommand,
+    ) -> Result<NativeWindowCommandResult, String> {
+        let result = match command {
+            UiWindowCommand::BeginDrag => self
+                .window
+                .drag_window()
+                .map_err(|error| format!("native window drag: {error}"))
+                .map(|_| NativeWindowCommandResult::Applied),
+            UiWindowCommand::BeginResize(edge) => self
+                .window
+                .drag_resize_window(resize_direction(edge))
+                .map_err(|error| format!("native window resize: {error}"))
+                .map(|_| NativeWindowCommandResult::Applied),
+            UiWindowCommand::Minimize => {
+                self.window.set_minimized(true);
+                Ok(NativeWindowCommandResult::Applied)
+            }
+            UiWindowCommand::ToggleMaximize => {
+                self.window.set_maximized(!self.window.is_maximized());
+                Ok(NativeWindowCommandResult::Applied)
+            }
+            UiWindowCommand::Close => Ok(NativeWindowCommandResult::RequestClose),
+            UiWindowCommand::ShowSystemMenu => Ok(NativeWindowCommandResult::ShowSystemMenu),
+        }?;
+
+        Ok(result)
     }
 
     pub fn adapter(&self) -> &wgpu::Adapter {
@@ -251,5 +296,18 @@ impl NativeUiWindowHost {
         host.render_frame(basic_device, &self.device, &self.queue, &view, frame);
         output.present();
         Ok(())
+    }
+}
+
+const fn resize_direction(edge: UiResizeEdge) -> ResizeDirection {
+    match edge {
+        UiResizeEdge::North => ResizeDirection::North,
+        UiResizeEdge::South => ResizeDirection::South,
+        UiResizeEdge::East => ResizeDirection::East,
+        UiResizeEdge::West => ResizeDirection::West,
+        UiResizeEdge::NorthEast => ResizeDirection::NorthEast,
+        UiResizeEdge::NorthWest => ResizeDirection::NorthWest,
+        UiResizeEdge::SouthEast => ResizeDirection::SouthEast,
+        UiResizeEdge::SouthWest => ResizeDirection::SouthWest,
     }
 }

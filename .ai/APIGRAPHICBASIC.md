@@ -157,7 +157,7 @@ Until then, WGPU is a controlled bridge, not technical debt to delete blindly.
 - A temporary overlay may preserve authoritative visibility during a measured
   GPU parity gap, but it needs a bounded cost and removal condition. It must
   never become a second CAD/scene implementation.
-- New retained UI follows `docs/RAF_UI_AUTHORING.md`; backend work must not
+- New retained UI follows `docs/RAF_UI.md` and `docs/EDITOR_RAFUI.md`; backend work must not
   bypass its action and ownership boundaries.
 - Application menu bars use `UiApplicationMenu` and stable command IDs.
   `UiNodeKind::Menu` is only for in-surface context menus. Platform adapters

@@ -106,7 +106,7 @@ capability migrations. They must preserve this same scene/CAD/RafUI contract.
 
 The complete graphics contract is [ApiGraphicBasic](APIGRAPHICBASIC.md). The
 RafUI surface and menu construction contract is
-[RafUI Authoring Guide](RAF_UI_AUTHORING.md).
+[`RAF_UI.md`](RAF_UI.md) and [`EDITOR_RAFUI.md`](EDITOR_RAFUI.md).
 
 ## Viewport Surface Host
 
@@ -434,3 +434,5 @@ crates/raf_editor/src/panels/
 | Picking | Screen-space distance | Ray-sphere + ray-triangle |
 | Presentation | CPU image upload only | GPU texture or CPU pixel upload |
 | egui in renderer | Mixed | Isolated to editor shell |
+
+> Developed by Yoll. More info: [yoll.site](https://yoll.site).

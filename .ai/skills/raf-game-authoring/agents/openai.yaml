@@ -1,0 +1,4 @@
+interface:
+  display_name: "Raf Game Authoring"
+  short_description: "Create and validate game scenes and scripts"
+  default_prompt: "Use Raf attached authoring tools to inspect, preview, create, and verify a game scene without Play or Runtime."

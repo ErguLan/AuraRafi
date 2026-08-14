@@ -20,6 +20,9 @@ desktop.ini
 # User config
 *.user
 
+# Local editor attachment/session discovery
+.aura_rafi/agent_endpoint.json
+
 # Root temp/debug artifacts
 /check_errors.txt
 /err.txt

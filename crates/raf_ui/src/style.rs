@@ -74,6 +74,9 @@ pub struct UiVisualState<'a> {
     pub hovered_id: Option<&'a str>,
     pub focused_id: Option<&'a str>,
     pub active_id: Option<&'a str>,
+    pub selected_id: Option<&'a str>,
+    pub open_id: Option<&'a str>,
+    pub invalid_id: Option<&'a str>,
 }
 
 impl<'a> UiVisualState<'a> {
@@ -82,6 +85,9 @@ impl<'a> UiVisualState<'a> {
             hovered_id: focus.hovered.as_deref(),
             focused_id: focus.focused.as_deref(),
             active_id: focus.active.as_deref(),
+            selected_id: None,
+            open_id: None,
+            invalid_id: None,
         }
     }
 
@@ -95,6 +101,18 @@ impl<'a> UiVisualState<'a> {
 
     fn is_active(self, id: &str) -> bool {
         self.active_id == Some(id)
+    }
+
+    fn is_selected(self, id: &str) -> bool {
+        self.selected_id == Some(id)
+    }
+
+    fn is_open(self, id: &str) -> bool {
+        self.open_id == Some(id)
+    }
+
+    fn is_invalid(self, id: &str) -> bool {
+        self.invalid_id == Some(id)
     }
 }
 
@@ -116,6 +134,9 @@ pub enum UiStyleRuleState {
     Focused,
     Active,
     Disabled,
+    Selected,
+    Open,
+    Invalid,
 }
 
 impl Default for UiStyleRuleState {
@@ -132,6 +153,9 @@ impl UiStyleRuleState {
             Self::Focused => !node.disabled && state.is_focused(&node.id),
             Self::Active => !node.disabled && state.is_active(&node.id),
             Self::Disabled => node.disabled,
+            Self::Selected => !node.disabled && state.is_selected(&node.id),
+            Self::Open => !node.disabled && state.is_open(&node.id),
+            Self::Invalid => state.is_invalid(&node.id),
         }
     }
 }
@@ -188,8 +212,60 @@ impl UiStyleSheet {
                 rule.patch.apply_to(&mut resolved);
             }
         }
+
+        // Text inputs need a usable interaction affordance even when a surface
+        // did not author a dedicated `:hover` rule. Explicit rules still win;
+        // this fallback only gives the retained control a quiet visual lift.
+        if node.control.text_input().is_some() {
+            if state.is_hovered(&node.id)
+                && !self.has_state_rule(node, state, UiStyleRuleState::Hovered)
+            {
+                resolved.fill = lift_hover_color(resolved.fill, 8);
+                resolved.border = lift_hover_color(resolved.border, 24);
+                resolved.border_width = resolved.border_width.max(1.0);
+            } else if state.is_focused(&node.id)
+                && !self.has_state_rule(node, state, UiStyleRuleState::Focused)
+            {
+                resolved.border = lift_focus_color(resolved.border);
+                resolved.border_width = resolved.border_width.max(1.0);
+            }
+        }
         resolved
     }
+
+    fn has_state_rule(
+        &self,
+        node: &UiNode,
+        state: UiVisualState<'_>,
+        requested: UiStyleRuleState,
+    ) -> bool {
+        self.rules.iter().any(|rule| {
+            rule.state == requested
+                && rule.selector.matches(node)
+                && rule.state.matches(node, state)
+        })
+    }
+}
+
+fn lift_hover_color(mut color: [u8; 4], amount: u8) -> [u8; 4] {
+    if color[3] == 0 {
+        color = [112, 120, 132, 220];
+    } else {
+        color[0] = color[0].saturating_add(amount);
+        color[1] = color[1].saturating_add(amount);
+        color[2] = color[2].saturating_add(amount);
+    }
+    color
+}
+
+fn lift_focus_color(mut color: [u8; 4]) -> [u8; 4] {
+    if color[3] == 0 {
+        return [232, 133, 28, 240];
+    }
+    color[0] = color[0].saturating_add(32);
+    color[1] = color[1].saturating_add(32);
+    color[2] = color[2].saturating_add(32);
+    color
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -551,5 +627,22 @@ mod tests {
                 .fill,
             [255, 151, 46, 255]
         );
+    }
+
+    #[test]
+    fn text_input_gets_a_default_hover_affordance_without_a_surface_rule() {
+        let node = UiNode::text_input("query", crate::UiTextInput::new("query.value"));
+        let base = UiStyleSheet::default().resolve(&node);
+        let hovered = UiStyleSheet::default().resolve_with_state(
+            &node,
+            UiVisualState {
+                hovered_id: Some("query"),
+                ..UiVisualState::default()
+            },
+        );
+
+        assert_ne!(hovered.fill, base.fill);
+        assert_ne!(hovered.border, base.border);
+        assert_eq!(hovered.border_width, 1.0);
     }
 }

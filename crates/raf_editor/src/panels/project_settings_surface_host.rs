@@ -1,156 +1,274 @@
-//! ApiGraphicBasic host for the retained per-project Settings surface.
+//! State/action host for project-local settings.
 
 use eframe::{egui, egui_wgpu};
 use raf_core::config::{RenderPreset, ScriptExecutionMode, ScriptLanguage};
-use raf_core::i18n::t;
 use raf_core::project::Project;
-use raf_render::api_graphic_basic::ui_surface::{StudioUiPalette, UiAction, UiDispatchedAction};
+use raf_core::{config::Language, i18n::t};
+use raf_render::api_graphic_basic::ui_surface::{
+    StudioUiPalette, UiAction, UiControlState, UiDispatchedAction,
+};
 
 use crate::panels::raf_ui_surface_bridge::RafUiSurfaceBridge;
 use crate::project_settings_surface::build_project_settings_surface;
 
 pub struct ProjectSettingsSurfaceHost {
-    bridge: RafUiSurfaceBridge,
+    surface: RafUiSurfaceBridge,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectSettingsSurfaceIntent {
+    Changed,
+    ResetPanels,
 }
 
 impl Default for ProjectSettingsSurfaceHost {
     fn default() -> Self {
         Self {
-            bridge: RafUiSurfaceBridge::new("raf_ui_project_settings_surface"),
+            surface: RafUiSurfaceBridge::new("raf_ui_project_settings"),
         }
     }
 }
 
 impl ProjectSettingsSurfaceHost {
-    /// Applies retained controls immediately to the active Project, preserving
-    /// the legacy project.ron save transaction managed by `AuraRafiApp`.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         render_state: Option<&egui_wgpu::RenderState>,
         palette: StudioUiPalette,
+        language: Language,
         project: &mut Project,
-        global_console_commands_enabled: &mut bool,
-        language: raf_core::config::Language,
-    ) -> bool {
-        let mut changed = normalize_graphics_policy(project);
+        global_console_commands_enabled: bool,
+    ) -> Vec<ProjectSettingsSurfaceIntent> {
+        let mut intents = Vec::new();
+        if normalize_graphics_policy(project) {
+            intents.push(ProjectSettingsSurfaceIntent::Changed);
+        }
         let surface =
-            build_project_settings_surface(palette, project, *global_console_commands_enabled);
-        let default_scene_name = project.settings.default_scene_name.clone();
-        let actions = self.bridge.show_with_control_state(
+            build_project_settings_surface(palette, project, global_console_commands_enabled);
+        let scene_name = project.settings.default_scene_name.clone();
+        let actions = self.surface.show_with_control_state(
             ui,
             render_state,
             palette,
             surface,
             |controls| {
-                controls.set_text(
-                    "project-settings.default-scene",
-                    default_scene_name.clone(),
-                    512,
+                seed_text(
+                    controls,
+                    "project-settings.default_scene_name",
+                    &scene_name,
+                    128,
                 );
+                seed_project_numeric_settings(controls, project);
             },
             |key| t(key, language),
         );
-        changed |= apply_actions(actions, project, global_console_commands_enabled);
-        changed |= normalize_graphics_policy(project);
-        changed
+        intents.extend(self.apply_actions(actions, project, global_console_commands_enabled));
+        if normalize_graphics_policy(project) {
+            intents.push(ProjectSettingsSurfaceIntent::Changed);
+        }
+        intents
+    }
+
+    fn apply_actions(
+        &mut self,
+        actions: Vec<UiDispatchedAction>,
+        project: &mut Project,
+        global_console_commands_enabled: bool,
+    ) -> Vec<ProjectSettingsSurfaceIntent> {
+        let mut intents = Vec::new();
+        for dispatched in actions {
+            match dispatched.action {
+                UiAction::SetToggle { key, value } => {
+                    self.commit_numeric_settings(project);
+                    if apply_toggle(project, &key, value, global_console_commands_enabled) {
+                        intents.push(ProjectSettingsSurfaceIntent::Changed);
+                    }
+                }
+                UiAction::SetRange { key, value } => {
+                    self.commit_numeric_settings(project);
+                    if apply_range(project, &key, value) {
+                        intents.push(ProjectSettingsSurfaceIntent::Changed);
+                    }
+                    self.sync_numeric_text(project, &key);
+                }
+                UiAction::SetText { key, value } => {
+                    if !key.ends_with(".text") {
+                        self.commit_numeric_settings(project);
+                    }
+                    if key == "project-settings.default_scene_name"
+                        && project.settings.default_scene_name != value
+                    {
+                        project.settings.default_scene_name = value;
+                        intents.push(ProjectSettingsSurfaceIntent::Changed);
+                    } else if let Some(range_key) = key.strip_suffix(".text") {
+                        if let Ok(value) = value.trim().parse::<f32>() {
+                            if apply_range(project, range_key, value) {
+                                intents.push(ProjectSettingsSurfaceIntent::Changed);
+                            }
+                        }
+                    }
+                }
+                UiAction::Command { name } => {
+                    self.commit_numeric_settings(project);
+                    if name == "project-settings.reset-panels" {
+                        intents.push(ProjectSettingsSurfaceIntent::ResetPanels);
+                    } else if apply_command(project, &name) {
+                        intents.push(ProjectSettingsSurfaceIntent::Changed);
+                    }
+                }
+                _ => {}
+            }
+        }
+        intents
+    }
+
+    fn commit_numeric_settings(&mut self, project: &mut Project) {
+        for key in PROJECT_NUMERIC_KEYS {
+            let text_key = format!("{key}.text");
+            let text = self
+                .surface
+                .with_control_state_read(|controls| controls.text(&text_key).to_string());
+            let Some(text) = text else { continue };
+            let Ok(value) = text.trim().parse::<f32>() else {
+                continue;
+            };
+            apply_range(project, key, value);
+            self.sync_numeric_text(project, key);
+        }
+    }
+
+    fn sync_numeric_text(&mut self, project: &Project, range_key: &str) {
+        let Some(value) = project_numeric_text_value(project, range_key) else {
+            return;
+        };
+        let text_key = format!("{range_key}.text");
+        self.surface.with_control_state(|controls| {
+            controls.set_text(text_key.as_str(), value.clone(), 32);
+        });
     }
 }
 
-fn apply_actions(
-    actions: Vec<UiDispatchedAction>,
-    project: &mut Project,
-    global_console_commands_enabled: &mut bool,
-) -> bool {
-    let mut changed = false;
-    for dispatched in actions {
-        match dispatched.action {
-            UiAction::SetToggle { key, value } => {
-                changed |= apply_toggle(project, global_console_commands_enabled, &key, value)
-            }
-            UiAction::SetRange { key, value } => changed |= apply_range(project, &key, value),
-            UiAction::SetText { key, value } => {
-                if key == "project-settings.default-scene"
-                    && project.settings.default_scene_name != value
-                {
-                    project.settings.default_scene_name = value;
-                    changed = true;
-                }
-            }
-            UiAction::Command { name } => changed |= apply_command(project, &name),
-            _ => {}
+const PROJECT_NUMERIC_KEYS: &[&str] = &[
+    "project-settings.depth-resolution-scale",
+    "project-settings.stream-region-size",
+    "project-settings.stream-radius",
+    "project-settings.stream-lod-bias",
+];
+
+fn project_numeric_text_value(project: &Project, key: &str) -> Option<String> {
+    Some(match key {
+        "project-settings.depth-resolution-scale" => {
+            format!("{:.2}", project.settings.depth_resolution_scale)
         }
+        "project-settings.stream-region-size" => {
+            format!("{:.0}", project.settings.world_stream_region_size)
+        }
+        "project-settings.stream-radius" => project.settings.world_stream_load_radius.to_string(),
+        "project-settings.stream-lod-bias" => project.settings.world_stream_lod_bias.to_string(),
+        _ => return None,
+    })
+}
+
+fn seed_text(controls: &mut UiControlState, key: &str, value: &str, max_length: usize) {
+    if !controls.has_text(key) {
+        controls.set_text(key, value, max_length);
     }
-    changed
+}
+
+fn seed_project_numeric_settings(controls: &mut UiControlState, project: &Project) {
+    let values = [
+        (
+            "project-settings.depth-resolution-scale.text",
+            format!("{:.2}", project.settings.depth_resolution_scale),
+        ),
+        (
+            "project-settings.stream-region-size.text",
+            format!("{:.0}", project.settings.world_stream_region_size),
+        ),
+        (
+            "project-settings.stream-radius.text",
+            project.settings.world_stream_load_radius.to_string(),
+        ),
+        (
+            "project-settings.stream-lod-bias.text",
+            project.settings.world_stream_lod_bias.to_string(),
+        ),
+    ];
+    for (key, value) in values {
+        seed_text(controls, key, &value, 32);
+    }
 }
 
 fn apply_toggle(
     project: &mut Project,
-    global_console_commands_enabled: &mut bool,
     key: &str,
     value: bool,
+    global_console_commands_enabled: bool,
 ) -> bool {
-    match key {
-        "project-settings.show-hierarchy" => {
-            set_bool(&mut project.settings.show_hierarchy_panel, value)
+    if key == "project-settings.enable-console" && !global_console_commands_enabled {
+        return false;
+    }
+    if key != "project-settings.enable-scripting"
+        && (key.starts_with("project-settings.language.")
+            || key == "project-settings.auto-attach-scripts")
+        && !project.settings.enable_scripting
+    {
+        return false;
+    }
+    let setting = match key {
+        "project-settings.show-hierarchy" => &mut project.settings.show_hierarchy_panel,
+        "project-settings.show-properties" => &mut project.settings.show_properties_panel,
+        "project-settings.enable-audio" => &mut project.settings.enable_audio,
+        "project-settings.enable-physics" => &mut project.settings.enable_physics,
+        "project-settings.pause-unfocused" => &mut project.settings.pause_when_unfocused,
+        "project-settings.enable-complements" => &mut project.settings.enable_complements,
+        "project-settings.enable-console" => &mut project.settings.enable_console_commands,
+        "project-settings.enable-scripting" => &mut project.settings.enable_scripting,
+        "project-settings.auto-attach-scripts" => &mut project.settings.auto_attach_scripts,
+        "project-settings.allow-gpu-features" => &mut project.settings.allow_gpu_features,
+        "project-settings.depth-accurate" => &mut project.settings.depth_accurate,
+        "project-settings.world-streaming" => &mut project.settings.world_streaming_enabled,
+        key if key.starts_with("project-settings.language.") => {
+            let language = match key.rsplit('.').next() {
+                Some("rhai") => ScriptLanguage::Rhai,
+                Some("cpp") => ScriptLanguage::Cpp,
+                Some("nodes") => ScriptLanguage::Nodes,
+                _ => return false,
+            };
+            let before = project.settings.allowed_script_languages.has(language);
+            project
+                .settings
+                .allowed_script_languages
+                .set(language, value);
+            return before != value;
         }
-        "project-settings.show-properties" => {
-            set_bool(&mut project.settings.show_properties_panel, value)
-        }
-        "project-settings.enable-audio" => set_bool(&mut project.settings.enable_audio, value),
-        "project-settings.enable-physics" => set_bool(&mut project.settings.enable_physics, value),
-        "project-settings.pause-unfocused" => {
-            set_bool(&mut project.settings.pause_when_unfocused, value)
-        }
-        "project-settings.enable-complements" => {
-            set_bool(&mut project.settings.enable_complements, value)
-        }
-        "project-settings.enable-console" => {
-            let project_changed = set_bool(&mut project.settings.enable_console_commands, value);
-            let global_changed = set_bool(global_console_commands_enabled, value);
-            project_changed || global_changed
-        }
-        "project-settings.enable-scripting" => {
-            set_bool(&mut project.settings.enable_scripting, value)
-        }
-        "project-settings.script-language.rhai" => {
-            set_script_language(project, ScriptLanguage::Rhai, value)
-        }
-        "project-settings.script-language.cpp" => {
-            set_script_language(project, ScriptLanguage::Cpp, value)
-        }
-        "project-settings.script-language.nodes" => {
-            set_script_language(project, ScriptLanguage::Nodes, value)
-        }
-        "project-settings.auto-attach-scripts" => {
-            set_bool(&mut project.settings.auto_attach_scripts, value)
-        }
-        "project-settings.allow-gpu-features" => {
-            set_bool(&mut project.settings.allow_gpu_features, value)
-        }
-        "project-settings.depth-accurate" => set_bool(&mut project.settings.depth_accurate, value),
-        "project-settings.world-streaming" => {
-            set_bool(&mut project.settings.world_streaming_enabled, value)
-        }
-        _ => false,
+        _ => return false,
+    };
+    if *setting == value {
+        false
+    } else {
+        *setting = value;
+        true
     }
 }
 
 fn apply_range(project: &mut Project, key: &str, value: f32) -> bool {
     match key {
-        "project-settings.depth-resolution-scale" => set_f32(
+        "project-settings.depth-resolution-scale" if project.settings.depth_accurate => set_f32(
             &mut project.settings.depth_resolution_scale,
             value.clamp(0.35, 1.0),
         ),
-        "project-settings.stream-region-size" => set_f32(
-            &mut project.settings.world_stream_region_size,
-            value.clamp(32.0, 512.0),
-        ),
-        "project-settings.stream-radius" => set_u32(
+        "project-settings.stream-region-size" if project.settings.world_streaming_enabled => {
+            set_f32(
+                &mut project.settings.world_stream_region_size,
+                value.clamp(32.0, 512.0),
+            )
+        }
+        "project-settings.stream-radius" if project.settings.world_streaming_enabled => set_u32(
             &mut project.settings.world_stream_load_radius,
             value.round().clamp(1.0, 8.0) as u32,
         ),
-        "project-settings.stream-lod-bias" => set_i8(
+        "project-settings.stream-lod-bias" if project.settings.world_streaming_enabled => set_i8(
             &mut project.settings.world_stream_lod_bias,
             value.round().clamp(0.0, 4.0) as i8,
         ),
@@ -162,23 +280,34 @@ fn apply_command(project: &mut Project, command: &str) -> bool {
     match command {
         "project-settings.save.standard" => set_bool(&mut project.settings.linear_save, false),
         "project-settings.save.linear" => set_bool(&mut project.settings.linear_save, true),
-        "project-settings.script-mode.disabled" => {
-            set_script_execution_mode(project, ScriptExecutionMode::Disabled)
-        }
-        "project-settings.script-mode.editor" => {
-            set_script_execution_mode(project, ScriptExecutionMode::EditorOnly)
-        }
-        "project-settings.script-mode.runtime" => {
-            set_script_execution_mode(project, ScriptExecutionMode::Runtime)
-        }
-        "project-settings.preset.potato" => set_render_preset(project, RenderPreset::Potato),
-        "project-settings.preset.low" => set_render_preset(project, RenderPreset::Low),
-        "project-settings.preset.medium" if project.settings.allow_gpu_features => {
-            set_render_preset(project, RenderPreset::Medium)
-        }
-        "project-settings.preset.high" if project.settings.allow_gpu_features => {
-            set_render_preset(project, RenderPreset::High)
-        }
+        "project-settings.script-mode.disabled" if project.settings.enable_scripting => set_value(
+            &mut project.settings.script_execution_mode,
+            ScriptExecutionMode::Disabled,
+        ),
+        "project-settings.script-mode.editor" if project.settings.enable_scripting => set_value(
+            &mut project.settings.script_execution_mode,
+            ScriptExecutionMode::EditorOnly,
+        ),
+        "project-settings.script-mode.runtime" if project.settings.enable_scripting => set_value(
+            &mut project.settings.script_execution_mode,
+            ScriptExecutionMode::Runtime,
+        ),
+        "project-settings.preset.potato" => set_value(
+            &mut project.settings.runtime_render_preset,
+            RenderPreset::Potato,
+        ),
+        "project-settings.preset.low" => set_value(
+            &mut project.settings.runtime_render_preset,
+            RenderPreset::Low,
+        ),
+        "project-settings.preset.medium" if project.settings.allow_gpu_features => set_value(
+            &mut project.settings.runtime_render_preset,
+            RenderPreset::Medium,
+        ),
+        "project-settings.preset.high" if project.settings.allow_gpu_features => set_value(
+            &mut project.settings.runtime_render_preset,
+            RenderPreset::High,
+        ),
         _ => false,
     }
 }
@@ -197,70 +326,48 @@ fn normalize_graphics_policy(project: &mut Project) -> bool {
     }
 }
 
-fn set_script_language(project: &mut Project, language: ScriptLanguage, enabled: bool) -> bool {
-    let previous = project.settings.allowed_script_languages.has(language);
-    if previous != enabled {
-        project
-            .settings
-            .allowed_script_languages
-            .set(language, enabled);
-        true
-    } else {
+fn set_bool(target: &mut bool, value: bool) -> bool {
+    if *target == value {
         false
+    } else {
+        *target = value;
+        true
     }
 }
 
-fn set_script_execution_mode(project: &mut Project, value: ScriptExecutionMode) -> bool {
-    if project.settings.script_execution_mode != value {
-        project.settings.script_execution_mode = value;
-        true
-    } else {
+fn set_f32(target: &mut f32, value: f32) -> bool {
+    if (*target - value).abs() <= f32::EPSILON {
         false
+    } else {
+        *target = value;
+        true
     }
 }
 
-fn set_render_preset(project: &mut Project, value: RenderPreset) -> bool {
-    if project.settings.runtime_render_preset != value {
-        project.settings.runtime_render_preset = value;
-        true
-    } else {
+fn set_u32(target: &mut u32, value: u32) -> bool {
+    if *target == value {
         false
+    } else {
+        *target = value;
+        true
     }
 }
 
-fn set_bool(slot: &mut bool, value: bool) -> bool {
-    if *slot != value {
-        *slot = value;
-        true
-    } else {
+fn set_i8(target: &mut i8, value: i8) -> bool {
+    if *target == value {
         false
+    } else {
+        *target = value;
+        true
     }
 }
 
-fn set_f32(slot: &mut f32, value: f32) -> bool {
-    if (*slot - value).abs() > f32::EPSILON {
-        *slot = value;
-        true
-    } else {
+fn set_value<T: PartialEq>(target: &mut T, value: T) -> bool {
+    if *target == value {
         false
-    }
-}
-
-fn set_u32(slot: &mut u32, value: u32) -> bool {
-    if *slot != value {
-        *slot = value;
-        true
     } else {
-        false
-    }
-}
-
-fn set_i8(slot: &mut i8, value: i8) -> bool {
-    if *slot != value {
-        *slot = value;
+        *target = value;
         true
-    } else {
-        false
     }
 }
 
@@ -268,39 +375,32 @@ fn set_i8(slot: &mut i8, value: i8) -> bool {
 mod tests {
     use super::*;
     use raf_core::project::{ProjectSettings, ProjectType};
+    use std::path::PathBuf;
+    use uuid::Uuid;
 
     fn project() -> Project {
+        let now = chrono::Utc::now();
         Project {
-            id: uuid::Uuid::nil(),
-            name: "project-settings-host".to_string(),
+            id: Uuid::new_v4(),
+            name: "Demo".to_string(),
             project_type: ProjectType::Game,
-            path: std::path::PathBuf::from("project-settings-host"),
-            created_at: chrono::Utc::now(),
-            modified_at: chrono::Utc::now(),
+            path: PathBuf::from("."),
+            created_at: now,
+            modified_at: now,
             engine_version: "0.9.0".to_string(),
             settings: ProjectSettings::default(),
         }
     }
 
     #[test]
-    fn gpu_gate_normalizes_advanced_project_presets() {
-        let mut project = project();
-        project.settings.runtime_render_preset = RenderPreset::High;
-        assert!(normalize_graphics_policy(&mut project));
-        assert_eq!(project.settings.runtime_render_preset, RenderPreset::Low);
-    }
-
-    #[test]
-    fn console_toggle_stays_linked_to_the_global_switch() {
-        let mut project = project();
-        let mut global = false;
-        assert!(apply_toggle(
-            &mut project,
-            &mut global,
-            "project-settings.enable-console",
-            true,
+    fn project_settings_host_applies_and_bounds_streaming_values() {
+        let mut value = project();
+        value.settings.world_streaming_enabled = true;
+        assert!(apply_range(
+            &mut value,
+            "project-settings.stream-region-size",
+            1000.0
         ));
-        assert!(project.settings.enable_console_commands);
-        assert!(global);
+        assert_eq!(value.settings.world_stream_region_size, 512.0);
     }
 }

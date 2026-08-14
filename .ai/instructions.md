@@ -24,7 +24,7 @@ This file defines the strict, non-negotiable rules for code quality, behavior, a
   * Egui panels may remain as temporary body/presentation adapters during the
     migration, but no new long-lived chrome, menus, or renderer-owned canvas
     should be designed around Egui widgets.
-  * Follow `docs/RAF_UI_AUTHORING.md` before adding a RafUI surface, control,
+  * Follow `docs/RAF_UI.md` and `docs/EDITOR_RAFUI.md` before adding a RafUI surface, control,
     overlay, dock, scroll view, or menu.
 * **COMMAND BUS MUTATIONS**: All modifications to scene assets or schematic shapes must register actions to the `CommandBus` or execute transactional snapshots to sustain the Undo/Redo stack. Avoid silent global state mutations.
 * **PERSISTENT CONFIGURATION SETTINGS**: New persistent variables must be declared under `EngineSettings` in `crates/raf_core/src/config.rs` featuring appropriate `#[serde(default)]` serialization overlays.
@@ -33,6 +33,12 @@ This file defines the strict, non-negotiable rules for code quality, behavior, a
 
 ## 3. Manual `/` Console Commands & Tools Consistency
 * Every new core action must be linked to its manual Console slash command mapped inside `docs/COMMANDS.md`.
+* External Agent work must also follow `docs/AGENT_CLI_MCP_EXPANSION.md`:
+  RafUI/Console, the internal Agent, `raf` and MCP share the catalog and
+  command protocol. Attached mutations are project-scoped, confirmation-gated,
+  revision-aware, and must never activate Play or Runtime.
+  For game or scripting authoring, also load `.ai/skills/raf-game-authoring/SKILL.md`
+  and use its inspect -> preview -> confirm -> verify workflow.
 * Console command executes should return proper `CommandOutput` containing:
   * Title block.
   * Informational debug message lines.
@@ -83,7 +89,7 @@ work must load and follow `.ai/APIGRAPHICBASIC.md`.
 
 ## 7. RafUI Design And Interaction Rules
 
-All new retained UI work must follow `docs/RAF_UI_AUTHORING.md` and
+All new retained UI work must follow `docs/RAF_UI.md`, `docs/EDITOR_RAFUI.md`, and
 `.ulpi/design/DESIGN.md`.
 
 * **ONE AUTHORITATIVE MODEL**: A RafUI document describes presentation only.
@@ -130,3 +136,11 @@ All new retained UI work must follow `docs/RAF_UI_AUTHORING.md` and
   diagnostics, and density helpers live in their owning modules. Do not grow
   `app.rs`, a surface bridge, or a single panel file with cross-cutting UI
   infrastructure.
+* **MOTION BY DEFAULT, EFFECTS BY JUSTIFICATION**: State-changing interface
+  interactions should have purposeful transitions by default, especially menu
+  entry, selection, dragging, reordering, docking, panel creation/removal, and
+  layout changes. Use `UiTween` / `UiMotionSpec` from RafUI, keep targets and
+  transient timing in the host, preserve declarative surfaces, and honor
+  reduced-motion preferences. Do not add perpetual decorative animation. Treat
+  every transition as a performance change: measure CPU/GPU frame time,
+  allocations, texture/atlas work, and idle repaint before closing the task.

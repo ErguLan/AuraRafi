@@ -25,7 +25,9 @@ def draw_icon(name, painter, output_size=CANVAS):
     draw = ImageDraw.Draw(image)
     painter(draw)
     output = image.resize((output_size, output_size), Image.Resampling.LANCZOS)
-    output.save(ICON_DIR / name)
+    output_path = ICON_DIR / name
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output.save(output_path)
 
 
 def preview_canvas():
@@ -270,6 +272,56 @@ def redo(draw):
     line(draw, [(48, 24), (38, 21)], ORANGE, 2)
 
 
+def top_file(draw):
+    rounded(draw, (14, 9, 50, 55), 4, outline=WHITE, width=3)
+    line(draw, [(24, 9), (24, 22), (38, 22)], ORANGE, 3)
+    line(draw, [(24, 36), (42, 36)], MUTED, 2)
+    line(draw, [(24, 44), (42, 44)], MUTED, 2)
+
+
+def top_edit(draw):
+    line(draw, [(14, 48), (42, 20)], WHITE, 6)
+    line(draw, [(38, 16), (48, 26)], ORANGE, 5)
+    line(draw, [(12, 52), (24, 50)], MUTED, 3)
+
+
+def top_view(draw):
+    draw.ellipse((9 * SCALE, 20 * SCALE, 55 * SCALE, 44 * SCALE), outline=WHITE, width=3 * SCALE)
+    draw.ellipse((26 * SCALE, 27 * SCALE, 38 * SCALE, 39 * SCALE), fill=ORANGE)
+
+
+def top_project(draw):
+    outline = [(9, 19), (9, 52), (55, 52), (55, 19), (31, 19), (25, 13), (9, 13), (9, 19)]
+    line(draw, outline, WHITE, 3)
+    line(draw, [(14, 28), (50, 28)], ORANGE, 3)
+
+
+def top_help(draw):
+    draw.ellipse((10 * SCALE, 10 * SCALE, 54 * SCALE, 54 * SCALE), outline=WHITE, width=3 * SCALE)
+    line(draw, [(26, 25), (29, 20), (37, 20), (42, 25), (40, 31), (32, 35)], ORANGE, 3)
+    draw.ellipse((30 * SCALE, 42 * SCALE, 34 * SCALE, 46 * SCALE), fill=WHITE)
+
+
+def top_save(draw):
+    rounded(draw, (12, 10, 52, 54), 4, outline=WHITE, width=3)
+    rounded(draw, (22, 12, 42, 27), 2, outline=ORANGE, width=2)
+    rounded(draw, (22, 36, 42, 50), 3, outline=MUTED, width=2)
+
+
+def top_minimize(draw):
+    line(draw, [(14, 42), (50, 42)], WHITE, 4)
+
+
+def top_maximize(draw):
+    rounded(draw, (14, 14, 50, 50), 2, outline=WHITE, width=3)
+    line(draw, [(22, 21), (42, 21)], ORANGE, 2)
+
+
+def top_close(draw):
+    line(draw, [(16, 16), (48, 48)], WHITE, 4)
+    line(draw, [(48, 16), (16, 48)], WHITE, 4)
+
+
 def build_hub_variants(base_name):
     source = Image.open(ICON_DIR / base_name).convert("RGBA")
     stem = base_name.removesuffix("_HUB.png")
@@ -315,6 +367,18 @@ def main():
     draw_icon("complement.png", complement)
     draw_icon("undo.png", undo)
     draw_icon("redo.png", redo)
+    for name, painter in (
+        ("top/file.png", top_file),
+        ("top/edit.png", top_edit),
+        ("top/view.png", top_view),
+        ("top/project.png", top_project),
+        ("top/help.png", top_help),
+        ("top/save.png", top_save),
+        ("top/minimize.png", top_minimize),
+        ("top/maximize.png", top_maximize),
+        ("top/close.png", top_close),
+    ):
+        draw_icon(name, painter)
     hub_game_preview()
     hub_electronics_preview()
     for name in (

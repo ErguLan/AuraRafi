@@ -16,6 +16,7 @@ use raf_render::api_graphic_basic::ui_surface::{
     CpuUiSurfaceHost, DirectUiSurfaceHost, UiAction, UiDispatchedAction, UiInputState,
     UiPointerButton, UiSurfaceImageStore,
 };
+use raf_ui::UiWindowCommand;
 
 use crate::panels::gpu_canvas::GpuCanvas;
 use crate::studio_surface::{
@@ -38,6 +39,7 @@ pub enum HubSurfaceIntent {
     SetSearch(String),
     SetFilter(HubSurfaceFilter),
     SetTheme(Theme),
+    Window(UiWindowCommand),
 }
 
 struct GpuHubSurface {
@@ -326,7 +328,7 @@ impl HubSurfaceHost {
                 ));
             } else if changed {
                 let gpu = self.gpu.as_mut().expect("GPU Hub host must exist");
-                *gpu.host.surface_mut() = surface.clone();
+                gpu.host.set_surface(surface.clone());
                 if text_model_changed || language_changed || palette_changed {
                     gpu.host.session_mut().text_atlas.clear();
                 }
@@ -340,7 +342,7 @@ impl HubSurfaceHost {
                 self.cpu = Some(host);
             } else if changed {
                 let cpu = self.cpu.as_mut().expect("CPU Hub host must exist");
-                *cpu.surface_mut() = surface;
+                cpu.set_surface(surface);
                 if text_model_changed || language_changed || palette_changed {
                     cpu.session_mut().text_atlas.clear();
                 }
@@ -630,8 +632,16 @@ fn egui_input(ctx: &egui::Context, rect: egui::Rect) -> UiInputState {
             pointer_buttons_down: pointer_buttons_down(input),
             pointer_pressed_buttons: pointer_pressed_buttons(input),
             pointer_released_buttons: pointer_released_buttons(input),
+            pointer_pressed_outside: false,
             pressed_keys,
             text_input,
+            ime_preedit: String::new(),
+            modifiers: raf_ui::UiModifiers {
+                shift: input.modifiers.shift,
+                control: input.modifiers.ctrl,
+                alt: input.modifiers.alt,
+                command: input.modifiers.mac_cmd,
+            },
         }
     })
 }
@@ -731,6 +741,10 @@ fn intent_from_action(dispatched: UiDispatchedAction) -> Option<HubSurfaceIntent
             "hub.theme-dark" => Some(HubSurfaceIntent::SetTheme(Theme::Dark)),
             "hub.theme-light" => Some(HubSurfaceIntent::SetTheme(Theme::Light)),
             "hub.theme-system" => Some(HubSurfaceIntent::SetTheme(Theme::System)),
+            "window.minimize" => Some(HubSurfaceIntent::Window(UiWindowCommand::Minimize)),
+            "window.maximize" => Some(HubSurfaceIntent::Window(UiWindowCommand::ToggleMaximize)),
+            "window.close" => Some(HubSurfaceIntent::Window(UiWindowCommand::Close)),
+            "window.drag" => Some(HubSurfaceIntent::Window(UiWindowCommand::BeginDrag)),
             _ => None,
         },
         UiAction::Custom { channel, payload } if channel == "hub.project" => {
@@ -817,6 +831,21 @@ fn load_hub_images(store: &mut UiSurfaceImageStore) {
         store,
         "editor.hub.icon-pulse",
         include_bytes!("../../../../editor/assets/ui_icons/pulse.png"),
+    );
+    insert_embedded_png(
+        store,
+        "editor.hub.minimize",
+        include_bytes!("../../../../editor/assets/ui_icons/top/minimize.png"),
+    );
+    insert_embedded_png(
+        store,
+        "editor.hub.maximize",
+        include_bytes!("../../../../editor/assets/ui_icons/top/maximize.png"),
+    );
+    insert_embedded_png(
+        store,
+        "editor.hub.close",
+        include_bytes!("../../../../editor/assets/ui_icons/top/close.png"),
     );
 }
 

@@ -1,35 +1,16 @@
 use serde::Deserialize;
 
+// Keep the editor-facing names for compatibility, but make the core catalog
+// types authoritative. This prevents the headless CLI/MCP and the in-editor
+// Agent from drifting into two different schemas.
+pub use raf_core::{
+    CapabilityDefinition as CommandDefinition, CapabilityParameter as CommandParameter,
+};
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct CommandCatalog {
     pub version: u32,
     pub commands: Vec<CommandDefinition>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CommandDefinition {
-    pub name: String,
-    #[serde(default)]
-    pub aliases: Vec<String>,
-    pub domain: String,
-    pub category: String,
-    pub description_key: String,
-    #[serde(default)]
-    pub parameters: Vec<CommandParameter>,
-    #[serde(default)]
-    pub examples: Vec<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct CommandParameter {
-    pub name: String,
-    pub kind: String,
-    #[serde(default)]
-    pub required: bool,
-    #[serde(default)]
-    pub default: Option<String>,
-    #[serde(default)]
-    pub description_key: Option<String>,
 }
 
 impl CommandCatalog {
@@ -102,5 +83,6 @@ mod tests {
         assert!(catalog.find("game.add").is_some());
         assert!(catalog.find("undo").is_some());
         assert!(catalog.find("redo").is_some());
+        assert!(catalog.find("transaction.undo").is_some());
     }
 }

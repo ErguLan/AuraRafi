@@ -16,5 +16,7 @@ glam = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 image = { workspace = true }
+ab_glyph = { workspace = true }
+epaint_default_fonts = { workspace = true }
 pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }

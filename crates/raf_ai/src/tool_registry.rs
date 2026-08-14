@@ -46,6 +46,42 @@ impl ToolRegistry {
         }
     }
 
+    /// Builds an agent registry from the canonical core command catalog.
+    ///
+    /// The legacy `with_defaults` registry is kept for compatibility with
+    /// older callers, but new hosts should use this path so the CLI, MCP,
+    /// editor Agent and external providers discover the same commands.
+    pub fn from_capability_catalog(
+        catalog: &raf_core::CapabilityCatalog,
+        language: Language,
+    ) -> Self {
+        let mut registry = Self::new();
+        for capability in &catalog.capabilities {
+            registry.register(ToolDefinition {
+                name: capability.name.clone(),
+                category: capability.category.clone(),
+                description: t(&capability.description_key, language),
+                parameters: capability
+                    .parameters
+                    .iter()
+                    .map(|parameter| ToolParameter {
+                        name: parameter.name.clone(),
+                        param_type: parameter.kind.clone(),
+                        description: parameter
+                            .description_key
+                            .as_deref()
+                            .map(|key| t(key, language))
+                            .unwrap_or_else(|| parameter.name.clone()),
+                        required: parameter.required,
+                        enum_values: None,
+                    })
+                    .collect(),
+                returns: "EngineCommandResponse JSON".to_string(),
+            });
+        }
+        registry
+    }
+
     /// Register a tool definition.
     pub fn register(&mut self, tool: ToolDefinition) {
         tracing::debug!("Registered tool: {}", tool.name);
@@ -59,20 +95,25 @@ impl ToolRegistry {
 
     /// List all registered tools.
     pub fn list(&self) -> Vec<&ToolDefinition> {
-        self.tools.values().collect()
+        let mut tools: Vec<_> = self.tools.values().collect();
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        tools
     }
 
     /// List tools by category.
     pub fn by_category(&self, category: &str) -> Vec<&ToolDefinition> {
-        self.tools
+        let mut tools: Vec<_> = self
+            .tools
             .values()
             .filter(|t| t.category == category)
-            .collect()
+            .collect();
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        tools
     }
 
     /// Export all tools as JSON schema (for AI consumption).
     pub fn to_json_schema(&self) -> serde_json::Value {
-        let tools: Vec<&ToolDefinition> = self.tools.values().collect();
+        let tools = self.list();
         serde_json::json!({
             "tools": tools
         })
@@ -384,5 +425,13 @@ mod tests {
         assert!(!registry.list().is_empty());
         assert!(registry.get("create_entity").is_some());
         assert!(registry.get("place_component").is_some());
+    }
+
+    #[test]
+    fn capability_registry_uses_the_shared_command_catalog() {
+        let catalog = raf_core::CapabilityCatalog::builtin();
+        let registry = ToolRegistry::from_capability_catalog(&catalog, Language::English);
+        assert!(registry.get("game.add").is_some());
+        assert!(registry.get("electronics.add_part").is_some());
     }
 }

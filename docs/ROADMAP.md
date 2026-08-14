@@ -243,7 +243,8 @@ The 0.9.0 target establishes the editor IDE as the native "home" for the AI agen
 - [x] Tool name sanitization: dots and invalid characters in command names are sanitized for provider compatibility (e.g., `project.info` -> `project_info`)
 - [x] Chat persistence: `AgentHistory` saves/loads per-project conversation sessions as RON files
 - [x] Chat session management: left sidebar with session list, new/delete/switch sessions
-- [x] Agentic response style: AGENT.md now instructs chain-of-thought (plan -> execute -> summarize)
+- [x] Agent execution style: AGENT.md uses bounded plans, tool evidence and
+  concise summaries without exposing private reasoning
 - [x] Improved temperature (0.7) for more natural, expressive responses
 
 ### Pending (next)
@@ -304,6 +305,60 @@ The 0.9.0 target establishes the editor IDE as the native "home" for the AI agen
 
 ## v0.12.0 - ML & Robotics
 
+The first attached-editor vertical slice may be pulled forward after the RafUI,
+sessions, and scripting stabilization gates. This lets the real game project
+drive engine stabilization without activating Play or Runtime. The complete
+target remains v0.12 and is specified in
+`docs/AGENT_CLI_MCP_EXPANSION.md`.
+
+- [x] Attached editor bridge: first implementation is a local loopback TCP
+  endpoint published as `.aura_rafi/agent_endpoint.json`; keep the frame and
+  handshake contract transport-neutral so named pipes/Unix sockets can be
+  added later, with project identity, short-lived token, capability
+  negotiation, stale-revision errors, and explicit disconnect recovery
+- [x] Baby attached vertical slice (pull forward for game-first stabilization):
+  `raf attach --project PATH status|capabilities|project`, then
+  `raf attach --project PATH command game.* --confirm`; queue commands on the
+  editor owner thread so scene history, active session and persistence remain
+  authoritative
+- [x] Unified invocation: internal Agent calls the command kernel directly;
+  `raf` CLI and `raf mcp serve` reach the same kernel through the attached
+  bridge without depending on Egui or the Console UI
+- [x] Attached MCP preset: `raf mcp serve --attach PATH` performs the same
+  handshake and exposes status, capabilities, resources and the baby game
+  mutation allowlist to Codex, Claude Code and OpenCode
+- [ ] Project-scoped external tools: inspect projects, sessions, scenes, assets,
+  scripts, diagnostics, revisions, and bounded workspace content
+- [ ] Game-first mutation toolpack: entities, hierarchy, batch transforms,
+  prefabs, materials, asset ingress, scripting, deterministic terrain, paths,
+  vegetation regions, spawn markers, and scene validation
+- [x] Transaction safety baseline: dry-run previews, expected revisions,
+  idempotency, explicit confirmation, structured scene diffs, and real
+  editor-owned attached undo tokens. The token is scoped to project, session,
+  and issuing revision; composite transactions, checkpoints, and audit records
+  remain v0.12 work.
+- [ ] Harness task system: bounded progress events, cancellation, resumable
+  tasks, tool-call/time/entity budgets, and recovery after client disconnects
+- [x] Evidence contract baseline: attached responses return machine-readable
+  JSON/NDJSON, revision, scene diff, verification checks, warnings, and
+  transaction/undo metadata. Artifact resources and domain-specific evidence
+  remain v0.12 work.
+- [x] Human and AI onboarding: `docs/CLI_MCP_QUICKSTART.md` and the project
+  skill `.ai/skills/raf-game-authoring/` document attached authoring, scripting,
+  safety, and the no-Runtime boundary.
+- [ ] Optional closed-editor core host: manually activated `raf host`/MCP mode
+  that loads project documents without RafUI, Egui, or a renderer. Keep it
+  opt-in, renderer-free, budgeted, project-locked, and shut down after a task;
+  do not turn it into a resident service by default.
+- [ ] External agent onboarding: lightweight connection recipes for Codex,
+  Claude Code, and OpenCode using the same MCP server and capability catalog
+- [ ] Retained Agent UX after RafUI stabilization: progress, approvals, diff,
+  rollback, evidence viewer, task cancellation, and session-scoped history
+- [ ] Game-first skills and toolpacks expand only as the matching engine systems
+  become real; never advertise unsupported runtime, PBR, animation, particle,
+  physics, or material behavior
+- [ ] Evaluate ACP only if AuraRafi later needs to host full external coding
+  agents as a visual client; ACP is not required for the initial tool server
 - [ ] Training data export (JSON Lines, CSV)
 - [ ] Headless batch simulation for parallel training
 - [ ] ONNX Runtime inference bridge

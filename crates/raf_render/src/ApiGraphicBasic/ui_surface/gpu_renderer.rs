@@ -11,7 +11,9 @@ use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
 
-use super::{UiSurfaceDrawList, UiSurfaceImageStore, UiSurfacePaintCommand, UiTextAtlas};
+use super::{
+    UiSurfaceDrawList, UiSurfaceImageStore, UiSurfacePaintCommand, UiTextAtlas, UiTextAtlasRect,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UiSurfaceGpuMetrics {
@@ -104,6 +106,7 @@ pub struct UiSurfaceGpuRenderer {
     atlas_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     image_sampler: wgpu::Sampler,
+    icon_sampler: wgpu::Sampler,
     atlas_texture: Option<wgpu::Texture>,
     atlas_bind_group: Option<wgpu::BindGroup>,
     atlas_size: [u16; 2],
@@ -161,6 +164,16 @@ impl UiSurfaceGpuRenderer {
             mipmap_filter: wgpu::FilterMode::Nearest,
             ..wgpu::SamplerDescriptor::default()
         });
+        let icon_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ApiGraphicBasic.UiSurfaceIconSampler"),
+            // Built-in icons are authored at a higher resolution than their
+            // small controls. Linear magnification preserves the white-line
+            // artwork without the blocky pixels produced by nearest sampling.
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..wgpu::SamplerDescriptor::default()
+        });
         let solid_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ApiGraphicBasic.UiSurfaceSolidLayout"),
             bind_group_layouts: &[],
@@ -210,6 +223,7 @@ impl UiSurfaceGpuRenderer {
             atlas_layout,
             sampler,
             image_sampler,
+            icon_sampler,
             atlas_texture: None,
             atlas_bind_group: None,
             atlas_size: [0, 0],
@@ -276,6 +290,13 @@ impl UiSurfaceGpuRenderer {
                     u32::from(self.sync_image(device, queue, images, &quad.source_key));
             }
         }
+        // Keep GPU image memory proportional to the current surface. Images are
+        // content-addressed by source key, so an image that leaves the draw list
+        // is safe to release; it will be uploaded again only if it becomes
+        // visible later. This prevents editor previews and asset browsers from
+        // accumulating every thumbnail ever visited.
+        self.image_textures
+            .retain(|key, _| uploaded_image_keys.contains(key.as_str()));
 
         let geometry_fingerprint = retained_geometry_fingerprint(
             draw_list,
@@ -462,7 +483,8 @@ impl UiSurfaceGpuRenderer {
         atlas: &mut UiTextAtlas,
     ) -> bool {
         let size = atlas.size();
-        if self.atlas_size != size || self.atlas_texture.is_none() {
+        let texture_recreated = self.atlas_size != size || self.atlas_texture.is_none();
+        if texture_recreated {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("ApiGraphicBasic.UiSurfaceTextAtlas"),
                 size: wgpu::Extent3d {
@@ -499,24 +521,50 @@ impl UiSurfaceGpuRenderer {
         if !atlas.is_dirty() {
             return false;
         }
-        let rgba = atlas_rgba(atlas.pixels());
+        let region = if texture_recreated {
+            UiTextAtlasRect {
+                x: 0,
+                y: 0,
+                width: size[0],
+                height: size[1],
+            }
+        } else {
+            atlas.dirty_region().unwrap_or(UiTextAtlasRect {
+                x: 0,
+                y: 0,
+                width: size[0],
+                height: size[1],
+            })
+        };
+        let pixels = atlas_rgba_region(atlas.pixels(), size, region);
+        let (rgba, row_bytes) = padded_rgba_rows(
+            &pixels,
+            [
+                u32::from(region.width).max(1),
+                u32::from(region.height).max(1),
+            ],
+        );
         if let Some(texture) = self.atlas_texture.as_ref() {
             queue.write_texture(
                 wgpu::ImageCopyTexture {
                     texture,
                     mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
+                    origin: wgpu::Origin3d {
+                        x: u32::from(region.x),
+                        y: u32::from(region.y),
+                        z: 0,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 &rgba,
                 wgpu::ImageDataLayout {
                     offset: 0,
-                    bytes_per_row: Some(u32::from(size[0]) * 4),
-                    rows_per_image: Some(u32::from(size[1])),
+                    bytes_per_row: Some(row_bytes),
+                    rows_per_image: Some(u32::from(region.height)),
                 },
                 wgpu::Extent3d {
-                    width: u32::from(size[0]),
-                    height: u32::from(size[1]),
+                    width: u32::from(region.width),
+                    height: u32::from(region.height),
                     depth_or_array_layers: 1,
                 },
             );
@@ -589,6 +637,11 @@ impl UiSurfaceGpuRenderer {
             }
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let sampler = if key.starts_with("builtin://icon/") {
+            &self.icon_sampler
+        } else {
+            &self.image_sampler
+        };
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ApiGraphicBasic.UiSurfaceImageBindGroup"),
             layout: &self.atlas_layout,
@@ -599,7 +652,7 @@ impl UiSurfaceGpuRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.image_sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         });
@@ -1400,10 +1453,16 @@ mod tests {
     }
 }
 
-fn atlas_rgba(alpha: &[u8]) -> Vec<u8> {
-    let mut rgba = Vec::with_capacity(alpha.len() * 4);
-    for value in alpha {
-        rgba.extend_from_slice(&[255, 255, 255, *value]);
+fn atlas_rgba_region(alpha: &[u8], size: [u16; 2], region: UiTextAtlasRect) -> Vec<u8> {
+    let atlas_width = usize::from(size[0]);
+    let width = usize::from(region.width);
+    let height = usize::from(region.height);
+    let mut rgba = Vec::with_capacity(width * height * 4);
+    for row in 0..height {
+        let start = (usize::from(region.y) + row) * atlas_width + usize::from(region.x);
+        for value in &alpha[start..start + width] {
+            rgba.extend_from_slice(&[255, 255, 255, *value]);
+        }
     }
     rgba
 }

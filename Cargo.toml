@@ -12,8 +12,14 @@ members = [
     "crates/raf_net",
     "crates/raf_hardware",
     "crates/raf_script",
+    "crates/raf_cli",
     "editor",
 ]
+
+# The editor is the default executable for `cargo run`. The headless CLI
+# remains a workspace member and can be launched explicitly with
+# `cargo run -p raf_cli`.
+default-members = ["editor"]
 
 [workspace.package]
 version = "0.9.0"
@@ -94,3 +100,14 @@ opt-level = 3
 lto = "fat"
 codegen-units = 1
 strip = true
+
+# Keep the development executable debuggable while avoiding an entirely
+# unoptimized retained-UI/render path during interactive editor work.
+[profile.dev.package.raf_ui]
+opt-level = 2
+
+[profile.dev.package.raf_render]
+opt-level = 2
+
+[profile.dev.package.raf_editor]
+opt-level = 2

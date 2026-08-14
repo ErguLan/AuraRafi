@@ -7,6 +7,73 @@
 use crate::chat::ChatMessage;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Sender};
+use std::thread::{self, JoinHandle};
+
+struct HistorySaveRequest {
+    project_root: PathBuf,
+    history: AgentHistory,
+}
+
+/// Serializes and writes Agent history away from the editor frame thread.
+///
+/// The editor still owns the in-memory history and sends immutable snapshots to
+/// this worker. This keeps filesystem latency and RON serialization out of the
+/// render/input loop without sharing mutable editor state across threads.
+pub struct AgentHistoryWriter {
+    sender: Option<Sender<HistorySaveRequest>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Default for AgentHistoryWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AgentHistoryWriter {
+    pub fn new() -> Self {
+        let (sender, receiver) = mpsc::channel::<HistorySaveRequest>();
+        let handle = thread::Builder::new()
+            .name("agent-history-writer".to_string())
+            .spawn(move || {
+                while let Ok(request) = receiver.recv() {
+                    if let Err(error) = request.history.save(&request.project_root) {
+                        tracing::warn!(
+                            project = %request.project_root.display(),
+                            %error,
+                            "failed to persist Agent history"
+                        );
+                    }
+                }
+            })
+            .expect("failed to spawn Agent history writer");
+
+        Self {
+            sender: Some(sender),
+            handle: Some(handle),
+        }
+    }
+
+    pub fn enqueue(&self, project_root: &Path, history: &AgentHistory) {
+        let Some(sender) = self.sender.as_ref() else {
+            return;
+        };
+        let _ = sender.send(HistorySaveRequest {
+            project_root: project_root.to_path_buf(),
+            history: history.clone(),
+        });
+    }
+}
+
+impl Drop for AgentHistoryWriter {
+    fn drop(&mut self) {
+        self.sender.take();
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
 
 /// A saved Agent conversation.
 #[derive(Debug, Clone, Serialize, Deserialize)]

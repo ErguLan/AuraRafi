@@ -4,6 +4,7 @@ use crate::controls::{
     UiControl, UiImage, UiRange, UiScrollAxis, UiSkeleton, UiTextInput, UiToggle,
 };
 use crate::events::UiEventBinding;
+use crate::icons::UiIcon;
 use crate::layout::UiLayout;
 use crate::style::UiStyle;
 use crate::text::UiTextStyle;
@@ -34,6 +35,12 @@ pub struct UiNode {
     pub id: String,
     pub kind: UiNodeKind,
     pub text_key: Option<String>,
+    /// Literal text for runtime values that must not pass through i18n.
+    ///
+    /// Keeping this separate from `text_key` prevents formatted values such as
+    /// `"40 cm"` or `"75%"` from being mistaken for translation keys.
+    #[serde(default)]
+    pub text_value: Option<String>,
     #[serde(default)]
     pub classes: Vec<String>,
     pub layout: UiLayout,
@@ -46,8 +53,13 @@ pub struct UiNode {
     pub disabled: bool,
     #[serde(default)]
     pub tooltip_key: Option<String>,
+    /// Literal tooltip text for runtime values that must not pass through i18n.
+    #[serde(default)]
+    pub tooltip_value: Option<String>,
     #[serde(default)]
     pub accessibility_label_key: Option<String>,
+    #[serde(default)]
+    pub icon: Option<UiIcon>,
     #[serde(default)]
     pub text_style: Option<UiTextStyle>,
     #[serde(default)]
@@ -62,6 +74,7 @@ impl UiNode {
             id: id.into(),
             kind,
             text_key: None,
+            text_value: None,
             classes: Vec::new(),
             layout: UiLayout::default(),
             style: UiStyle::transparent(),
@@ -70,7 +83,9 @@ impl UiNode {
             focusable: false,
             disabled: false,
             tooltip_key: None,
+            tooltip_value: None,
             accessibility_label_key: None,
+            icon: None,
             text_style: None,
             event_handlers: Vec::new(),
             control: UiControl::None,
@@ -107,6 +122,13 @@ impl UiNode {
 
     pub fn with_text_key(mut self, text_key: impl Into<String>) -> Self {
         self.text_key = Some(text_key.into());
+        self.text_value = None;
+        self
+    }
+
+    pub fn with_text_value(mut self, text_value: impl Into<String>) -> Self {
+        self.text_value = Some(text_value.into());
+        self.text_key = None;
         self
     }
 
@@ -146,11 +168,23 @@ impl UiNode {
 
     pub fn with_tooltip_key(mut self, tooltip_key: impl Into<String>) -> Self {
         self.tooltip_key = Some(tooltip_key.into());
+        self.tooltip_value = None;
+        self
+    }
+
+    pub fn with_tooltip_value(mut self, tooltip_value: impl Into<String>) -> Self {
+        self.tooltip_value = Some(tooltip_value.into());
+        self.tooltip_key = None;
         self
     }
 
     pub fn with_accessibility_label_key(mut self, label_key: impl Into<String>) -> Self {
         self.accessibility_label_key = Some(label_key.into());
+        self
+    }
+
+    pub fn with_icon(mut self, icon: UiIcon) -> Self {
+        self.icon = Some(icon);
         self
     }
 

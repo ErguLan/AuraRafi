@@ -33,6 +33,18 @@ impl NativeUiInputBridge {
                 self.state.pointer_position = None;
                 true
             }
+            WindowEvent::Focused(false) => {
+                // A window can lose focus without emitting button-up events.
+                // Clearing capture here prevents a drag or text key from
+                // remaining logically active after an Alt+Tab or modal dialog.
+                self.state.pointer_buttons_down.clear();
+                self.state.pointer_pressed_buttons.clear();
+                self.state.pointer_released_buttons.clear();
+                self.state.pointer_down = false;
+                self.state.modifiers = raf_ui::UiModifiers::default();
+                self.state.pressed_keys.clear();
+                true
+            }
             WindowEvent::MouseInput { state, button, .. } => {
                 let pointer_button = match button {
                     MouseButton::Left => Some(raf_ui::UiPointerButton::Primary),
@@ -86,8 +98,27 @@ impl NativeUiInputBridge {
                 }
                 true
             }
+            WindowEvent::ModifiersChanged(modifiers) => {
+                let modifiers = modifiers.state();
+                self.state.modifiers = raf_ui::UiModifiers {
+                    shift: modifiers.shift_key(),
+                    control: modifiers.control_key(),
+                    alt: modifiers.alt_key(),
+                    command: modifiers.super_key(),
+                };
+                true
+            }
             WindowEvent::Ime(Ime::Commit(text)) => {
                 self.state.text_input.push_str(text);
+                self.state.ime_preedit.clear();
+                true
+            }
+            WindowEvent::Ime(Ime::Preedit(text, _)) => {
+                self.state.ime_preedit = text.clone();
+                true
+            }
+            WindowEvent::Ime(Ime::Enabled) | WindowEvent::Ime(Ime::Disabled) => {
+                self.state.ime_preedit.clear();
                 true
             }
             _ => false,
@@ -96,5 +127,9 @@ impl NativeUiInputBridge {
 
     pub fn state(&self) -> &UiInputState {
         &self.state
+    }
+
+    pub fn set_time_seconds(&mut self, time_seconds: f64) {
+        self.state.time_seconds = time_seconds.max(0.0);
     }
 }

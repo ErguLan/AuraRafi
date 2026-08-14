@@ -8,6 +8,13 @@ use crate::ai::{AgentMode, AiModelShortcut, AiProvider, AiProviderConfig};
 use crate::units::DisplayUnit;
 use serde::{Deserialize, Serialize};
 
+/// Minimum and maximum number of Agent messages rendered in one retained page.
+/// Smaller pages reduce layout and text-atlas work; larger pages reduce manual
+/// pagination at the cost of more work when a chat is opened.
+pub const AGENT_MESSAGE_PAGE_SIZE_MIN: u32 = 4;
+pub const AGENT_MESSAGE_PAGE_SIZE_MAX: u32 = 32;
+pub const AGENT_MESSAGE_PAGE_SIZE_DEFAULT: u32 = 8;
+
 // ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
@@ -71,8 +78,24 @@ fn default_grid_load_distance() -> f32 {
     15.0
 }
 
+fn default_hierarchy_row_height() -> f32 {
+    26.0
+}
+
+fn default_hierarchy_indent_width() -> f32 {
+    14.0
+}
+
 fn default_display_unit() -> DisplayUnit {
     DisplayUnit::Metric
+}
+
+fn default_agent_message_page_size() -> u32 {
+    AGENT_MESSAGE_PAGE_SIZE_DEFAULT
+}
+
+fn default_agent_streaming_enabled() -> bool {
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +270,32 @@ pub struct EngineSettings {
     /// Display unit system for the UI. Calculation is always in SI (meters).
     #[serde(default = "default_display_unit")]
     pub display_unit: DisplayUnit,
+    /// RafUI Hierarchy presentation preferences. These stay in the shared
+    /// Editor section because they affect the editor panel, not the runtime.
+    #[serde(default = "default_true")]
+    pub hierarchy_show_icons: bool,
+    #[serde(default = "default_true")]
+    pub hierarchy_show_visibility: bool,
+    #[serde(default = "default_true")]
+    pub hierarchy_show_locked: bool,
+    #[serde(default)]
+    pub hierarchy_show_hidden: bool,
+    #[serde(default = "default_true")]
+    pub hierarchy_auto_reveal_selection: bool,
+    #[serde(default = "default_true")]
+    pub hierarchy_expand_on_select: bool,
+    #[serde(default = "default_true")]
+    pub hierarchy_animations: bool,
+    #[serde(default = "default_hierarchy_row_height")]
+    pub hierarchy_row_height: f32,
+    #[serde(default = "default_hierarchy_indent_width")]
+    pub hierarchy_indent_width: f32,
+    /// Electronics-only presentation preferences. Grid and snap remain shared
+    /// editor settings because the 3D and CAD canvases use the same contract.
+    #[serde(default = "default_true")]
+    pub electronics_show_minimap: bool,
+    #[serde(default = "default_true")]
+    pub electronics_show_status: bool,
 
     // -- Solid Mode Rendering --
     /// Show surface edge lines in solid render mode.
@@ -363,6 +412,16 @@ pub struct EngineSettings {
     /// User-defined model shortcuts shown in the Agent model selector.
     #[serde(default = "default_agent_model_shortcuts")]
     pub agent_model_shortcuts: Vec<AiModelShortcut>,
+
+    /// Number of non-system Agent messages rendered in one retained page.
+    /// This bounds layout, text-atlas, and paint work when opening a chat.
+    #[serde(default = "default_agent_message_page_size")]
+    pub agent_message_page_size: u32,
+
+    /// Show assistant text incrementally when the provider supports the
+    /// OpenAI-compatible Server-Sent Events response format.
+    #[serde(default = "default_agent_streaming_enabled")]
+    pub agent_streaming_enabled: bool,
 
     /// Label of the model shortcut selected by default. "provider_default"
     /// means the raw model configured in the active provider card.
@@ -547,6 +606,17 @@ impl Default for EngineSettings {
             grid_load_distance: 15.0,
             auto_save_interval_seconds: 120,
             display_unit: DisplayUnit::Metric,
+            hierarchy_show_icons: true,
+            hierarchy_show_visibility: true,
+            hierarchy_show_locked: true,
+            hierarchy_show_hidden: false,
+            hierarchy_auto_reveal_selection: true,
+            hierarchy_expand_on_select: true,
+            hierarchy_animations: true,
+            hierarchy_row_height: default_hierarchy_row_height(),
+            hierarchy_indent_width: default_hierarchy_indent_width(),
+            electronics_show_minimap: true,
+            electronics_show_status: true,
             solid_show_surface_edges: false,
             solid_xray_mode: false,
             solid_face_tonality: true,
@@ -578,6 +648,8 @@ impl Default for EngineSettings {
             default_ai_provider: AiProvider::OpenRouter,
             agent_mode: AgentMode::Passive,
             agent_model_shortcuts: default_agent_model_shortcuts(),
+            agent_message_page_size: AGENT_MESSAGE_PAGE_SIZE_DEFAULT,
+            agent_streaming_enabled: true,
             default_agent_model: String::new(),
             window_width: 1280,
             window_height: 720,
@@ -614,6 +686,7 @@ impl EngineSettings {
                     settings.scale_gizmo_sensitivity = 3.5;
                 }
                 settings.normalize_ai_providers();
+                settings.normalize_agent_message_page_size();
                 settings
             }
             Err(_) => Self::default(),
@@ -639,6 +712,12 @@ impl EngineSettings {
             self.default_ai_provider = AiProvider::OpenRouter;
         }
     }
+
+    fn normalize_agent_message_page_size(&mut self) {
+        self.agent_message_page_size = self
+            .agent_message_page_size
+            .clamp(AGENT_MESSAGE_PAGE_SIZE_MIN, AGENT_MESSAGE_PAGE_SIZE_MAX);
+    }
 }
 
 #[cfg(test)]
@@ -652,6 +731,8 @@ mod tests {
         assert_eq!(s.language, Language::English);
         assert_eq!(s.render_execution_policy, RenderExecutionPolicy::Auto);
         assert_eq!(s.fps_limit, 60);
+        assert_eq!(s.agent_message_page_size, AGENT_MESSAGE_PAGE_SIZE_DEFAULT);
+        assert!(s.agent_streaming_enabled);
     }
 
     #[test]

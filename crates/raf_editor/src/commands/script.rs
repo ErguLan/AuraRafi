@@ -63,7 +63,10 @@ fn create_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) ->
         }
     };
 
-    let name = command.arg("name").unwrap_or("new_script").to_string();
+    let name = sanitize_script_name(command.arg("name").unwrap_or("new_script"));
+    if lang_str == "rust" {
+        return create_script_file(root, &name, "rs", rust_template(&name), "Rust");
+    }
     let scripts_dir = root.join("scripts");
     let _ = std::fs::create_dir_all(&scripts_dir);
 
@@ -111,6 +114,54 @@ fn create_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) ->
             "path": relative,
             "language": lang.label(),
         }),
+    )
+}
+
+fn create_script_file(
+    assets_root: &Path,
+    name: &str,
+    extension: &str,
+    content: String,
+    language: &str,
+) -> CommandOutput {
+    let scripts_dir = assets_root.join("scripts");
+    let _ = std::fs::create_dir_all(&scripts_dir);
+    let file_name = format!("{name}.{extension}");
+    let file_path = scripts_dir.join(&file_name);
+    let relative = format!("scripts/{file_name}");
+    if file_path.exists() {
+        return CommandOutput::error("Create script", format!("File already exists: {relative}"));
+    }
+    if let Err(error) = std::fs::write(&file_path, content) {
+        return CommandOutput::error("Create script", format!("Failed to write: {error}"));
+    }
+    CommandOutput::changed(
+        "Script created",
+        vec![
+            format!("Language: {language}"),
+            format!("Path: {relative}"),
+            "Edit it in an external editor, then attach it to an entity.".to_string(),
+        ],
+        serde_json::json!({"path": relative, "language": language}),
+    )
+}
+
+fn sanitize_script_name(value: &str) -> String {
+    let name: String = value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        .take(64)
+        .collect();
+    if name.is_empty() {
+        "new_script".to_string()
+    } else {
+        name
+    }
+}
+
+fn rust_template(name: &str) -> String {
+    format!(
+        "// Raf Engine Rust script: {name}\n// This template is an external authoring stub; runtime attachment remains explicit.\n\npub fn on_start() {{\n    // Initialize the entity or system here.\n}}\n\npub fn on_update(delta_seconds: f32) {{\n    let _ = delta_seconds;\n}}\n"
     )
 }
 

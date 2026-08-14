@@ -18,9 +18,15 @@ impl ViewportPanel {
             Color32::from_rgba_unmultiplied(40, 40, 50, 180)
         };
         let transforms = WorldTransformCache::build(scene);
-        let max_labels = label_budget_for_triangles(self.render_cfg.max_triangles);
+        let max_labels = label_budget_for_triangles(self.render_cfg.max_triangles)
+            .min(if self.selected.is_empty() { 8 } else { 16 });
         let mut drawn = 0;
+        let mut occupied = Vec::with_capacity(max_labels);
 
+        // With an active selection, labels are an inspection aid for the
+        // selected objects only. Showing every scene name at once produces
+        // the same visual noise as a debug overlay and hides the geometry.
+        let selected_only = !self.selected.is_empty();
         // Draw selected labels first so a dense scene cannot hide the active
         // object behind a low-end label budget.
         for selected_pass in [true, false] {
@@ -29,6 +35,9 @@ impl ViewportPanel {
                     continue;
                 }
                 let selected = self.selected.contains(&id);
+                if selected_only && !selected {
+                    continue;
+                }
                 if selected != selected_pass {
                     continue;
                 }
@@ -43,6 +52,19 @@ impl ViewportPanel {
                     let sx = rect.left() + screen[0];
                     let sy = rect.top() + screen[1];
                     if rect.contains(Pos2::new(sx, sy)) {
+                        let estimated_width =
+                            (node.name.chars().count() as f32 * 5.8 + 12.0).clamp(34.0, 220.0);
+                        let label_rect = Rect::from_center_size(
+                            Pos2::new(sx, sy - 5.0),
+                            egui::vec2(estimated_width, 16.0),
+                        );
+                        if occupied
+                            .iter()
+                            .any(|other: &Rect| other.intersects(label_rect))
+                        {
+                            continue;
+                        }
+                        occupied.push(label_rect);
                         painter.text(
                             Pos2::new(sx, sy),
                             egui::Align2::CENTER_BOTTOM,
@@ -358,13 +380,13 @@ impl ViewportPanel {
 
 fn label_budget_for_triangles(max_triangles: u32) -> usize {
     if max_triangles <= 2_000 {
-        24
+        12
     } else if max_triangles <= 20_000 {
-        64
+        24
     } else if max_triangles <= 100_000 {
-        128
+        48
     } else {
-        256
+        96
     }
 }
 
@@ -374,9 +396,9 @@ mod tests {
 
     #[test]
     fn label_budget_scales_with_render_tier() {
-        assert_eq!(label_budget_for_triangles(2_000), 24);
-        assert_eq!(label_budget_for_triangles(20_000), 64);
-        assert_eq!(label_budget_for_triangles(100_000), 128);
-        assert_eq!(label_budget_for_triangles(500_000), 256);
+        assert_eq!(label_budget_for_triangles(2_000), 12);
+        assert_eq!(label_budget_for_triangles(20_000), 24);
+        assert_eq!(label_budget_for_triangles(100_000), 48);
+        assert_eq!(label_budget_for_triangles(500_000), 96);
     }
 }

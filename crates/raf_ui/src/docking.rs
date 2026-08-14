@@ -3,11 +3,21 @@ use serde::{Deserialize, Serialize};
 use crate::events::UiPointerButton;
 use crate::focus::UiInputState;
 use crate::geometry::UiRect;
+use crate::icons::UiIconId;
 
 /// Height reserved at the top of a floating panel for its drag handle.
 pub const FLOATING_PANEL_TITLE_BAR_HEIGHT: f32 = 28.0;
 /// Square interaction zone used to resize a floating panel from its lower-right corner.
 pub const FLOATING_PANEL_RESIZE_HANDLE_SIZE: f32 = 14.0;
+
+/// Version of the serializable beta bottom-dock document.
+///
+/// Version 3 intentionally resets the pre-stabilization split layouts once.
+/// Those files can contain a visually valid-looking arrangement that still
+/// has stale group interaction state and cannot be moved reliably.
+pub const BOTTOM_DOCK_LAYOUT_VERSION: u32 = 3;
+/// Maximum number of independently resized bottom-dock groups.
+pub const MAX_BOTTOM_DOCK_GROUPS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockSide {
@@ -16,6 +26,520 @@ pub enum DockSide {
     Top,
     Bottom,
     Center,
+}
+
+/// A semantic tab used by a bottom dock group. The tab owns no application
+/// state; its identifier is the bridge between a retained surface and the
+/// editor application boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DockTab {
+    pub id: String,
+    pub title_key: String,
+    pub icon: UiIconId,
+}
+
+impl DockTab {
+    pub fn new(id: impl Into<String>, title_key: impl Into<String>, icon: UiIconId) -> Self {
+        Self {
+            id: id.into(),
+            title_key: title_key.into(),
+            icon,
+        }
+    }
+}
+
+/// One horizontal track in the bottom dock. `weight` is relative to the
+/// other visible groups and `min_width` protects compact utility surfaces from
+/// being squeezed into an unusable strip.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DockTabGroup {
+    pub id: String,
+    pub tabs: Vec<DockTab>,
+    pub active_tab: String,
+    #[serde(default = "default_bottom_group_weight")]
+    pub weight: f32,
+    #[serde(default = "default_bottom_group_min_width")]
+    pub min_width: f32,
+}
+
+fn default_bottom_group_weight() -> f32 {
+    1.0
+}
+
+fn default_bottom_group_min_width() -> f32 {
+    220.0
+}
+
+impl DockTabGroup {
+    pub fn new(id: impl Into<String>, tabs: Vec<DockTab>) -> Self {
+        let active_tab = tabs.first().map(|tab| tab.id.clone()).unwrap_or_default();
+        Self {
+            id: id.into(),
+            tabs,
+            active_tab,
+            weight: default_bottom_group_weight(),
+            min_width: default_bottom_group_min_width(),
+        }
+    }
+
+    pub fn with_weight(mut self, weight: f32) -> Self {
+        self.weight = weight.max(0.01);
+        self
+    }
+
+    pub fn with_min_width(mut self, min_width: f32) -> Self {
+        self.min_width = min_width.max(1.0);
+        self
+    }
+
+    pub fn select_tab(&mut self, tab_id: &str) -> bool {
+        if self.tabs.iter().any(|tab| tab.id == tab_id) {
+            let changed = self.active_tab != tab_id;
+            self.active_tab = tab_id.to_string();
+            changed
+        } else {
+            false
+        }
+    }
+
+    pub fn active_tab(&self) -> Option<&DockTab> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == self.active_tab)
+            .or_else(|| self.tabs.first())
+    }
+}
+
+/// Persistable model for the beta downbar. It deliberately models only the
+/// bottom horizontal composition; side/floating workspace docking remains in
+/// [`DockLayout`] and can be composed with this model later.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BottomDockLayout {
+    #[serde(default = "default_bottom_dock_version")]
+    pub version: u32,
+    #[serde(default = "default_bottom_dock_height")]
+    pub height: f32,
+    #[serde(default = "default_bottom_dock_height")]
+    pub expanded_height: f32,
+    #[serde(default)]
+    pub collapsed: bool,
+    pub groups: Vec<DockTabGroup>,
+}
+
+fn default_bottom_dock_version() -> u32 {
+    BOTTOM_DOCK_LAYOUT_VERSION
+}
+
+fn default_bottom_dock_height() -> f32 {
+    238.0
+}
+
+impl BottomDockLayout {
+    pub fn new(groups: Vec<DockTabGroup>) -> Self {
+        Self {
+            version: BOTTOM_DOCK_LAYOUT_VERSION,
+            height: default_bottom_dock_height(),
+            expanded_height: default_bottom_dock_height(),
+            collapsed: false,
+            groups,
+        }
+    }
+
+    pub fn effective_height(&self, collapsed_height: f32) -> f32 {
+        if self.collapsed {
+            collapsed_height.max(0.0)
+        } else {
+            self.height.max(0.0)
+        }
+    }
+
+    pub fn set_height(&mut self, height: f32, min_height: f32, max_height: f32) -> bool {
+        let minimum = min_height.max(0.0);
+        let maximum = max_height.max(minimum);
+        let next = height.clamp(minimum, maximum);
+        let changed = (self.height - next).abs() > f32::EPSILON;
+        self.height = next;
+        if !self.collapsed {
+            self.expanded_height = next;
+        }
+        changed
+    }
+
+    pub fn toggle_collapsed(&mut self, min_height: f32, max_height: f32) {
+        if self.collapsed {
+            self.collapsed = false;
+            self.height = self
+                .expanded_height
+                .clamp(min_height, max_height.max(min_height));
+        } else {
+            self.expanded_height = self.height;
+            self.collapsed = true;
+        }
+    }
+
+    pub fn select_tab(&mut self, group_id: &str, tab_id: &str) -> bool {
+        self.groups
+            .iter_mut()
+            .find(|group| group.id == group_id)
+            .is_some_and(|group| group.select_tab(tab_id))
+    }
+
+    /// Repairs a persisted layout before it is used by a host.
+    ///
+    /// Empty groups are not useful drop targets in the editor: they consume
+    /// width, leave a misleading empty surface, and make the next frame's
+    /// composition ambiguous. Normalization therefore removes them, clamps
+    /// the group count, and restores a valid active tab for every group.
+    pub fn normalize(&mut self) -> bool {
+        let before = self.groups.clone();
+        self.version = BOTTOM_DOCK_LAYOUT_VERSION;
+        self.groups.retain(|group| !group.tabs.is_empty());
+        self.groups.truncate(MAX_BOTTOM_DOCK_GROUPS);
+        for group in &mut self.groups {
+            group.weight = if group.weight.is_finite() {
+                group.weight.max(0.01)
+            } else {
+                default_bottom_group_weight()
+            };
+            group.min_width = if group.min_width.is_finite() {
+                group.min_width.max(1.0)
+            } else {
+                default_bottom_group_min_width()
+            };
+            if !group.tabs.iter().any(|tab| tab.id == group.active_tab) {
+                group.active_tab = group
+                    .tabs
+                    .first()
+                    .map(|tab| tab.id.clone())
+                    .unwrap_or_default();
+            }
+        }
+        before != self.groups
+    }
+
+    /// Returns local rectangles for each visible group in left-to-right order.
+    /// The resolver always consumes exactly `width`, so adjacent groups cannot
+    /// overlap even when the window is narrower than their preferred minimums.
+    pub fn resolve_columns(&self, width: f32, gap: f32) -> Vec<(String, UiRect)> {
+        let visible = self.groups.iter().collect::<Vec<_>>();
+        if visible.is_empty() || width <= 0.0 {
+            return Vec::new();
+        }
+
+        let gap = gap.max(0.0);
+        let content_width = (width - gap * visible.len().saturating_sub(1) as f32).max(0.0);
+        let total_weight = visible
+            .iter()
+            .map(|group| group.weight.max(0.01))
+            .sum::<f32>();
+        let minimum_total = visible
+            .iter()
+            .map(|group| group.min_width.max(1.0))
+            .sum::<f32>();
+        let sizes = if minimum_total >= content_width {
+            let size = content_width / visible.len() as f32;
+            vec![size; visible.len()]
+        } else {
+            let extra = content_width - minimum_total;
+            visible
+                .iter()
+                .map(|group| {
+                    group.min_width.max(1.0) + extra * (group.weight.max(0.01) / total_weight)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut cursor = 0.0;
+        visible
+            .iter()
+            .zip(sizes)
+            .enumerate()
+            .map(|(index, (group, size))| {
+                let rect = UiRect::new(cursor, 0.0, size.max(0.0), 0.0);
+                cursor += size.max(0.0);
+                if index + 1 < visible.len() {
+                    cursor += gap;
+                }
+                (group.id.clone(), rect)
+            })
+            .collect()
+    }
+
+    pub fn reorder_tab(&mut self, group_id: &str, from: usize, to: usize) -> bool {
+        let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) else {
+            return false;
+        };
+        if from >= group.tabs.len() || to >= group.tabs.len() || from == to {
+            return false;
+        }
+        let tab = group.tabs.remove(from);
+        group.tabs.insert(to, tab);
+        true
+    }
+
+    /// Moves a tab within one group. The target index is evaluated after the
+    /// source tab is removed, which makes drag previews stable while the tab
+    /// crosses its neighboring slots.
+    pub fn move_tab_within_group(
+        &mut self,
+        group_id: &str,
+        tab_id: &str,
+        target_index: usize,
+    ) -> bool {
+        let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) else {
+            return false;
+        };
+        let Some(source_index) = group.tabs.iter().position(|tab| tab.id == tab_id) else {
+            return false;
+        };
+        let tab = group.tabs.remove(source_index);
+        let target_index = target_index.min(group.tabs.len());
+        if source_index == target_index {
+            group.tabs.insert(source_index, tab);
+            return false;
+        }
+        group.tabs.insert(target_index, tab);
+        true
+    }
+
+    /// Moves one tab between visible groups. If the source loses its last tab,
+    /// that group is removed and the remaining columns reflow immediately.
+    pub fn move_tab_to_group(
+        &mut self,
+        source_group_id: &str,
+        target_group_id: &str,
+        tab_id: &str,
+    ) -> bool {
+        if source_group_id == target_group_id
+            || !self.groups.iter().any(|group| group.id == target_group_id)
+        {
+            return false;
+        }
+        let Some(source_index) = self
+            .groups
+            .iter()
+            .position(|group| group.id == source_group_id)
+        else {
+            return false;
+        };
+        let Some(tab_index) = self.groups[source_index]
+            .tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+        else {
+            return false;
+        };
+        let tab = self.groups[source_index].tabs.remove(tab_index);
+        if self.groups[source_index].active_tab == tab.id.as_str() {
+            self.groups[source_index].active_tab = self.groups[source_index]
+                .tabs
+                .first()
+                .map(|candidate| candidate.id.clone())
+                .unwrap_or_default();
+        }
+        let source_empty = self.groups[source_index].tabs.is_empty();
+        let target = self
+            .groups
+            .iter_mut()
+            .find(|group| group.id == target_group_id)
+            .expect("target group was checked above");
+        if target.tabs.is_empty() {
+            target.active_tab = tab.id.clone();
+        }
+        target.tabs.push(tab);
+        if source_empty {
+            self.groups.remove(source_index);
+        }
+        true
+    }
+
+    /// Resizes the boundary between two adjacent groups while preserving the
+    /// total width and the minimum width contract of every group.
+    pub fn resize_boundary(
+        &mut self,
+        left_group_id: &str,
+        right_group_id: &str,
+        width: f32,
+        gap: f32,
+        delta: f32,
+    ) -> bool {
+        let columns = self.resolve_columns(width, gap);
+        let Some(left_index) = columns
+            .iter()
+            .position(|(group_id, _)| group_id == left_group_id)
+        else {
+            return false;
+        };
+        let Some(right_index) = columns
+            .iter()
+            .position(|(group_id, _)| group_id == right_group_id)
+        else {
+            return false;
+        };
+        if right_index != left_index + 1 {
+            return false;
+        }
+
+        let left_width = columns[left_index].1.width;
+        let right_width = columns[right_index].1.width;
+        let left_min = self
+            .groups
+            .iter()
+            .find(|group| group.id == left_group_id)
+            .map(|group| group.min_width.max(1.0))
+            .unwrap_or(1.0);
+        let right_min = self
+            .groups
+            .iter()
+            .find(|group| group.id == right_group_id)
+            .map(|group| group.min_width.max(1.0))
+            .unwrap_or(1.0);
+        let pair_width = left_width + right_width;
+        if pair_width < left_min + right_min {
+            return false;
+        }
+        let next_left = (left_width + delta).clamp(left_min, pair_width - right_min);
+        let next_right = pair_width - next_left;
+        if (next_left - left_width).abs() <= f32::EPSILON {
+            return false;
+        }
+
+        let mut desired = columns
+            .iter()
+            .map(|(group_id, rect)| (group_id.clone(), rect.width))
+            .collect::<Vec<_>>();
+        desired[left_index].1 = next_left;
+        desired[right_index].1 = next_right;
+        for (group_id, size) in desired {
+            if let Some(group) = self.groups.iter_mut().find(|group| group.id == group_id) {
+                group.weight = (size - group.min_width.max(1.0)).max(0.01);
+            }
+        }
+        true
+    }
+
+    pub fn split_tab(
+        &mut self,
+        source_group_id: &str,
+        tab_id: &str,
+        new_group_id: impl Into<String>,
+    ) -> bool {
+        let new_group_id = new_group_id.into();
+        if self.groups.iter().any(|group| group.id == new_group_id) {
+            return false;
+        }
+        if self.groups.len() >= MAX_BOTTOM_DOCK_GROUPS {
+            return false;
+        }
+        let Some(source_index) = self
+            .groups
+            .iter()
+            .position(|group| group.id == source_group_id)
+        else {
+            return false;
+        };
+        let Some(tab_index) = self.groups[source_index]
+            .tabs
+            .iter()
+            .position(|tab| tab.id == tab_id)
+        else {
+            return false;
+        };
+        let source_weight = self.groups[source_index].weight;
+        let source_min_width = self.groups[source_index].min_width;
+        let tab = self.groups[source_index].tabs.remove(tab_index);
+        if self.groups[source_index].active_tab == tab.id.as_str() {
+            self.groups[source_index].active_tab = self.groups[source_index]
+                .tabs
+                .first()
+                .map(|candidate| candidate.id.clone())
+                .unwrap_or_default();
+        }
+        let mut group = DockTabGroup::new(new_group_id, vec![tab]);
+        group.weight = source_weight;
+        group.min_width = source_min_width;
+        let insert_at = if self.groups[source_index].tabs.is_empty() {
+            self.groups.remove(source_index);
+            source_index.min(self.groups.len())
+        } else {
+            source_index + 1
+        };
+        self.groups.insert(insert_at, group);
+        true
+    }
+
+    /// Splits a tab into a new group and places that group beside a target
+    /// track. Hosts use this for edge-drop gestures so the visual order
+    /// follows the direction in which the user released the mouse.
+    pub fn split_tab_next_to(
+        &mut self,
+        source_group_id: &str,
+        tab_id: &str,
+        new_group_id: impl Into<String>,
+        target_group_id: &str,
+        before: bool,
+    ) -> bool {
+        let new_group_id = new_group_id.into();
+        if !self.split_tab(source_group_id, tab_id, new_group_id.clone()) {
+            return false;
+        }
+        let Some(new_index) = self
+            .groups
+            .iter()
+            .position(|group| group.id == new_group_id)
+        else {
+            return false;
+        };
+        let group = self.groups.remove(new_index);
+        let Some(mut target_index) = self
+            .groups
+            .iter()
+            .position(|candidate| candidate.id == target_group_id)
+        else {
+            self.groups.insert(new_index.min(self.groups.len()), group);
+            return true;
+        };
+        if !before {
+            target_index += 1;
+        }
+        self.groups
+            .insert(target_index.min(self.groups.len()), group);
+        true
+    }
+
+    pub fn merge_groups(&mut self, source_group_id: &str, target_group_id: &str) -> bool {
+        if source_group_id == target_group_id {
+            return false;
+        }
+        let Some(source_index) = self
+            .groups
+            .iter()
+            .position(|group| group.id == source_group_id)
+        else {
+            return false;
+        };
+        if !self.groups.iter().any(|group| group.id == target_group_id) {
+            return false;
+        }
+        let source = self.groups.remove(source_index);
+        let Some(target) = self
+            .groups
+            .iter_mut()
+            .find(|group| group.id == target_group_id)
+        else {
+            return false;
+        };
+        target.tabs.extend(source.tabs);
+        if target.active_tab.is_empty() {
+            target.active_tab = target
+                .tabs
+                .first()
+                .map(|tab| tab.id.clone())
+                .unwrap_or_default();
+        }
+        self.normalize();
+        true
+    }
 }
 
 /// Persistence policy for a dock. Fixed docks remain part of the workspace
@@ -696,6 +1220,138 @@ fn split_track(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bottom_group(id: &str, tab_id: &str) -> DockTabGroup {
+        DockTabGroup::new(id, vec![DockTab::new(tab_id, "app.tab", UiIconId::Console)])
+    }
+
+    #[test]
+    fn bottom_dock_columns_fill_width_without_overlap() {
+        let mut layout = BottomDockLayout::new(vec![
+            bottom_group("left", "output"),
+            bottom_group("middle", "assets"),
+            bottom_group("right", "project"),
+        ]);
+        layout.groups[0].min_width = 140.0;
+        layout.groups[1].min_width = 180.0;
+        layout.groups[2].min_width = 120.0;
+
+        let columns = layout.resolve_columns(900.0, 4.0);
+        assert_eq!(columns.len(), 3);
+        assert_eq!(columns[0].1.x, 0.0);
+        assert!((columns[2].1.right() - 900.0).abs() < 0.01);
+        assert!(columns[0].1.right() <= columns[1].1.x);
+        assert!(columns[1].1.right() <= columns[2].1.x);
+    }
+
+    #[test]
+    fn bottom_dock_collapsed_state_restores_expanded_height() {
+        let mut layout = BottomDockLayout::new(vec![bottom_group("console", "output")]);
+        layout.set_height(320.0, 112.0, 420.0);
+        layout.toggle_collapsed(112.0, 420.0);
+        assert!(layout.collapsed);
+        assert_eq!(layout.effective_height(32.0), 32.0);
+        layout.toggle_collapsed(112.0, 420.0);
+        assert!(!layout.collapsed);
+        assert_eq!(layout.height, 320.0);
+    }
+
+    #[test]
+    fn bottom_dock_can_split_and_merge_tabs() {
+        let mut layout = BottomDockLayout::new(vec![DockTabGroup::new(
+            "utility",
+            vec![
+                DockTab::new("output", "app.output", UiIconId::Console),
+                DockTab::new("console", "app.studio_console", UiIconId::Console),
+            ],
+        )]);
+
+        assert!(layout.split_tab("utility", "console", "console-only"));
+        assert_eq!(layout.groups.len(), 2);
+        assert!(layout.merge_groups("console-only", "utility"));
+        assert_eq!(layout.groups.len(), 1);
+        assert_eq!(layout.groups[0].tabs.len(), 2);
+    }
+
+    #[test]
+    fn bottom_dock_moves_tabs_between_groups() {
+        let mut layout = BottomDockLayout::new(vec![
+            bottom_group("left", "console"),
+            bottom_group("right", "assets"),
+        ]);
+
+        assert!(layout.move_tab_to_group("left", "right", "console"));
+        assert_eq!(layout.groups.len(), 1);
+        assert_eq!(layout.groups[0].id, "right");
+        assert_eq!(layout.groups[0].tabs.len(), 2);
+        assert_eq!(layout.groups[0].tabs[1].id, "console");
+    }
+
+    #[test]
+    fn bottom_dock_reorders_tabs_within_a_group() {
+        let mut layout = BottomDockLayout::new(vec![DockTabGroup::new(
+            "main",
+            vec![
+                DockTab::new("console", "app.studio_console", UiIconId::Console),
+                DockTab::new("assets", "app.studio_assets", UiIconId::Assets),
+                DockTab::new("project", "app.studio_project", UiIconId::Project),
+            ],
+        )]);
+
+        assert!(layout.move_tab_within_group("main", "console", 2));
+        assert_eq!(
+            layout.groups[0]
+                .tabs
+                .iter()
+                .map(|tab| tab.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["assets", "project", "console"]
+        );
+    }
+
+    #[test]
+    fn bottom_dock_normalization_removes_empty_groups_and_caps_group_count() {
+        let mut layout = BottomDockLayout::new(vec![
+            bottom_group("one", "console"),
+            DockTabGroup::new("empty", Vec::new()),
+            bottom_group("two", "assets"),
+            bottom_group("three", "project"),
+            bottom_group("four", "settings"),
+        ]);
+
+        assert!(layout.normalize());
+        assert_eq!(layout.groups.len(), MAX_BOTTOM_DOCK_GROUPS);
+        assert!(!layout.groups.iter().any(|group| group.tabs.is_empty()));
+        assert_eq!(layout.version, BOTTOM_DOCK_LAYOUT_VERSION);
+    }
+
+    #[test]
+    fn bottom_dock_split_removes_source_when_it_loses_its_only_tab() {
+        let mut layout = BottomDockLayout::new(vec![bottom_group("main", "console")]);
+
+        assert!(layout.split_tab("main", "console", "console-only"));
+        assert_eq!(layout.groups.len(), 1);
+        assert_eq!(layout.groups[0].id, "console-only");
+    }
+
+    #[test]
+    fn bottom_dock_resizes_adjacent_group_boundary() {
+        let mut layout = BottomDockLayout::new(vec![
+            bottom_group("left", "console"),
+            bottom_group("middle", "assets"),
+            bottom_group("right", "project"),
+        ]);
+        let before = layout.resolve_columns(1200.0, 4.0);
+        let before_left = before[0].1.width;
+        let before_middle = before[1].1.width;
+
+        assert!(layout.resize_boundary("left", "middle", 1200.0, 4.0, 80.0));
+
+        let after = layout.resolve_columns(1200.0, 4.0);
+        assert!(after[0].1.width > before_left);
+        assert!(after[1].1.width < before_middle);
+        assert!((after[2].1.right() - 1200.0).abs() < 0.01);
+    }
 
     #[test]
     fn floating_panel_clamps_inside_workspace() {

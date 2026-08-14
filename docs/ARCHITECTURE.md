@@ -39,7 +39,7 @@ ownership. A document declares layout, styles, semantic text keys, and typed
 actions; a surface host maps those actions to existing backend operations; the
 application routes typed intents and owns persistence. The precise authoring
 contract, including menus and responsive layout, is maintained in
-[RafUI Authoring Guide](RAF_UI_AUTHORING.md).
+[`RAF_UI.md`](RAF_UI.md) and [`EDITOR_RAFUI.md`](EDITOR_RAFUI.md).
 
 ### RafUI Frontier Core Ownership
 
@@ -629,16 +629,16 @@ surfaces:
 To minimize token consumption, eradicate agent regressions, and avoid the generation of conflicting or outdated implementation structures, AuraRafi's development context is modularly partitioned under the `.ai/` directory.
 
 ### Core Context Redirection
-* **Agent Master Context**: [Agent.md](Agent.md) in the root now acts as a dedicated synapse router, redirecting all incoming LLM agents to the structured `.ai/` workspace.
-* **Master System Truth**: [.ai/SYSTEM_TRUTH.md](.ai/SYSTEM_TRUTH.md) — The single compiler-grade registry housing the up-to-date architecture mapping of all engine crates, files, and modules. 
-* **Strict Quality Directives**: [.ai/instructions.md](.ai/instructions.md) — Universal non-negotiable rules enforcing English-only codebases, no emojis, strict i18n JSON translations, complete-before-test flows, and `app.rs` file modularity.
+* **Agent Master Context**: [Agent.md](../Agent.md) in the root now acts as a dedicated synapse router, redirecting all incoming LLM agents to the structured `.ai/` workspace.
+* **Master System Truth**: [.ai/SYSTEM_TRUTH.md](../.ai/SYSTEM_TRUTH.md) — The single compiler-grade registry housing the up-to-date architecture mapping of all engine crates, files, and modules.
+* **Strict Quality Directives**: [.ai/instructions.md](../.ai/instructions.md) — Universal non-negotiable rules enforcing English-only codebases, no emojis, strict i18n JSON translations, complete-before-test flows, and `app.rs` file modularity.
 
 ### Specialized AI Roles
 Agents are categorized into four specialized roles to prevent token swelling and ensure maximum engineering focus:
-1. **CTO Lead (Systems & Core)**: [.ai/roles/cto_lead.md](.ai/roles/cto_lead.md) — Focuses on ECS (`hecs`), commands bus, memory safety, and thread-pool allocations.
-2. **Render Math (Graphics Programmer)**: [.ai/roles/render_math.md](.ai/roles/render_math.md) — Focuses on perspective/orthographic coordinate matrices, grids, ray picking, and PBR/CPU rasterization shaders.
-3. **CAD Electronics (Hardware Engineer)**: [.ai/roles/electronics.md](.ai/roles/electronics.md) — Focuses on routing, Union-Find netlists, DRC tests, DC Modified Nodal Analysis (MNA), and mapping RON components to 3D.
-4. **UI Designer (egui Minimalist)**: [.ai/roles/ui_designer.md](.ai/roles/ui_designer.md) — Focuses on visual alignments, responsive tab groups, and styling using `theme.rs` tokens.
+1. **CTO Lead (Systems & Core)**: [.ai/roles/cto_lead.md](../.ai/roles/cto_lead.md) — Focuses on ECS (`hecs`), commands bus, memory safety, and thread-pool allocations.
+2. **Render Math (Graphics Programmer)**: [.ai/roles/render_math.md](../.ai/roles/render_math.md) — Focuses on perspective/orthographic coordinate matrices, grids, ray picking, and PBR/CPU rasterization shaders.
+3. **CAD Electronics (Hardware Engineer)**: [.ai/roles/electronics.md](../.ai/roles/electronics.md) — Focuses on routing, Union-Find netlists, DRC tests, DC Modified Nodal Analysis (MNA), and mapping RON components to 3D.
+4. **Editor RafUI contract**: [`EDITOR_RAFUI.md`](EDITOR_RAFUI.md) — Focuses on visual alignment, responsive tab groups, interaction, and styling boundaries.
 
 ### Vision Triage Protocol
 To streamline development from screenshots, if an agent is presented with an application viewport frame or build output screenshot with no text context, it applies the standard **Vision Triage Protocol**:
@@ -646,3 +646,5 @@ To streamline development from screenshots, if an agent is presented with an app
 2. Search terminal windows/console logs inside the image for compile warnings or errors.
 3. Assess depth-sorting overlapping lines or connection traces.
 4. Update the internally stored triage skill according to the findings to suggest high-impact structural fixes immediately.
+
+> Developed by Yoll. More info: [yoll.site](https://yoll.site).

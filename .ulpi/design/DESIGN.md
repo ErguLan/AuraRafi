@@ -48,10 +48,13 @@ Contrast contract: dark text on dark background is approximately 17:1; muted tex
 | role | family | use | notes |
 |---|---|---|---|
 | display | Ubuntu Light, bundled vector font | screen titles only | 20px maximum in editor chrome; no marketing-scale type |
-| body | Ubuntu Light, bundled vector font | labels, descriptions, form values | 13px / 18px default |
-| utility | Ubuntu Mono when bundled; current monospace role otherwise | paths, IDs, measurements, console values | never use for prose |
+| body | Ubuntu Regular / Medium / Bold, bundled vector faces | labels, descriptions, form values | 13px / 18px default; weight selects a real face |
+| utility | Ubuntu Mono Regular / Medium when bundled; current monospace role otherwise | paths, IDs, measurements, console values | never use for prose |
 
-The current rasterizer already ships a bundled Ubuntu vector font. No web font loader or system-font dependency is permitted. A real Ubuntu Mono asset may be added later only as an explicit small, bundled asset change.
+RafUI bundles the Ubuntu Regular, Medium, and Bold faces under the
+ApiGraphicBasic asset boundary. No web font loader or system-font dependency is
+permitted. A real Ubuntu Mono asset may be added only as an explicit, bounded
+asset change.
 
 ## Scales (locked)
 
@@ -122,7 +125,7 @@ The signature remains the active edge. A tooltip does not become a brown bar,
 a focused button does not expand, and motion never exists only to decorate the
 screen. Every interaction must improve reading, targeting, or state feedback.
 
-The complete quality charter is recorded in
-`.ulpi/design/aurarafi-ui-quality.md`. It is the review authority for
-pixel-shimmer, subpixel-jitter, texture-bleeding, resampling, and GPU/CPU
-visual parity defects.
+The complete RafUI quality charter and visual acceptance rules are recorded in
+`docs/RAF_UI.md` and `docs/EDITOR_RAFUI.md`. They are the review authority for
+pixel shimmer, subpixel jitter, texture bleeding, resampling, responsive
+layout, and GPU/CPU visual parity defects.

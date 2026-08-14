@@ -17,7 +17,7 @@ pub enum UiSamplingMode {
     Linear,
 }
 
-/// Geometry policy used by RafUI Studio and both retained presentation paths.
+/// Geometry policy shared by retained presentation and future authoring tools.
 /// Keeping these values together prevents one host from applying text density
 /// to borders or icon density to layout geometry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -136,9 +136,59 @@ impl UiEnvironment {
         ]
     }
 
+    /// Converts a logical point into the physical target space used by a
+    /// compositor. Keeping this operation here prevents each host from
+    /// inventing a slightly different DPI formula.
+    pub fn logical_to_physical(self, point: [f32; 2]) -> [f32; 2] {
+        let scale = self.scale_factor.clamp(1.0, 4.0);
+        [point[0] * scale, point[1] * scale]
+    }
+
+    pub fn physical_to_logical(self, point: [f32; 2]) -> [f32; 2] {
+        let scale = self.scale_factor.clamp(1.0, 4.0);
+        [point[0] / scale, point[1] / scale]
+    }
+
+    /// Snaps geometry only when the density is integral. Fractional-DPI
+    /// targets retain fractional coordinates so linear filtering can produce
+    /// stable coverage instead of alternating one-pixel widths.
+    pub fn snap_physical(self, point: [f32; 2]) -> [f32; 2] {
+        let physical = self.logical_to_physical(point);
+        if self.density_contract().geometry_snap == UiGeometrySnap::PhysicalPixel {
+            [physical[0].round(), physical[1].round()]
+        } else {
+            physical
+        }
+    }
+
     pub fn logical_size_from_physical(self, physical: [u32; 2]) -> [f32; 2] {
         let scale = self.scale_factor.max(0.5);
         [physical[0] as f32 / scale, physical[1] as f32 / scale]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn density_round_trip_preserves_logical_points() {
+        let mut environment = UiEnvironment::new(1280, 720);
+        environment.scale_factor = 1.5;
+        let point = [17.25, 8.5];
+        let physical = environment.logical_to_physical(point);
+
+        assert_eq!(environment.physical_to_logical(physical), point);
+    }
+
+    #[test]
+    fn fractional_density_does_not_snap_geometry_early() {
+        let mut environment = UiEnvironment::new(1280, 720);
+        environment.scale_factor = 1.25;
+
+        let snapped = environment.snap_physical([10.24, 4.76]);
+        assert!((snapped[0] - 12.8).abs() < 1e-5);
+        assert!((snapped[1] - 5.95).abs() < 1e-5);
     }
 }
 

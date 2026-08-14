@@ -1,32 +1,33 @@
 //! # raf_editor
 //!
-//! Visual editor for AuraRafi. Provides:
-//! - Loading screen with branding
-//! - Project Hub (recent projects + create new)
-//! - Main editor with panels (viewport, hierarchy, properties, assets, console, AI chat)
-//! - Theme system (dark/light + orange accent)
-//! - Internationalization (EN/ES)
-//! - Settings panel
+//! AuraRafi editor boundary.
+//!
+//! The editor-chrome layer is being rebuilt as retained RafUI surfaces. This
+//! crate currently owns the loading/Hub entry surfaces, project/document
+//! wiring, domain commands, the beta downbar, and full-client Game/Electronics
+//! canvas hosts. The engine and renderer remain independent.
 
 pub mod agent_executor;
+#[path = "editor_viewport_app.rs"]
 pub mod app;
+pub mod application_bar_host;
+pub mod application_bar_surface;
 pub mod application_menu;
+pub mod attached;
 pub mod commands;
-pub mod console_surface;
-pub mod editor_shell;
-pub mod editor_shell_surface;
+pub mod console;
 pub mod electronics_assets;
-mod frame_timing;
+pub mod electronics_history;
 pub mod game_runtime;
 pub mod panels;
 pub mod pcb_document;
+pub mod project_catalog;
 pub mod project_settings_surface;
+pub mod scene_history;
 pub mod schematic_document;
 pub mod script_support;
-pub mod session_document;
 pub mod settings_surface;
 pub mod studio_surface;
 pub mod theme;
-pub mod ui_icons;
 
 pub use app::AuraRafiApp;

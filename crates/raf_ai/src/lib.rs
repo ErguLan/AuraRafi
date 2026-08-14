@@ -1,7 +1,8 @@
 //! # raf_ai
 //!
 //! AI agent interface for AuraRafi. Provides:
-//! - Tool registry: every engine operation exposed as an invocable tool
+//! - Tool registry: canonical command catalog exposed as invocable tools,
+//!   with a compatibility registry for older callers
 //! - Chat message protocol for bidirectional communication
 //! - Provider selector (Puerto, OpenRouter, OpenAI, GenAI, Claude)
 //! - Puerto bridge client for OpenClawd / OpenClaw gateways

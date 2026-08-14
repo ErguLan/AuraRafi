@@ -104,6 +104,7 @@ fn build_surface(palette: StudioUiPalette, progress: f32, lang: Language) -> UiS
                     line_height_px: 80.0,
                     weight: UiFontWeight::Regular,
                     color: tokens.text,
+                    inherit_color: false,
                 }),
         )
         .with_child(
@@ -135,6 +136,7 @@ fn build_surface(palette: StudioUiPalette, progress: f32, lang: Language) -> UiS
                             line_height_px: 24.0,
                             weight: UiFontWeight::Regular,
                             color: tokens.text_muted,
+                            inherit_color: false,
                         }),
                 ),
         )

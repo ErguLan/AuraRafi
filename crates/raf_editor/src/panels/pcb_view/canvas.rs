@@ -28,6 +28,7 @@ impl PcbViewPanel {
         self.canvas_dark_mode = ui.visuals().dark_mode;
         let palette = electronics_palette(self.canvas_dark_mode);
         let mut changed = false;
+        let mut document_changed = false;
         let hover_pos = ui
             .input(|i| i.pointer.hover_pos())
             .filter(|pointer| rect.contains(*pointer));
@@ -35,19 +36,33 @@ impl PcbViewPanel {
         let render_h = rect.height().max(1.0).round() as u32;
         let (left, right, top, bottom) =
             self.visible_world_bounds(render_w as f32, render_h as f32);
-        let mut cad_scene = CadScene::from_pcb(&self.layout);
-        if !self.show_airwires {
-            cad_scene
-                .objects
-                .retain(|object| object.kind != CadObjectKind::Airwire);
+        let document_revision = self.document_epoch;
+        if self
+            .cad_scene_cache
+            .as_ref()
+            .map_or(true, |(fingerprint, _)| *fingerprint != document_revision)
+        {
+            let mut cad_scene = CadScene::from_pcb(&self.layout);
+            if !self.show_airwires {
+                cad_scene
+                    .objects
+                    .retain(|object| object.kind != CadObjectKind::Airwire);
+            }
+            self.cad_scene_cache = Some((document_revision, cad_scene));
         }
+        let cad_scene = &self
+            .cad_scene_cache
+            .as_ref()
+            .expect("PCB CAD scene cache must exist")
+            .1;
         let cad_selection = self.cad_surface_selection();
-        self.cad_surface_host.present(
+        self.cad_surface_host.present_with_revision(
             ui.ctx(),
             wgpu_render_state,
             render_runtime,
             GraphicsSurfaceKind::PcbCanvas,
-            &cad_scene,
+            cad_scene,
+            document_revision,
             [render_w, render_h],
             [left, right, top, bottom],
             self.canvas_dark_mode,
@@ -171,6 +186,7 @@ impl PcbViewPanel {
                                     if component.position != snapped {
                                         component.position = snapped;
                                         self.layout.rebuild_airwires();
+                                        document_changed = true;
                                         changed = true;
                                     }
                                 }
@@ -190,6 +206,7 @@ impl PcbViewPanel {
                             self.selection = PcbSelection::Airwire(airwire_index);
                             if self.layout.route_airwire(airwire_index) {
                                 self.selection = PcbSelection::None;
+                                document_changed = true;
                                 changed = true;
                             }
                         }
@@ -212,6 +229,7 @@ impl PcbViewPanel {
                             self.layout.board_outline.points = closed;
                             self.outline_draft.clear();
                             self.tool = PcbTool::Select;
+                            document_changed = true;
                             changed = true;
                         } else {
                             self.outline_draft.push(world);
@@ -253,21 +271,29 @@ impl PcbViewPanel {
             })
             .unwrap_or_default();
         let info_text = format!("{}{}", cursor_mm, hint);
-        painter.text(
-            Pos2::new(rect.left() + 12.0, rect.bottom() - 18.0),
-            egui::Align2::LEFT_BOTTOM,
-            info_text,
-            egui::FontId::proportional(11.0),
-            palette.text_muted,
-        );
-        self.draw_minimap(&painter, rect);
+        if self.show_status {
+            painter.text(
+                Pos2::new(rect.left() + 12.0, rect.bottom() - 18.0),
+                egui::Align2::LEFT_BOTTOM,
+                info_text,
+                egui::FontId::proportional(11.0),
+                palette.text_muted,
+            );
+        }
+        if self.show_minimap {
+            self.draw_minimap(&painter, rect);
+        }
+
+        if document_changed {
+            self.mark_document_changed();
+        }
 
         changed
     }
 
     fn draw_minimap(&self, painter: &egui::Painter, canvas: Rect) {
         let palette = electronics_palette(self.canvas_dark_mode);
-        let size = egui::Vec2::new(126.0, 92.0);
+        let size = egui::Vec2::new(148.0, 96.0);
         let rect = Rect::from_min_size(
             Pos2::new(canvas.left() + 14.0, canvas.bottom() - size.y - 14.0),
             size,
@@ -306,26 +332,87 @@ impl PcbViewPanel {
         max += Vec2::splat(24.0);
         let span = (max - min).max(Vec2::splat(1.0));
         let content = rect.shrink2(egui::Vec2::splat(8.0));
+        let scale = (content.width() / span.x).min(content.height() / span.y);
+        let fitted_size = span * scale;
+        let fitted_origin = content.center() - egui::vec2(fitted_size.x * 0.5, fitted_size.y * 0.5);
         let project = |world: Vec2| {
             Pos2::new(
-                content.left() + (world.x - min.x) / span.x * content.width(),
-                content.bottom() - (world.y - min.y) / span.y * content.height(),
+                fitted_origin.x + (world.x - min.x) * scale,
+                fitted_origin.y + (world.y - min.y) * scale,
             )
         };
 
-        for trace in &self.layout.traces {
-            for segment in trace.points.windows(2) {
+        let outline = self
+            .layout
+            .board_outline
+            .points
+            .iter()
+            .map(|point| project(*point))
+            .collect::<Vec<_>>();
+        for segment in outline.windows(2) {
+            painter.line_segment(
+                [segment[0], segment[1]],
+                Stroke::new(1.2, Color32::from_rgb(101, 187, 126)),
+            );
+        }
+        if self.layout.outline_is_closed() && outline.len() > 2 {
+            if let (Some(first), Some(last)) = (outline.first(), outline.last()) {
                 painter.line_segment(
-                    [project(segment[0]), project(segment[1])],
-                    Stroke::new(1.0, Color32::from_rgb(92, 208, 116)),
+                    [*last, *first],
+                    Stroke::new(1.2, Color32::from_rgb(101, 187, 126)),
                 );
             }
         }
-        for component in &self.layout.components {
+        for trace in &self.layout.traces {
+            for segment in trace.points.windows(2) {
+                let color = if self.selection
+                    == PcbSelection::Trace(
+                        self.layout
+                            .traces
+                            .iter()
+                            .position(|candidate| candidate.id == trace.id)
+                            .unwrap_or(usize::MAX),
+                    ) {
+                    theme::ACCENT
+                } else {
+                    Color32::from_rgb(92, 208, 116)
+                };
+                painter.line_segment(
+                    [project(segment[0]), project(segment[1])],
+                    Stroke::new(1.0, color),
+                );
+            }
+        }
+        for (index, component) in self.layout.components.iter().enumerate() {
             painter.rect_filled(
-                Rect::from_center_size(project(component.position), egui::Vec2::splat(4.0)),
+                Rect::from_center_size(
+                    project(component.position),
+                    egui::Vec2::splat(if self.selection == PcbSelection::Component(index) {
+                        6.0
+                    } else {
+                        4.0
+                    }),
+                ),
                 1.5,
-                theme::ACCENT,
+                if self.selection == PcbSelection::Component(index) {
+                    Color32::from_rgb(255, 172, 64)
+                } else {
+                    theme::ACCENT
+                },
+            );
+        }
+
+        let (left, right, top, bottom) = self.visible_world_bounds(canvas.width(), canvas.height());
+        let visible_rect = Rect::from_two_pos(
+            project(Vec2::new(left, top)),
+            project(Vec2::new(right, bottom)),
+        )
+        .intersect(content);
+        if visible_rect.width() > 1.0 && visible_rect.height() > 1.0 {
+            painter.rect_stroke(
+                visible_rect,
+                2.0,
+                Stroke::new(1.0, Color32::from_rgba_premultiplied(255, 172, 64, 220)),
             );
         }
     }
@@ -505,6 +592,15 @@ impl PcbViewPanel {
         hovered_component: Option<usize>,
     ) {
         for (index, component) in self.layout.components.iter().enumerate() {
+            let selected = self.selection == PcbSelection::Component(index);
+            let hovered = hovered_component == Some(index);
+            // AGB already owns the scalable component backdrop. At overview
+            // zoom there is no reason to rebuild footprints, atlas bounds,
+            // and pad labels for every component when only selected/hovered
+            // overlays need to remain interactive.
+            if !draw_detail_overlay && !selected && !hovered {
+                continue;
+            }
             let footprint =
                 footprint_definition(&component.footprint, component.pad_nets.len().max(1));
             let center = self.world_to_screen(rect, component.position);
@@ -517,9 +613,7 @@ impl PcbViewPanel {
             let visual_size =
                 egui::vec2(body_size.x.max(asset_size.x), body_size.y.max(asset_size.y));
             let visual_rect = Rect::from_center_size(center, visual_size);
-            let selected = self.selection == PcbSelection::Component(index);
-            let hovered = hovered_component == Some(index);
-            if !draw_detail_overlay && !selected && !hovered {
+            if !rect.intersects(visual_rect.expand(24.0)) {
                 continue;
             }
             let palette = electronics_palette(self.canvas_dark_mode);

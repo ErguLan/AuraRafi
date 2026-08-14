@@ -95,7 +95,7 @@ impl UiDocument {
     }
 
     /// Mutable counterpart used by controlled authoring tools such as RafUI
-    /// Studio. Domain state still belongs to the application boundary; this
+    /// authoring tools. Domain state still belongs to the application boundary; this
     /// only edits the retained UI document itself.
     pub fn find_node_mut(&mut self, id: &str) -> Option<&mut UiNode> {
         find_node_mut(&mut self.root, id)
@@ -105,11 +105,50 @@ impl UiDocument {
         if self.find_node(&node.id).is_some() {
             return Err("UI node id already exists.".to_string());
         }
+        let mut ids = std::collections::BTreeSet::new();
+        collect_ids(&node, &mut ids)?;
+        if ids.iter().any(|id| self.find_node(id).is_some()) {
+            return Err("UI subtree contains an id already used by the document.".to_string());
+        }
         let Some(parent) = find_node_mut(&mut self.root, parent_id) else {
             return Err("UI parent node was not found.".to_string());
         };
         parent.children.push(node);
         Ok(())
+    }
+
+    /// Validates serialized documents before a host attempts layout or input.
+    /// This keeps malformed authoring data from reaching renderer hot paths.
+    pub fn validate(&self) -> Result<(), Vec<String>> {
+        let mut errors = Vec::new();
+        if self.version == 0 || self.version > UI_DOCUMENT_VERSION {
+            errors.push(format!("Unsupported UI document version {}.", self.version));
+        }
+        if self.name.trim().is_empty() {
+            errors.push("UI document name cannot be empty.".to_string());
+        }
+        if self.root.kind != UiNodeKind::Root {
+            errors.push("UI document root must have kind Root.".to_string());
+        }
+        let mut ids = std::collections::BTreeSet::new();
+        validate_node(&self.root, &mut ids, &mut errors);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(errors)
+        }
+    }
+
+    /// Applies the lossless migrations known by the current document format.
+    pub fn migrate(&mut self) -> Result<(), Vec<String>> {
+        if self.version > UI_DOCUMENT_VERSION {
+            return Err(vec![format!(
+                "Cannot migrate future UI document version {}.",
+                self.version
+            )]);
+        }
+        self.version = UI_DOCUMENT_VERSION;
+        self.validate()
     }
 
     pub fn remove_node(&mut self, id: &str) -> Option<UiNode> {
@@ -158,6 +197,108 @@ fn remove_node(node: &mut UiNode, id: &str) -> Option<UiNode> {
     None
 }
 
+fn collect_ids(node: &UiNode, ids: &mut std::collections::BTreeSet<String>) -> Result<(), String> {
+    if node.id.trim().is_empty() {
+        return Err("UI node id cannot be empty.".to_string());
+    }
+    if !ids.insert(node.id.clone()) {
+        return Err(format!(
+            "UI subtree contains duplicate node id '{}'.",
+            node.id
+        ));
+    }
+    for child in &node.children {
+        collect_ids(child, ids)?;
+    }
+    Ok(())
+}
+
+fn validate_node(
+    node: &UiNode,
+    ids: &mut std::collections::BTreeSet<String>,
+    errors: &mut Vec<String>,
+) {
+    if node.id.trim().is_empty() {
+        errors.push("UI node id cannot be empty.".to_string());
+    } else if !ids.insert(node.id.clone()) {
+        errors.push(format!("Duplicate UI node id '{}'.", node.id));
+    }
+    if !node.layout.gap.is_finite() || node.layout.gap < 0.0 {
+        errors.push(format!("Node '{}' has an invalid layout gap.", node.id));
+    }
+    for dimension in node
+        .layout
+        .basis
+        .iter()
+        .chain(node.layout.min_size.iter())
+        .chain(node.layout.max_size.iter())
+    {
+        if !dimension.is_finite() || *dimension < 0.0 {
+            errors.push(format!(
+                "Node '{}' has an invalid layout dimension.",
+                node.id
+            ));
+            break;
+        }
+    }
+    for padding in [
+        node.layout.padding.left,
+        node.layout.padding.right,
+        node.layout.padding.top,
+        node.layout.padding.bottom,
+    ] {
+        if !padding.is_finite() || padding < 0.0 {
+            errors.push(format!("Node '{}' has invalid layout padding.", node.id));
+            break;
+        }
+    }
+    if !node.layout.grow.is_finite() || node.layout.grow < 0.0 {
+        errors.push(format!(
+            "Node '{}' has an invalid layout grow value.",
+            node.id
+        ));
+    }
+    if !node.layout.grid.min_column_width.is_finite()
+        || node.layout.grid.min_column_width < 0.0
+        || !node.layout.grid.row_height.is_finite()
+        || node.layout.grid.row_height < 0.0
+    {
+        errors.push(format!("Node '{}' has invalid grid metrics.", node.id));
+    }
+    if let Some(rect) = node.layout.rect {
+        if [rect.x, rect.y, rect.width, rect.height]
+            .iter()
+            .any(|value| !value.is_finite() || *value < 0.0)
+        {
+            errors.push(format!("Node '{}' has an invalid explicit rect.", node.id));
+        }
+    }
+    if let Some(text_style) = node.text_style {
+        if !text_style.size_px.is_finite()
+            || !text_style.line_height_px.is_finite()
+            || text_style.size_px <= 0.0
+            || text_style.line_height_px <= 0.0
+        {
+            errors.push(format!("Node '{}' has invalid text metrics.", node.id));
+        }
+    }
+    if node.kind == UiNodeKind::TextInput && node.control.text_input().is_none() {
+        errors.push(format!(
+            "TextInput '{}' is missing UiTextInput control data.",
+            node.id
+        ));
+    }
+    if node.kind == UiNodeKind::ScrollView && node.control.scroll_axis().is_none() {
+        errors.push(format!(
+            "ScrollView '{}' is missing scroll axis data.",
+            node.id
+        ));
+    }
+    for child in &node.children {
+        validate_node(child, ids, errors);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -194,5 +335,32 @@ mod tests {
         assert!(document.find_node("start").is_some());
         assert!(document.remove_node("start").is_some());
         assert!(document.find_node("start").is_none());
+    }
+
+    #[test]
+    fn validation_rejects_duplicate_ids_and_bad_root() {
+        let mut document = UiDocument::blank("Interface");
+        document.root.kind = UiNodeKind::Panel;
+        document
+            .root
+            .children
+            .push(UiNode::new("same", UiNodeKind::Label));
+        document
+            .root
+            .children
+            .push(UiNode::new("same", UiNodeKind::Label));
+        let errors = document.validate().unwrap_err();
+        assert!(errors.iter().any(|error| error.contains("root")));
+        assert!(errors.iter().any(|error| error.contains("Duplicate")));
+    }
+
+    #[test]
+    fn validation_rejects_non_finite_layout_values() {
+        let mut document = UiDocument::blank("Interface");
+        document.root.layout.gap = f32::NAN;
+        document.root.layout.grid.row_height = f32::INFINITY;
+        let errors = document.validate().unwrap_err();
+        assert!(errors.iter().any(|error| error.contains("gap")));
+        assert!(errors.iter().any(|error| error.contains("grid")));
     }
 }

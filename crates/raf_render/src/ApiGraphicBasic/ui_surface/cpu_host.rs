@@ -11,6 +11,7 @@ use super::{
 
 pub struct CpuUiSurfaceHost {
     surface: UiSurface,
+    surface_revision: u64,
     session: UiSurfaceSession,
     compositor: UiSurfaceCpuRenderer,
     images: UiSurfaceImageStore,
@@ -25,6 +26,7 @@ impl CpuUiSurfaceHost {
     pub fn new(surface: UiSurface, clear_color: [u8; 4]) -> Self {
         Self {
             surface,
+            surface_revision: 0,
             session: UiSurfaceSession::default(),
             compositor: UiSurfaceCpuRenderer::new(),
             images: UiSurfaceImageStore::default(),
@@ -41,7 +43,15 @@ impl CpuUiSurfaceHost {
     }
 
     pub fn surface_mut(&mut self) -> &mut UiSurface {
+        self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
         &mut self.surface
+    }
+
+    pub fn set_surface(&mut self, surface: UiSurface) {
+        if self.surface != surface {
+            self.surface = surface;
+            self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
+        }
     }
 
     pub fn session(&self) -> &UiSurfaceSession {
@@ -52,6 +62,10 @@ impl CpuUiSurfaceHost {
     /// the CPU fallback behavior aligned with the direct GPU host.
     pub fn session_mut(&mut self) -> &mut UiSurfaceSession {
         &mut self.session
+    }
+
+    pub fn layout_rect(&self, id: &str) -> Option<raf_ui::UiRect> {
+        self.compilation.layout_rect(id)
     }
 
     pub fn clear_color(&self) -> [u8; 4] {
@@ -93,6 +107,7 @@ impl CpuUiSurfaceHost {
         let frame = self.compilation.layout(
             &self.surface,
             &mut self.session,
+            self.surface_revision,
             size,
             raster_scale,
             self.clear_color,
@@ -122,11 +137,15 @@ impl CpuUiSurfaceHost {
         let compiled = self.compilation.compile(
             &self.surface,
             &mut self.session,
+            self.surface_revision,
             logical_size,
             raster_scale,
             self.clear_color,
             |key| resolve(key),
         );
+        for quad in &compiled.draw_list.images {
+            self.images.ensure_builtin_key(&quad.source_key);
+        }
         let draw_list = compiled.draw_list.scaled_for_output(
             target_size[0].max(1) as f32 / logical_size[0].max(1) as f32,
             target_size[1].max(1) as f32 / logical_size[1].max(1) as f32,

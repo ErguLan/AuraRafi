@@ -21,7 +21,7 @@ pub struct UiSurfaceCompileMetrics {
 
 #[derive(Debug, Clone, PartialEq)]
 struct UiSurfaceLayoutKey {
-    surface: UiSurface,
+    surface_revision: u64,
     controls: UiControlState,
     focus: UiFocusState,
     logical_size: [u32; 2],
@@ -32,14 +32,14 @@ struct UiSurfaceLayoutKey {
 
 impl UiSurfaceLayoutKey {
     fn new(
-        surface: &UiSurface,
+        surface_revision: u64,
         session: &UiSurfaceSession,
         logical_size: [u32; 2],
         raster_scale: f32,
         clear_color: [u8; 4],
     ) -> Self {
         Self {
-            surface: surface.clone(),
+            surface_revision,
             controls: session.interaction.controls.clone(),
             focus: session.interaction.focus.clone(),
             logical_size: [logical_size[0].max(1), logical_size[1].max(1)],
@@ -60,6 +60,7 @@ struct CachedPaint {
     layout_revision: u64,
     atlas_revision: u64,
     resolved_text: Vec<String>,
+    frame: Arc<UiSurfaceFrame>,
     draw_list: Arc<UiSurfaceDrawList>,
 }
 
@@ -89,16 +90,33 @@ impl UiSurfaceCompilationCache {
         self.metrics
     }
 
+    pub fn layout_rect(&self, id: &str) -> Option<raf_ui::UiRect> {
+        self.layout.as_ref().and_then(|cached| {
+            cached
+                .frame
+                .layout_boxes
+                .iter()
+                .find(|layout| layout.id == id)
+                .map(|layout| layout.rect)
+        })
+    }
+
     pub fn layout(
         &mut self,
         surface: &UiSurface,
         session: &mut UiSurfaceSession,
+        surface_revision: u64,
         logical_size: [u32; 2],
         raster_scale: f32,
         clear_color: [u8; 4],
     ) -> Arc<UiSurfaceFrame> {
-        let key =
-            UiSurfaceLayoutKey::new(surface, session, logical_size, raster_scale, clear_color);
+        let key = UiSurfaceLayoutKey::new(
+            surface_revision,
+            session,
+            logical_size,
+            raster_scale,
+            clear_color,
+        );
         self.metrics.layout_cache_hit =
             self.layout.as_ref().is_some_and(|cached| cached.key == key);
         self.metrics.paint_cache_hit = false;
@@ -128,6 +146,7 @@ impl UiSurfaceCompilationCache {
         &mut self,
         surface: &UiSurface,
         session: &mut UiSurfaceSession,
+        surface_revision: u64,
         logical_size: [u32; 2],
         raster_scale: f32,
         clear_color: [u8; 4],
@@ -136,7 +155,14 @@ impl UiSurfaceCompilationCache {
     where
         F: FnMut(&str) -> String,
     {
-        let cached_frame = self.layout(surface, session, logical_size, raster_scale, clear_color);
+        let cached_frame = self.layout(
+            surface,
+            session,
+            surface_revision,
+            logical_size,
+            raster_scale,
+            clear_color,
+        );
         let needs_intrinsic_fit = cached_frame.layout_boxes.iter().any(|layout| {
             matches!(
                 layout.width_mode,
@@ -150,26 +176,44 @@ impl UiSurfaceCompilationCache {
                     | raf_ui::UiSizeMode::MaxContent
             )
         });
-        let mut intrinsic_frame = needs_intrinsic_fit.then(|| (*cached_frame).clone());
         let layout_revision = self
             .layout
             .as_ref()
             .expect("layout cache exists after compilation")
             .revision;
-        let resolved_text = {
-            let frame = intrinsic_frame.as_ref().unwrap_or(cached_frame.as_ref());
-            session.resolve_text_requests(frame, |key| resolve(key))
-        };
+        let resolved_text = { session.resolve_text_requests(&cached_frame, |key| resolve(key)) };
+        session.sync_resolved_text(&cached_frame, &resolved_text);
         let atlas_revision = session.text_atlas.revision();
         self.metrics.paint_cache_hit = self.paint.as_ref().is_some_and(|cached| {
             cached.layout_revision == layout_revision
                 && cached.atlas_revision == atlas_revision
                 && cached.resolved_text == resolved_text
         });
-        if let Some(frame) = intrinsic_frame.as_mut() {
-            session.fit_intrinsic_text_to_resolved(frame, &resolved_text, raster_scale);
+        if self.metrics.paint_cache_hit {
+            let cached = self
+                .paint
+                .as_ref()
+                .expect("paint cache exists after a cache hit");
+            return UiSurfaceCompiledFrame {
+                frame: Arc::clone(&cached.frame),
+                draw_list: Arc::clone(&cached.draw_list),
+            };
         }
-        let frame = intrinsic_frame.as_ref().unwrap_or(cached_frame.as_ref());
+        let intrinsic_frame = needs_intrinsic_fit.then(|| {
+            let intrinsic_sizes =
+                session.intrinsic_sizes_for_frame(&cached_frame, &resolved_text, raster_scale);
+            session.rebuild_layout_with_intrinsic_sizes(
+                surface,
+                logical_size[0],
+                logical_size[1],
+                clear_color,
+                raster_scale,
+                &intrinsic_sizes,
+            )
+        });
+        let frame = intrinsic_frame
+            .map(Arc::new)
+            .unwrap_or_else(|| Arc::clone(&cached_frame));
         let draw_list = if let Some(cached) = self.paint.as_ref().filter(|cached| {
             cached.layout_revision == layout_revision
                 && cached.atlas_revision == atlas_revision
@@ -177,7 +221,7 @@ impl UiSurfaceCompilationCache {
         }) {
             Arc::clone(&cached.draw_list)
         } else {
-            session.sync_resolved_text(frame, &resolved_text);
+            session.sync_resolved_text(&frame, &resolved_text);
             let draw_list = Arc::new(UiSurfaceDrawList::build_with_resolved_text_values_at_scale(
                 &frame,
                 &session.text_atlas,
@@ -189,17 +233,13 @@ impl UiSurfaceCompilationCache {
                 layout_revision,
                 atlas_revision: session.text_atlas.revision(),
                 resolved_text,
+                frame: Arc::clone(&frame),
                 draw_list: Arc::clone(&draw_list),
             });
             draw_list
         };
 
-        UiSurfaceCompiledFrame {
-            frame: intrinsic_frame
-                .map(Arc::new)
-                .unwrap_or_else(|| Arc::clone(&cached_frame)),
-            draw_list,
-        }
+        UiSurfaceCompiledFrame { frame, draw_list }
     }
 }
 
@@ -208,15 +248,18 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::api_graphic_basic::ui_surface::{StudioUiPalette, UiNode, UiNodeKind};
+    use crate::api_graphic_basic::ui_surface::{StudioUiPalette, UiLayout, UiNode, UiNodeKind};
 
     #[test]
     fn reuses_layout_and_paint_for_an_unchanged_surface() {
         let surface = UiSurface::new(
             "cache",
             StudioUiPalette::IndustrialDark,
-            UiNode::new("root", UiNodeKind::Root)
-                .with_child(UiNode::new("label", UiNodeKind::Label).with_text_key("label")),
+            UiNode::new("root", UiNodeKind::Root).with_child(
+                UiNode::new("label", UiNodeKind::Label)
+                    .with_text_key("label")
+                    .with_layout(UiLayout::fit_content()),
+            ),
         );
         let mut session = UiSurfaceSession::default();
         let mut cache = UiSurfaceCompilationCache::default();
@@ -224,6 +267,7 @@ mod tests {
         let first = cache.compile(
             &surface,
             &mut session,
+            0,
             [320, 120],
             1.0,
             [0, 0, 0, 255],
@@ -232,6 +276,7 @@ mod tests {
         let second = cache.compile(
             &surface,
             &mut session,
+            0,
             [320, 120],
             1.0,
             [0, 0, 0, 255],
@@ -244,5 +289,38 @@ mod tests {
         assert!(cache.metrics().paint_cache_hit);
         assert_eq!(cache.metrics().layout_builds, 1);
         assert_eq!(cache.metrics().paint_builds, 1);
+    }
+
+    #[test]
+    fn surface_revision_invalidates_without_cloning_the_document_into_the_key() {
+        let surface = UiSurface::new(
+            "cache-revision",
+            StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root),
+        );
+        let mut session = UiSurfaceSession::default();
+        let mut cache = UiSurfaceCompilationCache::default();
+
+        let first = cache.compile(
+            &surface,
+            &mut session,
+            0,
+            [320, 120],
+            1.0,
+            [0, 0, 0, 255],
+            |key| key.to_string(),
+        );
+        let second = cache.compile(
+            &surface,
+            &mut session,
+            1,
+            [320, 120],
+            1.0,
+            [0, 0, 0, 255],
+            |key| key.to_string(),
+        );
+
+        assert!(!Arc::ptr_eq(&first.frame, &second.frame));
+        assert_eq!(cache.metrics().layout_builds, 2);
     }
 }

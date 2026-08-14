@@ -7,6 +7,19 @@ pub enum UiPointerButton {
     Middle,
 }
 
+/// Renderer-agnostic pointer affordance requested by a retained surface.
+/// Native hosts translate this into their windowing toolkit's cursor enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UiCursorIcon {
+    Default,
+    PointingHand,
+    Text,
+    ResizeHorizontal,
+    ResizeVertical,
+    ResizeNorthEastSouthWest,
+    ResizeNorthWestSouthEast,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiEventKind {
     Click,

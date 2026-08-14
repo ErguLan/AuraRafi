@@ -1,32 +1,31 @@
 # RafUI
 
-For the implementation contract, menu recipe, layout rules, and review checklist,
-read [RafUI Authoring Guide](RAF_UI_AUTHORING.md) before adding a surface.
-For the reusable authoring, inspection, DPI, diagnostics, and snapshot contract,
-read [RafUI Studio](../.ulpi/design/rafui-studio.md).
+Estado: activo. Este documento es la autoridad tecnica de RafUI. Para el
+contrato funcional del editor, workbenches, paneles e interacciones consulta
+[`EDITOR_RAFUI.md`](EDITOR_RAFUI.md). Para el contrato grafico consulta
+[`RENDERER.md`](RENDERER.md).
+
+RafUI es la UI retenida oficial de AuraRafi. Las superficies describen
+presentacion; los hosts conservan estado temporal y los modulos de dominio
+ejecutan comandos, persistencia y undo/redo.
+
+No agregues nueva funcionalidad en Egui. Los adaptadores Egui existentes son
+transicionales mientras el editor migra a RafUI.
+The former RafUI Studio authoring helper was removed during the editor
+interface decommission. Its design material is preserved under
+`.ulpi/design/archive/` for historical reference and must not be treated as an
+active runtime or authoring dependency.
 
 RafUI is AuraRafi's retained, Rust-native user-interface system. It is not an
 HTML runtime and it does not embed a browser. Documents are serializable Rust
 data, the renderer is ApiGraphicBasic, and platform hosts only provide window,
 input, assets, and a target texture.
 
-## RafUI Studio
+## Authoring status
 
-`RafUiStudio` is the shared authoring-quality layer for retained surfaces. It
-does not replace `UiDocument`, the application command dispatcher, or the
-renderer. It provides one predictable contract for:
-
-- reusable recipes in `raf_ui::components`;
-- structured node inspection and controlled document edits;
-- independent geometry, text, and icon density policies;
-- dark/light DPI cases at 100%, 125%, 150%, and 200%;
-- data-only document and frame diagnostics;
-- structural and RGBA golden snapshots;
-- validation against the application's real command and localization catalogs.
-
-The complete contract and the authoring flow live in
-[rafui-studio.md](../.ulpi/design/rafui-studio.md). A new surface should use
-this API before introducing a one-off layout or renderer workaround.
+RafUI's retained document, layout, style, text, input, and renderer-neutral
+contracts remain available. The old inspection/recipe/snapshot helper is not
+currently part of the public crate while the editor surface is being rebuilt.
 
 ## Goals
 
@@ -113,6 +112,26 @@ RafUI controls are retained node data, not hard-coded editor widgets:
 Document structure remains persistent. Focus, active values, pointer state,
 and scroll offsets belong to `UiSurfaceSession` / `UiControlState`, so opening
 two windows does not write transient UI state into project files.
+
+Toggle and range controls are rendered by the RafUI presentation core, not by
+individual surfaces. A range that needs exact values composes its slider with
+an editable numeric text input. Hosts seed transient text only once per field,
+parse and clamp committed values, and preserve partial edits while the user is
+typing. This prevents the common failure where a field cannot be cleared or a
+small value appears frozen.
+
+The editor downbar starts as one ordered tab group, can reorder tabs horizontally
+and split through edge dragging up to three groups. Dragging shows a transient
+orange/purple target preview; only release mutates the layout. Empty source
+groups are removed and the layout is persisted per project. Loading repairs
+duplicate tab IDs globally, restores missing tabs and the active tab, and saves
+the repaired layout. Layout files from an older dock contract are reset once to
+the clean default so stale split interaction state cannot survive an upgrade.
+The retained source node remains present during a drag, and RafUI captures its
+drag actions at pointer-down so a rebuilt tab strip still receives `DragEnd`.
+Project Settings is a downbar tab; global Settings remains
+in the application bar. Project and Assets consume real view models and show
+truthful empty states instead of sample rows.
 
 ## Commands
 
@@ -253,9 +272,9 @@ state and never become document text. The legacy `settings_panel.rs` remains
 compiled as a recovery reference during the shell migration, but is not the
 normal settings route.
 
-`SETTINGS_SURFACE.md` records the complete control parity table, draft/save
-lifecycle, validation boundaries, DPI behavior, and the ownership split between
-the app, retained document, host, and ApiGraphicBasic compositor.
+Settings ownership, draft/save lifecycle, validation boundaries, DPI behavior,
+and the split between app, retained document, host, and ApiGraphicBasic
+compositor are defined in [`EDITOR_RAFUI.md`](EDITOR_RAFUI.md).
 
 ### Active Project Settings Migration
 
@@ -266,10 +285,13 @@ graphics policy, and world streaming. The host applies typed actions to the
 active `ProjectSettings`; `AuraRafiApp` retains the existing immediate
 `project.ron` persistence and the linked global/project console-command gate.
 
-Unlike global Settings, this surface has no draft: its prior behavior saves an
-accepted project setting immediately. It uses the same GPU-first ApiGraphicBasic
+Unlike global Settings, this surface has no Cancel action or second draft:
+accepted project settings save immediately to `project.ron`, and the project
+name remains beside the `Project Settings` title. It uses the same GPU-first ApiGraphicBasic
 composition, CPU recovery host, semantic palette, i18n, retained input, and
 bounded text state as the global Settings route.
+Its Layout section also exposes `Reset Panels`, which restores the one-group
+default and persists the downbar repair for the active project.
 
 ### Active Console Migration
 
@@ -305,12 +327,13 @@ center-mode, inspector, bottom-tab, visibility, and settings intents. It uses
 the same document for Game and Electronics, while the center canvas stays
 renderer-owned and is never redrawn as a generic UI widget.
 
-The first live editor adapters are the fixed bottom tab strip and the
-Properties/Sessions selector. Both are rendered by RafUI through
-ApiGraphicBasic with the existing Eframe placement bridge; Console, Assets,
-Project Settings, Node Editor, Agent, Properties, and Sessions retain their
-existing bodies until each body is migrated. This preserves working behavior
-while removing the old hand-painted tab controls from the editor chrome.
+The current live editor downbar adapters are the fixed bottom tab strip,
+Console, Assets, Project, and Project Settings. They are rendered by RafUI
+through ApiGraphicBasic with the existing eframe placement bridge. Node Editor,
+Agent, Properties, and Sessions are intentionally not default tabs during this
+stabilization pass; they must be added only when their real bodies and state
+contracts are ready. This keeps the active shell truthful while removing the
+old hand-painted tab controls from the editor chrome.
 
 Electronics also uses the retained contextual strip for Schematic and PCB.
 Its intent boundary retains cross-probe selection and PCB synchronization in
@@ -394,7 +417,9 @@ Embedded UI images also receive premultiplied-alpha mipmaps at the GPU upload
 boundary. Their sampler chooses the nearest complete mip level instead of
 blending two levels, keeping 64px source icons stable and defined when displayed
 at 12–18px while preventing transparent edge colors from becoming bright point
-noise.
+noise. Semantic technical icons use a separate high-density built-in source and
+nearest magnification; CPU recovery follows the same rule instead of bilinear
+blurring a small icon.
 
 ### Core data flow
 
@@ -407,8 +432,26 @@ UiDocument + UiSurfaceSession
   -> ApiGraphicBasic GPU compositor | CPU recovery compositor
 ```
 
-The bridge-specific tooltip recipe lives in
-`crates/raf_editor/src/panels/raf_ui_tooltip.rs`; its placement contract lives
+The tooltip policy lives in
+`crates/raf_render/src/ApiGraphicBasic/ui_surface/mod.rs`; its placement contract lives
 in `crates/raf_ui/src/overlays.rs`; its visual node recipe lives in
-`crates/raf_ui/src/components.rs`. This separation prevents tooltip policy
-from accumulating in `raf_ui_surface_bridge.rs`.
+`crates/raf_ui/src/components.rs`. The tooltip is delayed by hover intent,
+measured after localization, and anchored below the pointer when the window
+has room. This separation prevents tooltip policy from accumulating in a
+product panel or compatibility bridge.
+
+### Semantic icons and per-control color
+
+Authors use `UiIconId` or the `icon_button_with_icon`/`tree_row_with_icon`
+recipes instead of embedding a PNG path in every surface. ApiGraphicBasic owns
+the 64px source raster, upload, mip policy, and backend sampling. Bitmap art is
+still available for multicolor assets, but technical UI icons remain light and
+stable across 100%, 125%, 150%, and 200% DPI.
+
+Every node can keep its own `UiStyle`, and an ordered `UiStyleSheet` can target
+an ID, class, or node kind in a specific state. `UiStylePatch` can override
+fill, border, text, opacity, radius, and border width for one control without
+forking the renderer. Use semantic `UiTheme` tokens as defaults and local
+overrides only when a component genuinely needs a different color.
+
+> Developed by Yoll. More info: [yoll.site](https://yoll.site).

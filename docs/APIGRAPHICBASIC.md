@@ -117,7 +117,8 @@ renderer-owned center surfaces; RafUI owns their docks, command rows, menus,
 inspectors, and overlays that derive from the same authoritative model.
 
 For document construction, menu lifecycle, responsive layout, and the
-temporary CAD overlay rule, use [RafUI Authoring Guide](RAF_UI_AUTHORING.md).
+temporary CAD overlay rule, use [`RAF_UI.md`](RAF_UI.md) and
+[`EDITOR_RAFUI.md`](EDITOR_RAFUI.md).
 
 ## Asset Ingress
 
@@ -210,3 +211,33 @@ The temporary eframe bridge is allowed to paint the completed RafUI texture as
 a compatibility placement operation. It must not create an egui rectangle,
 egui text label, egui tooltip, or egui-owned interaction state for a retained
 RafUI component.
+
+## RafUI quality contract
+
+ApiGraphicBasic owns the presentation details that determine whether a retained
+surface looks crisp: the text atlas, semantic icon rasterization, resource
+uploads, mip policy, GPU sampler choice, CPU recovery sampling, and final
+logical-to-physical geometry. RafUI owns only serializable semantics, layout,
+style, focus, actions, and text/icon requests.
+
+Technical icons resolve through `UiIconId` and are generated from compact
+vector-like primitives into a 64px source image. They are not tiny PNGs scaled
+up by a panel. Text and icons have independent density/sampling policies, and
+CPU recovery uses nearest sampling for built-in icons so the fallback does not
+reintroduce the blur that the GPU path removed.
+
+The font registry is now located here as well. It selects the bundled Ubuntu
+Regular, Medium, or Bold outline for each semantic request; the UFL license is
+stored beside those assets. No alpha darkening or synthetic dilation is used,
+so small text keeps clean antialiasing instead of developing a soft halo.
+
+Tooltips are window-level overlay content. The session waits for 320ms of
+stable hover intent, then animates opacity over 120ms. The tooltip measures the
+resolved text before placement and prefers a position below the pointer; it
+flips only when the viewport edge requires it. Its layout never enlarges the
+trigger, panel, or viewport.
+
+The renderer also exposes `UiSurfaceDiagnostics` for duplicate IDs, invalid
+clips, zero-sized boxes, focus order, icon regions, and missing labels. These
+diagnostics are intended to run before visual screenshot review, not as a
+replacement for it.

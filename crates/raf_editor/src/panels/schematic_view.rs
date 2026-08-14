@@ -11,6 +11,7 @@ use raf_electronics::simulation::SimulationResults;
 use raf_render::bridge::{RenderRuntime, RenderRuntimeSnapshot};
 
 use super::electronics_cad_surface_host::ElectronicsCadSurfaceHost;
+use super::electronics_context_menu_surface::ElectronicsContextMenuSurfaceHost;
 use crate::electronics_assets::ElectronicsAssetAtlas;
 use crate::theme;
 
@@ -31,7 +32,6 @@ pub(crate) struct ElectronicsPalette {
     pub card_bg: Color32,
     pub card_hover: Color32,
     pub card_active: Color32,
-    pub chip_bg: Color32,
     pub border: Color32,
     pub text: Color32,
     pub text_dim: Color32,
@@ -49,7 +49,6 @@ pub(crate) fn electronics_palette(is_dark: bool) -> ElectronicsPalette {
             card_bg: Color32::from_rgb(18, 22, 28),
             card_hover: Color32::from_rgb(25, 30, 37),
             card_active: Color32::from_rgb(44, 36, 24),
-            chip_bg: Color32::from_rgb(30, 30, 35),
             border: Color32::from_rgb(33, 39, 48),
             text: Color32::from_rgb(224, 226, 232),
             text_dim: Color32::from_rgb(150, 156, 168),
@@ -65,7 +64,6 @@ pub(crate) fn electronics_palette(is_dark: bool) -> ElectronicsPalette {
             card_bg: Color32::from_rgb(255, 255, 255),
             card_hover: Color32::from_rgb(237, 243, 250),
             card_active: Color32::from_rgb(255, 238, 210),
-            chip_bg: Color32::from_rgb(235, 239, 246),
             border: Color32::from_rgb(203, 211, 224),
             text: Color32::from_rgb(34, 39, 48),
             text_dim: Color32::from_rgb(84, 94, 110),
@@ -142,6 +140,8 @@ pub struct SchematicViewPanel {
     pub library: ComponentLibrary,
     pub offset: Vec2,
     pub zoom: f32,
+    pub show_minimap: bool,
+    pub show_status: bool,
     selection: SchematicSelection,
     placement: PlacementMode,
     placement_rotation: f32,
@@ -159,6 +159,7 @@ pub struct SchematicViewPanel {
     box_select_start: Option<Pos2>,
     box_select_rect: Option<Rect>,
     context_menu: Option<ContextMenu>,
+    context_menu_surface: ElectronicsContextMenuSurfaceHost,
     editing_value: Option<(usize, String)>,
     value_editor_just_opened: bool,
     /// Inline net name editor: (wire_index, draft_name).
@@ -175,8 +176,12 @@ pub struct SchematicViewPanel {
     export_message: Option<String>,
     render_runtime: RenderRuntimeSnapshot,
     cad_surface_host: ElectronicsCadSurfaceHost,
+    pub(super) cad_scene_cache: Option<(u64, raf_electronics::CadScene)>,
     asset_atlas: ElectronicsAssetAtlas,
     canvas_dark_mode: bool,
+    auto_fit_pending: bool,
+    focus_component_pending: Option<usize>,
+    document_epoch: u64,
 }
 
 impl Default for SchematicViewPanel {
@@ -188,6 +193,8 @@ impl Default for SchematicViewPanel {
             library,
             offset: Vec2::new(200.0, 150.0),
             zoom: 1.0,
+            show_minimap: true,
+            show_status: true,
             selection: SchematicSelection::None,
             placement: PlacementMode::None,
             placement_rotation: 0.0,
@@ -205,6 +212,7 @@ impl Default for SchematicViewPanel {
             box_select_start: None,
             box_select_rect: None,
             context_menu: None,
+            context_menu_surface: ElectronicsContextMenuSurfaceHost::default(),
             editing_value: None,
             value_editor_just_opened: false,
             editing_net_name: None,
@@ -218,8 +226,12 @@ impl Default for SchematicViewPanel {
             export_message: None,
             render_runtime: RenderRuntimeSnapshot::default(),
             cad_surface_host: ElectronicsCadSurfaceHost::new("schematic_canvas_render"),
+            cad_scene_cache: None,
             asset_atlas: ElectronicsAssetAtlas::default(),
             canvas_dark_mode: true,
+            auto_fit_pending: true,
+            focus_component_pending: None,
+            document_epoch: 0,
         }
     }
 }
@@ -303,9 +315,106 @@ impl SchematicViewPanel {
         self.rotate_placement_preview();
     }
 
-    pub fn fit_view_from_ui(&mut self) {
-        self.offset = Vec2::new(260.0, 150.0);
-        self.zoom = 1.2;
+    pub fn fit_view_from_ui(&mut self, width: f32, height: f32) {
+        self.fit_view_to_content(width, height);
+    }
+
+    pub fn set_schematic(&mut self, schematic: Schematic) {
+        self.schematic = schematic;
+        self.document_epoch = self.document_epoch.wrapping_add(1);
+        self.selection = SchematicSelection::None;
+        self.placement = PlacementMode::None;
+        self.placement_rotation = 0.0;
+        self.wire_start = None;
+        self.library_search.clear();
+        self.library_scroll = 0.0;
+        self.quick_search_open = false;
+        self.quick_search_query.clear();
+        self.quick_search_selected = 0;
+        self.clipboard_components.clear();
+        self.test_results.clear();
+        self.show_test_results = false;
+        self.drag_state = None;
+        self.box_select_start = None;
+        self.box_select_rect = None;
+        self.context_menu = None;
+        self.editing_value = None;
+        self.value_editor_just_opened = false;
+        self.editing_net_name = None;
+        self.measurement_start = None;
+        self.measurement_end = None;
+        self.sim_results = None;
+        self.sim_active = false;
+        self.sim_phase = 0.0;
+        self.show_export_menu = false;
+        self.export_message = None;
+        self.cad_scene_cache = None;
+        self.auto_fit_pending = true;
+        self.focus_component_pending = None;
+    }
+
+    /// Cheap revision hint for retained side panels. The CAD canvas refreshes
+    /// its fingerprint when the document changes; side panels consume that
+    /// cached value instead of hashing every component on every editor frame.
+    pub(crate) fn surface_revision_hint(&self) -> (u64, u64) {
+        (
+            self.document_epoch,
+            self.cad_scene_cache
+                .as_ref()
+                .map(|(fingerprint, _)| *fingerprint)
+                .unwrap_or_default(),
+        )
+    }
+
+    pub(crate) fn mark_document_changed(&mut self) {
+        self.document_epoch = self.document_epoch.wrapping_add(1);
+    }
+
+    fn fit_view_to_content(&mut self, width: f32, height: f32) {
+        let mut points = Vec::new();
+        // Use the same CAD scene that AGB/WGPU renders instead of estimating
+        // component bounds from the lightweight editor overlay. This keeps
+        // the initial camera aligned with the actual body, pins and labels.
+        let cad_scene = raf_electronics::CadScene::from_schematic(&self.schematic);
+        for object in &cad_scene.objects {
+            if let Some(rect) = object.rect {
+                let half = rect.size * 0.5;
+                points.push(rect.center - half);
+                points.push(rect.center + half);
+            }
+            points.extend(object.points.iter().copied());
+        }
+        if points.is_empty() {
+            for component in &self.schematic.components {
+                points.push(component.position);
+            }
+        }
+
+        let Some(first) = points.first().copied() else {
+            self.zoom = 0.85;
+            self.offset = Vec2::new(width.max(1.0) * 0.5, height.max(1.0) * 0.5);
+            return;
+        };
+        let (mut min, mut max) = (first, first);
+        for point in points {
+            min = min.min(point);
+            max = max.max(point);
+        }
+
+        let span = (max - min).max(glam::Vec2::splat(1.0));
+        // Keep the initial overview readable. The user can still zoom freely
+        // afterwards, but opening a document should not start at symbol scale.
+        let padding = 80.0;
+        let usable_width = (width - padding * 2.0).max(160.0);
+        let usable_height = (height - padding * 2.0).max(120.0);
+        self.zoom = (usable_width / span.x)
+            .min(usable_height / span.y)
+            .clamp(0.25, 0.9);
+        let center = (min + max) * 0.5;
+        self.offset = Vec2::new(
+            width * 0.5 - center.x * self.zoom,
+            height * 0.5 - center.y * self.zoom,
+        );
     }
 
     pub fn toggle_library_from_ui(&mut self) {
@@ -337,6 +446,14 @@ impl SchematicViewPanel {
         self.zoom = (self.zoom / 1.15).clamp(0.3, 4.0);
     }
 
+    pub fn set_minimap_visible(&mut self, visible: bool) {
+        self.show_minimap = visible;
+    }
+
+    pub fn set_status_visible(&mut self, visible: bool) {
+        self.show_status = visible;
+    }
+
     fn show_surface(
         &mut self,
         ui: &mut Ui,
@@ -347,13 +464,35 @@ impl SchematicViewPanel {
     ) -> bool {
         let mut changed = false;
 
-        self.asset_atlas.request_assets(ELECTRONICS_ASSETS);
-        self.asset_atlas.process(ui.ctx());
+        // The retained navigator owns the active library presentation. The
+        // canvas still requests only the small symbol subset needed by the
+        // minimap, so its component silhouettes remain image-backed even when
+        // the full library panel is hidden.
+        if show_embedded_library {
+            self.asset_atlas.request_assets(ELECTRONICS_ASSETS);
+        } else if self.show_minimap {
+            self.asset_atlas.request_assets(ELECTRONICS_MINIMAP_ASSETS);
+        }
+        if show_embedded_library || self.show_minimap {
+            self.asset_atlas.process(ui.ctx());
+        }
         if draw_toolbar {
             changed |= self.draw_toolbar(ui);
         }
 
         let available = ui.available_rect_before_wrap();
+        if self.auto_fit_pending {
+            self.fit_view_to_content(available.width(), available.height());
+            self.auto_fit_pending = false;
+        }
+        if let Some(index) = self.focus_component_pending.take() {
+            if let Some(component) = self.schematic.components.get(index) {
+                self.offset = Vec2::new(
+                    available.width() * 0.5 - component.position.x * self.zoom,
+                    available.height() * 0.5 - component.position.y * self.zoom,
+                );
+            }
+        }
         if show_embedded_library {
             let lib_width = 242.0;
             let lib_rect = Rect::from_min_size(
@@ -374,7 +513,7 @@ impl SchematicViewPanel {
         changed |= self.draw_value_editor(ui);
         changed |= self.draw_net_name_editor(ui);
         changed |= self.draw_quick_search(ui);
-        changed |= self.draw_context_menu(ui);
+        changed |= self.draw_context_menu(ui, wgpu_render_state);
         changed
     }
 
@@ -437,6 +576,11 @@ impl SchematicViewPanel {
         self.selection = SchematicSelection::None;
     }
 
+    pub fn select_all_components(&mut self) {
+        let indices = (0..self.schematic.components.len()).collect::<Vec<_>>();
+        self.set_component_multi_selection(indices);
+    }
+
     pub(super) fn placement_rotation(&self) -> f32 {
         self.placement_rotation
     }
@@ -467,9 +611,7 @@ impl SchematicViewPanel {
         for (idx, comp) in self.schematic.components.iter().enumerate() {
             if comp.designator.to_lowercase() == lower {
                 self.selection = SchematicSelection::Component(idx);
-                // Center view on the component.
-                let pos = self.schematic.components[idx].position;
-                self.offset = Vec2::new(-pos.x * self.zoom, -pos.y * self.zoom);
+                self.focus_component_pending = Some(idx);
                 return;
             }
         }
@@ -736,8 +878,8 @@ impl SchematicViewPanel {
                         )
                         .clicked()
                     {
-                        self.offset = Vec2::new(260.0, 150.0);
-                        self.zoom = 1.2;
+                        let available = ui.available_rect_before_wrap();
+                        self.fit_view_to_content(available.width(), available.height());
                     }
 
                     if self
@@ -1081,6 +1223,16 @@ const ELECTRONICS_ASSETS: &[&str] = &[
     "library/magnet.png",
     "library/battery.png",
     "library/ground.png",
+    "symbols/resistor.png",
+    "symbols/capacitor.png",
+    "symbols/led.png",
+    "symbols/magnet.png",
+    "symbols/battery.png",
+    "symbols/ground.png",
+    "symbols/generic.png",
+];
+
+const ELECTRONICS_MINIMAP_ASSETS: &[&str] = &[
     "symbols/resistor.png",
     "symbols/capacitor.png",
     "symbols/led.png",

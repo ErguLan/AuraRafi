@@ -36,11 +36,21 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 * `src/i18n.rs`: The custom JSON translation engine. Compiles locale mappings directly into the static executable.
 * `locales/en.json` & `locales/es.json`: Static bilingual locale files (Spanish and English).
 * `src/command.rs`: Governs the transactional `CommandBus`.
+* `src/command_protocol.rs`, `src/capabilities.rs`, `src/ipc.rs`: Shared
+  request/response frames, canonical capability catalog, and the project-scoped
+  local attach handshake used by the CLI, MCP and editor Agent.
 * `src/event.rs`: Universal string-keyed typeless pub/sub event pipeline.
 * `src/world_state.rs`: Observer snapshot recording game parameters (time, camera, resources, biome) for AI Directorship.
 
 #### 2. `raf_editor` (Graphical Interface Controls)
 * `src/lib.rs`: Re-exports editor layouts and assets.
+* `src/attached.rs`: Loopback attach listener. It owns transport/authentication
+  only; requests are queued to `AuraRafiApp` so scene history, session and
+  persistence remain editor-authoritative. Attached scene writes return a
+  scoped `UndoToken` backed by `SceneHistory`; stale project/session/revision
+  tokens are rejected.
+* `src/editor_viewport_app.rs`: Active editor state boundary, including the
+  attached command executor and first game-first external mutation allowlist.
 * `src/app.rs`: central state router sheet; handles loading gates, Hub menus, project setup views, status telemetry, auto-saves, and global window close traps.
 * `src/theme.rs`: Solid color tokens and warm orange accent configurations (`#D4771A`).
 * `src/ui_icons.rs`: Load-budgeted asynchronous icon atlas dispatcher.
@@ -55,6 +65,23 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 * `src/panels/asset_browser.rs`: Asset tracking and dynamic filesystem monitor.
 * `src/panels/console.rs`: Panel supporting debugging and manual console input line.
 * `src/panels/ai_chat.rs`: Multi-provider LLM interface (supports OpenClaw).
+* `src/panels/agent_surface.rs`: Retained Agent workbench. It renders a
+  configurable page of non-system messages through
+  `EngineSettings::agent_message_page_size`; the runtime still owns the full
+  conversation for model context.
+* `src/panels/raf_ui_surface_bridge.rs`: Transitional RafUI presentation bridge
+  for Agent and other retained surfaces. GPU and CPU paths must both update
+  their last-presented logical/physical target sizes after a render so idle
+  surfaces do not invalidate continuously.
+
+#### 2a. `raf_cli` (External Agent Adapter)
+* `src/main.rs`: Headless CLI, JSONL endpoint, MCP stdio adapter, and attached
+  mode routing. It never exposes Play, Stop or Runtime.
+* `src/attached.rs`: Project-scoped loopback client using the shared IPC
+  handshake and command frames.
+
+* `.ai/skills/raf-game-authoring/`: Reusable AI workflow for attached scene and
+  scripting authoring. `docs/CLI_MCP_QUICKSTART.md` is the human-facing setup.
 
 #### 3. `raf_ui` (Retained UI Model)
 * `src/node.rs`, `src/layout.rs`, `src/style.rs`: Serializable retained nodes,
@@ -73,7 +100,7 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
   rows, and compact tooltip nodes.
 * `src/environment.rs`: Logical/physical density conversion and bounded
   raster-scale policy.
-* `docs/RAF_UI_AUTHORING.md`: Required practical authoring contract.
+* `docs/RAF_UI.md` and `docs/EDITOR_RAFUI.md`: Active RafUI technical and editor authoring contracts.
 
 #### 4. `raf_render` (Graphics Runtime)
 * `src/bridge/render_runtime.rs`: Canonical shared runtime and surface/backend state for Scene, CAD, and renderer-owned surfaces.
@@ -141,14 +168,31 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 * **Transitional Egui**: Existing `show(&mut self, ui: &mut egui::Ui)` bodies
   are temporary adapters. New menus, rails, fixed dock chrome, and renderer
   canvas ownership must use RafUI/ApiGraphicBasic contracts instead.
-* **Authoring source of truth**: Read `docs/RAF_UI_AUTHORING.md`,
-  `docs/APIGRAPHICBASIC.md`, and `.ulpi/design/DESIGN.md` before UI or surface
-  changes. They define exact menu, theme, canvas, resource, and ownership
-  behavior.
+* **Authoring source of truth**: Read `docs/RAF_UI.md`,
+  `docs/EDITOR_RAFUI.md`, `docs/APIGRAPHICBASIC.md`, and
+  `.ulpi/design/DESIGN.md` before UI or surface changes. They define exact
+  menu, theme, canvas, resource, editor, and ownership behavior.
 
 ### B. Command Console Loop
 * Manual commands typed with `/` in the Console flow to `parse_console_input` in `app.rs`.
 * Parsed fields are mapped in `execute_console_command`. Every mutating command pushes an undo state copy first, mutates the state, and records the change in `record_immediate_document_change` (zero-latency auto-save when linear saving is enabled).
 
-### C. Game Engine Viewport / PCB Layout Unification
+### C. Agent Retained Rendering Guardrails
+* Agent history pagination is a view optimization, not backend loading. `Load
+  older messages` and `Back to latest` change the visible page; they must not
+  create a second persistence path or move history I/O into the render loop.
+* The page size is persisted as `EngineSettings::agent_message_page_size`,
+  defaults to 8, and is clamped to 4..32. Keep the current-page bound when
+  changing the Agent surface; rendering the full runtime history defeats the
+  retained text-atlas budget.
+* When changing session or page, reset transient scroll/focus/hover/pointer
+  capture state. Do not reuse a previous surface's interaction state against
+  a new message document.
+* Performance validation must inspect `render_needed`, target-size markers,
+  layout/paint cache hits, atlas uploads, and GPU present time. Switching tabs
+  is not proof that Agent is fixed; it only stops executing the Agent bridge.
+
+### D. Game Engine Viewport / PCB Layout Unification
 * A PCB is mapped into the `SceneGraph` container directly using its footprint's physical parameters. Primitives (fr4 boards as flat Cubes, IC chips as black Cubes, pads as Cylinders) represent the layout instantly in the 3D viewport, sharing the same render pipeline of standard game assets.
+
+> Developed by Yoll. More info: [yoll.site](https://yoll.site).

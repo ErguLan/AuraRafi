@@ -7,7 +7,7 @@ impl ViewportPanel {
         }
 
         // Block shortcuts when user is typing in a text field.
-        if ctx.wants_keyboard_input() {
+        if ctx.wants_keyboard_input() || super::raf_ui_keyboard_capture(ctx) {
             return;
         }
 
@@ -65,6 +65,11 @@ impl ViewportPanel {
         vp_h: f32,
     ) -> bool {
         let multi_selection = self.selected.len() > 1;
+        let selected_locked = self
+            .selected
+            .first()
+            .and_then(|id| scene.get(*id))
+            .is_some_and(|node| node.locked);
         let selected_world_pos = self.selected.first().and_then(|&id| {
             scene
                 .get(id)
@@ -72,6 +77,13 @@ impl ViewportPanel {
         });
 
         let mut changed = false;
+
+        if selected_locked
+            && (response.drag_started_by(egui::PointerButton::Primary)
+                || response.dragged_by(egui::PointerButton::Primary))
+        {
+            return false;
+        }
 
         if response.drag_started_by(egui::PointerButton::Primary) {
             if multi_selection {
@@ -82,6 +94,7 @@ impl ViewportPanel {
                     let local = [pos.x - rect.left(), pos.y - rect.top()];
                     self.begin_group_transform_drag(scene, view_proj, local, vp_w, vp_h);
                     if self.group_drag_axis != GizmoAxis::None {
+                        self.begin_scene_edit_snapshot(scene);
                         self.drag_ongoing = true;
                         changed = true;
                     } else {
@@ -95,6 +108,7 @@ impl ViewportPanel {
                             }
                         }
                         if !self.group_free_drag_starts.is_empty() {
+                            self.begin_scene_edit_snapshot(scene);
                             self.drag_ongoing = true;
                             changed = true;
                         }
@@ -118,6 +132,9 @@ impl ViewportPanel {
                     vp_h,
                     presentation_scale,
                 );
+                if self.bridge.active_drag_axis() != GizmoAxis::None {
+                    self.begin_scene_edit_snapshot(scene);
+                }
 
                 // If gizmo was not hit, try free drag on the entity.
                 if self.bridge.active_drag_axis() == GizmoAxis::None {
@@ -125,7 +142,8 @@ impl ViewportPanel {
                         .bridge
                         .pick_entity(scene, view_proj, local[0], local[1], vp_w, vp_h);
                     if let Some(id) = picked {
-                        if scene.get(id).is_some() {
+                        if scene.get(id).is_some_and(|node| !node.locked) {
+                            self.begin_scene_edit_snapshot(scene);
                             let world = scene.world_matrix(id);
                             let center = world.col(3).truncate();
                             self.free_drag_active = true;
@@ -380,6 +398,7 @@ impl ViewportPanel {
                 if self.overlay_blocks_world_input(rect, pointer) {
                     return changed;
                 }
+                self.begin_scene_edit_snapshot(scene);
                 let local = [pointer.x - rect.left(), pointer.y - rect.top()];
                 self.bridge
                     .begin_edit_drag(scene, selected, view_proj, vp_w, vp_h, local);

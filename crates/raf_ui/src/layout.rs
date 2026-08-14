@@ -229,6 +229,13 @@ impl Default for UiLayout {
 }
 
 impl UiLayout {
+    /// Minimum horizontal breathing room for authored text. RafUI applies
+    /// this only when a surface opts into the semantic text-safe pass; it is
+    /// kept here so every renderer uses the same spacing contract.
+    pub const TEXT_SAFE_INSET_X: f32 = 8.0;
+    pub const TEXT_SAFE_INSET_Y: f32 = 4.0;
+    pub const LABEL_SAFE_INSET_X: f32 = 4.0;
+
     pub fn fill(flow: UiFlow) -> Self {
         Self {
             grow: 1.0,
@@ -263,6 +270,25 @@ impl UiLayout {
 
     pub fn with_height_mode(mut self, mode: UiSizeMode) -> Self {
         self.height_mode = mode;
+        self
+    }
+
+    /// Adds the minimum visual safe area around text without removing larger
+    /// spacing authored by a surface. Compact controls receive vertical
+    /// breathing room; labels and structural text only receive a horizontal
+    /// inset so an 18px label is not clipped inside an 18px track.
+    pub fn with_text_safe_area(mut self, compact_control: bool) -> Self {
+        let horizontal = if compact_control {
+            Self::TEXT_SAFE_INSET_X
+        } else {
+            Self::LABEL_SAFE_INSET_X
+        };
+        self.padding.left = self.padding.left.max(horizontal);
+        self.padding.right = self.padding.right.max(horizontal);
+        if compact_control {
+            self.padding.top = self.padding.top.max(Self::TEXT_SAFE_INSET_Y);
+            self.padding.bottom = self.padding.bottom.max(Self::TEXT_SAFE_INSET_Y);
+        }
         self
     }
 

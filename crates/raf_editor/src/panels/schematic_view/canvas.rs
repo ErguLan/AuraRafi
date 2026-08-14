@@ -10,12 +10,12 @@ use egui::{Color32, Pos2, Rect, Stroke, Vec2};
 use raf_core::i18n::t;
 use raf_electronics::component::{ElectronicComponent, Pin, PinDirection, SimModel};
 use raf_electronics::schematic::WireAnchor;
-use raf_electronics::simulation::SimulationResults;
-use raf_electronics::{CadObjectKind, CadScene};
-use raf_render::api_graphic_basic::cad_surface::CadSurfaceHitRegion;
-use raf_render::api_graphic_basic::schematic_symbols::{
-    schematic_symbol_recipe, SchematicSymbolKind,
+use raf_electronics::schematic_symbols::{
+    schematic_symbol_recipe, symbol_kind_for_component, SchematicSymbolKind,
 };
+use raf_electronics::simulation::SimulationResults;
+use raf_electronics::{orthogonal_wire_points, CadObjectKind, CadScene};
+use raf_render::api_graphic_basic::cad_surface::CadSurfaceHitRegion;
 use raf_render::bridge::{GraphicsSurfaceKind, RenderRuntime};
 
 use super::{
@@ -24,13 +24,23 @@ use super::{
     PIN_SNAP_DISTANCE, WIRE_ENDPOINT_SNAP_DISTANCE, WIRE_HIT_DISTANCE, WIRE_JUNCTION_SNAP_DISTANCE,
 };
 use crate::panels::electronics_cad_surface_host::CadSurfaceSelection;
+use crate::panels::electronics_context_menu_surface::{
+    ElectronicsContextMenuAction, ElectronicsContextMenuTarget,
+};
 use crate::theme;
 
 const GPU_DETAIL_COMPONENT_LIMIT: usize = 96;
 const GPU_DETAIL_ZOOM_THRESHOLD: f32 = 1.15;
-// The CAD command stream remains the scalable path, while this overlay keeps editable
-// nets authoritative until every GPU backend renders wire segments identically.
+// AGB remains the scalable backdrop. For ordinary schematics, keep the thin
+// retained wire overlay as an authoritative safety net: a ready texture only
+// means that a texture exists, not that every static line survived the GPU
+// presentation/cache path. Very large documents opt into GPU-only wires to
+// keep the low-end path bounded.
 const GPU_WIRE_OVERLAY_LIMIT: usize = 4_096;
+const MINIMAP_SIZE: Vec2 = Vec2::new(182.0, 116.0);
+const MINIMAP_COMPONENT_MIN_SIZE: Vec2 = Vec2::new(10.0, 7.0);
+const MINIMAP_COMPONENT_MAX_SIZE: Vec2 = Vec2::new(22.0, 15.0);
+const MINIMAP_WIRE_INSET: f32 = 3.0;
 
 impl SchematicViewPanel {
     /// Renders and handles interaction events for the schematic canvas container.
@@ -52,6 +62,7 @@ impl SchematicViewPanel {
         render_runtime: &mut RenderRuntime,
     ) -> bool {
         let mut changed = false;
+        let mut document_changed = false;
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
         self.canvas_dark_mode = ui.visuals().dark_mode;
@@ -65,14 +76,28 @@ impl SchematicViewPanel {
         let render_h = rect.height().max(1.0).round() as u32;
         let (left, right, top, bottom) =
             self.visible_world_bounds(render_w as f32, render_h as f32);
-        let cad_scene = CadScene::from_schematic(&self.schematic);
+        let document_revision = self.document_epoch;
+        if self
+            .cad_scene_cache
+            .as_ref()
+            .map_or(true, |(fingerprint, _)| *fingerprint != document_revision)
+        {
+            self.cad_scene_cache =
+                Some((document_revision, CadScene::from_schematic(&self.schematic)));
+        }
+        let cad_scene = &self
+            .cad_scene_cache
+            .as_ref()
+            .expect("schematic CAD scene cache must exist")
+            .1;
         let cad_selection = self.cad_surface_selection();
-        self.cad_surface_host.present(
+        self.cad_surface_host.present_with_revision(
             ui.ctx(),
             wgpu_render_state,
             render_runtime,
             GraphicsSurfaceKind::SchematicCanvas,
-            &cad_scene,
+            cad_scene,
+            document_revision,
             [render_w, render_h],
             [left, right, top, bottom],
             self.canvas_dark_mode,
@@ -112,15 +137,21 @@ impl SchematicViewPanel {
             let hovered_wires = hovered_wire
                 .map(|idx| self.wire_group_indices(idx))
                 .unwrap_or_default();
-            // Keep the authoritative wire overlay for normal-sized schematics.
-            // It preserves editor selection/hover feedback even when the GPU
-            // backdrop is cached, while the CAD surface remains the scalable
-            // path for larger documents.
-            let draw_wire_overlay = self.schematic.wires.len() <= GPU_WIRE_OVERLAY_LIMIT;
+            // Do not infer complete wire visibility from texture readiness.
+            // The retained overlay is cheap for normal schematics and keeps
+            // every cable visible even if the GPU texture is stale/partial;
+            // hover must never be the thing that makes a passive cable appear.
+            let draw_wire_overlay =
+                should_draw_wire_overlay(gpu_backdrop_ready, self.schematic.wires.len());
 
             for (idx, wire) in self.schematic.wires.iter().enumerate() {
                 let start = self.world_to_screen(Pos2::new(wire.start.x, wire.start.y), rect);
                 let end = self.world_to_screen(Pos2::new(wire.end.x, wire.end.y), rect);
+                if !rect.intersects(Rect::from_two_pos(start, end).expand(WIRE_HIT_DISTANCE + 4.0))
+                {
+                    continue;
+                }
+                let route = orthogonal_route_points(start, end);
                 let is_selected = selected_wires.contains(&idx);
                 let is_hovered = hovered_wires.contains(&idx);
                 let is_related = hovered_component
@@ -128,8 +159,7 @@ impl SchematicViewPanel {
                     .unwrap_or(false);
                 let wire_color = if is_selected {
                     theme::ACCENT
-                } else if is_hovered || is_related || matches!(self.placement, PlacementMode::Wire)
-                {
+                } else if is_hovered || is_related {
                     Color32::from_rgb(118, 226, 134)
                 } else {
                     Color32::from_rgb(82, 200, 100)
@@ -142,8 +172,9 @@ impl SchematicViewPanel {
                     (2.0 * self.zoom).max(1.5)
                 };
 
-                if draw_wire_overlay {
-                    let route = orthogonal_route_points(start, end);
+                // The CAD backdrop owns ordinary visibility. Hover, selection,
+                // and related-wire feedback are small dynamic overlays.
+                if draw_wire_overlay || is_selected || is_hovered || is_related {
                     for segment in route.windows(2) {
                         painter.line_segment(
                             [segment[0], segment[1]],
@@ -152,7 +183,7 @@ impl SchematicViewPanel {
                     }
                 }
 
-                if is_selected || is_hovered || matches!(self.placement, PlacementMode::Wire) {
+                if is_selected || is_hovered || is_related {
                     let node_radius = (3.5 * self.zoom).max(3.0);
                     for point in [start, end] {
                         painter.circle_filled(point, node_radius, palette.node_bg);
@@ -161,7 +192,16 @@ impl SchematicViewPanel {
                 }
 
                 if !wire.net.is_empty() {
-                    let mid = Pos2::new((start.x + end.x) * 0.5, (start.y + end.y) * 0.5 - 10.0);
+                    let mid = route
+                        .windows(2)
+                        .next()
+                        .map(|segment| {
+                            Pos2::new(
+                                (segment[0].x + segment[1].x) * 0.5,
+                                (segment[0].y + segment[1].y) * 0.5 - 10.0,
+                            )
+                        })
+                        .unwrap_or(start);
                     painter.text(
                         mid,
                         egui::Align2::CENTER_BOTTOM,
@@ -210,12 +250,18 @@ impl SchematicViewPanel {
                 || self.schematic.components.len() <= GPU_DETAIL_COMPONENT_LIMIT
                 || self.zoom >= GPU_DETAIL_ZOOM_THRESHOLD;
             for (idx, comp) in self.schematic.components.iter().enumerate() {
-                let preview_selected = self.box_select_rect.map_or(false, |box_rect| {
-                    let center =
-                        self.world_to_screen(Pos2::new(comp.position.x, comp.position.y), rect);
-                    let body = self.component_body_rect(center, symbol_kind_for_component(comp));
-                    box_rect.intersects(body)
-                });
+                if !comp.visible {
+                    continue;
+                }
+                let center =
+                    self.world_to_screen(Pos2::new(comp.position.x, comp.position.y), rect);
+                let body = self.component_body_rect(center, symbol_kind_for_component(comp));
+                if !rect.intersects(body.expand(24.0)) {
+                    continue;
+                }
+                let preview_selected = self
+                    .box_select_rect
+                    .map_or(false, |box_rect| box_rect.intersects(body));
                 let is_selected = self.is_component_selected(idx) || preview_selected;
                 let is_hovered = hovered_component == Some(idx);
                 let hovered_pin = hover_candidate.and_then(|candidate| {
@@ -341,8 +387,12 @@ impl SchematicViewPanel {
                 palette.text_muted,
             );
 
-            self.draw_minimap(&painter, rect);
-            self.draw_canvas_status(&painter, rect);
+            if self.show_minimap {
+                self.draw_minimap(&painter, rect);
+            }
+            if self.show_status {
+                self.draw_canvas_status(&painter, rect);
+            }
         }
 
         if !self.show_export_menu && matches!(self.placement, PlacementMode::None) {
@@ -418,6 +468,7 @@ impl SchematicViewPanel {
                                 let new_pos = glam::Vec2::new(world.x, world.y);
                                 if self.schematic.components[idx].position != new_pos {
                                     self.schematic.components[idx].position = new_pos;
+                                    document_changed = true;
                                     changed = true;
                                 }
                             }
@@ -503,6 +554,7 @@ impl SchematicViewPanel {
                             self.schematic.add_component(comp);
                             let last = self.schematic.components.len().saturating_sub(1);
                             self.selection = SchematicSelection::Component(last);
+                            document_changed = true;
                             changed = true;
                         }
                     }
@@ -522,6 +574,7 @@ impl SchematicViewPanel {
                         }
                         self.select_components_with_modifiers(new_indices, false, false);
                         self.placement = PlacementMode::None;
+                        document_changed = true;
                         changed = true;
                     }
                     PlacementMode::Wire => {
@@ -530,7 +583,9 @@ impl SchematicViewPanel {
                                 self.prepare_connection_for_commit(start);
                             let (end_world, end_changed) =
                                 self.prepare_connection_for_commit(candidate);
-                            changed |= start_changed || end_changed;
+                            let anchors_changed = start_changed || end_changed;
+                            document_changed |= anchors_changed;
+                            changed |= anchors_changed;
 
                             if start_world.distance(end_world) > 0.01 {
                                 let route = orthogonal_route_points(start_world, end_world);
@@ -538,12 +593,14 @@ impl SchematicViewPanel {
                                     .iter()
                                     .map(|point| glam::Vec2::new(point.x, point.y))
                                     .collect();
-                                changed |= self.schematic.add_wire_path_anchored(
+                                let wire_changed = self.schematic.add_wire_path_anchored(
                                     &route_points,
                                     "",
                                     wire_anchor_for_candidate(&self.schematic, start),
                                     wire_anchor_for_candidate(&self.schematic, candidate),
                                 ) > 0;
+                                document_changed |= wire_changed;
+                                changed |= wire_changed;
                             }
 
                             let finish_wire = response
@@ -580,7 +637,9 @@ impl SchematicViewPanel {
                                 hovered_wire.or_else(|| self.hit_test_wire(mouse, rect))
                             {
                                 let world = self.snap_to_grid(self.screen_to_world(mouse, rect));
-                                changed |= self.split_wire_at_world(world, Some(idx));
+                                let wire_changed = self.split_wire_at_world(world, Some(idx));
+                                document_changed |= wire_changed;
+                                changed |= wire_changed;
                                 self.selection = SchematicSelection::Wire(
                                     idx.min(self.schematic.wires.len().saturating_sub(1)),
                                 );
@@ -715,7 +774,9 @@ impl SchematicViewPanel {
         }
 
         if ui.input(|i| i.key_pressed(egui::Key::Delete)) {
-            changed |= self.delete_selection();
+            let deleted = self.delete_selection();
+            document_changed |= deleted;
+            changed |= deleted;
         }
 
         if ui.input(|i| i.key_pressed(egui::Key::R)) {
@@ -729,6 +790,7 @@ impl SchematicViewPanel {
                 let comp = &mut self.schematic.components[idx];
                 comp.rotation = (comp.rotation + 90.0) % 360.0;
                 self.schematic.sync_wire_anchors();
+                document_changed = true;
                 changed = true;
             }
         }
@@ -743,6 +805,7 @@ impl SchematicViewPanel {
                     pin.offset.x = -pin.offset.x;
                 }
                 self.schematic.sync_wire_anchors();
+                document_changed = true;
                 changed = true;
             }
         }
@@ -757,7 +820,9 @@ impl SchematicViewPanel {
 
         let ctrl_d = ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::D));
         if ctrl_d {
-            changed |= self.duplicate_selection();
+            let duplicated = self.duplicate_selection();
+            document_changed |= duplicated;
+            changed |= duplicated;
         }
 
         if ui.input(|i| i.modifiers.ctrl && i.key_pressed(egui::Key::C)) {
@@ -774,15 +839,25 @@ impl SchematicViewPanel {
             self.quick_search_selected = 0;
         }
 
+        // The CAD frame is prepared before pointer/key mutations are applied.
+        // Publish the new document revision here so the next frame rebuilds
+        // the AGB/WGPU scene instead of reusing stale component or wire
+        // geometry. Idle frames still take the retained cache path.
+        if document_changed {
+            self.mark_document_changed();
+        }
+
         changed
     }
 
     fn draw_minimap(&self, painter: &egui::Painter, canvas: Rect) {
         let palette = electronics_palette(self.canvas_dark_mode);
-        let size = Vec2::new(148.0, 94.0);
         let rect = Rect::from_min_size(
-            Pos2::new(canvas.left() + 14.0, canvas.bottom() - size.y - 14.0),
-            size,
+            Pos2::new(
+                canvas.left() + 14.0,
+                canvas.bottom() - MINIMAP_SIZE.y - 14.0,
+            ),
+            MINIMAP_SIZE,
         );
         painter.rect_filled(rect, 4.0, palette.overlay_bg);
         painter.rect_stroke(
@@ -805,15 +880,24 @@ impl SchematicViewPanel {
             palette.text,
         );
 
-        let mut points = self
-            .schematic
-            .components
-            .iter()
-            .map(|component| component.position)
-            .collect::<Vec<_>>();
+        let mut points = Vec::new();
+        for component in &self.schematic.components {
+            let corners = component_world_corners(component);
+            points.extend(corners);
+            for pin in &component.pins {
+                let pin_world = component_pin_world(component, pin);
+                points.push(glam::Vec2::new(pin_world.x, pin_world.y));
+            }
+        }
         for wire in &self.schematic.wires {
-            points.push(wire.start);
-            points.push(wire.end);
+            points.extend(
+                orthogonal_route_points(
+                    Pos2::new(wire.start.x, wire.start.y),
+                    Pos2::new(wire.end.x, wire.end.y),
+                )
+                .into_iter()
+                .map(|point| glam::Vec2::new(point.x, point.y)),
+            );
         }
         let Some(&first) = points.first() else {
             painter.text(
@@ -832,87 +916,104 @@ impl SchematicViewPanel {
             max = max.max(point);
         }
 
-        for component in &self.schematic.components {
-            let half_body = glam::Vec2::new(COMP_BODY_W * 0.5, COMP_BODY_H * 0.5);
-            min = min.min(component.position - half_body);
-            max = max.max(component.position + half_body);
-        }
-
-        let margin = glam::Vec2::splat(28.0);
+        let document_min = min;
+        let document_max = max;
+        let span = (document_max - document_min).max(glam::Vec2::splat(1.0));
+        let margin = glam::Vec2::new((span.x * 0.08).max(18.0), (span.y * 0.08).max(18.0));
         min -= margin;
         max += margin;
-        let span = (max - min).max(glam::Vec2::splat(1.0));
         let content = Rect::from_min_max(
             Pos2::new(rect.left() + 9.0, rect.top() + 30.0),
             Pos2::new(rect.right() - 9.0, rect.bottom() - 9.0),
         );
-        let scale = (content.width() / span.x)
-            .min(content.height() / span.y)
-            .max(0.001);
-        let fitted_size = span * scale;
-        let fitted_origin = Pos2::new(
-            content.center().x - fitted_size.x * 0.5,
-            content.center().y - fitted_size.y * 0.5,
+        let projection = MinimapProjection::new(content, min, max);
+
+        painter.rect_stroke(
+            projection.world_rect(document_min, document_max),
+            1.5,
+            Stroke::new(1.0, palette.border),
         );
-        let project = |world: glam::Vec2| {
-            Pos2::new(
-                fitted_origin.x + (world.x - min.x) * scale,
-                fitted_origin.y + (world.y - min.y) * scale,
-            )
-        };
 
         let selected_wires = self.selected_wire_indices();
-        for wire in &self.schematic.wires {
-            let color = if selected_wires.iter().any(|idx| {
-                self.schematic
-                    .wires
-                    .get(*idx)
-                    .map(|selected| selected.id == wire.id)
-                    .unwrap_or(false)
-            }) {
+        let visible_world = self.visible_world_bounds(canvas.width(), canvas.height());
+        let visible_rect = projection
+            .world_rect(
+                glam::Vec2::new(visible_world.0, visible_world.2),
+                glam::Vec2::new(visible_world.1, visible_world.3),
+            )
+            .intersect(content);
+        if visible_rect.width() > 1.0 && visible_rect.height() > 1.0 {
+            painter.rect_filled(
+                visible_rect,
+                2.0,
+                Color32::from_rgba_premultiplied(255, 172, 64, 16),
+            );
+        }
+
+        for (wire_index, wire) in self.schematic.wires.iter().enumerate() {
+            let color = if selected_wires.contains(&wire_index) {
                 theme::ACCENT
             } else {
                 Color32::from_rgb(112, 224, 136)
             };
-            painter.line_segment(
-                [project(wire.start), project(wire.end)],
-                Stroke::new(1.5, color),
+            let route = orthogonal_route_points(
+                Pos2::new(wire.start.x, wire.start.y),
+                Pos2::new(wire.end.x, wire.end.y),
             );
-        }
-        for component in &self.schematic.components {
-            let center = project(component.position);
-            let footprint = Vec2::new(
-                (COMP_BODY_W * scale).clamp(5.0, 12.0),
-                (COMP_BODY_H * scale).clamp(4.0, 9.0),
-            );
-            painter.rect_filled(
-                Rect::from_center_size(center, footprint),
-                1.5,
-                if self.is_component_selected(
-                    self.schematic
-                        .components
-                        .iter()
-                        .position(|candidate| candidate.id == component.id)
-                        .unwrap_or(usize::MAX),
-                ) {
-                    Color32::from_rgb(255, 172, 64)
-                } else {
-                    Color32::from_rgb(224, 229, 236)
-                },
-            );
-            painter.rect_stroke(
-                Rect::from_center_size(center, footprint),
-                1.5,
-                Stroke::new(1.0, palette.border),
-            );
+            for segment in route.windows(2) {
+                let [start, end] = shorten_minimap_segment(
+                    projection.project(glam::Vec2::new(segment[0].x, segment[0].y)),
+                    projection.project(glam::Vec2::new(segment[1].x, segment[1].y)),
+                    MINIMAP_WIRE_INSET,
+                );
+                painter.line_segment([start, end], Stroke::new(1.2, color));
+            }
         }
 
-        let (left, right, top, bottom) = self.visible_world_bounds(canvas.width(), canvas.height());
-        let visible_rect = Rect::from_two_pos(
-            project(glam::Vec2::new(left, top)),
-            project(glam::Vec2::new(right, bottom)),
-        )
-        .intersect(content);
+        for (component_index, component) in self.schematic.components.iter().enumerate() {
+            let center = projection.project(component.position);
+            let footprint = Vec2::new(
+                (COMP_BODY_W * projection.scale)
+                    .clamp(MINIMAP_COMPONENT_MIN_SIZE.x, MINIMAP_COMPONENT_MAX_SIZE.x),
+                (COMP_BODY_H * projection.scale)
+                    .clamp(MINIMAP_COMPONENT_MIN_SIZE.y, MINIMAP_COMPONENT_MAX_SIZE.y),
+            );
+            let selected = self.is_component_selected(component_index);
+            // Symbol assets are square. Keep their aspect ratio instead of
+            // stretching them to the component body's wider footprint.
+            let icon_size = footprint.x.min(footprint.y).max(8.0);
+            let icon_rect = Rect::from_center_size(center, Vec2::splat(icon_size));
+            let tint = if component.visible {
+                Color32::WHITE
+            } else {
+                Color32::from_rgba_premultiplied(150, 158, 174, 120)
+            };
+            let painted = self.asset_atlas.paint(
+                painter,
+                minimap_asset_for_component(component),
+                icon_rect,
+                tint,
+            );
+            if !painted {
+                let polygon = rotated_minimap_polygon(center, footprint * 0.5, component.rotation);
+                let fill = if selected {
+                    Color32::from_rgb(255, 172, 64)
+                } else if component.visible {
+                    Color32::from_rgb(224, 229, 236)
+                } else {
+                    Color32::from_rgba_premultiplied(126, 135, 150, 96)
+                };
+                painter.add(egui::Shape::convex_polygon(
+                    polygon.to_vec(),
+                    fill,
+                    Stroke::new(0.8, palette.border),
+                ));
+            }
+            if selected {
+                painter.rect_stroke(icon_rect.expand(1.0), 2.0, Stroke::new(1.0, theme::ACCENT));
+            }
+        }
+
         if visible_rect.width() > 1.0 && visible_rect.height() > 1.0 {
             painter.rect_stroke(
                 visible_rect,
@@ -961,7 +1062,7 @@ impl SchematicViewPanel {
         (left, right, top, bottom)
     }
 
-    /// Renders the floating popup context menu at the mouse cursor position.
+    /// Renders the floating RafUI context menu at the mouse cursor position.
     ///
     /// Depending on the `SchematicSelection` click target (Component, MultipleComponents, Wire, or None),
     /// displays actions such as:
@@ -973,184 +1074,143 @@ impl SchematicViewPanel {
     /// - Placing components and testing electrical rules.
     ///
     /// Returns `true` if any interactive action altered the schematics.
-    pub(super) fn draw_context_menu(&mut self, ui: &mut egui::Ui) -> bool {
+    pub(super) fn draw_context_menu(
+        &mut self,
+        ui: &mut egui::Ui,
+        render_state: Option<&egui_wgpu::RenderState>,
+    ) -> bool {
         let menu = match self.context_menu.clone() {
             Some(menu) => menu,
             None => return false,
         };
-
-        let mut close_menu = false;
+        let target = match &menu.target {
+            SchematicSelection::None => ElectronicsContextMenuTarget::Canvas {
+                can_paste: !self.clipboard_components.is_empty(),
+            },
+            SchematicSelection::Component(index) => {
+                let Some(component) = self.schematic.components.get(*index) else {
+                    self.context_menu = None;
+                    return false;
+                };
+                ElectronicsContextMenuTarget::Component {
+                    index: *index,
+                    label: format!("{}  {}", component.designator, component.value),
+                    locked: component.locked,
+                    has_datasheet: component
+                        .datasheet
+                        .as_ref()
+                        .is_some_and(|value| !value.trim().is_empty()),
+                }
+            }
+            SchematicSelection::MultipleComponents(indices) => {
+                ElectronicsContextMenuTarget::MultipleComponents {
+                    count: indices.len(),
+                }
+            }
+            SchematicSelection::Wire(index) => {
+                let Some(wire) = self.schematic.wires.get(*index) else {
+                    self.context_menu = None;
+                    return false;
+                };
+                let label = if wire.net.trim().is_empty() {
+                    format!("{} #{}", t("app.schematic_wire", self.lang), index)
+                } else {
+                    format!("{}  {}", t("app.schematic_wire", self.lang), wire.net)
+                };
+                ElectronicsContextMenuTarget::Wire {
+                    index: *index,
+                    label,
+                }
+            }
+        };
+        let palette = if self.canvas_dark_mode {
+            raf_ui::StudioUiPalette::IndustrialDark
+        } else {
+            raf_ui::StudioUiPalette::PaperLight
+        };
+        let output = self.context_menu_surface.show(
+            ui,
+            render_state,
+            palette,
+            self.lang,
+            menu.screen_pos,
+            &target,
+        );
         let mut changed = false;
-        let menu_id = egui::Id::new("schematic_context_menu");
-
-        egui::Area::new(menu_id)
-            .fixed_pos(menu.screen_pos)
-            .pivot(egui::Align2::LEFT_TOP)
-            .order(egui::Order::Foreground)
-            .show(ui.ctx(), |ui| {
-                egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    ui.set_min_width(150.0);
-
-                    match menu.target {
-                        SchematicSelection::Component(idx) => {
-                            if ui.button(t("app.edit_value", self.lang)).clicked() {
-                                if idx < self.schematic.components.len() {
-                                    let value = self.schematic.components[idx].value.clone();
-                                    self.editing_value = Some((idx, value));
-                                    self.value_editor_just_opened = true;
-                                }
-                                close_menu = true;
-                            }
-
-                            if ui.button(t("app.rotate_r", self.lang)).clicked() {
-                                if idx < self.schematic.components.len() {
-                                    let snapshot = self.schematic.components[idx].clone();
-                                    self.ensure_wire_anchors_for_component_snapshot(&snapshot);
-                                    self.schematic.components[idx].rotation =
-                                        (self.schematic.components[idx].rotation + 90.0) % 360.0;
-                                    self.schematic.sync_wire_anchors();
-                                    changed = true;
-                                }
-                                close_menu = true;
-                            }
-
-                            if ui.button(t("app.duplicate_ctrl_d", self.lang)).clicked() {
-                                self.selection = SchematicSelection::Component(idx);
-                                changed |= self.duplicate_selection();
-                                close_menu = true;
-                            }
-
-                            if idx < self.schematic.components.len() {
-                                let locked = self.schematic.components[idx].locked;
-                                if ui
-                                    .button(if locked {
-                                        t("app.electronics_unlock", self.lang)
-                                    } else {
-                                        t("app.electronics_lock", self.lang)
-                                    })
-                                    .clicked()
-                                {
-                                    self.schematic.components[idx].locked = !locked;
-                                    changed = true;
-                                    close_menu = true;
-                                }
-
-                                let has_datasheet = self.schematic.components[idx]
-                                    .datasheet
-                                    .as_ref()
-                                    .map(|value| !value.trim().is_empty())
-                                    .unwrap_or(false);
-                                ui.add_enabled(
-                                    has_datasheet,
-                                    egui::Button::new(t("app.electronics_datasheet", self.lang)),
-                                );
-                            }
-
-                            ui.separator();
-
-                            if ui
-                                .button(
-                                    egui::RichText::new(t("app.delete_del", self.lang))
-                                        .color(theme::STATUS_ERROR),
-                                )
-                                .clicked()
-                            {
-                                self.selection = SchematicSelection::Component(idx);
-                                changed |= self.delete_selection();
-                                close_menu = true;
-                            }
-                        }
-                        SchematicSelection::MultipleComponents(indices) => {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{}: {}",
-                                    t("app.electronics_selection", self.lang),
-                                    indices.len()
-                                ))
-                                .size(11.0)
-                                .color(Color32::from_rgb(160, 166, 178)),
-                            );
-
-                            if ui.button(t("app.duplicate_ctrl_d", self.lang)).clicked() {
-                                changed |= self.duplicate_selection();
-                                close_menu = true;
-                            }
-
-                            if ui
-                                .button(
-                                    egui::RichText::new(t("app.delete_del", self.lang))
-                                        .color(theme::STATUS_ERROR),
-                                )
-                                .clicked()
-                            {
-                                changed |= self.delete_selection();
-                                close_menu = true;
-                            }
-                        }
-                        SchematicSelection::Wire(idx) => {
-                            if ui
-                                .button(t("app.electronics_rename_net", self.lang))
-                                .clicked()
-                            {
-                                let current_name = self
-                                    .schematic
-                                    .wires
-                                    .get(idx)
-                                    .map(|w| w.net.clone())
-                                    .unwrap_or_default();
-                                self.editing_net_name = Some((idx, current_name));
-                                self.selection = SchematicSelection::Wire(idx);
-                                close_menu = true;
-                            }
-
-                            if ui
-                                .button(
-                                    egui::RichText::new(t("app.delete_wire_del", self.lang))
-                                        .color(theme::STATUS_ERROR),
-                                )
-                                .clicked()
-                            {
-                                self.selection = SchematicSelection::Wire(idx);
-                                changed |= self.delete_selection();
-                                close_menu = true;
-                            }
-                        }
-                        SchematicSelection::None => {
-                            if ui
-                                .button(t("app.electronics_place_component", self.lang))
-                                .clicked()
-                            {
-                                self.quick_search_open = true;
-                                self.quick_search_query.clear();
-                                self.quick_search_selected = 0;
-                                close_menu = true;
-                            }
-
-                            if ui
-                                .add_enabled(
-                                    !self.clipboard_components.is_empty(),
-                                    egui::Button::new(t("app.electronics_paste", self.lang)),
-                                )
-                                .clicked()
-                            {
-                                let _ = self.start_clipboard_preview();
-                                close_menu = true;
-                            }
-
-                            if ui.button(t("app.electrical_test", self.lang)).clicked() {
-                                self.test_results = self.schematic.electrical_test();
-                                self.show_test_results = true;
-                                close_menu = true;
-                            }
-                        }
+        let mut close_menu = output.dismissed;
+        for action in output.actions {
+            close_menu = true;
+            match action {
+                ElectronicsContextMenuAction::EditValue(index) => {
+                    if let Some(component) = self.schematic.components.get(index) {
+                        self.editing_value = Some((index, component.value.clone()));
+                        self.value_editor_just_opened = true;
                     }
-                });
-            });
-
+                }
+                ElectronicsContextMenuAction::Rotate(index) => {
+                    if index < self.schematic.components.len() {
+                        let snapshot = self.schematic.components[index].clone();
+                        self.ensure_wire_anchors_for_component_snapshot(&snapshot);
+                        self.schematic.components[index].rotation =
+                            (self.schematic.components[index].rotation + 90.0) % 360.0;
+                        self.schematic.sync_wire_anchors();
+                        changed = true;
+                    }
+                }
+                ElectronicsContextMenuAction::Duplicate => {
+                    changed |= self.duplicate_selection();
+                }
+                ElectronicsContextMenuAction::ToggleLock(index) => {
+                    if let Some(component) = self.schematic.components.get_mut(index) {
+                        component.locked = !component.locked;
+                        changed = true;
+                    }
+                }
+                ElectronicsContextMenuAction::OpenDatasheet(index) => {
+                    if let Some(url) = self
+                        .schematic
+                        .components
+                        .get(index)
+                        .and_then(|component| component.datasheet.as_ref())
+                        .filter(|url| !url.trim().is_empty())
+                    {
+                        ui.ctx().open_url(egui::OpenUrl::new_tab(url.clone()));
+                    }
+                }
+                ElectronicsContextMenuAction::RenameNet(index) => {
+                    let current_name = self
+                        .schematic
+                        .wires
+                        .get(index)
+                        .map(|wire| wire.net.clone())
+                        .unwrap_or_default();
+                    self.editing_net_name = Some((index, current_name));
+                    self.selection = SchematicSelection::Wire(index);
+                }
+                ElectronicsContextMenuAction::Delete => {
+                    changed |= self.delete_selection();
+                }
+                ElectronicsContextMenuAction::PlaceComponent => {
+                    self.quick_search_open = true;
+                    self.quick_search_query.clear();
+                    self.quick_search_selected = 0;
+                }
+                ElectronicsContextMenuAction::Paste => {
+                    let _ = self.start_clipboard_preview();
+                }
+                ElectronicsContextMenuAction::ElectricalTest => {
+                    self.test_results = self.schematic.electrical_test();
+                    self.show_test_results = true;
+                }
+            }
+        }
         if close_menu {
             self.context_menu = None;
+            self.context_menu_surface.close();
         }
-
+        if changed {
+            self.mark_document_changed();
+        }
         changed
     }
 
@@ -1231,6 +1291,10 @@ impl SchematicViewPanel {
             self.editing_value = Some((idx, buffer));
         }
 
+        if changed {
+            self.mark_document_changed();
+        }
+
         changed
     }
 
@@ -1293,6 +1357,10 @@ impl SchematicViewPanel {
 
         if keep_open {
             self.editing_net_name = Some((wire_idx, buffer));
+        }
+
+        if changed {
+            self.mark_document_changed();
         }
 
         changed
@@ -1512,7 +1580,12 @@ impl SchematicViewPanel {
         draw_symbol_geometry: bool,
         draw_detail_overlay: bool,
     ) {
-        if !draw_detail_overlay && !is_selected && !is_hovered {
+        // Keep the lightweight vector symbol visible even when the detailed
+        // labels/pins overlay is throttled for large schematics. The CAD
+        // scene owns the picking bounds; this pass only draws the cheap line
+        // representation, so skipping it would make unselected components
+        // appear to disappear as soon as the document grows.
+        if !draw_detail_overlay && !draw_symbol_geometry && !is_selected && !is_hovered {
             return;
         }
 
@@ -1521,14 +1594,8 @@ impl SchematicViewPanel {
         let symbol_kind = symbol_kind_for_component(comp);
         let recipe = schematic_symbol_recipe(symbol_kind);
         let body = self.component_body_rect(center, symbol_kind);
+        let label_zoom = self.zoom.clamp(0.85, 1.25);
 
-        let fill = if is_selected {
-            palette.card_active
-        } else if is_hovered {
-            palette.card_hover
-        } else {
-            palette.card_bg
-        };
         let border = if is_selected {
             theme::ACCENT
         } else if is_hovered {
@@ -1537,27 +1604,14 @@ impl SchematicViewPanel {
             palette.border
         };
 
-        if draw_symbol_geometry {
-            painter.rect_filled(body, 6.0 * self.zoom, fill);
-            painter.rect_stroke(body, 6.0 * self.zoom, Stroke::new(1.0, border));
-        } else if is_selected || is_hovered {
+        // The CAD scene owns the canvas and picking geometry. The editable
+        // symbol itself stays a quiet line drawing here, so the schematic is
+        // not represented as a stack of colored cards.
+        if is_selected || is_hovered {
             painter.rect_stroke(body, 6.0 * self.zoom, Stroke::new(1.0, border));
         }
 
-        let painted_asset = if draw_detail_overlay
-            && (comp.rotation.abs() < 0.1 || (comp.rotation % 360.0).abs() < 0.1)
-        {
-            self.asset_atlas.paint(
-                painter,
-                symbol_asset_for_component(comp),
-                body.shrink(2.0 * self.zoom),
-                Color32::WHITE,
-            )
-        } else {
-            false
-        };
-
-        if draw_symbol_geometry && !painted_asset {
+        if draw_symbol_geometry {
             for segment in recipe.segments {
                 let a = transform_local_point(center, segment[0], comp.rotation, self.zoom);
                 let b = transform_local_point(center, segment[1], comp.rotation, self.zoom);
@@ -1582,90 +1636,92 @@ impl SchematicViewPanel {
             }
         }
 
-        if symbol_kind == SchematicSymbolKind::Magnet {
+        if draw_detail_overlay && symbol_kind == SchematicSymbolKind::Magnet {
             let left = transform_local_point(center, [-7.0, 0.0], comp.rotation, self.zoom);
             let right = transform_local_point(center, [7.0, 0.0], comp.rotation, self.zoom);
             painter.text(
                 left,
                 egui::Align2::CENTER_CENTER,
                 "N",
-                egui::FontId::proportional((9.0 * self.zoom).max(9.0)),
+                egui::FontId::proportional(9.0 * label_zoom),
                 theme::ACCENT,
             );
             painter.text(
                 right,
                 egui::Align2::CENTER_CENTER,
                 "S",
-                egui::FontId::proportional((9.0 * self.zoom).max(9.0)),
+                egui::FontId::proportional(9.0 * label_zoom),
                 Color32::from_rgb(170, 198, 236),
             );
         }
 
-        painter.text(
-            Pos2::new(center.x, body.top() - 5.0 * self.zoom),
-            egui::Align2::CENTER_BOTTOM,
-            &comp.designator,
-            egui::FontId::proportional((10.0 * self.zoom).max(10.0)),
-            theme::ACCENT,
-        );
-
-        painter.text(
-            Pos2::new(center.x, body.bottom() + 5.0 * self.zoom),
-            egui::Align2::CENTER_TOP,
-            &comp.value,
-            egui::FontId::proportional((9.0 * self.zoom).max(9.0)),
-            palette.text_dim,
-        );
-
-        if !comp.footprint.trim().is_empty() {
+        if draw_detail_overlay {
             painter.text(
-                Pos2::new(body.right(), body.bottom() + 17.0 * self.zoom),
-                egui::Align2::RIGHT_TOP,
-                &comp.footprint,
-                egui::FontId::proportional((8.0 * self.zoom).max(8.0)),
-                palette.text_muted,
+                Pos2::new(center.x, body.top() - 5.0 * self.zoom),
+                egui::Align2::CENTER_BOTTOM,
+                &comp.designator,
+                egui::FontId::proportional(10.0 * label_zoom),
+                theme::ACCENT,
             );
+            painter.text(
+                Pos2::new(center.x, body.bottom() + 5.0 * self.zoom),
+                egui::Align2::CENTER_TOP,
+                &comp.value,
+                egui::FontId::proportional(9.0 * label_zoom),
+                palette.text_dim,
+            );
+            if !comp.footprint.trim().is_empty() {
+                painter.text(
+                    Pos2::new(body.right(), body.bottom() + 17.0 * label_zoom),
+                    egui::Align2::RIGHT_TOP,
+                    &comp.footprint,
+                    egui::FontId::proportional(8.0 * label_zoom),
+                    palette.text_muted,
+                );
+            }
         }
 
-        for (pin_idx, pin) in comp.pins.iter().enumerate() {
-            let pin_world = component_pin_world(comp, pin);
-            let pin_screen = self.world_to_screen(pin_world, canvas_rect);
-            let pin_color = pin_direction_color(pin.direction);
-            let pin_radius = if hovered_pin == Some(pin_idx) {
-                (PIN_DOT_RADIUS + 2.0) * self.zoom
-            } else {
-                PIN_DOT_RADIUS * self.zoom
-            }
-            .max(3.0);
-
-            painter.circle_filled(pin_screen, pin_radius, palette.node_bg);
-            painter.circle_stroke(
-                pin_screen,
-                pin_radius,
-                Stroke::new((1.5 * self.zoom).max(1.2), pin_color),
-            );
-
-            let label_offset = if pin.offset.x < 0.0 {
-                -9.0 * self.zoom
-            } else {
-                9.0 * self.zoom
-            };
-            let align = if pin.offset.x < 0.0 {
-                egui::Align2::RIGHT_CENTER
-            } else {
-                egui::Align2::LEFT_CENTER
-            };
-            painter.text(
-                Pos2::new(pin_screen.x + label_offset, pin_screen.y),
-                align,
-                &pin.name,
-                egui::FontId::proportional((8.0 * self.zoom).max(8.0)),
-                if hovered_pin == Some(pin_idx) {
-                    palette.text
+        if draw_detail_overlay {
+            for (pin_idx, pin) in comp.pins.iter().enumerate() {
+                let pin_world = component_pin_world(comp, pin);
+                let pin_screen = self.world_to_screen(pin_world, canvas_rect);
+                let pin_color = pin_direction_color(pin.direction);
+                let pin_radius = if hovered_pin == Some(pin_idx) {
+                    (PIN_DOT_RADIUS + 2.0) * self.zoom
                 } else {
-                    palette.text_muted
-                },
-            );
+                    PIN_DOT_RADIUS * self.zoom
+                }
+                .max(3.0);
+
+                painter.circle_filled(pin_screen, pin_radius, palette.node_bg);
+                painter.circle_stroke(
+                    pin_screen,
+                    pin_radius,
+                    Stroke::new((1.5 * self.zoom).max(1.2), pin_color),
+                );
+
+                let label_offset = if pin.offset.x < 0.0 {
+                    -9.0 * label_zoom
+                } else {
+                    9.0 * label_zoom
+                };
+                let align = if pin.offset.x < 0.0 {
+                    egui::Align2::RIGHT_CENTER
+                } else {
+                    egui::Align2::LEFT_CENTER
+                };
+                painter.text(
+                    Pos2::new(pin_screen.x + label_offset, pin_screen.y),
+                    align,
+                    &pin.name,
+                    egui::FontId::proportional(8.0 * label_zoom),
+                    if hovered_pin == Some(pin_idx) {
+                        palette.text
+                    } else {
+                        palette.text_muted
+                    },
+                );
+            }
         }
     }
 
@@ -2096,7 +2152,7 @@ impl SchematicViewPanel {
             let center =
                 self.world_to_screen(Pos2::new(comp.position.x, comp.position.y), canvas_rect);
             let body = self.component_body_rect(center, symbol_kind_for_component(comp));
-            if body.expand(6.0).contains(mouse) {
+            if comp.visible && body.expand(6.0).contains(mouse) {
                 return Some(idx);
             }
         }
@@ -2108,6 +2164,15 @@ impl SchematicViewPanel {
         let mut best: Option<(usize, usize, Pos2, f32)> = None;
 
         for (comp_idx, comp) in self.schematic.components.iter().enumerate() {
+            if !comp.visible {
+                continue;
+            }
+            let center =
+                self.world_to_screen(Pos2::new(comp.position.x, comp.position.y), canvas_rect);
+            let body = self.component_body_rect(center, symbol_kind_for_component(comp));
+            if !body.expand(PIN_SNAP_DISTANCE).contains(mouse) {
+                continue;
+            }
             for (pin_idx, pin) in comp.pins.iter().enumerate() {
                 let world = component_pin_world(comp, pin);
                 let screen = self.world_to_screen(world, canvas_rect);
@@ -2128,9 +2193,20 @@ impl SchematicViewPanel {
         let mut best: Option<(usize, f32)> = None;
 
         for (idx, wire) in self.schematic.wires.iter().enumerate() {
-            let a = self.world_to_screen(Pos2::new(wire.start.x, wire.start.y), canvas_rect);
-            let b = self.world_to_screen(Pos2::new(wire.end.x, wire.end.y), canvas_rect);
-            let dist = point_to_segment_distance(mouse, a, b);
+            let route = orthogonal_route_points(
+                self.world_to_screen(Pos2::new(wire.start.x, wire.start.y), canvas_rect),
+                self.world_to_screen(Pos2::new(wire.end.x, wire.end.y), canvas_rect),
+            );
+            if !polyline_intersects_rect(
+                &route,
+                Rect::from_center_size(mouse, Vec2::splat(WIRE_HIT_DISTANCE * 2.0)),
+            ) {
+                continue;
+            }
+            let dist = route
+                .windows(2)
+                .map(|segment| point_to_segment_distance(mouse, segment[0], segment[1]))
+                .fold(f32::MAX, f32::min);
             if dist < WIRE_HIT_DISTANCE && best.map(|entry| dist < entry.1).unwrap_or(true) {
                 best = Some((idx, dist));
             }
@@ -2217,22 +2293,33 @@ impl SchematicViewPanel {
                 }
             }
 
-            let start = self.world_to_screen(Pos2::new(wire.start.x, wire.start.y), canvas_rect);
-            let end = self.world_to_screen(Pos2::new(wire.end.x, wire.end.y), canvas_rect);
-            let (projected, distance, t) = project_point_to_segment(mouse, start, end);
-            if distance <= WIRE_JUNCTION_SNAP_DISTANCE
-                && t > 0.05
-                && t < 0.95
-                && distance < best_distance
-            {
-                best_distance = distance;
-                candidate = ConnectionCandidate {
-                    world: self.snap_to_grid(self.screen_to_world(projected, canvas_rect)),
-                    kind: ConnectionKind::WireJunction,
-                    component_index: None,
-                    pin_index: None,
-                    wire_index: Some(idx),
-                };
+            let route = orthogonal_route_points(
+                self.world_to_screen(Pos2::new(wire.start.x, wire.start.y), canvas_rect),
+                self.world_to_screen(Pos2::new(wire.end.x, wire.end.y), canvas_rect),
+            );
+            if !polyline_intersects_rect(
+                &route,
+                Rect::from_center_size(mouse, Vec2::splat(WIRE_JUNCTION_SNAP_DISTANCE * 2.0)),
+            ) {
+                continue;
+            }
+            for segment in route.windows(2) {
+                let (projected, distance, t) =
+                    project_point_to_segment(mouse, segment[0], segment[1]);
+                if distance <= WIRE_JUNCTION_SNAP_DISTANCE
+                    && t > 0.05
+                    && t < 0.95
+                    && distance < best_distance
+                {
+                    best_distance = distance;
+                    candidate = ConnectionCandidate {
+                        world: self.snap_to_grid(self.screen_to_world(projected, canvas_rect)),
+                        kind: ConnectionKind::WireJunction,
+                        component_index: None,
+                        pin_index: None,
+                        wire_index: Some(idx),
+                    };
+                }
             }
         }
 
@@ -2370,6 +2457,91 @@ impl SchematicViewPanel {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct MinimapProjection {
+    world_min: glam::Vec2,
+    scale: f32,
+    origin: Pos2,
+    content: Rect,
+}
+
+impl MinimapProjection {
+    fn new(content: Rect, world_min: glam::Vec2, world_max: glam::Vec2) -> Self {
+        let span = (world_max - world_min).max(glam::Vec2::splat(1.0));
+        let scale = (content.width() / span.x)
+            .min(content.height() / span.y)
+            .max(0.001);
+        let fitted_size = span * scale;
+        let origin = Pos2::new(
+            content.center().x - fitted_size.x * 0.5,
+            content.center().y - fitted_size.y * 0.5,
+        );
+        Self {
+            world_min,
+            scale,
+            origin,
+            content,
+        }
+    }
+
+    fn project(&self, world: glam::Vec2) -> Pos2 {
+        Pos2::new(
+            self.origin.x + (world.x - self.world_min.x) * self.scale,
+            self.origin.y + (world.y - self.world_min.y) * self.scale,
+        )
+    }
+
+    fn world_rect(&self, min: glam::Vec2, max: glam::Vec2) -> Rect {
+        Rect::from_two_pos(self.project(min), self.project(max)).intersect(self.content)
+    }
+}
+
+fn shorten_minimap_segment(start: Pos2, end: Pos2, inset: f32) -> [Pos2; 2] {
+    let delta = end - start;
+    let length = delta.length();
+    if length <= f32::EPSILON {
+        return [start, end];
+    }
+    let shorten = inset.min(length * 0.22);
+    let direction = delta / length;
+    [start + direction * shorten, end - direction * shorten]
+}
+
+fn rotated_minimap_polygon(center: Pos2, half_size: Vec2, rotation_deg: f32) -> [Pos2; 4] {
+    let angle = rotation_deg.to_radians();
+    let cos = angle.cos();
+    let sin = angle.sin();
+    let rotate = |point: Vec2| {
+        Pos2::new(
+            center.x + point.x * cos - point.y * sin,
+            center.y + point.x * sin + point.y * cos,
+        )
+    };
+    [
+        rotate(Vec2::new(-half_size.x, -half_size.y)),
+        rotate(Vec2::new(half_size.x, -half_size.y)),
+        rotate(Vec2::new(half_size.x, half_size.y)),
+        rotate(Vec2::new(-half_size.x, half_size.y)),
+    ]
+}
+
+fn component_world_corners(component: &ElectronicComponent) -> [glam::Vec2; 4] {
+    let half_size = glam::Vec2::new(COMP_BODY_W * 0.5, COMP_BODY_H * 0.5);
+    let angle = component.rotation.to_radians();
+    let cos = angle.cos();
+    let sin = angle.sin();
+    let rotate = |point: glam::Vec2| {
+        component.position
+            + glam::Vec2::new(point.x * cos - point.y * sin, point.x * sin + point.y * cos)
+    };
+    [
+        rotate(glam::Vec2::new(-half_size.x, -half_size.y)),
+        rotate(glam::Vec2::new(half_size.x, -half_size.y)),
+        rotate(glam::Vec2::new(half_size.x, half_size.y)),
+        rotate(glam::Vec2::new(-half_size.x, half_size.y)),
+    ]
+}
+
 /// Computes the exact absolute world coordinates of a terminal Pin helper. Handles orientation angles.
 fn component_pin_world(comp: &ElectronicComponent, pin: &Pin) -> Pos2 {
     let rot_rad = comp.rotation.to_radians();
@@ -2382,23 +2554,7 @@ fn component_pin_world(comp: &ElectronicComponent, pin: &Pin) -> Pos2 {
     Pos2::new(comp.position.x + rot_ox, comp.position.y + rot_oy)
 }
 
-/// Identifies the correct symbolic type to render based on model parameters.
-fn symbol_kind_for_component(comp: &ElectronicComponent) -> SchematicSymbolKind {
-    match comp.sim_model {
-        SimModel::Resistor { .. } => SchematicSymbolKind::Resistor,
-        SimModel::Capacitor { .. } => SchematicSymbolKind::Capacitor,
-        SimModel::Led { .. } => SchematicSymbolKind::Led,
-        SimModel::Magnet { .. } => SchematicSymbolKind::Magnet,
-        SimModel::DcSource { .. } => SchematicSymbolKind::Battery,
-        SimModel::Wire if comp.designator.eq_ignore_ascii_case("GND") => {
-            SchematicSymbolKind::Ground
-        }
-        _ => SchematicSymbolKind::Generic,
-    }
-}
-
-/// Resolves resource strings pointing to internal raster icons.
-fn symbol_asset_for_component(comp: &ElectronicComponent) -> &'static str {
+fn minimap_asset_for_component(comp: &ElectronicComponent) -> &'static str {
     match comp.sim_model {
         SimModel::Resistor { .. } => "symbols/resistor.png",
         SimModel::Capacitor { .. } => "symbols/capacitor.png",
@@ -2406,8 +2562,12 @@ fn symbol_asset_for_component(comp: &ElectronicComponent) -> &'static str {
         SimModel::Magnet { .. } => "symbols/magnet.png",
         SimModel::DcSource { .. } => "symbols/battery.png",
         SimModel::Wire if comp.designator.eq_ignore_ascii_case("GND") => "symbols/ground.png",
-        _ => "symbols/generic.png",
+        SimModel::Wire => "symbols/generic.png",
     }
+}
+
+fn should_draw_wire_overlay(gpu_backdrop_ready: bool, wire_count: usize) -> bool {
+    !gpu_backdrop_ready || wire_count <= GPU_WIRE_OVERLAY_LIMIT
 }
 
 /// Clones components and clears physical IDs and net routing connections during Clipboard copies.
@@ -2465,10 +2625,68 @@ fn transform_local_point(center: Pos2, local: [f32; 2], rotation_deg: f32, zoom:
 
 /// Calculates orthogonal routing steps between start and end layout coordinates.
 fn orthogonal_route_points(start: Pos2, end: Pos2) -> Vec<Pos2> {
-    if (start.x - end.x).abs() < 0.01 || (start.y - end.y).abs() < 0.01 {
-        vec![start, end]
-    } else {
-        vec![start, Pos2::new(end.x, start.y), end]
+    orthogonal_wire_points(
+        glam::Vec2::new(start.x, start.y),
+        glam::Vec2::new(end.x, end.y),
+    )
+    .into_iter()
+    .map(|point| Pos2::new(point.x, point.y))
+    .collect()
+}
+
+fn polyline_intersects_rect(points: &[Pos2], rect: Rect) -> bool {
+    let Some(first) = points.first().copied() else {
+        return false;
+    };
+    let (mut min, mut max) = (first, first);
+    for point in points.iter().skip(1).copied() {
+        min.x = min.x.min(point.x);
+        min.y = min.y.min(point.y);
+        max.x = max.x.max(point.x);
+        max.y = max.y.max(point.y);
+    }
+    Rect::from_min_max(min, max).intersects(rect)
+}
+
+#[cfg(test)]
+mod tests {
+    use egui::{Pos2, Rect};
+
+    use super::{should_draw_wire_overlay, MinimapProjection, GPU_WIRE_OVERLAY_LIMIT};
+
+    #[test]
+    fn wires_remain_visible_while_gpu_backdrop_warms_up() {
+        assert!(should_draw_wire_overlay(false, 10));
+    }
+
+    #[test]
+    fn normal_ready_documents_keep_a_passive_wire_safety_overlay() {
+        assert!(should_draw_wire_overlay(true, 10));
+    }
+
+    #[test]
+    fn very_large_ready_documents_delegate_static_wire_geometry_to_gpu() {
+        assert!(!should_draw_wire_overlay(true, GPU_WIRE_OVERLAY_LIMIT + 1));
+    }
+
+    #[test]
+    fn minimap_projection_keeps_document_bounds_inside_content() {
+        let content = Rect::from_min_size(Pos2::new(10.0, 20.0), egui::vec2(180.0, 96.0));
+        let projection = MinimapProjection::new(
+            content,
+            glam::Vec2::new(-400.0, -20.0),
+            glam::Vec2::new(1200.0, 980.0),
+        );
+
+        let document = projection.world_rect(
+            glam::Vec2::new(-400.0, -20.0),
+            glam::Vec2::new(1200.0, 980.0),
+        );
+
+        assert!(content.contains(document.left_top()));
+        assert!(content.contains(document.right_bottom()));
+        assert!(document.width() > 0.0);
+        assert!(document.height() > 0.0);
     }
 }
 

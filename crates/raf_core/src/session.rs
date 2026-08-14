@@ -185,6 +185,27 @@ impl ProjectSessionRegistry {
         id
     }
 
+    pub fn rename(&mut self, id: SessionId, name: impl Into<String>) -> Result<(), String> {
+        let name = name.into().trim().to_string();
+        if name.is_empty() {
+            return Err("session name cannot be empty".to_string());
+        }
+        if self
+            .sessions
+            .iter()
+            .any(|session| session.id != id && session.name.eq_ignore_ascii_case(&name))
+        {
+            return Err("a session with that name already exists".to_string());
+        }
+        let session = self
+            .sessions
+            .iter_mut()
+            .find(|session| session.id == id)
+            .ok_or_else(|| "session was not found".to_string())?;
+        session.name = name;
+        Ok(())
+    }
+
     pub fn duplicate(&mut self, id: SessionId, name: impl Into<String>) -> Option<SessionId> {
         let source = self.sessions.iter().find(|session| session.id == id)?;
         let mut duplicate = ProjectSession::new(name, source.kind);
@@ -249,5 +270,27 @@ mod tests {
         let mut registry = ProjectSessionRegistry::new(ProjectType::Game);
         let active = registry.active_session;
         assert!(!registry.remove(active));
+    }
+
+    #[test]
+    fn session_rename_keeps_storage_identity_and_rejects_duplicates() {
+        let mut registry = ProjectSessionRegistry::new(ProjectType::Game);
+        let main = registry.active_session;
+        let other = registry.create("Other", ProjectSessionKind::World);
+
+        let original_directory = registry
+            .active()
+            .map(|session| session.directory.clone())
+            .expect("main session exists");
+        registry.rename(main, "Renamed").expect("rename succeeds");
+        assert_eq!(
+            registry.active().map(|session| session.name.as_str()),
+            Some("Renamed")
+        );
+        assert_eq!(
+            registry.active().map(|session| &session.directory),
+            Some(&original_directory)
+        );
+        assert!(registry.rename(other, "renamed").is_err());
     }
 }

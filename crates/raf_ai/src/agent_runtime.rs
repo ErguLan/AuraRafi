@@ -4,8 +4,9 @@
 //! so the UI stays responsive. The caller calls `poll()` each frame to
 //! advance the state machine.
 
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use crate::chat::{ChatMessage, MessageRole};
 use crate::openai_client::{OpenAiClient, OpenAiConfig, OpenAiMessage, OpenAiTool, ToolCall};
@@ -84,6 +85,7 @@ pub enum AgentEvent {
 /// Shared cell for passing background-thread results back to the runtime.
 struct PendingResponse {
     result: Arc<Mutex<Option<Result<OpenAiMessage, String>>>>,
+    stream_rx: mpsc::Receiver<String>,
     _handle: JoinHandle<()>,
     tools: Vec<OpenAiTool>,
     active_mode: bool,
@@ -108,8 +110,11 @@ pub struct AgentRuntime {
     max_tool_calls: usize,
     tool_calls_executed: usize,
     max_tool_result_chars: usize,
+    tool_execution_interval: Duration,
+    last_tool_execution: Option<Instant>,
     pending: Option<PendingResponse>,
     pending_tool_execution: Option<PendingToolExecution>,
+    streaming_message_index: Option<usize>,
 }
 
 impl AgentRuntime {
@@ -126,8 +131,13 @@ impl AgentRuntime {
             max_tool_calls: 24,
             tool_calls_executed: 0,
             max_tool_result_chars: 16 * 1024,
+            // Give the editor a presentation frame between consecutive
+            // scene/asset mutations requested by the model.
+            tool_execution_interval: Duration::from_millis(40),
+            last_tool_execution: None,
             pending: None,
             pending_tool_execution: None,
+            streaming_message_index: None,
         }
     }
 
@@ -140,13 +150,18 @@ impl AgentRuntime {
         self.events.clear();
         self.turn_count = 0;
         self.tool_calls_executed = 0;
+        self.last_tool_execution = None;
         self.pending_tool_execution = None;
+        self.streaming_message_index = None;
     }
 
     pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
         let prompt = prompt.into();
         if let Some(first) = self.messages.first_mut() {
             if first.role == MessageRole::System {
+                if first.content == prompt {
+                    return;
+                }
                 first.content = prompt;
                 return;
             }
@@ -171,6 +186,8 @@ impl AgentRuntime {
         self.events.clear();
         self.turn_count = 0;
         self.tool_calls_executed = 0;
+        self.last_tool_execution = None;
+        self.streaming_message_index = None;
         self.push_message(ChatMessage::user(&content));
         self.spawn_next_request(tools, active_mode);
     }
@@ -188,6 +205,12 @@ impl AgentRuntime {
         self.max_tool_result_chars = max_tool_result_chars.max(256);
     }
 
+    /// Controls the minimum interval between editor-thread tool mutations.
+    /// A zero duration is useful for deterministic headless callers.
+    pub fn set_tool_execution_interval(&mut self, interval: Duration) {
+        self.tool_execution_interval = interval;
+    }
+
     /// Poll the runtime to advance the state machine. Must be called each frame.
     /// `executor` is only needed when tool calls must be executed (active mode).
     /// Returns the current `AgentStatus`.
@@ -203,6 +226,15 @@ impl AgentRuntime {
 
     /// Check if the background thread is done and process the response.
     fn check_pending(&mut self, executor: Option<&mut dyn ToolExecutor>) -> AgentStatus {
+        let deltas = self
+            .pending
+            .as_ref()
+            .map(|pending| pending.stream_rx.try_iter().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for delta in deltas {
+            self.append_stream_delta(&delta);
+        }
+
         let Some(pending) = self.pending.as_ref() else {
             self.status = AgentStatus::Done;
             return AgentStatus::Done;
@@ -225,7 +257,15 @@ impl AgentRuntime {
             Err(error) => {
                 self.last_error = Some(error.clone());
                 self.status = AgentStatus::Error;
-                self.push_message(ChatMessage::assistant(&format!("Error: {}", error)));
+                let error_message = format!("Error: {}", error);
+                if let Some(index) = self.streaming_message_index.take() {
+                    if let Some(message) = self.messages.get_mut(index) {
+                        message.content = error_message;
+                        message.tool_calls = None;
+                    }
+                } else {
+                    self.push_message(ChatMessage::assistant(&error_message));
+                }
                 self.emit(AgentEvent::StatusChanged(AgentStatus::Error, Some(error)));
                 AgentStatus::Error
             }
@@ -247,15 +287,10 @@ impl AgentRuntime {
         };
 
         if let Some(tool_calls) = message.tool_calls.clone() {
-            self.push_message(ChatMessage {
-                id: Uuid::new_v4(),
-                role: MessageRole::Assistant,
-                content: text,
-                timestamp: Utc::now(),
-                tool_calls: Some(
-                    serde_json::to_value(&tool_calls).unwrap_or_else(|_| serde_json::Value::Null),
-                ),
-            });
+            self.upsert_assistant_message(
+                text,
+                Some(serde_json::to_value(&tool_calls).unwrap_or_else(|_| serde_json::Value::Null)),
+            );
 
             let remaining_calls = self.max_tool_calls.saturating_sub(self.tool_calls_executed);
             if tool_calls.len() > remaining_calls {
@@ -315,7 +350,7 @@ impl AgentRuntime {
                 AgentStatus::AwaitingApproval
             }
         } else {
-            self.push_message(ChatMessage::assistant(&text));
+            self.upsert_assistant_message(text, None);
             self.status = AgentStatus::Done;
             self.turn_count = 0;
             self.emit(AgentEvent::StatusChanged(AgentStatus::Done, None));
@@ -341,18 +376,26 @@ impl AgentRuntime {
         let client = self.client.clone();
         let result = Arc::new(Mutex::new(None));
         let result_clone = result.clone();
+        let (stream_tx, stream_rx) = mpsc::channel();
         let tools_owned = tools.to_vec();
 
         let handle = std::thread::Builder::new()
             .name("agent-api-call".into())
             .spawn(move || {
-                let response = client.chat(&openai_messages, Some(&tools_owned));
+                let response = if client.config.streaming {
+                    client.chat_stream(&openai_messages, Some(&tools_owned), |delta| {
+                        let _ = stream_tx.send(delta.to_string());
+                    })
+                } else {
+                    client.chat(&openai_messages, Some(&tools_owned))
+                };
                 *result_clone.lock().unwrap() = Some(response);
             })
             .expect("failed to spawn agent api thread");
 
         self.pending = Some(PendingResponse {
             result,
+            stream_rx,
             _handle: handle,
             tools: tools.to_vec(),
             active_mode,
@@ -404,6 +447,43 @@ impl AgentRuntime {
         self.status = AgentStatus::Done;
         self.turn_count = 0;
         self.tool_calls_executed = 0;
+        self.last_tool_execution = None;
+        self.streaming_message_index = None;
+    }
+
+    fn append_stream_delta(&mut self, delta: &str) {
+        if delta.is_empty() {
+            return;
+        }
+        let index = if let Some(index) = self.streaming_message_index {
+            index
+        } else {
+            self.push_message(ChatMessage::assistant(""));
+            let index = self.messages.len().saturating_sub(1);
+            self.streaming_message_index = Some(index);
+            index
+        };
+        if let Some(message) = self.messages.get_mut(index) {
+            message.content.push_str(delta);
+        }
+    }
+
+    fn upsert_assistant_message(&mut self, text: String, tool_calls: Option<Value>) {
+        if let Some(index) = self.streaming_message_index.take() {
+            if let Some(message) = self.messages.get_mut(index) {
+                message.content = text;
+                message.tool_calls = tool_calls;
+                return;
+            }
+        }
+
+        self.push_message(ChatMessage {
+            id: Uuid::new_v4(),
+            role: MessageRole::Assistant,
+            content: text,
+            timestamp: Utc::now(),
+            tool_calls,
+        });
     }
 
     fn begin_tool_execution(&mut self, tools: &[OpenAiTool], active_mode: bool) {
@@ -411,12 +491,14 @@ impl AgentRuntime {
             tools: tools.to_vec(),
             active_mode,
         });
+        self.last_tool_execution = None;
         self.status = AgentStatus::ExecutingTools;
         self.emit(AgentEvent::StatusChanged(AgentStatus::ExecutingTools, None));
     }
 
-    /// Executes one tool call per poll so scene mutations cannot monopolize a
-    /// UI frame. Calls remain ordered because they share the editor executor.
+    /// Executes at most one tool call per scheduling interval so scene
+    /// mutations cannot monopolize consecutive UI frames. Calls remain
+    /// ordered because they share the editor executor.
     fn execute_next_tool(&mut self, executor: Option<&mut dyn ToolExecutor>) -> AgentStatus {
         let Some(executor) = executor else {
             let error = "No tool executor is available for queued agent work.".to_string();
@@ -426,7 +508,15 @@ impl AgentRuntime {
             return AgentStatus::Error;
         };
 
+        if self
+            .last_tool_execution
+            .is_some_and(|last| last.elapsed() < self.tool_execution_interval)
+        {
+            return AgentStatus::ExecutingTools;
+        }
+
         let max_tool_result_chars = self.max_tool_result_chars;
+        self.last_tool_execution = Some(Instant::now());
         let executed = self
             .pending_calls
             .iter_mut()
@@ -570,6 +660,7 @@ pub fn assistant_with_tool_calls(text: &str, calls: &[ToolCall]) -> OpenAiMessag
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[derive(Default)]
     struct RecordingExecutor {
@@ -586,6 +677,7 @@ mod tests {
     #[test]
     fn queued_tools_execute_one_call_per_poll() {
         let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+        runtime.set_tool_execution_interval(Duration::ZERO);
         runtime.pending_calls = vec![
             PendingToolCall::new("first", "game_add", serde_json::json!({})),
             PendingToolCall::new("second", "game_move", serde_json::json!({})),
@@ -664,5 +756,32 @@ mod tests {
 
         assert!(result.starts_with("abcd"));
         assert!(result.contains("truncated"));
+    }
+
+    #[test]
+    fn streamed_text_reuses_one_assistant_message_until_completion() {
+        let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+
+        runtime.append_stream_delta("Hola");
+        runtime.append_stream_delta(" mundo");
+
+        assert_eq!(runtime.messages.len(), 1);
+        assert_eq!(runtime.messages[0].content, "Hola mundo");
+
+        let status = runtime.handle_assistant_message(
+            OpenAiMessage {
+                role: "assistant".to_string(),
+                content: serde_json::json!("Hola mundo"),
+                tool_calls: None,
+                tool_call_id: None,
+            },
+            None,
+            &[],
+            false,
+        );
+
+        assert_eq!(status, AgentStatus::Done);
+        assert_eq!(runtime.messages.len(), 1);
+        assert!(runtime.streaming_message_index.is_none());
     }
 }

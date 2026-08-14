@@ -43,6 +43,11 @@ pub struct RenderRuntimeSnapshot {
     pub memory_budget: GraphicsMemoryBudget,
     /// Changes whenever the backing ApiGraphicBasic device is recreated.
     pub device_generation: u64,
+    /// Changes whenever ownership of the shared render target moves between
+    /// editor surfaces. The device can stay alive while its target contains
+    /// another tab's frame, so caches must not key presentation on the device
+    /// generation alone.
+    pub surface_generation: u64,
     pub advanced_gpu_features_allowed: bool,
     pub last_frame_metrics: SceneFrameMetrics,
 }
@@ -57,6 +62,7 @@ impl Default for RenderRuntimeSnapshot {
             capabilities: None,
             memory_budget: GraphicsMemoryBudget::default(),
             device_generation: 0,
+            surface_generation: 0,
             advanced_gpu_features_allowed: false,
             last_frame_metrics: SceneFrameMetrics::default(),
         }
@@ -86,6 +92,7 @@ pub struct RenderRuntime {
     advanced_gpu_features_allowed: bool,
     shared_graphics_context: Option<SharedGraphicsContext>,
     surface: GraphicsSurfaceKind,
+    surface_generation: u64,
     device: Option<BasicDevice>,
     device_generation: u64,
 }
@@ -97,6 +104,7 @@ impl Default for RenderRuntime {
             advanced_gpu_features_allowed: false,
             shared_graphics_context: None,
             surface: GraphicsSurfaceKind::None,
+            surface_generation: 0,
             device: None,
             device_generation: 0,
         }
@@ -139,6 +147,7 @@ impl RenderRuntime {
         }
 
         self.surface = surface;
+        self.surface_generation = self.surface_generation.wrapping_add(1);
         if surface.requires_graphics_device() {
             self.ensure_device();
         } else {
@@ -162,6 +171,7 @@ impl RenderRuntime {
                 .map(|device| device.memory_budget())
                 .unwrap_or_default(),
             device_generation: self.device_generation,
+            surface_generation: self.surface_generation,
             advanced_gpu_features_allowed: self.advanced_gpu_features_allowed,
             last_frame_metrics: self
                 .device

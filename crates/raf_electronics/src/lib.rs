@@ -14,11 +14,13 @@ pub mod netlist;
 pub mod pcb;
 pub mod schematic;
 pub mod schematic_graph;
+pub mod schematic_symbols;
 pub mod simulation;
 
 pub use cad_interaction::{pick as pick_cad_object, CadInteractionState, CadPickHit, CadSelection};
 pub use cad_scene::{
-    CadLayerKind, CadObject, CadObjectKind, CadPickPriority, CadRect, CadScene, CadSurfaceKind,
+    orthogonal_wire_points, CadLayerKind, CadObject, CadObjectKind, CadPickPriority, CadRect,
+    CadScene, CadSurfaceKind,
 };
 pub use component::{ElectronicComponent, PinDirection, SimModel};
 pub use drc::{run_drc, DrcIssue, DrcReport, DrcSeverity};
@@ -38,4 +40,7 @@ pub use pcb::{
 };
 pub use schematic::Schematic;
 pub use schematic_graph::{LegacyWarning, SchematicGraph};
+pub use schematic_symbols::{
+    schematic_symbol_recipe, symbol_kind_for_component, SchematicSymbolKind, SchematicSymbolRecipe,
+};
 pub use simulation::{simulate_dc, SimulationResults};

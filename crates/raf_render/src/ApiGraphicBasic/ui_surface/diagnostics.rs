@@ -4,6 +4,8 @@
 //! while CI and golden tests can assert the same layout invariants without
 //! opening a window.
 
+use std::collections::HashSet;
+
 use super::{UiDensityContract, UiEnvironment, UiSurfaceFrame};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -13,9 +15,14 @@ pub struct UiSurfaceDiagnostics {
     pub focusable_regions: usize,
     pub text_requests: usize,
     pub image_regions: usize,
+    pub icon_regions: usize,
     pub overlay_regions: usize,
     pub clipped_boxes: usize,
     pub zero_sized_boxes: usize,
+    pub invalid_clip_regions: usize,
+    pub duplicate_ids: usize,
+    pub missing_accessibility_labels: usize,
+    pub focus_order: usize,
     pub max_z_index: i16,
     pub density: UiDensityContract,
 }
@@ -26,6 +33,12 @@ impl UiSurfaceDiagnostics {
     }
 
     pub fn from_frame_at_density(frame: &UiSurfaceFrame, density: UiDensityContract) -> Self {
+        let mut seen_ids = HashSet::new();
+        let duplicate_ids = frame
+            .layout_boxes
+            .iter()
+            .filter(|layout| !seen_ids.insert(layout.id.as_str()))
+            .count();
         Self {
             layout_boxes: frame.layout_boxes.len(),
             interactive_regions: frame
@@ -57,6 +70,11 @@ impl UiSurfaceDiagnostics {
                     )
                 })
                 .count(),
+            icon_regions: frame
+                .layout_boxes
+                .iter()
+                .filter(|layout| layout.icon.is_some())
+                .count(),
             clipped_boxes: frame
                 .layout_boxes
                 .iter()
@@ -67,6 +85,23 @@ impl UiSurfaceDiagnostics {
                 .iter()
                 .filter(|layout| layout.rect.is_empty())
                 .count(),
+            invalid_clip_regions: frame
+                .layout_boxes
+                .iter()
+                .filter(|layout| !layout.rect.is_empty() && layout.clip_rect.is_empty())
+                .count(),
+            duplicate_ids,
+            missing_accessibility_labels: frame
+                .layout_boxes
+                .iter()
+                .filter(|layout| {
+                    layout.interactive
+                        && layout.icon.is_some()
+                        && layout.accessibility_label_key.is_none()
+                        && layout.text_key.is_none()
+                })
+                .count(),
+            focus_order: frame.focus_order.len(),
             max_z_index: frame
                 .layout_boxes
                 .iter()
@@ -79,6 +114,9 @@ impl UiSurfaceDiagnostics {
 
     pub fn has_layout_warnings(self) -> bool {
         self.zero_sized_boxes > 0
+            || self.invalid_clip_regions > 0
+            || self.duplicate_ids > 0
+            || self.missing_accessibility_labels > 0
     }
 }
 

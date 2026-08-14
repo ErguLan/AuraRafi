@@ -50,6 +50,16 @@ impl UiMotionSpec {
             easing: UiEasing::EaseOut,
         }
     }
+
+    /// Structural layout transition used when dock tracks are created,
+    /// removed, or rebalanced. Pointer-driven resizing remains immediate;
+    /// this longer curve is reserved for committed layout changes.
+    pub const fn layout() -> Self {
+        Self {
+            duration_seconds: 0.36,
+            easing: UiEasing::EaseOut,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -135,5 +145,12 @@ mod tests {
         let mut tween = UiTween::new(0.0, UiMotionSpec::tooltip());
         tween.set_target(1.0);
         assert_eq!(tween.advance(0.001, true), 1.0);
+    }
+
+    #[test]
+    fn structural_layout_motion_uses_the_locked_long_transition() {
+        let spec = UiMotionSpec::layout();
+        assert_eq!(spec.duration_seconds, 0.36);
+        assert_eq!(spec.easing, UiEasing::EaseOut);
     }
 }

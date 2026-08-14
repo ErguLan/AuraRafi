@@ -119,7 +119,7 @@ crates/
 6. Do not begin a native backend from documentation-only authorization.
 
 ### Adding a new retained surface:
-1. Read `docs/RAF_UI_AUTHORING.md`, `.ulpi/design/DESIGN.md`, and, if the
+1. Read `docs/RAF_UI.md`, `docs/EDITOR_RAFUI.md`, `.ulpi/design/DESIGN.md`, and, if the
    surface owns GPU presentation, `docs/APIGRAPHICBASIC.md`.
 2. Create a focused `*_surface.rs` document builder with stable IDs, semantic
    classes, i18n keys, responsive layout, and typed events.

@@ -67,6 +67,17 @@
       "examples": ["/redo"]
     },
     {
+      "name": "transaction.undo",
+      "aliases": ["undo.token"],
+      "domain": "shared",
+      "category": "editor",
+      "description_key": "commands.transaction_undo.desc",
+      "parameters": [
+        {"name": "token", "kind": "string", "required": true, "description_key": "commands.param.token"}
+      ],
+      "examples": ["/transaction.undo token=<undo_token>"]
+    },
+    {
       "name": "project.info",
       "aliases": ["project"],
       "domain": "shared",
@@ -74,6 +85,15 @@
       "description_key": "commands.project_info.desc",
       "parameters": [],
       "examples": ["/project.info"]
+    },
+    {
+      "name": "project.save",
+      "aliases": ["save"],
+      "domain": "shared",
+      "category": "project",
+      "description_key": "commands.project_save.desc",
+      "parameters": [],
+      "examples": ["/project.save"]
     },
     {
       "name": "workspace.read",
@@ -639,22 +659,6 @@
       "examples": ["/ui.document.clear_camera"]
     },
     {
-      "name": "rafui.studio.preview",
-      "aliases": ["rafui.preview"],
-      "domain": "shared",
-      "category": "ui",
-      "description_key": "commands.rafui_studio_preview.desc",
-      "parameters": [
-        {"name": "format", "kind": "enum", "required": false, "default": "text", "description_key": "commands.param.rafui_preview_format"},
-        {"name": "dpi", "kind": "number", "required": false, "default": "1.0", "description_key": "commands.param.rafui_preview_dpi"},
-        {"name": "theme", "kind": "enum", "required": false, "default": "dark", "description_key": "commands.param.rafui_preview_theme"}
-      ],
-      "examples": [
-        "/rafui.studio.preview",
-        "/rafui.studio.preview format=json dpi=1.25 theme=dark"
-      ]
-    },
-    {
       "name": "session.list",
       "aliases": ["sessions"],
       "domain": "shared",
@@ -685,6 +689,18 @@
         {"name": "session", "kind": "string", "required": true, "description_key": "commands.param.session"}
       ],
       "examples": ["/session.open session=Forest"]
+    },
+    {
+      "name": "session.rename",
+      "aliases": [],
+      "domain": "shared",
+      "category": "project",
+      "description_key": "commands.session_rename.desc",
+      "parameters": [
+        {"name": "session", "kind": "string", "required": true, "description_key": "commands.param.session"},
+        {"name": "name", "kind": "string", "required": true, "description_key": "commands.param.name"}
+      ],
+      "examples": ["/session.rename session=Forest name=Forest_Night"]
     },
     {
       "name": "session.duplicate",

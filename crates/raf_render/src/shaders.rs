@@ -284,7 +284,7 @@ fn line_vs(input: LineVertexInput, @builtin(vertex_index) vertex_index: u32) -> 
     let direction_length = max(length(direction_px), 0.0001);
     let perpendicular = vec2<f32>(-direction_px.y, direction_px.x) / direction_length;
     let half_width_ndc = perpendicular * (2.0 * max(input.width, 1.0) / max(line_uniforms.viewport, vec2<f32>(1.0)));
-    let at_end = vertex_index == 2u || vertex_index == 4u;
+    let at_end = vertex_index == 2u || vertex_index == 4u || vertex_index == 5u;
     let positive_side = vertex_index == 1u || vertex_index == 2u || vertex_index == 4u;
     let base_clip = select(start_clip, end_clip, at_end);
     let offset_xy = select(-half_width_ndc, half_width_ndc, positive_side) * base_clip.w;

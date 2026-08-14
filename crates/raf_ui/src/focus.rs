@@ -2,6 +2,18 @@ use serde::{Deserialize, Serialize};
 
 use crate::UiPointerButton;
 
+/// Shared per-frame key used by editor hosts to keep retained RafUI keyboard
+/// focus separate from viewport and document shortcuts.
+pub const KEYBOARD_CAPTURE_TEMP_ID: &str = "raf_ui.keyboard_capture";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct UiModifiers {
+    pub shift: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub command: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct UiFocusState {
     pub hovered: Option<String>,
@@ -56,8 +68,19 @@ pub struct UiInputState {
     pub pointer_buttons_down: Vec<UiPointerButton>,
     pub pointer_pressed_buttons: Vec<UiPointerButton>,
     pub pointer_released_buttons: Vec<UiPointerButton>,
+    /// True when a primary press happened outside the retained surface. A
+    /// host uses this to release retained focus without forwarding the click
+    /// to a different surface.
+    #[serde(default)]
+    pub pointer_pressed_outside: bool,
     pub pressed_keys: Vec<String>,
     pub text_input: String,
+    /// Current IME composition. Hosts may render it as an underline while
+    /// `text_input` remains reserved for committed text.
+    #[serde(default)]
+    pub ime_preedit: String,
+    #[serde(default)]
+    pub modifiers: UiModifiers,
 }
 
 impl UiInputState {
@@ -66,6 +89,10 @@ impl UiInputState {
         self.pressed_keys
             .iter()
             .any(|pressed| pressed.eq_ignore_ascii_case(&lower))
+    }
+
+    pub fn key_pressed_any(&self, keys: &[&str]) -> bool {
+        keys.iter().any(|key| self.key_pressed(key))
     }
 
     pub fn button_down(&self, button: UiPointerButton) -> bool {
@@ -119,6 +146,22 @@ impl UiFocusPolicy {
         } else {
             None
         }
+    }
+
+    pub fn previous_before(&self, current: Option<&str>) -> Option<&str> {
+        if self.tab_order.is_empty() {
+            return None;
+        }
+        let previous = current
+            .and_then(|id| self.tab_order.iter().position(|candidate| candidate == id))
+            .and_then(|index| index.checked_sub(1));
+        previous
+            .and_then(|index| self.tab_order.get(index).map(String::as_str))
+            .or_else(|| {
+                self.wrap
+                    .then(|| self.tab_order.last().map(String::as_str))
+                    .flatten()
+            })
     }
 
     pub fn from_focusable_ids(ids: impl IntoIterator<Item = String>) -> Self {

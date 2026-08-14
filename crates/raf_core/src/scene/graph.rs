@@ -6,6 +6,8 @@
 
 use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
+use std::cell::Cell;
+use std::fmt;
 use uuid::Uuid;
 
 use crate::scene::{AudioSource, Collider, RigidBody, SceneVariable, VariableValue};
@@ -119,6 +121,9 @@ pub struct SceneNode {
     pub children: Vec<SceneNodeId>,
     /// Whether this node is visible.
     pub visible: bool,
+    /// Prevents viewport transforms while keeping the node selectable.
+    #[serde(default)]
+    pub locked: bool,
     /// Associated ECS entity handle (optional, for linking with hecs).
     pub entity_index: Option<u32>,
     /// External script files attached to this entity (e.g. VS Code edited logic).
@@ -160,6 +165,7 @@ impl SceneNode {
             parent: None,
             children: Vec::new(),
             visible: true,
+            locked: false,
             entity_index: None,
             scripts: Vec::new(),
             variables: Vec::new(),
@@ -185,6 +191,7 @@ impl SceneNode {
             parent: None,
             children: Vec::new(),
             visible: true,
+            locked: false,
             entity_index: None,
             scripts: Vec::new(),
             variables: Vec::new(),
@@ -241,11 +248,15 @@ impl SceneNode {
 
 /// Flat-array scene graph. All nodes live in a contiguous `Vec` for
 /// cache-friendly iteration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct SceneGraph {
     nodes: Vec<SceneNode>,
     /// Indices of root-level nodes (no parent).
     roots: Vec<SceneNodeId>,
+    /// Cached render key. The cache is editor/runtime-local and is never
+    /// serialized; every graph mutator invalidates it before changing nodes.
+    #[serde(skip)]
+    render_cache: Cell<Option<u64>>,
 }
 
 impl SceneGraph {
@@ -254,11 +265,13 @@ impl SceneGraph {
         Self {
             nodes: Vec::new(),
             roots: Vec::new(),
+            render_cache: Cell::new(None),
         }
     }
 
     /// Add a root node and return its id.
     pub fn add_root(&mut self, name: &str) -> SceneNodeId {
+        self.render_cache.set(None);
         let id = SceneNodeId(self.nodes.len());
         self.nodes.push(SceneNode::new(name));
         self.roots.push(id);
@@ -267,6 +280,7 @@ impl SceneGraph {
 
     /// Add a child node under the given parent. Returns the child's id.
     pub fn add_child(&mut self, parent: SceneNodeId, name: &str) -> SceneNodeId {
+        self.render_cache.set(None);
         let child_id = SceneNodeId(self.nodes.len());
         let mut child = SceneNode::new(name);
         child.parent = Some(parent);
@@ -277,6 +291,7 @@ impl SceneGraph {
 
     /// Add a root folder node.
     pub fn add_root_folder(&mut self, name: &str) -> SceneNodeId {
+        self.render_cache.set(None);
         let id = SceneNodeId(self.nodes.len());
         self.nodes.push(SceneNode::folder(name));
         self.roots.push(id);
@@ -285,6 +300,7 @@ impl SceneGraph {
 
     /// Add a folder node under the given parent.
     pub fn add_child_folder(&mut self, parent: SceneNodeId, name: &str) -> SceneNodeId {
+        self.render_cache.set(None);
         let child_id = SceneNodeId(self.nodes.len());
         let mut child = SceneNode::folder(name);
         child.parent = Some(parent);
@@ -300,6 +316,7 @@ impl SceneGraph {
 
     /// Get a mutable reference to a node.
     pub fn get_mut(&mut self, id: SceneNodeId) -> Option<&mut SceneNode> {
+        self.render_cache.set(None);
         self.nodes.get_mut(id.0)
     }
 
@@ -392,8 +409,15 @@ impl SceneGraph {
     /// its retained frame without treating unrelated authoring changes as
     /// renderer invalidations.
     pub fn render_fingerprint(&self) -> u64 {
+        if let Some(cached) = self.render_cache.get() {
+            return cached;
+        }
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;
         mix_render_fingerprint(&mut hash, self.nodes.len() as u64);
+        mix_render_fingerprint(&mut hash, self.roots.len() as u64);
+        for root in &self.roots {
+            mix_render_fingerprint(&mut hash, root.0 as u64);
+        }
 
         for (index, node) in self.nodes.iter().enumerate() {
             mix_render_fingerprint(&mut hash, index as u64);
@@ -405,6 +429,10 @@ impl SceneGraph {
                 &mut hash,
                 node.parent.map(|id| id.0 as u64).unwrap_or(u64::MAX),
             );
+            mix_render_fingerprint(&mut hash, node.children.len() as u64);
+            for child in &node.children {
+                mix_render_fingerprint(&mut hash, child.0 as u64);
+            }
             for value in [
                 node.position.x,
                 node.position.y,
@@ -423,6 +451,7 @@ impl SceneGraph {
             }
         }
 
+        self.render_cache.set(Some(hash));
         hash
     }
 
@@ -436,6 +465,7 @@ impl SceneGraph {
 
     /// Add a root node with a specific primitive and return its id.
     pub fn add_root_with_primitive(&mut self, name: &str, primitive: Primitive) -> SceneNodeId {
+        self.render_cache.set(None);
         let id = SceneNodeId(self.nodes.len());
         self.nodes.push(SceneNode::with_primitive(name, primitive));
         self.roots.push(id);
@@ -451,65 +481,85 @@ impl SceneGraph {
         new_parent: Option<SceneNodeId>,
         before: Option<SceneNodeId>,
     ) -> bool {
-        if !self.is_valid_node(id) {
+        self.reparent_nodes_before(&[id], new_parent, before)
+    }
+
+    /// Reparent several sibling-independent nodes as one hierarchy operation.
+    ///
+    /// The source list is detached first and inserted in the same order. This
+    /// keeps multi-selection drag/drop undoable as one editor mutation and
+    /// avoids the reverse-order bug caused by inserting each source before the
+    /// same sibling independently.
+    pub fn reparent_nodes_before(
+        &mut self,
+        ids: &[SceneNodeId],
+        new_parent: Option<SceneNodeId>,
+        before: Option<SceneNodeId>,
+    ) -> bool {
+        let mut sources = Vec::with_capacity(ids.len());
+        for &id in ids {
+            if self.is_valid_node(id) && !sources.contains(&id) {
+                sources.push(id);
+            }
+        }
+        if sources.is_empty() {
             return false;
         }
 
         if let Some(parent_id) = new_parent {
             if !self.is_valid_node(parent_id)
-                || parent_id == id
-                || self.is_descendant(parent_id, id)
+                || sources.contains(&parent_id)
+                || sources
+                    .iter()
+                    .any(|source| self.is_descendant(parent_id, *source))
             {
                 return false;
             }
         }
 
-        // Validate before-sibling belongs to the same parent.
+        // A subtree may only be moved once. Selecting both an ancestor and a
+        // descendant would otherwise flatten the descendant into the target.
+        if sources.iter().enumerate().any(|(index, source)| {
+            sources.iter().enumerate().any(|(other_index, other)| {
+                index != other_index && self.is_descendant(*other, *source)
+            })
+        }) {
+            return false;
+        }
+
         if let Some(before_id) = before {
-            let sibling_parent = if let Some(ref node) = self.nodes.get(before_id.0) {
-                node.parent
-            } else {
+            let Some(before_node) = self.nodes.get(before_id.0) else {
                 return false;
             };
-            if sibling_parent != new_parent {
-                return false;
-            }
-            if before_id == id {
+            if before_node.parent != new_parent || sources.contains(&before_id) {
                 return false;
             }
         }
 
-        // Remove from old parent.
-        if let Some(old_parent) = self.nodes[id.0].parent {
-            if old_parent.0 < self.nodes.len() {
-                self.nodes[old_parent.0].children.retain(|c| *c != id);
-            }
-        } else {
-            self.roots.retain(|r| *r != id);
-        }
-
-        self.nodes[id.0].parent = new_parent;
-
-        // Insert into the correct position.
-        if let Some(before_id) = before {
-            let target = if let Some(parent_id) = new_parent {
-                &mut self.nodes[parent_id.0].children
+        self.render_cache.set(None);
+        for &id in &sources {
+            if let Some(old_parent) = self.nodes[id.0].parent {
+                self.nodes[old_parent.0]
+                    .children
+                    .retain(|child| *child != id);
             } else {
-                &mut self.roots
-            };
-            if let Some(pos) = target.iter().position(|&c| c == before_id) {
-                target.insert(pos, id);
-            } else {
-                target.push(id);
-            }
-        } else {
-            if let Some(parent_id) = new_parent {
-                self.nodes[parent_id.0].children.push(id);
-            } else if !self.roots.contains(&id) {
-                self.roots.push(id);
+                self.roots.retain(|root_id| *root_id != id);
             }
         }
 
+        for &id in &sources {
+            self.nodes[id.0].parent = new_parent;
+        }
+
+        let target = if let Some(parent_id) = new_parent {
+            &mut self.nodes[parent_id.0].children
+        } else {
+            &mut self.roots
+        };
+        let insert_at = before
+            .and_then(|before_id| target.iter().position(|child| *child == before_id))
+            .unwrap_or(target.len());
+        target.splice(insert_at..insert_at, sources.iter().copied());
         true
     }
 
@@ -528,6 +578,7 @@ impl SceneGraph {
             }
         }
 
+        self.render_cache.set(None);
         if let Some(old_parent) = self.nodes[id.0].parent {
             self.nodes[old_parent.0]
                 .children
@@ -556,6 +607,7 @@ impl SceneGraph {
             return false;
         }
 
+        self.render_cache.set(None);
         // Remove from parent's children list.
         if let Some(parent_id) = self.nodes[id.0].parent {
             if parent_id.0 < self.nodes.len() {
@@ -593,6 +645,27 @@ impl SceneGraph {
         self.duplicate_subtree_internal(id, parent, true)
     }
 
+    /// Duplicate a node and its subtree directly under a requested parent.
+    /// This is used by the editor's hierarchy paste operation.
+    pub fn duplicate_node_into(
+        &mut self,
+        id: SceneNodeId,
+        parent: Option<SceneNodeId>,
+    ) -> Option<SceneNodeId> {
+        if !self.is_valid_node(id) {
+            return None;
+        }
+        if let Some(parent_id) = parent {
+            if !self.is_valid_node(parent_id)
+                || parent_id == id
+                || self.is_descendant(parent_id, id)
+            {
+                return None;
+            }
+        }
+        self.duplicate_subtree_internal(id, parent, true)
+    }
+
     /// Ungroup a folder by moving its children to its parent (or root).
     pub fn ungroup_node(&mut self, id: SceneNodeId) -> bool {
         if !self.is_valid_node(id) || !self.nodes[id.0].is_folder {
@@ -601,6 +674,7 @@ impl SceneGraph {
 
         let parent = self.nodes[id.0].parent;
         let children = self.nodes[id.0].children.clone();
+        self.render_cache.set(None);
 
         for child_id in &children {
             self.nodes[child_id.0].parent = parent;
@@ -678,6 +752,7 @@ impl SceneGraph {
         offset_root: bool,
     ) -> Option<SceneNodeId> {
         let source = self.nodes.get(source_id.0)?.clone();
+        self.render_cache.set(None);
         let new_id = SceneNodeId(self.nodes.len());
         let mut copy = source.clone();
         copy.uuid = Uuid::new_v4();
@@ -700,6 +775,16 @@ impl SceneGraph {
         }
 
         Some(new_id)
+    }
+}
+
+impl fmt::Debug for SceneGraph {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SceneGraph")
+            .field("nodes", &self.nodes)
+            .field("roots", &self.roots)
+            .finish()
     }
 }
 
@@ -784,5 +869,81 @@ mod tests {
     fn legacy_sprite_primitive_deserializes_as_plane() {
         let primitive: Primitive = ron::from_str("Sprite2D").expect("legacy primitive alias");
         assert_eq!(primitive, Primitive::Plane);
+    }
+
+    #[test]
+    fn reparent_before_preserves_sibling_order_and_rejects_cycles() {
+        let mut graph = SceneGraph::new();
+        let root = graph.add_root("Root");
+        let first = graph.add_child(root, "First");
+        let second = graph.add_child(root, "Second");
+        let third = graph.add_child(root, "Third");
+
+        assert!(graph.reparent_node_before(third, Some(root), Some(first)));
+        assert_eq!(
+            graph.get(root).unwrap().children,
+            vec![third, first, second]
+        );
+        assert!(!graph.reparent_node_before(root, Some(third), None));
+    }
+
+    #[test]
+    fn multi_reparent_preserves_source_order() {
+        let mut graph = SceneGraph::new();
+        let root = graph.add_root("Root");
+        let first = graph.add_child(root, "First");
+        let second = graph.add_child(root, "Second");
+        let third = graph.add_child(root, "Third");
+        let target = graph.add_root("Target");
+        let before = graph.add_child(target, "Before");
+
+        assert!(graph.reparent_nodes_before(&[first, second], Some(target), Some(before)));
+        assert_eq!(
+            graph.get(target).unwrap().children,
+            vec![first, second, before]
+        );
+        assert_eq!(graph.get(root).unwrap().children, vec![third]);
+    }
+
+    #[test]
+    fn multi_reparent_rejects_ancestor_and_descendant_selection() {
+        let mut graph = SceneGraph::new();
+        let root = graph.add_root("Root");
+        let child = graph.add_child(root, "Child");
+        let target = graph.add_root("Target");
+
+        assert!(!graph.reparent_nodes_before(&[root, child], Some(target), None));
+        assert_eq!(graph.roots(), &[root, target]);
+        assert_eq!(graph.get(root).unwrap().children, vec![child]);
+    }
+
+    #[test]
+    fn duplicate_into_preserves_subtree_under_requested_parent() {
+        let mut graph = SceneGraph::new();
+        let source = graph.add_root_folder("Source");
+        graph.add_child(source, "Nested");
+        let target = graph.add_root_folder("Target");
+
+        let duplicate = graph.duplicate_node_into(source, Some(target)).unwrap();
+
+        assert_eq!(graph.get(duplicate).unwrap().parent, Some(target));
+        assert_eq!(graph.get(target).unwrap().children, vec![duplicate]);
+        assert_eq!(graph.get(duplicate).unwrap().children.len(), 1);
+        assert_ne!(
+            graph.get(source).unwrap().uuid,
+            graph.get(duplicate).unwrap().uuid
+        );
+    }
+
+    #[test]
+    fn render_fingerprint_tracks_child_order() {
+        let mut graph = SceneGraph::new();
+        let root = graph.add_root("Root");
+        let first = graph.add_child(root, "First");
+        let second = graph.add_child(root, "Second");
+        let before = graph.render_fingerprint();
+
+        assert!(graph.reparent_node_before(second, Some(root), Some(first)));
+        assert_ne!(graph.render_fingerprint(), before);
     }
 }

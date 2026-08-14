@@ -12,8 +12,6 @@
 
 #[path = "viewport_grid.rs"]
 mod viewport_grid;
-#[path = "viewport_hud.rs"]
-mod viewport_hud;
 #[path = "viewport_interaction.rs"]
 mod viewport_interaction;
 #[path = "viewport_overlay.rs"]
@@ -24,8 +22,7 @@ use egui::{Color32, Pos2, Rect, Stroke};
 use glam::{Mat4, Quat, Vec3};
 use std::time::{Duration, Instant};
 
-use raf_core::config::Language;
-use raf_core::i18n::t;
+use crate::commands::game::GameViewportPort;
 use raf_core::scene::graph::{Primitive, SceneGraph, SceneNodeId};
 use raf_core::scene::WorldTransformCache;
 use raf_render::bridge::{
@@ -40,7 +37,13 @@ use raf_render::WorldStreamConfig;
 use crate::panels::viewport_surface_host::{
     ViewportFrameKey, ViewportPresentationBackend, ViewportSurfaceHost,
 };
-use crate::ui_icons::UiIconAtlas;
+
+pub(super) fn raf_ui_keyboard_capture(ctx: &egui::Context) -> bool {
+    ctx.data(|data| {
+        data.get_temp::<bool>(egui::Id::new(raf_ui::KEYBOARD_CAPTURE_TEMP_ID))
+            .unwrap_or(false)
+    })
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewportMode {
@@ -71,6 +74,50 @@ pub enum RenderStyle {
     Solid,
     Wireframe,
     Preview,
+}
+
+pub const VIEWPORT_TOOLBAR_HEIGHT: f32 = 292.0;
+const VIEWPORT_TOOLBAR_TOP_HEIGHT: f32 = 46.0;
+const VIEWPORT_TOOLBAR_RAIL_TOP: f32 = 54.0;
+const VIEWPORT_TOOLBAR_RAIL_WIDTH: f32 = 42.0;
+const VIEWPORT_TOOLBAR_RAIL_HEIGHT: f32 = 226.0;
+
+pub fn viewport_toolbar_rect(rect: Rect) -> Rect {
+    let width = (rect.width() - 24.0).clamp(300.0, 396.0);
+    let height = VIEWPORT_TOOLBAR_HEIGHT.min((rect.height() - 24.0).max(46.0));
+    Rect::from_min_size(
+        Pos2::new(rect.left() + 12.0, rect.top() + 12.0),
+        egui::vec2(width, height),
+    )
+}
+
+pub fn viewport_toolbar_top_rect(rect: Rect) -> Rect {
+    let toolbar = viewport_toolbar_rect(rect);
+    Rect::from_min_size(
+        toolbar.min,
+        egui::vec2(toolbar.width(), VIEWPORT_TOOLBAR_TOP_HEIGHT),
+    )
+}
+
+pub fn viewport_toolbar_rail_rect(rect: Rect) -> Rect {
+    let toolbar = viewport_toolbar_rect(rect);
+    Rect::from_min_size(
+        egui::pos2(toolbar.left(), toolbar.top() + VIEWPORT_TOOLBAR_RAIL_TOP),
+        egui::vec2(
+            VIEWPORT_TOOLBAR_RAIL_WIDTH,
+            VIEWPORT_TOOLBAR_RAIL_HEIGHT
+                .min((toolbar.height() - VIEWPORT_TOOLBAR_RAIL_TOP).max(0.0)),
+        ),
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ViewportNavigationStatus {
+    pub tool: String,
+    pub space: String,
+    pub snap_label: String,
+    pub camera_label: String,
+    pub focus_lock: bool,
 }
 
 impl Default for RenderStyle {
@@ -121,9 +168,6 @@ pub struct ViewportPanel {
     pub solid_show_surface_edges: bool,
     pub solid_xray_mode: bool,
     pub solid_face_tonality: bool,
-    retained_toolbar_active: bool,
-    retained_overlay_rects: [Option<Rect>; 2],
-
     drag_ongoing: bool,
     free_drag_active: bool,
     free_drag_start_pos: Vec3,
@@ -155,6 +199,8 @@ pub struct ViewportPanel {
     /// Invalidates the viewport cache only when vertex-edit topology changes.
     /// Camera motion and ordinary scene edits already participate in the key.
     viewport_frame_epoch: u64,
+    scene_edit_snapshot: Option<SceneGraph>,
+    completed_scene_edit_snapshot: Option<SceneGraph>,
 }
 
 impl Default for ViewportPanel {
@@ -191,9 +237,6 @@ impl Default for ViewportPanel {
             solid_show_surface_edges: false,
             solid_xray_mode: false,
             solid_face_tonality: true,
-            retained_toolbar_active: false,
-            retained_overlay_rects: [None, None],
-
             drag_ongoing: false,
             free_drag_active: false,
             free_drag_start_pos: Vec3::ZERO,
@@ -220,12 +263,14 @@ impl Default for ViewportPanel {
             cached_grid_scene_fingerprint: None,
             cached_grid_y: -0.02,
             viewport_frame_epoch: 0,
+            scene_edit_snapshot: None,
+            completed_scene_edit_snapshot: None,
         }
     }
 }
 
 impl ViewportPanel {
-    pub fn show(
+    pub fn show_canvas_only(
         &mut self,
         ctx: &egui::Context,
         ui: &mut egui::Ui,
@@ -233,44 +278,8 @@ impl ViewportPanel {
         render_runtime: &mut RenderRuntime,
         scene: &mut SceneGraph,
         is_dark: bool,
-        lang: Language,
-        icons: &UiIconAtlas,
     ) -> bool {
-        self.show_internal(
-            ctx,
-            ui,
-            wgpu_render_state,
-            render_runtime,
-            scene,
-            is_dark,
-            lang,
-            icons,
-            true,
-        )
-    }
-
-    pub fn show_with_retained_toolbar(
-        &mut self,
-        ctx: &egui::Context,
-        ui: &mut egui::Ui,
-        wgpu_render_state: Option<&egui_wgpu::RenderState>,
-        render_runtime: &mut RenderRuntime,
-        scene: &mut SceneGraph,
-        is_dark: bool,
-        lang: Language,
-        icons: &UiIconAtlas,
-    ) -> bool {
-        self.show_internal(
-            ctx,
-            ui,
-            wgpu_render_state,
-            render_runtime,
-            scene,
-            is_dark,
-            lang,
-            icons,
-            false,
-        )
+        self.show_internal(ctx, ui, wgpu_render_state, render_runtime, scene, is_dark)
     }
 
     fn show_internal(
@@ -281,11 +290,7 @@ impl ViewportPanel {
         render_runtime: &mut RenderRuntime,
         scene: &mut SceneGraph,
         is_dark: bool,
-        lang: Language,
-        icons: &UiIconAtlas,
-        draw_hud_toolbar: bool,
     ) -> bool {
-        self.retained_toolbar_active = !draw_hud_toolbar;
         self.bridge
             .set_picking_policy(PickingPolicy::for_render_config(&self.render_cfg));
         let rect = ui.available_rect_before_wrap();
@@ -294,6 +299,12 @@ impl ViewportPanel {
 
         let response = ui.allocate_rect(rect, egui::Sense::click_and_drag());
         let painter = ui.painter_at(rect);
+        let keyboard_capture = ctx.wants_keyboard_input() || raf_ui_keyboard_capture(ctx);
+        let toolbar_blocked = ctx
+            .input(|input| input.pointer.hover_pos())
+            .is_some_and(|pos| self.overlay_blocks_world_input(rect, pos));
+        let canvas_hovered = response.hovered() && !toolbar_blocked;
+        let world_input_enabled = !keyboard_capture && canvas_hovered;
         let viewport_keys = ctx.input(|i| {
             (
                 i.key_pressed(egui::Key::Tab),
@@ -303,7 +314,7 @@ impl ViewportPanel {
         });
         let movement_input = ctx.input(|i| {
             let ctrl = i.modifiers.ctrl || i.modifiers.mac_cmd;
-            if ctrl {
+            if ctrl || !world_input_enabled {
                 return (0.0, 0.0, 0.0);
             }
             let invert_fwd = if self.invert_ws { 1.0 } else { -1.0 };
@@ -315,7 +326,7 @@ impl ViewportPanel {
             (forward, right, up)
         });
 
-        if response.hovered() {
+        if world_input_enabled {
             if viewport_keys.0 {
                 self.toggle_edit_mode(scene);
             }
@@ -329,15 +340,8 @@ impl ViewportPanel {
 
         let pointer_delta = ctx.input(|i| i.pointer.delta());
         let scroll_delta_y = ctx.input(|i| i.smooth_scroll_delta.y);
-        let retained_overlay_hovered = self.retained_toolbar_active
-            && ctx.input(|i| i.pointer.hover_pos()).is_some_and(|pos| {
-                self.retained_overlay_rects
-                    .iter()
-                    .flatten()
-                    .any(|rect| rect.contains(pos))
-            });
         // Ctrl+Scroll adjusts WASD speed at runtime.
-        if response.hovered() && !retained_overlay_hovered && scroll_delta_y.abs() > 0.01 {
+        if canvas_hovered && scroll_delta_y.abs() > 0.01 {
             let ctrl = ctx.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
             if ctrl {
                 self.wasd_speed_boost =
@@ -345,12 +349,11 @@ impl ViewportPanel {
             }
         }
 
-        let camera_interacting = !retained_overlay_hovered
+        let camera_interacting = !keyboard_capture
             && (response.dragged_by(egui::PointerButton::Secondary)
                 || response.dragged_by(egui::PointerButton::Middle)
-                || (response.hovered() && scroll_delta_y.abs() > 0.01));
-        let viewport_interacting =
-            !retained_overlay_hovered && (camera_interacting || response.dragged());
+                || (canvas_hovered && scroll_delta_y.abs() > 0.01));
+        let viewport_interacting = camera_interacting || (response.dragged() && canvas_hovered);
 
         // Focus lock: WASD offsets the editor camera relative to the focused
         // target. The offset only returns after every navigation key is
@@ -393,15 +396,21 @@ impl ViewportPanel {
 
         self.bridge.handle_camera_input(
             ViewportPointerInput {
-                pointer_delta: [pointer_delta.x, pointer_delta.y],
-                scroll_delta_y: if retained_overlay_hovered {
+                pointer_delta: if !world_input_enabled {
+                    [0.0, 0.0]
+                } else {
+                    [pointer_delta.x, pointer_delta.y]
+                },
+                scroll_delta_y: if !world_input_enabled {
                     0.0
                 } else {
                     scroll_delta_y
                 },
-                drag_secondary: response.dragged_by(egui::PointerButton::Secondary),
-                drag_middle: response.dragged_by(egui::PointerButton::Middle),
-                hovered: response.hovered() && !retained_overlay_hovered,
+                drag_secondary: world_input_enabled
+                    && response.dragged_by(egui::PointerButton::Secondary),
+                drag_middle: world_input_enabled
+                    && response.dragged_by(egui::PointerButton::Middle),
+                hovered: world_input_enabled,
                 move_forward: move_fwd,
                 move_right: move_rgt,
                 move_up: move_up,
@@ -423,13 +432,18 @@ impl ViewportPanel {
         // behind the scene state. Vertex edits also invalidate the frame key
         // only when they actually changed the mesh, preserving idle reuse.
         let view_proj = self.bridge.view_projection(vp_w, vp_h);
-        let pre_render_changed = if self.edit_mode == EditMode::Vertex {
+        let pre_render_changed = if toolbar_blocked {
+            false
+        } else if self.edit_mode == EditMode::Vertex {
             self.handle_edit_mode_input(&response, scene, &view_proj, rect, vp_w, vp_h)
         } else {
             self.handle_object_mode_input(&response, scene, &view_proj, rect, vp_w, vp_h)
         };
         if self.edit_mode == EditMode::Vertex && pre_render_changed {
             self.viewport_frame_epoch = self.viewport_frame_epoch.wrapping_add(1);
+        }
+        if response.drag_stopped_by(egui::PointerButton::Primary) {
+            self.completed_scene_edit_snapshot = self.scene_edit_snapshot.take();
         }
 
         if self.bridge.update_smooth_focus() {
@@ -580,7 +594,7 @@ impl ViewportPanel {
 
         if self.edit_mode != EditMode::Vertex {
             if let Some(pointer) = ctx.input(|i| i.pointer.hover_pos()) {
-                if response.hovered() && !self.overlay_blocks_world_input(rect, pointer) {
+                if canvas_hovered {
                     let local = [pointer.x - rect.left(), pointer.y - rect.top()];
                     if self.selected.len() > 1 {
                         self.bridge.update_transform_hover(
@@ -650,23 +664,12 @@ impl ViewportPanel {
             }
         }
 
-        if draw_hud_toolbar {
-            self.draw_hud(&painter, rect, is_dark, icons, lang);
-        } else {
-            self.draw_hud_without_toolbar(&painter, rect, is_dark, lang);
-        }
-
-        let mut changed = pre_render_changed;
-        changed |= if draw_hud_toolbar {
-            self.handle_hud_click(&response, rect, scene)
-        } else {
-            self.handle_retained_hud_click(&response, rect)
-        };
+        let changed = pre_render_changed;
 
         self.apply_object_shortcuts(ctx, scene);
 
         if self.edit_mode == EditMode::Vertex {
-            if response.dragged() {
+            if response.dragged() && canvas_hovered {
                 self.schedule_viewport_repaint(ctx);
             }
 
@@ -688,7 +691,7 @@ impl ViewportPanel {
         }
 
         // Request repaint for smooth camera interaction
-        if response.dragged() {
+        if response.dragged() && canvas_hovered {
             self.schedule_viewport_repaint(ctx);
         }
 
@@ -792,12 +795,93 @@ impl ViewportPanel {
         self.bridge.active_drag_axis() != GizmoAxis::None
     }
 
+    /// The viewport is currently presented without editor overlays. Keeping
+    /// this hook in the interaction layer makes the canvas contract explicit
+    /// and leaves room for future canvas-owned controls without reintroducing
+    /// the retired editor chrome.
+    pub(super) fn overlay_blocks_world_input(&self, rect: Rect, pos: Pos2) -> bool {
+        viewport_toolbar_top_rect(rect).contains(pos)
+            || viewport_toolbar_rail_rect(rect).contains(pos)
+    }
+
     pub fn gizmo_mode(&self) -> GizmoMode {
         self.bridge.gizmo().mode
     }
 
+    /// Data-only navigation strip model. The future RafUI shell can render it
+    /// without reimplementing viewport state or reading egui internals.
+    pub fn navigation_status(&self) -> ViewportNavigationStatus {
+        let tool = if self.select_mode {
+            "Select".to_string()
+        } else {
+            match self.bridge.gizmo().mode {
+                GizmoMode::Translate => "Move".to_string(),
+                GizmoMode::Rotate => "Rotate".to_string(),
+                GizmoMode::Scale => "Scale".to_string(),
+            }
+        };
+        let camera_label = match self.mode {
+            ViewportMode::View2D => "Orthographic 2D",
+            ViewportMode::View3D => "Orbit 3D",
+        };
+        ViewportNavigationStatus {
+            tool,
+            space: "World".to_string(),
+            snap_label: if self.grid_visible {
+                format!("Grid {:.3}", self.grid_spacing.max(0.0))
+            } else {
+                "Snap Off".to_string()
+            },
+            camera_label: camera_label.to_string(),
+            focus_lock: self.focus_locked,
+        }
+    }
+
     pub fn edit_mode(&self) -> EditMode {
         self.edit_mode
+    }
+
+    pub fn set_view_mode_from_ui(&mut self, mode: ViewportMode) {
+        self.mode = mode;
+    }
+
+    pub fn set_render_style_from_ui(&mut self, style: RenderStyle) {
+        self.render_style = style;
+    }
+
+    pub fn set_select_mode_from_ui(&mut self) {
+        self.select_mode = true;
+        self.bridge.gizmo_mut().visible = false;
+    }
+
+    pub fn toolbar_state(
+        &self,
+        compact: bool,
+    ) -> crate::panels::viewport_toolbar_surface::ViewportToolbarState {
+        use crate::panels::viewport_toolbar_surface::{
+            ViewportRenderStyle, ViewportTool, ViewportToolbarState, ViewportViewMode,
+        };
+        ViewportToolbarState {
+            select_mode: self.select_mode,
+            tool: match self.bridge.gizmo().mode {
+                GizmoMode::Translate => ViewportTool::Move,
+                GizmoMode::Rotate => ViewportTool::Rotate,
+                GizmoMode::Scale => ViewportTool::Scale,
+            },
+            render_style: match self.render_style {
+                RenderStyle::Solid => ViewportRenderStyle::Solid,
+                RenderStyle::Wireframe => ViewportRenderStyle::Wireframe,
+                RenderStyle::Preview => ViewportRenderStyle::Preview,
+            },
+            grid_visible: self.grid_visible,
+            labels_visible: self.show_labels,
+            view_menu_open: false,
+            view_mode: match self.mode {
+                ViewportMode::View2D => ViewportViewMode::View2d,
+                ViewportMode::View3D => ViewportViewMode::View3d,
+            },
+            compact,
+        }
     }
 
     pub fn toggle_edit_mode_from_ui(&mut self, scene: &SceneGraph) {
@@ -825,13 +909,6 @@ impl ViewportPanel {
         self.bridge.reset_isometric_view();
         self.focus_locked = false;
         self.focus_strafe_offset = Vec3::ZERO;
-    }
-
-    /// Stores the screen-space hit regions occupied by RafUI controls inside
-    /// the viewport. The renderer still owns the world surface, but
-    /// camera/gizmo input must not begin beneath either floating control bank.
-    pub fn set_retained_overlay_rects(&mut self, rects: [Option<Rect>; 2]) {
-        self.retained_overlay_rects = rects;
     }
 
     pub fn focus_selected_entity(&mut self, scene: &SceneGraph, selected: Option<SceneNodeId>) {
@@ -908,6 +985,21 @@ impl ViewportPanel {
 
     pub fn is_drag_ongoing(&self) -> bool {
         self.drag_ongoing
+    }
+
+    pub fn take_completed_scene_edit_snapshot(&mut self) -> Option<SceneGraph> {
+        self.completed_scene_edit_snapshot.take()
+    }
+
+    pub fn clear_scene_edit_snapshot(&mut self) {
+        self.scene_edit_snapshot = None;
+        self.completed_scene_edit_snapshot = None;
+    }
+
+    fn begin_scene_edit_snapshot(&mut self, scene: &SceneGraph) {
+        if self.scene_edit_snapshot.is_none() {
+            self.scene_edit_snapshot = Some(scene.clone());
+        }
     }
 
     fn clear_group_transform_state(&mut self) {
@@ -1281,7 +1373,10 @@ impl ViewportPanel {
             return false;
         }
 
-        !(interacting && self.selected.len() > 1)
+        // A dense label field is an overlay, not scene content. Keep it
+        // quiet while the camera is moving and let the selected/hovered
+        // object be represented by the gizmo and hierarchy instead.
+        !interacting && self.selected.len() <= 1
     }
 
     fn update_adaptive_render_scale(
@@ -1332,6 +1427,20 @@ impl ViewportPanel {
     }
 }
 
+impl GameViewportPort for ViewportPanel {
+    fn selected_ids(&self) -> Vec<SceneNodeId> {
+        self.selected.clone()
+    }
+
+    fn set_selected_ids(&mut self, ids: Vec<SceneNodeId>) {
+        self.selected = ids;
+    }
+
+    fn focus_entity(&mut self, scene: &SceneGraph, id: Option<SceneNodeId>) {
+        self.focus_selected_entity(scene, id);
+    }
+}
+
 fn smooth_metric_ms(current: f32, sample: f32) -> f32 {
     if current <= 0.0 {
         sample
@@ -1347,7 +1456,10 @@ fn adaptive_interaction_quality_bias(frame_budget_ms: f32) -> f32 {
 
 #[cfg(test)]
 mod tests {
-    use super::adaptive_interaction_quality_bias;
+    use super::{
+        adaptive_interaction_quality_bias, viewport_toolbar_rail_rect, viewport_toolbar_top_rect,
+    };
+    use egui::{pos2, vec2, Rect};
 
     #[test]
     fn potato_bias_is_more_aggressive_than_medium() {
@@ -1372,5 +1484,20 @@ mod tests {
         .clamp(0.35, requested_scale);
 
         assert!(potato_scale < medium_scale);
+    }
+
+    #[test]
+    fn toolbar_input_regions_match_the_two_visual_regions() {
+        let viewport = Rect::from_min_size(pos2(10.0, 20.0), vec2(900.0, 600.0));
+        let top = viewport_toolbar_top_rect(viewport);
+        let rail = viewport_toolbar_rail_rect(viewport);
+
+        assert_eq!(top.left(), 22.0);
+        assert_eq!(top.top(), 32.0);
+        assert_eq!(top.height(), 46.0);
+        assert_eq!(rail.left(), top.left());
+        assert_eq!(rail.top(), top.top() + 54.0);
+        assert_eq!(rail.width(), 42.0);
+        assert!(!top.intersects(rail));
     }
 }
