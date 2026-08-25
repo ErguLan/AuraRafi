@@ -101,13 +101,18 @@ impl SceneHistory {
     }
 }
 
-fn fingerprint(scene: &SceneGraph) -> u64 {
+pub(crate) fn scene_fingerprint(scene: &SceneGraph) -> u64 {
     // SceneGraph deliberately does not derive Hash because glam values are
     // not hashable. Debug is stable for the in-memory Rust model and this
-    // function is called only after an explicit mutation, never per frame.
+    // function is used after mutations and at save/exit boundaries, never in
+    // the normal render loop.
     let mut hasher = DefaultHasher::new();
     format!("{scene:?}").hash(&mut hasher);
     hasher.finish()
+}
+
+fn fingerprint(scene: &SceneGraph) -> u64 {
+    scene_fingerprint(scene)
 }
 
 #[cfg(test)]
@@ -134,5 +139,26 @@ mod tests {
         let scene = SceneGraph::new();
         assert!(!history.record_if_changed(scene.clone(), &scene));
         assert!(!history.can_undo());
+    }
+
+    #[test]
+    fn grouped_gesture_keeps_one_entry_and_next_gesture_stays_undoable() {
+        let mut history = SceneHistory::default();
+        let mut scene = SceneGraph::new();
+        let first = scene.clone();
+        scene.add_root("First");
+        assert!(history.record_if_changed_grouped(first, &scene, false));
+
+        let second = scene.clone();
+        scene.add_root("Second");
+        assert!(history.record_if_changed_grouped(second, &scene, true));
+        assert!(history.undo(&mut scene));
+        assert_eq!(scene.len(), 0);
+
+        let third = scene.clone();
+        scene.add_root("Third");
+        assert!(history.record_if_changed_grouped(third, &scene, false));
+        assert!(history.undo(&mut scene));
+        assert_eq!(scene.len(), 0);
     }
 }

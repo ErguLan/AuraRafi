@@ -15,14 +15,25 @@ raf workspace describe PATH --json
 
 ## Attached editor
 
-Open the Game project first. Then use:
+Open the Game project first. `raf editors --json` lists known projects, their
+type (game/electronics), editor state (hub/project), and which editors are
+live right now. When exactly one editor is live, the `--project` flag is
+optional. `raf editors --wait` blocks (max 15 s by default) until an editor
+appears:
 
 ```text
-raf attach --project PATH status --json
-raf attach --project PATH capabilities --json
-raf attach --project PATH command NAME --params JSON --dry-run
-raf attach --project PATH command NAME --params JSON --confirm --idempotency-key KEY
+raf editors --json
+raf editors --wait
+raf attach status --json
+raf attach capabilities --json
+raf attach command engine.status --json
+raf attach command game.batch --confirm --params '{"operations":[{"name":"game.add","params":{"primitive":"cube","name":"Stable"}},{"name":"game.move","params":{"name":"Stable","x":2}}]}'
+raf attach command NAME --params JSON --dry-run
+raf attach command NAME --params JSON --confirm --idempotency-key KEY
 ```
+
+Attached `engine.status` is always safe: it reports editor state, project
+type, entity count, and capabilities without touching a domain executor.
 
 `--expected-revision N` protects against a newer manual edit. Attached command
 responses are JSON when `--json` or `--ndjson` is selected.

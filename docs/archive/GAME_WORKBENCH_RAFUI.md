@@ -7,8 +7,8 @@ recovery pass.
 
 Hierarchy, Search, Console, Assets and Nodes are retained RafUI surfaces. The
 application coordinates them through typed intents; a surface never mutates a
-scene, graph, project or filesystem directly. The eframe layer only places a
-completed RafUI surface during the current window migration.
+scene, graph, project or filesystem directly. The native compositor only places
+a completed RafUI surface during the window lifecycle.
 
 The visual language is shared: dark industrial surfaces, compact neutral rows,
 white and muted text, and orange only for focus, selection and primary actions.
@@ -68,5 +68,5 @@ renders in the Game viewport.
 Historical files were used as behavior references through Git, including the
 former `asset_browser.rs`, `console.rs` and `node_editor.rs` contracts in
 commit `d6ed969`. Their working behavior was adapted to RafUI and
-ApiGraphicBasic; the retired Egui controls, layout and paint code were not
+ApiGraphicBasic; the retired controls, layout and paint code were not
 re-mounted.

@@ -9,11 +9,17 @@ use crate::units::DisplayUnit;
 use serde::{Deserialize, Serialize};
 
 /// Minimum and maximum number of Agent messages rendered in one retained page.
-/// Smaller pages reduce layout and text-atlas work; larger pages reduce manual
-/// pagination at the cost of more work when a chat is opened.
-pub const AGENT_MESSAGE_PAGE_SIZE_MIN: u32 = 4;
-pub const AGENT_MESSAGE_PAGE_SIZE_MAX: u32 = 32;
-pub const AGENT_MESSAGE_PAGE_SIZE_DEFAULT: u32 = 8;
+/// The page is intentionally large enough to keep a normal conversation in
+/// one wheel-scrollable viewport before manual pagination is needed.
+pub const AGENT_MESSAGE_PAGE_SIZE_MIN: u32 = 20;
+pub const AGENT_MESSAGE_PAGE_SIZE_MAX: u32 = 64;
+pub const AGENT_MESSAGE_PAGE_SIZE_DEFAULT: u32 = 24;
+
+/// Bounds for the maximum number of tokens requested for one Agent response.
+/// The selected provider/model may still enforce a lower effective limit.
+pub const AGENT_MAX_RESPONSE_TOKENS_MIN: u32 = 1_024;
+pub const AGENT_MAX_RESPONSE_TOKENS_MAX: u32 = 32_768;
+pub const AGENT_MAX_RESPONSE_TOKENS_DEFAULT: u32 = 4_096;
 
 // ---------------------------------------------------------------------------
 // Theme
@@ -86,6 +92,14 @@ fn default_hierarchy_indent_width() -> f32 {
     14.0
 }
 
+fn default_electronics_grid_step_mm() -> f32 {
+    20.0
+}
+
+fn default_electronics_grid_opacity() -> f32 {
+    0.55
+}
+
 fn default_display_unit() -> DisplayUnit {
     DisplayUnit::Metric
 }
@@ -96,6 +110,14 @@ fn default_agent_message_page_size() -> u32 {
 
 fn default_agent_streaming_enabled() -> bool {
     true
+}
+
+fn default_ai_persist_credentials() -> bool {
+    true
+}
+
+fn default_agent_max_response_tokens() -> u32 {
+    AGENT_MAX_RESPONSE_TOKENS_DEFAULT
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +308,11 @@ pub struct EngineSettings {
     pub hierarchy_expand_on_select: bool,
     #[serde(default = "default_true")]
     pub hierarchy_animations: bool,
+    /// Refresh numeric Inspector values while a viewport transform is being
+    /// dragged. Disable it to update Properties only after mouse release on
+    /// lower-end machines.
+    #[serde(default = "default_true")]
+    pub inspector_live_transform_updates: bool,
     #[serde(default = "default_hierarchy_row_height")]
     pub hierarchy_row_height: f32,
     #[serde(default = "default_hierarchy_indent_width")]
@@ -293,9 +320,14 @@ pub struct EngineSettings {
     /// Electronics-only presentation preferences. Grid and snap remain shared
     /// editor settings because the 3D and CAD canvases use the same contract.
     #[serde(default = "default_true")]
-    pub electronics_show_minimap: bool,
-    #[serde(default = "default_true")]
     pub electronics_show_status: bool,
+    /// Electronics-only CAD grid spacing. The document snap remains in the
+    /// same world units; this controls the visible authoring calibration.
+    #[serde(default = "default_electronics_grid_step_mm")]
+    pub electronics_grid_step_mm: f32,
+    /// Multiplier applied to Electronics grid line alpha.
+    #[serde(default = "default_electronics_grid_opacity")]
+    pub electronics_grid_opacity: f32,
 
     // -- Solid Mode Rendering --
     /// Show surface edge lines in solid render mode.
@@ -365,6 +397,11 @@ pub struct EngineSettings {
     /// If true, scale gizmo starts in uniform mode until Shift is held.
     #[serde(default)]
     pub uniform_scale_by_default: bool,
+    /// Show the transform gizmo when more than one entity is selected and let
+    /// move/rotate/scale operate on the whole group. When false the gizmo
+    /// stays a single-selection tool.
+    #[serde(default = "default_true")]
+    pub multi_select_gizmo_enabled: bool,
     /// Invert WASD forward/backward movement.
     #[serde(default)]
     pub invert_ws: bool,
@@ -400,6 +437,11 @@ pub struct EngineSettings {
     #[serde(default = "default_ai_providers")]
     pub ai_providers: Vec<AiProviderConfig>,
 
+    /// Persist provider model, endpoint, and API key in the global settings
+    /// file. This is enabled by default so provider setup survives restarts.
+    #[serde(default = "default_ai_persist_credentials")]
+    pub ai_persist_credentials: bool,
+
     /// Provider selected by default when starting a new conversation.
     #[serde(default)]
     pub default_ai_provider: AiProvider,
@@ -413,8 +455,9 @@ pub struct EngineSettings {
     #[serde(default = "default_agent_model_shortcuts")]
     pub agent_model_shortcuts: Vec<AiModelShortcut>,
 
-    /// Number of non-system Agent messages rendered in one retained page.
-    /// This bounds layout, text-atlas, and paint work when opening a chat.
+    /// Legacy persisted page-size preference. The native Agent now renders a
+    /// continuous scroll surface, but keeping this field preserves old project
+    /// settings files and avoids a migration break.
     #[serde(default = "default_agent_message_page_size")]
     pub agent_message_page_size: u32,
 
@@ -422,6 +465,11 @@ pub struct EngineSettings {
     /// OpenAI-compatible Server-Sent Events response format.
     #[serde(default = "default_agent_streaming_enabled")]
     pub agent_streaming_enabled: bool,
+
+    /// Maximum number of output tokens requested from the configured provider
+    /// for each Agent response.
+    #[serde(default = "default_agent_max_response_tokens")]
+    pub agent_max_response_tokens: u32,
 
     /// Label of the model shortcut selected by default. "provider_default"
     /// means the raw model configured in the active provider card.
@@ -613,10 +661,12 @@ impl Default for EngineSettings {
             hierarchy_auto_reveal_selection: true,
             hierarchy_expand_on_select: true,
             hierarchy_animations: true,
+            inspector_live_transform_updates: true,
             hierarchy_row_height: default_hierarchy_row_height(),
             hierarchy_indent_width: default_hierarchy_indent_width(),
-            electronics_show_minimap: true,
             electronics_show_status: true,
+            electronics_grid_step_mm: default_electronics_grid_step_mm(),
+            electronics_grid_opacity: default_electronics_grid_opacity(),
             solid_show_surface_edges: false,
             solid_xray_mode: false,
             solid_face_tonality: true,
@@ -635,6 +685,7 @@ impl Default for EngineSettings {
             rotate_gizmo_sensitivity: 3.5,
             scale_gizmo_sensitivity: 3.5,
             uniform_scale_by_default: false,
+            multi_select_gizmo_enabled: true,
             invert_ws: false,
             focus_lock_enabled: true,
             gizmo_growth_scale: 0.0,
@@ -645,11 +696,13 @@ impl Default for EngineSettings {
             script_timeout_ms: 100,
             script_external_editor_cmd: "code".to_string(),
             ai_providers: default_ai_providers(),
+            ai_persist_credentials: true,
             default_ai_provider: AiProvider::OpenRouter,
             agent_mode: AgentMode::Passive,
             agent_model_shortcuts: default_agent_model_shortcuts(),
             agent_message_page_size: AGENT_MESSAGE_PAGE_SIZE_DEFAULT,
             agent_streaming_enabled: true,
+            agent_max_response_tokens: AGENT_MAX_RESPONSE_TOKENS_DEFAULT,
             default_agent_model: String::new(),
             window_width: 1280,
             window_height: 720,
@@ -662,11 +715,39 @@ impl EngineSettings {
     /// File name for settings on disk.
     pub const FILE_NAME: &'static str = "aura_rafi_settings.ron";
 
+    /// Returns the per-user directory used for global engine settings.
+    pub fn user_config_dir() -> std::path::PathBuf {
+        #[cfg(windows)]
+        let base = std::env::var_os("APPDATA")
+            .or_else(|| std::env::var_os("LOCALAPPDATA"))
+            .map(std::path::PathBuf::from);
+
+        #[cfg(not(windows))]
+        let base = std::env::var_os("XDG_CONFIG_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("HOME")
+                    .map(std::path::PathBuf::from)
+                    .map(|home| home.join(".config"))
+            });
+
+        base.map(|path| path.join("AuraRafi"))
+            .or_else(|| std::env::current_dir().ok())
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    }
+
     /// Save settings to a RON file at the given directory path.
     pub fn save(&self, dir: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::create_dir_all(dir)?;
+        let mut persisted = self.clone();
+        if !persisted.ai_persist_credentials {
+            for provider in &mut persisted.ai_providers {
+                provider.api_key.clear();
+            }
+        }
         let path = dir.join(Self::FILE_NAME);
         let pretty = ron::ser::PrettyConfig::default();
-        let data = ron::ser::to_string_pretty(self, pretty)?;
+        let data = ron::ser::to_string_pretty(&persisted, pretty)?;
         std::fs::write(path, data)?;
         Ok(())
     }
@@ -687,6 +768,7 @@ impl EngineSettings {
                 }
                 settings.normalize_ai_providers();
                 settings.normalize_agent_message_page_size();
+                settings.normalize_agent_max_response_tokens();
                 settings
             }
             Err(_) => Self::default(),
@@ -718,6 +800,12 @@ impl EngineSettings {
             .agent_message_page_size
             .clamp(AGENT_MESSAGE_PAGE_SIZE_MIN, AGENT_MESSAGE_PAGE_SIZE_MAX);
     }
+
+    fn normalize_agent_max_response_tokens(&mut self) {
+        self.agent_max_response_tokens = self
+            .agent_max_response_tokens
+            .clamp(AGENT_MAX_RESPONSE_TOKENS_MIN, AGENT_MAX_RESPONSE_TOKENS_MAX);
+    }
 }
 
 #[cfg(test)]
@@ -733,6 +821,11 @@ mod tests {
         assert_eq!(s.fps_limit, 60);
         assert_eq!(s.agent_message_page_size, AGENT_MESSAGE_PAGE_SIZE_DEFAULT);
         assert!(s.agent_streaming_enabled);
+        assert!(s.ai_persist_credentials);
+        assert_eq!(
+            s.agent_max_response_tokens,
+            AGENT_MAX_RESPONSE_TOKENS_DEFAULT
+        );
     }
 
     #[test]
@@ -743,6 +836,46 @@ mod tests {
         let deserialized: EngineSettings = ron::from_str(&serialized).unwrap();
         assert_eq!(deserialized.theme, settings.theme);
         assert_eq!(deserialized.language, settings.language);
+    }
+
+    #[test]
+    fn save_and_load_preserve_provider_credentials_when_enabled() {
+        let directory =
+            std::env::temp_dir().join(format!("aurarafi-settings-test-{}", uuid::Uuid::new_v4()));
+        let mut settings = EngineSettings::default();
+        let provider = settings
+            .ai_providers
+            .iter_mut()
+            .find(|provider| provider.provider == AiProvider::OpenRouter)
+            .expect("OpenRouter provider");
+        provider.model = "test-model".to_string();
+        provider.api_key = "test-secret".to_string();
+
+        settings.save(&directory).expect("save settings");
+        let loaded = EngineSettings::load(&directory);
+        let loaded_provider = loaded
+            .ai_providers
+            .iter()
+            .find(|provider| provider.provider == AiProvider::OpenRouter)
+            .expect("loaded OpenRouter provider");
+        assert_eq!(loaded_provider.model, "test-model");
+        assert_eq!(loaded_provider.api_key, "test-secret");
+
+        settings.ai_persist_credentials = false;
+        settings
+            .save(&directory)
+            .expect("save settings without key");
+        let redacted = EngineSettings::load(&directory);
+        let redacted_provider = redacted
+            .ai_providers
+            .iter()
+            .find(|provider| provider.provider == AiProvider::OpenRouter)
+            .expect("redacted OpenRouter provider");
+        assert_eq!(redacted_provider.model, "test-model");
+        assert!(redacted_provider.api_key.is_empty());
+        assert!(!redacted.ai_persist_credentials);
+
+        std::fs::remove_dir_all(&directory).expect("remove temporary settings");
     }
 
     #[test]

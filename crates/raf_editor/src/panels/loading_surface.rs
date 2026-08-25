@@ -1,55 +1,107 @@
-//! Retained RafUI loading surface used before the project hub.
+//! Native retained loading surface.
+//!
+//! The loading document used to be placed through a legacy bridge. Keeping
+//! the document and the tiny host here preserves the splash UX while the
+//! native Winit application initializes the Hub.
 
-use eframe::{egui, egui_wgpu};
 use raf_core::config::Language;
 use raf_core::i18n::t;
-use raf_render::api_graphic_basic::ui_surface::UiSurface;
+use raf_render::api_graphic_basic::ui_surface::{
+    DirectUiSurfaceHost, NativeGraphicsContext, StudioUiPalette, UiSurface,
+};
+use raf_render::api_graphic_basic::EditorUiLayer;
 use raf_ui::{
-    StudioUiPalette, UiAlign, UiFlow, UiFontWeight, UiImage, UiImageFit, UiImageSource, UiJustify,
-    UiLayout, UiNode, UiNodeKind, UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleSelector,
-    UiStyleSheet, UiTextRole, UiTextStyle,
+    UiAlign, UiFlow, UiFontWeight, UiImage, UiImageFit, UiImageSource, UiJustify, UiLayout, UiNode,
+    UiNodeKind, UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleSelector, UiStyleSheet,
+    UiTextRole, UiTextStyle,
 };
 
-use super::raf_ui_surface_bridge::RafUiSurfaceBridge;
+use crate::editor_layout::EditorRect;
+
+const CLEAR: [u8; 4] = [8, 11, 15, 255];
 
 pub struct LoadingSurfaceHost {
-    bridge: RafUiSurfaceBridge,
+    rect: EditorRect,
+    host: DirectUiSurfaceHost,
+    last_key: Option<LoadingKey>,
 }
 
-impl Default for LoadingSurfaceHost {
-    fn default() -> Self {
-        let mut bridge = RafUiSurfaceBridge::new("raf_ui_loading");
-        let _ = bridge.register_embedded_png(
-            "loading.brand-mark",
-            include_bytes!("../../../../editor/icon.png"),
-        );
-        Self { bridge }
-    }
+#[derive(Debug, Clone, PartialEq)]
+struct LoadingKey {
+    rect: EditorRect,
+    palette: StudioUiPalette,
+    progress: u16,
+    language: Language,
 }
 
 impl LoadingSurfaceHost {
-    pub fn show(
+    pub fn new(
+        graphics: &NativeGraphicsContext<'_>,
+        rect: EditorRect,
+        palette: StudioUiPalette,
+    ) -> Self {
+        let surface = build_surface(palette, 0.0, Language::English);
+        let mut host = graphics.create_ui_host(surface, CLEAR);
+        if let Ok(decoded) = image::load_from_memory(include_bytes!("../../../../editor/icon.png"))
+        {
+            let decoded = decoded.to_rgba8();
+            let _ = host.images_mut().insert_rgba(
+                "loading.brand-mark".to_string(),
+                [decoded.width(), decoded.height()],
+                decoded.into_raw(),
+            );
+        }
+        Self {
+            rect,
+            host,
+            last_key: None,
+        }
+    }
+
+    pub fn sync(
         &mut self,
-        ui: &mut egui::Ui,
-        render_state: Option<&egui_wgpu::RenderState>,
+        rect: EditorRect,
         palette: StudioUiPalette,
         progress: f32,
-        lang: Language,
+        language: Language,
     ) {
-        let surface = build_surface(palette, progress, lang);
-        let _ = self
-            .bridge
-            .show_transparent(ui, render_state, palette, surface, |key| t(key, lang));
+        let key = LoadingKey {
+            rect,
+            palette,
+            progress: (progress.clamp(0.0, 1.0) * 1000.0).round() as u16,
+            language,
+        };
+        self.rect = rect;
+        if self.last_key.as_ref() == Some(&key) {
+            return;
+        }
+        self.host
+            .set_surface(build_surface(palette, progress, language));
+        self.last_key = Some(key);
+    }
+
+    pub fn compositor_layer(
+        &mut self,
+        scale_factor: f32,
+        target_size: [u32; 2],
+    ) -> EditorUiLayer<'_> {
+        EditorUiLayer {
+            host: &mut self.host,
+            target_rect: self.rect.to_physical(scale_factor, target_size),
+            logical_size: self.rect.logical_size(),
+            raster_scale: scale_factor.max(1.0),
+        }
     }
 }
 
-fn build_surface(palette: StudioUiPalette, progress: f32, lang: Language) -> UiSurface {
+fn build_surface(palette: StudioUiPalette, progress: f32, language: Language) -> UiSurface {
     let tokens = palette.tokens();
     let progress = progress.clamp(0.0, 1.0);
     let progress_label = format!("{:.0}%", progress * 100.0);
-    let status_width = match lang {
-        Language::English => 178.0,
-        Language::Spanish => 250.0,
+    let status_width = if language == Language::Spanish {
+        250.0
+    } else {
+        178.0
     };
     let track = UiNode::new("loading.progress.track", UiNodeKind::Panel)
         .with_layout(UiLayout::fixed(380.0, 6.0))
@@ -73,7 +125,6 @@ fn build_surface(palette: StudioUiPalette, progress: f32, lang: Language) -> UiS
                     opacity: 1.0,
                 }),
         );
-
     let card = UiNode::new("loading.card", UiNodeKind::Panel)
         .with_class("loading-card")
         .with_layout(UiLayout {
@@ -128,7 +179,7 @@ fn build_surface(palette: StudioUiPalette, progress: f32, lang: Language) -> UiS
                 })
                 .with_child(
                     UiNode::new("loading.status", UiNodeKind::Label)
-                        .with_text_key(t("app.loading_workspace", lang))
+                        .with_text_value(t("app.loading_workspace", language))
                         .with_layout(UiLayout::fixed(status_width, 24.0))
                         .with_text_style(UiTextStyle {
                             role: UiTextRole::Body,
@@ -151,24 +202,23 @@ fn build_surface(palette: StudioUiPalette, progress: f32, lang: Language) -> UiS
                 .with_child(track)
                 .with_child(
                     UiNode::new("loading.progress.label", UiNodeKind::Label)
-                        .with_text_key(progress_label)
+                        .with_text_value(progress_label)
                         .with_layout(UiLayout::fixed(48.0, 20.0))
                         .with_text_style(UiTextStyle::body(tokens.accent)),
                 ),
         )
         .with_child(
             UiNode::new("loading.engine", UiNodeKind::Label)
-                .with_text_key(t("app.engine", lang))
+                .with_text_value(t("app.engine", language))
                 .with_layout(UiLayout::fixed(56.0, 20.0))
                 .with_text_style(UiTextStyle::body(tokens.text_muted)),
         )
         .with_child(
             UiNode::new("loading.version", UiNodeKind::Label)
-                .with_text_key(format!("v{}", env!("CARGO_PKG_VERSION")))
+                .with_text_value(format!("v{}", env!("CARGO_PKG_VERSION")))
                 .with_layout(UiLayout::fixed(56.0, 20.0))
                 .with_text_style(UiTextStyle::body(tokens.text_muted)),
         );
-
     let root = UiNode::new("loading.root", UiNodeKind::Root)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
@@ -179,13 +229,7 @@ fn build_surface(palette: StudioUiPalette, progress: f32, lang: Language) -> UiS
         .with_style(UiStyle::transparent())
         .with_child(card);
     let mut surface = UiSurface::new("loading", palette, root);
-    surface.style_sheet = style_sheet(palette);
-    surface
-}
-
-fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
-    let tokens = palette.tokens();
-    UiStyleSheet {
+    surface.style_sheet = UiStyleSheet {
         rules: vec![UiStyleRule::new(
             UiStyleSelector::Class("loading-card".to_string()),
             UiStylePatch {
@@ -196,34 +240,6 @@ fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 ..UiStylePatch::default()
             },
         )],
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn node_by_id<'a>(node: &'a UiNode, id: &str) -> Option<&'a UiNode> {
-        if node.id == id {
-            return Some(node);
-        }
-        node.children.iter().find_map(|child| node_by_id(child, id))
-    }
-
-    #[test]
-    fn splash_text_and_percentage_reserve_nonzero_layout_tracks() {
-        let surface = build_surface(StudioUiPalette::IndustrialDark, 0.63, Language::Spanish);
-
-        for id in [
-            "loading.brand",
-            "loading.status",
-            "loading.progress.label",
-            "loading.engine",
-            "loading.version",
-        ] {
-            let node = node_by_id(&surface.root, id).expect("splash node must exist");
-            assert!(node.layout.basis[0] > 0.0, "{id} needs a width");
-            assert!(node.layout.basis[1] > 0.0, "{id} needs a height");
-        }
-    }
+    };
+    surface
 }

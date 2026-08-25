@@ -129,6 +129,7 @@ fn builtin_icon_png(id: UiIconId) -> Option<&'static [u8]> {
         UiIconId::Focus => Some(include_bytes!("../../../assets/ui_icons/png/focus.png")),
         UiIconId::Undo => Some(include_bytes!("../../../assets/ui_icons/png/undo.png")),
         UiIconId::Redo => Some(include_bytes!("../../../assets/ui_icons/png/redo.png")),
+        UiIconId::Refresh => None,
         UiIconId::Grid => Some(include_bytes!("../../../assets/ui_icons/png/grid.png")),
         UiIconId::View2d => Some(include_bytes!("../../../assets/ui_icons/png/view-2d.png")),
         UiIconId::View3d => Some(include_bytes!("../../../assets/ui_icons/png/view-3d.png")),
@@ -186,6 +187,7 @@ fn icon_id_from_key(key: &str) -> Option<UiIconId> {
         UiIconId::Focus,
         UiIconId::Undo,
         UiIconId::Redo,
+        UiIconId::Refresh,
         UiIconId::Grid,
         UiIconId::View2d,
         UiIconId::View3d,
@@ -353,6 +355,13 @@ fn builtin_icon_pixels(id: UiIconId) -> Vec<u8> {
             line(&mut pixels, [46.0, 20.0], [34.0, 10.0], stroke);
             line(&mut pixels, [46.0, 20.0], [34.0, 30.0], stroke);
             circle(&mut pixels, [25.0, 37.0], 13.0, stroke);
+        }
+        UiIconId::Refresh => {
+            circle(&mut pixels, [32.0, 32.0], 19.0, stroke);
+            line(&mut pixels, [44.0, 14.0], [52.0, 15.0], stroke);
+            line(&mut pixels, [52.0, 15.0], [50.0, 24.0], stroke);
+            line(&mut pixels, [20.0, 50.0], [12.0, 49.0], stroke);
+            line(&mut pixels, [12.0, 49.0], [14.0, 40.0], stroke);
         }
         UiIconId::Close => {
             line(&mut pixels, [16.0, 16.0], [48.0, 48.0], stroke);

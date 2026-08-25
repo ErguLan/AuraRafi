@@ -20,9 +20,9 @@ document remains historical context only until the next workbench is defined.
 
 The active editor shell is being rebuilt with RafUI surfaces. New work belongs
 to the current canvas-first shell and must not restore the removed RafUI Studio
-helper, obsolete inspector recipes, or decommissioned Egui panels wholesale.
-The temporary eframe host may place a surface, but it must not own new layout,
-control, or interaction semantics.
+helper, obsolete inspector recipes, or decommissioned legacy panels wholesale.
+The native host may place a surface, but it must not own new layout, control,
+or interaction semantics.
 
 ## Non-Negotiable Ownership
 
@@ -201,7 +201,7 @@ shared editor command row, never inside a random domain panel.
 ### Build An Application Menu Bar
 
 Do not represent the application menu bar as `UiNodeKind::Menu`. Use the
-shared `UiApplicationMenu` model so the eframe fallback and a native platform
+shared `UiApplicationMenu` model so the native application bar and platform
 adapter consume the same command IDs.
 
 ```rust
@@ -229,7 +229,7 @@ Application-menu rules are mandatory:
 - Labels are i18n keys. The platform host resolves them for the active language.
 - The app owns the one command dispatcher. A native adapter returns
   `UiMenuActivation`; it does not run persistence or domain mutations.
-- The eframe bar is a compatibility fallback, not a native-menu claim.
+- The application bar is a presentation adapter, not a second command model.
 - Do not create a second File/Edit/View implementation for a platform. Extend
   the shared model and its dispatcher instead.
 
@@ -376,7 +376,7 @@ let placement = place_overlay(
 
 The resolver first uses the requested side, then flips to its opposite side,
 then shifts inside the window. Never solve an out-of-bounds overlay by
-increasing the owner surface or by painting a second egui widget over it.
+increasing the owner surface or by painting a second widget over it.
 
 ### Hover and motion
 
@@ -438,7 +438,7 @@ The visual heart of AuraRafi is precision before decoration. Read
 particular, classify sparkling or crawling icons as pixel shimmer, subpixel
 jitter, temporal aliasing, texture bleeding, or resampling blur. Correct the
 physical-density and sampling contract first; do not compensate by enlarging
-buttons, adding glow, or painting a duplicate widget from Egui.
+buttons, adding glow, or painting a duplicate widget outside RafUI.
 
 Review retained surfaces at 100%, 125%, 150%, and 200% DPI in GPU and CPU
 paths. A hover or resize may change state styling, but must not make a small

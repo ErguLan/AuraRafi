@@ -1,5 +1,34 @@
 # AuraRafi Active Scene Viewport Renderer - Technical Reference
 
+## Module classification — 2026-08-20
+
+The active native editor path is intentionally narrow:
+
+- **Active composition:** `ApiGraphicBasic/`, `bridge/render_runtime.rs`,
+  `bridge/viewport_bridge.rs`, `bridge/input_handler.rs`,
+  `bridge/viewport_input.rs`, `bridge/editor_camera.rs`,
+  `bridge/gizmo_renderer.rs`, `scene_renderer.rs`, `geometry/`, `math/`, and
+  the CPU/GPU render pipeline used by `RenderRuntime`.
+- **Active contracts with optional consumers:** picking, gizmo math,
+  projection, editable scene data, software recovery, resource registries,
+  frame scheduler, and backend-neutral capability/handle types.
+- **Prepared or opt-in:** lighting, post-process, UV mapping, texture helpers,
+  LOD, material extensions, GPU deform, world streaming, complements and ray
+  tracing preparation. They must stay capability-gated and idle when disabled.
+- **Compatibility/public exports:** older renderer modules still re-exported
+  for domain or test compatibility are not proof that a second presentation
+  path is active. An export is retired only after checking consumers, tests and
+  external API impact.
+
+This classification is an architectural ledger, not permission to delete a
+module blindly. It exists so future work can distinguish active code from
+prepared infrastructure without recreating the old widget/backend bridge.
+
+The same rule applies to the Hub recipes left in `studio_surface.rs`: the
+currently mounted Hub builders are the authority, while disconnected legacy
+recipes are reference material until their removal is verified against visual
+and interaction coverage. They are not a second runtime path.
+
 > Version v0.9.0 - Scene viewport path inside the shared graphics runtime
 
 ## Overview
@@ -29,6 +58,9 @@ without enabling advanced effects:
   logical points, so high-DPI viewports stay sharp;
 - adjacent grid/edge lines become one `DrawLineBatch`. GPU expands instances to
   screen-space quads and CPU rasterization uses the same width/depth semantics;
+- adjacent opaque draws that reuse one mesh can become `DrawMeshBatch`. GPU
+  submits one indexed instanced draw with a reusable instance slot; CPU expands
+  the same batch in order for deterministic fallback output;
 - persistent meshes are deduplicated within a frame and the GPU cache is bounded
   by the potato/desktop memory budget. Vertex-edit overrides are transient;
 - culling/focus use world transform scale, and unnamed visible geometry is still
@@ -91,29 +123,28 @@ semantic paint data; the graphics layer owns text/image uploads, resource
 budgets, and presentation. `raf_assets` may decode content, but it cannot hand
 raw WGPU resources to a panel or document.
 
-### Controlled Hybrid Foundation
+### ApiGraphicBasic Ownership Foundation
 
 The first ApiGraphicBasic foundation is implemented while WGPU remains the
-active adapter. Backend-neutral generational handles, capabilities, adapter
-preference, memory budgets, `SharedGraphicsContext`, and `GpuTextureView` are
-now part of the runtime contract. The current presentation bridge may still
-use an explicit WGPU escape hatch; that bridge is transitional and does not
-define the upper-layer API.
+active private executor. Backend-neutral generational handles, capabilities,
+adapter preference, memory budgets, `SharedGraphicsContext`, and
+`GpuTextureView` are now part of the runtime contract. Any WGPU escape hatch is
+contained below ApiGraphicBasic and does not define the upper-layer API.
 
 Resource registries with eviction, structural batching, complete DeviceHub
 ownership, frame graph, and native DX12/Vulkan/Metal backends are later
-capability migrations. They must preserve this same scene/CAD/RafUI contract.
+capability additions. They must preserve this same scene/CAD/RafUI contract.
 
 The complete graphics contract is [ApiGraphicBasic](APIGRAPHICBASIC.md). The
 RafUI surface and menu construction contract is
 [`RAF_UI.md`](RAF_UI.md) and [`EDITOR_RAFUI.md`](EDITOR_RAFUI.md).
 
-## Viewport Surface Host
+## Native Canvas Composition
 
-`ViewportSurfaceHost` is the viewport presentation boundary. Today it still
-uses the egui texture bridge for final painting, but `ViewportPanel` no longer
-owns texture upload details directly. The host now also owns a
-`ViewportSurfacePlan` derived from `RenderConfig::resource_profile`.
+`NativeEditorCompositor` is the presentation boundary for the scene, CAD and
+RafUI layers. It composes ApiGraphicBasic outputs directly into the Winit
+swapchain; there is no legacy texture bridge or legacy viewport host in the
+runtime path.
 
 The plan exposes the short-term renderer roadmap without enabling heavy work
 by accident:
@@ -125,9 +156,9 @@ by accident:
 - prepared post-processing pass count
 - prepared PBR, particle, and skeletal animation budgets
 
-This makes the viewport surface the place where future direct-wgpu,
+This makes the native canvas boundary the place where future direct-wgpu,
 post-processing, shadow maps, PBR, particles, and skeletal animation can attach
-without putting that policy back into egui panels.
+without putting that policy into presentation panels.
 
 ## Render Resource Profile
 
@@ -144,7 +175,7 @@ explicit project gates still decide what actually runs.
 
 ## Studio UI Surface
 
-`raf_ui` is the first retained, non-egui UI data model for editor chrome and
+`raf_ui` is the retained UI data model for editor chrome and
 canvas overlays. `ApiGraphicBasic::ui_surface` compiles it into a dedicated
 `UiSurfaceDrawList`; this avoids creating a synthetic `SceneRenderFrame` or a
 second `BasicCommandList` for the same retained controls.
@@ -159,11 +190,10 @@ renderer resolves active language strings into glyphs.
 ## Architecture Layers
 
 ```
-  raf_editor  -  viewport.rs (editor shell)
-    viewport_hud.rs          toolbar / HUD
-    viewport_interaction.rs  click/drag routing
-    viewport_overlay.rs      gizmo / labels / vertex dots
-    viewport_grid.rs         grid drawing
+  raf_editor  -  native_application.rs (Winit composition root)
+    native_workbench.rs      RafUI chrome and semantic intents
+    native_editor_runtime.rs input, history, pacing, canvas orchestration
+    editor_layout.rs         shared DPI-aware workbench rectangles
   -----------------------------------------------
   raf_render  -  bridge/
     viewport_bridge.rs       camera + render orchestration
@@ -182,9 +212,9 @@ renderer resolves active language strings into glyphs.
 
 Separation of concerns:
 
-| Layer | Knows egui? | Mutates scene? | Role |
+| Layer | Knows a UI toolkit? | Mutates scene? | Role |
 |-------|:-:|:-:|------|
-| Editor shell (`viewport.rs`) | Yes | No | Layout, input routing, final presentation |
+| Native editor shell (`native_application.rs`) | No | No | Winit lifecycle, composition and project boundary |
 | Bridge (`viewport_bridge.rs`) | No | via controllers | Camera state, edit-session state, scene-view orchestration |
 | Runtime (`render_runtime.rs` + `device.rs`) | No | No | Backend selection, GPU presentation, CPU fallback execution |
 | Scene renderer (`scene_renderer.rs`) | No | No | Scene viewport frame construction and CPU reference path |
@@ -256,7 +286,7 @@ Owns camera state, `SceneRenderer`, `ViewportEditSession`, and
 | `pick_entity()` | Ray-sphere broad phase + ray-triangle narrow phase |
 | `begin/apply/end_transform_drag()` | Gizmo translate/rotate/scale |
 | `begin_edit_drag()` / `drag_selected_vertices()` | Vertex editing |
-| `project_edit_overlay()` | Projected edges + vertices for egui |
+| `project_edit_overlay()` | Renderer-neutral projected edges + vertices |
 
 ### ViewportTransformController
 
@@ -272,25 +302,26 @@ Per-entity `EditableMesh` state:
 - Mesh override for renderer so edited topology replaces cached primitive data.
 - Entity picking via ray-sphere broad phase + ray-triangle narrow phase.
 
-## Editor Shell (`viewport.rs`)
+## Native Editor Shell (`native_application.rs`)
 
-Thin shell that:
+The native shell:
 
-1. Allocates the egui rect.
-2. Delegates camera input to the bridge.
-3. Calls `bridge.render()`.
-4. Presents a GPU texture or uploads CPU pixels.
-5. Draws overlays and HUD.
-6. Routes interaction state back into the scene/edit session.
+1. Computes the shared DPI-aware editor rectangles.
+2. Routes one neutral input snapshot through RafUI and the active canvas.
+3. Calls the viewport/CAD frame builder.
+4. Composes GPU textures or CPU pixels through ApiGraphicBasic.
+5. Keeps project persistence and attached CLI/MCP commands at the application boundary.
 
-Sub-modules:
+The relevant native modules are:
 
 | File | Responsibility |
 |------|----------------|
-| `viewport_hud.rs` | Toolbar, 2D/3D toggle, OBJ/VTX badge, info pill, axis gizmo |
-| `viewport_interaction.rs` | Object/edit mode input, gizmo drag, entity pick, shortcuts |
-| `viewport_overlay.rs` | Labels, gizmo arrows/rings/cubes, vertex dots/edges |
-| `viewport_grid.rs` | 2D and 3D grid drawing |
+| `native_workbench.rs` | Workbench state and lifecycle coordinator |
+| `native_workbench_input.rs` | Native input dispatch and semantic intents |
+| `native_workbench_surface.rs` | RafUI toolbar, hierarchy, inspector, assets and status surfaces |
+| `native_editor_runtime.rs` | Input ownership, commands, history, pacing and canvas orchestration |
+| `panels/viewport_controller.rs` | Object/edit mode input, gizmo drag, entity pick, shortcuts |
+| `bridge/gizmo_renderer.rs` | Renderer-owned gizmo geometry |
 
 `overlay_blocks_world_input()` prevents HUD clicks from leaking into world
 picking.
@@ -334,12 +365,11 @@ records those objects into a `BasicCommandList`:
 - Components, pads, pins, labels, and DRC markers become quad geometry.
 - Wires, traces, board outlines, and airwires become line geometry.
 - The output frame remains CPU/GPU-neutral and runs through `BasicDevice`.
-- `ElectronicsCadSurfaceHost` is the editor bridge that passes visible world
-  bounds, activates the schematic or PCB graphics surface, and presents the
-  resulting GPU texture or CPU pixels through `GpuCanvas`.
-- Schematic and PCB both use the CAD surface host for their primary retained
-  canvas backdrops; egui remains for fallback drawing and dynamic overlays
-  during the transition.
+- `NativeElectronicsEditor` is the editor boundary that loads the active CAD
+  documents, owns schematic/PCB input and selection, and exposes a retained
+  `CadScene` to the shared compositor.
+- RafUI surfaces emit semantic Electronics commands into the native controller;
+  no widget host or compatibility bridge is part of the active CAD path.
 
 ## Camera
 
@@ -381,6 +411,8 @@ Phase 7 hot-path outcome:
 
 - Shared meshes now reuse GPU vertex/index buffers instead of recreating them every frame.
 - Mesh uniforms and line resources now grow into reusable per-draw slots instead of allocating per draw.
+- Opaque repeated mesh work can reuse one indexed draw through instancing;
+  translucent work deliberately stays ordered and unbatched.
 - Editable or otherwise transient meshes can still bypass long-lived caching, so edit-mode correctness is preserved.
 
 ## File Map
@@ -415,11 +447,10 @@ crates/raf_render/src/
   editable.rs                 EditableMesh + vertex ops
 
 crates/raf_editor/src/panels/
-  viewport.rs                 thin editor shell
-  viewport_hud.rs             toolbar + info + axis gizmo
-  viewport_interaction.rs     object/edit mode input
-  viewport_overlay.rs         gizmo drawing + vertex overlay
-  viewport_grid.rs            2D/3D grid
+  native_application.rs       Winit composition root
+  native_workbench.rs         RafUI editor chrome
+  native_editor_runtime.rs   input/history/pacing/canvas orchestration
+  panels/viewport_controller.rs object/edit mode input
 ```
 
 ## Old vs New
@@ -433,6 +464,6 @@ crates/raf_editor/src/panels/
 | Gizmo drag | Inline in viewport | Dedicated transform controller |
 | Picking | Screen-space distance | Ray-sphere + ray-triangle |
 | Presentation | CPU image upload only | GPU texture or CPU pixel upload |
-| egui in renderer | Mixed | Isolated to editor shell |
+| UI toolkit in renderer | None | RafUI is composed by the native host |
 
 > Developed by Yoll. More info: [yoll.site](https://yoll.site).

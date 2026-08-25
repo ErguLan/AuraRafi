@@ -20,6 +20,24 @@ const APPLICATION_MENU_SEPARATOR_HEIGHT: f32 = 8.0;
 const APPLICATION_MENU_GAP: f32 = 2.0;
 const APPLICATION_MENU_PADDING: f32 = 4.0;
 
+/// Returns the authored height of an application-menu popup.
+///
+/// The native workbench positions the popup as a separate absolute surface;
+/// keeping this calculation here prevents the host rectangle from clipping a
+/// menu when its command count changes.
+pub fn application_menu_popup_height(menu: &UiMenu) -> f32 {
+    APPLICATION_MENU_PADDING * 2.0
+        + APPLICATION_MENU_GAP * 2.0
+        + menu
+            .items
+            .iter()
+            .map(|item| match item {
+                UiMenuItem::Separator => APPLICATION_MENU_SEPARATOR_HEIGHT,
+                UiMenuItem::Command(_) | UiMenuItem::Submenu(_) => APPLICATION_MENU_ROW_HEIGHT,
+            })
+            .sum::<f32>()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentBarStatus {
     Ready,
@@ -137,6 +155,7 @@ pub fn build_application_bar_surface(
         .with_child(agent_toolbar_button(palette, agent_status))
         .with_child(
             UiNode::new("application-bar.drag-region", UiNodeKind::Panel)
+                .with_class("application-bar-drag-region")
                 .with_layout(UiLayout {
                     grow: 1.0,
                     ..UiLayout::default()
@@ -187,16 +206,7 @@ pub fn build_application_bar_surface(
 /// nodes and emits the stable command ids on activation.
 pub fn build_application_menu_popup_surface(palette: StudioUiPalette, menu: &UiMenu) -> UiSurface {
     let tokens = palette.tokens();
-    let height = APPLICATION_MENU_PADDING * 2.0
-        + APPLICATION_MENU_GAP * 2.0
-        + menu
-            .items
-            .iter()
-            .map(|item| match item {
-                UiMenuItem::Separator => APPLICATION_MENU_SEPARATOR_HEIGHT,
-                UiMenuItem::Command(_) | UiMenuItem::Submenu(_) => APPLICATION_MENU_ROW_HEIGHT,
-            })
-            .sum::<f32>();
+    let height = application_menu_popup_height(menu);
     let mut root = UiNode::new("application-menu.popup", UiNodeKind::Panel)
         .with_class("application-menu-popup")
         .with_layout(UiLayout {
@@ -204,7 +214,7 @@ pub fn build_application_menu_popup_surface(palette: StudioUiPalette, menu: &UiM
             gap: 0.0,
             padding: UiSpacing::same(APPLICATION_MENU_PADDING),
             overflow: raf_ui::UiOverflow::Clip,
-            ..UiLayout::fixed(APPLICATION_MENU_POPUP_WIDTH, height)
+            ..UiLayout::fixed(APPLICATION_MENU_POPUP_WIDTH, height).with_z_index(1000)
         })
         .with_style(UiStyle {
             fill: tokens.surface_raised,
@@ -345,6 +355,16 @@ fn application_menu_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleShee
             )
             .when(raf_ui::UiStyleRuleState::Hovered),
             raf_ui::UiStyleRule::new(
+                raf_ui::UiStyleSelector::Class("application-bar-menu".to_string()),
+                raf_ui::UiStylePatch {
+                    fill: Some(tokens.accent),
+                    border: Some(tokens.accent_hot),
+                    text: Some([255, 255, 255, 255]),
+                    ..raf_ui::UiStylePatch::default()
+                },
+            )
+            .when(raf_ui::UiStyleRuleState::Active),
+            raf_ui::UiStyleRule::new(
                 raf_ui::UiStyleSelector::Class("application-menu-row".to_string()),
                 raf_ui::UiStylePatch {
                     fill: Some(tokens.surface_raised),
@@ -389,6 +409,29 @@ fn agent_bar_rule(
     .when(raf_ui::UiStyleRuleState::Always)
 }
 
+fn agent_bar_hover_rule(class: &str, fill: [u8; 4], border: [u8; 4]) -> raf_ui::UiStyleRule {
+    raf_ui::UiStyleRule::new(
+        raf_ui::UiStyleSelector::Class(class.to_string()),
+        raf_ui::UiStylePatch {
+            fill: Some(fill),
+            border: Some(border),
+            text: Some([255, 255, 255, 255]),
+            border_width: Some(1.0),
+            ..raf_ui::UiStylePatch::default()
+        },
+    )
+    .when(raf_ui::UiStyleRuleState::Hovered)
+}
+
+fn hover_tint(base: [u8; 4], accent: [u8; 4]) -> [u8; 4] {
+    [
+        ((base[0] as u16 * 3 + accent[0] as u16) / 4) as u8,
+        ((base[1] as u16 * 3 + accent[1] as u16) / 4) as u8,
+        ((base[2] as u16 * 3 + accent[2] as u16) / 4) as u8,
+        base[3],
+    ]
+}
+
 fn separator(id: &str, color: [u8; 4]) -> UiNode {
     UiNode::new(id, UiNodeKind::Separator)
         .with_layout(UiLayout::fixed(1.0, 18.0))
@@ -426,8 +469,11 @@ fn menu_button(
         ))
         .with_accessibility_label_key(label_key)
         .focusable()
+        // Application menus are opened by a primary click. Registering the
+        // same command as ContextMenu makes a secondary gesture toggle the
+        // menu through the same path and can immediately undo the open state
+        // when the native snapshot contains both transitions.
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
-        .with_event(UiEventBinding::command(UiEventKind::ContextMenu, command))
 }
 
 fn action_button(
@@ -505,7 +551,7 @@ fn command_search(palette: StudioUiPalette) -> UiNode {
                     max_length: 256,
                     multiline: false,
                     password: false,
-                    submit_command: Some("search.open".to_string()),
+                    submit_command: Some(crate::application_menu::command::SEARCH_OPEN.to_string()),
                 },
             )
             .with_class("application-bar-command-input")
@@ -513,7 +559,9 @@ fn command_search(palette: StudioUiPalette) -> UiNode {
         )
         .with_child(
             UiNode::new("application-bar.command-search.shortcut", UiNodeKind::Label)
-                .with_text_key("Ctrl+K")
+                .with_text_key(crate::editor_shortcuts::accelerator_for(
+                    crate::application_menu::command::SEARCH_OPEN,
+                ))
                 .with_text_style(UiTextStyle::button(tokens.text_muted))
                 .with_layout(UiLayout::fit_content()),
         )
@@ -619,14 +667,35 @@ fn application_bar_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleSheet
             raf_ui::UiStyleRule::new(
                 raf_ui::UiStyleSelector::Class("application-bar-menu".to_string()),
                 raf_ui::UiStylePatch {
-                    fill: Some(tokens.surface_raised),
+                    fill: Some(hover_tint(tokens.surface_raised, tokens.accent)),
                     border: Some(tokens.accent),
                     border_width: Some(1.0),
-                    text: Some(tokens.text),
+                    text: Some([255, 255, 255, 255]),
                     ..raf_ui::UiStylePatch::default()
                 },
             )
             .when(raf_ui::UiStyleRuleState::Hovered),
+            raf_ui::UiStyleRule::new(
+                raf_ui::UiStyleSelector::Class("application-bar-menu-open".to_string()),
+                raf_ui::UiStylePatch {
+                    fill: Some(tokens.accent),
+                    border: Some(tokens.accent_hot),
+                    border_width: Some(1.0),
+                    text: Some([255, 255, 255, 255]),
+                    ..raf_ui::UiStylePatch::default()
+                },
+            )
+            .when(raf_ui::UiStyleRuleState::Always),
+            raf_ui::UiStyleRule::new(
+                raf_ui::UiStyleSelector::Class("application-bar-secondary-action".to_string()),
+                raf_ui::UiStylePatch {
+                    fill: Some(tokens.accent),
+                    border: Some(tokens.accent_hot),
+                    text: Some([255, 255, 255, 255]),
+                    ..raf_ui::UiStylePatch::default()
+                },
+            )
+            .when(raf_ui::UiStyleRuleState::Active),
             agent_bar_rule(
                 "application-bar-agent",
                 tokens.surface_alt,
@@ -651,6 +720,26 @@ fn application_bar_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleSheet
                 tokens.danger,
                 tokens.text,
             ),
+            agent_bar_hover_rule(
+                "application-bar-agent",
+                hover_tint(tokens.surface_raised, tokens.accent),
+                tokens.accent,
+            ),
+            agent_bar_hover_rule(
+                "application-bar-agent-busy",
+                hover_tint(tokens.surface_raised, tokens.accent),
+                tokens.accent_hot,
+            ),
+            agent_bar_hover_rule(
+                "application-bar-agent-warning",
+                hover_tint(tokens.surface_raised, tokens.warning),
+                tokens.warning,
+            ),
+            agent_bar_hover_rule(
+                "application-bar-agent-error",
+                hover_tint(tokens.surface_raised, tokens.danger),
+                tokens.danger,
+            ),
             raf_ui::UiStyleRule::new(
                 raf_ui::UiStyleSelector::Class("application-bar-secondary-action".to_string()),
                 raf_ui::UiStylePatch {
@@ -665,10 +754,10 @@ fn application_bar_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleSheet
             raf_ui::UiStyleRule::new(
                 raf_ui::UiStyleSelector::Class("application-bar-secondary-action".to_string()),
                 raf_ui::UiStylePatch {
-                    fill: Some(tokens.surface_raised),
+                    fill: Some(hover_tint(tokens.surface_raised, tokens.accent)),
                     border: Some(tokens.accent),
                     border_width: Some(1.0),
-                    text: Some(tokens.text),
+                    text: Some([255, 255, 255, 255]),
                     ..raf_ui::UiStylePatch::default()
                 },
             )
@@ -722,7 +811,7 @@ fn application_bar_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleSheet
             raf_ui::UiStyleRule::new(
                 raf_ui::UiStyleSelector::Class("application-bar-window-button".to_string()),
                 raf_ui::UiStylePatch {
-                    fill: Some(tokens.surface_raised),
+                    fill: Some(hover_tint(tokens.surface_raised, tokens.accent)),
                     border: Some(tokens.accent),
                     border_width: Some(1.0),
                     ..raf_ui::UiStylePatch::default()

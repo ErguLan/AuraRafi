@@ -12,8 +12,12 @@ Use this skill to instantly align with the core philosophy and strict rules of t
 
 ## 1. Core Principles
 - **No dependencies on MSVC:** Always build using `stable-x86_64-pc-windows-gnu`.
-- **Zero-cost, lightweight:** Run on low-end potato hardware. Avoid heavy GPU abstractions unless explicitly toggled. Default viewport uses our custom CPU Viewport Painter algorithm via `egui`.
-- **Modularity over Boilerplate:** `crates/raf_editor/src/app.rs` is restricted severely. State configuration lives there, but rendering lives in `panels/*.rs` via macros or independent implementations.
+- **Zero-cost, lightweight:** Run on low-end potato hardware. Keep the native
+  Winit + RafUI + ApiGraphicBasic path event-driven, with bounded GPU caches and
+  CPU recovery; advanced GPU features remain capability-gated.
+- **Modularity over Boilerplate:** Keep the native composition root focused on
+  lifecycle and routing. State, retained surfaces, commands, renderer bridges,
+  and domain adapters live behind their actual responsibility boundaries.
 
 ## 2. Unification of Electronics & Games
 - Electronics components are defined dynamically in `ElectricalAssets/*.ron`. They are purely data-driven. Do NOT use hardcoded Rust templates in `library.rs`.

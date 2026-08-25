@@ -17,8 +17,6 @@ If the AI can spawn an entity or place a resistor, **your complement can too**.
 use raf_core::complement::{
     ComplementContext, ComplementDomain, ComplementPresentation, EngineComplement,
 };
-use egui::Ui;
-
 pub struct WeatherComplement {
     intensity: f32,
 }
@@ -48,19 +46,20 @@ impl EngineComplement for WeatherComplement {
         ComplementPresentation::BottomTab
     }
 
-    fn draw_ui(&mut self, ui: &mut Ui, context: &mut ComplementContext) {
-        ui.label("Rain Intensity:");
-        if ui.add(egui::Slider::new(&mut self.intensity, 0.0..=1.0)).changed() {
-            // Future implementation:
-            // context.tools.call("set_weather", ...)
-        }
+    fn draw_ui(&mut self, context: &mut ComplementContext) {
+        // The complement contract exposes domain state only. A retained RafUI
+        // surface should bind a typed action to this state through the host.
+        let _ = context;
+        let _current_intensity = self.intensity;
     }
 }
 ```
 
 ## Registering Your Complement
 
-Once written, your complement must be registered. Keep an eye on `crates/raf_editor/src/app.rs` (or where the `ComplementRegistry` is initialized):
+Once written, your complement must be registered at the native composition
+boundary (currently `native_application.rs` or the project host that owns the
+`ComplementRegistry`):
 
 ```rust
 let mut registry = ComplementRegistry::new();

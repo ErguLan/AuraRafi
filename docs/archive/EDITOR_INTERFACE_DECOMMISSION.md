@@ -60,7 +60,7 @@ file only exists to connect one of the retired interface surfaces.
 - `crates/raf_editor/src/project_settings_surface.rs`
 - `crates/raf_editor/src/console_surface.rs`
 
-### Legacy Egui editor panels and chrome
+### Legacy editor panels and chrome
 
 These are presentation paths, not domain state:
 
@@ -69,7 +69,7 @@ These are presentation paths, not domain state:
 - `crates/raf_editor/src/panels/sessions.rs`
 - `crates/raf_editor/src/panels/console.rs` when no longer used by the
   viewport-first shell
-- Egui `SidePanel`, `TopBottomPanel`, toolbar, tab, inspector, hierarchy,
+- The former side panels, top/bottom bars, toolbar, tabs, inspector, hierarchy,
   properties, sessions, assets, console, and editor-menu blocks in `app.rs`
 
 ### RafUI core modules not used by the retained engine/viewport
@@ -91,8 +91,8 @@ next interface generation.
 - loading screen and startup lifecycle;
 - Project Hub, unless the teardown proves it is coupled to retired editor
   surfaces;
-- native window host and the minimum Eframe/WGPU loop required to present a
-  viewport;
+- native window host and the minimum legacy presentation loop required to
+  present a viewport;
 - `RenderRuntime`, ApiGraphicBasic, GPU and CPU fallback paths;
 - Game scene graph, scene documents, runtime, camera and viewport interaction;
 - Electronics schematic/PCB documents, CAD renderer, selection and viewport
@@ -135,9 +135,9 @@ Completed 2026-07-26.
 - Docks and secondary surfaces: the bottom/context/inspector/status hosts,
   asset/agent/console/settings/project-settings/common-dialog surfaces,
   sessions surface and RafUI Studio surface.
-- Legacy Egui panels: hierarchy, properties, console, node editor, project
-  settings, sessions, shortcuts, complements, PCB property panels and
-  schematic property panels.
+- Legacy panels: hierarchy, properties, console, node editor, project settings,
+  sessions, shortcuts, complements, PCB property panels and schematic
+  property panels.
 - Retired viewport HUD/toolbar module `panels/viewport_hud.rs`; viewport
   rendering and interaction remain in `panels/viewport.rs` and its canvas
   support modules.
@@ -152,9 +152,9 @@ Completed 2026-07-26.
 - `editor_viewport_app.rs` is now the only editor application boundary. It
   keeps Loading, Project Hub and New Project, then routes Game to a full
   client-area 3D canvas and Electronics to a full client-area CAD canvas.
-- Eframe/WGPU remains only as the temporary window/texture host. No Egui
-  `SidePanel`, `TopBottomPanel`, menu, dock, tab, inspector or console is
-  created after a project opens.
+- The native graphics host remains responsible for window/texture presentation.
+  No legacy panel, menu, dock, tab, inspector or console is created after a
+  project opens.
 - `raf_ui_surface_bridge.rs`, `raf_ui_tooltip.rs`, `gpu_canvas.rs` and the
   Hub/loading/new-project surfaces remain entry-flow infrastructure only.
 - `raf_core`, `raf_render`, `RenderRuntime`, scene/CAD documents, viewport
@@ -179,10 +179,9 @@ Completed 2026-07-26.
 
 ### Intentional limitation
 
-The application still uses Eframe as a presentation host because the current
-viewport/CAD APIs accept Egui placement contexts. That is not an editor panel;
-it is the remaining renderer adapter and is the next architectural seam for a
-native RafUI workbench.
+The historical application used a presentation host because the viewport/CAD
+APIs accepted placement contexts. That was not an editor panel; it was a
+renderer adapter. The current seam is the native RafUI workbench.
 
 ## Reconstruction inventory of the removed interface
 
@@ -198,7 +197,7 @@ Game and Electronics canvases. The shell organized project navigation,
 authoring commands, selection, inspection, auxiliary tools and status without
 owning the scene, CAD document or renderer data. Reconstructing it means
 building a new coherent workbench and reconnecting existing domain actions; it
-does not mean reviving the deleted Egui/RafUI panel trees.
+does not mean reviving the deleted legacy/RafUI panel trees.
 
 The removed visible interface included:
 
@@ -276,7 +275,7 @@ must not be copied back as the permanent implementation.
 ### Reconstruction rule
 
 The future interface must preserve this capability inventory while replacing
-the old presentation architecture. No deleted Egui panel, RafUI Studio screen
-or bridge-specific tooltip/layout workaround is a design source of truth. The
-new source of truth is the domain action/state map, the retained renderer
+the old presentation architecture. No deleted legacy panel, RafUI Studio
+screen or bridge-specific tooltip/layout workaround is a design source of
+truth. The new source of truth is the domain action/state map, the retained renderer
 contract and the new RafUI foundation quality gates.

@@ -101,5 +101,5 @@ that the engine is preparing resources before the Hub is usable.
 ## Build Handoff
 
 Implement exactly this specification with the existing RafUI retained surface,
-ApiGraphicBasic presentation bridge, i18n files, and eframe viewport commands.
+ApiGraphicBasic presentation bridge, i18n files, and native viewport commands.
 Do not redesign the editor shell or add a separate startup renderer.

@@ -9,6 +9,10 @@ use std::io::{BufRead, BufReader};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// Default maximum number of tokens requested for one Agent response.
+/// Providers may impose a lower effective limit.
+pub const DEFAULT_MAX_TOKENS: u32 = raf_core::config::AGENT_MAX_RESPONSE_TOKENS_DEFAULT;
+
 /// Configuration for an OpenAI-compatible endpoint.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiConfig {
@@ -38,7 +42,7 @@ impl Default for OpenAiConfig {
             base_url: "https://openrouter.ai/api/v1".to_string(),
             model: "openrouter/auto".to_string(),
             api_key: String::new(),
-            max_tokens: 4096,
+            max_tokens: DEFAULT_MAX_TOKENS,
             temperature: 0.2,
             streaming: true,
         }
@@ -406,5 +410,27 @@ mod tests {
         assert_eq!(call.id.as_deref(), Some("call_1"));
         assert_eq!(call.name, "game_add");
         assert_eq!(call.arguments, r#"{"name":"Cube"}"#);
+    }
+
+    #[test]
+    fn request_body_uses_the_configured_response_limit() {
+        let mut config = OpenAiConfig::default();
+        config.max_tokens = 8_192;
+        let client = OpenAiClient::new(config);
+
+        let body = client
+            .request_body(
+                &[OpenAiMessage {
+                    role: "user".to_string(),
+                    content: serde_json::json!("hello"),
+                    tool_calls: None,
+                    tool_call_id: None,
+                }],
+                None,
+                false,
+            )
+            .expect("request body");
+
+        assert_eq!(body["max_tokens"], serde_json::json!(8_192));
     }
 }

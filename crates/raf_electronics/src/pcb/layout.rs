@@ -25,7 +25,7 @@ impl PcbLayer {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BoardOutline {
     pub points: Vec<Vec2>,
 }
@@ -77,7 +77,7 @@ impl BoardOutline {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PcbComponentPlacement {
     pub component_id: Uuid,
     pub designator: String,
@@ -91,7 +91,7 @@ pub struct PcbComponentPlacement {
     pub pad_nets: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PcbTrace {
     pub id: Uuid,
     pub net: String,
@@ -100,7 +100,7 @@ pub struct PcbTrace {
     pub points: Vec<Vec2>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PcbAirwire {
     pub net: String,
     pub from_component_id: Uuid,
@@ -109,7 +109,7 @@ pub struct PcbAirwire {
     pub to: Vec2,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PcbLayout {
     pub name: String,
     pub board_outline: BoardOutline,

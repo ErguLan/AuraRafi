@@ -13,8 +13,6 @@ pub mod library;
 pub mod netlist;
 pub mod pcb;
 pub mod schematic;
-pub mod schematic_graph;
-pub mod schematic_symbols;
 pub mod simulation;
 
 pub use cad_interaction::{pick as pick_cad_object, CadInteractionState, CadPickHit, CadSelection};
@@ -39,8 +37,4 @@ pub use pcb::{
     PcbComponentPlacement, PcbLayer, PcbLayout, PcbSyncSummary, PcbTrace,
 };
 pub use schematic::Schematic;
-pub use schematic_graph::{LegacyWarning, SchematicGraph};
-pub use schematic_symbols::{
-    schematic_symbol_recipe, symbol_kind_for_component, SchematicSymbolKind, SchematicSymbolRecipe,
-};
 pub use simulation::{simulate_dc, SimulationResults};

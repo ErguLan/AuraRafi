@@ -1,7 +1,7 @@
 //! Renderer-ready retained UI draw data.
 //!
-//! This module has no `eframe` dependency. A native WGPU host and the legacy
-//! editor bridge can consume the same draw list while migration happens.
+//! This module has no window-framework dependency. Native WGPU hosts consume
+//! the same draw list as off-screen and test presenters.
 
 use std::borrow::Cow;
 use std::collections::HashMap;

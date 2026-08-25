@@ -21,6 +21,7 @@ pub mod event;
 pub mod ffi;
 pub mod hot_reload;
 pub mod i18n;
+pub mod input;
 pub mod ipc;
 pub mod project;
 pub mod save_system;
@@ -42,6 +43,10 @@ pub use config::{EngineSettings, Language, RenderQuality, TargetPlatform, Theme}
 pub use ecs::world::GameWorld;
 pub use event::{EventBus, EventId};
 pub use hot_reload::{FileChange, HotReloadConfig, HotReloadState, WatchCategory};
+pub use input::{
+    CaptureMode, InputKey, InputKeySet, InputModifiers, InputOwner, InputRegionId, InputRouter,
+    InputSnapshot, PointerButton, PointerButtonSet, PointerCapture,
+};
 pub use ipc::{
     decode_frame, encode_frame, validate_hello, AttachHello, AttachWelcome, EndpointDescriptor,
     IpcFrame, ATTACH_DESCRIPTOR_FILE, ATTACH_DIRECTORY, ATTACH_PROTOCOL_VERSION,

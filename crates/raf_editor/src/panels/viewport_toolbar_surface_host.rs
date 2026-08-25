@@ -1,85 +1,103 @@
-//! Host/controller for the retained Game viewport toolbar.
+//! Native host for the Game viewport toolbar.
 
-use eframe::{egui, egui_wgpu};
-use raf_core::config::Language;
-use raf_render::api_graphic_basic::ui_surface::{StudioUiPalette, UiSurface};
-use raf_ui::UiAction;
+use raf_core::{InputOwner, InputRegionId, InputRouter};
+use raf_render::api_graphic_basic::ui_surface::{
+    DirectUiSurfaceHost, NativeGraphicsContext, NativeUiInputBridge, StudioUiPalette, UiAction,
+};
+use raf_render::api_graphic_basic::EditorUiLayer;
 
-use super::raf_ui_surface_bridge::RafUiSurfaceBridge;
+use crate::editor_layout::EditorRect;
+
 use super::viewport_toolbar_surface::{
     build_viewport_toolbar_surface, parse_viewport_toolbar_action, ViewportToolbarAction,
     ViewportToolbarState,
 };
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SurfaceKey {
-    palette: StudioUiPalette,
+pub struct ViewportToolbarSurfaceHost {
+    region: InputRegionId,
+    rect: EditorRect,
+    host: DirectUiSurfaceHost,
     state: ViewportToolbarState,
 }
 
-pub struct ViewportToolbarSurfaceHost {
-    bridge: RafUiSurfaceBridge,
-    cached_key: Option<SurfaceKey>,
-    cached_surface: Option<UiSurface>,
-    view_menu_open: bool,
-}
-
-impl Default for ViewportToolbarSurfaceHost {
-    fn default() -> Self {
-        Self {
-            bridge: RafUiSurfaceBridge::new("raf_ui_viewport_toolbar"),
-            cached_key: None,
-            cached_surface: None,
-            view_menu_open: false,
-        }
-    }
-}
-
 impl ViewportToolbarSurfaceHost {
-    pub fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        render_state: Option<&egui_wgpu::RenderState>,
+    pub fn new(
+        graphics: &NativeGraphicsContext<'_>,
+        rect: EditorRect,
         palette: StudioUiPalette,
-        language: Language,
-        mut state: ViewportToolbarState,
-    ) -> Vec<ViewportToolbarAction> {
-        state.view_menu_open = self.view_menu_open;
-        let key = SurfaceKey { palette, state };
-        if self.cached_key != Some(key) {
-            self.cached_surface = Some(build_viewport_toolbar_surface(palette, state));
-            self.cached_key = Some(key);
+    ) -> Self {
+        Self {
+            region: InputRegionId::from_static("native.editor.viewport-toolbar"),
+            rect,
+            host: graphics.create_ui_host(
+                build_viewport_toolbar_surface(palette, default_toolbar_state()),
+                [0, 0, 0, 0],
+            ),
+            state: default_toolbar_state(),
         }
-        let Some(surface) = self.cached_surface.as_ref() else {
-            return Vec::new();
-        };
-        let dispatched =
-            self.bridge
-                .show_transparent_ref(ui, render_state, palette, surface, |key| {
-                    raf_core::i18n::t(key, language)
-                });
-        let mut actions = Vec::new();
-        for dispatched_action in dispatched {
-            if let UiAction::Command { name } = &dispatched_action.action {
-                if name == "viewport.dropdown.view.toggle" {
-                    self.view_menu_open = !self.view_menu_open;
-                    continue;
-                }
-                if name == "viewport.view-2d" || name == "viewport.view-3d" {
-                    self.view_menu_open = false;
-                }
-            }
-            if let Some(action) = parse_viewport_toolbar_action(&dispatched_action.action) {
-                actions.push(action);
-            }
-        }
-        actions
     }
 
-    pub fn reset(&mut self) {
-        self.cached_key = None;
-        self.cached_surface = None;
-        self.view_menu_open = false;
-        self.bridge.reset_surface_interaction(None);
+    pub fn sync(&mut self, palette: StudioUiPalette, rect: EditorRect) {
+        self.rect = rect;
+        self.host
+            .set_surface(build_viewport_toolbar_surface(palette, self.state));
+    }
+
+    pub fn state(&self) -> ViewportToolbarState {
+        self.state
+    }
+
+    pub fn process_input(
+        &mut self,
+        input: &NativeUiInputBridge,
+        router: &mut InputRouter,
+    ) -> Vec<ViewportToolbarAction> {
+        let actions = self.host.process_routed_input(
+            self.rect.logical_size(),
+            input.scale_factor() as f32,
+            |key| raf_core::i18n::t(key, raf_core::Language::English),
+            input,
+            router,
+            InputOwner::RetainedUi(self.region),
+            raf_ui::UiRect::new(self.rect.x, self.rect.y, self.rect.width, self.rect.height),
+        );
+        actions
+            .into_iter()
+            .filter_map(|action| match action.action {
+                UiAction::Command { .. } => parse_viewport_toolbar_action(&action.action),
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn compositor_layer(
+        &mut self,
+        scale_factor: f32,
+        target_size: [u32; 2],
+    ) -> EditorUiLayer<'_> {
+        EditorUiLayer {
+            host: &mut self.host,
+            target_rect: self.rect.to_physical(scale_factor, target_size),
+            logical_size: self.rect.logical_size(),
+            raster_scale: scale_factor.max(1.0),
+        }
+    }
+}
+
+fn default_toolbar_state() -> ViewportToolbarState {
+    ViewportToolbarState {
+        select_mode: true,
+        tool: super::viewport_toolbar_surface::ViewportTool::Select,
+        render_style: super::viewport_toolbar_surface::ViewportRenderStyle::Solid,
+        polygons_visible: false,
+        grid_visible: true,
+        labels_visible: true,
+        view_mode: super::viewport_toolbar_surface::ViewportViewMode::View3d,
+        view_menu_open: false,
+        shading_menu_open: false,
+        primitive_menu_open: false,
+        building_style: raf_core::project::BuildingStyle::Free,
+        building_menu_open: false,
+        compact: false,
     }
 }

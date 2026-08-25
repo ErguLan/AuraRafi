@@ -35,12 +35,32 @@ Open the Game project in AuraRafi first. The editor publishes a short-lived
 local endpoint at `.aura_rafi/agent_endpoint.json`. Then run:
 
 ```text
-raf attach --project D:\Games\HorseDemo status --json
-raf attach --project D:\Games\HorseDemo capabilities --json
+raf editors --json
+raf attach status --json
+raf attach capabilities --json
 ```
+
+`raf editors` walks the recent-projects registry, probes each published
+endpoint with a short loopback connect, and marks every editor `LIVE` or
+`stale`. Each entry reports the project type (game/electronics) and the
+editor state (hub/project) so agents pick the right command domain before
+connecting. When exactly one editor is live, `raf attach` and
+`raf mcp serve --attach` pick it automatically; no project path is required.
+Pass `--project PATH` to target a specific editor when several are open.
+
+`raf editors --wait[=SECONDS]` retries the scan every 400 ms (default budget
+15 s) until a live editor appears, so automation may start before the engine.
+
+Attached `engine.status` is domain-agnostic: it reports the editor state,
+project type, entity count, and capabilities without touching a domain
+executor. `game.batch` runs up to 64 game operations in one round trip, each
+through the normal gateway (history and idempotency preserved).
 
 The handshake checks project identity, session, protocol version, and the
 local session token. It uses loopback only; no public server is started.
+Descriptors left behind by a crashed editor are reported as stale instead of
+failing with a raw socket error, and are replaced the next time that project
+opens.
 
 ## 4. Create a small scene safely
 

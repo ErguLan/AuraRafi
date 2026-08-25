@@ -1,7 +1,7 @@
 //! Render abstraction layer.
 //!
 //! The trait that separates "what to render" from "how to render".
-//! Today: CpuPainter implements it (egui shapes, zero GPU).
+//! Today: CpuPainter implements it with zero GPU allocation.
 //! Tomorrow: WgpuPipeline implements it (vertex buffers, shaders).
 //! Future: RayTracePipeline implements it (ray tracing, GI).
 //!
@@ -145,7 +145,7 @@ impl std::fmt::Display for RenderError {
 /// This is the user-facing selector.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActiveBackend {
-    /// CPU painter via egui (default, zero GPU, potato-friendly).
+    /// CPU painter (zero GPU, potato-friendly).
     CpuPainter,
     /// GPU rendering via wgpu (opt-in, requires GPU).
     Wgpu,

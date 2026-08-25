@@ -2,7 +2,7 @@
 //!
 //! Console, CLI, MCP and RafUI should all stop at this boundary. A concrete
 //! executor owns project/domain state; this module owns only protocol mapping
-//! and never creates a window or an eframe console.
+//! and never creates a window or a presentation console.
 
 use raf_core::{CommandEndpoint, CommandSource, EngineCommandRequest, EngineCommandResponse};
 use raf_core::{TransactionId, TransactionLedger};

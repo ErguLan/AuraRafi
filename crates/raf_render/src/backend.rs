@@ -1,7 +1,7 @@
 //! Render backend selector.
 //!
 //! Allows the engine to switch between:
-//! - CPU painter (egui shapes, zero GPU, runs on anything)
+//! - CPU rasterizer (zero GPU, runs on anything)
 //! - GPU pipeline (wgpu, for when scenes get heavy)
 //!
 //! Default policy is GPU-first with fallback available through the global
@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 /// Which rendering backend to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RenderBackend {
-    /// CPU-based rendering via egui painter (projection math + shape drawing).
+    /// CPU-based rendering via projection math and shape drawing.
     /// Zero GPU memory, zero shaders, zero buffers.
     /// Default for potato PCs and low-resource mode.
     CpuPainter,

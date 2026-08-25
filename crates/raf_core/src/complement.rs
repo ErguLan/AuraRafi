@@ -50,8 +50,8 @@ pub trait EngineComplement {
     /// Called every frame if Headless or if window is open
     fn on_update(&mut self, _context: &mut ComplementContext<'_>) {}
 
-    /// The actual egui code. Only called if Presentation is BottomTab or FloatingWindow.
-    /// The context is where we eventually bind UI frameworks (like egui).
+    /// Presentation-specific work belongs to the active host (RafUI or a
+    /// future game-facing UI layer), not to the engine complement contract.
     /// Kept out of raf_core to preserve separation of concerns. To draw we pass raw UI downcasted via Any or safely bridged later.
     fn draw_ui(&mut self, _context: &mut ComplementContext<'_>) {}
 }

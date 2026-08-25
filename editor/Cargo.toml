@@ -11,12 +11,10 @@ raf_render = { workspace = true }
 raf_editor = { workspace = true }
 raf_assets = { workspace = true }
 raf_electronics = { workspace = true }
-raf_nodes = { workspace = true }
 raf_ai = { workspace = true }
 raf_net = { workspace = true }
-eframe = { workspace = true }
-egui = { workspace = true }
+winit = { workspace = true }
+pollster = "0.3"
 image = { workspace = true }
-raw-window-handle = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

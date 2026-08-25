@@ -55,13 +55,20 @@ bridge-shaped file:
 | Time-based transitions | `crates/raf_ui/src/motion.rs` |
 | Logical/physical density contract | `crates/raf_ui/src/environment.rs` |
 | Layout, text measurement, and shared paint payload | `crates/raf_render/src/ApiGraphicBasic/ui_surface/` |
-| Window placement compatibility | `crates/raf_editor/src/panels/raf_ui_surface_bridge.rs` |
-| Tooltip document recipe | `crates/raf_editor/src/panels/raf_ui_tooltip.rs` |
+| Native surface placement and input boundary | `crates/raf_editor/src/native_surface.rs`, `native_workbench.rs`, `native_studio.rs` |
+| Tooltip document recipe | RafUI surface recipes and the native compositor |
 
 An overlay is logically owned by its source surface but rendered in a global
 window layer. This is the required boundary for tooltips, menus, popovers,
 drag previews, and future modals. Owner clipping and overlay clipping are
 different contracts and must not be conflated.
+
+Electronics applies the same native boundary to its CAD viewport: RafUI owns
+toolbar, navigator, inspector, docks, tooltips, and interaction affordances;
+ApiGraphicBasic owns grid, wires, pins, component composition, selection, and
+the minimap inside the effective canvas rectangle. Electronics does not use an
+Egui bridge or a host overlay. Its DRC and simulation tasks run outside the UI
+thread and report observable running, completed, cancelled, and failed states.
 
 `UiSizeMode::FitContent` is resolved after semantic text localization and
 atlas synchronization. The first layout may reserve a safe bound, but the
@@ -81,7 +88,7 @@ AuraRafi/
     raf_core/         Core systems: ECS, scene graph, commands, events, config
     raf_ui/           Rust-native retained UI model, docking, style, events
     raf_render/       ApiGraphicBasic runtime, WGPU adapter, CPU recovery, and native-backend direction
-    raf_editor/       Retained RafUI direction with an egui/eframe transitional shell
+    raf_editor/       Native Winit + retained RafUI editor shell
     raf_assets/       Asset importing, browsing, JSON primitive manifests
     raf_electronics/  Electronic design: schematics, PCBs, simulation, DRC, export
     raf_nodes/        Visual scripting (no-code) node system + executor
@@ -313,8 +320,9 @@ Lightweight pub/sub system with type-erased events:
 Shared graphics runtime for editor surfaces, with GPU hardware execution first when available and built-in CPU software fallback via ApiGraphicBasic.
 
 The renderer direction is canvas-first: scene, schematic, PCB, and the studio
-UI surface all move toward `RenderRuntime -> BasicDevice`, with egui kept as a
-temporary editor shell where it is still useful.
+UI surface use `RenderRuntime -> BasicDevice`. RafUI is the retained editor
+surface and ApiGraphicBasic composes it with the active canvas; there is no
+Native Winit editor host with retained RafUI in the runtime path.
 
 ### Canonical Active Graphics Path
 
@@ -326,11 +334,11 @@ Notes:
 
 - The scene viewport builds its scene frame through `viewport_bridge.rs` and `scene_renderer.rs` before delegating execution to `RenderRuntime`.
 - The schematic and PCB canvases feed the same shared graphics runtime, so all three surfaces now live under one graphics-device policy and one fallback contract.
-- `raf_ui` provides the retained, non-egui UI data model for chrome, docking, floating panels, events, palette, i18n text keys, and the application-menu command tree. `ApiGraphicBasic::ui_surface` compiles that data into one cacheable `UiSurfaceDrawList` consumed by either GPU presentation or CPU recovery; it does not build a second scene `BasicCommandList` for UI.
+- `raf_ui` provides the retained UI data model for chrome, docking, floating panels, events, palette, i18n text keys, and the application-menu command tree. `ApiGraphicBasic::ui_surface` compiles that data into one cacheable `UiSurfaceDrawList` consumed by the native compositor; it does not build a second scene `BasicCommandList` for UI.
 - `SelectionIdBuffer` defines the pixel-perfect picking contract for future GPU readback and CPU-neutral selection tests, with layer/priority policy controlled by `PickingPolicy`.
 - `RenderBackendTrait`, `scene_data`, `world_stream`, ray tracing, and other advanced rendering modules remain prepared infrastructure rather than the primary active path today.
 
-### ApiGraphicBasic Controlled Hybrid Direction
+### ApiGraphicBasic Native Ownership Direction
 
 `ApiGraphicBasic` is the permanent graphics owner. WGPU is the current private
 GPU adapter and compatibility implementation below it. The migration does not
@@ -345,27 +353,27 @@ uploads, memory budgets, command encoding, pipelines, synchronization, frame
 graphs, asset residency, diagnostics, and device recovery. WGPU may execute any
 capability that has not yet moved behind a complete owned contract.
 
-The engine can remain useful through several hybrid states:
+The engine can evolve through several private backend states:
 
 - **WGPU-backed ownership**: ApiGraphicBasic owns the public direction while
-  WGPU still executes the active GPU path.
+  its private WGPU executor performs the active GPU path.
 - **Encapsulated WGPU**: no upper layer imports WGPU; it exists only as a
   compatibility backend.
-- **Native coexistence**: a native platform backend reaches parity while WGPU
-  stays available as fallback and reference.
-- **Native default**: a validated native backend becomes the default for its
-  platform, with WGPU optional for unsupported hardware.
+- **Native backend qualification**: a native platform backend reaches parity
+  behind the same ApiGraphicBasic contract.
+- **Native selection**: a validated native backend becomes the selected
+  executor for its platform; upper layers remain unchanged.
 - **WGPU retired**: WGPU leaves the shipping dependency graph only after
   parity, recovery, memory, pacing, idle, and hardware gates pass.
 
 One backend is selected per device/surface execution path. Cross-API resource
 mixing inside a frame is forbidden unless an explicit and measured interop
 contract is designed. The complete rule and removal gates live in
-[ApiGraphicBasic Controlled Hybrid Rule](../.ai/APIGRAPHICBASIC.md).
+[ApiGraphicBasic Native Ownership Rule](../.ai/APIGRAPHICBASIC.md).
 
 #### Foundation 1 (implemented 2026-07-18)
 
-The first hybrid foundation is active while WGPU still executes GPU work:
+The first ownership foundation is active while WGPU still executes GPU work:
 
 - `ApiGraphicBasic` owns generational resource handles instead of exposing
   native resource pointers as the default vocabulary.
@@ -374,13 +382,13 @@ The first hybrid foundation is active while WGPU still executes GPU work:
 - `RenderRuntimeSnapshot` reports backend identity and the active contract data.
 - The host context is named `SharedGraphicsContext`; the old WGPU name remains
   only as a compatibility alias.
-- `SceneFrameOutput` wraps its GPU view in `GpuTextureView` and gives the
-  current egui/native bridge an explicit transitional escape hatch.
+- `SceneFrameOutput` wraps its GPU view in `GpuTextureView` for the native
+  ApiGraphicBasic compositor. No legacy texture bridge is required.
 
-The resource registry/eviction implementation, structural batching, complete
-DeviceHub unification, frame graph, and native DX12/Vulkan/Metal implementations
-remain future capabilities. This is deliberate hybrid progress, not a claim
-that WGPU has already been removed.
+The resource registry/eviction and adjacent structural batching foundations are
+active; complete DeviceHub unification, frame graph, and native
+DX12/Vulkan/Metal implementations remain future capabilities. This does not
+change the single ApiGraphicBasic ownership path.
 
 ### Scene Viewport Rendering Path (v0.9.0)
 
@@ -392,15 +400,17 @@ owned by RafUI.
 The scene viewport path was restructured into three clean layers:
 
 **Layer 1 — Editor Shell** (`raf_editor::panels::viewport`)
-- `viewport.rs`: Transitional egui panel shell. It still coordinates rect allocation, input, render requests, presentation, and overlays; those responsibilities must continue shrinking toward renderer-side hosts instead of growing here.
-- `viewport_hud.rs`: Toolbar (G/R/S/F buttons), 2D/3D toggle, OBJ/VTX mode badge, info pill, axis gizmo corner widget.
-- `viewport_interaction.rs`: Object mode input (gizmo drag, entity pick, shift-select), edit mode input (vertex click/drag), keyboard shortcuts (G/R/S/F/Tab).
-- `viewport_overlay.rs`: Entity labels, gizmo arrows/arrowheads/rotation rings/scale cubes, vertex edit dots/edges.
-- `viewport_grid.rs`: 2D flat grid and 3D projected grid via egui painter.
+- `native_application.rs`: Winit lifecycle, event routing, persistence, and attached CLI/MCP command dispatch.
+- `native_workbench.rs`: Retained workbench state and lifecycle coordinator.
+- `native_workbench_input.rs`: Native input dispatch and semantic intent routing.
+- `native_workbench_surface.rs`: Retained composition for the application bar,
+  hierarchy, inspector, viewport toolbar, assets, and status dock.
+- `native_editor_runtime.rs`: Neutral input router, command registry, scene history, frame pacing, dynamic resolution, and canvas orchestration.
+- `editor_layout.rs`: DPI-aware layout contract shared by panel placement and viewport input rectangles.
 
 **Layer 2 — Bridge** (`raf_render::bridge`)
-- `viewport_bridge.rs`: Owns camera state (orbit yaw/pitch/distance, 2D offset/zoom), `SceneRenderer`, `ViewportEditSession`, and `ViewportTransformController`. Exposes `handle_camera_input()`, `render()`, `pick_entity()`, and transform/edit drag APIs. Zero egui dependency.
-- `input_handler.rs`: Per-entity `EditableMesh` state via `ViewportEditSession`. Vertex picking (10px screen threshold), vertex dragging (world delta → inverse rotation → local space move), precise entity picking (ray-sphere broad phase + ray-triangle narrow phase), projected overlay data for egui painting.
+- `viewport_bridge.rs`: Owns camera state (orbit yaw/pitch/distance, 2D offset/zoom), `SceneRenderer`, `ViewportEditSession`, and `ViewportTransformController`. Exposes `handle_camera_input()`, `render()`, `pick_entity()`, and transform/edit drag APIs.
+- `input_handler.rs`: Per-entity `EditableMesh` state via `ViewportEditSession`. Vertex picking (10px screen threshold), vertex dragging (world delta → inverse rotation → local space move), precise entity picking (ray-sphere broad phase + ray-triangle narrow phase), and renderer-neutral overlay data.
 - `transform_controller.rs`: `ViewportTransformController` with gizmo state and drag lifecycle (translate/rotate/scale). Projects mouse delta onto active axis in screen space, scales to world units via orbit distance.
 
 **Layer 3 — Pixel Production** (`raf_render::scene_renderer`)
@@ -470,17 +480,19 @@ Architecture: `SceneGraph -> SceneRenderData -> RenderBackendTrait -> Backend`
 
 ## Electronics (raf_electronics)
 
-- `schematic_graph`: **Independent** data graph for electronics, completely separated from game SceneGraph
-  - `SchematicNode`: component placement with canvas position, rotation, layer, selection
-  - `Net`: electrical connection tracking with pin references and computed voltage
-  - Own pick_component/pick_wire (click detection), selection, net rebuilding
-  - RON save/load, legacy Schematic conversion (backwards compat)
-  - Does NOT depend on raf_core::SceneGraph (prevents "Frostbite problem")
+- `schematic`: authoritative logical document with components, pins and wires.
+- `cad_scene`: renderer-neutral retained scene for Schematic and PCB, including
+  component hit bounds, pin markers, wires, board outline and structured DRC markers.
+- `pcb`: physical layout, footprints, pads, traces, airwires and outline.
+- `drc`, `simulation`, `netlist`, `export`: analysis and derived electrical
+  outputs.
+- `Schematic` is the sole logical Electronics document authority. The former
+  `schematic_graph` experiment is removed from the source tree and is not a
+  recovery path.
 
 ## Editor (raf_editor)
 
-Visual editor with an `egui`/`eframe` transitional shell and retained RafUI
-surfaces:
+Visual editor with a native Winit shell and retained RafUI surfaces:
 
 ### Application Flow
 
@@ -491,7 +503,9 @@ surfaces:
 
 ### Panel Layout
 
-- **Top**: Menu bar (File, Edit, View, Project) + Build/Run button + FPS
+- **Top**: Native RafUI menu bar (File, Edit, View, Project, Help) plus
+  project context, command search, settings, and native window controls. Play
+  and Run are intentionally not exposed while runtime truth is being stabilized.
 - **Left**: Hierarchy panel (scene tree with collapsible nodes)
 - **Right**: Properties panel (transform, color/material, primitive type, visibility)
 - **Center**: Viewport (scene view) or Schematic view (electronics)
@@ -506,7 +520,7 @@ surfaces:
 
 ### Panels
 
-- **Viewport**: Modular orthographic-2D/perspective-3D editor shell (`viewport.rs`) delegating to `raf_render::bridge`. Z-buffered CPU rendering with Solid/Wireframe/Preview modes, shared CPU/GPU line batching, bounded mesh reuse, projected grid, entity labels, transform gizmos (G/R/S), vertex edit mode, and RafUI-compatible overlays. Sub-modules: `viewport_hud.rs`, `viewport_interaction.rs`, `viewport_overlay.rs`, `viewport_grid.rs`.
+- **Viewport**: Modular orthographic-2D/perspective-3D native editor shell delegating to `raf_render::bridge`. Z-buffered CPU rendering with Solid/Wireframe/Preview modes, shared CPU/GPU line batching, bounded mesh reuse, projected grid, entity labels, transform gizmos (G/R/T), vertex edit mode, and RafUI-compatible overlays. Composition lives in `native_application.rs`, `native_workbench.rs`, `native_editor_runtime.rs`, and `panels/viewport_controller.rs`.
 - **Hierarchy**: Scene tree with selection and collapsible groups
 - **Properties**: Transform editing, RGB color picker with 7 presets, primitive type dropdown, visibility toggle
 - **Console**: Log output with severity filters and auto-scroll
@@ -514,7 +528,10 @@ surfaces:
 - **Node Editor**: Visual scripting canvas with bezier connections
 - **Schematic View**: Electronics component placement and wiring
 - **Settings**: Theme, language, quality, editor prefs, Simple Mode toggle, target platform selector
-- **AI Chat**: Chat interface structure (not yet functional)
+- **AI Chat**: Native RafUI Agent surface with sessions, model/mode controls,
+  approvals, pagination, and the existing provider/runtime boundary. It remains
+  unavailable until its configured provider is ready; the surface itself is not
+  a deleted or placeholder panel.
 
 ## Assets (raf_assets)
 
@@ -538,8 +555,20 @@ surfaces:
 - Gerber export structure for JLCPCB/PCBWay (manufacturer-specific layers defined, placeholder until PCB 3D layout)
 - Circuit sharing: RON serialization for shareable compact strings
 - **Schematic document split**: Electronics projects now persist their editor document as `schematic.ron`; `scene.ron` remains only for game projects.
-- **Schematic editor modularization**: The editor-side schematic workflow is split between `raf_editor/src/panels/schematic_view.rs`, `raf_editor/src/panels/schematic_view/canvas.rs`, and `raf_editor/src/panels/schematic_panels.rs` so the interaction layer no longer lives in a single large file.
-- **Render ownership for symbols**: Code-drawn schematic symbols now live in `raf_render/src/ApiGraphicBasic/schematic_symbols.rs` and are imported into the editor instead of being drawn ad-hoc inside the UI panel code.
+- **Schematic editor modularization**: The active workflow is split between
+  `electronics_controller.rs`, `electronics_controller_interaction.rs`,
+  `native_electronics.rs`,
+  `native_workbench.rs`, `native_workbench_surface.rs`,
+  `native_workbench_input.rs`, `native_workbench_electronics.rs`,
+  `native_workbench_settings.rs`, `native_workbench_helpers.rs` and the
+  retained `panels/electronics_*_surface.rs` modules. The former widget panels
+  are no longer active files.
+- **Native Electronics assets**: Schematic component artwork is loaded from the native PNG catalog in `editor/assets/electronics/library/` and presented by the RafUI canvas overlay. CAD geometry keeps hit regions, pins and wires without procedural component-symbol strokes.
+- **Electronics viewport boundary**: `EditorFrameLayout::electronics_canvas()`
+  is the only CAD target for the Electronics grid, wires and native artwork.
+  The RafUI overlay uses local canvas coordinates, `UiOverflow::Clip` and the
+  same physical target rectangle; toolbar, panels, docks and modals remain
+  outside that surface. Games keeps its existing canvas policy.
 - **Open-source extension hooks**: `raf_electronics::extensions` now exposes a lightweight registry for source mods to inject additional `ComponentTemplate`s and custom DRC/ERC rules without patching the built-in library or hard-coded rule list.
 
 ## Visual Scripting (raf_nodes & raf_editor)
@@ -593,7 +622,9 @@ surfaces:
 
 ## Recent Schematic UX Stabilization
 
-- `raf_editor::app` now switches left/right panels by `ViewportMode`: scene projects keep hierarchy/properties, while electronics projects use schematic-specific hierarchy and property inspectors.
+- `native_application.rs` and `native_workbench.rs` switch the retained
+  left/right surfaces by project type: scene projects keep hierarchy/properties,
+  while Electronics projects use the native navigator and property inspector.
 - The center panel now treats the schematic editor as a first-class workspace instead of a scene-editor variant, including proper modified-state tracking after canvas interactions.
 - Electronics project load/save flow was aligned with project type: opening an electronics project restores `schematic.ron`, and saving writes the same file back through the editor document helpers.
 - Localized schematic UI labels were expanded in `raf_core/locales/en.json` and `crates/raf_core/locales/es.json` so the new hierarchy, properties, hover hints, and status summaries resolve through the same i18n layer as the rest of the editor.
@@ -613,10 +644,10 @@ surfaces:
 - `raf_electronics::pcb` now owns the physical board model:
   - `footprint.rs`: built-in footprint definitions and generic fallback pad generation.
   - `layout.rs`: `PcbLayout`, `BoardOutline`, placed components, traces, airwires, and schematic-to-PCB sync.
-- `raf_editor` now owns the PCB UX layer:
-  - `panels/pcb_view.rs` + `panels/pcb_view/canvas.rs`: 2D PCB canvas, component placement, airwire routing, outline drafting.
-  - `panels/pcb_panels.rs`: PCB hierarchy and properties side panels.
-  - `pcb_document.rs`: load/save helpers for `pcb_layout.ron`.
+- `raf_editor` now owns the PCB UX layer through
+  `electronics_controller.rs`, `native_electronics.rs` and the retained
+  `panels/electronics_*_surface.rs` modules. `pcb_document.rs` owns load/save
+  for `pcb_layout.ron`.
 - Save flow for electronics projects now persists two coordinated documents:
   - `schematic.ron`: logical circuit and simulation source.
   - `pcb_layout.ron`: board outline, placements, traces, and unresolved airwires.

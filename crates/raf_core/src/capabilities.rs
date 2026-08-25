@@ -2,7 +2,7 @@
 //!
 //! The JSON catalog remains the single authoring source for editor commands.
 //! This module gives headless clients a lightweight, renderer/UI-independent
-//! view of that catalog without depending on `raf_editor` or Egui.
+//! view of that catalog without depending on `raf_editor` or a UI toolkit.
 
 use serde::{Deserialize, Serialize};
 

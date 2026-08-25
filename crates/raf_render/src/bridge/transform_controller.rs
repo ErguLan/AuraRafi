@@ -35,6 +35,19 @@ pub struct ViewportTransformController {
     last_drag_mouse: Option<[f32; 2]>,
 }
 
+/// One frame of gizmo drag math computed against an arbitrary gizmo origin.
+///
+/// Multi-selection drags use this instead of [`Self::apply_drag`] because the
+/// editor controller owns every member transform; the renderer-side controller
+/// only resolves pointer motion into axis-space quantities.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisDragOutcome {
+    /// Signed world-units advance along the dragged axis (translate/scale).
+    pub axis_delta: f32,
+    /// Signed accumulated rotation in radians around the dragged axis.
+    pub rotation_radians: f32,
+}
+
 impl Default for ViewportTransformController {
     fn default() -> Self {
         Self {
@@ -62,6 +75,12 @@ impl ViewportTransformController {
     }
 
     pub fn set_mode(&mut self, mode: GizmoMode) {
+        // A mode switch during a drag must not leave the previous controller
+        // owning the pointer. The next gesture should start from a clean
+        // axis/start-transform state.
+        if self.drag_axis != GizmoAxis::None {
+            self.end_drag();
+        }
         self.gizmo.mode = mode;
         self.gizmo.active_axis = GizmoAxis::None;
         self.hover_scale_sign = 0.0;
@@ -146,10 +165,11 @@ impl ViewportTransformController {
                 vp_h,
             ),
             GizmoMode::Scale => {
-                let hit = picking::pick_gizmo_scale_handle(
+                let hit = picking::pick_gizmo_scale_handle_scaled(
                     pointer_local,
                     entity_pos,
                     node.scale,
+                    presentation_scale,
                     view_proj,
                     vp_w,
                     vp_h,
@@ -216,14 +236,32 @@ impl ViewportTransformController {
                 vp_h,
             ),
             GizmoMode::Scale => {
-                let hit = picking::pick_gizmo_scale_handle(
+                let picked = picking::pick_gizmo_scale_handle_scaled(
                     pointer_local,
                     entity_pos,
                     node.scale,
+                    presentation_scale,
                     view_proj,
                     vp_w,
                     vp_h,
                 );
+                // Hover is resolved immediately before pointer dispatch in the
+                // editor. Prefer that axis when it is available so a handle
+                // that is visibly lit cannot lose the press to entity drag
+                // because the pointer moved a fraction of a pixel between
+                // frames.
+                let hover_sign = if self.hover_scale_sign == 0.0 {
+                    1.0
+                } else {
+                    self.hover_scale_sign.signum()
+                };
+                let hovered = match self.gizmo.active_axis {
+                    GizmoAxis::X => Some((0, 0.0, hover_sign)),
+                    GizmoAxis::Y => Some((1, 0.0, hover_sign)),
+                    GizmoAxis::Z => Some((2, 0.0, hover_sign)),
+                    GizmoAxis::None => None,
+                };
+                let hit = hovered.or(picked);
                 self.drag_scale_sign = hit.map(|(_, _, sign)| sign).unwrap_or(1.0);
                 hit.map(|(axis_idx, distance, _)| (axis_idx, distance))
             }
@@ -301,28 +339,17 @@ impl ViewportTransformController {
         } else {
             entity_pos
         };
-        let axis_end_world = handle_origin_world + face_dir;
-        let origin_screen = transform::project_point(handle_origin_world, view_proj, vp_w, vp_h);
-        let axis_screen = transform::project_point(axis_end_world, view_proj, vp_w, vp_h);
-        let (Some((o_s, _)), Some((a_s, _))) = (origin_screen, axis_screen) else {
+        let Some((axis_screen_dir, axis_len)) =
+            screen_axis_basis(handle_origin_world, face_dir, view_proj, vp_w, vp_h)
+        else {
             return false;
         };
-
-        let axis_screen_dir = [a_s[0] - o_s[0], a_s[1] - o_s[1]];
-        let axis_len = (axis_screen_dir[0] * axis_screen_dir[0]
-            + axis_screen_dir[1] * axis_screen_dir[1])
-            .sqrt();
         if axis_len < 1.0 {
             return false;
         }
 
-        let mouse_delta = [
-            current_mouse[0] - start_mouse[0],
-            current_mouse[1] - start_mouse[1],
-        ];
-        let projection =
-            (mouse_delta[0] * axis_screen_dir[0] + mouse_delta[1] * axis_screen_dir[1]) / axis_len;
-        let delta = projection * (orbit_distance / (vp_w.min(vp_h) * 0.5));
+        let delta = pointer_axis_projection(start_mouse, current_mouse, &axis_screen_dir, axis_len)
+            * (orbit_distance / (vp_w.min(vp_h) * 0.5));
 
         match self.gizmo.mode {
             GizmoMode::Translate => {
@@ -378,10 +405,8 @@ impl ViewportTransformController {
                     // the object rotated backwards. By accumulating the
                     // per-frame delta we keep rotating in the same direction.
                     let last = self.last_drag_mouse.unwrap_or(start_mouse);
-                    let inc_mouse = [current_mouse[0] - last[0], current_mouse[1] - last[1]];
-                    let inc_projection = (inc_mouse[0] * axis_screen_dir[0]
-                        + inc_mouse[1] * axis_screen_dir[1])
-                        / axis_len;
+                    let inc_projection =
+                        pointer_axis_projection(last, current_mouse, &axis_screen_dir, axis_len);
                     let inc_delta = inc_projection * (orbit_distance / (vp_w.min(vp_h) * 0.5));
                     let inc_radians = inc_delta * std::f32::consts::FRAC_PI_4; // 45 deg base
                     self.accumulated_rotation += axis_dir * inc_radians;
@@ -409,6 +434,210 @@ impl ViewportTransformController {
         true
     }
 
+    /// Hover hit-testing against an explicit gizmo origin, used when the
+    /// gizmo represents a multi-selection group anchored at its centroid.
+    pub fn update_hover_world(
+        &mut self,
+        origin: Vec3,
+        entity_scale: Vec3,
+        view_proj: &Mat4,
+        pointer_local: [f32; 2],
+        vp_w: f32,
+        vp_h: f32,
+        presentation_scale: f32,
+    ) {
+        if self.drag_axis != GizmoAxis::None {
+            self.gizmo.active_axis = self.drag_axis;
+            return;
+        }
+        let gizmo_hit = match self.gizmo.mode {
+            GizmoMode::Rotate => picking::pick_gizmo_rotation_ring_scaled(
+                pointer_local,
+                origin,
+                presentation_scale,
+                view_proj,
+                vp_w,
+                vp_h,
+            ),
+            GizmoMode::Translate => picking::pick_gizmo_arrow_scaled(
+                pointer_local,
+                origin,
+                presentation_scale,
+                view_proj,
+                vp_w,
+                vp_h,
+            ),
+            GizmoMode::Scale => {
+                let hit = picking::pick_gizmo_scale_handle(
+                    pointer_local,
+                    origin,
+                    entity_scale,
+                    view_proj,
+                    vp_w,
+                    vp_h,
+                );
+                self.hover_scale_sign = hit.map(|(_, _, sign)| sign).unwrap_or(0.0);
+                hit.map(|(axis_idx, distance, _)| (axis_idx, distance))
+            }
+        };
+        if self.gizmo.mode != GizmoMode::Scale {
+            self.hover_scale_sign = 0.0;
+        }
+        self.gizmo.active_axis = gizmo_hit
+            .map(|(axis_idx, _)| [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z][axis_idx])
+            .unwrap_or(GizmoAxis::None);
+    }
+
+    /// Begins a drag against an explicit gizmo origin without reading member
+    /// transforms from the scene. Member start states are owned by the
+    /// editor-side controller.
+    pub fn begin_drag_world(
+        &mut self,
+        origin: Vec3,
+        entity_scale: Vec3,
+        view_proj: &Mat4,
+        pointer_local: [f32; 2],
+        vp_w: f32,
+        vp_h: f32,
+        presentation_scale: f32,
+    ) {
+        let gizmo_hit = match self.gizmo.mode {
+            GizmoMode::Rotate => picking::pick_gizmo_rotation_ring_scaled(
+                pointer_local,
+                origin,
+                presentation_scale,
+                view_proj,
+                vp_w,
+                vp_h,
+            ),
+            GizmoMode::Translate => picking::pick_gizmo_arrow_scaled(
+                pointer_local,
+                origin,
+                presentation_scale,
+                view_proj,
+                vp_w,
+                vp_h,
+            ),
+            GizmoMode::Scale => picking::pick_gizmo_scale_handle(
+                pointer_local,
+                origin,
+                entity_scale,
+                view_proj,
+                vp_w,
+                vp_h,
+            )
+            .map(|(axis_idx, distance, _)| (axis_idx, distance)),
+        };
+        if let Some((axis_idx, _)) = gizmo_hit {
+            self.drag_axis = [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z][axis_idx];
+            self.gizmo.active_axis = self.drag_axis;
+            self.drag_start_mouse = Some(pointer_local);
+            self.drag_start_pos = Some(origin);
+            self.drag_start_scale = Some(entity_scale);
+            self.drag_start_rotation = Some(Vec3::ZERO);
+            self.accumulated_rotation = Vec3::ZERO;
+            self.last_drag_mouse = Some(pointer_local);
+        }
+    }
+
+    /// Resolves the current pointer into axis-space drag quantities without
+    /// mutating any scene node. Returns `None` when no drag is active or the
+    /// axis projects degenerately this frame.
+    ///
+    /// Rotation accumulates internally exactly like [`Self::apply_drag`], so
+    /// alternating between both entry points mid-gesture stays consistent.
+    pub fn compute_axis_drag(
+        &mut self,
+        view_proj: &Mat4,
+        current_mouse: [f32; 2],
+        orbit_distance: f32,
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Option<AxisDragOutcome> {
+        if self.drag_axis == GizmoAxis::None {
+            return None;
+        }
+        let start_mouse = self.drag_start_mouse?;
+        let axis_dir = match self.drag_axis {
+            GizmoAxis::X => Vec3::X,
+            GizmoAxis::Y => Vec3::Y,
+            GizmoAxis::Z => Vec3::Z,
+            GizmoAxis::None => return None,
+        };
+        let face_sign = if self.gizmo.mode == GizmoMode::Scale {
+            let sign = self.drag_scale_sign.signum();
+            if sign == 0.0 {
+                1.0
+            } else {
+                sign
+            }
+        } else {
+            1.0
+        };
+        let face_dir = axis_dir * face_sign;
+
+        let entity_pos = self.drag_start_pos.unwrap_or(Vec3::ZERO);
+        let handle_origin_world = if self.gizmo.mode == GizmoMode::Scale {
+            let start_scale = self
+                .drag_start_scale
+                .unwrap_or(Vec3::ONE)
+                .abs()
+                .max(Vec3::splat(0.05));
+            Vec3::new(
+                if self.drag_axis == GizmoAxis::X {
+                    start_scale.x * 0.5 * face_dir.x.signum()
+                } else {
+                    0.0
+                },
+                if self.drag_axis == GizmoAxis::Y {
+                    start_scale.y * 0.5 * face_dir.y.signum()
+                } else {
+                    0.0
+                },
+                if self.drag_axis == GizmoAxis::Z {
+                    start_scale.z * 0.5 * face_dir.z.signum()
+                } else {
+                    0.0
+                },
+            ) + entity_pos
+        } else {
+            entity_pos
+        };
+
+        let (axis_screen_dir, axis_len) =
+            screen_axis_basis(handle_origin_world, face_dir, view_proj, vp_w, vp_h)?;
+        if axis_len < 1.0 {
+            return None;
+        }
+
+        let delta = pointer_axis_projection(start_mouse, current_mouse, &axis_screen_dir, axis_len)
+            * (orbit_distance / (vp_w.min(vp_h) * 0.5));
+
+        match self.gizmo.mode {
+            GizmoMode::Rotate => {
+                let last = self.last_drag_mouse.unwrap_or(start_mouse);
+                let inc_projection =
+                    pointer_axis_projection(last, current_mouse, &axis_screen_dir, axis_len);
+                let inc_delta = inc_projection * (orbit_distance / (vp_w.min(vp_h) * 0.5));
+                let inc_radians = inc_delta * std::f32::consts::FRAC_PI_4;
+                self.accumulated_rotation += axis_dir * inc_radians;
+                self.last_drag_mouse = Some(current_mouse);
+                Some(AxisDragOutcome {
+                    axis_delta: 0.0,
+                    rotation_radians: match self.drag_axis {
+                        GizmoAxis::X => self.accumulated_rotation.x,
+                        GizmoAxis::Y => self.accumulated_rotation.y,
+                        _ => self.accumulated_rotation.z,
+                    },
+                })
+            }
+            GizmoMode::Translate | GizmoMode::Scale => Some(AxisDragOutcome {
+                axis_delta: delta,
+                rotation_radians: 0.0,
+            }),
+        }
+    }
+
     pub fn end_drag(&mut self) {
         self.drag_axis = GizmoAxis::None;
         self.gizmo.active_axis = GizmoAxis::None;
@@ -421,4 +650,30 @@ impl ViewportTransformController {
         self.accumulated_rotation = Vec3::ZERO;
         self.last_drag_mouse = None;
     }
+}
+
+/// Projects a world-space handle origin plus one world-unit face direction
+/// into screen space, returning the screen axis direction and its length.
+fn screen_axis_basis(
+    handle_origin_world: Vec3,
+    face_dir: Vec3,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<([f32; 2], f32)> {
+    let origin_screen = transform::project_point(handle_origin_world, view_proj, vp_w, vp_h);
+    let axis_screen =
+        transform::project_point(handle_origin_world + face_dir, view_proj, vp_w, vp_h);
+    let (Some((o_s, _)), Some((a_s, _))) = (origin_screen, axis_screen) else {
+        return None;
+    };
+    let dir = [a_s[0] - o_s[0], a_s[1] - o_s[1]];
+    let len = (dir[0] * dir[0] + dir[1] * dir[1]).sqrt();
+    Some((dir, len))
+}
+
+/// Signed projection of a pointer displacement onto a screen-space axis.
+fn pointer_axis_projection(from: [f32; 2], to: [f32; 2], dir: &[f32; 2], len: f32) -> f32 {
+    let delta = [to[0] - from[0], to[1] - from[1]];
+    (delta[0] * dir[0] + delta[1] * dir[1]) / len
 }

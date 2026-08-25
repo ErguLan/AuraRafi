@@ -119,6 +119,50 @@ pub struct ProjectSettings {
     /// Attach a default script to newly created entities.
     #[serde(default)]
     pub auto_attach_scripts: bool,
+    /// Editor building assist for Game projects. Free keeps today's behavior;
+    /// Organized quantizes transforms and blocks entity overlap.
+    #[serde(default)]
+    pub building_style: BuildingStyle,
+    /// Fixed translation/scale quantum in meters used by the organized
+    /// building style. 1.0 places objects on whole meters.
+    #[serde(default = "default_building_snap_step")]
+    pub building_snap_step: f32,
+}
+
+/// Building assist style for the Game viewport editor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BuildingStyle {
+    /// Unconstrained authoring, identical to the historical behavior.
+    Free,
+    /// Grid-quantized movement with collision-aware clamping against walls.
+    Organized,
+}
+
+impl Default for BuildingStyle {
+    fn default() -> Self {
+        Self::Free
+    }
+}
+
+impl BuildingStyle {
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Free => "free",
+            Self::Organized => "professional",
+        }
+    }
+
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        match slug {
+            "free" => Some(Self::Free),
+            "professional" => Some(Self::Organized),
+            _ => None,
+        }
+    }
+}
+
+fn default_building_snap_step() -> f32 {
+    1.0
 }
 
 impl Default for ProjectSettings {
@@ -145,6 +189,8 @@ impl Default for ProjectSettings {
             allowed_script_languages: ScriptLanguageFlags::DEFAULT,
             script_execution_mode: ScriptExecutionMode::EditorOnly,
             auto_attach_scripts: false,
+            building_style: BuildingStyle::Free,
+            building_snap_step: default_building_snap_step(),
         }
     }
 }

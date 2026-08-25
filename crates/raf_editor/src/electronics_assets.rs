@@ -1,38 +1,60 @@
+//! Background asset atlas for the native Electronics surfaces.
+//!
+//! The old atlas stored widget texture handles. Native AGB surfaces consume
+//! immutable RGBA uploads instead, so this module keeps the useful part—the
+//! worker, de-duplication and failure tracking—without owning a UI toolkit.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::{self, Receiver, Sender};
 
-use eframe::egui::{self, Color32, Rect, TextureHandle};
 use image::RgbaImage;
 
 const FALLBACK_ASSET: &str = "symbols/generic.png";
 
-struct PendingAssetUpload {
-    name: &'static str,
-    size: [usize; 2],
-    pixels: Vec<u8>,
+#[derive(Debug, Clone)]
+pub struct ElectronicsAssetImage {
+    pub name: String,
+    pub size: [u32; 2],
+    pub pixels: Vec<u8>,
 }
 
-enum AssetWorkerResult {
-    Ready(PendingAssetUpload),
-    Failed(&'static str),
+enum WorkerResult {
+    Ready(ElectronicsAssetImage),
+    Failed { path: String, error: String },
 }
 
 pub struct ElectronicsAssetAtlas {
-    textures: HashMap<&'static str, TextureHandle>,
-    queued: HashSet<&'static str>,
-    failed: HashSet<&'static str>,
-    request_tx: Sender<&'static str>,
-    result_rx: Receiver<AssetWorkerResult>,
+    images: HashMap<String, ElectronicsAssetImage>,
+    queued: HashSet<String>,
+    failed: HashSet<String>,
+    request_tx: Sender<String>,
+    result_rx: Receiver<WorkerResult>,
 }
 
 impl Default for ElectronicsAssetAtlas {
     fn default() -> Self {
-        let (request_tx, request_rx) = mpsc::channel();
-        let (result_tx, result_rx) = mpsc::channel();
-        spawn_asset_loader(request_rx, result_tx);
-
+        let (request_tx, request_rx) = mpsc::channel::<String>();
+        let (result_tx, result_rx) = mpsc::channel::<WorkerResult>();
+        std::thread::Builder::new()
+            .name("raf-electronics-assets".to_string())
+            .spawn(move || {
+                while let Ok(name) = request_rx.recv() {
+                    let result = std::fs::read(&name)
+                        .map_err(|error| format!("{name}: {error}"))
+                        .and_then(|bytes| {
+                            image::load_from_memory(&bytes)
+                                .map_err(|error| format!("{name}: {error}"))
+                        })
+                        .map(|image| to_asset_image(name.clone(), image.to_rgba8()));
+                    let _ = result_tx.send(match result {
+                        Ok(image) => WorkerResult::Ready(image),
+                        Err(error) => WorkerResult::Failed { path: name, error },
+                    });
+                }
+            })
+            .expect("electronics asset worker must start");
         Self {
-            textures: HashMap::new(),
+            images: HashMap::new(),
             queued: HashSet::new(),
             failed: HashSet::new(),
             request_tx,
@@ -42,110 +64,59 @@ impl Default for ElectronicsAssetAtlas {
 }
 
 impl ElectronicsAssetAtlas {
-    pub fn request_assets(&mut self, names: &[&'static str]) {
-        self.queue(FALLBACK_ASSET);
-        for name in names {
-            self.queue(*name);
-        }
-    }
-
-    pub fn process(&mut self, ctx: &egui::Context) {
-        while let Ok(result) = self.result_rx.try_recv() {
-            match result {
-                AssetWorkerResult::Ready(asset) => {
-                    self.queued.remove(asset.name);
-                    let image = egui::ColorImage::from_rgba_unmultiplied(asset.size, &asset.pixels);
-                    let texture = ctx.load_texture(
-                        format!("electronics-asset-{}", asset.name),
-                        image,
-                        egui::TextureOptions::LINEAR,
-                    );
-                    self.textures.insert(asset.name, texture);
-                }
-                AssetWorkerResult::Failed(name) => {
-                    self.queued.remove(name);
-                    self.failed.insert(name);
-                }
-            }
-        }
-
-        if !self.queued.is_empty() {
-            ctx.request_repaint();
-        }
-    }
-
-    pub fn paint(
-        &self,
-        painter: &egui::Painter,
-        name: &'static str,
-        rect: Rect,
-        tint: Color32,
-    ) -> bool {
-        let Some(texture) = self
-            .textures
-            .get(name)
-            .or_else(|| self.textures.get(FALLBACK_ASSET))
-        else {
-            return false;
-        };
-        let uv = Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
-        painter.image(texture.id(), rect, uv, tint);
-        true
-    }
-
-    fn queue(&mut self, name: &'static str) {
-        if self.textures.contains_key(name)
-            || self.queued.contains(name)
-            || self.failed.contains(name)
-        {
+    pub fn request(&mut self, path: impl Into<String>) {
+        let path = path.into();
+        if self.images.contains_key(&path) || !self.queued.insert(path.clone()) {
             return;
         }
-        self.queued.insert(name);
-        if self.request_tx.send(name).is_err() {
-            self.queued.remove(name);
-            self.failed.insert(name);
+        if self.request_tx.send(path).is_err() {
+            self.queued.clear();
         }
+    }
+
+    pub fn poll(&mut self) -> bool {
+        let mut changed = false;
+        while let Ok(result) = self.result_rx.try_recv() {
+            match result {
+                WorkerResult::Ready(image) => {
+                    self.queued.remove(&image.name);
+                    self.images.insert(image.name.clone(), image);
+                    changed = true;
+                }
+                WorkerResult::Failed {
+                    path,
+                    error: _error,
+                } => {
+                    self.queued.remove(&path);
+                    self.failed.insert(path);
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
+    pub fn image(&self, path: &str) -> Option<&ElectronicsAssetImage> {
+        self.images.get(path)
+    }
+
+    pub fn fallback_name() -> &'static str {
+        FALLBACK_ASSET
+    }
+
+    pub fn failed(&self, path: &str) -> bool {
+        self.failed.contains(path)
+    }
+
+    pub fn len(&self) -> usize {
+        self.images.len()
     }
 }
 
-fn spawn_asset_loader(request_rx: Receiver<&'static str>, result_tx: Sender<AssetWorkerResult>) {
-    let asset_root =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../editor/assets/electronics");
-
-    let _ = std::thread::Builder::new()
-        .name("raf-electronics-asset-loader".to_string())
-        .spawn(move || {
-            while let Ok(name) = request_rx.recv() {
-                let result = load_asset_pixels(&asset_root, name)
-                    .map(AssetWorkerResult::Ready)
-                    .unwrap_or(AssetWorkerResult::Failed(name));
-                let _ = result_tx.send(result);
-            }
-        });
-}
-
-fn load_asset_pixels(root: &std::path::Path, name: &'static str) -> Option<PendingAssetUpload> {
-    let path = root.join(name);
-    let bytes = std::fs::read(path).ok()?;
-    let image = image::load_from_memory(&bytes).ok()?.to_rgba8();
-    let rgba = prepare_asset_rgba(image);
-
-    Some(PendingAssetUpload {
+fn to_asset_image(name: String, image: RgbaImage) -> ElectronicsAssetImage {
+    ElectronicsAssetImage {
         name,
-        size: [rgba.width() as usize, rgba.height() as usize],
-        pixels: rgba.into_vec(),
-    })
-}
-
-fn prepare_asset_rgba(rgba: RgbaImage) -> RgbaImage {
-    if rgba.width() <= 128 && rgba.height() <= 128 {
-        image::imageops::resize(
-            &rgba,
-            rgba.width() * 2,
-            rgba.height() * 2,
-            image::imageops::FilterType::CatmullRom,
-        )
-    } else {
-        rgba
+        size: [image.width(), image.height()],
+        pixels: image.into_raw(),
     }
 }

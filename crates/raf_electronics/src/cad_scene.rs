@@ -6,7 +6,6 @@ use crate::component::ElectronicComponent;
 use crate::drc::{DrcIssue, DrcReport, DrcSeverity};
 use crate::pcb::{footprint_definition, PcbLayer, PcbLayout};
 use crate::schematic::{component_pin_world_position, Schematic};
-use crate::schematic_symbols::{schematic_symbol_recipe, symbol_kind_for_component};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CadSurfaceKind {
@@ -78,7 +77,7 @@ pub struct CadObject {
     pub pick_priority: CadPickPriority,
     pub rect: Option<CadRect>,
     pub points: Vec<Vec2>,
-    /// Additional independent line paths used by schematic symbols.
+    /// Additional independent line paths used by pin markers and CAD traces.
     ///
     /// `points` remains the canonical polyline for wires/traces. Symbol paths
     /// are kept separate so adjacent strokes are never joined accidentally
@@ -416,23 +415,21 @@ fn push_schematic_component(objects: &mut Vec<CadObject>, component: &Electronic
         CadRect::new(component.position, body_size),
         component.appearance.color,
     );
-    body.line_paths = schematic_symbol_paths(component);
     body.label = Some(format!("{} {}", component.designator, component.value));
     objects.push(body);
 
     for pin in &component.pins {
+        let pin_center = component_pin_world_position(component, pin);
         let mut object = CadObject::rect(
             format!("pin:{}:{}", component.id, pin.id),
             Some(component.id),
             CadObjectKind::Pin,
             CadLayerKind::Schematic,
             CadPickPriority::Pin,
-            CadRect::new(
-                component_pin_world_position(component, pin),
-                Vec2::new(10.0, 10.0),
-            ),
-            [245, 245, 246, 255],
+            CadRect::new(pin_center, Vec2::new(10.0, 10.0)),
+            [112, 224, 136, 255],
         );
+        object.line_paths = schematic_pin_paths(pin_center);
         object.label = Some(pin.name.clone());
         if !pin.net.trim().is_empty() {
             object.net = Some(pin.net.clone());
@@ -441,19 +438,15 @@ fn push_schematic_component(objects: &mut Vec<CadObject>, component: &Electronic
     }
 }
 
-fn schematic_symbol_paths(component: &ElectronicComponent) -> Vec<Vec<Vec2>> {
-    let recipe = schematic_symbol_recipe(symbol_kind_for_component(component));
-
-    recipe
-        .segments
-        .iter()
-        .map(|segment| {
-            vec![
-                component.position + rotate_vec2(Vec2::from(segment[0]), component.rotation),
-                component.position + rotate_vec2(Vec2::from(segment[1]), component.rotation),
-            ]
-        })
-        .collect()
+fn schematic_pin_paths(center: Vec2) -> Vec<Vec<Vec2>> {
+    let half = 5.0;
+    vec![vec![
+        center + Vec2::new(-half, -half),
+        center + Vec2::new(half, -half),
+        center + Vec2::new(half, half),
+        center + Vec2::new(-half, half),
+        center + Vec2::new(-half, -half),
+    ]]
 }
 
 fn schematic_component_body_size(component: &ElectronicComponent) -> Vec2 {
@@ -555,6 +548,11 @@ mod tests {
             .objects
             .iter()
             .any(|object| object.kind == CadObjectKind::Pin));
+        assert!(scene
+            .objects
+            .iter()
+            .filter(|object| object.kind == CadObjectKind::Pin)
+            .all(|object| !object.line_paths.is_empty()));
         assert!(scene.objects.iter().all(|object| {
             object.kind != CadObjectKind::Pin || object.source_id == Some(resistor_id)
         }));
@@ -571,8 +569,8 @@ mod tests {
     }
 
     #[test]
-    fn schematic_component_scene_contains_rotated_symbol_paths() {
-        let mut schematic = Schematic::new("Symbol geometry");
+    fn schematic_component_scene_leaves_symbol_rendering_to_native_assets() {
+        let mut schematic = Schematic::new("Native symbol assets");
         let mut resistor = ElectronicComponent::resistor("10k");
         resistor.position = Vec2::new(100.0, 80.0);
         resistor.rotation = 90.0;
@@ -585,18 +583,8 @@ mod tests {
             .find(|object| object.kind == CadObjectKind::Component)
             .expect("component CAD object");
 
-        assert_eq!(component.line_paths.len(), 8);
-        assert!(component.line_paths.iter().all(|path| path.len() == 2));
-        assert!(component
-            .line_paths
-            .iter()
-            .flatten()
-            .any(|point| point.x < 100.0));
-        assert!(component
-            .line_paths
-            .iter()
-            .flatten()
-            .any(|point| point.x > 100.0));
+        assert!(component.line_paths.is_empty());
+        assert!(component.rect.is_some());
     }
 
     #[test]

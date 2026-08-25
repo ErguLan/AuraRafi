@@ -6,7 +6,7 @@
 use raf_core::ai::{AgentMode, AiProvider};
 use raf_core::config::{
     EngineSettings, Language, RenderExecutionPolicy, RenderQuality, ScriptLanguage, TargetPlatform,
-    Theme, ViewportRenderMode, AGENT_MESSAGE_PAGE_SIZE_MAX, AGENT_MESSAGE_PAGE_SIZE_MIN,
+    Theme, ViewportRenderMode,
 };
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAction, UiAlign, UiCompactMode, UiEventBinding, UiEventKind, UiFlow,
@@ -15,14 +15,11 @@ use raf_render::api_graphic_basic::ui_surface::{
     UiSurface, UiTextInput, UiTextStyle, UiToggle,
 };
 
-const CONTROL_WIDTH: f32 = 232.0;
-const SEGMENT_MIN_WIDTH: f32 = 76.0;
+const CONTROL_WIDTH: f32 = 360.0;
+const SEGMENT_MIN_WIDTH: f32 = 68.0;
+const SETTINGS_ROW_HEIGHT: f32 = 56.0;
 const ACCENT: [u8; 4] = [232, 133, 28, 255];
 const AI_CARD_GAP: f32 = 10.0;
-const AI_SUMMARY_CARD_HEIGHT: f32 = 310.0;
-const AI_PROVIDER_CARD_HEIGHT: f32 = 286.0;
-const AI_SHORTCUT_HEADER_HEIGHT: f32 = 52.0;
-const AI_SHORTCUT_ROW_HEIGHT: f32 = 38.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSection {
@@ -145,15 +142,17 @@ pub fn build_settings_surface_with_api_keys(
 
 fn navigation(palette: StudioUiPalette, active: SettingsSection) -> UiNode {
     let tokens = palette.tokens();
-    let mut node = UiNode::new("settings.navigation", UiNodeKind::Panel)
+    let mut node = UiNode::scroll_view("settings.navigation", UiScrollAxis::Vertical)
         .with_class("settings-navigation")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             basis: [224.0, 0.0],
+            width_mode: UiSizeMode::Fixed,
+            height_mode: UiSizeMode::Fill,
             min_size: [0.0, 0.0],
             padding: UiSpacing::same(16.0),
             gap: 4.0,
-            overflow: UiOverflow::Clip,
+            overflow: UiOverflow::ScrollY,
             responsive: vec![raf_ui::UiResponsiveRule {
                 max_width: 760.0,
                 flow: Some(UiFlow::Column),
@@ -517,6 +516,12 @@ fn editor(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
             "settings.snap_to_grid",
             settings.snap_to_grid,
         ))
+        .with_child(toggle_row(
+            palette,
+            "settings.inspector-live-transform-updates",
+            "settings.inspector_live_transform_updates",
+            settings.inspector_live_transform_updates,
+        ))
         .with_child(range_row_disabled(
             palette,
             "settings.grid_size",
@@ -538,6 +543,26 @@ fn editor(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
             0.5,
             format!("{:.1} m", settings.grid_load_distance),
             settings.simple_mode,
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.electronics-grid-step",
+            "settings.electronics_grid_step_mm",
+            settings.electronics_grid_step_mm,
+            5.0,
+            100.0,
+            1.0,
+            format!("{:.0} mm", settings.electronics_grid_step_mm),
+        ))
+        .with_child(range_row(
+            palette,
+            "settings.electronics-grid-opacity",
+            "settings.electronics_grid_opacity",
+            settings.electronics_grid_opacity,
+            0.2,
+            1.0,
+            0.05,
+            format!("{:.0}%", settings.electronics_grid_opacity * 100.0),
         ))
         .with_child(range_row_disabled(
             palette,
@@ -573,39 +598,45 @@ fn editor(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
             "settings.command_console_enabled",
             settings.command_console_enabled,
         ))
-        .with_child(toggle_row(
+        .with_child(toggle_row_with_key(
             palette,
             "settings.hierarchy-icons",
+            "settings.hierarchy_icons",
             "settings.hierarchy_show_icons",
             settings.hierarchy_show_icons,
         ))
-        .with_child(toggle_row(
+        .with_child(toggle_row_with_key(
             palette,
             "settings.hierarchy-visibility",
+            "settings.hierarchy_visibility",
             "settings.hierarchy_show_visibility",
             settings.hierarchy_show_visibility,
         ))
-        .with_child(toggle_row(
+        .with_child(toggle_row_with_key(
             palette,
             "settings.hierarchy-locked",
+            "settings.hierarchy_locked",
             "settings.hierarchy_show_locked",
             settings.hierarchy_show_locked,
         ))
-        .with_child(toggle_row(
+        .with_child(toggle_row_with_key(
             palette,
             "settings.hierarchy-hidden",
+            "settings.hierarchy_hidden",
             "settings.hierarchy_show_hidden",
             settings.hierarchy_show_hidden,
         ))
-        .with_child(toggle_row(
+        .with_child(toggle_row_with_key(
             palette,
             "settings.hierarchy-auto-reveal",
+            "settings.hierarchy_auto_reveal",
             "settings.hierarchy_auto_reveal_selection",
             settings.hierarchy_auto_reveal_selection,
         ))
-        .with_child(toggle_row(
+        .with_child(toggle_row_with_key(
             palette,
             "settings.hierarchy-expand-selection",
+            "settings.hierarchy_expand_selection",
             "settings.hierarchy_expand_on_select",
             settings.hierarchy_expand_on_select,
         ))
@@ -635,14 +666,9 @@ fn editor(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
             1.0,
             format!("{} px", settings.hierarchy_indent_width.round()),
         ))
-        .with_child(toggle_row(
+        .with_child(toggle_row_with_key(
             palette,
-            "settings.electronics-minimap",
-            "settings.electronics_show_minimap",
-            settings.electronics_show_minimap,
-        ))
-        .with_child(toggle_row(
-            palette,
+            "settings.electronics-status",
             "settings.electronics-status",
             "settings.electronics_show_status",
             settings.electronics_show_status,
@@ -726,7 +752,7 @@ fn viewport(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
             "settings.wasd-speed",
             "settings.wasd_speed",
             settings.wasd_speed,
-            0.5,
+            0.05,
             5.0,
             0.1,
             format!("{:.2}x", settings.wasd_speed),
@@ -736,6 +762,12 @@ fn viewport(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
             "settings.uniform-scale",
             "settings.uniform_scale_by_default",
             settings.uniform_scale_by_default,
+        ))
+        .with_child(toggle_row(
+            palette,
+            "settings.multi-select-gizmo",
+            "settings.multi_select_gizmo_enabled",
+            settings.multi_select_gizmo_enabled,
         ))
         .with_child(range_row(
             palette,
@@ -837,51 +869,33 @@ fn ai(
     settings: &EngineSettings,
     revealed_api_keys: &[AiProvider],
 ) -> UiNode {
-    let provider_count = AiProvider::editor_supported()
-        .iter()
-        .filter(|provider| {
-            settings
-                .ai_providers
-                .iter()
-                .any(|config| config.provider == **provider)
-        })
-        .count();
-    let shortcut_height = if settings.agent_model_shortcuts.is_empty() {
-        78.0
-    } else {
-        AI_SHORTCUT_HEADER_HEIGHT
-            + settings.agent_model_shortcuts.len() as f32 * AI_SHORTCUT_ROW_HEIGHT
-    };
-    let card_count = provider_count + 2;
-    let content_height = AI_SUMMARY_CARD_HEIGHT
-        + provider_count as f32 * AI_PROVIDER_CARD_HEIGHT
-        + shortcut_height
-        + AI_CARD_GAP * (card_count.saturating_sub(1) as f32);
     let mut root = UiNode::new("settings.ai.workspace", UiNodeKind::Panel).with_layout(UiLayout {
         flow: UiFlow::Column,
         gap: AI_CARD_GAP,
-        ..UiLayout::fixed(0.0, content_height).with_width_mode(UiSizeMode::Fill)
+        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
     });
 
     let summary_card = card(palette, "settings.ai_providers")
         .with_child(provider_default_row(palette, settings))
-        .with_child(segment_row(
+        .with_child(agent_mode_row(palette, settings))
+        .with_child(
+            UiNode::new("settings.agent-mode.help", UiNodeKind::Label)
+                .with_text_key("settings.agent_mode_desc")
+                .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(toggle_row(
             palette,
-            "settings.agent-mode",
-            "settings.agent_mode",
-            &[
-                (
-                    "settings.agent_mode_passive",
-                    "settings.agent_mode.passive",
-                    settings.agent_mode == AgentMode::Passive,
-                ),
-                (
-                    "settings.agent_mode_active",
-                    "settings.agent_mode.active",
-                    settings.agent_mode == AgentMode::Active,
-                ),
-            ],
+            "settings.ai-persist-credentials",
+            "settings.ai_persist_credentials",
+            settings.ai_persist_credentials,
         ))
+        .with_child(
+            UiNode::new("settings.ai-persist-credentials.help", UiNodeKind::Label)
+                .with_text_key("settings.ai_persist_credentials_desc")
+                .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
+                .with_layout(UiLayout::fit_content()),
+        )
         .with_child(toggle_row(
             palette,
             "settings.command-console-ai",
@@ -896,15 +910,20 @@ fn ai(
         ))
         .with_child(range_row(
             palette,
-            "settings.agent-message-page-size",
-            "settings.agent_message_page_size",
-            settings.agent_message_page_size as f32,
-            AGENT_MESSAGE_PAGE_SIZE_MIN as f32,
-            AGENT_MESSAGE_PAGE_SIZE_MAX as f32,
-            4.0,
-            settings.agent_message_page_size.to_string(),
+            "settings.agent-max-response-tokens",
+            "settings.agent_max_response_tokens",
+            settings.agent_max_response_tokens as f32,
+            raf_core::config::AGENT_MAX_RESPONSE_TOKENS_MIN as f32,
+            raf_core::config::AGENT_MAX_RESPONSE_TOKENS_MAX as f32,
+            256.0,
+            format!("{} tokens", settings.agent_max_response_tokens),
         ))
-        .with_layout(fixed_card_layout(AI_SUMMARY_CARD_HEIGHT));
+        .with_child(
+            UiNode::new("settings.agent-max-response-tokens.help", UiNodeKind::Label)
+                .with_text_key("settings.agent_max_response_tokens_desc")
+                .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
+                .with_layout(UiLayout::fit_content()),
+        );
     root = root.with_child(summary_card);
 
     for provider in AiProvider::editor_supported() {
@@ -926,11 +945,15 @@ fn ai(
 
 fn provider_default_row(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
     let tokens = palette.tokens();
+    let provider_count = AiProvider::editor_supported().len().max(1) as f32;
+    let gap = 4.0;
+    let option_width = 112.0;
+    let toolbar_width = option_width * provider_count + gap * (provider_count - 1.0);
     let mut options = UiNode::new("settings.ai_provider.default.control", UiNodeKind::Toolbar)
         .with_layout(UiLayout {
             flow: UiFlow::Row,
-            gap: 4.0,
-            ..UiLayout::fixed(CONTROL_WIDTH, 30.0)
+            gap,
+            ..UiLayout::fixed(toolbar_width, 30.0)
         });
     for provider in AiProvider::editor_supported() {
         let id = provider_id(*provider);
@@ -972,6 +995,56 @@ fn provider_default_row(palette: StudioUiPalette, settings: &EngineSettings) -> 
     )
 }
 
+fn agent_mode_row(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
+    let tokens = palette.tokens();
+    let option_width = 178.0;
+    let mut control =
+        UiNode::new("settings.agent-mode.control", UiNodeKind::Toolbar).with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 4.0,
+            ..UiLayout::fixed(option_width * 2.0 + 4.0, 42.0)
+        });
+    for (mode, label_key, command) in [
+        (
+            AgentMode::Passive,
+            "settings.agent_mode_passive",
+            "settings.agent_mode.passive",
+        ),
+        (
+            AgentMode::Active,
+            "settings.agent_mode_active",
+            "settings.agent_mode.active",
+        ),
+    ] {
+        let selected = settings.agent_mode == mode;
+        control = control.with_child(
+            UiNode::new(format!("settings.agent-mode.{command}"), UiNodeKind::Button)
+                .with_class(if selected {
+                    "settings-mode-option-current"
+                } else {
+                    "settings-mode-option"
+                })
+                .with_layout(UiLayout::fixed(option_width, 42.0).with_text_safe_area(true))
+                .with_text_key(label_key)
+                .with_text_style(UiTextStyle::button(if selected {
+                    ACCENT
+                } else {
+                    tokens.text_muted
+                }))
+                .focusable()
+                .with_event(UiEventBinding::command(UiEventKind::Click, command)),
+        );
+    }
+    row(
+        palette,
+        "settings.agent-mode".to_string(),
+        "settings.agent_mode".to_string(),
+        None,
+        control,
+    )
+}
+
 fn provider_card(
     palette: StudioUiPalette,
     config: &raf_core::ai::AiProviderConfig,
@@ -984,7 +1057,8 @@ fn provider_card(
             flow: UiFlow::Column,
             gap: 4.0,
             padding: UiSpacing::same(10.0),
-            ..UiLayout::fixed(0.0, AI_PROVIDER_CARD_HEIGHT).with_width_mode(UiSizeMode::Fill)
+            max_size: [760.0, 0.0],
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
             UiNode::new(
@@ -1009,6 +1083,7 @@ fn provider_card(
             &config.base_url,
             false,
             None,
+            None,
         ))
         .with_child(ai_text_row(
             palette,
@@ -1016,6 +1091,7 @@ fn provider_card(
             "settings.ai_provider_model",
             &config.model,
             false,
+            None,
             None,
         ))
         .with_child(ai_text_row(
@@ -1025,6 +1101,7 @@ fn provider_card(
             &config.api_key,
             !revealed,
             Some(&format!("settings.ai_provider.reveal.{id}")),
+            Some(&format!("settings.ai_provider.clear.{id}")),
         ))
         .with_child(command_button(
             palette,
@@ -1044,13 +1121,21 @@ fn ai_text_row(
     _value: &str,
     password: bool,
     reveal_command: Option<&str>,
+    clear_command: Option<&str>,
 ) -> UiNode {
+    let button_width = if reveal_command.is_some() && clear_command.is_some() {
+        113.0
+    } else if reveal_command.is_some() || clear_command.is_some() {
+        58.0
+    } else {
+        0.0
+    };
     let mut control = UiNode::new(format!("{id}.control"), UiNodeKind::Toolbar)
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
             gap: 5.0,
-            ..UiLayout::fixed(CONTROL_WIDTH + 58.0, 30.0)
+            ..UiLayout::fixed(CONTROL_WIDTH + button_width, 30.0)
         })
         .with_child(
             UiNode::text_input(
@@ -1081,6 +1166,16 @@ fn ai_text_row(
             54.0,
         ));
     }
+    if let Some(command) = clear_command {
+        control = control.with_child(command_button(
+            palette,
+            &format!("{id}.clear"),
+            "settings.ai_provider_clear",
+            command,
+            "settings-secondary-button",
+            54.0,
+        ));
+    }
     row(
         palette,
         id.to_string(),
@@ -1092,14 +1187,7 @@ fn ai_text_row(
 
 fn model_shortcuts_card(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
     let tokens = palette.tokens();
-    let mut panel = card(palette, "settings.ai_models_title").with_layout(fixed_card_layout(
-        if settings.agent_model_shortcuts.is_empty() {
-            78.0
-        } else {
-            AI_SHORTCUT_HEADER_HEIGHT
-                + settings.agent_model_shortcuts.len() as f32 * AI_SHORTCUT_ROW_HEIGHT
-        },
-    ));
+    let mut panel = card(palette, "settings.ai_models_title");
     if settings.agent_model_shortcuts.is_empty() {
         return panel.with_child(
             UiNode::new("settings.ai_models.empty", UiNodeKind::Label)
@@ -1118,6 +1206,7 @@ fn model_shortcuts_card(palette: StudioUiPalette, settings: &EngineSettings) -> 
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
             gap: 6.0,
+            overflow: UiOverflow::Clip,
             ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
@@ -1249,15 +1338,6 @@ fn card(palette: StudioUiPalette, title_key: &str) -> UiNode {
                 .with_text_style(UiTextStyle::panel_title(tokens.text))
                 .with_layout(UiLayout::fixed(0.0, 24.0)),
         )
-}
-
-fn fixed_card_layout(height: f32) -> UiLayout {
-    UiLayout {
-        flow: UiFlow::Column,
-        gap: 6.0,
-        padding: UiSpacing::same(14.0),
-        ..UiLayout::fixed(0.0, height).with_width_mode(UiSizeMode::Fill)
-    }
 }
 
 fn toggle_row(
@@ -1453,15 +1533,7 @@ fn segment_row(
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
             gap,
-            responsive: vec![raf_ui::UiResponsiveRule {
-                max_width: 480.0,
-                flow: Some(UiFlow::RowWrap),
-                basis: Some([0.0, 90.0]),
-                padding: None,
-                gap: Some(4.0),
-                compact: Some(UiCompactMode::Wrap),
-                grid_columns: None,
-            }],
+            overflow: UiOverflow::Clip,
             ..UiLayout::fixed(toolbar_width, 30.0)
         });
     for (value_key, command, selected) in values {
@@ -1535,7 +1607,7 @@ fn row(
                 compact: Some(UiCompactMode::Stack),
                 grid_columns: None,
             }],
-            ..UiLayout::fixed(0.0, 44.0).with_width_mode(UiSizeMode::Fill)
+            ..UiLayout::fixed(0.0, SETTINGS_ROW_HEIGHT).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(copy)
         .with_child(control)
@@ -1638,6 +1710,46 @@ fn settings_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 },
             )
             .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-mode-option".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-mode-option-current".to_string()),
+                UiStylePatch {
+                    fill: Some([55, 43, 26, 255]),
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-mode-option".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-mode-option-current".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent),
+                    border: Some(tokens.accent_hot),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
             UiStyleRule::new(
                 UiStyleSelector::Class("settings-segment".to_string()),
                 UiStylePatch {
@@ -1784,6 +1896,24 @@ mod tests {
         node.children.iter().find_map(|child| find_node(child, id))
     }
 
+    fn collect_nodes_with_class<'a>(node: &'a UiNode, class: &str, output: &mut Vec<&'a UiNode>) {
+        if node.classes.iter().any(|candidate| candidate == class) {
+            output.push(node);
+        }
+        for child in &node.children {
+            collect_nodes_with_class(child, class, output);
+        }
+    }
+
+    fn collect_text_keys(node: &UiNode, output: &mut Vec<String>) {
+        if let Some(text_key) = &node.text_key {
+            output.push(text_key.clone());
+        }
+        for child in &node.children {
+            collect_text_keys(child, output);
+        }
+    }
+
     #[test]
     fn settings_surface_keeps_all_legacy_sections_in_a_single_navigation_contract() {
         assert_eq!(SettingsSection::ALL.len(), 7);
@@ -1852,6 +1982,59 @@ mod tests {
                 && segment.layout.padding.left >= 8.0
                 && segment.layout.padding.right >= 8.0
         }));
+        assert!(segments.layout.responsive.is_empty());
+    }
+
+    #[test]
+    fn every_settings_section_keeps_rows_separated_and_labels_localized() {
+        for section in SettingsSection::ALL {
+            let surface = build_settings_surface(
+                StudioUiPalette::IndustrialDark,
+                &EngineSettings::default(),
+                section,
+            );
+            let mut rows = Vec::new();
+            collect_nodes_with_class(&surface.root, "settings-row", &mut rows);
+            assert!(!rows.is_empty(), "section {section:?} has no settings rows");
+            assert!(rows
+                .iter()
+                .all(|row| row.layout.basis[1] >= SETTINGS_ROW_HEIGHT));
+
+            let mut segments = Vec::new();
+            collect_nodes_with_class(&surface.root, "settings-segments", &mut segments);
+            assert!(segments
+                .iter()
+                .all(|toolbar| toolbar.layout.responsive.is_empty()));
+
+            let mut text_keys = Vec::new();
+            collect_text_keys(&surface.root, &mut text_keys);
+            assert!(text_keys
+                .iter()
+                .all(|key| !key.starts_with("settings.hierarchy_show_")
+                    && !key.starts_with("settings.electronics_show_")));
+
+            let mut session = UiSurfaceSession::default();
+            let frame =
+                session.build_layout_frame_at_scale(&surface, 1600, 2400, [0, 0, 0, 255], 1.0);
+            let mut rects = rows
+                .iter()
+                .map(|row| {
+                    frame
+                        .layout_boxes
+                        .iter()
+                        .find(|layout| layout.id == row.id)
+                        .unwrap_or_else(|| panic!("missing layout box {}", row.id))
+                        .rect
+                })
+                .collect::<Vec<_>>();
+            rects.sort_by(|left, right| left.y.total_cmp(&right.y));
+            assert!(
+                rects
+                    .windows(2)
+                    .all(|pair| { pair[1].y + 0.01 >= pair[0].y + pair[0].height }),
+                "overlapping settings rows in {section:?}: {rects:?}"
+            );
+        }
     }
 
     #[test]
@@ -1871,30 +2054,43 @@ mod tests {
     }
 
     #[test]
-    fn ai_surface_reserves_vertical_tracks_for_provider_cards() {
+    fn ai_surface_uses_intrinsic_vertical_tracks_for_provider_cards() {
         let surface = build_settings_surface(
             StudioUiPalette::IndustrialDark,
             &EngineSettings::default(),
             SettingsSection::Ai,
         );
         let workspace = find_node(&surface.root, "settings.ai.workspace").expect("AI workspace");
-        assert_eq!(workspace.layout.height_mode, UiSizeMode::Fixed);
-        assert!(workspace.layout.basis[1] >= AI_SUMMARY_CARD_HEIGHT);
-        let page_size = find_node(&surface.root, "settings.agent-message-page-size.slider")
-            .expect("Agent page-size slider");
-        assert!(matches!(&page_size.control, raf_ui::UiControl::Range(_)));
+        assert_eq!(workspace.layout.height_mode, UiSizeMode::FitContent);
 
         for provider in AiProvider::editor_supported() {
             let id = provider_id(*provider);
             let card = find_node(&surface.root, &format!("settings.ai_provider.{id}.card"))
                 .expect("provider card");
-            assert_eq!(card.layout.height_mode, UiSizeMode::Fixed);
-            assert_eq!(card.layout.basis[1], AI_PROVIDER_CARD_HEIGHT);
+            assert_eq!(card.layout.height_mode, UiSizeMode::FitContent);
         }
     }
 
     #[test]
-    fn ai_summary_and_shortcut_cards_keep_vertical_flow_when_fixed() {
+    fn ai_surface_exposes_provider_credential_persistence_toggle() {
+        let surface = build_settings_surface(
+            StudioUiPalette::IndustrialDark,
+            &EngineSettings::default(),
+            SettingsSection::Ai,
+        );
+        let toggle = find_node(&surface.root, "settings.ai-persist-credentials.row")
+            .expect("provider credential persistence toggle");
+        assert!(toggle.interactive);
+        let help = find_node(&surface.root, "settings.ai-persist-credentials.help")
+            .expect("provider credential persistence help");
+        assert_eq!(
+            help.text_key.as_deref(),
+            Some("settings.ai_persist_credentials_desc")
+        );
+    }
+
+    #[test]
+    fn ai_summary_and_shortcut_cards_keep_vertical_flow_when_intrinsic() {
         let surface = build_settings_surface(
             StudioUiPalette::IndustrialDark,
             &EngineSettings::default(),
@@ -1908,7 +2104,6 @@ mod tests {
             "settings.agent-mode.row",
             "settings.command-console-ai.row",
             "settings.agent-streaming.row",
-            "settings.agent-message-page-size.row",
         ];
         let rects = ids
             .iter()

@@ -17,14 +17,17 @@ pub mod command {
     pub const EDIT_UNDO: &str = "edit.undo";
     pub const EDIT_REDO: &str = "edit.redo";
     pub const EDIT_DUPLICATE: &str = "edit.duplicate";
+    pub const EDIT_COPY: &str = "edit.copy";
+    pub const EDIT_PASTE: &str = "edit.paste";
     pub const EDIT_DELETE: &str = "edit.delete";
     pub const EDIT_SELECT_ALL: &str = "edit.select_all";
+    pub const SEARCH_OPEN: &str = "search.open";
     pub const VIEW_GRID: &str = "view.grid";
     pub const VIEW_SCENE: &str = "editor.scene_view";
     pub const VIEW_HIERARCHY: &str = "editor.hierarchy_view";
     pub const VIEW_INSPECTOR: &str = "editor.inspector_view";
-    pub const VIEW_SCHEMATIC: &str = "editor.schematic_view";
-    pub const VIEW_PCB: &str = "editor.pcb_view";
+    pub const VIEW_SCHEMATIC: &str = "electronics.mode.schematic";
+    pub const VIEW_PCB: &str = "electronics.mode.pcb";
     pub const PROJECT_OPEN_FOLDER: &str = "project.open_folder";
     pub const PROJECT_CLOSE: &str = "project.close";
     pub const HELP_KEYBOARD_SHORTCUTS: &str = "help.keyboard_shortcuts";
@@ -48,6 +51,9 @@ pub struct ApplicationMenuState {
     pub undo_available: bool,
     pub redo_available: bool,
     pub selection_available: bool,
+    pub select_all_available: bool,
+    pub copy_available: bool,
+    pub paste_available: bool,
 }
 
 pub fn build_application_menu(state: ApplicationMenuState) -> UiApplicationMenu {
@@ -102,7 +108,7 @@ pub fn build_application_menu(state: ApplicationMenuState) -> UiApplicationMenu 
                 .with_item(command_with_accelerator(
                     command::PROJECT_SAVE,
                     "app.save_menu",
-                    "Ctrl+S",
+                    crate::editor_shortcuts::accelerator_for(command::PROJECT_SAVE),
                 ))
                 .with_item(UiMenuItem::Separator)
                 .with_item(command(command::EDITOR_SETTINGS, "app.settings_menu"))
@@ -116,14 +122,14 @@ pub fn build_application_menu(state: ApplicationMenuState) -> UiApplicationMenu 
                 .with_item(configured_with_accelerator(
                     command::EDIT_UNDO,
                     "app.undo_menu",
-                    "Ctrl+Z",
+                    crate::editor_shortcuts::accelerator_for(command::EDIT_UNDO),
                     state.undo_available,
                     state.undo_available,
                 ))
                 .with_item(configured_with_accelerator(
                     command::EDIT_REDO,
                     "app.redo_menu",
-                    "Ctrl+Y",
+                    crate::editor_shortcuts::accelerator_for(command::EDIT_REDO),
                     state.redo_available,
                     state.redo_available,
                 ))
@@ -131,22 +137,36 @@ pub fn build_application_menu(state: ApplicationMenuState) -> UiApplicationMenu 
                 .with_item(configured_with_accelerator(
                     command::EDIT_DUPLICATE,
                     "app.duplicate_menu",
-                    "Ctrl+D",
+                    crate::editor_shortcuts::accelerator_for(command::EDIT_DUPLICATE),
                     edit_commands_available,
+                    false,
+                ))
+                .with_item(configured_with_accelerator(
+                    command::EDIT_COPY,
+                    "app.copy_menu",
+                    crate::editor_shortcuts::accelerator_for(command::EDIT_COPY),
+                    state.copy_available,
+                    false,
+                ))
+                .with_item(configured_with_accelerator(
+                    command::EDIT_PASTE,
+                    "app.paste_menu",
+                    crate::editor_shortcuts::accelerator_for(command::EDIT_PASTE),
+                    state.paste_available,
                     false,
                 ))
                 .with_item(configured_with_accelerator(
                     command::EDIT_DELETE,
                     "app.delete_menu",
-                    "Del",
+                    crate::editor_shortcuts::accelerator_for(command::EDIT_DELETE),
                     edit_commands_available,
                     false,
                 ))
                 .with_item(configured_with_accelerator(
                     command::EDIT_SELECT_ALL,
                     "app.select_all_menu",
-                    "Ctrl+A",
-                    edit_commands_available,
+                    crate::editor_shortcuts::accelerator_for(command::EDIT_SELECT_ALL),
+                    state.select_all_available,
                     false,
                 )),
             view_menu,
@@ -216,6 +236,9 @@ mod tests {
             undo_available: false,
             redo_available: false,
             selection_available: false,
+            select_all_available: false,
+            copy_available: false,
+            paste_available: false,
         });
         let commands = menu.command_ids();
         assert!(commands.contains(&command::VIEW_SCENE));
@@ -237,6 +260,9 @@ mod tests {
             undo_available: false,
             redo_available: false,
             selection_available: false,
+            select_all_available: false,
+            copy_available: false,
+            paste_available: false,
         });
         assert!(menu.contains_command(command::VIEW_SCHEMATIC));
         assert!(menu.contains_command(command::VIEW_PCB));
@@ -254,6 +280,9 @@ mod tests {
             undo_available: false,
             redo_available: false,
             selection_available: false,
+            select_all_available: false,
+            copy_available: false,
+            paste_available: false,
         });
         let edit = menu
             .menus

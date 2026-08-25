@@ -21,9 +21,8 @@ This file defines the strict, non-negotiable rules for code quality, behavior, a
     a `*_surface_host.rs` action/presentation host. The document owns semantic
     nodes, layout, classes, text keys, and event bindings; the host maps typed
     actions to existing backend behavior.
-  * Egui panels may remain as temporary body/presentation adapters during the
-    migration, but no new long-lived chrome, menus, or renderer-owned canvas
-    should be designed around Egui widgets.
+  * The retired widget path is absent from runtime. New chrome, menus, and
+    renderer-owned canvases must use RafUI and the native Winit compositor.
   * Follow `docs/RAF_UI.md` and `docs/EDITOR_RAFUI.md` before adding a RafUI surface, control,
     overlay, dock, scroll view, or menu.
 * **COMMAND BUS MUTATIONS**: All modifications to scene assets or schematic shapes must register actions to the `CommandBus` or execute transactional snapshots to sustain the Undo/Redo stack. Avoid silent global state mutations.
@@ -65,7 +64,7 @@ When presented with a visual reference, screenshot, or UI diagnostic page withou
 
 ---
 
-## 6. ApiGraphicBasic Controlled Hybrid Protocol
+## 6. ApiGraphicBasic Native Ownership Protocol
 
 All renderer, viewport, CAD, RafUI presentation, shader, GPU asset, and backend
 work must load and follow `.ai/APIGRAPHICBASIC.md`.
@@ -73,17 +72,18 @@ work must load and follow `.ai/APIGRAPHICBASIC.md`.
 * **ONE GRAPHICS OWNER**: `ApiGraphicBasic` owns the public graphics contract.
   WGPU is the current adapter/compatibility backend, not an API exposed to
   editor surfaces or documents.
-* **CAPABILITY-BY-CAPABILITY MIGRATION**: Move complete responsibilities behind
+* **CAPABILITY-BY-CAPABILITY OWNERSHIP**: Move complete responsibilities behind
   Rafi-owned contracts over time. Do not schedule a blind numbered rewrite or a
-  big-bang WGPU deletion.
-* **ONE BACKEND PER EXECUTION PATH**: Do not mix WGPU and native resources in a
-  frame without an explicit, measured interop design.
+  big-bang backend deletion.
+* **ONE PRIVATE EXECUTION PATH**: ApiGraphicBasic selects and owns the executor
+  for a surface. Upper layers never mix WGPU/native resources or maintain a
+  second renderer path.
 * **PRESERVE UPPER LAYERS**: Native backends must not duplicate viewport, CAD,
   RafUI, scene, document, or command logic.
-* **MEASURE BEFORE DEFAULT SWITCHES**: A native backend becomes default only
-  after parity, memory, pacing, idle, recovery, and hardware validation.
-* **NO STRONG PROGRAMMING BY IMPLICATION**: Documentation of the hybrid plan is
-  not authorization to implement a native backend or remove WGPU.
+* **MEASURE BEFORE BACKEND CHANGES**: A backend change requires parity, memory,
+  pacing, idle, recovery, and hardware validation.
+* **NO STRONG PROGRAMMING BY IMPLICATION**: A backend roadmap is not
+  authorization to replace the active executor or remove compatibility code.
 
 ---
 
@@ -102,8 +102,8 @@ All new retained UI work must follow `docs/RAF_UI.md`, `docs/EDITOR_RAFUI.md`, a
   navigation. Never model a menu as a permanently present card.
 * **APPLICATION MENU CONTRACT**: File/Edit/View/Project/Help use
   `UiApplicationMenu`, stable command IDs, and one application dispatcher.
-  The eframe bar is a temporary fallback. A native platform adapter returns
-  `UiMenuActivation` values and never owns business logic. Do not duplicate
+  The native Winit menu adapter returns `UiMenuActivation` values and never
+  owns business logic. Do not duplicate
   the menu tree per host or platform.
 * **CANVAS CONTRACT**: Viewport, Schematic, and PCB stay renderer-owned
   surfaces. RafUI may own surrounding chrome and overlays, but a minimap,
@@ -128,7 +128,7 @@ All new retained UI work must follow `docs/RAF_UI.md`, `docs/EDITOR_RAFUI.md`, a
 * **OVERLAY OWNERSHIP**: A tooltip, menu, popover, modal, or drag preview may
   be semantically owned by a surface, but its placement is resolved in the
   global window coordinate space through `raf_ui::overlays`. Do not solve
-  clipping with an egui painter or a larger owner surface.
+  clipping with a second painter or a larger owner surface.
 * **INTRINSIC LAYOUT**: Use `UiSizeMode::FitContent` and the resolved text
   atlas for content-sized controls. Hardcoded widths are allowed only for
   structural rails, stable toolbars, and explicit design constraints.

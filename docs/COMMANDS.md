@@ -38,7 +38,7 @@ to enter the existing undo history.
 
 The `raf` binary is a UI-independent adapter over the same core protocol. It
 can be used by Codex, Claude Code, OpenCode or another local harness without
-starting Egui or WGPU:
+starting the editor renderer:
 
 ```text
 raf doctor --json

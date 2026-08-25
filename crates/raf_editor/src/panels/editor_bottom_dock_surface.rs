@@ -13,6 +13,9 @@ use raf_render::api_graphic_basic::ui_surface::{
 };
 
 use crate::console::{ConsoleEntryId, ConsolePanel, LogEntry, LogLevel};
+use crate::panels::primitive_create::{
+    primitive_key, primitive_name, primitive_slug, CREATEABLE_PRIMITIVES,
+};
 use raf_ui::{DockTab, DockTabGroup};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,14 +34,36 @@ pub enum AssetFilter {
     Scripts,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AssetsIntent {
     QueryChanged(String),
     FilterChanged(AssetFilter),
     OpenFolder,
     Refresh,
     OpenAsset(String),
+    BeginDrag(String),
+    DropAsset { path: String, position: [f32; 2] },
     CreateScript { language: String, name: String },
+    CreateFile { name: String },
+    CreatePrimitive(raf_core::scene::Primitive),
+}
+
+/// Virtual assets that are always available in a Game project. They are
+/// authoring shortcuts, not files on disk; opening or dropping one still
+/// executes the real scene-creation path in the application boundary.
+pub const BUILTIN_ASSET_ROWS: [&str; 4] = [
+    "builtin://primitive/cube",
+    "builtin://primitive/sphere",
+    "builtin://primitive/cylinder",
+    "builtin://primitive/plane",
+];
+
+pub fn asset_rows_with_builtins(asset_rows: &[String]) -> Vec<String> {
+    BUILTIN_ASSET_ROWS
+        .iter()
+        .map(|row| (*row).to_string())
+        .chain(asset_rows.iter().cloned())
+        .collect()
 }
 
 /// Non-persistent visual state shown while a bottom tab is being dragged.
@@ -115,12 +140,6 @@ pub fn build_tab_strip_surface(
         root = root.with_child(drag_preview_tab(
             preview.expect("same target implies preview"),
         ));
-    } else if preview.is_some_and(|preview| {
-        preview.target_group_id == group.id && preview.split_before.is_some()
-    }) {
-        root = root.with_child(drag_preview_tab(
-            preview.expect("split target implies preview"),
-        ));
     }
 
     root = root.with_child(
@@ -182,9 +201,11 @@ pub fn build_drop_preview_surface(
     palette: StudioUiPalette,
     pulse: f32,
     split_before: bool,
+    transition: f32,
 ) -> UiSurface {
     let alpha = (44.0 + pulse.clamp(0.0, 1.0) * 36.0) as u8;
     let border_alpha = (170.0 + pulse.clamp(0.0, 1.0) * 85.0) as u8;
+    let transition = transition.clamp(0.0, 1.0);
     let tokens = palette.tokens();
     let direction_key = if split_before {
         "editor.downbar.split_left"
@@ -205,7 +226,7 @@ pub fn build_drop_preview_surface(
             text: tokens.text,
             border_width: 2.0,
             radius: 5.0,
-            opacity: 1.0,
+            opacity: 0.2 + transition * 0.8,
         })
         .with_child(
             UiNode::new("bottom.drop-preview.title", UiNodeKind::Label)
@@ -220,6 +241,80 @@ pub fn build_drop_preview_surface(
                 .with_layout(UiLayout::fit_content()),
         );
     UiSurface::new("editor.bottom.drop-preview", palette, root)
+}
+
+/// Transparent-but-visible grabber between two bottom-dock groups. The visual
+/// divider stays narrow while the retained button owns a wider hit target so
+/// resizing does not require pixel-perfect aim.
+pub fn build_dock_splitter_surface(
+    palette: StudioUiPalette,
+    left_group_id: &str,
+    right_group_id: &str,
+) -> UiSurface {
+    let tokens = palette.tokens();
+    let target = format!("{left_group_id}|{right_group_id}");
+    let root = UiNode::new(format!("bottom.splitter.{target}"), UiNodeKind::Button)
+        .with_class("bottom-dock-splitter")
+        .with_layout(UiLayout::fill(UiFlow::None))
+        .with_style(UiStyle {
+            fill: [0, 0, 0, 0],
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 0.0,
+            radius: 0.0,
+            opacity: 1.0,
+        })
+        .with_tooltip_key("editor.downbar.resize")
+        .with_accessibility_label_key("editor.downbar.resize")
+        .focusable()
+        .with_event(UiEventBinding::command(
+            UiEventKind::DragStart,
+            format!("bottom.resize.start.{target}"),
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::DragMove,
+            format!("bottom.resize.move.{target}"),
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::DragEnd,
+            format!("bottom.resize.end.{target}"),
+        ));
+    let mut surface = UiSurface::new(
+        format!("editor.bottom.splitter.{left_group_id}.{right_group_id}"),
+        palette,
+        root,
+    );
+    surface.style_sheet = UiStyleSheet {
+        rules: vec![
+            UiStyleRule::new(
+                UiStyleSelector::Class("bottom-dock-splitter".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("bottom-dock-splitter".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent),
+                    opacity: Some(0.78),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("bottom-dock-splitter".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent_hot),
+                    opacity: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Active),
+        ],
+    };
+    surface
 }
 
 pub fn build_tab_context_menu_surface(
@@ -249,7 +344,7 @@ pub fn build_tab_context_menu_surface(
                 "bottom.tab-context.split-left",
                 "editor.downbar.split_left",
                 UiIconId::ChevronLeft,
-                format!("bottom.context.split-left.{group_id}.{tab_id}"),
+                format!("bottom.context.split-left.{group_id}|{tab_id}"),
             )
             .disabled(!can_split),
         )
@@ -258,7 +353,7 @@ pub fn build_tab_context_menu_surface(
                 "bottom.tab-context.split-right",
                 "editor.downbar.split_right",
                 UiIconId::ChevronRight,
-                format!("bottom.context.split-right.{group_id}.{tab_id}"),
+                format!("bottom.context.split-right.{group_id}|{tab_id}"),
             )
             .disabled(!can_split),
         )
@@ -323,7 +418,7 @@ fn tab_button(group: &DockTabGroup, tab: &DockTab, active: bool) -> UiNode {
         _ => 96.0,
     };
     UiNode::new(
-        format!("bottom.tab.{}.{}", group.id, tab.id),
+        format!("bottom.tab.{}|{}", group.id, tab.id),
         UiNodeKind::Button,
     )
     .with_class(class)
@@ -340,23 +435,23 @@ fn tab_button(group: &DockTabGroup, tab: &DockTab, active: bool) -> UiNode {
     .focusable()
     .with_event(UiEventBinding::command(
         UiEventKind::Click,
-        format!("bottom.tab.{}.{}", group.id, tab.id),
+        format!("bottom.tab.{}|{}", group.id, tab.id),
     ))
     .with_event(UiEventBinding::command(
         UiEventKind::DragStart,
-        format!("bottom.drag.start.{}.{}", group.id, tab.id),
+        format!("bottom.drag.start.{}|{}", group.id, tab.id),
     ))
     .with_event(UiEventBinding::command(
         UiEventKind::DragMove,
-        format!("bottom.drag.move.{}.{}", group.id, tab.id),
+        format!("bottom.drag.move.{}|{}", group.id, tab.id),
     ))
     .with_event(UiEventBinding::command(
         UiEventKind::DragEnd,
-        format!("bottom.drag.end.{}.{}", group.id, tab.id),
+        format!("bottom.drag.end.{}|{}", group.id, tab.id),
     ))
     .with_event(UiEventBinding::command(
         UiEventKind::ContextMenu,
-        format!("bottom.context.open.{}.{}", group.id, tab.id),
+        format!("bottom.context.open.{}|{}", group.id, tab.id),
     ))
 }
 
@@ -750,8 +845,18 @@ pub fn build_assets_surface(
     visible_range: Option<(usize, usize)>,
     script_menu_open: bool,
     script_name: &str,
+    primitive_menu_open: bool,
+    dragging_asset: Option<&str>,
+    file_menu_open: bool,
+    file_name: &str,
 ) -> UiSurface {
     let tokens = palette.tokens();
+    if primitive_menu_open {
+        let root = primitive_create_modal_root(palette);
+        let mut surface = UiSurface::new("editor.bottom.assets", palette, root);
+        surface.style_sheet = bottom_style_sheet(palette);
+        return surface;
+    }
     let filtered_rows = asset_rows
         .iter()
         .enumerate()
@@ -782,7 +887,12 @@ pub fn build_assets_surface(
         ));
     }
     for (source_index, row) in filtered_rows.iter().skip(start).take(end - start) {
-        list = list.with_child(asset_row(palette, *source_index, row.as_str()));
+        list = list.with_child(asset_row(
+            palette,
+            *source_index,
+            row.as_str(),
+            dragging_asset == Some(row.as_str()),
+        ));
     }
     if end < total_rows {
         list = list.with_child(spacer(
@@ -920,6 +1030,32 @@ pub fn build_assets_surface(
                             UiEventKind::KeyPress("space".to_string()),
                             "assets.create-script",
                         )),
+                )
+                .with_child(
+                    UiNode::new("assets.create-primitive", UiNodeKind::Button)
+                        .with_class("asset-action asset-create-primitive")
+                        .with_icon(UiIcon::new(UiIconId::Cube).with_size(UiIconSize::Small))
+                        .with_text_key("app.create_primitive")
+                        .with_accessibility_label_key("app.create_primitive")
+                        .with_layout(UiLayout::fit_content().with_text_safe_area(true))
+                        .focusable()
+                        .with_event(UiEventBinding::command(
+                            UiEventKind::Click,
+                            "assets.create-primitive.toggle",
+                        )),
+                )
+                .with_child(
+                    UiNode::new("assets.create-file", UiNodeKind::Button)
+                        .with_class("asset-action asset-create-file")
+                        .with_icon(UiIcon::new(UiIconId::Add).with_size(UiIconSize::Small))
+                        .with_tooltip_key("app.create_file")
+                        .with_accessibility_label_key("app.create_file")
+                        .with_layout(UiLayout::fixed(28.0, 28.0))
+                        .focusable()
+                        .with_event(UiEventBinding::command(
+                            UiEventKind::Click,
+                            "assets.create-file",
+                        )),
                 ),
         );
 
@@ -968,11 +1104,180 @@ pub fn build_assets_surface(
     if script_menu_open {
         root = root.with_child(script_template_popover(palette, script_name));
     }
+    if file_menu_open {
+        root = root.with_child(file_create_popover(palette, file_name));
+    }
     root = root.with_child(list);
 
     let mut surface = UiSurface::new("editor.bottom.assets", palette, root);
     surface.style_sheet = bottom_style_sheet(palette);
     surface
+}
+
+fn primitive_create_modal_root(palette: StudioUiPalette) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new("assets.primitive-modal-root", UiNodeKind::Overlay)
+        .with_class("asset-primitive-modal-root")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            align_items: UiAlign::Center,
+            justify_content: UiJustify::Center,
+            ..UiLayout::fill(UiFlow::Column)
+        })
+        .with_style(UiStyle {
+            fill: [5, 8, 13, 238],
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 0.0,
+            radius: 0.0,
+            opacity: 1.0,
+        })
+        .focusable()
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("escape".to_string()),
+            "assets.create-primitive.cancel",
+        ))
+        .with_child(primitive_create_modal(palette))
+}
+
+fn primitive_create_modal(palette: StudioUiPalette) -> UiNode {
+    let tokens = palette.tokens();
+    let mut modal = UiNode::new("assets.primitive-modal", UiNodeKind::Panel)
+        .with_class("asset-primitive-modal")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 8.0,
+            padding: UiSpacing::same(16.0),
+            ..UiLayout::fixed(420.0, 258.0).with_z_index(220)
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface_raised,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: 8.0,
+            opacity: 1.0,
+        })
+        .with_child(
+            UiNode::new("assets.primitive-modal.header", UiNodeKind::Toolbar)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Row,
+                    align_items: UiAlign::Center,
+                    gap: 9.0,
+                    ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
+                })
+                .with_icon(
+                    UiIcon::new(UiIconId::Cube)
+                        .with_size(UiIconSize::Toolbar)
+                        .with_tint(tokens.accent),
+                )
+                .with_text_key("app.create_primitive")
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_child(
+                    UiNode::new("assets.primitive-modal.header.spacer", UiNodeKind::Panel)
+                        .with_layout(UiLayout {
+                            grow: 1.0,
+                            ..UiLayout::default()
+                        }),
+                )
+                .with_child(
+                    UiNode::new("assets.primitive-modal.close", UiNodeKind::Button)
+                        .with_icon(UiIcon::new(UiIconId::Close).with_size(UiIconSize::Small))
+                        .with_tooltip_key("app.cancel")
+                        .with_accessibility_label_key("app.cancel")
+                        .with_layout(UiLayout::fixed(26.0, 26.0))
+                        .focusable()
+                        .with_event(UiEventBinding::command(
+                            UiEventKind::Click,
+                            "assets.create-primitive.cancel",
+                        )),
+                ),
+        )
+        .with_child(
+            UiNode::new("assets.primitive-modal.hint", UiNodeKind::Label)
+                .with_text_key("app.create_primitive_hint")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fixed(0.0, 22.0).with_width_mode(UiSizeMode::Fill)),
+        );
+    for (row, primitives) in CREATEABLE_PRIMITIVES.chunks(2).enumerate() {
+        let mut group = UiNode::new(
+            format!("assets.primitive-modal.row.{row}"),
+            UiNodeKind::Toolbar,
+        )
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 8.0,
+            ..UiLayout::fixed(0.0, 60.0).with_width_mode(UiSizeMode::Fill)
+        });
+        for primitive in primitives {
+            group = group.with_child(asset_primitive_modal_option(palette, *primitive));
+        }
+        modal = modal.with_child(group);
+    }
+    modal.with_child(
+        UiNode::new("assets.primitive-modal.footer", UiNodeKind::Toolbar)
+            .with_layout(UiLayout {
+                flow: UiFlow::Row,
+                align_items: UiAlign::Center,
+                justify_content: UiJustify::End,
+                ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
+            })
+            .with_child(
+                UiNode::new("assets.primitive-modal.footer.cancel", UiNodeKind::Button)
+                    .with_text_key("app.cancel")
+                    .with_text_style(UiTextStyle::button(tokens.text_muted))
+                    .with_layout(UiLayout::fixed(82.0, 28.0).with_text_safe_area(true))
+                    .focusable()
+                    .with_event(UiEventBinding::command(
+                        UiEventKind::Click,
+                        "assets.create-primitive.cancel",
+                    )),
+            ),
+    )
+}
+
+fn asset_primitive_modal_option(
+    palette: StudioUiPalette,
+    primitive: raf_core::scene::Primitive,
+) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new(
+        format!(
+            "assets.primitive-modal.option.{}",
+            primitive_slug(primitive)
+        ),
+        UiNodeKind::Button,
+    )
+    .with_class("asset-primitive-modal-option")
+    .with_layout(UiLayout {
+        flow: UiFlow::Row,
+        align_items: UiAlign::Center,
+        gap: 10.0,
+        padding: UiSpacing::xy(12.0, 0.0),
+        ..UiLayout::fixed(0.0, 60.0)
+            .with_width_mode(UiSizeMode::Fill)
+            .with_text_safe_area(true)
+    })
+    .with_icon(
+        UiIcon::new(match primitive {
+            raf_core::scene::Primitive::Cube => UiIconId::Cube,
+            raf_core::scene::Primitive::Sphere => UiIconId::Sphere,
+            raf_core::scene::Primitive::Cylinder => UiIconId::Cylinder,
+            raf_core::scene::Primitive::Plane => UiIconId::Plane,
+            raf_core::scene::Primitive::Empty => UiIconId::Node,
+        })
+        .with_size(UiIconSize::Toolbar)
+        .with_tint(tokens.accent),
+    )
+    .with_text_key(primitive_key(primitive))
+    .with_text_style(UiTextStyle::button(tokens.text))
+    .with_accessibility_label_key(primitive_key(primitive))
+    .focusable()
+    .with_event(UiEventBinding::command(
+        UiEventKind::Click,
+        format!("assets.create-primitive:{}", primitive_slug(primitive)),
+    ))
 }
 
 const ASSET_ROW_HEIGHT: f32 = 32.0;
@@ -987,12 +1292,19 @@ fn asset_virtual_spacer_height(row_count: usize) -> f32 {
     }
 }
 
-fn asset_row(palette: StudioUiPalette, index: usize, row: &str) -> UiNode {
+fn asset_row(palette: StudioUiPalette, index: usize, row: &str, dragging: bool) -> UiNode {
     let tokens = palette.tokens();
     let command = format!("assets.open:{row}");
+    let drag_start = format!("assets.drag.start:{row}");
+    let drag_end = format!("assets.drag.end:{row}");
+    let class = if dragging {
+        "asset-row asset-row-dragging"
+    } else {
+        "asset-row"
+    };
     UiNode::new(format!("assets.row.{index}"), UiNodeKind::Panel)
-        .with_class("asset-row")
-        .with_text_value(row)
+        .with_class(class)
+        .with_text_value(asset_display_name(row))
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
@@ -1017,6 +1329,15 @@ fn asset_row(palette: StudioUiPalette, index: usize, row: &str) -> UiNode {
             UiEventKind::KeyPress("space".to_string()),
             command,
         ))
+        .with_event(UiEventBinding::command(UiEventKind::DragStart, drag_start))
+        .with_event(UiEventBinding::command(UiEventKind::DragEnd, drag_end))
+}
+
+fn asset_display_name(row: &str) -> String {
+    row.strip_prefix("builtin://primitive/")
+        .and_then(crate::panels::primitive_create::parse_primitive_slug)
+        .map(|primitive| format!("Built-in / {}", primitive_name(primitive)))
+        .unwrap_or_else(|| row.to_string())
 }
 
 fn script_template_popover(palette: StudioUiPalette, _script_name: &str) -> UiNode {
@@ -1131,6 +1452,98 @@ fn script_template_popover(palette: StudioUiPalette, _script_name: &str) -> UiNo
                         )),
                 ),
         )
+}
+
+fn file_create_popover(palette: StudioUiPalette, file_name: &str) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new("assets.file-popover", UiNodeKind::Menu)
+        .with_class("asset-file-popover")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 6.0,
+            padding: UiSpacing::same(8.0),
+            align_self: Some(UiAlign::Stretch),
+            ..UiLayout::fit_content()
+                .with_width_mode(UiSizeMode::Fill)
+                .with_z_index(20)
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface_raised,
+            border: tokens.accent,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: 5.0,
+            opacity: 1.0,
+        })
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("escape".to_string()),
+            "assets.file.cancel",
+        ))
+        .with_child(
+            UiNode::new("assets.file-title", UiNodeKind::Label)
+                .with_text_key("app.create_file")
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(
+            UiNode::text_input(
+                "assets.file-name",
+                raf_ui::UiTextInput {
+                    value_key: "assets.file-name".to_string(),
+                    placeholder_key: Some("app.file_name_placeholder".to_string()),
+                    max_length: 128,
+                    multiline: false,
+                    password: false,
+                    submit_command: Some("assets.file.create".to_string()),
+                },
+            )
+            .with_layout(UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill))
+            .with_text_value(file_name.to_string())
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("escape".to_string()),
+                "assets.file.cancel",
+            )),
+        )
+        .with_child(
+            UiNode::new("assets.file-actions", UiNodeKind::Toolbar)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Row,
+                    justify_content: UiJustify::End,
+                    gap: 5.0,
+                    ..UiLayout::fit_content()
+                })
+                .with_child(file_action_button(
+                    "file-cancel",
+                    "app.cancel",
+                    "assets.file.cancel",
+                ))
+                .with_child(file_action_button(
+                    "file-create",
+                    "app.create",
+                    "assets.file.create",
+                )),
+        )
+}
+
+fn file_action_button(id: &str, label_key: &str, command: &str) -> UiNode {
+    UiNode::new(format!("assets.file.{id}"), UiNodeKind::Button)
+        .with_class("asset-file-action")
+        .with_text_key(label_key)
+        .with_layout(UiLayout::fit_content().with_text_safe_area(true))
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("enter".to_string()),
+            command,
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("space".to_string()),
+            command,
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("escape".to_string()),
+            "assets.file.cancel",
+        ))
 }
 
 fn script_template_button(id: &str, label_key: &str, command: &str) -> UiNode {
@@ -1345,7 +1758,7 @@ pub fn build_status_surface(palette: StudioUiPalette, status: &[String]) -> UiSu
             align_items: UiAlign::Center,
             gap: 0.0,
             padding: UiSpacing::xy(10.0, 0.0),
-            overflow: UiOverflow::Clip,
+            overflow: UiOverflow::ScrollX,
             ..UiLayout::fill(UiFlow::Row)
         })
         .with_style(UiStyle {
@@ -1405,6 +1818,15 @@ fn command_button(id: &str, text_key: &str, icon: UiIconId, command: &str) -> Ui
 }
 
 fn asset_icon(name: &str) -> UiIconId {
+    if let Some(slug) = name.strip_prefix("builtin://primitive/") {
+        return match crate::panels::primitive_create::parse_primitive_slug(slug) {
+            Some(raf_core::scene::Primitive::Cube) => UiIconId::Cube,
+            Some(raf_core::scene::Primitive::Sphere) => UiIconId::Sphere,
+            Some(raf_core::scene::Primitive::Cylinder) => UiIconId::Cylinder,
+            Some(raf_core::scene::Primitive::Plane) => UiIconId::Plane,
+            _ => UiIconId::Assets,
+        };
+    }
     let extension = name
         .rsplit_once('.')
         .map(|(_, extension)| extension.to_ascii_lowercase());
@@ -1473,6 +1895,27 @@ fn bottom_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 },
             )
             .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("bottom-tab-active".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent),
+                    border: Some(tokens.accent_hot),
+                    border_width: Some(1.0),
+                    text: Some([255, 255, 255, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("bottom-tab".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent),
+                    border: Some(tokens.accent_hot),
+                    text: Some([255, 255, 255, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Active),
             UiStyleRule::new(
                 UiStyleSelector::Class("bottom-tab-context".to_string()),
                 UiStylePatch {
@@ -1945,13 +2388,13 @@ mod tests {
             )],
         );
         let tabs = build_tab_strip_surface(StudioUiPalette::IndustrialDark, &group, false, None);
-        let console_tab = child(&tabs.root, "bottom.tab.workspace.console");
+        let console_tab = child(&tabs.root, "bottom.tab.workspace|console");
         assert!(console_tab.event_handlers.iter().any(|binding| {
             binding.event == UiEventKind::ContextMenu
                 && matches!(
                     &binding.action,
                     raf_ui::UiAction::Command { name }
-                        if name == "bottom.context.open.workspace.console"
+                        if name == "bottom.context.open.workspace|console"
                 )
         }));
 
@@ -1964,11 +2407,11 @@ mod tests {
         for (node_id, expected_command) in [
             (
                 "bottom.tab-context.split-left",
-                "bottom.context.split-left.workspace.console",
+                "bottom.context.split-left.workspace|console",
             ),
             (
                 "bottom.tab-context.split-right",
-                "bottom.context.split-right.workspace.console",
+                "bottom.context.split-right.workspace|console",
             ),
             ("bottom.tab-context.reset", "bottom.context.reset"),
         ] {
@@ -1978,6 +2421,43 @@ mod tests {
                     &binding.action,
                     raf_ui::UiAction::Command { name } if name == expected_command
                 )
+            }));
+        }
+    }
+
+    #[test]
+    fn bottom_splitter_exposes_a_wide_resize_contract() {
+        let surface = build_dock_splitter_surface(
+            StudioUiPalette::IndustrialDark,
+            "native.primary",
+            "native.group.2",
+        );
+        assert_eq!(surface.root.layout.width_mode, UiSizeMode::Fill);
+        assert_eq!(surface.root.layout.height_mode, UiSizeMode::Fill);
+        assert_eq!(
+            surface.root.tooltip_key.as_deref(),
+            Some("editor.downbar.resize")
+        );
+        for (event, expected) in [
+            (
+                UiEventKind::DragStart,
+                "bottom.resize.start.native.primary|native.group.2",
+            ),
+            (
+                UiEventKind::DragMove,
+                "bottom.resize.move.native.primary|native.group.2",
+            ),
+            (
+                UiEventKind::DragEnd,
+                "bottom.resize.end.native.primary|native.group.2",
+            ),
+        ] {
+            assert!(surface.root.event_handlers.iter().any(|binding| {
+                binding.event == event
+                    && matches!(
+                        &binding.action,
+                        raf_ui::UiAction::Command { name } if name == expected
+                    )
             }));
         }
     }
@@ -2044,7 +2524,7 @@ mod tests {
             )],
         );
         let surface = build_tab_strip_surface(StudioUiPalette::IndustrialDark, &group, false, None);
-        let tab = child(&surface.root, "bottom.tab.main.project-settings");
+        let tab = child(&surface.root, "bottom.tab.main|project-settings");
 
         assert_eq!(tab.layout.basis, [104.0, 28.0]);
         assert_eq!(tab.text_key.as_deref(), Some("app.studio_project"));
@@ -2086,5 +2566,14 @@ mod tests {
         assert_eq!(asset_icon("board.pcb"), UiIconId::Pcb);
         assert_eq!(asset_icon("config.ron"), UiIconId::Project);
         assert_eq!(asset_icon("Building_A.glb"), UiIconId::Assets);
+    }
+
+    #[test]
+    fn game_assets_include_truthful_builtin_primitive_rows() {
+        let rows = asset_rows_with_builtins(&["models/tree.glb".to_string()]);
+        assert_eq!(rows.len(), BUILTIN_ASSET_ROWS.len() + 1);
+        assert_eq!(asset_display_name(&rows[0]), "Built-in / Cube");
+        assert_eq!(asset_icon(&rows[1]), UiIconId::Sphere);
+        assert_eq!(rows.last().map(String::as_str), Some("models/tree.glb"));
     }
 }

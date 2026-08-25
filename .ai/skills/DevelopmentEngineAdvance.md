@@ -1,7 +1,41 @@
 # DevelopmentEngineAdvance - AuraRafi Development Skill
 
 > Reincarnation document. New AI sessions: absorb everything here.
-> Last updated: 2026-07-18
+> Last updated: 2026-08-20
+>
+> Current authority note: the native migration is now the active path. Older
+> widget-host and `app.rs`/legacy panel references below are historical context
+> only; new work follows `native_application.rs`, `native_workbench.rs`,
+> `native_editor_runtime.rs`, RafUI surfaces, and ApiGraphicBasic.
+
+## Current native module map
+
+For new work, use this map instead of the historical tree farther below:
+
+- `crates/raf_editor/src/native_application.rs`: Winit lifecycle and native
+  composition root.
+- `crates/raf_editor/src/native_workbench.rs`: retained Game workbench state
+  and lifecycle coordinator.
+- `crates/raf_editor/src/native_workbench_input.rs`: input routing and
+  editor-facing semantic intents.
+- `crates/raf_editor/src/native_workbench_surface.rs`: retained surface
+  composition for the shell and docks.
+- `crates/raf_editor/src/native_editor_runtime.rs`: scene, camera, history,
+  render runtime, frame pacing, and viewport state.
+- `crates/raf_editor/src/native_editor_commands.rs`: translation from UI
+  intents to shared editor mutations.
+- `crates/raf_editor/src/native_attached_executor.rs`: CLI/MCP attached
+  command forwarding into the same command boundary.
+- `crates/raf_editor/src/native_electronics.rs`: direct CAD scene adapter used by
+  the native Electronics controller and ApiGraphicBasic compositor.
+- `crates/raf_editor/src/electronics_controller.rs`: live schematic/PCB
+  document, selection, history, analysis and authoring boundary.
+- `crates/raf_editor/src/electronics_controller_interaction.rs`: native CAD
+  input, gestures, placement, routing, editing, persistence and undo/redo.
+- `crates/raf_editor/src/electronics_command_adapter.rs`: shared catalog
+  command execution for Agent, CLI/MCP and native editor requests.
+- `crates/raf_render/src/ApiGraphicBasic/`: shared composition, device,
+  resource, frame-scheduler, and retained-surface presentation contracts.
 
 ## WHO YOU ARE
 
@@ -16,7 +50,8 @@ The user is Erick ("w" is his signature slang). Works fast, builds multiple prod
 **AuraRafi** = dual-purpose Rust engine for AAA games + physical electronics (PCB/CAD) from ONE editor.
 
 - **Language**: Rust core. C++ or Objective-C++ only through thin FFI bridges when a platform SDK materially requires it.
-- **UI**: retained RafUI direction with an egui/eframe transitional shell. Native desktop.
+- **UI**: native Winit shell with retained RafUI surfaces. The retired widget
+  host is not a runtime dependency.
 - **Graphics ownership**: `ApiGraphicBasic` is the owner. WGPU is the current private compatibility backend and is replaced gradually behind the owned contract. Load `.ai/APIGRAPHICBASIC.md` for every graphics task.
 - **Build**: `stable-x86_64-pc-windows-gnu` via MSYS2/MinGW. NEVER MSVC.
 - **Build dir**: `target_gnu/` (NOT `target/`). Set in `.cargo/config.toml`.
@@ -101,7 +136,7 @@ crates/
 | **No heavy deps** | Zero tokio, zero reqwest in core path. |
 | **ApiGraphicBasic owns graphics** | WGPU stays private and loses responsibilities capability by capability; no big-bang deletion. |
 | **One backend per execution path** | Never mix WGPU/native resources accidentally inside one frame. |
-| **RafUI owns new editor chrome** | New documents, menus, docks, settings shells, and overlays use RafUI; Egui bodies are transitional adapters. |
+| **RafUI owns editor chrome** | New documents, menus, docks, settings shells, and overlays use RafUI. Historical widget bodies are not active adapters. |
 | **One authoritative canvas model** | Navigator, selection, wires/traces, and status consume the real scene/CAD document and visible-world transform. |
 | **`cargo check` before done** | Always verify. PS exit code 1 with no "error[" = success. |
 | **Translations in BOTH files** | Every t() key needs en.json AND es.json entry. |
@@ -127,8 +162,8 @@ crates/
    texture lifecycle, menu placement, or action translation.
 4. Register the narrow route/host in `app.rs`; do not place a raw visual tree
    or backend mutation inside the app loop.
-5. Egui may mount a temporary legacy body, but it must not gain permanent menu,
-   shell, dock, or canvas ownership.
+5. Historical widget bodies are reference material only; do not mount them back
+   into the native editor or give them menu, shell, dock, or canvas ownership.
 
 ### Building menus in RafUI:
 1. Create a focusable trigger that emits `UiAction::OpenMenu`.
@@ -163,7 +198,9 @@ crates/
 
 ## KNOWN ISSUES / AVOID
 
-- **egui `clicked()` vs `dragged()`**: Mutually exclusive. Use `dragged_by()` for drag start.
+- **Native retained input**: distinguish press, drag, release, and pointer
+  capture through RafUI's `UiInputState`/`InputRouter` contract; do not add
+  toolkit-specific input workarounds.
 - **`target/` vs `target_gnu/`**: Build artifacts in `target_gnu/`.
 - **PowerShell stderr**: cargo warnings -> stderr -> exit code 1. Not real errors.
 - **depth_sort.rs painter's algorithm**: Fails on interpenetrating meshes. KNOWN LIMITATION. Z-buffer CPU planned as opt-in fix.
@@ -177,7 +214,7 @@ crates/
 - Node editor with executor
 - Full i18n EN/ES via JSON (76+ new keys by Erick)
 - Shared ApiGraphicBasic GPU-first Scene/CAD presentation with CPU recovery
-- Retained RafUI surfaces and a transitional egui/eframe shell
+- Retained RafUI surfaces under the native Winit host
 - Entity picking, multi-select
 - Transform gizmo arrows (Move/Rotate/Scale) with drag
 - WASD camera + scroll zoom + F focus + invert mouse settings

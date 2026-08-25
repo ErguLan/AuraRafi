@@ -1,7 +1,7 @@
 //! Renderer-side viewport bridge.
 //!
 //! Owns camera/navigation state, render orchestration, and edit-session state
-//! so the editor panel can stay focused on egui layout and painting.
+//! so the editor host can stay focused on retained layout and painting.
 
 use glam::{Mat4, Vec3};
 
@@ -12,7 +12,7 @@ use crate::bridge::editor_camera::{EditorCameraBlock, EditorCameraMode};
 use crate::bridge::input_handler::{ProjectedEditOverlay, ViewportEditSession};
 use crate::bridge::picking_policy::PickingPolicy;
 use crate::bridge::render_runtime::RenderRuntime;
-use crate::bridge::transform_controller::ViewportTransformController;
+use crate::bridge::transform_controller::{AxisDragOutcome, ViewportTransformController};
 use crate::camera::{Camera, CameraMode};
 use crate::gizmo::{GizmoAxis, GizmoMode, GizmoState};
 use crate::scene_renderer::{FrameStats, RenderOptions, SceneRenderFrame, SceneRenderer};
@@ -35,6 +35,7 @@ pub struct ViewportNavigationConfig {
     pub invert_mouse_x: bool,
     pub invert_mouse_y: bool,
     pub move_sensitivity: f32,
+    pub wasd_speed: f32,
     pub rotate_sensitivity: f32,
     pub scale_sensitivity: f32,
 }
@@ -45,6 +46,7 @@ impl Default for ViewportNavigationConfig {
             invert_mouse_x: false,
             invert_mouse_y: true,
             move_sensitivity: 3.5,
+            wasd_speed: 1.0,
             rotate_sensitivity: 3.5,
             scale_sensitivity: 3.5,
         }
@@ -406,6 +408,67 @@ impl ViewportBridge {
         );
     }
 
+    pub fn update_transform_hover_world(
+        &mut self,
+        origin: Vec3,
+        entity_scale: Vec3,
+        view_proj: &Mat4,
+        pointer_local: [f32; 2],
+        vp_w: f32,
+        vp_h: f32,
+        presentation_scale: f32,
+    ) {
+        self.transform_controller.update_hover_world(
+            origin,
+            entity_scale,
+            view_proj,
+            pointer_local,
+            vp_w,
+            vp_h,
+            presentation_scale,
+        );
+    }
+
+    pub fn begin_transform_drag_world(
+        &mut self,
+        origin: Vec3,
+        entity_scale: Vec3,
+        view_proj: &Mat4,
+        pointer_local: [f32; 2],
+        vp_w: f32,
+        vp_h: f32,
+        presentation_scale: f32,
+    ) {
+        self.transform_controller.begin_drag_world(
+            origin,
+            entity_scale,
+            view_proj,
+            pointer_local,
+            vp_w,
+            vp_h,
+            presentation_scale,
+        );
+    }
+
+    /// Resolves the active drag into axis-space quantities without touching
+    /// scene nodes. Used by multi-selection drags where the editor owns every
+    /// member transform.
+    pub fn compute_axis_drag(
+        &mut self,
+        view_proj: &Mat4,
+        current_mouse: [f32; 2],
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Option<AxisDragOutcome> {
+        self.transform_controller.compute_axis_drag(
+            view_proj,
+            current_mouse,
+            self.orbit_distance,
+            vp_w,
+            vp_h,
+        )
+    }
+
     pub fn apply_transform_drag(
         &mut self,
         scene: &mut SceneGraph,
@@ -450,6 +513,8 @@ impl ViewportBridge {
             }
 
             if input.hovered && input.scroll_delta_y.abs() > 0.01 {
+                // Positive wheel motion means wheel-up and zooms toward the
+                // scene.
                 self.zoom_2d *= 1.0 + input.scroll_delta_y * 0.0015 * config.scale_sensitivity;
                 self.zoom_2d = self.zoom_2d.clamp(0.1, 50.0);
             }
@@ -494,13 +559,23 @@ impl ViewportBridge {
             let right =
                 Vec3::new(self.orbit_yaw.cos(), 0.0, -self.orbit_yaw.sin()).normalize_or_zero();
             let up = Vec3::Y;
-            let move_speed = self.orbit_distance.max(2.0) * 0.85 * config.move_sensitivity * dt;
-            self.camera.target += forward * input.move_forward * move_speed;
+            // `forward` is the target-to-camera vector in orbit space. Moving
+            // the camera forward therefore moves the orbit target in the
+            // opposite direction. The square-root distance scale keeps fly
+            // navigation usable when the camera is far from the scene instead
+            // of making a low setting feel unnaturally fast.
+            let move_speed = self.orbit_distance.clamp(2.0, 200.0).sqrt()
+                * 0.05
+                * config.wasd_speed.clamp(0.05, 5.0)
+                * dt;
+            self.camera.target -= forward * input.move_forward * move_speed;
             self.camera.target += right * input.move_right * move_speed;
             self.camera.target += up * input.move_up * move_speed;
         }
 
         if input.hovered && input.scroll_delta_y.abs() > 0.01 {
+            // Positive wheel motion means wheel-up and reduces the orbit
+            // distance to zoom toward the scene.
             self.orbit_distance *= 1.0 - input.scroll_delta_y * 0.001 * config.scale_sensitivity;
             self.orbit_distance = self.orbit_distance.clamp(0.5, 200.0);
         }

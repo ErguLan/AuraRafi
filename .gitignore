@@ -30,3 +30,7 @@ desktop.ini
 
 # Agent run logs
 /.codex-run-logs/
+
+# Local smoke-test output and generated Python bytecode
+/artifacts/
+**/__pycache__/

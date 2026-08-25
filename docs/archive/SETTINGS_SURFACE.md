@@ -93,9 +93,8 @@ displays without changing control values or hit regions.
   visibility, target texture, and action translation.
 - `settings_surface.rs`: owns only the retained document and styling.
 - ApiGraphicBasic: owns composition and the GPU/CPU presentation paths.
-- Eframe: temporarily provides the native event loop and final texture
-  placement. It is not the Settings layout or widget system.
+- The native window host provides the event loop and final texture placement.
+  It is not the Settings layout or widget system.
 
-This separation means the future native RafUI window host can replace the
-temporary Eframe placement without rewriting Settings data, validation,
-translations, or persistence.
+This separation keeps the RafUI window host independent from Settings data,
+validation, translations, and persistence.

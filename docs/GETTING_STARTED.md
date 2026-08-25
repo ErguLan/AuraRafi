@@ -69,16 +69,17 @@ When you first launch AuraRafi, you will see:
 
 The central viewport shows your game scene in 2D or 3D:
 
-- **Orbit Camera**: Left-mouse drag (3D mode)
+- **Orbit Camera**: Hold right mouse and drag in the viewport (3D mode)
 - **Pan**: Middle-mouse drag
 - **Zoom**: Scroll wheel
-- **Reset View**: Double-click
-- **Tools**: Select (Q), Move (W), Rotate (E), Scale (R)
-- **Render Style**: Cycle with Z key (Solid+Wire / Wireframe / Solid Only)
+- **Reset View**: Use the Reset View control in the viewport toolbar
+- **Tools**: Move (G), Rotate (R), Scale (T), Select mode (C)
+- **Render Style**: Use the Solid/Wireframe/Preview dropdown and polygon-edge toggle
 - **2D/3D Toggle**: Click buttons at top-center
 - **Change Color**: Use the color picker in the Properties panel (right side)
 - **Change Shape**: Use the primitive dropdown in Properties > Shape
 - **Multi-select**: Shift+Click in hierarchy/viewport, Ctrl+A for all entities
+- **Camera shortcuts**: WASD/QE move, G/R/T select Move/Rotate/Scale, F focuses selection
 - **Edit Mode**: Tab toggles Object / Vertex mode foundations
 
 ### Play Mode

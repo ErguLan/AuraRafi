@@ -54,7 +54,7 @@ Los puntos mas importantes hoy son estos:
 
 Hoy `GameRuntimeState` es practicamente un stub:
 
-- `RuntimeInputState::from_egui(...)` no traduce input real
+- El adaptador anterior de entrada de UI no traduce input real
 - `GameRuntimeState::start(...)` solo clona `SceneGraph`
 - `GameRuntimeState::update(...)` devuelve `RuntimeReport::default()`
 - no hay loop real de runtime
@@ -438,7 +438,7 @@ Cuando el runtime ya sea real, yo si evaluaria moverlo a crate propio:
 Motivo:
 
 - separa editor host de runtime host
-- reduce acoplamiento con egui
+- reduce acoplamiento con el shell de UI
 - hace mas facil testing
 - permite pensar export/build futuro sin llevarte el editor entero
 

@@ -94,7 +94,7 @@ impl Framebuffer {
         }
     }
 
-    /// Get the raw RGBA pixel data (for uploading to egui texture).
+    /// Get the raw RGBA pixel data for a host texture upload.
     pub fn pixels(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.color.as_ptr() as *const u8, self.color.len() * 4) }
     }
@@ -144,6 +144,32 @@ impl Framebuffer {
             self.depth[idx] = z;
         }
 
+        true
+    }
+
+    /// Blend a pixel over the current color without reading or modifying the
+    /// scene depth buffer. Used by renderer-owned screen-space overlays.
+    #[inline]
+    pub fn blend_pixel_no_depth(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) -> bool {
+        if x >= self.width || y >= self.height {
+            return false;
+        }
+
+        let idx = (y * self.width + x) as usize;
+        if a == u8::MAX {
+            self.color[idx] = pack_rgba(r, g, b, a);
+            return true;
+        }
+
+        let alpha = a as f32 / 255.0;
+        let inv_alpha = 1.0 - alpha;
+        let [dst_r, dst_g, dst_b, _] = unpack_rgba(self.color[idx]);
+        self.color[idx] = pack_rgba(
+            (r as f32 * alpha + dst_r as f32 * inv_alpha) as u8,
+            (g as f32 * alpha + dst_g as f32 * inv_alpha) as u8,
+            (b as f32 * alpha + dst_b as f32 * inv_alpha) as u8,
+            255,
+        );
         true
     }
 

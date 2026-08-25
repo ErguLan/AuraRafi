@@ -227,6 +227,7 @@ struct MeshVertexInput {
 struct MeshVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
+    @location(1) color: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> mesh_uniforms: MeshUniforms;
@@ -236,13 +237,14 @@ fn mesh_vs(input: MeshVertexInput) -> MeshVertexOutput {
     var output: MeshVertexOutput;
     output.clip_position = mesh_uniforms.mvp * vec4<f32>(input.position, 1.0);
     output.world_normal = normalize((mesh_uniforms.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz);
+    output.color = mesh_uniforms.color;
     return output;
 }
 
 @fragment
 fn mesh_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
     let lit = mesh_uniforms.params.x;
-    let base_color = mesh_uniforms.color;
+    let base_color = input.color;
     if (lit < 0.5) {
         return base_color;
     }
@@ -250,6 +252,38 @@ fn mesh_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
     let light_dir = normalize(mesh_uniforms.light_dir.xyz);
     let lambert = 0.3 + 0.7 * max(dot(normalize(input.world_normal), light_dir), 0.0);
     return vec4<f32>(base_color.rgb * lambert, base_color.a);
+}
+
+struct MeshInstancedVertexInput {
+    @location(0) position: vec3<f32>,
+    @location(1) normal: vec3<f32>,
+    @location(2) model_0: vec4<f32>,
+    @location(3) model_1: vec4<f32>,
+    @location(4) model_2: vec4<f32>,
+    @location(5) model_3: vec4<f32>,
+    @location(6) color: vec4<f32>,
+};
+
+@vertex
+fn mesh_instanced_vs(input: MeshInstancedVertexInput) -> MeshVertexOutput {
+    var output: MeshVertexOutput;
+    let model = mat4x4<f32>(input.model_0, input.model_1, input.model_2, input.model_3);
+    output.clip_position = mesh_uniforms.mvp * model * vec4<f32>(input.position, 1.0);
+    output.world_normal = normalize((model * vec4<f32>(input.normal, 0.0)).xyz);
+    output.color = input.color;
+    return output;
+}
+
+@fragment
+fn mesh_instanced_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
+    let lit = mesh_uniforms.params.x;
+    if (lit < 0.5) {
+        return input.color;
+    }
+
+    let light_dir = normalize(mesh_uniforms.light_dir.xyz);
+    let lambert = 0.3 + 0.7 * max(dot(normalize(input.world_normal), light_dir), 0.0);
+    return vec4<f32>(input.color.rgb * lambert, input.color.a);
 }
 
 struct LineUniforms {
@@ -304,6 +338,50 @@ fn line_vs(input: LineVertexInput, @builtin(vertex_index) vertex_index: u32) -> 
 
 @fragment
 fn line_fs(input: LineVertexOutput) -> @location(0) vec4<f32> {
+    return input.color;
+}
+
+struct OverlayUniforms {
+    viewport: vec2<f32>,
+    _padding: vec2<f32>,
+};
+
+struct OverlayVertexInput {
+    @location(0) point_0: vec4<f32>,
+    @location(1) point_1: vec4<f32>,
+    @location(2) point_2: vec4<f32>,
+    @location(3) color: vec4<f32>,
+};
+
+struct OverlayVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> overlay_uniforms: OverlayUniforms;
+
+@vertex
+fn overlay_vs(input: OverlayVertexInput, @builtin(vertex_index) vertex_index: u32) -> OverlayVertexOutput {
+    var output: OverlayVertexOutput;
+    var point = input.point_0.xy;
+    if (vertex_index == 1u) {
+        point = input.point_1.xy;
+    } else if (vertex_index == 2u) {
+        point = input.point_2.xy;
+    }
+
+    let viewport = max(overlay_uniforms.viewport, vec2<f32>(1.0));
+    let ndc = vec2<f32>(
+        point.x / viewport.x * 2.0 - 1.0,
+        1.0 - point.y / viewport.y * 2.0,
+    );
+    output.clip_position = vec4<f32>(ndc, 0.0, 1.0);
+    output.color = input.color;
+    return output;
+}
+
+@fragment
+fn overlay_fs(input: OverlayVertexOutput) -> @location(0) vec4<f32> {
     return input.color;
 }
 "#;

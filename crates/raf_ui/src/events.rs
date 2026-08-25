@@ -58,6 +58,9 @@ pub enum UiAction {
         key: String,
         value: String,
     },
+    SetClipboard {
+        text: String,
+    },
     ScrollTo {
         id: String,
         offset: [f32; 2],

@@ -45,6 +45,56 @@ pub struct GameCommandContext<'a> {
     pub viewport: &'a mut dyn GameViewportPort,
 }
 
+const KNOWN_GAME_COMMANDS: &[&str] = &[
+    "game.add",
+    "game.select",
+    "game.rename",
+    "game.delete",
+    "game.duplicate",
+    "game.set_transform",
+    "game.move",
+    "game.rotate",
+    "game.scale",
+    "game.color",
+    "game.arrange_grid",
+    "game.generate_prefab",
+    "game.describe_scene",
+    "game.focus",
+    "game.batch",
+];
+
+/// Unknown-command errors teach the caller the real surface instead of
+/// leaving agents guessing.
+fn unknown_game_command(command_name: &str) -> CommandOutput {
+    let query = command_name
+        .trim_start_matches("game.")
+        .to_ascii_lowercase();
+    let mut suggestions: Vec<String> = KNOWN_GAME_COMMANDS
+        .iter()
+        .filter(|known| {
+            known
+                .trim_start_matches("game.")
+                .to_ascii_lowercase()
+                .contains(&query)
+                || query.is_empty()
+        })
+        .map(|known| (*known).to_string())
+        .collect();
+    if suggestions.is_empty() {
+        suggestions = KNOWN_GAME_COMMANDS
+            .iter()
+            .map(|known| known.to_string())
+            .collect();
+    }
+    CommandOutput::error(
+        "Game command",
+        format!(
+            "Unknown game command: {command_name}. Available commands: {}",
+            suggestions.join(", ")
+        ),
+    )
+}
+
 pub fn execute(
     command_name: &str,
     command: &ParsedCommand,
@@ -65,10 +115,7 @@ pub fn execute(
         "game.generate_prefab" => generate_prefab(command, ctx),
         "game.describe_scene" => describe_scene(ctx),
         "game.focus" => focus_entity(command, ctx),
-        _ => CommandOutput::error(
-            "Game command",
-            format!("Unknown game command: {command_name}"),
-        ),
+        other => unknown_game_command(other),
     }
 }
 
@@ -750,13 +797,12 @@ mod tests {
     use super::*;
     use crate::commands::output::CommandLevel;
     use crate::commands::parser::{parse_console_input, ParsedInput};
-    use crate::panels::viewport::ViewportPanel;
 
     #[test]
     fn add_primitive_uses_builtin_asset_manifest() {
         let mut scene = SceneGraph::new();
         let mut selection = SceneSelectionState::default();
-        let mut viewport = ViewportPanel::default();
+        let mut viewport = HeadlessGameViewportPort::default();
         let ParsedInput::Command(command) =
             parse_console_input("/game.add primitive=cube name=Block x=1 y=2 z=3").unwrap()
         else {

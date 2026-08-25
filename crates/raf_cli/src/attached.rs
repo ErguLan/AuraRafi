@@ -9,16 +9,19 @@ use raf_core::ipc::{
 };
 use raf_core::{CommandEndpoint, CommandSource, EngineCommandRequest, EngineCommandResponse};
 use serde_json::{json, Value};
-use std::io::{BufRead, BufReader, BufWriter, Write};
-use std::net::TcpStream;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Loopback connect fails fast so stale descriptors do not stall the CLI.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(1);
+/// The editor queues attached commands onto its frame loop, so the Welcome
+/// and command responses stay patient even while the editor is busy.
+const IO_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub struct AttachedClient {
-    writer: BufWriter<TcpStream>,
-    reader: BufReader<TcpStream>,
+    stream: TcpStream,
     welcome: AttachWelcome,
     project_path: PathBuf,
 }
@@ -47,38 +50,62 @@ impl AttachedClient {
                 descriptor.transport
             ));
         }
-        let address = descriptor
+        let address: SocketAddr = descriptor
             .address
             .parse()
             .map_err(|error| format!("Invalid attached endpoint address: {error}"))?;
-        let stream = TcpStream::connect_timeout(&address, CONNECT_TIMEOUT).map_err(|error| {
-            format!("Unable to connect to the open editor at {address}: {error}")
+        // Plain blocking connect: loopback refuses dead ports instantly, and
+        // connect_timeout's nonblocking dance has historically been flaky on
+        // the windows-gnu toolchain.
+        let stream = TcpStream::connect(address).map_err(|_| {
+            format!(
+                "No editor is answering at {address}. The descriptor is stale \
+                 (crashed or killed editor); it will be replaced when the editor \
+                 reopens this project. Run `raf editors` to list live editors."
+            )
         })?;
         stream
-            .set_read_timeout(Some(CONNECT_TIMEOUT))
+            .set_read_timeout(Some(IO_TIMEOUT))
             .map_err(|error| format!("Configure attached read timeout: {error}"))?;
         stream
-            .set_write_timeout(Some(CONNECT_TIMEOUT))
+            .set_write_timeout(Some(IO_TIMEOUT))
             .map_err(|error| format!("Configure attached write timeout: {error}"))?;
-        let reader_stream = stream
-            .try_clone()
-            .map_err(|error| format!("Clone attached stream: {error}"))?;
-        let mut writer = BufWriter::new(stream);
-        let mut reader = BufReader::new(reader_stream);
-        let hello = AttachHello::new(client_name, &descriptor);
-        write_frame(&mut writer, IpcFrame::Hello(hello))?;
-        let welcome = read_frame(&mut reader)?;
-        let IpcFrame::Welcome(welcome) = welcome else {
-            return Err("Attached editor did not return a welcome frame.".to_string());
+        // Borrowed halves instead of try_clone keep this path byte-identical
+        // to a plain connect/write/read loop, which is what the editor's
+        // listener is validated against.
+        let welcome = {
+            let mut writer: &TcpStream = &stream;
+            let mut reader: &TcpStream = &stream;
+            let hello = AttachHello::new(client_name, &descriptor);
+            write_frame(&mut writer, IpcFrame::Hello(hello))?;
+            let frame = match read_frame(&mut reader) {
+                Ok(frame) => frame,
+                Err(error) => {
+                    // Surface whatever the editor did send so transport bugs
+                    // are diagnosable from the CLI alone.
+                    let mut leftover = [0u8; 256];
+                    let peeked = reader.read(&mut leftover).unwrap_or(0);
+                    if peeked > 0 {
+                        return Err(format!(
+                            "{error}; pending bytes: {}",
+                            String::from_utf8_lossy(&leftover[..peeked])
+                        ));
+                    }
+                    return Err(error);
+                }
+            };
+            let IpcFrame::Welcome(welcome) = frame else {
+                return Err("Attached editor did not return a welcome frame.".to_string());
+            };
+            if !welcome.accepted {
+                return Err(welcome
+                    .error
+                    .unwrap_or_else(|| "The editor rejected the attached client.".to_string()));
+            }
+            welcome
         };
-        if !welcome.accepted {
-            return Err(welcome
-                .error
-                .unwrap_or_else(|| "The editor rejected the attached client.".to_string()));
-        }
         Ok(Self {
-            writer,
-            reader,
+            stream,
             welcome,
             project_path,
         })
@@ -119,10 +146,12 @@ impl CommandEndpoint for AttachedClient {
             CommandSource::Mcp => CommandSource::Mcp,
             _ => CommandSource::Cli,
         };
-        if let Err(error) = write_frame(&mut self.writer, IpcFrame::Command(request.clone())) {
+        let mut writer: &TcpStream = &self.stream;
+        let mut reader: &TcpStream = &self.stream;
+        if let Err(error) = write_frame(&mut writer, IpcFrame::Command(request.clone())) {
             return EngineCommandResponse::error(request.id, "Attached transport", error);
         }
-        match read_frame(&mut self.reader) {
+        match read_frame(&mut reader) {
             Ok(IpcFrame::Response(response)) => response,
             Ok(IpcFrame::Error { message }) => {
                 EngineCommandResponse::error(request.id, "Attached transport", message)
@@ -145,13 +174,27 @@ fn write_frame(writer: &mut impl Write, frame: IpcFrame) -> Result<(), String> {
         .map_err(|error| format!("Attached write: {error}"))
 }
 
-fn read_frame(reader: &mut impl BufRead) -> Result<IpcFrame, String> {
-    let mut line = String::new();
-    let bytes = reader
-        .read_line(&mut line)
-        .map_err(|error| format!("Attached read: {error}"))?;
-    if bytes == 0 {
-        return Err("The editor closed the attached connection.".to_string());
+/// Reads one newline-delimited frame byte by byte. Attached payloads are
+/// small, so the per-byte loop is negligible next to frame pacing and it
+/// keeps the transport free of buffered-reader state.
+fn read_frame(reader: &mut impl Read) -> Result<IpcFrame, String> {
+    let mut line: Vec<u8> = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        let bytes = reader
+            .read(&mut byte)
+            .map_err(|error| format!("Attached read: {error}"))?;
+        if bytes == 0 {
+            return Err("The editor closed the attached connection.".to_string());
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        line.push(byte[0]);
+        if line.len() > raf_core::MAX_COMMAND_FRAME_BYTES {
+            return Err("IPC frame exceeds the 1 MiB safety limit.".to_string());
+        }
     }
-    decode_frame(&line)
+    let text = String::from_utf8(line).map_err(|error| format!("Attached decode: {error}"))?;
+    decode_frame(&text)
 }

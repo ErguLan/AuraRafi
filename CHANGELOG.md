@@ -5,6 +5,62 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.5] - 2026-08-24 - First Stable Edition
+
+### Added
+
+- **Native editor runtime**: the primary application now runs through Winit,
+  retained RafUI surfaces, and ApiGraphicBasic presentation without a legacy
+  widget runtime in the active editor path.
+- **Game workbench**: restored and unified Hierarchy, Inspector, viewport
+  controls, bottom-dock panels, project search, session actions, scene editing,
+  native focus routing, and unsaved-exit confirmation.
+- **Native Electronics foundation**: introduced retained Electronics
+  controllers, navigation, inspectors, overlays, minimap support, command
+  adapters, and shared CAD presentation through the graphics boundary.
+- **Native Agent experience**: restored sessions, history paging, provider and
+  configured-model selection, Active/Passive modes, streaming state, approvals,
+  composer input, and Settings integration.
+- **Shared command access**: editor, Agent, CLI, and MCP-compatible attached
+  clients now converge on the same command protocol instead of maintaining
+  independent mutation paths.
+
+### Changed
+
+- **RafUI interaction system**: strengthened retained focus, text input,
+  pointer capture, hover/pressed states, dropdown placement, scrolling,
+  invalidation, docking, and frame scheduling across native surfaces.
+- **Graphics ownership**: expanded ApiGraphicBasic with editor composition,
+  resource reuse, frame scheduling, native input translation, and cached GPU
+  presentation while retaining deliberate CPU recovery paths.
+- **Editor UX**: aligned icons, toolbars, responsive panels, Settings, Hub,
+  Hierarchy, Inspector, Agent, and viewport gizmos around one native visual and
+  interaction language.
+- **Documentation**: consolidated the current architecture, command catalog,
+  renderer ownership, native Electronics design, RafUI guidance, stabilization
+  status, and English/Spanish localization contracts.
+
+### Removed
+
+- **Retired editor surfaces**: removed obsolete schematic/PCB widget views,
+  superseded CAD surface hosting, duplicated schematic graph/symbol modules,
+  and stale runtime guidance that conflicted with the native architecture.
+
+### Fixed
+
+- **Editor startup**: `cargo run` once again selects the native editor as the
+  workspace default executable.
+- **Input and presentation stability**: corrected cross-panel shortcut leaks,
+  stale repaint paths, model/mode selection feedback, real-time FPS reporting,
+  exit-to-Hub flow, hierarchy interactions, inspector commits, and multiple
+  Agent layout and responsiveness regressions found during migration.
+
+### Validation
+
+- `cargo fmt --all -- --check`
+- `git diff --check`
+- `cargo test --workspace`
+
 ## [0.9.0] - 2026-07-13 - Surface Foundation, Session Architecture, and GPU-First Stabilization
 
 ### Added
@@ -118,12 +174,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Viewport Architecture Refactoring** (`crates/raf_editor/src/panels/`):
-  - Refactored viewport panel shell to a clean, lightweight egui panel (`viewport.rs`).
+  - Refactored viewport panel shell to a clean, lightweight retained UI panel (`viewport.rs`).
   - Extracted HUD toolbar with G/R/S/F buttons, 2D/3D toggle, OBJ/VTX mode badge, and axis gizmo (`viewport_hud.rs`).
   - Decoupled object-mode and vertex-mode drag and click interactions (`viewport_interaction.rs`).
   - Added dedicated overlay rendering for labels, transform gizmos, and vertex edits (`viewport_overlay.rs`).
 - **Renderer Bridge Layer** (`crates/raf_render/src/bridge/`):
-  - Introduced `ViewportBridge` to own camera state, renderer, edit session, and transform controllers independently from egui.
+  - Introduced `ViewportBridge` to own camera state, renderer, edit session, and transform controllers independently from the widget layer.
   - Implemented `ViewportTransformController` to manage gizmo drag lifecycle and axis projection.
   - Created `ViewportEditSession` to manage per-entity editable mesh state, vertex selection, and vertex dragging.
   - Implemented precise entity picking using ray-sphere broad phase and ray-triangle narrow phase intersection testing.
@@ -208,7 +264,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **CRITICAL: Gizmo drag detection**: migrated from `clicked()` (which never fires during drag in egui) to `dragged_by()` with first-frame axis detection. Gizmo arrows are now fully functional for Move, Rotate, and Scale.
+- **CRITICAL: Gizmo drag detection**: migrated from click-only detection to drag-state detection with first-frame axis selection. Gizmo arrows are now fully functional for Move, Rotate, and Scale.
 - Toolbar click zones updated for horizontal layout.
 - Keyboard shortcuts now require viewport hover (prevents conflicts with other panels).
 - Selection sync between hierarchy/viewport uses `Vec<SceneNodeId>` consistently across ALL operations (add, delete, duplicate, undo, redo, select_all).

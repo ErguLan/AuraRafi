@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 use crate::events::UiPointerButton;
@@ -195,7 +197,20 @@ impl BottomDockLayout {
         self.version = BOTTOM_DOCK_LAYOUT_VERSION;
         self.groups.retain(|group| !group.tabs.is_empty());
         self.groups.truncate(MAX_BOTTOM_DOCK_GROUPS);
-        for group in &mut self.groups {
+        let mut group_ids = HashSet::new();
+        let mut tab_ids = HashSet::new();
+        for (index, group) in self.groups.iter_mut().enumerate() {
+            if group.id.trim().is_empty() || !group_ids.insert(group.id.clone()) {
+                let base = format!("bottom.group.{index}");
+                let mut candidate = base.clone();
+                let mut suffix = 2;
+                while !group_ids.insert(candidate.clone()) {
+                    candidate = format!("{base}.{suffix}");
+                    suffix += 1;
+                }
+                group.id = candidate;
+            }
+            group.tabs.retain(|tab| tab_ids.insert(tab.id.clone()));
             group.weight = if group.weight.is_finite() {
                 group.weight.max(0.01)
             } else {
@@ -214,6 +229,7 @@ impl BottomDockLayout {
                     .unwrap_or_default();
             }
         }
+        self.groups.retain(|group| !group.tabs.is_empty());
         before != self.groups
     }
 

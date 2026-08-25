@@ -45,7 +45,8 @@ The foundation already exists:
 - `assets/commands/catalog.json` is the canonical command catalog;
 - `EngineCommandRequest` and `EngineCommandResponse` are transport-neutral;
 - the internal Agent can execute editor domain commands;
-- `raf` can inspect, create, and open projects without Egui or WGPU;
+- `raf` can inspect, create, and open projects without the editor UI or a
+  renderer;
 - `raf serve` exposes bounded JSONL over stdio;
 - `raf mcp serve` exposes MCP tools and resources over stdio;
 - requests already carry confirmation, dry-run, revision, transaction,
@@ -74,7 +75,7 @@ The early beta has two explicit modes:
   undo history.
 - **Optional headless core (future):** when the editor is closed, a manually
   activated `raf host`/MCP process may load the project and expose the same
-  command kernel without RafUI, Egui, or a renderer. It is not a resident
+  command kernel without RafUI or a renderer. It is not a resident
   service: the user starts it for a task, it advertises a local endpoint, and
   it exits or unloads when the task is complete. Resource budgets and an
   explicit opt-in keep potato hardware responsive.
@@ -125,9 +126,9 @@ stable enough. It is intentionally smaller than the full v0.12 harness.
 7. Disconnects, stale revisions, changed sessions, and editor shutdown return
    explicit recoverable errors.
 
-The attached bridge must not know about Egui. Its host belongs beside the
-editor application state and command gateway, so replacing the window host
-does not require replacing CLI or MCP.
+The attached bridge must not know about the editor UI host. Its host belongs
+beside the editor application state and command gateway, so replacing the
+window host does not require replacing CLI or MCP.
 
 ## Initial Game Toolpack
 
@@ -238,7 +239,7 @@ turning on Play or Runtime.
 - remote unauthenticated command servers;
 - direct access to engine internals from scripts or agents;
 - arbitrary host filesystem or shell access through engine tools;
-- an Egui-specific CLI/MCP bridge;
+- a UI-toolkit-specific CLI/MCP bridge;
 - pretending that unsupported PBR, animation, particles, or physics features
   were created successfully.
 

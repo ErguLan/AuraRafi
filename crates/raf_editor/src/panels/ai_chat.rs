@@ -35,6 +35,7 @@ struct RuntimeKey {
     model: String,
     api_key: String,
     streaming: bool,
+    max_tokens: u32,
 }
 
 /// The editor-facing Agent state.
@@ -49,10 +50,12 @@ pub struct AgentPanel {
     pub sidebar_open: bool,
     pub new_model_label: String,
     pub new_model_id: String,
+    pub new_model_error: Option<String>,
     pub open_settings_requested: bool,
     pub settings_changed: bool,
     pub language: Language,
     pub last_status: AgentStatus,
+    visual_revision: u64,
     loaded_project_path: Option<PathBuf>,
     runtime_key: Option<RuntimeKey>,
     tools_language: Option<Language>,
@@ -74,10 +77,12 @@ impl Default for AgentPanel {
             sidebar_open: true,
             new_model_label: String::new(),
             new_model_id: String::new(),
+            new_model_error: None,
             open_settings_requested: false,
             settings_changed: false,
             language: Language::English,
             last_status: AgentStatus::Done,
+            visual_revision: 0,
             loaded_project_path: None,
             runtime_key: None,
             tools_language: None,
@@ -125,13 +130,41 @@ impl AgentPanel {
 
     /// Poll the non-blocking runtime once per editor frame.
     pub(crate) fn poll(&mut self, executor: &mut dyn ToolExecutor) {
+        let previous_status = self.runtime.status.clone();
+        let previous_message_count = self.runtime.messages.len();
+        let previous_last_message = self
+            .runtime
+            .messages
+            .last()
+            .map(|message| (message.id.clone(), message.content.clone()));
+        let previous_pending = format!("{:?}", self.runtime.pending_calls);
         let status = self.runtime.poll(Some(executor));
+        let current_last_message = self
+            .runtime
+            .messages
+            .last()
+            .map(|message| (message.id.clone(), message.content.clone()));
+        let runtime_changed = previous_status != self.runtime.status
+            || previous_message_count != self.runtime.messages.len()
+            || previous_last_message != current_last_message
+            || previous_pending != format!("{:?}", self.runtime.pending_calls);
+        if runtime_changed {
+            self.visual_revision = self.visual_revision.wrapping_add(1);
+        }
         if status != self.last_status {
             self.last_status = status;
             self.persist_history();
         } else if self.runtime.messages.len() != self.last_saved_message_count {
             self.persist_history();
         }
+    }
+
+    pub(crate) fn visual_revision(&self) -> u64 {
+        self.visual_revision
+    }
+
+    pub(crate) fn has_live_output(&self) -> bool {
+        self.runtime.status.blocks_input()
     }
 
     pub(crate) fn readiness(&self, settings: &EngineSettings) -> AgentReadiness {
@@ -186,18 +219,34 @@ impl AgentPanel {
                     self.settings_changed = true;
                 }
             }
-            AgentAction::SetNewModelLabel(value) => self.new_model_label = value,
-            AgentAction::SetNewModelId(value) => self.new_model_id = value,
+            AgentAction::SetNewModelLabel(value) => {
+                self.new_model_label = value;
+                self.new_model_error = None;
+            }
+            AgentAction::SetNewModelId(value) => {
+                self.new_model_id = value;
+                self.new_model_error = None;
+            }
             AgentAction::AddModel => {
-                if self.model_registry.add(
-                    self.new_model_label.trim(),
-                    settings.default_ai_provider,
-                    self.new_model_id.trim(),
-                ) {
+                let label = self.new_model_label.trim();
+                let model_id = self.new_model_id.trim();
+                if label.is_empty() {
+                    self.new_model_error =
+                        Some(t("app.agent_add_model_missing_label", self.language));
+                } else if model_id.is_empty() {
+                    self.new_model_error = Some(t("app.agent_add_model_missing_id", self.language));
+                } else if self.model_registry.get(label).is_some() {
+                    self.new_model_error = Some(t("app.agent_add_model_duplicate", self.language));
+                } else if self
+                    .model_registry
+                    .add(label, settings.default_ai_provider, model_id)
+                {
                     settings.agent_model_shortcuts = self.model_registry.shortcuts.clone();
+                    self.selected_model = label.to_string();
                     self.settings_changed = true;
                     self.new_model_label.clear();
                     self.new_model_id.clear();
+                    self.new_model_error = None;
                 }
             }
             AgentAction::OpenSettings => self.open_settings_requested = true,
@@ -246,6 +295,7 @@ impl AgentPanel {
         self.runtime.set_system_prompt(self.system_prompt.clone());
         self.runtime.start_run(&content, &self.tools, active_mode);
         self.last_status = AgentStatus::Thinking;
+        self.persist_history();
     }
 
     fn ensure_project_history(&mut self, project: Option<&Project>) {
@@ -254,6 +304,7 @@ impl AgentPanel {
             if self.history.active_index.is_none() && project.is_some() {
                 let index = self.history.ensure_active_session("New chat");
                 self.load_session_into_runtime(index);
+                self.persist_history_with_force(true);
             }
             return;
         }
@@ -267,6 +318,7 @@ impl AgentPanel {
         self.last_saved_message_count = 0;
         if let Some(index) = self.history.active_index {
             self.load_session_into_runtime(index);
+            self.persist_history_with_force(true);
         }
     }
 
@@ -280,6 +332,7 @@ impl AgentPanel {
             model: self.effective_model(&provider),
             api_key: provider.api_key.clone(),
             streaming: settings.agent_streaming_enabled,
+            max_tokens: settings.agent_max_response_tokens,
         };
         if self.runtime_key.as_ref() == Some(&key) {
             return;
@@ -290,13 +343,14 @@ impl AgentPanel {
             base_url: key.base_url.clone(),
             model: key.model.clone(),
             api_key: key.api_key.clone(),
-            max_tokens: 4096,
+            max_tokens: key.max_tokens,
             temperature: 0.2,
             streaming: key.streaming,
         });
         self.runtime.messages = messages;
         self.runtime.set_system_prompt(self.system_prompt.clone());
         self.runtime_key = Some(key);
+        self.visual_revision = self.visual_revision.wrapping_add(1);
     }
 
     fn start_new_chat(&mut self) {
@@ -304,7 +358,7 @@ impl AgentPanel {
         self.history.start_session("New chat");
         self.runtime.set_system_prompt(self.system_prompt.clone());
         self.input_text.clear();
-        self.persist_history();
+        self.persist_history_with_force(true);
     }
 
     fn select_session(&mut self, index: usize) {
@@ -313,7 +367,7 @@ impl AgentPanel {
         }
         self.history.active_index = Some(index);
         self.load_session_into_runtime(index);
-        self.persist_history();
+        self.persist_history_with_force(true);
     }
 
     fn load_session_into_runtime(&mut self, index: usize) {
@@ -328,6 +382,7 @@ impl AgentPanel {
         self.runtime.set_system_prompt(self.system_prompt.clone());
         self.input_text.clear();
         self.last_status = AgentStatus::Done;
+        self.visual_revision = self.visual_revision.wrapping_add(1);
     }
 
     fn delete_session(&mut self, index: usize) {
@@ -352,25 +407,65 @@ impl AgentPanel {
         } else {
             self.start_new_chat();
         }
-        self.persist_history();
+        self.persist_history_with_force(true);
     }
 
     fn persist_history(&mut self) {
+        self.persist_history_with_force(false);
+    }
+
+    fn persist_history_with_force(&mut self, force: bool) {
         let Some(index) = self.history.active_index else {
             return;
         };
         let Some(session) = self.history.sessions.get_mut(index) else {
             return;
         };
-        if messages_equal(&session.messages, &self.runtime.messages) {
+        let title = self
+            .runtime
+            .messages
+            .iter()
+            .find(|message| message.role == raf_ai::chat::MessageRole::User)
+            .map(|message| fallback_session_title(&message.content));
+        let title_changed = title.as_deref().is_some_and(|title| {
+            is_default_session_title(&session.title) && session.title != title
+        });
+        if title_changed {
+            if let Some(title) = title {
+                session.title = title;
+            }
+        }
+        let messages_changed = !messages_equal(&session.messages, &self.runtime.messages);
+        if !force && !messages_changed && !title_changed {
             return;
         }
-        session.messages = self.runtime.messages.clone();
-        session.touch();
+        if messages_changed {
+            session.messages = self.runtime.messages.clone();
+            session.touch();
+        }
         self.last_saved_message_count = self.runtime.messages.len();
         if let Some(project_path) = self.loaded_project_path.as_deref() {
             self.history_writer.enqueue(project_path, &self.history);
         }
+    }
+}
+
+fn is_default_session_title(title: &str) -> bool {
+    let normalized = title.trim().to_ascii_lowercase();
+    normalized.is_empty() || normalized == "new chat" || normalized == "nueva conversacion"
+}
+
+fn fallback_session_title(content: &str) -> String {
+    const MAX_TITLE_CHARS: usize = 42;
+    let normalized = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut title = normalized.chars().take(MAX_TITLE_CHARS).collect::<String>();
+    if normalized.chars().count() > MAX_TITLE_CHARS {
+        title.push('…');
+    }
+    if title.is_empty() {
+        "New chat".to_string()
+    } else {
+        title
     }
 }
 
@@ -433,5 +528,34 @@ mod tests {
         let messages = vec![ChatMessage::user("hello")];
         assert!(messages_equal(&messages, &messages));
         assert_ne!(messages[0].role, MessageRole::Assistant);
+    }
+
+    #[test]
+    fn mode_action_updates_settings_for_the_next_agent_submission() {
+        let mut panel = AgentPanel::default();
+        let mut settings = EngineSettings::default();
+        settings.agent_mode = AgentMode::Passive;
+
+        panel.apply_action(AgentAction::SetMode(AgentMode::Active), &mut settings);
+
+        assert_eq!(settings.agent_mode, AgentMode::Active);
+        assert!(panel.settings_changed);
+    }
+
+    #[test]
+    fn response_token_setting_reconfigures_the_native_runtime() {
+        let mut panel = AgentPanel::default();
+        let mut settings = EngineSettings::default();
+        settings.agent_max_response_tokens = 8_192;
+        settings
+            .ai_providers
+            .iter_mut()
+            .find(|provider| provider.provider == settings.default_ai_provider)
+            .expect("default AI provider")
+            .enabled = true;
+
+        panel.prepare(&settings, None, &CommandCatalog::builtin());
+
+        assert_eq!(panel.runtime.client.config.max_tokens, 8_192);
     }
 }

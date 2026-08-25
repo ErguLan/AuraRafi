@@ -309,6 +309,24 @@ fn record_node(
                 Some(intrinsic_sizes),
             ));
         }
+        let measured_max_offset = [
+            (flow_content.width - content.width).max(0.0),
+            (flow_content.height - content.height).max(0.0),
+        ];
+        // A text-fit surface is laid out once provisionally before its atlas
+        // measurements are available. Reuse the last authoritative extent in
+        // that pass so a wheel tick or thumb pixel cannot clamp itself back to
+        // the tiny provisional range. The intrinsic pass supplies the fresh
+        // value and is allowed to shrink it when content really changed.
+        let max_offset = if intrinsic_sizes.is_empty() {
+            let previous = control_state.scroll_max_offset(&node.id);
+            [
+                measured_max_offset[0].max(previous[0]),
+                measured_max_offset[1].max(previous[1]),
+            ]
+        } else {
+            measured_max_offset
+        };
         scroll_metrics.push(UiScrollMetrics {
             id: node.id.clone(),
             viewport_size: [content.width.max(0.0), content.height.max(0.0)],
@@ -316,11 +334,19 @@ fn record_node(
                 flow_content.width.max(content.width),
                 flow_content.height.max(content.height),
             ],
-            max_offset: [
-                (flow_content.width - content.width).max(0.0),
-                (flow_content.height - content.height).max(0.0),
-            ],
+            max_offset,
         });
+        append_scrollbar(
+            &node.id,
+            content,
+            parent_clip,
+            max_offset,
+            control_state.scroll_offset(&node.id),
+            z_index,
+            visual_state,
+            boxes,
+            hit_regions,
+        );
     }
     match flow {
         UiFlow::None => {
@@ -426,6 +452,152 @@ fn explicit_child_container(child: &UiNode, parent_content: UiRect) -> UiRect {
         (_, Some(rect)) => rect,
         (_, None) => parent_content,
     }
+}
+
+const SCROLLBAR_HIT_WIDTH: f32 = 18.0;
+const SCROLLBAR_VISUAL_WIDTH: f32 = 7.0;
+const SCROLLBAR_EDGE_INSET: f32 = 4.0;
+const SCROLLBAR_MIN_THUMB: f32 = 28.0;
+const GENERATED_SCROLLBAR_PREFIX: &str = "__rafui.scrollbar.";
+
+/// Adds the shared retained scrollbar affordance for vertical scroll views.
+/// It is generated from measured scroll metrics rather than authored by each
+/// panel, so the wheel, thumb drag and visual extent stay in one RafUI model.
+fn append_scrollbar(
+    scroll_id: &str,
+    viewport: UiRect,
+    parent_clip: UiRect,
+    max_offset: [f32; 2],
+    offset: [f32; 2],
+    z_index: i16,
+    visual_state: UiVisualState<'_>,
+    boxes: &mut Vec<UiLayoutBox>,
+    hit_regions: &mut Vec<UiHitRegion>,
+) {
+    if max_offset[1] <= f32::EPSILON || viewport.width <= 0.0 || viewport.height <= 0.0 {
+        return;
+    }
+    let track_height = (viewport.height - SCROLLBAR_EDGE_INSET * 2.0).max(1.0);
+    let hit_width = SCROLLBAR_HIT_WIDTH.min(viewport.width).max(1.0);
+    let visual_width = SCROLLBAR_VISUAL_WIDTH.min(hit_width).max(1.0);
+    let hit_x = (viewport.right() - hit_width).max(viewport.x);
+    let visual_x = (viewport.right() - visual_width - SCROLLBAR_EDGE_INSET)
+        .max(viewport.x)
+        .min(hit_x + hit_width - visual_width);
+    let track_hit = UiRect::new(
+        hit_x,
+        viewport.y + SCROLLBAR_EDGE_INSET,
+        hit_width,
+        track_height.min(viewport.height),
+    );
+    let track_visual = UiRect::new(visual_x, track_hit.y, visual_width, track_hit.height);
+    let content_height = viewport.height + max_offset[1];
+    let thumb_height = (track_hit.height * viewport.height / content_height)
+        .clamp(SCROLLBAR_MIN_THUMB.min(track_hit.height), track_hit.height);
+    let thumb_travel = (track_hit.height - thumb_height).max(0.0);
+    let thumb_y = track_hit.y
+        + thumb_travel * (offset[1].max(0.0) / max_offset[1].max(f32::EPSILON)).clamp(0.0, 1.0);
+    let thumb_hit = UiRect::new(hit_x, thumb_y, hit_width, thumb_height);
+    let thumb_visual = UiRect::new(visual_x, thumb_y, visual_width, thumb_height);
+    let clip = parent_clip.intersection(viewport);
+    let track_id = format!("{GENERATED_SCROLLBAR_PREFIX}{scroll_id}.track");
+    let thumb_id = format!("{GENERATED_SCROLLBAR_PREFIX}{scroll_id}.thumb");
+    let hovered = visual_state.hovered_id == Some(track_id.as_str())
+        || visual_state.hovered_id == Some(thumb_id.as_str());
+    let active = visual_state.active_id == Some(track_id.as_str())
+        || visual_state.active_id == Some(thumb_id.as_str());
+    let thumb_color = if active || hovered {
+        [232, 133, 28, 255]
+    } else {
+        [102, 112, 126, 235]
+    };
+    push_scrollbar_box(
+        boxes,
+        hit_regions,
+        track_id,
+        track_visual,
+        track_hit,
+        clip,
+        UiStyle {
+            fill: if active || hovered {
+                [51, 60, 72, 150]
+            } else {
+                [0, 0, 0, 0]
+            },
+            border: [0, 0, 0, 0],
+            text: [0, 0, 0, 0],
+            border_width: 0.0,
+            radius: track_visual.width * 0.5,
+            opacity: 1.0,
+        },
+        z_index.saturating_add(4),
+    );
+    push_scrollbar_box(
+        boxes,
+        hit_regions,
+        thumb_id,
+        thumb_visual,
+        thumb_hit,
+        clip,
+        UiStyle {
+            fill: thumb_color,
+            border: if active || hovered {
+                [255, 190, 92, 255]
+            } else {
+                [145, 154, 168, 220]
+            },
+            text: [0, 0, 0, 0],
+            border_width: 1.0,
+            radius: thumb_visual.width * 0.5,
+            opacity: 1.0,
+        },
+        z_index.saturating_add(5),
+    );
+}
+
+fn push_scrollbar_box(
+    boxes: &mut Vec<UiLayoutBox>,
+    hit_regions: &mut Vec<UiHitRegion>,
+    id: String,
+    visual_rect: UiRect,
+    hit_rect: UiRect,
+    clip_rect: UiRect,
+    style: UiStyle,
+    z_index: i16,
+) {
+    boxes.push(UiLayoutBox {
+        id: id.clone(),
+        kind: UiNodeKind::Panel,
+        text_key: None,
+        text_value: None,
+        tooltip_key: None,
+        tooltip_value: None,
+        rect: visual_rect,
+        content_rect: visual_rect,
+        clip_rect,
+        interactive: true,
+        focusable: false,
+        disabled: false,
+        accessibility_label_key: None,
+        z_index,
+        width_mode: UiSizeMode::Fixed,
+        height_mode: UiSizeMode::Fixed,
+        style,
+        text_style: None,
+        icon: None,
+        control: UiControl::None,
+        text_edit: None,
+    });
+    hit_regions.push(UiHitRegion {
+        id,
+        kind: UiNodeKind::Panel,
+        rect: hit_rect,
+        clip_rect,
+        z_index,
+        interactive: true,
+        focusable: false,
+        disabled: false,
+    });
 }
 
 fn record_flow_children(
@@ -1204,6 +1376,59 @@ mod tests {
             intrinsic_flow_main_size_with_map(&section, &section.layout, false, None),
             120.0
         );
+    }
+
+    #[test]
+    fn overflowing_vertical_scroll_view_builds_a_visible_manual_scrollbar() {
+        let scroll = UiNode::scroll_view("list", super::super::UiScrollAxis::Vertical).with_layout(
+            UiLayout {
+                flow: UiFlow::Column,
+                ..UiLayout::fixed(180.0, 80.0)
+            },
+        );
+        let mut scroll = scroll;
+        for index in 0..8 {
+            scroll = scroll.with_child(
+                UiNode::new(format!("item-{index}"), UiNodeKind::Panel)
+                    .with_layout(UiLayout::fixed(0.0, 30.0)),
+            );
+        }
+        let surface = super::super::UiSurface::new(
+            "scrollbar",
+            super::super::StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root)
+                .with_layout(UiLayout::fill(UiFlow::Column))
+                .with_child(scroll),
+        );
+        let mut session = super::super::UiSurfaceSession::default();
+        // Metrics are measured after the first layout; the following frame
+        // paints the thumb using that retained extent and current offset.
+        let _ = session.build_frame(&surface, 220, 100, [0, 0, 0, 255]);
+        let frame = session.build_frame(&surface, 220, 100, [0, 0, 0, 255]);
+        let track = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "__rafui.scrollbar.list.track")
+            .expect("scrollbar track");
+        let thumb = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "__rafui.scrollbar.list.thumb")
+            .expect("scrollbar thumb");
+
+        assert!(track.interactive);
+        assert!(track.rect.width < 10.0);
+        assert!(thumb.rect.height < track.rect.height);
+        let track_hit = frame
+            .hit_regions
+            .iter()
+            .find(|region| region.id == "__rafui.scrollbar.list.track")
+            .expect("scrollbar track hit region");
+        assert!(track_hit.rect.width > track.rect.width);
+        assert!(frame
+            .hit_regions
+            .iter()
+            .any(|region| { region.id == "__rafui.scrollbar.list.thumb" && region.interactive }));
     }
 
     #[test]

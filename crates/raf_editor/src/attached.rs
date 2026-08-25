@@ -2,7 +2,8 @@
 //!
 //! The listener owns no scene, UI, or renderer state. It only authenticates a
 //! project-scoped client, queues command requests, and waits for the UI thread
-//! to execute them through `AuraRafiApp`. This keeps all document mutation on
+//! to execute them through the native application boundary. This keeps all
+//! document mutation on
 //! the same thread that owns editor history and session state.
 
 use raf_core::ipc::{
@@ -19,6 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use uuid::Uuid;
+use winit::event_loop::EventLoopProxy;
 
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
@@ -34,6 +36,9 @@ pub struct PendingAttachedCommand {
 struct AttachedState {
     descriptor: EndpointDescriptor,
     discovery_project: Option<PathBuf>,
+    /// Main-thread wakeup for queued commands. The editor only pays attention
+    /// when a client actually sends something; idle editors never poll.
+    wakeup: Option<EventLoopProxy<()>>,
 }
 
 pub struct AttachedCommandHost {
@@ -67,6 +72,7 @@ impl AttachedCommandHost {
         let state = Arc::new(Mutex::new(AttachedState {
             descriptor,
             discovery_project: None,
+            wakeup: None,
         }));
         let (request_sender, requests) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -94,6 +100,7 @@ impl AttachedCommandHost {
             state: Arc::new(Mutex::new(AttachedState {
                 descriptor,
                 discovery_project: None,
+                wakeup: None,
             })),
             requests,
             stop: Arc::new(AtomicBool::new(true)),
@@ -114,6 +121,13 @@ impl AttachedCommandHost {
             .clone()
     }
 
+    /// Wakes the winit event loop when a queued command needs the main
+    /// thread. Called once per client setup; costs nothing while idle.
+    pub fn set_wakeup(&self, wakeup: EventLoopProxy<()>) {
+        let mut state = self.state.lock().expect("attach state lock poisoned");
+        state.wakeup = Some(wakeup);
+    }
+
     pub fn update_project(
         &self,
         project: Option<&Project>,
@@ -122,44 +136,68 @@ impl AttachedCommandHost {
         session_name: Option<String>,
         capabilities: Vec<String>,
     ) {
-        let mut state = self.state.lock().expect("attach state lock poisoned");
-        let previous_discovery = state.discovery_project.clone();
-        state.descriptor.project_id = project.map(|project| project.id);
-        state.descriptor.project_path = project.map(|project| project.path.clone());
-        state.descriptor.session_id = session_id;
-        state.descriptor.session_name = session_name;
-        state.descriptor.revision = revision;
-        state.descriptor.capabilities = capabilities;
-        state.discovery_project = project.map(|project| project.path.clone());
+        let (previous_discovery, discovery_project, descriptor) = {
+            let mut state = self.state.lock().expect("attach state lock poisoned");
+            let previous_discovery = state.discovery_project.clone();
+            state.descriptor.project_id = project.map(|project| project.id);
+            state.descriptor.project_path = project.map(|project| project.path.clone());
+            state.descriptor.session_id = session_id;
+            state.descriptor.session_name = session_name;
+            state.descriptor.project_type = project.map(|project| match project.project_type {
+                raf_core::project::ProjectType::Game => "game".to_string(),
+                raf_core::project::ProjectType::Electronics => "electronics".to_string(),
+            });
+            state.descriptor.editor_state =
+                Some(if project.is_some() { "project" } else { "hub" }.to_string());
+            state.descriptor.revision = revision;
+            state.descriptor.capabilities = capabilities;
+            state.discovery_project = project.map(|project| project.path.clone());
+            (
+                previous_discovery,
+                state.discovery_project.clone(),
+                state.descriptor.clone(),
+            )
+        };
 
-        if previous_discovery != state.discovery_project {
+        // File I/O (potentially OneDrive-synced) runs OUTSIDE the state lock
+        // so attached client threads never stall behind disk latency.
+        if previous_discovery != discovery_project {
             if let Some(previous) = previous_discovery {
                 EndpointDescriptor::remove_for_project(&previous);
             }
         }
-        if let Some(project_path) = state.discovery_project.as_deref() {
-            if let Err(error) = state.descriptor.write_for_project(project_path) {
+        if let Some(project_path) = discovery_project.as_deref() {
+            if let Err(error) = descriptor.write_for_project(project_path) {
                 tracing::warn!(%error, "could not publish editor attach descriptor");
             }
         }
     }
 
     pub fn update_revision(&self, revision: Revision) {
-        let mut state = self.state.lock().expect("attach state lock poisoned");
-        state.descriptor.revision = revision;
-        if let Some(project_path) = state.discovery_project.as_deref() {
-            if let Err(error) = state.descriptor.write_for_project(project_path) {
+        let (discovery_project, descriptor) = {
+            let mut state = self.state.lock().expect("attach state lock poisoned");
+            if state.descriptor.revision == revision {
+                return;
+            }
+            state.descriptor.revision = revision;
+            (state.discovery_project.clone(), state.descriptor.clone())
+        };
+        if let Some(project_path) = discovery_project.as_deref() {
+            if let Err(error) = descriptor.write_for_project(project_path) {
                 tracing::debug!(%error, "could not refresh editor attach descriptor");
             }
         }
     }
 
     pub fn update_session(&self, session_id: Option<Uuid>, session_name: Option<String>) {
-        let mut state = self.state.lock().expect("attach state lock poisoned");
-        state.descriptor.session_id = session_id;
-        state.descriptor.session_name = session_name;
-        if let Some(project_path) = state.discovery_project.as_deref() {
-            if let Err(error) = state.descriptor.write_for_project(project_path) {
+        let (discovery_project, descriptor) = {
+            let mut state = self.state.lock().expect("attach state lock poisoned");
+            state.descriptor.session_id = session_id;
+            state.descriptor.session_name = session_name;
+            (state.discovery_project.clone(), state.descriptor.clone())
+        };
+        if let Some(project_path) = discovery_project.as_deref() {
+            if let Err(error) = descriptor.write_for_project(project_path) {
                 tracing::debug!(%error, "could not refresh editor session descriptor");
             }
         }
@@ -341,6 +379,13 @@ fn handle_connection(
                 responder: response_sender,
             })
             .map_err(|_| "editor command queue is unavailable".to_string())?;
+        // Wake the winit event loop so the main thread drains and answers
+        // even when the editor is idle and rendering nothing.
+        if let Ok(state) = state.lock() {
+            if let Some(wakeup) = state.wakeup.as_ref() {
+                let _ = wakeup.send_event(());
+            }
+        }
         let command_started = Instant::now();
         let response = loop {
             match response_receiver.recv_timeout(Duration::from_millis(200)) {

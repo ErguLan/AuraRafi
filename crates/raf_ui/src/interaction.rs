@@ -1,3 +1,4 @@
+use crate::controls::UiControl;
 use crate::events::{UiAction, UiCursorIcon, UiEventKind, UiPointerButton};
 use crate::focus::{UiFocusPolicy, UiFocusState, UiInputState, UiModifiers};
 use crate::geometry::UiRect;
@@ -8,6 +9,9 @@ use crate::state::UiControlState;
 const DRAG_THRESHOLD_PX: f32 = 4.0;
 const DOUBLE_CLICK_DISTANCE_PX: f32 = 6.0;
 const DOUBLE_CLICK_TIME_SECONDS: f64 = 0.45;
+const TEXT_REPEAT_DELAY_SECONDS: f64 = 0.45;
+const TEXT_REPEAT_INTERVAL_SECONDS: f64 = 0.035;
+const GENERATED_SCROLLBAR_PREFIX: &str = "__rafui.scrollbar.";
 
 /// A resolved UI action emitted by the retained interaction controller.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,6 +44,9 @@ pub struct UiInteractionState {
     last_text_click: Option<UiTextClick>,
     last_pointer_click: Option<UiPointerClick>,
     last_modifiers: UiModifiers,
+    text_repeat_key: Option<String>,
+    text_repeat_next_seconds: f64,
+    scrollbar_grab_offset: Option<f32>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -69,6 +76,7 @@ impl UiInteractionState {
         self.drag_started = false;
         self.drag_origin = None;
         self.text_selection_target = None;
+        self.scrollbar_grab_offset = None;
         self.focus.set_active(None);
     }
 
@@ -84,18 +92,31 @@ impl UiInteractionState {
     /// gesture. Hosts can keep delivering a drag after the pointer leaves the
     /// surface without treating another surface's drag as local input.
     pub fn has_pointer_capture(&self) -> bool {
-        self.pointer_was_down || self.active_pointer_target.is_some()
+        // A primary button can be down over a transparent/non-interactive
+        // region without belonging to RafUI. The old `pointer_was_down`
+        // shortcut turned any full-window retained surface into a pointer
+        // shield and starved the viewport camera after a toolbar hover or
+        // click. Only an actual hit target owns the gesture.
+        self.active_pointer_target.is_some()
     }
 
-    /// Returns whether this retained surface currently owns keyboard focus.
-    /// The editor host uses this boundary to prevent viewport shortcuts from
-    /// interpreting text-entry keys intended for RafUI controls.
+    /// Returns whether this retained surface currently owns text-entry input.
+    ///
+    /// Buttons, hierarchy rows, toggles and ranges may be focusable for
+    /// keyboard accessibility, but they must not freeze viewport navigation
+    /// merely because they remain focused after a click. Only a focused text
+    /// input owns the editor's typing boundary.
     pub fn captures_keyboard_input(&self, root: &UiNode) -> bool {
         self.focus
             .focused
             .as_deref()
             .and_then(|id| find_node(root, id))
-            .is_some_and(|node| node.focusable && !node.disabled)
+            .is_some_and(|node| {
+                node.kind == UiNodeKind::TextInput
+                    && node.focusable
+                    && !node.disabled
+                    && node.control.text_input().is_some()
+            })
     }
 
     /// Clears pointer and focus state when the retained document changes
@@ -110,6 +131,8 @@ impl UiInteractionState {
         self.last_text_click = None;
         self.last_pointer_click = None;
         self.last_modifiers = UiModifiers::default();
+        self.text_repeat_key = None;
+        self.text_repeat_next_seconds = 0.0;
     }
 
     pub fn hover_elapsed_seconds(&self, now_seconds: f64) -> f32 {
@@ -131,6 +154,9 @@ impl UiInteractionState {
         let Some(hovered_id) = self.focus.hovered.as_deref() else {
             return UiCursorIcon::Default;
         };
+        if is_scrollbar_target(hovered_id) {
+            return UiCursorIcon::ResizeVertical;
+        }
         let Some(node) = find_node(root, hovered_id) else {
             return UiCursorIcon::Default;
         };
@@ -140,7 +166,33 @@ impl UiInteractionState {
         if node.control.text_input().is_some() {
             return UiCursorIcon::Text;
         }
-        if node.focusable || node.kind == UiNodeKind::Button || !node.event_handlers.is_empty() {
+        if node
+            .classes
+            .iter()
+            .any(|class| class == "editor-splitter-vertical" || class == "bottom-dock-splitter")
+        {
+            return UiCursorIcon::ResizeHorizontal;
+        }
+        if node
+            .classes
+            .iter()
+            .any(|class| class == "editor-splitter-horizontal")
+        {
+            return UiCursorIcon::ResizeVertical;
+        }
+        // Focusability is a keyboard-navigation property, not a promise that
+        // the pointer is over a clickable control. Panels, scroll containers,
+        // and the native title drag region may be focusable/interactive while
+        // still needing the normal arrow cursor.
+        if node
+            .classes
+            .iter()
+            .any(|class| class == "application-bar-drag-region")
+        {
+            return UiCursorIcon::Default;
+        }
+        let value_control = matches!(node.control, UiControl::Toggle(_) | UiControl::Range(_));
+        if node.kind == UiNodeKind::Button || !node.event_handlers.is_empty() || value_control {
             return UiCursorIcon::PointingHand;
         }
         UiCursorIcon::Default
@@ -213,6 +265,30 @@ impl UiInteractionState {
             self.drag_origin = input.pointer_position;
             self.text_selection_target = None;
             self.focus.set_active(hovered_id.clone());
+            if let Some(target_id) = hovered_id.as_deref() {
+                if let Some((scroll_id, is_thumb)) = scrollbar_target(target_id) {
+                    let thumb = scrollbar_region(hit_regions, scroll_id, true);
+                    self.scrollbar_grab_offset = input.pointer_position.map(|point| {
+                        if is_thumb {
+                            thumb.map(|region| point[1] - region.rect.y).unwrap_or(0.0)
+                        } else {
+                            thumb.map(|region| region.rect.height * 0.5).unwrap_or(0.0)
+                        }
+                    });
+                    if !is_thumb {
+                        if let Some(point) = input.pointer_position {
+                            dispatch_scrollbar_position(
+                                &mut self.controls,
+                                hit_regions,
+                                scroll_id,
+                                point,
+                                self.scrollbar_grab_offset.unwrap_or(0.0),
+                                &mut dispatched,
+                            );
+                        }
+                    }
+                }
+            }
             if let Some(hit) = hovered.as_ref() {
                 if hit.focusable {
                     self.focus.request_focus(hit.id.clone());
@@ -318,7 +394,20 @@ impl UiInteractionState {
                     );
                     self.drag_started = true;
                 }
-                if self.drag_started {
+                if let Some((scroll_id, is_thumb)) = scrollbar_target(id) {
+                    if self.drag_started || !is_thumb {
+                        if let Some(point) = input.pointer_position {
+                            dispatch_scrollbar_position(
+                                &mut self.controls,
+                                hit_regions,
+                                scroll_id,
+                                point,
+                                self.scrollbar_grab_offset.unwrap_or(0.0),
+                                &mut dispatched,
+                            );
+                        }
+                    }
+                } else if self.drag_started {
                     dispatch_captured(
                         root,
                         id,
@@ -449,19 +538,61 @@ impl UiInteractionState {
             }
         }
 
-        if let Some(focused) = self.focus.focused.as_deref() {
+        if let Some(focused) = self.focus.focused.clone() {
             if let Some(input_control) =
-                find_node(root, focused).and_then(|node| node.control.text_input())
+                find_node(root, &focused).and_then(|node| node.control.text_input())
             {
                 let value_key = input_control.value_key.as_str();
                 let mut text_changed = false;
                 let mut text_event = None;
-                if (input.modifiers.control || input.modifiers.command) && input.key_pressed("a") {
+                let word_modifier = input.modifiers.control || input.modifiers.command;
+                if word_modifier && input.key_pressed("a") {
                     self.controls.select_all(value_key);
-                } else if input.key_pressed("backspace") && self.controls.backspace(value_key) {
+                } else if word_modifier && input.key_pressed("c") {
+                    let selected = self.controls.selected_text(value_key);
+                    if !selected.is_empty() {
+                        dispatched.push(UiDispatchedAction {
+                            target_id: focused.clone(),
+                            event: UiEventKind::KeyPress("copy".to_string()),
+                            action: UiAction::SetClipboard { text: selected },
+                        });
+                    }
+                } else if word_modifier && input.key_pressed("x") {
+                    let selected = self.controls.selected_text(value_key);
+                    if !selected.is_empty() {
+                        dispatched.push(UiDispatchedAction {
+                            target_id: focused.clone(),
+                            event: UiEventKind::KeyPress("cut".to_string()),
+                            action: UiAction::SetClipboard { text: selected },
+                        });
+                        text_changed = self.controls.backspace(value_key);
+                        text_event = Some("cut".to_string());
+                    }
+                } else if word_modifier && input.key_pressed("v") {
+                    if let Some(paste) = input.clipboard_text.as_deref() {
+                        text_changed =
+                            self.controls
+                                .append_text(value_key, paste, input_control.max_length);
+                        text_event = Some("paste".to_string());
+                    }
+                } else if (input.key_pressed("backspace") || input.key_down("backspace"))
+                    && self.text_repeat_due(input, "backspace")
+                    && if word_modifier {
+                        self.controls.delete_backward_word(value_key)
+                    } else {
+                        self.controls.backspace(value_key)
+                    }
+                {
                     text_changed = true;
                     text_event = Some("backspace".to_string());
-                } else if input.key_pressed("delete") && self.controls.delete_forward(value_key) {
+                } else if (input.key_pressed("delete") || input.key_down("delete"))
+                    && self.text_repeat_due(input, "delete")
+                    && if word_modifier {
+                        self.controls.delete_forward_word(value_key)
+                    } else {
+                        self.controls.delete_forward(value_key)
+                    }
+                {
                     text_changed = true;
                     text_event = Some("delete".to_string());
                 } else if input.key_pressed_any(&["arrowleft", "left"]) {
@@ -479,7 +610,7 @@ impl UiInteractionState {
                 }
                 if text_changed {
                     dispatched.push(UiDispatchedAction {
-                        target_id: focused.to_string(),
+                        target_id: focused.clone(),
                         event: UiEventKind::KeyPress(
                             text_event.unwrap_or_else(|| "text_edit".to_string()),
                         ),
@@ -502,7 +633,7 @@ impl UiInteractionState {
                     )
                 {
                     dispatched.push(UiDispatchedAction {
-                        target_id: focused.to_string(),
+                        target_id: focused.clone(),
                         event: UiEventKind::TextInput(input.text_input.clone()),
                         action: UiAction::SetText {
                             key: input_control.value_key.clone(),
@@ -513,7 +644,7 @@ impl UiInteractionState {
                 if input.key_pressed("enter") && !input_control.multiline {
                     if let Some(command) = input_control.submit_command.as_ref() {
                         dispatched.push(UiDispatchedAction {
-                            target_id: focused.to_string(),
+                            target_id: focused.clone(),
                             event: UiEventKind::KeyPress("enter".to_string()),
                             action: UiAction::Command {
                                 name: command.clone(),
@@ -522,11 +653,11 @@ impl UiInteractionState {
                     }
                 }
             } else if let Some(toggle) =
-                find_node(root, focused).and_then(|node| node.control.toggle())
+                find_node(root, &focused).and_then(|node| node.control.toggle())
             {
                 if input.key_pressed("space") || input.key_pressed("enter") {
                     dispatched.push(UiDispatchedAction {
-                        target_id: focused.to_string(),
+                        target_id: focused.clone(),
                         event: UiEventKind::KeyPress("space".to_string()),
                         action: UiAction::SetToggle {
                             key: toggle.value_key.clone(),
@@ -535,7 +666,7 @@ impl UiInteractionState {
                     });
                 }
             } else if let Some(range) =
-                find_node(root, focused).and_then(|node| node.control.range())
+                find_node(root, &focused).and_then(|node| node.control.range())
             {
                 let value = if input.key_pressed("home") {
                     Some(range.min)
@@ -550,7 +681,7 @@ impl UiInteractionState {
                 };
                 if let Some(value) = value {
                     dispatched.push(UiDispatchedAction {
-                        target_id: focused.to_string(),
+                        target_id: focused.clone(),
                         event: UiEventKind::KeyPress("range".to_string()),
                         action: UiAction::SetRange {
                             key: range.value_key.clone(),
@@ -562,7 +693,7 @@ impl UiInteractionState {
             for key in &input.pressed_keys {
                 dispatch(
                     root,
-                    focused,
+                    &focused,
                     UiEventKind::KeyPress(key.clone()),
                     &mut dispatched,
                 );
@@ -570,7 +701,7 @@ impl UiInteractionState {
             if !input.text_input.is_empty() {
                 dispatch(
                     root,
-                    focused,
+                    &focused,
                     UiEventKind::TextInput(input.text_input.clone()),
                     &mut dispatched,
                 );
@@ -581,12 +712,84 @@ impl UiInteractionState {
         self.last_pointer_position = input.pointer_position;
         dispatched
     }
+
+    fn text_repeat_due(&mut self, input: &UiInputState, key: &str) -> bool {
+        if input.key_pressed(key) {
+            self.text_repeat_key = Some(key.to_string());
+            self.text_repeat_next_seconds = input.time_seconds + TEXT_REPEAT_DELAY_SECONDS;
+            return true;
+        }
+        if !input.key_down(key) || self.text_repeat_key.as_deref() != Some(key) {
+            return false;
+        }
+        if input.time_seconds < self.text_repeat_next_seconds {
+            return false;
+        }
+        self.text_repeat_next_seconds = input.time_seconds + TEXT_REPEAT_INTERVAL_SECONDS;
+        true
+    }
 }
 
 fn distance_squared(left: [f32; 2], right: [f32; 2]) -> f32 {
     let dx = left[0] - right[0];
     let dy = left[1] - right[1];
     dx * dx + dy * dy
+}
+
+fn is_scrollbar_target(id: &str) -> bool {
+    id.starts_with(GENERATED_SCROLLBAR_PREFIX)
+}
+
+fn scrollbar_target(id: &str) -> Option<(&str, bool)> {
+    let suffix = id.strip_prefix(GENERATED_SCROLLBAR_PREFIX)?;
+    if let Some(scroll_id) = suffix.strip_suffix(".thumb") {
+        return Some((scroll_id, true));
+    }
+    suffix
+        .strip_suffix(".track")
+        .map(|scroll_id| (scroll_id, false))
+}
+
+fn scrollbar_region<'a>(
+    hit_regions: &'a [UiHitRegion],
+    scroll_id: &str,
+    thumb: bool,
+) -> Option<&'a UiHitRegion> {
+    let suffix = if thumb { ".thumb" } else { ".track" };
+    let id = format!("{GENERATED_SCROLLBAR_PREFIX}{scroll_id}{suffix}");
+    hit_regions.iter().find(|region| region.id == id)
+}
+
+fn dispatch_scrollbar_position(
+    controls: &mut UiControlState,
+    hit_regions: &[UiHitRegion],
+    scroll_id: &str,
+    point: [f32; 2],
+    grab_offset: f32,
+    dispatched: &mut Vec<UiDispatchedAction>,
+) {
+    let (Some(track), Some(thumb)) = (
+        scrollbar_region(hit_regions, scroll_id, false),
+        scrollbar_region(hit_regions, scroll_id, true),
+    ) else {
+        return;
+    };
+    let travel = (track.rect.height - thumb.rect.height).max(0.0);
+    let fraction = if travel <= f32::EPSILON {
+        0.0
+    } else {
+        ((point[1] - track.rect.y - grab_offset) / travel).clamp(0.0, 1.0)
+    };
+    let max_offset = controls.scroll_max_offset(scroll_id);
+    let offset = controls.set_scroll_offset(scroll_id, [max_offset[0], max_offset[1] * fraction]);
+    dispatched.push(UiDispatchedAction {
+        target_id: scroll_id.to_string(),
+        event: UiEventKind::DragMove,
+        action: UiAction::ScrollTo {
+            id: scroll_id.to_string(),
+            offset,
+        },
+    });
 }
 
 fn proportional_text_index(text: &str, rect: UiRect, point: [f32; 2]) -> usize {
@@ -1124,6 +1327,15 @@ mod tests {
             button_state.cursor_hint(&button_root),
             crate::UiCursorIcon::PointingHand
         );
+
+        let panel_root = UiNode::new("root", UiNodeKind::Root)
+            .with_child(UiNode::new("settings", UiNodeKind::Panel).focusable());
+        let mut panel_state = UiInteractionState::default();
+        panel_state.focus.set_hovered(Some("settings".to_string()));
+        assert_eq!(
+            panel_state.cursor_hint(&panel_root),
+            crate::UiCursorIcon::Default
+        );
     }
 
     #[test]
@@ -1137,6 +1349,16 @@ mod tests {
 
         assert!(state.captures_keyboard_input(&root));
         state.focus.clear_focus();
+        assert!(!state.captures_keyboard_input(&root));
+    }
+
+    #[test]
+    fn focused_button_does_not_capture_viewport_keyboard_input() {
+        let root = UiNode::new("root", UiNodeKind::Root)
+            .with_child(UiNode::new("save", UiNodeKind::Button).focusable());
+        let mut state = UiInteractionState::default();
+        state.focus.request_focus("save");
+
         assert!(!state.captures_keyboard_input(&root));
     }
 
@@ -1285,6 +1507,62 @@ mod tests {
         assert!(actions.iter().any(|action| matches!(
             action.action,
             UiAction::ScrollTo { ref id, offset } if id == "list" && offset == [0.0, 48.0]
+        )));
+    }
+
+    #[test]
+    fn manual_scrollbar_thumb_drag_updates_the_retained_scroll_offset() {
+        let root = UiNode::scroll_view("list", crate::UiScrollAxis::Vertical);
+        let regions = vec![
+            UiHitRegion {
+                id: "__rafui.scrollbar.list.track".to_string(),
+                kind: UiNodeKind::Panel,
+                rect: UiRect::new(230.0, 0.0, 10.0, 120.0),
+                clip_rect: UiRect::new(0.0, 0.0, 240.0, 120.0),
+                z_index: 4,
+                interactive: true,
+                focusable: false,
+                disabled: false,
+            },
+            UiHitRegion {
+                id: "__rafui.scrollbar.list.thumb".to_string(),
+                kind: UiNodeKind::Panel,
+                rect: UiRect::new(230.0, 0.0, 10.0, 30.0),
+                clip_rect: UiRect::new(0.0, 0.0, 240.0, 120.0),
+                z_index: 5,
+                interactive: true,
+                focusable: false,
+                disabled: false,
+            },
+        ];
+        let mut state = UiInteractionState::default();
+        state.controls.set_scroll_metrics("list", [0.0, 180.0]);
+
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                pointer_position: Some([235.0, 10.0]),
+                pointer_down: true,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        let actions = state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                pointer_position: Some([235.0, 80.0]),
+                pointer_down: true,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+
+        assert_eq!(state.controls.scroll_offset("list"), [0.0, 140.0]);
+        assert!(actions.iter().any(|action| matches!(
+            action.action,
+            UiAction::ScrollTo { ref id, offset } if id == "list" && offset == [0.0, 140.0]
         )));
     }
 

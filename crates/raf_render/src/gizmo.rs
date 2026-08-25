@@ -2,7 +2,7 @@
 //!
 //! Provides visual axis arrows (X/Y/Z) that the user can drag
 //! to move/scale/rotate entities along a single axis.
-//! Drawn with the same CPU painter - no GPU resources.
+//! Recorded through the renderer's lightweight line-command path.
 
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
@@ -49,7 +49,7 @@ impl Default for GizmoState {
             mode: GizmoMode::Translate,
             visible: true,
             handle_length: 60.0,
-            hit_threshold: 8.0,
+            hit_threshold: 14.0,
         }
     }
 }

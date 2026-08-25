@@ -23,7 +23,7 @@ runtime process.
 The future runtime should consume the same serialized scene, primitive asset
 manifests, script attachment paths, and `EditorCameraBlock`-independent camera
 components. It must own its own window/surface lifecycle and never reuse the
-editor's egui shell as an in-game UI host.
+editor's RafUI shell as an in-game UI host.
 
 This keeps today’s script assets useful without forcing runtime behavior into
 the editor before its platform, rendering, and sandbox contracts are ready.

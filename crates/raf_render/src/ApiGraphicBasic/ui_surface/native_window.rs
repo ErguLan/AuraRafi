@@ -1,7 +1,6 @@
 //! Native Winit and WGPU presentation host for retained UI.
 //!
-//! The current editor may keep an `eframe` adapter during migration, but this
-//! host owns a real surface and can present `raf_ui` without Egui.
+//! This host owns a real surface and presents `raf_ui` directly.
 
 use std::sync::Arc;
 
@@ -9,12 +8,18 @@ use winit::window::{ResizeDirection, Window};
 
 use super::{
     CpuUiSurfaceHost, DirectUiSurfaceFrame, DirectUiSurfaceHost, NativeApplicationMenuAdapter,
-    UiSurfaceCpuMetrics,
+    UiSurface, UiSurfaceCpuMetrics,
 };
+use crate::api_graphic_basic::cad_surface_host::DirectCadSurfaceHost;
 use crate::api_graphic_basic::canvas_presenter::DirectCanvasPresenter;
 use crate::api_graphic_basic::canvas_presenter::DirectSceneSurfaceHost;
-use crate::api_graphic_basic::device::BasicDevice;
-use crate::api_graphic_basic::device::SceneFrameOutput;
+use crate::api_graphic_basic::capabilities::{GraphicsAdapterPreference, GraphicsMemoryBudget};
+use crate::api_graphic_basic::device::{
+    BasicDevice, BasicDeviceConfig, SceneFrameOutput, SharedGraphicsContext,
+};
+use crate::api_graphic_basic::{
+    EditorCanvasLayer, EditorComposedFrame, EditorUiLayer, NativeEditorCompositor,
+};
 use crate::scene_renderer::SceneRenderFrame;
 use raf_ui::{UiApplicationMenu, UiResizeEdge, UiWindowCommand};
 
@@ -27,18 +32,71 @@ pub enum NativeWindowCommandResult {
     ShowSystemMenu,
 }
 
+/// Opaque graphics construction context exposed to editor hosts.
+///
+/// The concrete WGPU device and target format stay inside ApiGraphicBasic.
+/// Editor surfaces can request owned UI/CAD hosts without importing adapter
+/// types into their public constructors.
+pub struct NativeGraphicsContext<'a> {
+    device: &'a wgpu::Device,
+    color_format: wgpu::TextureFormat,
+}
+
+impl NativeGraphicsContext<'_> {
+    pub fn create_ui_host(&self, surface: UiSurface, clear_color: [u8; 4]) -> DirectUiSurfaceHost {
+        DirectUiSurfaceHost::new(surface, self.device, self.color_format, clear_color)
+    }
+
+    pub fn create_cad_host(&self, clear_color: [u8; 4]) -> DirectCadSurfaceHost {
+        DirectCadSurfaceHost::new(self.device, self.color_format, clear_color)
+    }
+
+    pub(crate) fn device(&self) -> &wgpu::Device {
+        self.device
+    }
+
+    pub(crate) fn color_format(&self) -> wgpu::TextureFormat {
+        self.color_format
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NativeUiWindowConfig {
+    pub adapter_preference: GraphicsAdapterPreference,
+    pub memory_budget: GraphicsMemoryBudget,
+    pub desired_maximum_frame_latency: u32,
+}
+
+impl Default for NativeUiWindowConfig {
+    fn default() -> Self {
+        Self {
+            adapter_preference: GraphicsAdapterPreference::LowPower,
+            memory_budget: GraphicsMemoryBudget::potato(),
+            desired_maximum_frame_latency: 2,
+        }
+    }
+}
+
 pub struct NativeUiWindowHost {
     window: Arc<Window>,
     _instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     adapter: wgpu::Adapter,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
+    device: Arc<wgpu::Device>,
+    queue: Arc<wgpu::Queue>,
     configuration: wgpu::SurfaceConfiguration,
+    host_config: NativeUiWindowConfig,
 }
 
 impl NativeUiWindowHost {
     pub async fn create(window: Arc<Window>) -> Result<Self, String> {
+        Self::create_with_config(window, NativeUiWindowConfig::default()).await
+    }
+
+    pub async fn create_with_config(
+        window: Arc<Window>,
+        host_config: NativeUiWindowConfig,
+    ) -> Result<Self, String> {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::all(),
             ..wgpu::InstanceDescriptor::default()
@@ -48,7 +106,12 @@ impl NativeUiWindowHost {
             .map_err(|error| format!("native UI surface: {error}"))?;
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
+                power_preference: match host_config.adapter_preference {
+                    GraphicsAdapterPreference::LowPower => wgpu::PowerPreference::LowPower,
+                    GraphicsAdapterPreference::HighPerformance => {
+                        wgpu::PowerPreference::HighPerformance
+                    }
+                },
                 force_fallback_adapter: false,
                 compatible_surface: Some(&surface),
             })
@@ -60,7 +123,12 @@ impl NativeUiWindowHost {
                     label: Some("ApiGraphicBasic.NativeUiDevice"),
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::downlevel_defaults(),
-                    memory_hints: wgpu::MemoryHints::Performance,
+                    memory_hints: match host_config.adapter_preference {
+                        GraphicsAdapterPreference::LowPower => wgpu::MemoryHints::MemoryUsage,
+                        GraphicsAdapterPreference::HighPerformance => {
+                            wgpu::MemoryHints::Performance
+                        }
+                    },
                 },
                 None,
             )
@@ -95,7 +163,7 @@ impl NativeUiWindowHost {
             present_mode,
             alpha_mode,
             view_formats: vec![],
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: host_config.desired_maximum_frame_latency.clamp(1, 3),
         };
         surface.configure(&device, &configuration);
 
@@ -104,9 +172,10 @@ impl NativeUiWindowHost {
             _instance: instance,
             surface,
             adapter,
-            device,
-            queue,
+            device: Arc::new(device),
+            queue: Arc::new(queue),
             configuration,
+            host_config,
         })
     }
 
@@ -154,16 +223,37 @@ impl NativeUiWindowHost {
         &self.adapter
     }
 
-    pub fn device(&self) -> &wgpu::Device {
-        &self.device
+    pub fn graphics_context(&self) -> NativeGraphicsContext<'_> {
+        NativeGraphicsContext {
+            device: self.device.as_ref(),
+            color_format: self.configuration.format,
+        }
     }
 
-    pub fn queue(&self) -> &wgpu::Queue {
-        &self.queue
+    pub fn shared_graphics_context(&self) -> SharedGraphicsContext {
+        SharedGraphicsContext::from_host(self.device.clone(), self.queue.clone())
     }
 
-    pub fn color_format(&self) -> wgpu::TextureFormat {
-        self.configuration.format
+    pub fn basic_device_config(&self) -> BasicDeviceConfig {
+        BasicDeviceConfig {
+            allow_gpu: true,
+            force_cpu: false,
+            shared_graphics_context: Some(self.shared_graphics_context()),
+            memory_budget: self.host_config.memory_budget,
+            adapter_preference: self.host_config.adapter_preference,
+        }
+    }
+
+    pub fn size(&self) -> [u32; 2] {
+        [self.configuration.width, self.configuration.height]
+    }
+
+    pub fn width(&self) -> u32 {
+        self.configuration.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.configuration.height
     }
 
     /// Installs the shared application command tree through a platform-owned
@@ -225,6 +315,66 @@ impl NativeUiWindowHost {
         );
         frame.present();
         Ok(output)
+    }
+
+    pub fn render_editor_frame<F>(
+        &mut self,
+        compositor: &mut NativeEditorCompositor,
+        canvas_layer: Option<EditorCanvasLayer>,
+        ui: &mut DirectUiSurfaceHost,
+        logical_size: [u32; 2],
+        raster_scale: f32,
+        resolve: F,
+    ) -> Result<EditorComposedFrame, wgpu::SurfaceError>
+    where
+        F: FnMut(&str) -> String,
+    {
+        let frame = self.surface.get_current_texture()?;
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut composed = compositor.compose(
+            self.device.as_ref(),
+            self.queue.as_ref(),
+            &view,
+            [self.configuration.width, self.configuration.height],
+            canvas_layer,
+            ui,
+            logical_size,
+            raster_scale,
+            resolve,
+        );
+        frame.present();
+        composed.metrics.presents = 1;
+        Ok(composed)
+    }
+
+    pub fn render_editor_layers<F>(
+        &mut self,
+        compositor: &mut NativeEditorCompositor,
+        canvas_layer: Option<EditorCanvasLayer>,
+        ui_layers: &mut [EditorUiLayer<'_>],
+        resolve: F,
+    ) -> Result<EditorComposedFrame, wgpu::SurfaceError>
+    where
+        F: FnMut(&str) -> String,
+    {
+        let frame = self.surface.get_current_texture()?;
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let mut composed = compositor.compose_layers(
+            self.device.as_ref(),
+            self.queue.as_ref(),
+            &view,
+            [self.configuration.width, self.configuration.height],
+            canvas_layer,
+            ui_layers,
+            resolve,
+        );
+        frame.present();
+        composed.metrics.presents = 1;
+        Ok(composed)
     }
 
     pub fn present_canvas(

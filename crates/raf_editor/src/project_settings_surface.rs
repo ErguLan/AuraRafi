@@ -4,12 +4,12 @@
 //! serialized with the active project and never modify global preferences.
 
 use raf_core::config::{RenderPreset, ScriptExecutionMode, ScriptLanguage};
-use raf_core::project::Project;
+use raf_core::project::{BuildingStyle, Project};
 use raf_render::api_graphic_basic::ui_surface::{
-    StudioUiPalette, UiAlign, UiCompactMode, UiEventBinding, UiEventKind, UiFlow, UiLayout, UiNode,
-    UiNodeKind, UiOverflow, UiRange, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle, UiStylePatch,
-    UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurface, UiTextInput,
-    UiTextStyle, UiToggle,
+    StudioUiPalette, UiAction, UiAlign, UiCompactMode, UiEventBinding, UiEventKind, UiFlow,
+    UiLayout, UiNode, UiNodeKind, UiOverflow, UiRange, UiScrollAxis, UiSizeMode, UiSpacing,
+    UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurface,
+    UiTextInput, UiTextStyle, UiToggle,
 };
 
 const CONTROL_WIDTH: f32 = 232.0;
@@ -122,6 +122,7 @@ fn overview(palette: StudioUiPalette, project: &Project) -> UiNode {
 }
 
 fn layout(palette: StudioUiPalette, project: &Project) -> UiNode {
+    let organized = project.settings.building_style == BuildingStyle::Organized;
     section(palette, "project-settings.layout", "app.project_layout")
         .with_child(toggle_row(
             palette,
@@ -136,6 +137,18 @@ fn layout(palette: StudioUiPalette, project: &Project) -> UiNode {
             "app.show_properties_panel",
             "project-settings.show-properties",
             project.settings.show_properties_panel,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.building-snap-step",
+            "app.building_snap_step",
+            "project-settings.building-snap-step",
+            project.settings.building_snap_step,
+            0.5,
+            2.0,
+            0.05,
+            format!("{:.2} m", project.settings.building_snap_step),
+            !organized,
         ))
         .with_child(
             UiNode::new("project-settings.reset-panels", UiNodeKind::Button)
@@ -469,19 +482,29 @@ fn toggle_row_disabled(
 ) -> UiNode {
     let id = id.into();
     let label_key = label_key.into();
+    let value_key = value_key.into();
     let row = row(
         palette,
         id.clone(),
         label_key,
-        UiNode::toggle(format!("{id}.control"), UiToggle::new(value_key, value))
-            .with_class("project-settings-toggle")
-            .with_layout(UiLayout::fixed(48.0, 28.0))
-            .disabled(disabled),
+        UiNode::toggle(
+            format!("{id}.control"),
+            UiToggle::new(value_key.clone(), value),
+        )
+        .with_class("project-settings-toggle")
+        .with_layout(UiLayout::fixed(48.0, 28.0))
+        .disabled(disabled),
     );
     if disabled {
         row.with_class("project-settings-row-disabled")
     } else {
-        row
+        row.with_event(UiEventBinding {
+            event: UiEventKind::Click,
+            action: UiAction::SetToggle {
+                key: value_key,
+                value: !value,
+            },
+        })
     }
 }
 

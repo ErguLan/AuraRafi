@@ -1,7 +1,8 @@
 //! Native presentation of ApiGraphicBasic scene textures.
 //!
 //! A viewport, schematic, or PCB surface may render off-screen and use this
-//! presenter to reach a native WGPU swapchain without becoming an Egui image.
+//! presenter to reach a native WGPU swapchain without becoming a foreign UI
+//! image.
 
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -51,6 +52,28 @@ impl DirectSceneSurfaceHost {
         );
     }
 
+    /// Presents an already-rendered ApiGraphicBasic output. Native editor
+    /// hosts use this when the shared `RenderRuntime` owns device selection
+    /// and frame scheduling, so CAD/Electronics does not need to reach into a
+    /// concrete `BasicDevice`.
+    pub fn present_output(
+        &mut self,
+        presentation_device: &wgpu::Device,
+        presentation_queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        output: SceneFrameOutput,
+        source_size: [u32; 2],
+    ) {
+        self.presenter.present(
+            presentation_device,
+            presentation_queue,
+            target,
+            output,
+            source_size,
+            self.clear_color,
+        );
+    }
+
     pub fn presenter_mut(&mut self) -> &mut DirectCanvasPresenter {
         &mut self.presenter
     }
@@ -63,6 +86,46 @@ pub struct DirectCanvasPresenter {
     cpu_texture: Option<wgpu::Texture>,
     cpu_view: Option<Arc<wgpu::TextureView>>,
     cpu_size: [u32; 2],
+    source_key: usize,
+    source_bind_group: Option<wgpu::BindGroup>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanvasTargetRect {
+    pub x: u32,
+    pub y: u32,
+    pub width: u32,
+    pub height: u32,
+}
+
+impl CanvasTargetRect {
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    pub const fn full(size: [u32; 2]) -> Self {
+        Self::new(0, 0, size[0], size[1])
+    }
+
+    pub(crate) fn clipped(self, target_size: [u32; 2]) -> Self {
+        let x = self.x.min(target_size[0]);
+        let y = self.y.min(target_size[1]);
+        Self {
+            x,
+            y,
+            width: self.width.min(target_size[0].saturating_sub(x)),
+            height: self.height.min(target_size[1].saturating_sub(y)),
+        }
+    }
+}
+
+pub(crate) struct PreparedCanvasSource {
+    view: Arc<wgpu::TextureView>,
 }
 
 impl DirectCanvasPresenter {
@@ -137,6 +200,8 @@ impl DirectCanvasPresenter {
             cpu_texture: None,
             cpu_view: None,
             cpu_size: [0, 0],
+            source_key: 0,
+            source_bind_group: None,
         }
     }
 
@@ -149,16 +214,19 @@ impl DirectCanvasPresenter {
         source_size: [u32; 2],
         clear_color: [u8; 4],
     ) {
-        let source = match output {
-            SceneFrameOutput::GpuTexture { view, .. } => Some(view.arc()),
-            SceneFrameOutput::CpuPixels(pixels) => {
-                self.upload_cpu_pixels(device, queue, &pixels, source_size)
-            }
-        };
+        let source = self.prepare_output(device, queue, output, source_size);
         let Some(source) = source else {
             return;
         };
-        self.present_texture(device, queue, target, source.as_ref(), clear_color);
+        self.present_texture(
+            device,
+            queue,
+            target,
+            source,
+            source_size,
+            CanvasTargetRect::full(source_size),
+            clear_color,
+        );
     }
 
     /// Presents a borrowed CPU RGBA buffer without allocating an intermediate
@@ -175,54 +243,120 @@ impl DirectCanvasPresenter {
         let Some(source) = self.upload_cpu_pixels(device, queue, pixels, source_size) else {
             return;
         };
-        self.present_texture(device, queue, target, source.as_ref(), clear_color);
+        self.present_texture(
+            device,
+            queue,
+            target,
+            PreparedCanvasSource { view: source },
+            source_size,
+            CanvasTargetRect::full(source_size),
+            clear_color,
+        );
+    }
+
+    pub(crate) fn prepare_output(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        output: SceneFrameOutput,
+        source_size: [u32; 2],
+    ) -> Option<PreparedCanvasSource> {
+        let view = match output {
+            SceneFrameOutput::GpuTexture { view, .. } => view.arc(),
+            SceneFrameOutput::CpuPixels(pixels) => {
+                self.upload_cpu_pixels(device, queue, &pixels, source_size)?
+            }
+        };
+        Some(PreparedCanvasSource { view })
     }
 
     fn present_texture(
-        &self,
+        &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         target: &wgpu::TextureView,
-        source: &wgpu::TextureView,
+        source: PreparedCanvasSource,
+        target_size: [u32; 2],
+        target_rect: CanvasTargetRect,
         clear_color: [u8; 4],
     ) {
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("ApiGraphicBasic.CanvasPresenterBindGroup"),
-            layout: &self.bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(source),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&self.sampler),
-                },
-            ],
-        });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ApiGraphicBasic.CanvasPresenterEncoder"),
         });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("ApiGraphicBasic.CanvasPresenterPass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(color_from_bytes(clear_color)),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-            });
-            pass.set_pipeline(&self.pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..6, 0..1);
-        }
+        self.encode_prepared(
+            device,
+            &mut encoder,
+            target,
+            target_size,
+            target_rect,
+            source,
+            wgpu::LoadOp::Clear(color_from_bytes(clear_color)),
+        );
         queue.submit(std::iter::once(encoder.finish()));
+    }
+
+    pub(crate) fn encode_prepared(
+        &mut self,
+        device: &wgpu::Device,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        target_size: [u32; 2],
+        target_rect: CanvasTargetRect,
+        source: PreparedCanvasSource,
+        load: wgpu::LoadOp<wgpu::Color>,
+    ) {
+        let rect = target_rect.clipped(target_size);
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        let key = Arc::as_ptr(&source.view) as usize;
+        if self.source_key != key || self.source_bind_group.is_none() {
+            self.source_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ApiGraphicBasic.CanvasPresenterBindGroup"),
+                layout: &self.bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(source.view.as_ref()),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                    },
+                ],
+            }));
+            self.source_key = key;
+        }
+        let Some(bind_group) = self.source_bind_group.as_ref() else {
+            return;
+        };
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("ApiGraphicBasic.CanvasPresenterPass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        pass.set_viewport(
+            rect.x as f32,
+            rect.y as f32,
+            rect.width as f32,
+            rect.height as f32,
+            0.0,
+            1.0,
+        );
+        pass.set_scissor_rect(rect.x, rect.y, rect.width, rect.height);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bind_group, &[]);
+        pass.draw(0..6, 0..1);
     }
 
     fn upload_cpu_pixels(

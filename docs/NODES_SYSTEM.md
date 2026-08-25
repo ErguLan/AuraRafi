@@ -12,11 +12,13 @@ The data model lives primarily inside `raf_nodes`.
 In earlier iterations, the engine only held a singular global graph. Now, the state holds a `graphs: Vec<NodeGraph>` list. This allows the user to have multiple contextual event trees (e.g. "On Player Death", "Weather Loop", etc.) decoupled from each other.
 
 ## 2. The GUI Interaction (`raf_editor`)
-The `NodeEditorPanel` (housed in `crates/raf_editor`) controls all interactivity.
-Since `egui` processes UI element hits sequentially, the editor implements critical physics fixes:
-- **Input Swallowing Protection**: The underlying canvas layer uses `ui.allocate_space()` and intercepts clicks *before* the nodes are drawn dynamically on top. If `egui` checks collision sequentially, nodes painted later automatically block background hits, bypassing the "input swallowing" bug completely.
-- **Ray-cast Pin Connections**: Drag connections use `any_released()` and literal `Rect::contains()` to mathematically test if the mouse pointer released a wire *exactly* atop an opposing pin's bounding box instead of relying on `hovered()`. This stops drag focus locks.
-- **Z-Index Selection**: Clicking on a node's header flags it as the `selected_node`. Rendering loops evaluate `selected_node` against the iterative list and explicitly apply rendering highlights, avoiding heavy internal state machines. 
+The node graph data model remains independent of the editor host. The current
+workbench presents it as a retained RafUI document through the native
+ApiGraphicBasic compositor.
+
+Hit testing, drag capture, selection and z-order use RafUI's retained input
+contract and typed actions. The node canvas must not create a second renderer
+outside the shared ApiGraphicBasic composition boundary.
 
 ## 3. History and Undo/Redo Engine
 Deep-cloning history allows real-time iteration.

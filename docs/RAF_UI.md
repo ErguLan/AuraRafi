@@ -9,8 +9,8 @@ RafUI es la UI retenida oficial de AuraRafi. Las superficies describen
 presentacion; los hosts conservan estado temporal y los modulos de dominio
 ejecutan comandos, persistencia y undo/redo.
 
-No agregues nueva funcionalidad en Egui. Los adaptadores Egui existentes son
-transicionales mientras el editor migra a RafUI.
+El editor ya no tiene una ruta de runtime del toolkit retirado. Las superficies nuevas y
+las migradas deben seguir usando RafUI con el host Winit nativo.
 The former RafUI Studio authoring helper was removed during the editor
 interface decommission. Its design material is preserved under
 `.ulpi/design/archive/` for historical reference and must not be treated as an
@@ -50,7 +50,7 @@ Each `UiDocument` owns a serializable `UiTheme`. A user can alter tokens and
 metrics in one place, then use `root_style`, `panel_style`, `input_style`, and
 `accent_style` to make a whole interface follow it. `UiEnvironment` supplies
 viewport size, scale, dark/light preference, reduced-motion preference, and
-high-contrast preference without coupling documents to Winit or eframe.
+high-contrast preference without coupling documents to Winit or the native host.
 
 ## Layout
 
@@ -155,9 +155,9 @@ for user-created game UI as well as future editor surfaces.
 - `CpuUiSurfaceHost`: matching CPU recovery compositor.
 - `NativeUiWindowHost`: Winit integration and retained input bridge.
 
-The legacy egui shell is still present while editor panels migrate in focused
-steps. RafUI is the default document theme and the target system for new
-surfaces; it does not inject a default game HUD into user projects.
+The native Winit shell is now the active editor host. RafUI is the document
+system for editor surfaces; it does not inject a default game HUD into user
+projects.
 
 ### Compilation And Submission
 
@@ -187,29 +187,25 @@ menu bar: File, Edit, View, Project, and Help. Its entries carry stable command
 IDs, i18n label keys, enabled state, checked state, and optional accelerators.
 The application dispatches those IDs at one command boundary.
 
-The temporary eframe shell renders that exact model as an in-window fallback;
-it is not described as a native operating-system menu. `NativeUiWindowHost`
-accepts a `NativeApplicationMenuAdapter` when the native Winit shell owns the
-event loop. A platform adapter installs the menu and returns only
+`NativeUiWindowHost` accepts a `NativeApplicationMenuAdapter` while the native
+Winit shell owns the event loop. A platform adapter installs the menu and returns only
 `UiMenuActivation` command IDs. It must never execute scene, CAD, persistence,
 or editor logic itself.
 
 ### Active Hub Migration
 
-`AppScreen::ProjectHub` now opens the retained RafUI Hub immediately after the
-loading screen. `HubSurfaceHost` builds its document from real recent-project
-metadata, renders it into an ApiGraphicBasic-owned WGPU texture, and presents
-that texture through the temporary eframe bridge. The GPU host is the normal
-path; `CpuUiSurfaceHost` is used only when the host exposes no shared WGPU
-render state.
+`AppScreen::ProjectHub` opens the retained RafUI Hub through
+`NativeStudioSurface`. It builds its document from project metadata, renders
+through ApiGraphicBasic, and presents it in the native Winit compositor. The
+GPU host is the normal path; `CpuUiSurfaceHost` remains the recovery path.
 
 The Hub's retained actions are translated at the editor boundary into typed
 intent values for search, filter, theme selection, create, settings, open,
 duplicate, and forget. A project can also open the retained context menu with
-the secondary pointer button; the menu is an elevated RafUI node, not an egui
-popup. Project persistence and loading therefore stay outside the UI document.
-`panels/hub.rs` remains compiled as a recovery implementation, but it is not
-the normal route after Loading.
+the secondary pointer button; the menu is an elevated RafUI node. Project
+persistence and loading therefore stay outside the UI document.
+The native Hub surface is the normal route after Loading; old panel recipes are
+historical references only.
 
 The desktop Hub has three independent retained regions: the fixed project rail,
 a scrollable workspace, and a fixed-width scrollable side rail. The workspace
@@ -239,23 +235,21 @@ logical geometry to the denser target. The CPU recovery compositor receives
 the equivalent scaled draw list. This prevents browser-like texture upscaling
 from making text, borders, and icons look soft at 120 DPI and above.
 
-The eframe compatibility boundary also translates its wheel sign into RafUI's
-content-offset convention. A wheel-down gesture increases the content offset
-and reveals lower content; a wheel-up gesture returns toward the top.
+The native input bridge translates wheel input into RafUI's content-offset
+convention. A wheel-down gesture increases the content offset and reveals
+lower content; a wheel-up gesture returns toward the top.
 
 The first Hub pass used a temporary bitmap alphabet to prove the atlas path.
 RafUI now rasterizes a bundled vector font into the same bounded alpha atlas,
-so text stays proportional and localized without making the UI depend on egui
+so text stays proportional and localized without adding a second widget system
 widgets. The Hub does not continuously request repaint while idle. It asks for
 one follow-up frame only after an interaction changes retained state, avoiding
 an unnecessary present loop in the launcher.
 
 ### Active Settings Migration
 
-`AppScreen::Settings` now mounts `SettingsSurfaceHost` instead of the legacy
-widget panel. The host builds `settings_surface.rs` from the existing
-`EngineSettings` draft and renders it to an ApiGraphicBasic-owned target.
-Eframe still places that texture while the native window host is introduced.
+`AppScreen::Settings` mounts the retained settings surface from the existing
+`EngineSettings` draft and renders it through the native ApiGraphicBasic host.
 
 The settings document has a fixed navigation rail, a single scrollable content
 region, and a fixed Save/Cancel footer. Its sections are Appearance,
@@ -268,8 +262,7 @@ The migration keeps existing fields connected: render policy and FPS limit,
 grid/autosave/units, viewport camera and gizmo controls, prepared scripting
 preferences, supported OpenRouter/OpenAI provider settings, Agent mode, and
 target-platform flags. API keys are represented by transient password input
-state and never become document text. The legacy `settings_panel.rs` remains
-compiled as a recovery reference during the shell migration, but is not the
+state and never become document text. The legacy settings recipe is not the
 normal settings route.
 
 Settings ownership, draft/save lifecycle, validation boundaries, DPI behavior,
@@ -282,7 +275,7 @@ The `Project Settings` bottom-tab body now uses
 `ProjectSettingsSurfaceHost`. Its retained document covers overview, dock
 visibility, project runtime flags, linear save, prepared scripting, project
 graphics policy, and world streaming. The host applies typed actions to the
-active `ProjectSettings`; `AuraRafiApp` retains the existing immediate
+active `ProjectSettings`; the native application boundary retains the existing
 `project.ron` persistence and the linked global/project console-command gate.
 
 Unlike global Settings, this surface has no Cancel action or second draft:
@@ -329,7 +322,7 @@ renderer-owned and is never redrawn as a generic UI widget.
 
 The current live editor downbar adapters are the fixed bottom tab strip,
 Console, Assets, Project, and Project Settings. They are rendered by RafUI
-through ApiGraphicBasic with the existing eframe placement bridge. Node Editor,
+through ApiGraphicBasic and the native compositor. Node Editor,
 Agent, Properties, and Sessions are intentionally not default tabs during this
 stabilization pass; they must be added only when their real bodies and state
 contracts are ready. This keeps the active shell truthful while removing the
@@ -343,13 +336,10 @@ into the UI renderer.
 ### Active Electronics CAD Migration
 
 Electronics now consumes the shared shell as a CAD workbench rather than as a
-generic scene editor. The Schematic and PCB canvases remain
-`ElectronicsCadSurfaceHost` targets owned by ApiGraphicBasic, including their
-GPU-first command lists, hit regions, cache behavior, and CPU recovery path.
-RafUI owns the contextual Schematic/PCB selector, Inspector/Sessions selector,
-and the fixed bottom-tab chrome; the transitional adapters retain the existing
-document-bound library, property forms, routing, selection, and cross-probe
-logic until each body moves to a direct retained surface.
+generic scene editor. The native Electronics canvas feeds `CadScene` through
+the same ApiGraphicBasic `RenderRuntime` and compositor as Game. Its document
+mutation and rich CAD controls are owned by `NativeElectronicsEditor`; RafUI
+surfaces emit semantic commands and do not mutate the document directly.
 
 The Electronics left dock presents the project navigator and live component
 library, including search, placement selection, clipped catalog scrolling, and
@@ -361,9 +351,10 @@ second CAD scene for UI decoration.
 
 The shared bottom dock exposes real `DRC` and `Simulation` tabs for electronics
 projects. Their result bodies consume the existing `raf_electronics` report and
-DC solver structures. Running a check remains an application action; editing
-the CAD document invalidates cached reports, so stale analysis cannot be shown
-as current. The `tools/generate_electronics_ui_icons.ps1` development utility
+DC solver structures. Checks run as cancellable background tasks and expose
+`running`, `completed`, `cancelled`, and `failed` states; editing the CAD
+document invalidates cached reports, so stale analysis cannot be shown as
+current. The `tools/generate_electronics_ui_icons.ps1` development utility
 creates the local high-resolution PNG toolbar and catalog assets; it is never
 called by the editor at runtime.
 
@@ -403,8 +394,8 @@ previously solved inside individual editor bridges:
    text-request, and z-order counts for editor inspection and CI tests.
 
 The active editor tooltip is a separate transparent RafUI surface composed in
-the global tooltip layer. The eframe bridge only places the already-rendered
-RafUI texture; it does not draw the tooltip rectangle or its text.
+the global tooltip layer. The native compositor only places the already-
+rendered RafUI surface; it does not draw the tooltip rectangle or its text.
 
 Retained UI canvases use nearest sampling whenever the physical source size
 matches the physical host rectangle, preserving one-pixel borders, icon edges,

@@ -35,6 +35,21 @@ impl UiTextEditState {
 }
 
 impl UiControlState {
+    /// Returns the portion of control state that changes retained layout.
+    ///
+    /// Measured scroll extents are outputs of layout, not layout inputs. They
+    /// must stay out of renderer cache keys or an intrinsic text pass will
+    /// immediately invalidate its own measured frame and leave hit-testing on
+    /// the provisional scroll range.
+    pub fn layout_snapshot(&self) -> Self {
+        let mut snapshot = self.clone();
+        snapshot.scroll_max_offsets.clear();
+        snapshot
+            .scroll_offsets
+            .retain(|_, offset| offset.iter().any(|value| *value != 0.0));
+        snapshot
+    }
+
     pub fn text(&self, key: &str) -> &str {
         self.text_values.get(key).map(String::as_str).unwrap_or("")
     }
@@ -119,6 +134,43 @@ impl UiControlState {
         true
     }
 
+    /// Deletes the word immediately before the caret. Whitespace is treated
+    /// as a separator, matching the behavior users expect from native text
+    /// fields when pressing Ctrl/Command+Backspace.
+    pub fn delete_backward_word(&mut self, key: &str) -> bool {
+        if self.text_edit(key).has_selection() {
+            return self.backspace(key);
+        }
+        let Some(value) = self.text_values.get_mut(key) else {
+            return false;
+        };
+        let edit = self.text_edit.entry(key.to_string()).or_insert_with(|| {
+            let end = value.chars().count();
+            UiTextEditState {
+                cursor: end,
+                anchor: end,
+            }
+        });
+        if edit.cursor == 0 {
+            return false;
+        }
+        let chars = value.chars().collect::<Vec<_>>();
+        let mut start = edit.cursor.min(chars.len());
+        while start > 0 && chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        while start > 0 && !chars[start - 1].is_whitespace() {
+            start -= 1;
+        }
+        let range = start..edit.cursor.min(chars.len());
+        let mut chars = chars;
+        chars.drain(range.clone());
+        *value = chars.into_iter().collect();
+        edit.cursor = range.start;
+        edit.anchor = range.start;
+        true
+    }
+
     pub fn delete_forward(&mut self, key: &str) -> bool {
         let Some(value) = self.text_values.get_mut(key) else {
             return false;
@@ -143,6 +195,55 @@ impl UiControlState {
         edit.cursor = range.start;
         edit.anchor = range.start;
         true
+    }
+
+    pub fn delete_forward_word(&mut self, key: &str) -> bool {
+        if self.text_edit(key).has_selection() {
+            return self.delete_forward(key);
+        }
+        let Some(value) = self.text_values.get_mut(key) else {
+            return false;
+        };
+        let edit = self.text_edit.entry(key.to_string()).or_insert_with(|| {
+            let end = value.chars().count();
+            UiTextEditState {
+                cursor: end,
+                anchor: end,
+            }
+        });
+        let chars = value.chars().collect::<Vec<_>>();
+        let mut end = edit.cursor.min(chars.len());
+        while end < chars.len() && chars[end].is_whitespace() {
+            end += 1;
+        }
+        while end < chars.len() && !chars[end].is_whitespace() {
+            end += 1;
+        }
+        if end == edit.cursor.min(chars.len()) {
+            return false;
+        }
+        let range = edit.cursor.min(chars.len())..end;
+        let mut chars = chars;
+        chars.drain(range.clone());
+        *value = chars.into_iter().collect();
+        edit.cursor = range.start;
+        edit.anchor = range.start;
+        true
+    }
+
+    pub fn selected_text(&self, key: &str) -> String {
+        let Some(value) = self.text_values.get(key) else {
+            return String::new();
+        };
+        let edit = self.text_edit(key);
+        if !edit.has_selection() {
+            return String::new();
+        }
+        value
+            .chars()
+            .skip(edit.selection().start)
+            .take(edit.selection().len())
+            .collect()
     }
 
     pub fn move_cursor(&mut self, key: &str, direction: i32, extend: bool) {
@@ -254,15 +355,26 @@ impl UiControlState {
     ///
     /// Text-fit surfaces measure once before they know the final wrapped line
     /// heights. Clamping against that first estimate can discard a valid
-    /// offset before the intrinsic pass computes the real extent.
+    /// offset before the intrinsic pass computes the real extent. Keep a
+    /// previously measured larger extent until that authoritative pass runs.
     pub fn set_scroll_metrics_preserving_offset(
         &mut self,
         id: impl Into<String>,
         max_offset: [f32; 2],
     ) {
         let id = id.into();
-        self.scroll_max_offsets
-            .insert(id.clone(), [max_offset[0].max(0.0), max_offset[1].max(0.0)]);
+        let previous = self
+            .scroll_max_offsets
+            .get(&id)
+            .copied()
+            .unwrap_or([0.0; 2]);
+        self.scroll_max_offsets.insert(
+            id.clone(),
+            [
+                max_offset[0].max(previous[0]).max(0.0),
+                max_offset[1].max(previous[1]).max(0.0),
+            ],
+        );
         let offset = self.scroll_offsets.entry(id).or_insert([0.0, 0.0]);
         offset[0] = offset[0].max(0.0);
         offset[1] = offset[1].max(0.0);
@@ -273,6 +385,34 @@ impl UiControlState {
             .get(id)
             .copied()
             .unwrap_or([0.0, 0.0])
+    }
+
+    /// Sets a scroll position from a direct-manipulation control such as the
+    /// retained scrollbar thumb. The same clamping rules as wheel scrolling
+    /// apply, so hosts cannot leave a scroll view outside its measured extent.
+    pub fn set_scroll_offset(&mut self, id: impl Into<String>, offset: [f32; 2]) -> [f32; 2] {
+        let id = id.into();
+        let offset = [
+            if offset[0].is_finite() {
+                offset[0]
+            } else {
+                0.0
+            },
+            if offset[1].is_finite() {
+                offset[1]
+            } else {
+                0.0
+            },
+        ];
+        let max_offset = self
+            .scroll_max_offsets
+            .get(&id)
+            .copied()
+            .unwrap_or([0.0, 0.0]);
+        let current = self.scroll_offsets.entry(id).or_insert([0.0, 0.0]);
+        current[0] = offset[0].clamp(0.0, max_offset[0]);
+        current[1] = offset[1].clamp(0.0, max_offset[1]);
+        *current
     }
 
     pub fn scroll_by(&mut self, id: impl Into<String>, delta: [f32; 2]) -> [f32; 2] {
@@ -337,6 +477,14 @@ mod tests {
     }
 
     #[test]
+    fn direct_scroll_offset_is_clamped_for_manual_scrollbar_drags() {
+        let mut state = UiControlState::default();
+        state.set_scroll_metrics("list", [0.0, 240.0]);
+        assert_eq!(state.set_scroll_offset("list", [0.0, 160.0]), [0.0, 160.0]);
+        assert_eq!(state.set_scroll_offset("list", [0.0, 999.0]), [0.0, 240.0]);
+    }
+
+    #[test]
     fn provisional_scroll_metrics_do_not_discard_a_pending_intrinsic_offset() {
         let mut state = UiControlState::default();
         state.set_scroll_metrics("list", [0.0, 500.0]);
@@ -382,6 +530,18 @@ mod tests {
 
         assert_eq!(state.text_edit("query").cursor, 0);
         assert_eq!(state.text_edit("query").anchor, 0);
+    }
+
+    #[test]
+    fn text_edit_supports_word_delete_and_selected_text() {
+        let mut state = UiControlState::default();
+        state.set_text("query", "hello world", 32);
+        assert_eq!(state.selected_text("query"), "");
+        assert!(state.delete_backward_word("query"));
+        assert_eq!(state.text("query"), "hello ");
+        state.set_cursor("query", 0, false);
+        assert!(state.delete_forward_word("query"));
+        assert_eq!(state.text("query"), " ");
     }
 
     #[test]

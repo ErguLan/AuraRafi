@@ -2,12 +2,21 @@
 
 This file contains the definitive technical registry of AuraRafi. AI agents must rely on this file as the primary architectural mapping of the codebase.
 
+## Current native migration truth (2026-08-20)
+
+The active editor path is Winit + RafUI + ApiGraphicBasic. The retired widget
+toolkit is not a runtime dependency or an ownership boundary. Any old panel
+paths mentioned below are historical records, not active ownership. The
+current presentation boundary is
+`native_application.rs`, `native_workbench.rs`, `native_editor_runtime.rs`,
+`native_surface.rs`, and `ApiGraphicBasic::editor_compositor`.
+
 ## 1. Core Architectural Pillars
 AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Graphs and CAD PCB Design Topologies inside a lightweight structural core.
 
 * **ApiGraphicBasic Graphics Ownership**: `ApiGraphicBasic` is the sole public graphics owner. WGPU is the current private adapter/compatibility backend while owned DX12, Vulkan, and Metal backends mature behind the same contract. The authoritative migration rule is `.ai/APIGRAPHICBASIC.md`.
 * **GPU Hardware Driver Priority**: Uses available GPU hardware as the normal execution path, including integrated GPUs for potato profiles. CPU software rasterization is recovery, headless, testing, or incompatibility; it is not the automatic definition of low-spec mode.
-* **Controlled Hybrid Migration**: Responsibilities move from WGPU-facing implementation into Rafi-owned contracts capability by capability. Upper layers never fork into separate WGPU/native versions, and WGPU is removed only after parity and validation gates pass.
+* **Native Graphics Ownership**: Responsibilities move into Rafi-owned ApiGraphicBasic contracts capability by capability. Upper layers never fork into separate WGPU/native versions; WGPU remains private until a validated executor replacement exists.
 * **Viewport Integrity Baseline (2026-07-19)**: View2D is an orthographic view of the shared 3D scene. The active scene path batches adjacent lines, bounds persistent mesh reuse, renders physical pixels for high-DPI targets, and uses world-transform scale for culling/focus. `Sprite2D` is a legacy alias to `Plane`, not an active primitive.
 * **Unified Event & Mutator Layers**: High-level commands flow through the `CommandBus` to support transaction replays, Undo/Redo historical stacks, and AI Tool Calling.
 * **No MSVC Tooling Assumptions**: Always compiled via `stable-x86_64-pc-windows-gnu` using MinGW/MSYS2 toolchains on Windows. All compiled outputs are routed to `target_gnu/`.
@@ -20,10 +29,8 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 
 ### Main Entry Points
 * **`editor/`**: Binary wrapping crate.
-  * `src/main.rs`: Entry point. Prepares the desktop window and transitional
-    `eframe` context, allocates custom icon textures (`icon.png`), and mounts
-    `AuraRafiApp`. RafUI native-host work remains behind the same application
-    boundary.
+  * `src/main.rs`: Entry point. Starts the native Winit application boundary;
+    RafUI surfaces and ApiGraphicBasic own presentation below it.
 
 ### Crates Directory (`crates/`)
 
@@ -45,34 +52,46 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 #### 2. `raf_editor` (Graphical Interface Controls)
 * `src/lib.rs`: Re-exports editor layouts and assets.
 * `src/attached.rs`: Loopback attach listener. It owns transport/authentication
-  only; requests are queued to `AuraRafiApp` so scene history, session and
+  only; requests are queued to the native editor host so scene history, session and
   persistence remain editor-authoritative. Attached scene writes return a
   scoped `UndoToken` backed by `SceneHistory`; stale project/session/revision
   tokens are rejected.
-* `src/editor_viewport_app.rs`: Active editor state boundary, including the
-  attached command executor and first game-first external mutation allowlist.
-* `src/app.rs`: central state router sheet; handles loading gates, Hub menus, project setup views, status telemetry, auto-saves, and global window close traps.
-* `src/theme.rs`: Solid color tokens and warm orange accent configurations (`#D4771A`).
-* `src/ui_icons.rs`: Load-budgeted asynchronous icon atlas dispatcher.
-* `src/script_support.rs`: Code checking, hot-reload notifications, and routing scripts to external IDEs.
-* `src/panels/viewport.rs`: Transitional egui-hosted central canvas shell. Renderer ownership, camera/edit state, frame caching, and presentation must continue moving behind renderer-side hosts rather than growing this panel.
-* `src/panels/viewport_grid.rs`: Draws infinite 3D coordinate grids on the canvas.
-* `src/panels/viewport_edit.rs`: Vertex/face subquery editing drawing routines.
-* `src/panels/schematic_view.rs`: Interactive electrical wiring workspace.
-* `src/panels/node_editor.rs`: Logic scripting canvas using custom Bezier curves.
-* `src/panels/hierarchy.rs`: Scene Graph tree node inspector.
-* `src/panels/properties.rs`: selected node attribute forms (colors, visibility, coordinates).
-* `src/panels/asset_browser.rs`: Asset tracking and dynamic filesystem monitor.
-* `src/panels/console.rs`: Panel supporting debugging and manual console input line.
-* `src/panels/ai_chat.rs`: Multi-provider LLM interface (supports OpenClaw).
-* `src/panels/agent_surface.rs`: Retained Agent workbench. It renders a
-  configurable page of non-system messages through
-  `EngineSettings::agent_message_page_size`; the runtime still owns the full
-  conversation for model context.
-* `src/panels/raf_ui_surface_bridge.rs`: Transitional RafUI presentation bridge
-  for Agent and other retained surfaces. GPU and CPU paths must both update
-  their last-presented logical/physical target sizes after a render so idle
-  surfaces do not invalidate continuously.
+* `src/native_application.rs`: Winit lifecycle and native composition root.
+* `src/native_editor_runtime.rs`: neutral input, command registry, history,
+  frame pacing, dynamic resolution, and canvas orchestration.
+* `src/native_editor_commands.rs`: RafUI/menu intent translation into runtime
+  scene operations.
+* `src/native_attached_executor.rs`: CLI/MCP attached command boundary.
+* `src/native_surface.rs`: Native retained RafUI placement/input wrapper.
+* `src/native_workbench.rs`: Game editor chrome state, lifecycle and retained
+  lifecycle coordinator.
+* `src/native_workbench_input.rs`: retained-surface input dispatch and intent
+  routing for the workbench.
+* `src/native_workbench_surface.rs`: retained composition for the shell,
+  navigator, inspector, toolbar, dock and status bar.
+* `src/native_workbench_electronics.rs`: Electronics navigator and inspector
+  plus analysis projections used by the native workbench compositor.
+* `src/native_studio.rs`: Native project Hub and create/open flow.
+* `src/native_electronics.rs`: Direct CAD canvas adapter over the shared
+  ApiGraphicBasic compositor.
+* `src/electronics_controller.rs`: Authoritative Electronics/PCB document,
+  selection, history, persistence and analysis state.
+* `src/electronics_controller_interaction.rs`: native CAD input, gestures,
+  placement, routing, editing and persistence mechanics over the live editor.
+* `src/native_attached_executor.rs`: Shared CommandGateway adapters for native
+  UI, Agent and attached CLI/MCP Electronics commands.
+* `src/panels/viewport_controller.rs`: Native central canvas interaction,
+  camera/edit state, picking, and renderer-owned gizmo state.
+* `src/panels/hierarchy_model.rs`, `hierarchy_surface.rs`: Scene tree model and
+  retained hierarchy surface.
+* `src/panels/inspector_surface.rs`: Selected-node forms and transform commits.
+* `src/panels/editor_bottom_dock_surface.rs`: Console, Assets, Project and
+  Agent bottom-dock surfaces.
+* `src/panels/primitive_create.rs`, `search_surface.rs`,
+  `viewport_toolbar_surface.rs`: focused retained authoring surfaces.
+
+Retired panel paths are intentionally omitted from this active map; they remain
+recoverable through version history and the stabilization archive.
 
 #### 2a. `raf_cli` (External Agent Adapter)
 * `src/main.rs`: Headless CLI, JSONL endpoint, MCP stdio adapter, and attached
@@ -114,8 +133,8 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
   * `diagnostics.rs`: Data-only frame inspection for layout, clipping, hit regions, text requests, zero-size nodes, and z-order.
   * `render.rs`: Intrinsic-size aware layout boxes, shared hit regions, and paint input.
   * `compilation.rs`: Separate layout/paint invalidation keyed by controls, focus, raster density, motion, and resolved text.
-* `.ai/APIGRAPHICBASIC.md`: Mandatory controlled-hybrid and native-backend migration rule.
-* `src/projection.rs`: Projects 3D vectors onto the 2D egui coordinate plane.
+* `.ai/APIGRAPHICBASIC.md`: Mandatory ApiGraphicBasic ownership and backend-evolution rule.
+* `src/projection.rs`: Projects 3D vectors onto the native logical canvas.
 * `src/camera.rs`: Matrix calculation for camera orientation, zoom, Orbit, and flyover.
 * `src/depth_sort.rs`: Quick-Sort implementation sorting polygons back-to-front (Painter's algorithm).
 * `src/post_process.rs`: CPU shaders for bloom, saturation, vignette, tone-mapping, and FXAA.
@@ -165,9 +184,8 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
   4. Map `UiAction` values to existing command, validation, undo, and
      persistence boundaries. Do not mutate models inside the document builder.
   5. Register the route/host in `app.rs` without embedding raw visual trees.
-* **Transitional Egui**: Existing `show(&mut self, ui: &mut egui::Ui)` bodies
-  are temporary adapters. New menus, rails, fixed dock chrome, and renderer
-  canvas ownership must use RafUI/ApiGraphicBasic contracts instead.
+* **Native RafUI**: Retained surfaces own new menus, rails, fixed dock chrome,
+  and editor overlays; ApiGraphicBasic owns their GPU/CPU composition.
 * **Authoring source of truth**: Read `docs/RAF_UI.md`,
   `docs/EDITOR_RAFUI.md`, `docs/APIGRAPHICBASIC.md`, and
   `.ulpi/design/DESIGN.md` before UI or surface changes. They define exact

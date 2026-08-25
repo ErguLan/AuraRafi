@@ -13,7 +13,7 @@ The engine foundation is in place and several vertical slices have already moved
 - [x] Event bus for decoupled communication
 - [x] Project management (create, load, save)
 - [x] Configuration system with RON persistence
-- [x] Temporary editor shell with panels (egui/eframe)
+- [x] Temporary editor shell retired after the native RafUI workbench landed
 - [x] Rust-native retained UI foundation (`raf_ui` + ApiGraphicBasic direct host)
 - [x] RafUI authoring contract for surface ownership, menus, themes, docking, and canvas fidelity
 - [x] Theme system (dark/light + orange accent)
@@ -40,7 +40,8 @@ The engine foundation is in place and several vertical slices have already moved
 
 ## v0.2.0 - Rendering (Done)
 
-Rendering implemented via CPU projection + egui painter (zero GPU pipelines, runs on any hardware):
+Rendering is implemented through the ApiGraphicBasic scene command path with
+GPU execution when available and CPU recovery for constrained hardware:
 
 - [x] Viewport rendering integration (CPU projection through view_proj matrices, no wgpu render passes needed - lighter)
 - [x] Shader-free rendering (all shading computed in Rust: face_brightness() with directional light dot product)
@@ -58,7 +59,8 @@ Rendering implemented via CPU projection + egui painter (zero GPU pipelines, run
 - [x] Mesh merge: combine multiple meshes into one, vertex welding, source tracking for unmerge
 - [x] Mesh groups: group entities by ID to move/transform together
 - [x] Render backend switch: CPU painter (default, zero GPU) / GPU wgpu (opt-in), frame budget, adaptive detail, potato preset
-- [x] Independent SchematicGraph for electronics: separated from game SceneGraph, own data model with selection/picking/nets/serialization
+- [x] Native Electronics document authority: `Schematic` + `PcbLayout`,
+  renderer-neutral `CadScene`, retained RafUI and shared command gateway
 - [x] Depth-sorted rendering (painter's algorithm): all faces from all entities sorted by depth before drawing -- eliminates Z-fighting/overlap artifacts, O(n log n) per frame
 - [x] Transform gizmo arrows: RGB arrows (X red, Y green, Z blue) with arrowhead triangles, axis labels, drag interaction for Move/Scale tools, screen-space hit testing
 - [x] Entity picking: click to select in 3D viewport via screen-space projection, click-on-empty deselects, overlay-area exclusion
@@ -195,15 +197,15 @@ Follow-up work after 0.8.0:
 Full architectural rewrite of the viewport and render pipeline. The monolithic viewport file was split into a thin editor shell plus a renderer-side bridge layer. The rendering backend was replaced with a proper Z-buffer scanline rasterizer.
 
 ### Viewport Architecture
-- [x] Viewport shell refactored to ~302 line thin egui panel (`viewport.rs`)
-- [x] HUD toolbar with G/R/S/F buttons, 2D/3D toggle, OBJ/VTX mode badge, info pill, axis gizmo (`viewport_hud.rs`)
-- [x] Object mode input: gizmo drag, entity picking, shift-select, keyboard shortcuts (`viewport_interaction.rs`)
-- [x] Vertex edit mode input: click-to-select vertices, drag-to-move, Tab toggle (`viewport_interaction.rs`)
-- [x] Overlay drawing: entity labels, gizmo arrows/rotation rings/scale cubes, vertex dots/edges (`viewport_overlay.rs`)
+- [x] Native Winit application with a retained RafUI workbench (`native_application.rs`, `native_workbench.rs`)
+- [x] ApiGraphicBasic canvas + RafUI composition in one presentation command submission
+- [x] Object mode input: gizmo drag, entity picking, selection, and keyboard shortcuts through the neutral input router
+- [x] Native toolbar with G/R/T/F, 2D/3D, render-style, grid, labels, and polygon toggles
+- [x] UI/canvas pointer ownership and click-away behavior without a second UI host
 - [x] HUD click blocking: UI overlays consume clicks before they reach world picking
 
 ### Renderer Bridge (`raf_render::bridge`)
-- [x] `ViewportBridge`: owns camera state, renderer, edit session, and transform controller — zero egui dependency
+- [x] `ViewportBridge`: owns camera state, renderer, edit session, and transform controller — zero widget-toolkit dependency
 - [x] `ViewportTransformController`: gizmo drag lifecycle (translate/rotate/scale) with screen-space axis projection
 - [x] `ViewportEditSession`: per-entity editable mesh state, vertex picking (10px), vertex dragging (world→local via inverse rotation)
 - [x] Precise entity picking: ray-sphere broad phase + ray-triangle narrow phase (replaces old screen-space distance check)
@@ -279,9 +281,7 @@ The 0.9.0 target establishes the editor IDE as the native "home" for the AI agen
   reduced-motion behavior, semantic component recipes, bounded HiDPI density,
   and shared GPU/CPU diagnostics.
 - [x] RafUI tooltip migration: compact tooltip content is authored and
-  rendered by a dedicated transparent RafUI surface; the transitional Egui
-  bridge only composites its completed texture and never paints tooltip text
-  or rectangles.
+  rendered by a dedicated RafUI surface in the native compositor.
 - [ ] ApiGraphicBasic owned graphics evolution: complete the resource registry,
   eviction, upload enforcement, frame graph, synchronization, and presentation
   lifecycle so backends can be selected per platform without coupling editor
@@ -323,7 +323,7 @@ target remains v0.12 and is specified in
   authoritative
 - [x] Unified invocation: internal Agent calls the command kernel directly;
   `raf` CLI and `raf mcp serve` reach the same kernel through the attached
-  bridge without depending on Egui or the Console UI
+  bridge without depending on a presentation panel or the Console UI
 - [x] Attached MCP preset: `raf mcp serve --attach PATH` performs the same
   handshake and exposes status, capabilities, resources and the baby game
   mutation allowlist to Codex, Claude Code and OpenCode
@@ -347,7 +347,7 @@ target remains v0.12 and is specified in
   skill `.ai/skills/raf-game-authoring/` document attached authoring, scripting,
   safety, and the no-Runtime boundary.
 - [ ] Optional closed-editor core host: manually activated `raf host`/MCP mode
-  that loads project documents without RafUI, Egui, or a renderer. Keep it
+  that loads project documents without RafUI or a renderer. Keep it
   opt-in, renderer-free, budgeted, project-locked, and shut down after a task;
   do not turn it into a resident service by default.
 - [ ] External agent onboarding: lightweight connection recipes for Codex,

@@ -17,7 +17,7 @@ use crate::ScriptResult;
 
 /// Snapshot of input state for one frame. Filled by the editor/runtime
 /// from the host window's input events. Engine-agnostic: does not depend
-/// on egui or winit.
+/// on a particular UI or window framework.
 #[derive(Debug, Clone, Default)]
 pub struct InputSnapshot {
     /// Keys currently held down, normalized to lowercase strings

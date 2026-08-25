@@ -1,4 +1,4 @@
-# ApiGraphicBasic Controlled Hybrid Rule
+# ApiGraphicBasic Native Ownership Rule
 
 > Architectural rule for every AI agent and renderer change.
 > Decision date: 2026-07-18.
@@ -12,20 +12,20 @@ Use both documents for renderer, surface, RafUI, GPU asset, or backend work.
 adapter and compatibility backend; it is not the permanent public API, resource
 owner, presentation owner, or architecture ceiling.
 
-The engine follows a controlled hybrid migration:
+The active engine path is one Rafi-owned graphics contract:
 
 ```text
 Viewport | CAD | RafUI | Assets
                 |
         ApiGraphicBasic
                 |
-   WGPU adapter | CPU recovery
+   private WGPU executor | CPU recovery
                 |
  Future native DX12 | Vulkan | Metal backends
 ```
 
-The hybrid exists below `ApiGraphicBasic`. Editor surfaces and documents must
-never implement separate WGPU and native-renderer code paths.
+Backend variation exists only below `ApiGraphicBasic`. Editor surfaces,
+documents, and RafUI must never implement separate backend or renderer paths.
 
 ## 2. Migration Is Capability-Based, Not Level-Based
 
@@ -73,7 +73,7 @@ Strong renderer programming still requires explicit user authorization.
 The first foundation is implemented while WGPU remains the active executor. It
 currently provides generational handles, backend-neutral capabilities, adapter
 preference, potato/desktop budgets, a neutral shared host context, and a GPU
-output wrapper with an explicit transitional WGPU bridge.
+output wrapper over the private WGPU executor.
 
 It does not yet provide a complete resource registry, cross-surface structural
 batching, unified DeviceHub across every host, frame graph, or native
@@ -81,25 +81,24 @@ DX12/Vulkan/Metal execution. The active scene viewport already has bounded
 persistent mesh reuse and contiguous line batching; this is a measured hot-path
 optimization, not a claim that every surface has a complete batch scheduler.
 
-## 4. Hybrid Runtime States
+## 4. Private Backend Evolution
 
-The engine may pass through these long-lived states without changing upper
-layers:
+The engine may evolve these internal states without changing upper layers:
 
 - **WGPU-backed ownership**: ApiGraphicBasic owns the public contract while
-  WGPU executes GPU work.
+  its private WGPU executor performs GPU work.
 - **Encapsulated compatibility**: WGPU exists only inside
   `raf_backend_wgpu`; no editor or surface imports it.
-- **Native backend coexistence**: a native backend reaches parity while WGPU
-  remains available as fallback and reference.
-- **Native default**: the qualified native backend becomes the platform
-  default; WGPU remains optional for unsupported devices.
+- **Native backend qualification**: a future native backend reaches parity
+  behind the same ApiGraphicBasic contract.
+- **Native selection**: the qualified backend becomes the selected executor
+  for a supported platform; upper layers remain unchanged.
 - **WGPU retired**: WGPU leaves the shipping graph only after all removal
   gates pass.
 
-Select one backend for a device/surface execution path. Do not mix WGPU and a
-native API inside the same frame unless a deliberately designed and measured
-interop contract exists. Accidental cross-API copies are forbidden.
+Select one executor for a device/surface execution path. Do not mix private
+backend resources inside the same frame. Accidental cross-API copies are
+forbidden.
 
 ## 5. WGPU Removal Gates
 
@@ -115,7 +114,8 @@ candidate backend must pass:
 - CPU recovery availability;
 - no WGPU types or assumptions in upper layers.
 
-Until then, WGPU is a controlled bridge, not technical debt to delete blindly.
+Until then, WGPU remains the private executor. It is not an editor bridge or
+an alternative UI ownership path, and it must not be removed blindly.
 
 ## 6. Potato-First Contract
 
@@ -178,8 +178,9 @@ Until then, WGPU is a controlled bridge, not technical debt to delete blindly.
   density. GPU and CPU presentation use equivalent logical geometry.
 - `UiTween` owns time-based feedback. A settled motion cannot request idle
   frames; reduced motion resolves immediately.
-- The transitional eframe bridge may compose a finished RafUI texture only. It
-  may not draw retained text, rectangles, tooltips, menus, or interaction state.
+- The native Winit host composes finished RafUI surfaces only. It may not draw
+  retained text, rectangles, tooltips, menus, or interaction state outside the
+  RafUI document contract.
 - `UiSurfaceDiagnostics` is the shared inspection contract for layout, clipping,
   hit regions, text requests, zero-size geometry, and z-order.
 

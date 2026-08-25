@@ -289,6 +289,22 @@ impl SceneGraph {
         child_id
     }
 
+    /// Add a visible primitive under the given parent and return its id.
+    pub fn add_child_with_primitive(
+        &mut self,
+        parent: SceneNodeId,
+        name: &str,
+        primitive: Primitive,
+    ) -> SceneNodeId {
+        self.render_cache.set(None);
+        let child_id = SceneNodeId(self.nodes.len());
+        let mut child = SceneNode::with_primitive(name, primitive);
+        child.parent = Some(parent);
+        self.nodes.push(child);
+        self.nodes[parent.0].children.push(child_id);
+        child_id
+    }
+
     /// Add a root folder node.
     pub fn add_root_folder(&mut self, name: &str) -> SceneNodeId {
         self.render_cache.set(None);

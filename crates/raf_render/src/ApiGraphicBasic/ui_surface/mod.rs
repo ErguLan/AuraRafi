@@ -1,6 +1,6 @@
 //! Lightweight retained UI surface for ApiGraphicBasic.
 //!
-//! This is the first non-egui UI contract for editor chrome and canvas
+//! This is the retained UI contract for editor chrome and canvas
 //! overlays. It stores layout and text keys as data, compiles one retained
 //! paint list for CPU or GPU composition, and does not depend on the legacy
 //! editor shell.
@@ -33,7 +33,9 @@ pub use direct_host::{DirectUiSurfaceFrame, DirectUiSurfaceHost};
 pub use gpu_renderer::{UiSurfaceGpuMetrics, UiSurfaceGpuRenderer};
 pub use images::{UiSurfaceImageData, UiSurfaceImageStore};
 pub use native_input::NativeUiInputBridge;
-pub use native_window::{NativeUiWindowHost, NativeWindowCommandResult};
+pub use native_window::{
+    NativeGraphicsContext, NativeUiWindowConfig, NativeUiWindowHost, NativeWindowCommandResult,
+};
 pub use presentation::{
     UiSurfaceDrawList, UiSurfaceImageQuad, UiSurfacePaintCommand, UiSurfaceQuad, UiSurfaceTextQuad,
 };
@@ -414,6 +416,13 @@ pub struct UiSurfaceSession {
 impl UiSurfaceSession {
     pub fn transient_motion_revision(&self) -> u32 {
         self.tooltip_motion.value().to_bits()
+    }
+
+    /// True while RafUI still has a tooltip transition that needs another
+    /// retained frame. Native hosts use this to keep event-driven rendering
+    /// alive until the interaction settles.
+    pub fn has_active_motion(&self) -> bool {
+        !self.tooltip_motion.is_settled()
     }
 
     /// Lets a native host honor `UiEnvironment::prefers_reduced_motion`

@@ -2,7 +2,7 @@
 //!
 //! This module owns temporary editable mesh state, precise scene picking,
 //! and projected overlay data for edit mode. It is renderer-side so the
-//! egui panel can stay thin and mostly paint precomputed data.
+//! retained surface can stay thin and mostly paint precomputed data.
 
 use std::collections::HashMap;
 use std::sync::OnceLock;

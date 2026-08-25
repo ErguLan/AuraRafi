@@ -1,4 +1,4 @@
-//! Direct retained CAD surface host without Egui presentation.
+//! Direct retained CAD surface host for native presentation.
 
 use glam::Vec2;
 use raf_electronics::CadScene;
@@ -64,5 +64,25 @@ impl DirectCadSurfaceHost {
             &frame.frame,
         );
         true
+    }
+
+    /// Presents an output already rendered by the shared RenderRuntime.
+    /// Electronics stays behind the same native canvas boundary as Game and
+    /// does not need to access a concrete BasicDevice.
+    pub fn present_output(
+        &mut self,
+        presentation_device: &wgpu::Device,
+        presentation_queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        output: crate::api_graphic_basic::device::SceneFrameOutput,
+        source_size: [u32; 2],
+    ) {
+        self.scene_host.present_output(
+            presentation_device,
+            presentation_queue,
+            target,
+            output,
+            source_size,
+        );
     }
 }

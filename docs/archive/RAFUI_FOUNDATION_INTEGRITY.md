@@ -5,9 +5,8 @@ Fecha: 2026-07-27
 
 Este documento es la lista de invariantes que RafUI debe cerrar antes de
 volver a montar una superficie grande. No autoriza Play, Runtime ni una nueva
-pantalla de RafUI Studio. El editor puede seguir usando egui como puente de
-presentacion mientras el contrato retained se valida por pruebas y hosts
-headless.
+pantalla de RafUI Studio. El contrato retained se valida por pruebas y hosts
+headless; no se debe reintroducir un puente visual legado.
 
 ## Invariantes cerradas en esta pasada
 
@@ -27,7 +26,7 @@ headless.
   Backspace en estado de sesion; Ctrl/Cmd+A selecciona todo y el puente
   nativo conserva el preedit de IME sin insertarlo antes del commit.
 - Shift+Tab, modificadores y composicion de input ya tienen lugar en el
-  contrato de entrada; la adaptacion visual de egui o Winit puede alimentarlos.
+  contrato de entrada; el host nativo puede alimentarlos.
 - Perder el foco de la ventana libera botones, teclas y modificadores para que
   Alt+Tab o un dialogo modal no deje un drag fantasma.
 - `UiSurfaceSession::set_reduced_motion` permite que el host aplique la
@@ -99,7 +98,7 @@ finge un backend que aun no este montado.
 - Play, Stop, Runtime, simulacion jugable o loop de runtime.
 - Sombras, PBR, postprocesado, particulas o animacion esqueletica.
 - Una nueva pantalla RafUI Studio.
-- Un segundo sistema de widgets dentro de egui.
+- Un segundo sistema de widgets fuera de RafUI.
 
 ## Gate antes de reconstruir el shell
 

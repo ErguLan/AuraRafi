@@ -38,7 +38,7 @@ cd AuraRafi
 cargo check -p raf_editor
 
 # Run the editor
-cargo run -p aura_rafi_editor --release
+cargo run
 ```
 
 If you are on Windows and use the GNU toolchain, see `SETUP.md` for the MinGW
@@ -47,8 +47,12 @@ step before running the editor.
 What works today after launch:
 
 - Game projects open with the scene editor, hierarchy, properties, asset browser, and a scene viewport routed through the shared graphics runtime (GPU when available, CPU fallback retained).
+- Game projects also expose a native RafUI Nodes tab backed by `raf_nodes`; the active graph is loaded from and saved to the current session.
 - Game runtime foundations remain in the repository, but live Play mode is currently temporarily disconnected while renderer/runtime truth is being stabilized.
-- Electronics projects open with the schematic editor and can switch into PCB View for synchronized physical layout editing.
+- Electronics projects enter the shared native CAD canvas. The electronics
+  domain, checks, simulation and exports remain available, while rich
+  schematic/PCB authoring is intentionally passive during the current Game
+  editor stabilization wave.
 - Save/load, undo/redo, project persistence, DRC, DC simulation, SVG/BOM/netlist export, and localized UI are already integrated.
 - Some roadmap systems are intentionally present as prepared architecture and are documented as such in the changelog and architecture docs.
 
@@ -58,7 +62,7 @@ What works today after launch:
 |-------|---------|
 | `raf_core` | ECS, scene graph, command bus, events, configuration |
 | `raf_render` | Shared graphics runtime for Scene/Schematic/PCB, CPU software fallback path, and prepared render abstraction/backends |
-| `raf_editor` | Visual editor UI with egui/eframe |
+| `raf_editor` | Native Winit editor UI with retained RafUI surfaces |
 | `raf_assets` | Asset importing, browsing, primitives |
 | `raf_electronics` | Schematic editor domain, simulation, DRC, export pipeline, synchronized PCB layout model |
 | `raf_nodes` | Visual node-based scripting, graph validation, executor |
@@ -91,8 +95,8 @@ Documentation note:
 ## Technology
 
 - **Language**: Rust (2021 edition)
-- **Rendering**: shared graphics runtime via `RenderRuntime` + `ApiGraphicBasic`, using GPU hardware execution when available and CPU software fallback when not; the scene viewport keeps a dedicated CPU scene path as the reference fallback implementation
-- **UI**: egui + eframe
+- **Rendering**: shared graphics runtime via `RenderRuntime` + `ApiGraphicBasic`, using GPU hardware execution when available and CPU software fallback when not; WGPU remains a private adapter below the graphics boundary
+- **UI**: RafUI retained surfaces under a native Winit host
 - **ECS**: hecs
 - **Math**: glam (SIMD-optimized)
 - **Serialization**: serde + RON

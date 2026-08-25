@@ -1,7 +1,7 @@
 //! `raf`: the lightweight, headless command and MCP surface for AuraRafi.
 //!
 //! This binary intentionally depends on `raf_core` only. It can inspect and
-//! create projects without opening Egui, WGPU or the editor window, or attach
+//! create projects without opening the renderer or editor window, or attach
 //! to an already-open editor through the project-scoped local IPC descriptor.
 
 use raf_core::capabilities::{CapabilityCatalog, CapabilityDefinition};
@@ -21,7 +21,9 @@ use std::path::{Path, PathBuf};
 use std::process;
 
 mod attached;
+mod discovery;
 use attached::AttachedClient;
+use discovery::DiscoveredEditor;
 
 const PROGRAM: &str = "raf";
 const PROTOCOL_VERSION: &str = "2025-06-18";
@@ -748,19 +750,112 @@ fn print_response(response: &EngineCommandResponse, format: OutputFormat) -> Cli
 fn print_help() {
     println!(
         "{PROGRAM} - lightweight AuraRafi command and MCP surface\n\n\
-Usage:\n  raf doctor [--json]\n  raf status [--project PATH] [--json]\n  raf project create --name NAME [--parent PATH] [--type game|electronics] --confirm\n  raf project open PATH\n  raf project info [PATH]\n  raf capabilities [search QUERY]\n  raf session list [--project PATH]\n  raf workspace describe [PATH]\n  raf command NAME [--params JSON] [--dry-run] [--confirm]\n  raf mcp serve [--project PATH]\n  raf serve [--project PATH]            JSONL command endpoint\n\nGlobal output: --json, --ndjson, --format human|json"
+Usage:\n  raf doctor [--json]\n  raf editors [--json]                 list known projects and live editors\n  raf status [--project PATH] [--json]\n  raf attach [ACTION] [--project PATH]  PATH is optional when one editor is live\n  raf project create --name NAME [--parent PATH] [--type game|electronics] --confirm\n  raf project open PATH\n  raf project info [PATH]\n  raf capabilities [search QUERY]\n  raf session list [--project PATH]\n  raf workspace describe [PATH]\n  raf command NAME [--params JSON] [--dry-run] [--confirm]\n  raf mcp serve [--attach PATH]         PATH is optional when one editor is live\n  raf serve [--project PATH]            JSONL command endpoint\n\nGlobal output: --json, --ndjson, --format human|json"
     );
 }
 
+/// Lists every known project that publishes an attach descriptor, marking
+/// which editors are actually listening right now. Stale descriptors from
+/// crashed sessions are reported as not alive instead of failing silently.
+///
+/// With `--wait[=SECONDS]` the scan retries every 400 ms until a live editor
+/// appears or the budget expires, so automation can start before the engine.
+/// The poll is bounded and only runs for this command's lifetime.
+fn print_editors(
+    extra: Option<&Path>,
+    format: OutputFormat,
+    wait_seconds: Option<f32>,
+) -> CliResult<()> {
+    const WAIT_POLL: std::time::Duration = std::time::Duration::from_millis(400);
+    let deadline = wait_seconds.map(|seconds| {
+        std::time::Instant::now() + std::time::Duration::from_secs_f32(seconds.max(0.5))
+    });
+    let editors = loop {
+        let editors = discovery::discover_editors(extra.or(env::current_dir().ok().as_deref()));
+        if !discovery::live_editors(&editors).is_empty() || deadline.is_none() {
+            break editors;
+        }
+        if std::time::Instant::now() >= deadline.unwrap() {
+            break editors;
+        }
+        std::thread::sleep(WAIT_POLL);
+    };
+    let live = discovery::live_editors(&editors).len();
+    match format {
+        OutputFormat::Human => {
+            println!(
+                "{live} live editor(s) across {} known project(s):",
+                editors.len()
+            );
+            for editor in &editors {
+                let state = if editor.alive { "LIVE" } else { "stale" };
+                let session = editor
+                    .descriptor
+                    .session_name
+                    .clone()
+                    .unwrap_or_else(|| "-".to_string());
+                let kind = editor
+                    .descriptor
+                    .project_type
+                    .clone()
+                    .unwrap_or_else(|| "?".to_string());
+                println!(
+                    "- [{state}] {} | type: {kind} | session: {} | pid {} | rev {}",
+                    editor.project_path.display(),
+                    session,
+                    editor.descriptor.process_id,
+                    editor.descriptor.revision
+                );
+            }
+            if wait_seconds.is_some() && live == 0 {
+                return Err("Timed out waiting for a live AuraRafi editor.".to_string());
+            }
+            Ok(())
+        }
+        OutputFormat::Json | OutputFormat::Ndjson => {
+            let payload = json!({
+                "live_count": live,
+                "scanned": editors.len(),
+                "timed_out": wait_seconds.is_some() && live == 0,
+                "editors": editors.iter().map(DiscoveredEditor::to_json).collect::<Vec<_>>(),
+            });
+            println!(
+                "{}",
+                serde_json::to_string(&payload).map_err(|error| error.to_string())?
+            );
+            if wait_seconds.is_some() && live == 0 {
+                return Err("Timed out waiting for a live AuraRafi editor.".to_string());
+            }
+            Ok(())
+        }
+    }
+}
 fn run_attached_cli(options: &Options, format: OutputFormat) -> CliResult<()> {
-    let project_path = options
-        .path("project")
-        .or_else(|| options.positionals.get(1).map(PathBuf::from))
-        .ok_or_else(|| "raf attach requires --project PATH.".to_string())?;
+    let explicit_path = options.path("project").or_else(|| {
+        options.positionals.get(1).and_then(|value| {
+            // A bare positional is only a project path when it exists on
+            // disk; anything else is an attached action name.
+            let path = PathBuf::from(value);
+            let known_action = matches!(
+                value.as_str(),
+                "command"
+                    | "status"
+                    | "engine.status"
+                    | "capabilities"
+                    | "project"
+                    | "project.info"
+            );
+            (path.exists() && !known_action).then_some(path)
+        })
+    });
+    let project_path = match explicit_path {
+        Some(path) => path,
+        None => discovery::pick_single_live(None)?.project_path,
+    };
     let mut client = AttachedClient::connect(&project_path, "raf-cli")?;
     let response = match options.positionals.get(1).map(String::as_str) {
         Some("command") => run_command_request(&mut client, options)?,
-        Some("status") => client.execute(EngineCommandRequest::new(
+        Some("status") | Some("engine.status") => client.execute(EngineCommandRequest::new(
             "engine.status",
             json!({}),
             CommandSource::Cli,
@@ -798,10 +893,10 @@ fn run_cli(arguments: Vec<String>) -> CliResult<()> {
         return run_attached_cli(&options, format);
     }
     if command == "mcp" && options.has("attach") {
-        let attach_path = options
-            .path("attach")
-            .or_else(|| options.path("project"))
-            .ok_or_else(|| "raf mcp --attach requires a project path.".to_string())?;
+        let attach_path = match options.path("attach").or_else(|| options.path("project")) {
+            Some(path) => path,
+            None => discovery::pick_single_live(None)?.project_path,
+        };
         let client = AttachedClient::connect(&attach_path, "raf-mcp")?;
         return run_mcp_stdio(client);
     }
@@ -811,6 +906,13 @@ fn run_cli(arguments: Vec<String>) -> CliResult<()> {
         "help" | "--help" | "-h" => {
             print_help();
             return Ok(());
+        }
+        "editors" | "ls" => {
+            let wait = options
+                .value("wait")
+                .and_then(|raw| raw.parse::<f32>().ok())
+                .or_else(|| options.has("wait").then(|| 15.0));
+            return print_editors(options.path("project").as_deref(), format, wait);
         }
         "doctor" => engine.execute(EngineCommandRequest::new(
             "engine.doctor",

@@ -159,8 +159,33 @@ pub const GIZMO_LENGTH: f32 = 1.2;
 /// Radius of the rotation rings in world units.
 pub const GIZMO_ROTATION_RADIUS: f32 = 1.35;
 
-/// Radius of scale handles in screen pixels.
-pub const GIZMO_SCALE_HANDLE_RADIUS: f32 = 7.0;
+/// Base radius of scale handles in screen pixels.
+pub const GIZMO_SCALE_HANDLE_RADIUS: f32 = 8.0;
+
+/// World-space gap between a scale handle and the selected object's face.
+///
+/// Scale handles are deliberately outside the object silhouette. The gap is
+/// relative to the object, with a small floor and cap so tiny and very large
+/// primitives remain easy to target without making the gizmo drift away.
+pub const GIZMO_SCALE_HANDLE_OUTSET: f32 = 0.08;
+
+/// Extra screen-space forgiveness around scale handles. The visible handle is
+/// intentionally small, but its interaction target should remain comfortable
+/// on high-DPI displays and while the viewport is being rendered adaptively.
+pub const GIZMO_SCALE_HANDLE_PICK_PADDING: f32 = 12.0;
+
+/// Resolve the visible and interactive scale-handle radius for the current
+/// camera distance. The lower bound keeps handles comfortable up close, while
+/// the cap prevents a distant camera from producing oversized controls.
+pub fn gizmo_scale_handle_radius(presentation_scale: f32) -> f32 {
+    let distance_growth = (presentation_scale.max(1.0) * 0.32).clamp(1.0, 1.8);
+    GIZMO_SCALE_HANDLE_RADIUS * distance_growth
+}
+
+/// Invisible screen-space radius for translate-arrow picking. The shaft stays
+/// visually thin; this larger target makes it reliable on high-DPI displays
+/// and when the pointer moves a few pixels between hover and press frames.
+pub const GIZMO_ARROW_PICK_RADIUS: f32 = 14.0;
 
 /// Segments used for projected rotation ring hit-testing.
 pub const GIZMO_ROTATION_SEGMENTS: usize = 48;
@@ -188,13 +213,16 @@ pub fn project_gizmo_scale_handles(
     vp_h: f32,
 ) -> Vec<GizmoScaleHandle> {
     let extents = entity_scale.abs().max(Vec3::splat(0.1)) * 0.5;
+    let outset = (extents.max_element() * 0.12)
+        .max(GIZMO_SCALE_HANDLE_OUTSET)
+        .min(0.5);
     let handles = [
-        (Vec3::new(extents.x, 0.0, 0.0), 0usize, 1.0f32),
-        (Vec3::new(-extents.x, 0.0, 0.0), 0usize, -1.0f32),
-        (Vec3::new(0.0, extents.y, 0.0), 1usize, 1.0f32),
-        (Vec3::new(0.0, -extents.y, 0.0), 1usize, -1.0f32),
-        (Vec3::new(0.0, 0.0, extents.z), 2usize, 1.0f32),
-        (Vec3::new(0.0, 0.0, -extents.z), 2usize, -1.0f32),
+        (Vec3::new(extents.x + outset, 0.0, 0.0), 0usize, 1.0f32),
+        (Vec3::new(-extents.x - outset, 0.0, 0.0), 0usize, -1.0f32),
+        (Vec3::new(0.0, extents.y + outset, 0.0), 1usize, 1.0f32),
+        (Vec3::new(0.0, -extents.y - outset, 0.0), 1usize, -1.0f32),
+        (Vec3::new(0.0, 0.0, extents.z + outset), 2usize, 1.0f32),
+        (Vec3::new(0.0, 0.0, -extents.z - outset), 2usize, -1.0f32),
     ];
 
     handles
@@ -317,7 +345,7 @@ pub fn pick_gizmo_arrow_scaled(
             project_gizmo_arrow_scaled(entity_pos, arrow, presentation_scale, view_proj, vp_w, vp_h)
         {
             let dist = point_to_segment_distance(click, screen.start, screen.end);
-            if dist < 8.0 {
+            if dist <= GIZMO_ARROW_PICK_RADIUS {
                 let is_better = match best {
                     None => true,
                     Some((_, prev_dist)) => dist < prev_dist,
@@ -332,7 +360,7 @@ pub fn pick_gizmo_arrow_scaled(
     best
 }
 
-/// Hit-test projected scale handles.
+/// Hit-test projected scale handles at the default presentation scale.
 pub fn pick_gizmo_scale_handle(
     click: [f32; 2],
     entity_pos: Vec3,
@@ -341,13 +369,29 @@ pub fn pick_gizmo_scale_handle(
     vp_w: f32,
     vp_h: f32,
 ) -> Option<(usize, f32, f32)> {
+    pick_gizmo_scale_handle_scaled(click, entity_pos, entity_scale, 1.0, view_proj, vp_w, vp_h)
+}
+
+/// Hit-test projected scale handles using the same distance-aware radius used
+/// by the renderer.
+pub fn pick_gizmo_scale_handle_scaled(
+    click: [f32; 2],
+    entity_pos: Vec3,
+    entity_scale: Vec3,
+    presentation_scale: f32,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<(usize, f32, f32)> {
+    let pick_radius =
+        gizmo_scale_handle_radius(presentation_scale) + GIZMO_SCALE_HANDLE_PICK_PADDING;
     let mut best: Option<(usize, f32, f32)> = None;
 
     for handle in project_gizmo_scale_handles(entity_pos, entity_scale, view_proj, vp_w, vp_h) {
         let dx = click[0] - handle.center[0];
         let dy = click[1] - handle.center[1];
         let distance = (dx * dx + dy * dy).sqrt();
-        if distance <= GIZMO_SCALE_HANDLE_RADIUS + 4.0 {
+        if distance <= pick_radius {
             let is_better = match best {
                 None => true,
                 Some((_, best_distance, _)) => distance < best_distance,
@@ -531,5 +575,48 @@ mod tests {
     fn point_segment_distance_offset() {
         let dist = point_to_segment_distance([5.0, 3.0], [0.0, 0.0], [10.0, 0.0]);
         assert!((dist - 3.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn translate_arrow_pick_has_invisible_forgiveness() {
+        let picked = pick_gizmo_arrow_scaled(
+            [400.0, 313.0],
+            Vec3::ZERO,
+            1.0,
+            &Mat4::IDENTITY,
+            800.0,
+            600.0,
+        );
+        assert!(picked.is_some());
+    }
+
+    #[test]
+    fn scale_face_pick_has_invisible_forgiveness() {
+        let picked = pick_gizmo_scale_handle(
+            [517.0, 300.0],
+            Vec3::ZERO,
+            Vec3::splat(0.5),
+            &Mat4::IDENTITY,
+            800.0,
+            600.0,
+        );
+        assert!(picked.is_some());
+    }
+
+    #[test]
+    fn scale_handles_project_outside_each_face() {
+        let handles = project_gizmo_scale_handles(
+            Vec3::ZERO,
+            Vec3::splat(0.5),
+            &Mat4::IDENTITY,
+            800.0,
+            600.0,
+        );
+
+        assert_eq!(handles.len(), 6);
+        assert!(handles[0].center[0] > 500.0);
+        assert!(handles[1].center[0] < 300.0);
+        assert!(handles[2].center[1] < 225.0);
+        assert!(handles[3].center[1] > 375.0);
     }
 }

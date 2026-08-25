@@ -6,6 +6,15 @@
 
 use serde::{Deserialize, Serialize};
 
+pub trait GraphicsHandle: Copy + Eq + std::hash::Hash {
+    const INVALID: Self;
+
+    fn from_parts(index: u32, generation: u32) -> Self;
+    fn index(self) -> u32;
+    fn generation(self) -> u32;
+    fn is_valid(self) -> bool;
+}
+
 macro_rules! define_handle {
     ($name:ident, $doc:literal) => {
         #[doc = $doc]
@@ -41,6 +50,26 @@ macro_rules! define_handle {
         impl Default for $name {
             fn default() -> Self {
                 Self::INVALID
+            }
+        }
+
+        impl GraphicsHandle for $name {
+            const INVALID: Self = Self::INVALID;
+
+            fn from_parts(index: u32, generation: u32) -> Self {
+                Self::new(index, generation)
+            }
+
+            fn index(self) -> u32 {
+                self.index
+            }
+
+            fn generation(self) -> u32 {
+                self.generation
+            }
+
+            fn is_valid(self) -> bool {
+                self.index != u32::MAX && self.generation != 0
             }
         }
     };

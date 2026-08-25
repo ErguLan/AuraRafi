@@ -1,6 +1,6 @@
 //! Backend state for the retained editor console.
 //!
-//! The model intentionally has no Egui or RafUI dependency. A presentation
+//! The model intentionally has no presentation dependency. A presentation
 //! host mirrors the input into a transient control state, emits typed actions,
 //! and the application boundary performs command execution.
 

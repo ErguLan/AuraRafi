@@ -40,7 +40,7 @@ impl UiSurfaceLayoutKey {
     ) -> Self {
         Self {
             surface_revision,
-            controls: session.interaction.controls.clone(),
+            controls: session.interaction.controls.layout_snapshot(),
             focus: session.interaction.focus.clone(),
             logical_size: [logical_size[0].max(1), logical_size[1].max(1)],
             raster_scale_bits: raster_scale.clamp(1.0, 4.0).to_bits(),
@@ -199,21 +199,28 @@ impl UiSurfaceCompilationCache {
                 draw_list: Arc::clone(&cached.draw_list),
             };
         }
-        let intrinsic_frame = needs_intrinsic_fit.then(|| {
+        let frame = if needs_intrinsic_fit {
             let intrinsic_sizes =
                 session.intrinsic_sizes_for_frame(&cached_frame, &resolved_text, raster_scale);
-            session.rebuild_layout_with_intrinsic_sizes(
+            let frame = Arc::new(session.rebuild_layout_with_intrinsic_sizes(
                 surface,
                 logical_size[0],
                 logical_size[1],
                 clear_color,
                 raster_scale,
                 &intrinsic_sizes,
-            )
-        });
-        let frame = intrinsic_frame
-            .map(Arc::new)
-            .unwrap_or_else(|| Arc::clone(&cached_frame));
+            ));
+            // Input is processed before presentation on the next native
+            // frame. Keep the measured layout, hit regions and scroll metrics
+            // together so interaction never falls back to the provisional
+            // pre-text-fit extent while the renderer shows the intrinsic one.
+            if let Some(cached) = self.layout.as_mut() {
+                cached.frame = Arc::clone(&frame);
+            }
+            frame
+        } else {
+            Arc::clone(&cached_frame)
+        };
         let draw_list = if let Some(cached) = self.paint.as_ref().filter(|cached| {
             cached.layout_revision == layout_revision
                 && cached.atlas_revision == atlas_revision
@@ -248,7 +255,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::api_graphic_basic::ui_surface::{StudioUiPalette, UiLayout, UiNode, UiNodeKind};
+    use crate::api_graphic_basic::ui_surface::{
+        StudioUiPalette, UiFlow, UiInputState, UiLayout, UiNode, UiNodeKind, UiScrollAxis,
+        UiSizeMode,
+    };
 
     #[test]
     fn reuses_layout_and_paint_for_an_unchanged_surface() {
@@ -322,5 +332,83 @@ mod tests {
 
         assert!(!Arc::ptr_eq(&first.frame, &second.frame));
         assert_eq!(cache.metrics().layout_builds, 2);
+    }
+
+    #[test]
+    fn intrinsic_scroll_extent_remains_authoritative_for_next_input_frame() {
+        let mut list = UiNode::scroll_view("list", UiScrollAxis::Vertical).with_layout(UiLayout {
+            flow: UiFlow::Column,
+            ..UiLayout::fixed(180.0, 80.0)
+        });
+        for index in 0..8 {
+            list = list.with_child(
+                UiNode::new(format!("item-{index}"), UiNodeKind::Label)
+                    .with_text_value(
+                        "A long wrapped row that must contribute its measured height to the scroll extent.",
+                    )
+                    .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+            );
+        }
+        let surface = UiSurface::new(
+            "intrinsic-scroll-cache",
+            StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root)
+                .with_layout(UiLayout::fill(UiFlow::Column))
+                .with_child(list),
+        );
+        let mut session = UiSurfaceSession::default();
+        let mut cache = UiSurfaceCompilationCache::default();
+
+        let compiled = cache.compile(
+            &surface,
+            &mut session,
+            0,
+            [220, 100],
+            1.0,
+            [0, 0, 0, 255],
+            |key| key.to_string(),
+        );
+        let max_offset = session.interaction.controls.scroll_max_offset("list")[1];
+        assert!(max_offset > 2.0);
+
+        let frame = cache.layout(&surface, &mut session, 0, [220, 100], 1.0, [0, 0, 0, 255]);
+        assert!(Arc::ptr_eq(&compiled.frame, &frame));
+        session.process_input(
+            &surface,
+            &frame,
+            &UiInputState {
+                pointer_position: Some([90.0, 40.0]),
+                scroll_delta: [0.0, 48.0],
+                ..UiInputState::default()
+            },
+        );
+
+        assert_eq!(session.interaction.controls.scroll_offset("list")[1], 48.0);
+
+        for expected in [96.0, 144.0, 192.0] {
+            let frame = cache.layout(&surface, &mut session, 0, [220, 100], 1.0, [0, 0, 0, 255]);
+            session.process_input(
+                &surface,
+                &frame,
+                &UiInputState {
+                    pointer_position: Some([90.0, 40.0]),
+                    scroll_delta: [0.0, 48.0],
+                    ..UiInputState::default()
+                },
+            );
+            assert_eq!(
+                session.interaction.controls.scroll_offset("list")[1],
+                expected
+            );
+            let _ = cache.compile(
+                &surface,
+                &mut session,
+                0,
+                [220, 100],
+                1.0,
+                [0, 0, 0, 255],
+                |key| key.to_string(),
+            );
+        }
     }
 }

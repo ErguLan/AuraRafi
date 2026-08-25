@@ -58,9 +58,8 @@ modelo paralelo del mundo.
 ### Graficos
 
 RafUI entrega sus documentos al pipeline de ApiGraphicBasic. WGPU puede ser el
-backend privado actual cuando AGB lo requiera. Egui no es una ruta de
-implementacion nueva; cualquier puente existente es transicional y no debe
-recibir funcionalidades nuevas.
+backend privado actual cuando AGB lo requiera. El toolkit retirado no es una
+ruta de implementacion nueva y ningun puente heredado debe recibir funciones.
 
 ## Shell y layout
 
@@ -253,7 +252,7 @@ lectura automatica de una IA.
 
 Antes de declarar una superficie terminada:
 
-1. Confirmar ownership y que no se introdujo Egui nuevo.
+1. Confirmar ownership y que no se introdujo una segunda UI toolkit.
 2. Revisar overflow, texto, foco, teclado, scroll, estados y escala DPI.
 3. Verificar Game y Electronics en layouts separados.
 4. Ejecutar `cargo fmt --check` y los checks focalizados disponibles despues

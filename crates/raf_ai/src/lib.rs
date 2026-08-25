@@ -41,7 +41,7 @@ pub use image_worker::{
     AssetImageWorkerConfig, AssetLocalPngStyle, GeneratedImageAsset,
 };
 pub use mesh_provider::{MeshChunk, MeshProviderConfig, MeshProviderState, MeshProviderType};
-pub use openai_client::{OpenAiClient, OpenAiConfig};
+pub use openai_client::{OpenAiClient, OpenAiConfig, DEFAULT_MAX_TOKENS};
 pub use provider::{AgentMode, AiModelShortcut, AiProvider, AiProviderConfig};
 pub use puerto::{ConnectionStatus, PuertoClient, PuertoConfig};
 pub use tool_registry::{ToolDefinition, ToolParameter, ToolRegistry};

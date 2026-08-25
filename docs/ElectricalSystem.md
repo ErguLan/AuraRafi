@@ -1,5 +1,9 @@
 # Electrical System
 
+> Arquitectura activa: consultar [ELECTRONICS_NATIVE_ARCHITECTURE.md](ELECTRONICS_NATIVE_ARCHITECTURE.md).
+> Las referencias a paneles y hosts anteriores que aparezcan más abajo son
+> históricas y no describen el runtime nativo actual.
+
 Este documento explica de forma directa como está armado el sistema eléctrico de AuraRafi, qué piezas toca cada crate y cómo se puede extender sin meterse a romper el corazón del engine.
 
 ## Qué es este sistema realmente
@@ -10,7 +14,7 @@ La idea actual es esta:
 
 - El editor muestra un canvas de schematics y herramientas de edición.
 - `raf_electronics` guarda los datos reales del circuito.
-- `raf_render` dibuja símbolos y primitivas visuales reutilizables.
+- `raf_render` presenta superficies CAD y registra los assets visuales nativos.
 - `raf_core` sigue dando infraestructura general como proyecto, config, i18n y command bus.
 
 Eso evita mezclar lógica de videojuegos con lógica de circuitos.
@@ -21,8 +25,16 @@ Eso evita mezclar lógica de videojuegos con lógica de circuitos.
 
 Aquí vive la UX del schematic editor.
 
-- `panels/schematic_view.rs`: coordina el panel y el estado alto nivel.
-- `panels/schematic_view/canvas.rs`: aquí está lo pesado; hit testing, grid, wire placement, drag, zoom, contexto y dibujo del canvas.
+- `electronics_controller.rs`: documento vivo, cámara, selección, historial,
+  escena y análisis.
+- `electronics_analysis.rs`: tareas cancelables de DRC y simulación fuera del
+  hilo de UI; solo entrega resultados al controlador nativo.
+- `electronics_controller_interaction.rs`: input CAD, gestos, authoring,
+  undo/redo y persistencia sobre el documento vivo.
+- `native_electronics.rs`: host directo de la escena para ApiGraphicBasic.
+- `native_workbench.rs`, `native_workbench_input.rs`,
+  `native_workbench_surface.rs` y `panels/electronics_*_surface.rs`: shell,
+  input semántico y RafUI retenido.
 - `panels/schematic_panels.rs`: inspector lateral e “hierarchy” del circuito.
 - `schematic_document.rs`: helper pequeño para cargar y guardar `schematic.ron`.
 
@@ -41,15 +53,12 @@ Aquí vive el dato real del circuito.
 
 La regla importante aquí es que el editor consume este dato, no lo reinventa.
 
-### `raf_render`
+### Assets visuales
 
-El render se queda con la responsabilidad de los símbolos dibujados por código.
-
-Ahora los símbolos del schematic están centralizados en:
-
-- `raf_render/src/ApiGraphicBasic/schematic_symbols.rs`
-
-Eso importa porque evita spaghetti visual dentro del panel del editor. Si el símbolo cambia, cambia en el render layer, no en veinte callbacks de UI.
+Los símbolos visibles del schematic se sirven como PNG nativos desde
+`editor/assets/electronics/library/` y RafUI los compone como una capa acotada
+sobre el CAD. `CadScene` conserva rectángulos de hit-test, pines y wires, pero
+ya no inventa el dibujo del componente con segmentos hardcodeados.
 
 ## Flujo de un schematic
 
@@ -57,10 +66,11 @@ El flujo completo hoy va más o menos así:
 
 1. Se abre un proyecto Electronics.
 2. El editor carga `schematic.ron`.
-3. `SchematicViewPanel` muestra componentes, grid y wires.
-4. Al mover, colocar o cablear, el panel marca el documento como modificado.
+3. `NativeElectronicsEditor` deriva `CadScene` y RafUI compone los controles.
+4. Al mover, colocar o cablear, el controlador registra historial y marca el documento como modificado.
 5. Al guardar, se serializa de nuevo a `schematic.ron`.
-6. Si se corre DRC o simulación, el cálculo baja a `raf_electronics`.
+6. Si se corre DRC o simulación, el controlador crea una tarea de análisis
+   fuera del hilo de UI y el cálculo baja a `raf_electronics`.
 
 El punto importante es que `scene.ron` y `schematic.ron` ya no comparten responsabilidad. Cada dominio guarda su documento correcto.
 
@@ -210,7 +220,7 @@ Ahora el circuito se divide limpio entre:
 
 - UX en `raf_editor`
 - datos y reglas en `raf_electronics`
-- símbolos en `raf_render`
+- assets visuales nativos en `editor/assets/electronics/library/`
 - extensiones generales en `complements`
 - extensiones eléctricas específicas en `raf_electronics::extensions`
 
@@ -268,8 +278,9 @@ Trae una base funcional para:
 
 Aquí hay una diferencia importante con el schematic:
 
-- en schematic el dibujo puede apoyarse en símbolos dibujados por código
-- en PCB la base nueva trabaja con footprint geometry y preview asset references, no con `ApiGraphicBasic`
+- Schematic y PCB comparten `CadScene` y el camino de presentación de
+  `ApiGraphicBasic`; el dominio aporta geometría de hit-test y footprints sin
+  duplicar hosts de render. El artwork del schematic viene del catálogo nativo.
 
 Todavía faltan previews visuales más ricas y una librería de footprints más extensa, pero la arquitectura ya quedó en el sitio correcto para crecer sin mezclar símbolos lógicos con geometría física.
 

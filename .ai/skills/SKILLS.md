@@ -9,13 +9,14 @@
 - `crates/raf_electronics/src/library.rs` — biblioteca de partes incorporadas
 - `crates/raf_electronics/src/schematic.rs` — estructura del esquematico
 - `crates/raf_electronics/src/netlist.rs` — generacion de netlist
-- `crates/raf_editor/src/panels/schematic_view.rs` — UI del editor
+- `crates/raf_editor/src/native_electronics.rs` — adaptador de canvas CAD nativo
 
 **Pasos tipo**:
 1. Leer `component.rs` para entender SimModel
 2. Agregar variante, implementar parse
 3. Agregar a library.rs
-4. Agregar dibujo en schematic_view.rs
+4. Agregar la presentación al canvas CAD nativo sólo después de definir el
+   contrato de interacción; durante la estabilización la frontera sigue verde
 5. `cargo check`
 
 ---
@@ -27,7 +28,7 @@
 **Archivos clave**:
 - `crates/raf_nodes/src/node.rs` — definiciones de nodos y pins
 - `crates/raf_nodes/src/executor.rs` — logica de ejecucion
-- `crates/raf_editor/src/panels/node_editor.rs` — UI de la paleta
+- `crates/raf_editor/src/native_workbench.rs` — punto de integración RafUI
 
 ---
 
@@ -35,9 +36,12 @@
 
 **Cuando usar**: El usuario pide mejoras visuales al viewport de escena.
 
-**Archivo clave**: `crates/raf_editor/src/panels/viewport.rs`
+**Archivos clave**: `crates/raf_editor/src/panels/viewport_controller.rs`,
+`crates/raf_render/src/bridge/`, y `crates/raf_editor/src/native_workbench.rs`
 
-**Importante**: Mantener CPU rendering (egui painter + proyeccion matematica). NO agregar pipeline GPU sin discutirlo primero.
+**Importante**: Mantener el canvas bajo ApiGraphicBasic: GPU WGPU como adapter
+privado cuando esté disponible y CPU como recuperación. RafUI posee el chrome y
+la interacción retenida; no reintroducir el host retirado ni crear un segundo renderer.
 
 ---
 

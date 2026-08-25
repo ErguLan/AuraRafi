@@ -2,13 +2,17 @@
 
 Registro de decisiones importantes y por que se tomaron.
 
-## ADR-001: CPU rendering en viewport (no GPU inmediato)
+## ADR-001: CPU rendering en viewport (no GPU inmediato) — SUPERSEDED 2026-08-20
 
-**Decision**: El viewport usa egui painter con proyeccion matematica, NO un pipeline wgpu completo.
+**Decision original**: El viewport usaba un painter inmediato con proyeccion
+matematica, no un pipeline WGPU completo.
 
-**Razon**: Setup de wgpu requiere shaders WGSL, render passes, buffers de GPU — todo eso agrega tiempo de compilacion y puede fallar en hardware sin drivers modernos. Con egui painter, un cubo proyectado en 2D se ve igual de bien para el editor y corre en cualquier cosa.
+**Razon**: Setup de wgpu requiere shaders WGSL, render passes, buffers de GPU — todo eso agrega tiempo de compilacion y puede fallar en hardware sin drivers modernos. Con el painter inmediato de aquella etapa, un cubo proyectado en 2D se veia igual de bien para el editor y corria en cualquier cosa.
 
-**Consecuencia**: El rendering final del juego (no el editor) si usara wgpu. El viewport del editor es preview ligero.
+**Estado actual**: Esta decisión ya no gobierna el editor. El viewport nativo
+usa RafUI para chrome/interacción y ApiGraphicBasic para el canvas de escena,
+con WGPU como adapter GPU privado y CPU como recuperación. El juego todavía no
+activa Play/Runtime en esta misión.
 
 ---
 

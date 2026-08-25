@@ -14,6 +14,8 @@ use raf_ui::{
 };
 
 use super::hierarchy_model::{HierarchyRow, HierarchyView};
+use super::primitive_create::{primitive_key, primitive_slug, CREATEABLE_PRIMITIVES};
+use crate::project_catalog::ProjectCatalogResults;
 use raf_core::scene::Primitive;
 
 pub fn build_hierarchy_surface(
@@ -22,6 +24,8 @@ pub fn build_hierarchy_surface(
     selected: &[raf_core::scene::SceneNodeId],
     renaming: Option<(raf_core::scene::SceneNodeId, &str)>,
     menu_target: Option<(raf_core::scene::SceneNodeId, bool)>,
+    empty_menu_open: bool,
+    empty_primitive_menu_open: bool,
     menu_label: Option<&str>,
     menu_position: Option<[f32; 2]>,
     surface_size: [f32; 2],
@@ -32,13 +36,24 @@ pub fn build_hierarchy_surface(
     show_locked: bool,
     transition: f32,
     drag_ghost: Option<(&str, [f32; 2])>,
+    drop_target: Option<raf_core::scene::SceneNodeId>,
     box_selection: Option<raf_ui::UiRect>,
     can_paste: bool,
     compact_tabs: bool,
     active_tab: &str,
     bookmark_filled: [bool; 3],
+    search_results: Option<&ProjectCatalogResults>,
 ) -> UiSurface {
     let tokens = palette.tokens();
+    let _ = (
+        menu_target,
+        empty_menu_open,
+        empty_primitive_menu_open,
+        menu_label,
+        menu_position,
+        surface_size,
+        can_paste,
+    );
     let mut tree = UiNode::scroll_view("hierarchy.tree", UiScrollAxis::Vertical)
         .with_class("hierarchy-tree")
         .with_layout(UiLayout {
@@ -68,6 +83,10 @@ pub fn build_hierarchy_surface(
         .with_event(UiEventBinding::command(
             UiEventKind::Click,
             "hierarchy.clear-selection",
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::ContextMenu,
+            "hierarchy.empty-menu",
         ));
 
     if view.top_spacer > 0.0 {
@@ -84,6 +103,7 @@ pub fn build_hierarchy_surface(
             show_icons,
             show_visibility,
             show_locked,
+            drop_target,
         ));
     }
     if view.bottom_spacer > 0.0 {
@@ -114,7 +134,7 @@ pub fn build_hierarchy_surface(
         "assets" => assets_tab(palette),
         "world" => world_tab(palette),
         "bookmarks" => bookmarks_tab(palette, bookmark_filled),
-        "search" => search_tab(palette),
+        "search" => search_tab(palette, search_results),
         _ => tree,
     };
     let root = UiNode::new("hierarchy.root", UiNodeKind::Root)
@@ -140,19 +160,6 @@ pub fn build_hierarchy_surface(
         })
         .with_child(content);
 
-    let root = if let Some((target, is_folder)) = menu_target {
-        root.with_child(context_menu(
-            palette,
-            target,
-            is_folder,
-            menu_label,
-            menu_position,
-            surface_size,
-            can_paste,
-        ))
-    } else {
-        root
-    };
     let root = if let Some((label, pointer)) = drag_ghost {
         root.with_child(drag_ghost_node(palette, label, pointer))
     } else {
@@ -167,6 +174,312 @@ pub fn build_hierarchy_surface(
     let mut surface = UiSurface::new("editor.hierarchy", palette, root);
     surface.style_sheet = hierarchy_style_sheet(palette);
     surface
+}
+
+/// Builds only the context menus in a full-screen overlay surface. Keeping
+/// this out of the side-panel surface lets menus cross the Hierarchy boundary
+/// just like native editor context menus do.
+pub fn build_hierarchy_context_overlay_surface(
+    palette: StudioUiPalette,
+    menu_target: Option<(raf_core::scene::SceneNodeId, bool)>,
+    empty_menu_open: bool,
+    empty_primitive_menu_open: bool,
+    menu_label: Option<&str>,
+    menu_position: Option<[f32; 2]>,
+    surface_size: [f32; 2],
+    can_paste: bool,
+) -> UiSurface {
+    let mut root = UiNode::new("hierarchy.context-overlay.root", UiNodeKind::Root)
+        .with_layout(UiLayout {
+            padding: UiSpacing::same(HIERARCHY_ROOT_PADDING),
+            ..UiLayout::fill(UiFlow::None)
+        })
+        .with_style(UiStyle::transparent());
+    if let Some((target, is_folder)) = menu_target {
+        root = root.with_child(context_menu(
+            palette,
+            target,
+            is_folder,
+            menu_label,
+            menu_position,
+            surface_size,
+            can_paste,
+        ));
+    } else if empty_menu_open {
+        root = root.with_child(empty_context_menu(
+            palette,
+            menu_position,
+            surface_size,
+            can_paste,
+        ));
+        if empty_primitive_menu_open {
+            root = root.with_child(empty_primitive_menu(palette, menu_position, surface_size));
+        }
+    }
+    let mut surface = UiSurface::new("editor.hierarchy.context-overlay", palette, root);
+    surface.style_sheet = hierarchy_style_sheet(palette);
+    surface
+}
+
+fn empty_context_menu(
+    palette: StudioUiPalette,
+    position: Option<[f32; 2]>,
+    surface_size: [f32; 2],
+    can_paste: bool,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let menu_rect = empty_context_menu_rect(position, can_paste, surface_size);
+    let authored_rect = raf_ui::UiRect::new(
+        menu_rect.x - HIERARCHY_ROOT_PADDING,
+        menu_rect.y - HIERARCHY_ROOT_PADDING,
+        menu_rect.width,
+        menu_rect.height,
+    );
+    let mut menu = UiNode::new("hierarchy.empty-context-menu", UiNodeKind::Menu)
+        .with_class("hierarchy-context-menu")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: CONTEXT_MENU_GAP,
+            padding: UiSpacing::same(CONTEXT_MENU_PADDING),
+            overflow: UiOverflow::Clip,
+            ..UiLayout::absolute(authored_rect).with_z_index(220)
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface_raised,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: 4.0,
+            opacity: 1.0,
+        })
+        .focusable()
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("escape".to_string()),
+            "hierarchy.menu.close",
+        ))
+        .with_child(menu_title(
+            palette,
+            "hierarchy.empty-context-menu.title",
+            "app.scene_actions",
+            UiIconId::Scene,
+        ))
+        .with_child(menu_item(
+            palette,
+            "hierarchy.empty-context-menu.create-primitive",
+            "app.create_primitive",
+            UiIconId::Cube,
+            "hierarchy.empty.create-primitive-menu",
+            true,
+        ));
+    menu = menu.with_child(menu_item(
+        palette,
+        "hierarchy.empty-context-menu.entity",
+        "app.create_entity",
+        UiIconId::Node,
+        "hierarchy.create-entity:root",
+        false,
+    ));
+    menu = menu.with_child(menu_item(
+        palette,
+        "hierarchy.empty-context-menu.folder",
+        "app.add_folder",
+        UiIconId::Folder,
+        "hierarchy.create-folder:root",
+        false,
+    ));
+    if can_paste {
+        menu = menu.with_child(menu_item(
+            palette,
+            "hierarchy.empty-context-menu.paste",
+            "app.paste_menu",
+            UiIconId::Add,
+            "hierarchy.paste:root",
+            false,
+        ));
+    }
+    menu
+}
+
+fn empty_primitive_menu(
+    palette: StudioUiPalette,
+    position: Option<[f32; 2]>,
+    surface_size: [f32; 2],
+) -> UiNode {
+    let tokens = palette.tokens();
+    let rect = empty_primitive_menu_rect(position, surface_size);
+    let authored_rect = raf_ui::UiRect::new(
+        rect.x - HIERARCHY_ROOT_PADDING,
+        rect.y - HIERARCHY_ROOT_PADDING,
+        rect.width,
+        rect.height,
+    );
+    let mut menu = UiNode::new("hierarchy.empty-primitive-menu", UiNodeKind::Menu)
+        .with_class("hierarchy-context-menu hierarchy-primitive-menu")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 5.0,
+            padding: UiSpacing::same(8.0),
+            ..UiLayout::absolute(authored_rect).with_z_index(230)
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface_raised,
+            border: tokens.accent,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: 6.0,
+            opacity: 1.0,
+        })
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("escape".to_string()),
+            "hierarchy.menu.close",
+        ))
+        .with_child(menu_title(
+            palette,
+            "hierarchy.empty-primitive-menu.title",
+            "app.create_primitive",
+            UiIconId::Cube,
+        ));
+    for primitive in CREATEABLE_PRIMITIVES {
+        menu = menu.with_child(primitive_menu_item(
+            palette,
+            primitive,
+            format!(
+                "hierarchy.create-primitive:root:{}",
+                primitive_slug(primitive)
+            ),
+        ));
+    }
+    menu
+}
+
+fn menu_title(palette: StudioUiPalette, id: &str, text_key: &str, icon: UiIconId) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new(id, UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 7.0,
+            ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_icon(
+            UiIcon::new(icon)
+                .with_size(UiIconSize::Small)
+                .with_tint(tokens.accent),
+        )
+        .with_text_key(text_key)
+        .with_text_style(UiTextStyle::panel_title(tokens.text))
+}
+
+fn menu_item(
+    palette: StudioUiPalette,
+    id: &str,
+    text_key: &str,
+    icon: UiIconId,
+    command: impl Into<String>,
+    arrow: bool,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let mut item = UiNode::new(id, UiNodeKind::Button)
+        .with_class("hierarchy-menu-button")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 8.0,
+            padding: UiSpacing::xy(9.0, 0.0),
+            ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new(format!("{id}.icon"), UiNodeKind::Label)
+                .with_icon(
+                    UiIcon::new(icon)
+                        .with_size(UiIconSize::Small)
+                        .with_tint(tokens.text_muted),
+                )
+                .with_layout(UiLayout::fixed(16.0, 18.0)),
+        )
+        .with_child(
+            UiNode::new(format!("{id}.label"), UiNodeKind::Label)
+                .with_text_key(text_key)
+                .with_text_style(UiTextStyle::button(tokens.text))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fit_content().with_text_safe_area(true)
+                }),
+        )
+        .with_accessibility_label_key(text_key)
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command));
+    if arrow {
+        item = item.with_child(
+            UiNode::new(format!("{id}.arrow"), UiNodeKind::Label)
+                .with_icon(
+                    UiIcon::new(UiIconId::ChevronRight)
+                        .with_size(UiIconSize::Small)
+                        .with_tint(tokens.text_muted),
+                )
+                .with_layout(UiLayout::fixed(16.0, 18.0)),
+        );
+    }
+    item
+}
+
+fn primitive_menu_item(
+    palette: StudioUiPalette,
+    primitive: Primitive,
+    command: impl Into<String>,
+) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new(
+        format!("hierarchy.primitive-option.{}", primitive_slug(primitive)),
+        UiNodeKind::Button,
+    )
+    .with_class("hierarchy-primitive-option")
+    .with_layout(UiLayout {
+        flow: UiFlow::Row,
+        align_items: UiAlign::Center,
+        gap: 8.0,
+        padding: UiSpacing::xy(8.0, 0.0),
+        ..UiLayout::fixed(0.0, 31.0).with_width_mode(UiSizeMode::Fill)
+    })
+    .with_child(
+        UiNode::new(
+            format!(
+                "hierarchy.primitive-option.{}.icon",
+                primitive_slug(primitive)
+            ),
+            UiNodeKind::Label,
+        )
+        .with_icon(
+            UiIcon::new(match primitive {
+                Primitive::Cube => UiIconId::Cube,
+                Primitive::Sphere => UiIconId::Sphere,
+                Primitive::Cylinder => UiIconId::Cylinder,
+                Primitive::Plane => UiIconId::Plane,
+                Primitive::Empty => UiIconId::Node,
+            })
+            .with_size(UiIconSize::Small)
+            .with_tint(tokens.accent),
+        )
+        .with_layout(UiLayout::fixed(16.0, 18.0)),
+    )
+    .with_child(
+        UiNode::new(
+            format!(
+                "hierarchy.primitive-option.{}.label",
+                primitive_slug(primitive)
+            ),
+            UiNodeKind::Label,
+        )
+        .with_text_key(primitive_key(primitive))
+        .with_text_style(UiTextStyle::button(tokens.text))
+        .with_layout(UiLayout {
+            grow: 1.0,
+            ..UiLayout::fit_content().with_text_safe_area(true)
+        }),
+    )
+    .with_accessibility_label_key(primitive_key(primitive))
+    .focusable()
+    .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
 fn header(palette: StudioUiPalette) -> UiNode {
@@ -194,13 +507,6 @@ fn header(palette: StudioUiPalette) -> UiNode {
                     ..UiLayout::fit_content()
                 }),
         )
-        .with_child(icon_button(
-            palette,
-            "hierarchy.header.close",
-            UiIconId::Close,
-            "hierarchy.panel.toggle",
-            "ui.close",
-        ))
 }
 
 fn tabs(palette: StudioUiPalette, compact_tabs: bool, active_tab: &str) -> UiNode {
@@ -241,11 +547,11 @@ fn tabs(palette: StudioUiPalette, compact_tabs: bool, active_tab: &str) -> UiNod
                 UiLayout::fixed(32.0, 25.0)
             } else {
                 let width = match id {
-                    "hierarchy" => 94.0,
-                    "assets" => 74.0,
-                    "world" => 72.0,
-                    "bookmarks" => 108.0,
-                    "search" => 84.0,
+                    "hierarchy" => 86.0,
+                    "assets" => 70.0,
+                    "world" => 68.0,
+                    "bookmarks" => 102.0,
+                    "search" => 78.0,
                     _ => 80.0,
                 };
                 UiLayout::fixed(width, 25.0).with_text_safe_area(true)
@@ -471,15 +777,16 @@ fn bookmarks_tab(palette: StudioUiPalette, filled: [bool; 3]) -> UiNode {
     list
 }
 
-fn search_tab(palette: StudioUiPalette) -> UiNode {
+fn search_tab(palette: StudioUiPalette, results: Option<&ProjectCatalogResults>) -> UiNode {
     let tokens = palette.tokens();
-    UiNode::new("hierarchy.search-tab", UiNodeKind::Panel)
+    let mut panel = UiNode::new("hierarchy.search-tab", UiNodeKind::Panel)
         .with_class("hierarchy-tab-card")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 8.0,
             padding: UiSpacing::same(10.0),
-            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+            overflow: UiOverflow::ScrollY,
+            ..UiLayout::fill(UiFlow::Column).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
             UiNode::text_input(
@@ -511,6 +818,76 @@ fn search_tab(palette: StudioUiPalette) -> UiNode {
                     UiEventKind::Click,
                     "hierarchy.search.open",
                 )),
+        );
+
+    let Some(results) = results else {
+        return panel;
+    };
+    let result_count = results.assets.len() + results.project_entries.len();
+    panel = panel.with_child(
+        UiNode::new("hierarchy.search-tab.results-heading", UiNodeKind::Label)
+            .with_text_key("app.search_results")
+            .with_text_style(UiTextStyle::button(tokens.text))
+            .with_layout(UiLayout::fit_content()),
+    );
+    panel = panel.with_child(
+        UiNode::new("hierarchy.search-tab.results-count", UiNodeKind::Label)
+            .with_text_value(result_count.to_string())
+            .with_text_style(UiTextStyle::body(tokens.text_muted))
+            .with_layout(UiLayout::fit_content()),
+    );
+    for (index, entry) in results.project_entries.iter().enumerate() {
+        panel = panel.with_child(search_result_row(
+            palette,
+            &format!("hierarchy.search.project.{index}"),
+            &entry.label,
+            entry.icon,
+            entry.depth,
+        ));
+    }
+    for (index, asset) in results.assets.iter().enumerate() {
+        panel = panel.with_child(search_result_row(
+            palette,
+            &format!("hierarchy.search.asset.{index}"),
+            asset,
+            UiIconId::Assets,
+            0,
+        ));
+    }
+    panel
+}
+
+fn search_result_row(
+    palette: StudioUiPalette,
+    id: &str,
+    label: &str,
+    icon: UiIconId,
+    depth: u8,
+) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new(id, UiNodeKind::Toolbar)
+        .with_class("hierarchy-search-result")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 6.0,
+            padding: UiSpacing {
+                left: 6.0 + f32::from(depth) * 10.0,
+                right: 6.0,
+                top: 2.0,
+                bottom: 2.0,
+            },
+            ..UiLayout::fixed(0.0, 26.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
+        .with_child(
+            UiNode::new(format!("{id}.label"), UiNodeKind::Label)
+                .with_text_value(label.to_string())
+                .with_text_style(UiTextStyle::body(tokens.text))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fit_content()
+                }),
         )
 }
 
@@ -609,9 +986,12 @@ fn row_node(
     show_icons: bool,
     show_visibility: bool,
     show_locked: bool,
+    drop_target: Option<raf_core::scene::SceneNodeId>,
 ) -> UiNode {
     let is_selected = selected.contains(&row.id);
-    let class = if is_selected {
+    let class = if drop_target == Some(row.id) {
+        "hierarchy-row-drop-target"
+    } else if is_selected {
         "hierarchy-row-selected"
     } else if !row.visible {
         "hierarchy-row-hidden"
@@ -690,7 +1070,7 @@ fn row_node(
         );
     }
 
-    if let Some((rename_id, rename_value)) = renaming {
+    if let Some((rename_id, _rename_value)) = renaming {
         if rename_id == row.id {
             root = root.with_child(
                 UiNode::text_input(
@@ -712,17 +1092,6 @@ fn row_node(
                     ..UiLayout::fixed(0.0, row_height - 2.0)
                 }),
             );
-            root = root.with_child(small_button(
-                "hierarchy.rename.ok",
-                "app.ok",
-                format!("hierarchy.rename.commit:{}", row.id.0),
-            ));
-            root = root.with_child(small_button(
-                "hierarchy.rename.cancel",
-                "app.cancel",
-                "hierarchy.rename.cancel".to_string(),
-            ));
-            let _ = rename_value;
             return root;
         }
     }
@@ -765,6 +1134,10 @@ fn row_node(
     .with_event(UiEventBinding::command(
         UiEventKind::DragStart,
         format!("hierarchy.drag.start:{}", row.id.0),
+    ))
+    .with_event(UiEventBinding::command(
+        UiEventKind::DragMove,
+        format!("hierarchy.drag.move:{}", row.id.0),
     ))
     .with_event(UiEventBinding::command(
         UiEventKind::DragEnd,
@@ -1080,6 +1453,8 @@ fn spacer(id: &str, height: f32) -> UiNode {
 }
 
 const CONTEXT_MENU_WIDTH: f32 = 244.0;
+const EMPTY_CONTEXT_MENU_WIDTH: f32 = 226.0;
+const EMPTY_PRIMITIVE_MENU_WIDTH: f32 = 220.0;
 const HIERARCHY_ROOT_PADDING: f32 = 4.0;
 const CONTEXT_MENU_MARGIN: f32 = 8.0;
 const CONTEXT_MENU_PADDING: f32 = 6.0;
@@ -1087,6 +1462,37 @@ const CONTEXT_MENU_GAP: f32 = 2.0;
 const CONTEXT_MENU_TITLE_HEIGHT: f32 = 24.0;
 const CONTEXT_MENU_BUTTON_HEIGHT: f32 = 27.0;
 const CONTEXT_MENU_BASE_BUTTON_COUNT: usize = 13;
+
+pub(crate) fn empty_context_menu_rect(
+    position: Option<[f32; 2]>,
+    can_paste: bool,
+    surface_size: [f32; 2],
+) -> raf_ui::UiRect {
+    let button_count = 3 + usize::from(can_paste);
+    let height = CONTEXT_MENU_PADDING * 2.0
+        + CONTEXT_MENU_TITLE_HEIGHT
+        + button_count as f32 * (CONTEXT_MENU_BUTTON_HEIGHT + CONTEXT_MENU_GAP);
+    let point = position.unwrap_or([CONTEXT_MENU_MARGIN, 130.0]);
+    let x = clamp_menu_axis(point[0], surface_size[0].max(0.0), EMPTY_CONTEXT_MENU_WIDTH);
+    let y = clamp_menu_axis(point[1], surface_size[1].max(0.0), height);
+    raf_ui::UiRect::new(x, y, EMPTY_CONTEXT_MENU_WIDTH, height)
+}
+
+pub(crate) fn empty_primitive_menu_rect(
+    position: Option<[f32; 2]>,
+    surface_size: [f32; 2],
+) -> raf_ui::UiRect {
+    let main = empty_context_menu_rect(position, false, surface_size);
+    let right_x = main.right() + 6.0;
+    let x = if right_x + EMPTY_PRIMITIVE_MENU_WIDTH + CONTEXT_MENU_MARGIN <= surface_size[0] {
+        right_x
+    } else {
+        (main.x - EMPTY_PRIMITIVE_MENU_WIDTH - 6.0).max(CONTEXT_MENU_MARGIN)
+    };
+    let height = 38.0 + CREATEABLE_PRIMITIVES.len() as f32 * 36.0;
+    let y = clamp_menu_axis(main.y, surface_size[1].max(0.0), height);
+    raf_ui::UiRect::new(x, y, EMPTY_PRIMITIVE_MENU_WIDTH, height)
+}
 
 pub(crate) fn context_menu_rect(
     position: Option<[f32; 2]>,
@@ -1214,6 +1620,12 @@ fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             "hierarchy-row-selected",
             selection_fill,
             tokens.border,
+            tokens.text,
+        ),
+        class_rule(
+            "hierarchy-row-drop-target",
+            [116, 67, 24, 90],
+            tokens.accent_hot,
             tokens.text,
         ),
         class_rule(
@@ -1364,6 +1776,12 @@ fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             "hierarchy-drag-ghost",
             tokens.surface_raised,
             tokens.accent,
+            tokens.text,
+        ),
+        class_rule(
+            "hierarchy-search-result",
+            tokens.surface_alt,
+            tokens.border,
             tokens.text,
         ),
     ];
@@ -1523,6 +1941,8 @@ mod tests {
             &[],
             None,
             None,
+            false,
+            false,
             None,
             None,
             [460.0, 400.0],
@@ -1534,10 +1954,12 @@ mod tests {
             1.0,
             None,
             None,
+            None,
             false,
             false,
             "hierarchy",
             [false; 3],
+            None,
         );
         let serialized = format!("{surface:?}");
         assert!(!serialized.contains("Games"));
@@ -1567,5 +1989,44 @@ mod tests {
         assert_eq!(row.children.len(), 5);
         assert!(row.children.iter().all(|tab| tab.text_key.is_some()));
         assert!(total_width + row.layout.padding.left + row.layout.padding.right <= 414.0);
+    }
+
+    #[test]
+    fn empty_context_menu_exposes_primitive_disclosure_and_options() {
+        let surface = build_hierarchy_context_overlay_surface(
+            StudioUiPalette::IndustrialDark,
+            None,
+            true,
+            true,
+            None,
+            Some([80.0, 80.0]),
+            [900.0, 600.0],
+            false,
+        );
+        let trigger = find_node(
+            &surface.root,
+            "hierarchy.empty-context-menu.create-primitive",
+        )
+        .expect("primitive trigger");
+        assert!(trigger.event_handlers.iter().any(|binding| matches!(
+            &binding.action,
+            raf_ui::UiAction::Command { name }
+                if name == "hierarchy.empty.create-primitive-menu"
+        )));
+        let arrow = find_node(
+            &surface.root,
+            "hierarchy.empty-context-menu.create-primitive.arrow",
+        )
+        .expect("primitive disclosure arrow");
+        assert_eq!(
+            arrow.icon.as_ref().map(|icon| icon.id),
+            Some(UiIconId::ChevronRight)
+        );
+
+        for slug in ["cube", "sphere", "cylinder", "plane"] {
+            assert!(
+                find_node(&surface.root, &format!("hierarchy.primitive-option.{slug}")).is_some()
+            );
+        }
     }
 }

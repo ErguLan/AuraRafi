@@ -1,6 +1,71 @@
 # Estado De Estabilizacion
 
-Fecha: 2026-07-05
+Fecha: 2026-08-23
+
+## Estado actual de la migracion (2026-08-23)
+
+Este documento conserva el historial de fases y hallazgos de estabilizacion.
+Sus marcas `DONE`, rutas y nombres de hosts describen el estado de la fecha en
+que fueron escritos, no una garantia del checkout actual. La ruta vigente del
+editor es Winit + RafUI + ApiGraphicBasic: `native_application.rs` compone el
+ciclo de ventana, `native_workbench.rs` y `native_studio.rs` contienen las
+superficies retenidas, `native_editor_runtime.rs` concentra input/historial/
+pacing, y `NativeEditorCompositor` compone canvas y UI.
+
+Los hosts y adaptadores antiguos ya no forman parte de los manifiestos ni del
+runtime activo. Las secciones posteriores que mencionan esos adaptadores,
+`ViewportSurfaceHost` u otros hosts antiguos son evidencia historica para
+comparar bugs, no archivos que deban reintroducirse. El canvas de Game y el
+canvas de Electronics usan la frontera nativa. Electronics ya tiene edición,
+historial, selección y comandos conectados; la aceptación que falta es visual
+en el editor y la ampliación progresiva de authoring PCB/analysis.
+
+La prioridad actual sigue siendo estabilizar input/foco, comandos, historial,
+compositor, caches y consumo de recursos antes de activar Play/Runtime. En
+Electronics, la composición retained ya está separada de la lógica del shell:
+`native_workbench_surface.rs` compone las superficies y
+`native_workbench_input.rs` enruta input, `native_workbench_surface.rs` compone
+las superficies y `native_workbench_electronics.rs` prepara proyecciones del
+documento. No se
+deben reintroducir los archivos widget eliminados ni traer implementaciones
+desde Git para resolver regresiones; cualquier recuperación debe reconstruirse
+contra las APIs actuales y comprobarse en el checkout vivo.
+
+DRC y simulación muestran estados explícitos (`not run`, `running`,
+`completed`, `cancelled` y `failed`). El cálculo nativo se ejecuta fuera del
+hilo de UI mediante `electronics_analysis.rs`; el dock hace polling del
+resultado, permite cancelar y los cambios del documento invalidan los
+resultados anteriores y sus marcadores DRC.
+
+## Actualizacion 2026-08-20 — Fronteras nativas y alcance vigente
+
+- El editor inicia por la ruta nativa `Winit -> RafUI -> ApiGraphicBasic`.
+  `raf_editor` ya no importa tipos `wgpu::*` ni declara WGPU como dependencia
+  directa; WGPU permanece encapsulado dentro de `raf_render` como adapter.
+- La ventana, cierre, resize, DPI, minimizar, restauracion y presentacion son
+  responsabilidades del host nativo Winit/ApiGraphicBasic. El renderer no
+  intenta reemplazar el shell del sistema operativo ni recrear controles de
+  ventana por su cuenta.
+ - Electronics ya no es una frontera pasiva: `NativeElectronicsEditor` es el
+  controlador activo de schematic/PCB, historial, seleccion, input, DRC,
+  simulacion y comandos. La aceptacion pendiente es visual en el editor y la
+  ampliacion progresiva de authoring PCB/analysis; no se deben reintroducir
+  los hosts de widgets retirados.
+- La superficie Game de Nodes ya fue reconstruida como documento RafUI nativo:
+  carga y guarda el `NodeGraph` de la sesion y sus comandos de alta, baja,
+  seleccion y validacion pasan por el boundary nativo. Las demas superficies
+  Game historicas se recuperaran con la misma regla; no se restauran cuerpos
+  de la interfaz retirada.
+- Loading, Hub, New Project, descubrimiento de proyectos y apertura/retorno al
+  Hub usan ahora superficies nativas directas; la lista se reconstruye desde
+  `project.ron` y la creacion conserva la ruta por defecto y el selector de
+  carpeta.
+- Agent/AI Chat no se eliminó: su superficie RafUI nativa conserva sesiones,
+  paginacion, modelos, modos, aprobaciones y composer. Si el proveedor no esta
+  configurado muestra su estado real, sin fingir que el backend esta activo.
+- Los modulos renderer sin consumidores del camino nativo quedan clasificados
+  como `prepared` o `compatibility` hasta una auditoria de API publica. No se
+  eliminan por conteo de archivos ni se consideran basura automaticamente.
 
 ## Actualizacion 2026-08-13 - Beta de authoring Agent/CLI/MCP
 
@@ -16,7 +81,7 @@ Fecha: 2026-07-05
   capacidades, proyecto y workspace. No simula mutaciones de escena que no
   hayan pasado por un executor de documentos.
 - Queda documentado para v0.12 un host core opcional y manual para trabajar con
-  el editor cerrado: sin RafUI, Egui ni renderer, con lock de proyecto,
+  el editor cerrado: sin RafUI ni renderer, con lock de proyecto,
   presupuestos de recursos, endpoint local efimero y apagado explicito. No se
   convertira en un servicio residente por defecto para proteger equipos
   potato.
@@ -108,7 +173,7 @@ Fecha: 2026-07-05
   texturas de imagen que abandonan el draw list.
 - Iconos con texto usan una composicion leading/label y tintado semantico;
   estilos agregan estados Selected/Open/Invalid y pueden heredar color del
-  tema. Esto queda en el nucleo, no en una pantalla egui.
+  tema. Esto queda en el nucleo, no en una pantalla de UI concreta.
 - `ViewportPanel::navigation_status()` prepara el modelo de la futura franja
   `Move | World | Snap | Camera | Focus Lock`. No se agrego una interfaz ni se
   duplico el manejo del viewport.
@@ -198,8 +263,9 @@ Fecha: 2026-07-05
   CPU reciben la misma geometria retenida.
 - `UiSurfaceDiagnostics` expone conteos de cajas, clipping, hit regions,
   text requests, nodos de tamaño cero y z-order para inspector y golden tests.
-- La migracion conserva el bridge eframe como compositor de texturas. No se
-  agrego dibujo de rectangulos, texto ni interaccion retenida desde egui.
+- La migracion conserva un compositor de texturas como frontera de presentacion.
+  No se agrego dibujo de rectangulos, texto ni interaccion retenida fuera de
+  RafUI.
 - Verificacion estructural de esta actualizacion: `cargo check -p raf_ui
   -p raf_render -p raf_editor` pasa. La validacion visual manual queda abierta
   hasta reiniciar el engine y revisar dark/light, compacto, HiDPI, GPU y CPU.
@@ -211,8 +277,8 @@ Fecha: 2026-07-05
 - La clave de cache ya no se invalida en cada frame de Vertex Edit: solo cambia
   cuando una edicion modifica la malla. La camara y la escena siguen siendo
   entradas explicitas de la clave.
-- El target de escena respeta `pixels_per_point` de egui, por lo que el render
-  usa pixeles fisicos y los overlays conservan geometria logica.
+- El target de escena respeta la escala DPI del host nativo, por lo que el
+  render usa pixeles fisicos y los overlays conservan geometria logica.
 - Las lineas contiguas se registran como `DrawLineBatch`; GPU y CPU comparten
   ancho, color y depth bias. El GPU expande cada linea a un quad de seis
   vertices en una sola llamada por batch; el CPU usa el mismo ancho visible.
@@ -246,13 +312,11 @@ Fecha: 2026-07-05
   changing the visual stacking order. Metrics expose cache hits, upload bytes,
   paint runs, and draw calls for real before/after measurements.
 - `UiApplicationMenu` is the canonical File/Edit/View/Project/Help command
-  tree. The current eframe bar renders that shared model as a fallback, while
-  `NativeApplicationMenuAdapter` gives the native Winit shell the same command
-  IDs later. Platform adapters return activations only; they never mutate
-  scene, CAD, project, or persistence state.
-- A literal operating-system menu is not claimed while eframe owns the window
-  and event loop. That migration has an explicit native-host boundary instead
-  of a hidden platform-specific fork.
+  tree. The native application bar and `NativeApplicationMenuAdapter` consume
+  that shared model. Platform adapters return activations only; they never
+  mutate scene, CAD, project, or persistence state.
+- The native Winit shell owns the window and event loop. Menu presentation has
+  an explicit native-host boundary instead of a hidden platform-specific fork.
 
 ## Actualizacion 2026-07-18 - Contratos RafUI y ApiGraphicBasic
 
@@ -264,19 +328,19 @@ Fecha: 2026-07-05
   nueva superficie. Tokens semanticos, i18n, contraste, escala logica/fisica,
   no inventar datos, no usar decoracion costosa y no crear un segundo sistema
   de widgets son requisitos, no sugerencias.
-- CAD: Schematic y PCB siguen siendo superficies ApiGraphicBasic. El minimapa,
-  rutas, seleccion y bounds visibles deben consumir el mismo documento CAD.
-  Un overlay temporal y limitado solo es valido para preservar visibilidad
-  autoritativa mientras exista una diferencia de paridad GPU/CPU.
+- CAD: Schematic y PCB siguen siendo superficies ApiGraphicBasic. El overlay
+  de componentes solo consume assets PNG y el mismo documento CAD para sus
+  bounds; el minimapa decorativo anterior fue retirado hasta tener navegación
+  real sobre la cámara.
 - ApiGraphicBasic: `docs/APIGRAPHICBASIC.md` fija que Scene, CAD, RafUI y
   assets pasan por contratos y handles propios. `raf_assets` descubre y
   decodifica; ApiGraphicBasic asigna, sube, presupuesta y libera recursos GPU.
   WGPU continua como backend privado actual y no puede filtrarse hacia
   documentos, paneles o modelos de dominio.
-- Estado de migracion: Hub, Settings y partes del shell/CAD ya ejercen RafUI;
-  los cuerpos que aun usan adaptadores Egui siguen siendo transitorios. La
-  documentacion no declara terminada la sustitucion visual ni la validacion
-  manual completa del editor.
+- Estado de migracion: Hub, Settings y las superficies principales del
+  shell/CAD ejercen RafUI; cualquier adaptador de presentacion legado restante
+  es transitorio y no debe recibir nuevas superficies. La documentacion no
+  sustituye la validacion manual completa del editor.
 
 Este documento resume que ya esta resuelto en codigo, que ya venia funcionando, que sigue pendiente y en que fase cae cada bloque. La idea es tener una sola fuente de verdad mientras cerramos la estabilizacion antes de testear a fondo.
 
@@ -326,7 +390,7 @@ Este documento resume que ya esta resuelto en codigo, que ya venia funcionando, 
 - Alcance de esta actualizacion: solo documentacion y reglas. No se modifico el
   renderer, no se inicio DX12/Vulkan/Metal y no se elimino ninguna dependencia.
 
-Regla autoritativa: [ApiGraphicBasic Controlled Hybrid Rule](../.ai/APIGRAPHICBASIC.md).
+Regla autoritativa: [ApiGraphicBasic Native Ownership Rule](../.ai/APIGRAPHICBASIC.md).
 
 ## Actualizacion 2026-07-18 - Fundacion 1 Implementada
 
@@ -341,7 +405,8 @@ Regla autoritativa: [ApiGraphicBasic Controlled Hybrid Rule](../.ai/APIGRAPHICBA
 - `SharedGraphicsContext` reemplaza el nombre WGPU en la frontera del runtime.
   `SharedWgpuContext` queda solamente como alias transitorio para compatibilidad.
 - `SceneFrameOutput` encapsula la vista GPU en `GpuTextureView` con handle Rafi.
-  `from_wgpu` y `as_wgpu` sobreviven solo para el puente Egui/native actual.
+  `from_wgpu` y `as_wgpu` sobreviven solo como aliases de compatibilidad para
+  la frontera nativa de presentacion.
 - Verificacion: `cargo test -p raf_render --lib` (134) y
   `cargo test -p raf_editor --lib` (66) pasan; `cargo check -p aura_rafi_editor`
   tambien termina correctamente.
@@ -355,10 +420,9 @@ Regla autoritativa: [ApiGraphicBasic Controlled Hybrid Rule](../.ai/APIGRAPHICBA
   contextual RafUI, navegador CAD a la izquierda, inspector a la derecha y
   dock inferior fijo. Los documentos, seleccion, cross-probe y sincronizacion
   PCB siguen en sus modulos existentes; no se creo una segunda escena CAD.
-- Canvas: `ElectronicsCadSurfaceHost` sigue siendo el propietario de la
-  presentacion ApiGraphicBasic GPU-first y del fallback CPU. Schematic y PCB
-  agregan minimapa, estado de zoom y recursos PNG de mayor densidad sin
-  depender de iconos escalados de baja resolucion.
+- Canvas: la presentación actual pertenece a `native_electronics.rs` y al
+  host directo de ApiGraphicBasic; esta entrada conserva el nombre del host
+  anterior sólo como evidencia de la migración.
 - Biblioteca: el catalogo de schematic conserva busqueda y colocacion, ahora
   con clipping, scroll de contenido correcto y barra de posicion para escalar
   a bibliotecas mas grandes.
@@ -371,8 +435,8 @@ Regla autoritativa: [ApiGraphicBasic Controlled Hybrid Rule](../.ai/APIGRAPHICBA
 
 ## Actualizacion 2026-07-12
 
-- FPS visible: el contador deja de derivarse de `egui::unstable_dt` o solo del
-  tiempo de CPU del viewport. Usa un reloj monotono suavizado del editor, por
+- FPS visible: el contador deja de derivarse de un reloj de UI inestable o solo
+  del tiempo de CPU del viewport. Usa un reloj monotono suavizado del editor, por
   lo que un frame ocioso no se reporta como un valor astronomico. El limitador
   reutiliza la ultima presentacion valida hasta el siguiente intervalo, de modo
   que limita trabajo real de CPU/GPU y no solo solicitudes de repaint.
@@ -438,8 +502,8 @@ silenciarse en logs.
 - Adaptador temporal: el editor actual ya usa esas dimensiones persistidas para
   sus paneles laterales e inferior y las guarda solo despues de terminar un
   arrastre sobre el borde. Un resize de ventana no pisa la preferencia del
-  usuario. Todavia no se afirma que los cuerpos de esos paneles dejaron Egui:
-  esa es la siguiente migracion, ahora con una sola fuente de verdad de layout.
+  usuario. La fuente de verdad de layout es RafUI y los hosts nativos; los
+  adaptadores historicos no deben volver a recibir cuerpos de panel.
 - Documento retained: `editor_shell_surface.rs` define el shell comun de Game
   y Electronics con intents tipados. Viewport, Schematic y PCB quedan como
   superficies de renderer, no como widgets genericos.
@@ -477,8 +541,8 @@ silenciarse en logs.
 
 ## Actualizacion 2026-07-14 - Nitidez Y Scroll Del Hub RafUI
 
-- Scroll: la adaptacion Egui -> RafUI invierte el signo de la rueda al entrar
-  al contrato de offsets retained. Wheel-down ahora muestra contenido mas bajo
+- Scroll: la adaptacion del shell anterior al contrato RafUI invierte el signo
+  de la rueda al entrar al contrato de offsets retained. Wheel-down ahora muestra contenido mas bajo
   y wheel-up regresa hacia el inicio. Se comprobo en la ventana nativa.
 - HiDPI: `HubSurfaceHost` conserva layout e input en puntos logicos, pero crea
   el target de ApiGraphicBasic usando `pixels_per_point`. El atlas de texto se
@@ -650,7 +714,9 @@ Se abordaron Fase 12 (descubribilidad HUD), Fase 14 (settings sin friccion), Fas
 
 - **Fase 12 — Tooltips HUD del viewport**:
   - Los botones del HUD (G/R/S/F, 2D/3D, badge OBJ/VTX, toggles de grid/labels, axis gizmo X/Y/Z/ISO) ahora muestran tooltip flotante al hacer hover.
-  - Como el HUD se pinta directo con `Painter` (sin `egui::Response`), los tooltips se implementan con hit-test manual del pointer contra cada rect conocido + pintado en layer Foreground.
+  - Como el HUD se pinta directo con `Painter` y no depende de respuestas de un
+    toolkit externo, los tooltips se implementan con hit-test manual del
+    pointer contra cada rect conocido + pintado en layer Foreground.
   - 13 keys de traduccion nuevas (EN/ES) en `viewport.hud.*`.
   - El tooltip se oculta mientras el boton primario esta presionado (no estorba durante drag).
 
@@ -1629,11 +1695,13 @@ Sesion enfocada en bugs de movimiento reportados por el CEO y mejoras de UX chic
 ## Actualizacion 2026-07-07 - Superficies CAD, render tiers y runtime Rhai
 
 - `raf_electronics::cad_scene` ahora deriva escenas CAD retenidas desde schematic y PCB: componentes, pins, wires, traces, pads, airwires, labels, board outline y DRC markers.
-- `ApiGraphicBasic::cad_surface` convierte esas escenas CAD a `BasicCommandList`, y `ElectronicsCadSurfaceHost` presenta schematic/PCB por el runtime grafico compartido con fallback CPU.
+- `ApiGraphicBasic::cad_surface` convierte esas escenas CAD a
+  `BasicCommandList`; `native_electronics.rs` presenta Schematic/PCB por el
+  runtime gráfico compartido con fallback CPU.
 - `RenderConfig::for_preset` y `RenderConfig::resource_profile` formalizan los presupuestos por tier: triangulos, textura, escala de superficie, sombras, post-proceso, luces y budgets futuros.
-- `ViewportSurfaceHost` ahora deriva un `ViewportSurfacePlan` del tier activo: escala de superficie, frame budget, sombras preparadas, post-proceso, PBR, particulas y skeletal animation quedan como contrato de superficie, no como logica desperdigada en egui.
+- `ViewportSurfaceHost` ahora deriva un `ViewportSurfacePlan` del tier activo: escala de superficie, frame budget, sombras preparadas, post-proceso, PBR, particulas y skeletal animation quedan como contrato de superficie, no como logica desperdigada en el shell de UI.
 - `raf_script::runtime::RhaiScriptRuntime` queda como harness preparado: carga scripts `.rhai` adjuntos, ejecuta `on_start` y `on_update(dt)` contra una escena clonada y reporta errores reales del Host API.
-- `raf_editor::game_runtime` sigue como fachada preparada, no como Play mode activo. Convierte input egui a `InputSnapshot` y mantiene separada la escena editable de la escena clonada para futuras conexiones.
+- `raf_editor::game_runtime` sigue como fachada preparada, no como Play mode activo. Convierte el `InputSnapshot` nativo a la entrada del runtime de scripts y mantiene separada la escena editable de la escena clonada para futuras conexiones.
 - `/script.run` usa la misma sesion Rhai para ejecutar `on_start` una vez contra una escena clonada, sin mutar el documento editable.
 - `SelectionIdBuffer` define el contrato de seleccion pixel-perfect: ID por pixel, prioridad por capa y desempate por profundidad. `IdBufferSpec::scaled_extent` deja listo el sizing por tier.
 - Play mode del producto sigue guardado en `app.rs`; el harness Rhai ya compila y tiene tests, pero falta reactivar el flujo completo con consola, estado visible, nodes, physics y scene locking validados juntos.
@@ -1649,8 +1717,8 @@ Sesion enfocada en bugs de movimiento reportados por el CEO y mejoras de UX chic
   y paneles laterales con rangos que protegen el canvas.
 - Inspector elimina el titulo duplicado y estabiliza Properties/Sessions como
   tabs RafUI.
-- El menu contextual del schematic fue migrado de un popup Egui a una superficie
-  RafUI contextual con cierre por Escape, clic exterior o accion.
+- El menu contextual del schematic fue migrado del popup historico a una
+  superficie RafUI contextual con cierre por Escape, clic exterior o accion.
 - El downbar de Electronics migra a `workspace + analysis`; Game conserva un
   solo downbar a todo el ancho. Las tabs tienen menu RafUI de clic derecho para
   dividir o restaurar paneles.

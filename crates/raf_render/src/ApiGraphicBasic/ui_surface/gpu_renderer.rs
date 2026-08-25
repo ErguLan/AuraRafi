@@ -2,7 +2,7 @@
 //!
 //! It renders into any caller-owned texture view. Window ownership stays
 //! outside this type, which keeps it usable by a native Winit host, tests, or
-//! an off-screen editor surface without reintroducing an `eframe` dependency.
+//! an off-screen editor surface without coupling it to a window framework.
 
 use std::borrow::Cow;
 use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
@@ -10,6 +10,8 @@ use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use bytemuck::{Pod, Zeroable};
+
+use crate::api_graphic_basic::canvas_presenter::CanvasTargetRect;
 
 use super::{
     UiSurfaceDrawList, UiSurfaceImageStore, UiSurfacePaintCommand, UiTextAtlas, UiTextAtlasRect,
@@ -277,8 +279,73 @@ impl UiSurfaceGpuRenderer {
         images: &UiSurfaceImageStore,
         clear_color: [u8; 4],
     ) -> UiSurfaceGpuMetrics {
-        let width = target_size[0].max(1);
-        let height = target_size[1].max(1);
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ApiGraphicBasic.UiSurfaceEncoder"),
+        });
+        let metrics = self.encode_at_scale(
+            device,
+            queue,
+            &mut encoder,
+            target,
+            target_size,
+            logical_size,
+            draw_list,
+            atlas,
+            images,
+            wgpu::LoadOp::Clear(color_from_bytes(clear_color, true)),
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+        metrics
+    }
+
+    pub(crate) fn encode_at_scale(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        target_size: [u32; 2],
+        logical_size: [u32; 2],
+        draw_list: &UiSurfaceDrawList,
+        atlas: &mut UiTextAtlas,
+        images: &UiSurfaceImageStore,
+        load: wgpu::LoadOp<wgpu::Color>,
+    ) -> UiSurfaceGpuMetrics {
+        self.encode_in_rect(
+            device,
+            queue,
+            encoder,
+            target,
+            target_size,
+            CanvasTargetRect::full(target_size),
+            logical_size,
+            draw_list,
+            atlas,
+            images,
+            load,
+        )
+    }
+
+    pub(crate) fn encode_in_rect(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        target: &wgpu::TextureView,
+        target_size: [u32; 2],
+        target_rect: CanvasTargetRect,
+        logical_size: [u32; 2],
+        draw_list: &UiSurfaceDrawList,
+        atlas: &mut UiTextAtlas,
+        images: &UiSurfaceImageStore,
+        load: wgpu::LoadOp<wgpu::Color>,
+    ) -> UiSurfaceGpuMetrics {
+        let target_rect = target_rect.clipped(target_size);
+        if target_rect.width == 0 || target_rect.height == 0 {
+            return UiSurfaceGpuMetrics::default();
+        }
+        let width = target_rect.width;
+        let height = target_rect.height;
         let logical_width = logical_size[0].max(1);
         let logical_height = logical_size[1].max(1);
         let mut metrics = UiSurfaceGpuMetrics::default();
@@ -314,7 +381,7 @@ impl UiSurfaceGpuRenderer {
         if geometry_rebuilt {
             // UiStyle colors and registered PNGs are stored as sRGB values.
             // The compositor operates in linear light even when its target is
-            // Unorm because the eframe bridge presents it into an sRGB target.
+            // Unorm because the native compositor presents it into an sRGB target.
             let geometry = UiSurfaceGpuGeometryCache {
                 fingerprint: geometry_fingerprint,
                 solid_batch: solid_vertices(
@@ -389,9 +456,6 @@ impl UiSurfaceGpuRenderer {
         metrics.paint_runs = paint_runs.len() as u32;
         metrics.draw_calls = metrics.paint_runs;
 
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("ApiGraphicBasic.UiSurfaceEncoder"),
-        });
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ApiGraphicBasic.UiSurfacePass"),
@@ -399,7 +463,7 @@ impl UiSurfaceGpuRenderer {
                     view: target,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(color_from_bytes(clear_color, true)),
+                        load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -407,6 +471,14 @@ impl UiSurfaceGpuRenderer {
                 timestamp_writes: None,
                 occlusion_query_set: None,
             });
+            pass.set_viewport(
+                target_rect.x as f32,
+                target_rect.y as f32,
+                target_rect.width as f32,
+                target_rect.height as f32,
+                0.0,
+                1.0,
+            );
             let solid_buffer = self
                 .solid_buffer
                 .as_ref()
@@ -462,8 +534,8 @@ impl UiSurfaceGpuRenderer {
                 }
                 if active_scissor != Some(run.scissor) {
                     pass.set_scissor_rect(
-                        run.scissor.0,
-                        run.scissor.1,
+                        target_rect.x.saturating_add(run.scissor.0),
+                        target_rect.y.saturating_add(run.scissor.1),
                         run.scissor.2,
                         run.scissor.3,
                     );
@@ -472,7 +544,6 @@ impl UiSurfaceGpuRenderer {
                 pass.draw(run.range.clone(), 0..1);
             }
         }
-        queue.submit(std::iter::once(encoder.finish()));
         metrics
     }
 

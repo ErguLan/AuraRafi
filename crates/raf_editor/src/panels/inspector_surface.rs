@@ -1015,13 +1015,22 @@ fn vector_row(palette: StudioUiPalette, label: &str, value: Vec3) -> UiNode {
                     UiNodeKind::Label,
                 )
                 .with_text_value(axis.to_ascii_uppercase())
-                .with_text_style(UiTextStyle::button(palette.tokens().text_muted))
+                .with_text_style(UiTextStyle::button(axis_color(axis)))
                 .with_layout(UiLayout::fit_content()),
             )
             .with_child(numeric_text_input(palette, label, axis, current));
         controls = controls.with_child(axis_cell);
     }
     row.with_child(controls)
+}
+
+fn axis_color(axis: &str) -> [u8; 4] {
+    match axis {
+        "x" => [255, 102, 102, 255],
+        "y" => [92, 214, 128, 255],
+        "z" => [92, 166, 255, 255],
+        _ => [210, 214, 220, 255],
+    }
 }
 
 fn numeric_text_input(palette: StudioUiPalette, label: &str, axis: &str, _current: f32) -> UiNode {
@@ -1695,7 +1704,7 @@ fn icon_button(
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
-fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
+pub(crate) fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
     let tokens = palette.tokens();
     UiStyleSheet {
         rules: vec![

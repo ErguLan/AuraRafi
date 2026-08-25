@@ -6,8 +6,8 @@ Surface authors must also follow the [RafUI Authoring Guide](RAF_UI_AUTHORING.md
 for ownership boundaries, menus, and validation.
 
 This document records the lightweight UI and primitive-model direction for the
-editor. The goal is a professional canvas-first interface that can grow away
-from egui without making the engine heavy.
+editor. The goal is a professional canvas-first interface that can remain
+lightweight while moving ownership to RafUI.
 
 ## Design Goals
 
@@ -41,18 +41,18 @@ caller-owned WGPU texture view or CPU recovery buffer.
 | `ApiGraphicBasic::ui_surface` | Layout/input compilation, text atlas, retained paint composition |
 
 `DirectUiSurfaceHost` owns retained interaction state and `UiSurfaceGpuRenderer`
-without Eframe. `CpuUiSurfaceHost` consumes the same retained draw list and
+without the legacy widget host. `CpuUiSurfaceHost` consumes the same retained draw list and
 text atlas into reusable straight-alpha RGBA pixels for recovery-mode
 presentation. `NativeUiWindowHost` owns a Winit/WGPU presentation surface,
 and `NativeUiInputBridge` maps Winit input into the same renderer-neutral focus
-and action system. Existing Egui panels remain temporary adapters while editor
-chrome migrates; new data surfaces do not need Egui ownership.
+and action system. Existing legacy panels remain historical adapters while
+editor chrome migrates; new data surfaces do not need legacy ownership.
 
 The first active editor route is the project Hub. `HubSurfaceHost` maps the
-current eframe input snapshot to `UiInputState`, builds `HubSurfaceModel` from
+the native input snapshot to `UiInputState`, builds `HubSurfaceModel` from
 real recent projects, and renders the retained document to an off-screen WGPU
-texture. The eframe adapter only places that final texture while the native
-window shell remains a later step. The Hub uses a welcome/featured-project
+texture. The native compositor places that final texture directly. The Hub uses
+a welcome/featured-project
 center column, a real create/activity side column, and a bottom theme selector
 without inventing project types or status data. Search, filters, theme changes,
 secondary-click project menus, project actions, and the GPU-to-CPU recovery
@@ -101,7 +101,8 @@ positions, visibility, sizes, and dock sides belong to a saved workspace.
 `UiStyleSheet` also supports retained visual state rules for hover, focus,
 active, and disabled controls. `UiSurfaceSession` carries pointer/focus state
 between frames and resolves those rules into the same GPU/CPU draw frame. This
-keeps input feedback local to the UI surface without tying it to Egui widgets.
+keeps input feedback local to the UI surface without tying it to a legacy widget
+implementation.
 
 The direct compositor preserves a unified paint order across fills, borders,
 and text. It sorts retained paint commands by accumulated stacking context and
@@ -114,7 +115,7 @@ rendering visually coherent without another UI tree or heavyweight dependency.
 ## Viewport Surface Host
 
 `ViewportSurfaceHost` in `raf_editor` is the explicit presentation boundary for
-the scene viewport. Today it still uses an egui texture bridge, but texture
+the scene viewport. The retained surface owns the texture bridge, while texture
 upload and native-texture registration are no longer owned directly by
 `ViewportPanel`. This gives the project one place to replace the bridge with a
 direct wgpu surface path later.
@@ -191,7 +192,7 @@ Schematic / PcbLayout / DrcReport
   -> GPU texture or CPU fallback pixels
 ```
 
-The current egui schematic and PCB panels can keep their shell while rendering
+The historical schematic and PCB panels could keep their shell while rendering
 and selection migrate object-by-object to `CadScene`.
 
 `raf_editor::panels::ElectronicsCadSurfaceHost` is the editor-side host for
@@ -214,7 +215,7 @@ Each CAD hit region also carries a stable source identity from the schematic or
 PCB model. Canvas selection resolves that identity directly instead of parsing
 the visual object name, so render labels can change without breaking selection.
 The same IDs drive the base-surface selection outline, which keeps selected
-objects visible even when rich egui detail overlays are intentionally skipped
+objects visible even when rich detail overlays are intentionally skipped
 at dense zoom levels.
 
 For dense canvases, the GPU surface owns the base body, copper, wire, and pad
@@ -225,7 +226,7 @@ CPU drawing from becoming the limiting factor while retaining precise editing
 feedback.
 
 The schematic and PCB canvases now use this host for their retained CAD
-backdrop. The egui fallback and interaction overlays remain in place while
+backdrop. The historical fallback and interaction overlays remained in place while
 selection, routing previews, and inspectors migrate incrementally into
 `CadScene`.
 
@@ -261,7 +262,7 @@ measurements in a host UI library.
 editor-workspace blueprint: toolbar, hierarchy dock, viewport canvas,
 inspector, and bottom work area. Its labels are localization keys and its
 actions are command identifiers. It is a retained native definition, not a
-second set of production egui panels.
+second set of production legacy panels.
 
 The `UiTextAtlas` rasterizes and caches alpha coverage once per resolved text
 and glyph style. Color is applied during composition rather than duplicating
@@ -295,14 +296,14 @@ path for saved/imported model manifests later.
 
 ## Migration Plan
 
-1. Keep egui as the temporary editor shell for panels that have not migrated;
-   the active Project Hub already renders through RafUI's GPU-first host.
+1. Keep the active Project Hub and migrated panels on RafUI's GPU-first host;
+   do not reintroduce the retired editor shell.
 2. Move canvas overlays and HUD primitives to `UiSurface` where it reduces
-   egui painter work, after the text-atlas rasterizer can draw localized text
+   legacy painter work, after the text-atlas rasterizer can draw localized text
    without falling back to the shell.
 3. Use `UiSurfaceSession` plus the raster text atlas for retained UI controls.
-   `DirectUiSurfaceHost` and `NativeUiWindowHost` already present them without
-   egui when the application entry point moves to the native shell.
+   `DirectUiSurfaceHost` and `NativeUiWindowHost` already present them through
+   RafUI at the native application entry point.
 4. Move floating studio panels to retained surfaces with serialized layout,
    workspace clamping, move, resize, and z-order preservation.
 5. Keep electronics component growth paused until schematic/PCB selection,

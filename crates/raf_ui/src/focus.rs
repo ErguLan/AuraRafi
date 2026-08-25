@@ -68,13 +68,22 @@ pub struct UiInputState {
     pub pointer_buttons_down: Vec<UiPointerButton>,
     pub pointer_pressed_buttons: Vec<UiPointerButton>,
     pub pointer_released_buttons: Vec<UiPointerButton>,
-    /// True when a primary press happened outside the retained surface. A
-    /// host uses this to release retained focus without forwarding the click
-    /// to a different surface.
+    /// True when a pointer-button press happened outside the retained surface.
+    /// A host uses this to release retained focus without forwarding the click
+    /// to a different surface. This includes primary, secondary, and middle
+    /// buttons so viewport navigation can reclaim input from editor chrome.
     #[serde(default)]
     pub pointer_pressed_outside: bool,
+    /// Keys currently held down. Unlike `pressed_keys`, this remains true for
+    /// every frame while the physical key is held and enables shared key-repeat
+    /// behavior in RafUI instead of per-surface workarounds.
+    #[serde(default)]
+    pub keys_down: Vec<String>,
     pub pressed_keys: Vec<String>,
     pub text_input: String,
+    /// Text supplied by the native clipboard bridge for this frame.
+    #[serde(default)]
+    pub clipboard_text: Option<String>,
     /// Current IME composition. Hosts may render it as an underline while
     /// `text_input` remains reserved for committed text.
     #[serde(default)]
@@ -93,6 +102,13 @@ impl UiInputState {
 
     pub fn key_pressed_any(&self, keys: &[&str]) -> bool {
         keys.iter().any(|key| self.key_pressed(key))
+    }
+
+    pub fn key_down(&self, key: &str) -> bool {
+        let lower = key.to_ascii_lowercase();
+        self.keys_down
+            .iter()
+            .any(|pressed| pressed.eq_ignore_ascii_case(&lower))
     }
 
     pub fn button_down(&self, button: UiPointerButton) -> bool {

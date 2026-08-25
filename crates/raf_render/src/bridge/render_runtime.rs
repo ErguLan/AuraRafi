@@ -10,7 +10,10 @@ use crate::api_graphic_basic::device::{
     BasicBackendType, BasicDevice, BasicDeviceConfig, SceneFrameMetrics, SceneFrameOutput,
     SharedGraphicsContext,
 };
-use crate::api_graphic_basic::{GraphicsBackendId, GraphicsCapabilities, GraphicsMemoryBudget};
+use crate::api_graphic_basic::{
+    FrameInvalidation, FramePacingProfile, FramePermit, FrameScheduler, FrameSchedulerMetrics,
+    GraphicsBackendId, GraphicsCapabilities, GraphicsMemoryBudget,
+};
 use crate::scene_renderer::SceneRenderFrame;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +53,8 @@ pub struct RenderRuntimeSnapshot {
     pub surface_generation: u64,
     pub advanced_gpu_features_allowed: bool,
     pub last_frame_metrics: SceneFrameMetrics,
+    pub pacing_profile: FramePacingProfile,
+    pub scheduler_metrics: FrameSchedulerMetrics,
 }
 
 impl Default for RenderRuntimeSnapshot {
@@ -65,6 +70,8 @@ impl Default for RenderRuntimeSnapshot {
             surface_generation: 0,
             advanced_gpu_features_allowed: false,
             last_frame_metrics: SceneFrameMetrics::default(),
+            pacing_profile: FramePacingProfile::Eco,
+            scheduler_metrics: FrameSchedulerMetrics::default(),
         }
     }
 }
@@ -95,6 +102,7 @@ pub struct RenderRuntime {
     surface_generation: u64,
     device: Option<BasicDevice>,
     device_generation: u64,
+    scheduler: FrameScheduler,
 }
 
 impl Default for RenderRuntime {
@@ -107,6 +115,7 @@ impl Default for RenderRuntime {
             surface_generation: 0,
             device: None,
             device_generation: 0,
+            scheduler: FrameScheduler::default(),
         }
     }
 }
@@ -126,6 +135,7 @@ impl RenderRuntime {
         self.policy = policy;
         self.advanced_gpu_features_allowed = advanced_gpu_features_allowed;
         self.device = None;
+        self.scheduler.request(FrameInvalidation::EXPLICIT);
     }
 
     pub fn set_shared_graphics_context(
@@ -134,6 +144,7 @@ impl RenderRuntime {
     ) {
         self.shared_graphics_context = shared_graphics_context;
         self.device = None;
+        self.scheduler.request(FrameInvalidation::WINDOW);
     }
 
     pub fn activate_surface(&mut self, surface: GraphicsSurfaceKind) {
@@ -148,6 +159,7 @@ impl RenderRuntime {
 
         self.surface = surface;
         self.surface_generation = self.surface_generation.wrapping_add(1);
+        self.scheduler.request(FrameInvalidation::WINDOW);
         if surface.requires_graphics_device() {
             self.ensure_device();
         } else {
@@ -178,7 +190,44 @@ impl RenderRuntime {
                 .as_ref()
                 .map(|device| device.last_frame_metrics())
                 .unwrap_or_default(),
+            pacing_profile: self.scheduler.profile(),
+            scheduler_metrics: self.scheduler.metrics(),
         }
+    }
+
+    pub fn scheduler(&self) -> &FrameScheduler {
+        &self.scheduler
+    }
+
+    pub fn scheduler_mut(&mut self) -> &mut FrameScheduler {
+        &mut self.scheduler
+    }
+
+    pub fn set_frame_pacing_profile(&mut self, profile: FramePacingProfile) {
+        self.scheduler.set_profile(profile);
+    }
+
+    pub fn request_frame(&mut self, reason: FrameInvalidation) {
+        self.scheduler.request(reason);
+    }
+
+    pub fn set_continuous_frame_reason(&mut self, reason: FrameInvalidation, active: bool) {
+        self.scheduler.set_continuous(reason, active);
+    }
+
+    pub fn next_frame(&mut self, now_seconds: f64) -> Option<FramePermit> {
+        self.scheduler.request_frame(now_seconds)
+    }
+
+    pub fn finish_frame(
+        &mut self,
+        permit: FramePermit,
+        presented_at_seconds: f64,
+        frame_cpu_ms: f32,
+        frame_gpu_ms: f32,
+    ) {
+        self.scheduler
+            .finish_frame(permit, presented_at_seconds, frame_cpu_ms, frame_gpu_ms);
     }
 
     pub fn render_scene_frame(&mut self, frame: &SceneRenderFrame) -> SceneFrameOutput {

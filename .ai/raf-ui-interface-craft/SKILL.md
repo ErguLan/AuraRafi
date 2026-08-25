@@ -1,6 +1,6 @@
 ---
 name: raf-ui-interface-craft
-description: Create, refine, and migrate ProyectRaf editor interfaces with Rust-native RafUI, especially downbars, tool groups, Console, Assets, Project, status bars, and retained surfaces. Use when an interface must match a screenshot, when an Egui panel is being migrated, when visual density or overlap bugs need correction, or when a new RafUI surface must preserve the editor architecture.
+description: Create, refine, and maintain ProyectRaf editor interfaces with Rust-native RafUI, especially downbars, tool groups, Console, Assets, Project, status bars, and retained surfaces. Use when an interface must match a screenshot, when a historical widget panel is being retired, when visual density or overlap bugs need correction, or when a new RafUI surface must preserve the editor architecture.
 ---
 
 # RafUI Interface Craft
@@ -11,7 +11,7 @@ Use this guide whenever changing editor chrome in ProyectRaf. Treat the interfac
 
 1. Read `.ai/SYSTEM_TRUTH.md`, `.ai/instructions.md`, `.ai/APIGRAPHICBASIC.md`, `docs/RAF_UI.md`, and `docs/EDITOR_RAFUI.md` before editing.
 2. Inspect the current host, surface builder, backend model, locale keys, and the executable that will be tested.
-3. Separate three things: current code contract, historical Egui behavior, and screenshot/design intent. Recover behavior from deleted files only after understanding the current surface.
+3. Separate three things: current code contract, historical panel behavior, and screenshot/design intent. Recover behavior from deleted files only after understanding the current surface; historical panels are evidence, never an active dependency.
 4. Preserve unrelated worktree changes and do not restore decommissioned panels wholesale.
 
 ## Keep the RafUI boundary
@@ -21,10 +21,9 @@ Use this split for every surface:
 - `*_surface.rs`: declarative `UiNode` tree, layout, styles, icons, text keys, and typed event bindings.
 - `*_surface_host.rs` or host module: bridge lifetime, input mirroring, action dispatch, scrolling, and placement.
 - backend model: console entries, project data, selection, commands, and persistence; do not put domain mutation in the surface builder.
-- Egui/eframe: legacy compatibility placement only while the native Winit host
-  is being migrated. Never add new UI behavior, layout logic, or interaction
-  semantics to Egui. The target implementation is RafUI plus the native Winit
-  window host.
+- Retired widget panels: reference material only. The active editor path is
+  RafUI plus the native Winit window host; do not add compatibility placement,
+  UI behavior, layout logic, or interaction semantics back to the retired path.
 
 Give every interactive node a stable semantic ID. Emit `UiAction` commands or typed control actions and let the host apply them. Keep source code and locale keys in English; provide English and Spanish locale values.
 
@@ -64,7 +63,9 @@ GPU/CPU frame time, allocations, texture/atlas work, and idle repaints.
 - Treat `UiLayoutBox.content_rect` as the only paint origin for text, icons, and caret geometry. Do not compensate for padding with per-panel `x` offsets.
 - Keep text requests bounded by the content box and clip their quads to that same box. A row can be correctly laid out and still look broken if the painter ignores its content bounds.
 - Focused text inputs must retain `UiTextEditState` when hosts seed the same value again. Draw the caret from atlas metrics so it stays aligned with the actual glyph advance.
-- Retained interaction exposes semantic cursor hints: `Text` for text inputs and `PointingHand` for actionable controls. Native bridges translate the hint; surfaces do not depend on egui cursor types.
+- Retained interaction exposes semantic cursor hints: `Text` for text inputs and
+  `PointingHand` for actionable controls. Native bridges translate the hint;
+  surfaces do not depend on toolkit-specific cursor types.
 
 ## Application bar and settings contract
 
@@ -86,15 +87,17 @@ boundaries:
 
 - `settings_surface.rs` owns the seven global sections: Appearance,
   Performance, Editor, Viewport, Scripting, AI, and Platform.
-- `settings_surface_host.rs` owns draft mutation, validation, save/cancel, and
-  `aura_rafi_settings.ron` persistence.
+- `native_workbench.rs` owns the active settings draft mutation, validation,
+  save/cancel dispatch, and `aura_rafi_settings.ron` persistence around the
+  retained `settings_surface.rs` document.
 - `project_settings_surface.rs` owns the six project sections: Overview,
   Layout, Runtime, Saving, Scripting, and Graphics. Its header keeps the
   project name beside the `Project Settings` title and has no Cancel action.
   The Layout section must expose a real `Reset Panels` action.
-- `project_settings_surface_host.rs` owns project mutation and immediate
-  accepted-value persistence to `project.ron`; Project Settings is not a
-  second draft boundary.
+- `native_workbench.rs` owns project mutation and immediate accepted-value
+  persistence to `project.ron` around the retained
+  `project_settings_surface.rs` document; Project Settings is not a second
+  draft boundary.
 
 Never put persistence or domain mutation in the surface builder. Every control
 needs a stable value key, and segment controls must receive a real label key;

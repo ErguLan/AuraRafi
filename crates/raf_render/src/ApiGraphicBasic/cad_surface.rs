@@ -110,7 +110,12 @@ pub fn build_cad_surface_frame(
         .unwrap_or([0.0, width as f32, 0.0, height as f32]);
 
     if options.show_grid {
-        record_grid(&mut commands, &options, bounds);
+        record_grid(
+            &mut commands,
+            &options,
+            bounds,
+            [width as f32, height as f32],
+        );
     }
 
     let mut sorted = scene.objects.iter().collect::<Vec<_>>();
@@ -243,6 +248,25 @@ fn record_selection_outline(
     commands: &mut BasicCommandList,
 ) {
     let z = object_z(object) - 0.08;
+    if !object.line_paths.is_empty() {
+        let width = match object.kind {
+            CadObjectKind::Pin | CadObjectKind::Pad => 2.0,
+            _ => options.selection_width.max(1.0),
+        };
+        for path in &object.line_paths {
+            for segment in path.windows(2) {
+                record_line(
+                    commands,
+                    segment[0],
+                    segment[1],
+                    z,
+                    width,
+                    options.selection_color,
+                );
+            }
+        }
+        return;
+    }
     if let Some(rect) = object.rect {
         record_border(
             commands,
@@ -272,12 +296,27 @@ fn record_selection_outline(
     }
 }
 
-fn record_grid(commands: &mut BasicCommandList, options: &CadSurfaceOptions, bounds: [f32; 4]) {
-    let step = options.grid_step.max(1.0);
+fn record_grid(
+    commands: &mut BasicCommandList,
+    options: &CadSurfaceOptions,
+    bounds: [f32; 4],
+    viewport_size: [f32; 2],
+) {
+    let base_step = options.grid_step.max(1.0);
     let [left, right, top, bottom] = bounds;
     if right <= left || bottom <= top {
         return;
     }
+
+    // Keep the grid readable at long range. The snap step remains unchanged;
+    // only the visual guide collapses to a stable 1/2/5/10 sequence once
+    // adjacent lines would occupy less than twelve physical pixels. This
+    // avoids the irregular visual density caused by arbitrary ceil factors.
+    let world_span = Vec2::new(right - left, bottom - top);
+    let pixels_per_world =
+        (viewport_size[0].max(1.0) / world_span.x).min(viewport_size[1].max(1.0) / world_span.y);
+    let screen_step = base_step * pixels_per_world.max(0.0);
+    let step = visual_grid_step(base_step, screen_step);
 
     let start_x = (left / step).floor() as i32 - 1;
     let end_x = (right / step).ceil() as i32 + 1;
@@ -309,6 +348,20 @@ fn record_grid(commands: &mut BasicCommandList, options: &CadSurfaceOptions, bou
             color,
         );
     }
+}
+
+fn visual_grid_step(base_step: f32, screen_step: f32) -> f32 {
+    let mut multiplier = 1.0;
+    while screen_step.max(0.01) * multiplier < 12.0 {
+        multiplier = if multiplier < 2.0 {
+            2.0
+        } else if multiplier < 5.0 {
+            5.0
+        } else {
+            multiplier * 2.0
+        };
+    }
+    (base_step.max(1.0) * multiplier).max(base_step.max(1.0))
 }
 
 fn grid_line_color(index: i32, options: &CadSurfaceOptions) -> [u8; 4] {
@@ -376,18 +429,13 @@ fn record_object(
     // can batch them without the editor repainting the static geometry.
     for path in &object.line_paths {
         for segment in path.windows(2) {
-            record_line(
-                commands,
-                segment[0],
-                segment[1],
-                z - 0.015,
-                2.0,
-                if schematic {
+            let line_color =
+                if schematic && !matches!(object.kind, CadObjectKind::Pin | CadObjectKind::Pad) {
                     options.symbol_color
                 } else {
                     object_line_color(object)
-                },
-            );
+                };
+            record_line(commands, segment[0], segment[1], z - 0.015, 2.0, line_color);
         }
     }
 
@@ -567,7 +615,7 @@ fn object_border_width(object: &CadObject) -> f32 {
 fn object_z(object: &CadObject) -> f32 {
     // The CAD canvas uses an orthographic projection with a clip-space depth
     // range of 0..=1. Negative z values are clipped before the line shader
-    // runs, which made GPU symbols disappear while the egui hover overlay
+    // runs, which made GPU symbols disappear while a hover overlay
     // still made them look intermittently present.
     (0.82 - 0.05 * layer_order(object.layer) as f32 - 0.0005 * object.pick_priority as i32 as f32)
         .clamp(0.05, 0.95)
@@ -780,8 +828,8 @@ mod tests {
     }
 
     #[test]
-    fn cad_surface_keeps_schematic_symbols_in_visible_depth_range() {
-        let mut schematic = Schematic::new("Symbol depth");
+    fn cad_surface_leaves_schematic_symbol_artwork_to_the_native_overlay() {
+        let mut schematic = Schematic::new("Native symbol overlay");
         let mut resistor = ElectronicComponent::resistor("10k");
         resistor.position = Vec2::new(80.0, 60.0);
         schematic.add_component(resistor);
@@ -813,9 +861,14 @@ mod tests {
             .filter(|line| line.color == [245, 245, 246, 255])
             .collect::<Vec<_>>();
 
-        assert_eq!(symbol_lines.len(), 8);
-        assert!(symbol_lines.iter().all(|line| {
-            (0.0..=1.0).contains(&line.start.z) && (0.0..=1.0).contains(&line.end.z)
-        }));
+        assert!(symbol_lines.is_empty());
+    }
+
+    #[test]
+    fn visual_grid_step_uses_stable_density_levels() {
+        assert_eq!(visual_grid_step(20.0, 20.0), 20.0);
+        assert_eq!(visual_grid_step(20.0, 6.0), 40.0);
+        assert_eq!(visual_grid_step(20.0, 2.5), 100.0);
+        assert!(visual_grid_step(20.0, 0.4) >= 200.0);
     }
 }

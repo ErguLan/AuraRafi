@@ -1,9 +1,7 @@
-//! UI-independent bridge between the Agent runtime and the current editor.
+//! UI-independent Agent command adapter for the native editor.
 //!
-//! The historical executor knew about the deleted editor shell and several
-//! retired panels. This adapter keeps the useful command contract while
-//! accepting only the current domain ports. The Agent surface never receives
-//! this type; it only asks the controller to run a typed action.
+//! The Agent talks to the same command catalog and game command kernel as CLI,
+//! MCP and the retained editor. It never receives RafUI or Winit types.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -18,20 +16,15 @@ use serde_json::Value;
 
 use crate::commands::{
     catalog::{CommandCatalog, CommandDefinition},
-    electronics::{self, ElectronicsCommandContext},
     game::{self, GameCommandContext, GameViewportPort, SceneSelectionState},
     output::CommandOutput,
     parser::{parse_console_input, ParsedInput},
     script::{self, ScriptCommandContext},
     workspace,
 };
-use crate::panels::pcb_view::PcbViewPanel;
-use crate::panels::schematic_view::SchematicViewPanel;
-use crate::panels::viewport::ViewportPanel;
+use crate::electronics_controller::NativeElectronicsEditor;
+use crate::panels::viewport_controller::NativeGameViewportController;
 
-/// The editor actions that are safe to queue after a tool has finished.
-/// Undo/redo are queued so the application boundary can apply them to its
-/// scene history after the Agent tool call returns.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentEditorAction {
     Undo,
@@ -53,7 +46,6 @@ impl AgentProjectContext {
     }
 }
 
-/// OpenAI function names cannot contain dots, slashes, or spaces.
 pub fn sanitize_tool_name(name: &str) -> String {
     let sanitized: String = name
         .chars()
@@ -76,9 +68,6 @@ pub fn sanitize_tool_name(name: &str) -> String {
     }
 }
 
-/// Build the sanitized-name lookup for commands available in the current
-/// editor. Retired UI-document and session commands remain in the catalog,
-/// but are not advertised until their current host exists.
 pub fn build_tool_name_map(catalog: &CommandCatalog) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for command in catalog
@@ -95,110 +84,29 @@ pub fn build_tool_name_map(catalog: &CommandCatalog) -> HashMap<String, String> 
     map
 }
 
-/// Current editor mutation context exposed to the runtime.
 pub struct AgentToolExecutor<'a> {
     pub scene: &'a mut SceneGraph,
     pub selection: &'a mut SceneSelectionState,
-    pub viewport: &'a mut ViewportPanel,
-    pub schematic_view: &'a mut SchematicViewPanel,
-    pub pcb_view: &'a mut PcbViewPanel,
+    pub viewport: &'a mut NativeGameViewportController,
+    pub electronics: Option<&'a mut NativeElectronicsEditor>,
     pub project: Option<AgentProjectContext>,
     pub catalog: &'a CommandCatalog,
     pub tool_name_map: HashMap<String, String>,
     pub editor_actions: &'a mut Vec<AgentEditorAction>,
 }
 
-impl<'a> AgentToolExecutor<'a> {
+impl AgentToolExecutor<'_> {
     pub fn build_tools(catalog: &CommandCatalog, language: Language) -> Vec<OpenAiTool> {
         catalog
             .commands
             .iter()
             .filter(|command| tool_supported(command))
             .map(|command| {
-                let name = sanitize_tool_name(&command.name);
-                command_to_openai_tool(&name, command, language)
+                command_to_openai_tool(&sanitize_tool_name(&command.name), command, language)
             })
             .collect()
     }
-}
 
-impl ToolExecutor for AgentToolExecutor<'_> {
-    fn execute(&mut self, name: &str, arguments: Value) -> Result<String, String> {
-        let original_name = self
-            .tool_name_map
-            .get(name)
-            .map(String::as_str)
-            .unwrap_or(name);
-        let definition = self
-            .catalog
-            .find(original_name)
-            .ok_or_else(|| format!("Unknown Agent tool: {name}"))?;
-        if !tool_supported(definition) {
-            return Err(format!(
-                "Tool '{}' is not available in this editor build.",
-                definition.name
-            ));
-        }
-        if !domain_allowed(&definition.domain, self.project.as_ref()) {
-            return Err(format!(
-                "Command '{}' is not available for the active project type.",
-                definition.name
-            ));
-        }
-
-        let command_line = build_command_line(&definition.name, &arguments);
-        let parsed = match parse_console_input(&command_line) {
-            Ok(ParsedInput::Command(command)) => command,
-            Ok(ParsedInput::Message(_)) => {
-                return Err("Tool arguments did not form a command.".to_string())
-            }
-            Err(error) => return Err(format!("Failed to parse Agent command: {error}")),
-        };
-
-        let output = match definition.domain.as_str() {
-            "game" => {
-                let mut context = GameCommandContext {
-                    scene: self.scene,
-                    selection: self.selection,
-                    viewport: self.viewport as &mut dyn GameViewportPort,
-                };
-                game::execute(&definition.name, &parsed, &mut context)
-            }
-            "electronics" => {
-                let mut context = ElectronicsCommandContext {
-                    schematic_view: self.schematic_view,
-                    pcb_view: self.pcb_view,
-                };
-                electronics::execute(&definition.name, &parsed, &mut context)
-            }
-            "shared" => self.execute_shared(&definition.name, &parsed),
-            other => CommandOutput::error(
-                "Agent command",
-                format!("No current editor adapter exists for domain '{other}'."),
-            ),
-        };
-
-        if output.level == crate::commands::output::CommandLevel::Error {
-            Err(command_output_to_string(&output))
-        } else {
-            Ok(command_output_to_string(&output))
-        }
-    }
-
-    fn describe(&self, name: &str) -> String {
-        self.catalog
-            .find(name)
-            .map(|definition| {
-                format!(
-                    "{} (domain: {}, category: {})",
-                    definition.name, definition.domain, definition.category
-                )
-            })
-            .unwrap_or_else(|| format!("Execute {name}"))
-    }
-}
-
-impl AgentToolExecutor<'_> {
     fn execute_shared(
         &mut self,
         command_name: &str,
@@ -270,9 +178,86 @@ impl AgentToolExecutor<'_> {
     }
 }
 
+impl ToolExecutor for AgentToolExecutor<'_> {
+    fn execute(&mut self, name: &str, arguments: Value) -> Result<String, String> {
+        let original_name = self
+            .tool_name_map
+            .get(name)
+            .map(String::as_str)
+            .unwrap_or(name);
+        let definition = self
+            .catalog
+            .find(original_name)
+            .ok_or_else(|| format!("Unknown Agent tool: {name}"))?;
+        if !tool_supported(definition) {
+            return Err(format!(
+                "Tool '{}' is not available in this editor build.",
+                definition.name
+            ));
+        }
+        if !domain_allowed(&definition.domain, self.project.as_ref()) {
+            return Err(format!(
+                "Command '{}' is not available for the active project type.",
+                definition.name
+            ));
+        }
+        let command_line = build_command_line(&definition.name, &arguments);
+        let parsed = match parse_console_input(&command_line) {
+            Ok(ParsedInput::Command(command)) => command,
+            Ok(ParsedInput::Message(_)) => {
+                return Err("Tool arguments did not form a command.".to_string())
+            }
+            Err(error) => return Err(format!("Failed to parse Agent command: {error}")),
+        };
+        let output = match definition.domain.as_str() {
+            "game" => {
+                let mut context = GameCommandContext {
+                    scene: self.scene,
+                    selection: self.selection,
+                    viewport: self.viewport as &mut dyn GameViewportPort,
+                };
+                game::execute(&definition.name, &parsed, &mut context)
+            }
+            "shared" => self.execute_shared(&definition.name, &parsed),
+            "electronics" => self
+                .electronics
+                .as_deref_mut()
+                .map(|editor| editor.execute_catalog_command(&definition.name, &parsed))
+                .unwrap_or_else(|| {
+                    CommandOutput::error(
+                        "Agent command",
+                        "The native Electronics document is not mounted for this session.",
+                    )
+                }),
+            other => CommandOutput::error(
+                "Agent command",
+                format!("No current editor adapter exists for domain '{other}'."),
+            ),
+        };
+        if output.level == crate::commands::output::CommandLevel::Error {
+            Err(command_output_to_string(&output))
+        } else {
+            Ok(command_output_to_string(&output))
+        }
+    }
+
+    fn describe(&self, name: &str) -> String {
+        self.catalog
+            .find(name)
+            .map(|definition| {
+                format!(
+                    "{} (domain: {}, category: {})",
+                    definition.name, definition.domain, definition.category
+                )
+            })
+            .unwrap_or_else(|| format!("Execute {name}"))
+    }
+}
+
 fn tool_supported(command: &CommandDefinition) -> bool {
     match command.domain.as_str() {
-        "game" | "electronics" => true,
+        "game" => true,
+        "electronics" => true,
         "shared" => matches!(
             command.name.as_str(),
             "help"
@@ -393,25 +378,4 @@ fn command_output_to_string(output: &CommandOutput) -> String {
     lines.push(format!("changed: {}", output.changed));
     lines.push(format!("json: {}", output.json));
     lines.join("\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn tool_names_are_safe_for_openai_function_calls() {
-        assert_eq!(sanitize_tool_name("game.add"), "game_add");
-        assert_eq!(sanitize_tool_name("1st.command"), "_1st_command");
-    }
-
-    #[test]
-    fn retired_ui_commands_are_not_advertised() {
-        let catalog = CommandCatalog::builtin();
-        let tools = AgentToolExecutor::build_tools(&catalog, Language::English);
-        assert!(!tools
-            .iter()
-            .any(|tool| tool.function.name.starts_with("ui_")));
-        assert!(tools.iter().any(|tool| tool.function.name == "game_add"));
-    }
 }

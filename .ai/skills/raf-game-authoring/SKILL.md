@@ -15,8 +15,10 @@ headless core host is implemented.
 ## Workflow
 
 1. Identify the project path, project type, active session, and current
-   revision. Run `raf doctor`, `engine.status`, `project.info`, and
-   `capabilities.list` as appropriate.
+   revision. Run `raf doctor`, `raf editors`, `engine.status`,
+   `project.info`, and `capabilities.list` as appropriate. `raf editors`
+   reports which projects have a live attached editor; with exactly one
+   live editor, attach commands need no project path.
 2. Inspect the scene, scripts, assets, and workspace bounds before planning a
    mutation. Keep generated entity/file counts within an explicit budget.
 3. Break a complex request into canonical commands. Use `dry_run=true` for

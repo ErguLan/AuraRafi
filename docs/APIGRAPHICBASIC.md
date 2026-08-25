@@ -35,8 +35,8 @@ CPU RGBA pixels; it never owns the device lifecycle itself.
 
 ## Foundation 1 Implemented
 
-The first controlled-hybrid foundation landed on 2026-07-18 while WGPU remains
-the active executor:
+The first ApiGraphicBasic ownership foundation landed on 2026-07-18 while WGPU
+remains the private active executor:
 
 - generational Rafi-owned handles exist for core GPU resource categories;
 - backend-neutral capabilities, adapter preference, and potato/desktop memory
@@ -44,8 +44,8 @@ the active executor:
 - `RenderRuntimeSnapshot` reports backend id, capabilities, and budget;
 - `SharedGraphicsContext` is the neutral runtime boundary for the current host;
 - GPU scene output is wrapped in `GpuTextureView` with a Rafi texture handle;
-- the remaining `from_wgpu`/`as_wgpu` methods are explicit transitional bridges
-  for the current egui/native presentation path.
+- the remaining `from_wgpu`/`as_wgpu` methods are private executor adapters
+  contained below the native Winit/RafUI presentation boundary.
 
 This does not claim that the resource registry, cross-surface batching, frame graph,
 or native backends are complete. Those responsibilities migrate in later
@@ -108,8 +108,8 @@ The compilation cache preserves that single paint payload across unchanged
 frames. It keys layout on document, control/focus state, size, and density;
 it keys paint on resolved text and atlas revision. The GPU compositor retains
 vertex buffers and batches only adjacent compatible paint work so stacking
-order remains correct. UI must not create a second command-list path merely
-to satisfy a legacy presentation bridge.
+order remains correct. UI must not create a second command-list path or
+compatibility host.
 
 RafUI must not create a second GPU renderer, own WGPU textures, or draw a
 scene/CAD canvas as generic controls. The Viewport, Schematic, and PCB remain
@@ -207,10 +207,9 @@ levels. The image sampler selects the nearest complete mip level rather than
 interpolating between two levels, so minified icons do not shimmer or become
 washed out as their parent surface is rebuilt.
 
-The temporary eframe bridge is allowed to paint the completed RafUI texture as
-a compatibility placement operation. It must not create an egui rectangle,
-egui text label, egui tooltip, or egui-owned interaction state for a retained
-RafUI component.
+The native Winit host composes the completed RafUI surface and ApiGraphicBasic
+canvas layers directly. There is no legacy-widget compatibility placement in
+the active runtime; historical bridge text belongs to the migration archive.
 
 ## RafUI quality contract
 

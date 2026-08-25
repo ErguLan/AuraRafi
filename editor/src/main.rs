@@ -1,63 +1,17 @@
-//! AuraRafi Editor - Main entry point.
+//! AuraRafi Editor native entry point.
 //!
-//! This binary launches the full AuraRafi editor application.
+//! The executable owns only logging and the Winit event loop. RafUI owns
+//! retained editor surfaces and ApiGraphicBasic owns scene/UI composition.
 
-fn main() -> eframe::Result<()> {
-    // Initialize logging.
+fn main() {
     tracing_subscriber::fmt()
         .with_max_level(tracing::Level::INFO)
         .with_target(false)
         .init();
 
-    tracing::info!("Proyecto Rafi Editor starting...");
-
-    // Load custom icon from embedded PNG.
-    let icon = load_icon();
-
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("Proyecto Rafi")
-            .with_inner_size([660.0, 540.0])
-            .with_min_inner_size([660.0, 540.0])
-            .with_resizable(false)
-            .with_decorations(false)
-            .with_transparent(true)
-            .with_icon(icon),
-        ..Default::default()
-    };
-
-    eframe::run_native(
-        "Proyecto Rafi",
-        options,
-        Box::new(|cc| Ok(Box::new(raf_editor::AuraRafiApp::new(cc)))),
-    )
-}
-
-/// Load the application icon from the embedded PNG file.
-fn load_icon() -> egui::IconData {
-    let icon_bytes = include_bytes!("../icon.png");
-    match image::load_from_memory(icon_bytes) {
-        Ok(img) => {
-            let rgba = img.to_rgba8();
-            let (w, h) = rgba.dimensions();
-            egui::IconData {
-                rgba: rgba.into_raw(),
-                width: w,
-                height: h,
-            }
-        }
-        Err(_) => {
-            // Fallback: 32x32 solid orange icon.
-            let size = 32u32;
-            let rgba = vec![212u8, 119, 26, 255].repeat((size * size) as usize);
-            egui::IconData {
-                rgba,
-                width: size,
-                height: size,
-            }
-        }
+    tracing::info!("Proyecto Rafi Editor starting with native RafUI host");
+    if let Err(error) = raf_editor::native_application::run_native() {
+        tracing::error!(%error, "native editor stopped with an error");
+        std::process::exit(1);
     }
 }
-
-use eframe::egui;
-use image;

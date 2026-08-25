@@ -25,9 +25,9 @@ metadata tree.
 
 New Hierarchy and Inspector controls are authored as RafUI documents and
 presented through ApiGraphicBasic. ApiGraphicBasic uses the configured WGPU
-path, with its existing CPU fallback. The current eframe/egui loop is only the
-temporary window-shell and panel mounting adapter; it does not define the new
-controls, layout, painting or interaction rules.
+path, with its existing CPU fallback. The current native loop owns window-shell
+and panel mounting; it does not define the new controls, layout, painting or
+interaction rules outside RafUI.
 
 ## Connected behavior
 

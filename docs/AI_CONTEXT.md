@@ -28,8 +28,9 @@ files before changing behavior across the editor, UI, renderer, or engine:
 - **ApiGraphicBasic owns the graphics contract.** WGPU is the current adapter,
   not the final public engine identity. Keep new renderer code backend-neutral
   and preserve GPU hardware plus CPU fallback.
-- **RAFUI is the target UI runtime.** Egui is a temporary shell/bridge while
-  retained RAFUI surfaces replace it safely.
+- **RafUI is the active UI runtime.** The native Winit host composes retained
+  RafUI surfaces and ApiGraphicBasic canvas layers. The retired widget toolkit
+  is historical migration evidence only and is not a runtime dependency.
 - **Low-end hardware is a product requirement.** Prefer retained state,
   bounded caches, incremental work, profiling, and explicit fallbacks over
   always-on heavy systems.

@@ -48,8 +48,8 @@ futuros deben pulir esta composicion y conservar sus contratos.
 
 - ApiGraphicBasic es la autoridad publica del canvas CAD y de RafUI. WGPU solo
   se usa detras de su adapter privado.
-- No se agregan fallbacks visuales duplicados en Egui para ocultar errores del
-  renderer.
+- No se agregan fallbacks visuales duplicados fuera de RafUI para ocultar
+  errores del renderer.
 - `GpuLineVertex` alinea `vec3` a 16 bytes. Su layout debe conservar offsets
   `0, 16, 32, 48, 52`; volver a empaquetarlo implicitamente hace desaparecer
   grid, cables y simbolos.

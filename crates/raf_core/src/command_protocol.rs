@@ -1,6 +1,6 @@
 //! Transport-neutral command protocol for RafUI, console, CLI and agents.
 //!
-//! The protocol deliberately contains no window, egui, WGPU or runtime/play
+//! The protocol deliberately contains no window, renderer or runtime/play
 //! types. A client can talk to an already-open editor or to a headless engine
 //! process through the same newline-delimited JSON messages.
 

@@ -2,12 +2,14 @@
 
 ## Agregar un nuevo panel al editor
 
-1. Crear `crates/raf_editor/src/panels/mi_panel.rs`
-2. Implementar struct con `Default` y `fn show(&mut self, ui: &mut egui::Ui)`
-3. Registrar en `panels/mod.rs`: `pub mod mi_panel;`
-4. Agregar campo en `AuraRafiApp` struct en `app.rs`
-5. Inicializar en `AuraRafiApp::new()` con `MiPanel::default()`
-6. Llamar `.show(ui)` en el lugar apropiado del layout
+1. Crear un `*_surface.rs` declarativo en `crates/raf_editor/src/panels/`.
+2. Implementar un `*_surface.rs` declarativo y un host nativo sólo si requiere
+   estado temporal, input, composición o persistencia.
+3. Registrar el módulo en `panels/mod.rs` si es una superficie reutilizable.
+4. Componer la superficie desde `native_workbench.rs` o el host nativo dueño
+   de esa región; no crear un host Egui/Eframe.
+5. Emitir comandos semánticos RafUI y resolverlos en el controlador o gateway
+   de dominio correspondiente.
 
 ---
 
@@ -16,8 +18,9 @@
 1. Agregar variante al enum `SimModel` en `raf_electronics/src/component.rs`
 2. Implementar parsing en `SimModel::parse()`
 3. Agregar a `ComponentLibrary::default()` en `library.rs`
-4. Agregar icono de dibujo en `schematic_view.rs` -> funcion `draw_component()`
-5. Agregar al DRC si tiene reglas especiales (`raf_electronics/src/drc.rs`)
+4. Agregar su representación a `raf_electronics/src/cad_scene.rs` y validar
+   sus líneas/pines en la escena nativa.
+5. Agregarla al DRC si tiene reglas especiales (`raf_electronics/src/drc.rs`)
 
 ---
 

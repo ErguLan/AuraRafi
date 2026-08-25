@@ -8,8 +8,9 @@
 //! - `render_pipeline/`- CPU scanline rasterizer with Z-buffer
 //! - `scene_renderer`  - Full scene render orchestrator (scene in, pixels out)
 //!
-//! Legacy modules are preserved for backward compatibility with editor panels
-//! that have not yet migrated. They will be removed incrementally.
+//! The editor presentation path is native Winit + RafUI. Older renderer
+//! modules remain only where they still provide backend-neutral scene, math,
+//! or compatibility data; they are not an alternate UI host.
 
 // === NEW RENDERER ARCHITECTURE ===
 pub mod bridge;
@@ -18,7 +19,11 @@ pub mod math;
 pub mod render_pipeline;
 pub mod scene_renderer;
 
-// --- Core pipeline (active today, CPU painter) ---
+// --- Core renderer and compatibility exports ---
+// The active editor path is ApiGraphicBasic + SceneRenderer with GPU-first
+// execution and CPU recovery. The modules below include active math/picking
+// contracts plus prepared or compatibility APIs; see docs/RENDERER.md for the
+// current classification instead of treating every public export as active.
 #[path = "ApiGraphicBasic/mod.rs"]
 pub mod api_graphic_basic;
 pub mod backend;
@@ -26,6 +31,7 @@ pub mod camera;
 pub mod depth_sort;
 pub mod editable;
 pub mod gizmo;
+pub mod gizmo_visual;
 pub mod lod;
 pub mod mesh;
 pub mod picking;
@@ -34,7 +40,7 @@ pub mod pipeline;
 pub mod projection;
 pub mod renderer;
 
-// --- v0.7.0: Advanced rendering (opt-in, zero-cost when disabled) ---
+// --- Prepared advanced rendering (opt-in, zero-cost when disabled) ---
 pub mod lighting;
 pub mod post_process;
 pub mod render_config;
@@ -42,16 +48,16 @@ pub mod shaders;
 pub mod texture;
 pub mod uv_mapping;
 
-// --- v0.8.0: Software Z-buffer rasterizer (opt-in, zero-cost when disabled) ---
+// --- CPU recovery and software rasterization ---
 pub mod software_raster;
 
-// --- Render abstraction layer (prepared, connects scene to backend) ---
+// --- Prepared render abstraction layer ---
 pub mod abstraction;
 pub mod material;
 pub mod scene_data;
 pub mod spatial;
 
-// --- Advanced complements (prepared, zero cost when disabled) ---
+// --- Prepared advanced complements (zero cost when disabled) ---
 pub mod complements;
 pub mod gpu_deform;
 pub mod world_stream;

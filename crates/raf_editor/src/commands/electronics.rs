@@ -1,18 +1,64 @@
 use glam::Vec2;
-use raf_electronics::schematic::component_pin_world_position;
+use raf_electronics::schematic::{component_pin_world_position, WireAnchor};
 use raf_electronics::{
-    export_bom_csv, export_netlist_text, BoardOutline, ElectronicComponent, PcbLayer,
+    export_bom_csv, export_netlist_text, BoardOutline, ElectronicComponent, PcbLayer, PcbLayout,
+    Schematic,
 };
 use uuid::Uuid;
 
 use crate::commands::output::CommandOutput;
 use crate::commands::parser::ParsedCommand;
-use crate::panels::pcb_view::PcbViewPanel;
-use crate::panels::schematic_view::SchematicViewPanel;
+
+/// Neutral command-side view of a schematic.
+///
+/// This deliberately contains no presentation state from RafUI or a renderer.
+/// The name is kept for command compatibility while the actual
+/// editor surface is migrated independently.
+pub struct SchematicCommandView<'a> {
+    pub schematic: &'a mut Schematic,
+    pub selected_component: Option<usize>,
+    pub selected_wire: Option<usize>,
+}
+
+impl SchematicCommandView<'_> {
+    fn select_component(&mut self, index: usize) {
+        self.selected_component = Some(index);
+        self.selected_wire = None;
+    }
+
+    fn select_wire(&mut self, index: usize) {
+        self.selected_wire = Some(index);
+        self.selected_component = None;
+    }
+
+    fn clear_selection(&mut self) {
+        self.selected_component = None;
+        self.selected_wire = None;
+    }
+}
+
+/// Neutral command-side view of a PCB layout.
+pub struct PcbCommandView<'a> {
+    pub layout: &'a mut PcbLayout,
+    pub selected_component: Option<usize>,
+    pub selected_trace: Option<usize>,
+}
+
+impl PcbCommandView<'_> {
+    fn select_component(&mut self, index: usize) {
+        self.selected_component = Some(index);
+        self.selected_trace = None;
+    }
+
+    fn select_trace(&mut self, index: usize) {
+        self.selected_trace = Some(index);
+        self.selected_component = None;
+    }
+}
 
 pub struct ElectronicsCommandContext<'a> {
-    pub schematic_view: &'a mut SchematicViewPanel,
-    pub pcb_view: &'a mut PcbViewPanel,
+    pub schematic_view: SchematicCommandView<'a>,
+    pub pcb_view: PcbCommandView<'a>,
 }
 
 pub fn execute(
@@ -167,6 +213,15 @@ fn delete_component(
         return CommandOutput::error("Delete component", "Component target not found.");
     };
     let component = ctx.schematic_view.schematic.components.remove(index);
+    ctx.schematic_view.schematic.wires.retain(|wire| {
+        !wire
+            .start_anchor
+            .is_some_and(|anchor| anchor_component_id(anchor) == component.id)
+            && !wire
+                .end_anchor
+                .is_some_and(|anchor| anchor_component_id(anchor) == component.id)
+    });
+    ctx.schematic_view.schematic.sync_wire_anchors();
     ctx.schematic_view.clear_selection();
     CommandOutput::changed(
         format!("Deleted {}", component.designator),
@@ -184,6 +239,13 @@ fn delete_component(
             }
         }),
     )
+}
+
+fn anchor_component_id(anchor: WireAnchor) -> Uuid {
+    match anchor {
+        WireAnchor::Pin { component_id, .. } => component_id,
+        WireAnchor::Point(_) => Uuid::nil(),
+    }
 }
 
 fn select_component(
@@ -579,6 +641,7 @@ fn describe_schematic(ctx: &mut ElectronicsCommandContext<'_>) -> CommandOutput 
 fn pcb_sync(ctx: &mut ElectronicsCommandContext<'_>) -> CommandOutput {
     let summary = ctx
         .pcb_view
+        .layout
         .sync_from_schematic(&ctx.schematic_view.schematic);
     CommandOutput::changed(
         "PCB synced from schematic",

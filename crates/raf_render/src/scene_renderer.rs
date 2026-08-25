@@ -12,8 +12,8 @@
 //! 6. Rasterize with scanline + Z-buffer
 //! 7. Output pixel buffer
 //!
-//! This module lives in raf_render and has no egui dependency.
-//! The editor's viewport bridge uploads the pixel buffer to egui.
+//! This module lives in raf_render and has no UI dependency.
+//! The editor's viewport host consumes its scene output directly.
 
 use glam::{Mat4, Vec3, Vec4};
 use std::collections::HashSet;
@@ -66,7 +66,7 @@ pub enum RenderMode {
 
 /// Per-frame renderer options supplied by the editor viewport.
 ///
-/// These values keep the scene renderer independent from egui while still
+/// These values keep the scene renderer independent from the UI while still
 /// allowing the editor to control presentation details such as solid edges,
 /// xray opacity, and selection highlighting.
 #[derive(Debug, Clone, Copy)]
@@ -161,31 +161,11 @@ pub struct SceneRenderFrame {
     pub stats: FrameStats,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct GridBounds {
-    min_x: f32,
-    max_x: f32,
-    min_z: f32,
-    max_z: f32,
-}
-
-impl GridBounds {
-    fn from_center_radius(center: Vec3, radius: f32) -> Self {
-        Self {
-            min_x: center.x - radius,
-            max_x: center.x + radius,
-            min_z: center.z - radius,
-            max_z: center.z + radius,
-        }
-    }
-
-    fn expand_with(&mut self, center: Vec3, radius: f32) {
-        self.min_x = self.min_x.min(center.x - radius);
-        self.max_x = self.max_x.max(center.x + radius);
-        self.min_z = self.min_z.min(center.z - radius);
-        self.max_z = self.max_z.max(center.z + radius);
-    }
-}
+/// Fixed height of the world grid plane. The grid is intentionally
+/// detached from both the camera and the scene content: it never follows
+/// the camera height, never stretches to cover the scene bounds, and never
+/// rides along an object being dragged. It stays flat and quiet.
+pub const GRID_Y: f32 = -0.02;
 
 impl SceneRenderer {
     /// Create a new renderer with initial viewport dimensions.
@@ -320,7 +300,6 @@ impl SceneRenderer {
                 is_selected,
                 dist_to_camera: dist,
                 is_transparent,
-                bounding_radius: bounding_r,
                 triangle_count: primitive_triangle_count(
                     node.primitive,
                     &self.cube_mesh,
@@ -346,7 +325,6 @@ impl SceneRenderer {
                 .unwrap_or(std::cmp::Ordering::Equal),
         });
         apply_triangle_budget(&mut jobs, options.triangle_budget, &mut stats);
-        let grid_bounds = grid_bounds_for_jobs(&jobs);
 
         if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
             draw_world_grid(
@@ -356,7 +334,7 @@ impl SceneRenderer {
                 vp_h,
                 options.grid_spacing,
                 options.grid_load_distance,
-                grid_bounds,
+                options.grid_y,
             );
         }
 
@@ -622,7 +600,6 @@ impl SceneRenderer {
                 is_selected,
                 dist_to_camera: dist,
                 is_transparent,
-                bounding_radius: bounding_r,
                 triangle_count: primitive_triangle_count(
                     node.primitive,
                     &self.cube_mesh,
@@ -646,7 +623,6 @@ impl SceneRenderer {
                 .unwrap_or(std::cmp::Ordering::Equal),
         });
         apply_triangle_budget(&mut jobs, options.triangle_budget, &mut stats);
-        let grid_bounds = grid_bounds_for_jobs(&jobs);
 
         let use_tonality =
             !(matches!(options.mode, RenderMode::Solid) && !options.solid_face_tonality);
@@ -656,12 +632,10 @@ impl SceneRenderer {
                 if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
                     record_world_grid(
                         &mut commands,
-                        camera,
                         options.grid_spacing,
                         options.grid_load_distance,
                         options.grid_y,
                         options.grid_no_depth_test,
-                        grid_bounds,
                     );
                 }
                 grid_drawn = true;
@@ -750,12 +724,10 @@ impl SceneRenderer {
             if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
                 record_world_grid(
                     &mut commands,
-                    camera,
                     options.grid_spacing,
                     options.grid_load_distance,
                     options.grid_y,
                     options.grid_no_depth_test,
-                    grid_bounds,
                 );
             }
         }
@@ -810,6 +782,24 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
                     vp_h,
                 );
             }
+            GraphicCommand::DrawMeshBatch { mesh_id, instances } => {
+                let Some(mesh) = frame.commands.mesh(*mesh_id) else {
+                    continue;
+                };
+                for instance in instances {
+                    rasterize_mesh_command(
+                        framebuffer,
+                        mesh,
+                        &frame.view_proj,
+                        &instance.transform,
+                        frame.light_dir,
+                        instance.color,
+                        current_pipeline,
+                        vp_w,
+                        vp_h,
+                    );
+                }
+            }
             GraphicCommand::DrawLine {
                 start,
                 end,
@@ -850,6 +840,15 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
                     );
                 }
             }
+            GraphicCommand::DrawScreenTriangleBatch { triangles } => {
+                for triangle in triangles {
+                    rasterize_screen_triangle_no_depth(
+                        framebuffer,
+                        triangle.points,
+                        triangle.color,
+                    );
+                }
+            }
             GraphicCommand::DrawGrid { .. } => {}
         }
     }
@@ -864,7 +863,6 @@ struct RenderJob {
     is_selected: bool,
     dist_to_camera: f32,
     is_transparent: bool,
-    bounding_radius: f32,
     triangle_count: u32,
 }
 
@@ -935,22 +933,6 @@ fn apply_triangle_budget(jobs: &mut Vec<RenderJob>, triangle_budget: u32, stats:
     });
 }
 
-fn grid_bounds_for_jobs(jobs: &[RenderJob]) -> Option<GridBounds> {
-    let mut bounds: Option<GridBounds> = None;
-    for job in jobs {
-        let world_pos = job.model.col(3).truncate();
-        if let Some(existing) = &mut bounds {
-            existing.expand_with(world_pos, job.bounding_radius);
-        } else {
-            bounds = Some(GridBounds::from_center_radius(
-                world_pos,
-                job.bounding_radius,
-            ));
-        }
-    }
-    bounds
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -964,7 +946,6 @@ mod tests {
             is_selected: selected,
             dist_to_camera: id as f32,
             is_transparent: false,
-            bounding_radius: 1.0,
             triangle_count: 12,
         }
     }
@@ -1042,33 +1023,21 @@ fn record_wireframe_overlay(
 
 fn record_world_grid(
     commands: &mut BasicCommandList,
-    camera: &Camera,
     spacing: f32,
     load_distance: f32,
     grid_y: f32,
     no_depth_test: bool,
-    bounds: Option<GridBounds>,
 ) {
+    const DEPTH_BIAS: f32 = 0.002;
+
     let base_spacing = spacing.max(0.25);
     let margin = load_distance.max(base_spacing);
-    let bounds = bounds.unwrap_or(GridBounds {
-        min_x: -margin,
-        max_x: margin,
-        min_z: -margin,
-        max_z: margin,
-    });
-    let center_x = (bounds.min_x + bounds.max_x) * 0.5;
-    let center_z = (bounds.min_z + bounds.max_z) * 0.5;
-    let half_x = ((bounds.max_x - bounds.min_x) * 0.5).min(margin) + margin;
-    let half_z = ((bounds.max_z - bounds.min_z) * 0.5).min(margin) + margin;
-    let min_x = ((center_x - half_x) / base_spacing).floor() * base_spacing;
-    let max_x = ((center_x + half_x) / base_spacing).ceil() * base_spacing;
-    let min_z = ((center_z - half_z) / base_spacing).floor() * base_spacing;
-    let max_z = ((center_z + half_z) / base_spacing).ceil() * base_spacing;
+    let min_x = (-margin / base_spacing).floor() * base_spacing;
+    let max_x = (margin / base_spacing).ceil() * base_spacing;
+    let min_z = (-margin / base_spacing).floor() * base_spacing;
+    let max_z = (margin / base_spacing).ceil() * base_spacing;
     let bounds_min = Vec3::new(min_x, 0.0, min_z);
     let bounds_max = Vec3::new(max_x, 0.0, max_z);
-    let cam_y = camera.eye().y.abs();
-    let depth_bias = (cam_y * 0.0005 + 0.002).clamp(0.001, 0.02);
 
     for line in build_3d_grid(bounds_min, bounds_max, base_spacing) {
         let color = match line.kind {
@@ -1079,7 +1048,7 @@ fn record_world_grid(
 
         let start = Vec3::new(line.start.x, grid_y, line.start.z);
         let end = Vec3::new(line.end.x, grid_y, line.end.z);
-        commands.draw_line(start, end, color, 1.0, no_depth_test, depth_bias);
+        commands.draw_line(start, end, color, 1.0, no_depth_test, DEPTH_BIAS);
     }
 }
 
@@ -1212,6 +1181,64 @@ fn rasterize_world_line_command(
     }
 }
 
+/// Rasterize a renderer-owned 2D overlay without touching the scene depth
+/// buffer. This is the CPU counterpart of ApiGraphicBasic's overlay pipeline.
+fn rasterize_screen_triangle_no_depth(fb: &mut Framebuffer, points: [[f32; 2]; 3], color: [u8; 4]) {
+    let min_x = points
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .clamp(0.0, fb.width() as f32) as u32;
+    let min_y = points
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::INFINITY, f32::min)
+        .floor()
+        .clamp(0.0, fb.height() as f32) as u32;
+    let max_x = points
+        .iter()
+        .map(|point| point[0])
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .clamp(0.0, fb.width() as f32) as u32;
+    let max_y = points
+        .iter()
+        .map(|point| point[1])
+        .fold(f32::NEG_INFINITY, f32::max)
+        .ceil()
+        .clamp(0.0, fb.height() as f32) as u32;
+
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+
+    let edge = |a: [f32; 2], b: [f32; 2], p: [f32; 2]| {
+        (p[0] - a[0]) * (b[1] - a[1]) - (p[1] - a[1]) * (b[0] - a[0])
+    };
+    let area = edge(points[0], points[1], points[2]);
+    if area.abs() <= f32::EPSILON {
+        return;
+    }
+
+    for y in min_y..max_y {
+        for x in min_x..max_x {
+            let point = [x as f32 + 0.5, y as f32 + 0.5];
+            let w0 = edge(points[1], points[2], point);
+            let w1 = edge(points[2], points[0], point);
+            let w2 = edge(points[0], points[1], point);
+            let inside = if area > 0.0 {
+                w0 >= 0.0 && w1 >= 0.0 && w2 >= 0.0
+            } else {
+                w0 <= 0.0 && w1 <= 0.0 && w2 <= 0.0
+            };
+            if inside {
+                fb.blend_pixel_no_depth(x, y, color[0], color[1], color[2], color[3]);
+            }
+        }
+    }
+}
+
 /// Draw wireframe edges for a selected object (free function to avoid borrow conflict).
 fn draw_wireframe_overlay(
     fb: &mut Framebuffer,
@@ -1264,29 +1291,19 @@ fn draw_world_grid(
     vp_h: f32,
     spacing: f32,
     load_distance: f32,
-    bounds: Option<GridBounds>,
+    grid_y: f32,
 ) {
+    const DEPTH_BIAS: f32 = 0.002;
+
     let base_spacing = spacing.max(0.25);
     let margin = load_distance.max(base_spacing);
-    let bounds = bounds.unwrap_or(GridBounds {
-        min_x: -margin,
-        max_x: margin,
-        min_z: -margin,
-        max_z: margin,
-    });
-    let center_x = (bounds.min_x + bounds.max_x) * 0.5;
-    let center_z = (bounds.min_z + bounds.max_z) * 0.5;
-    let half_x = ((bounds.max_x - bounds.min_x) * 0.5).min(margin) + margin;
-    let half_z = ((bounds.max_z - bounds.min_z) * 0.5).min(margin) + margin;
-    let min_x = ((center_x - half_x) / base_spacing).floor() * base_spacing;
-    let max_x = ((center_x + half_x) / base_spacing).ceil() * base_spacing;
-    let min_z = ((center_z - half_z) / base_spacing).floor() * base_spacing;
-    let max_z = ((center_z + half_z) / base_spacing).ceil() * base_spacing;
+    let min_x = (-margin / base_spacing).floor() * base_spacing;
+    let max_x = (margin / base_spacing).ceil() * base_spacing;
+    let min_z = (-margin / base_spacing).floor() * base_spacing;
+    let max_z = (margin / base_spacing).ceil() * base_spacing;
     let bounds_min = Vec3::new(min_x, 0.0, min_z);
     let bounds_max = Vec3::new(max_x, 0.0, max_z);
     let view_proj = camera.view_projection(vp_w, vp_h);
-    let cam_y = camera.eye().y.abs();
-    let depth_bias = (cam_y * 0.0005 + 0.002).clamp(0.001, 0.02);
 
     for line in build_3d_grid(bounds_min, bounds_max, base_spacing) {
         let color = match line.kind {
@@ -1295,9 +1312,9 @@ fn draw_world_grid(
             GridLineKind::Minor => [224, 224, 228, 255],
         };
 
-        let start = Vec3::new(line.start.x, -0.02, line.start.z);
-        let end = Vec3::new(line.end.x, -0.02, line.end.z);
-        draw_world_line(fb, &view_proj, start, end, vp_w, vp_h, color, depth_bias);
+        let start = Vec3::new(line.start.x, grid_y, line.start.z);
+        let end = Vec3::new(line.end.x, grid_y, line.end.z);
+        draw_world_line(fb, &view_proj, start, end, vp_w, vp_h, color, DEPTH_BIAS);
     }
 }
 

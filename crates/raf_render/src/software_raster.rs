@@ -6,7 +6,7 @@
 //! Resolution can be reduced (e.g. 0.5x) for potato hardware.
 //! Default = OFF (painter sort remains the default path).
 //!
-//! Pipeline: triangles -> barycentric rasterization -> depth test -> framebuffer -> egui texture.
+//! Pipeline: triangles -> barycentric rasterization -> depth test -> framebuffer.
 
 use glam::{Mat4, Vec3, Vec4};
 
@@ -92,7 +92,7 @@ impl SoftwareFramebuffer {
         }
     }
 
-    /// Get the raw RGBA pixel data for uploading to egui texture.
+    /// Get the raw RGBA pixel data for a host texture upload.
     pub fn pixels(&self) -> &[u8] {
         &self.color
     }

@@ -521,8 +521,8 @@ The crate compiles and tests the Rhai backend plus the first runtime session.
 ### Phase B: Prepared script lifecycle harness (in progress)
 - `raf_script::runtime::RhaiScriptRuntime` loads attached scripts, calls
   `on_start`, and calls `on_update(dt)` on a cloned scene.
-- `GameRuntimeState` owns the editor facade and converts egui input to the
-  engine-agnostic `InputSnapshot`.
+- `GameRuntimeState` owns the editor preparation facade and consumes the
+  engine-agnostic `InputSnapshot` produced by the native input contract.
 - Keep the top-level Play button guarded until runtime state, console logs,
   physics, nodes, and scene locking are validated together.
 - Console output for script logs and errors.
@@ -548,7 +548,7 @@ The crate compiles and tests the Rhai backend plus the first runtime session.
 
 ### Phase F: Standalone runtime export (future)
 - `ScriptContext` runs without editor dependencies.
-- Same Host API, same backends, no `egui` in the path.
+- Same Host API, same backends, and no editor UI toolkit in the runtime path.
 - Ship `.wasm` and `.rhai` in the export bundle.
 
 ---

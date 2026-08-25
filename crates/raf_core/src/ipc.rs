@@ -37,6 +37,13 @@ pub struct EndpointDescriptor {
     pub session_id: Option<Uuid>,
     #[serde(default)]
     pub session_name: Option<String>,
+    /// "game" or "electronics" when a project is open; lets agents pick the
+    /// right command domain before connecting.
+    #[serde(default)]
+    pub project_type: Option<String>,
+    /// "hub" when no project is open, "project" otherwise.
+    #[serde(default)]
+    pub editor_state: Option<String>,
     #[serde(default)]
     pub revision: Revision,
     #[serde(default)]
@@ -55,6 +62,8 @@ impl EndpointDescriptor {
             project_path: None,
             session_id: None,
             session_name: None,
+            project_type: None,
+            editor_state: None,
             revision: 0,
             capabilities: Vec::new(),
         }

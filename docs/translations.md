@@ -61,10 +61,8 @@ In your `.rs` file, ensure you have access to the current language (usually pass
 use raf_core::i18n::t;
 use raf_core::config::Language;
 
-fn draw_ui(ui: &mut egui::Ui, lang: Language) {
-    if ui.button(t("sim.start", lang)).clicked() {
-        // Implementation logic
-    }
+fn translated_label(lang: Language) -> &'static str {
+    t("sim.start", lang)
 }
 ```
 
@@ -73,7 +71,10 @@ fn draw_ui(ui: &mut egui::Ui, lang: Language) {
 ## Advanced Usage & Best Practices
 
 ### Contextual Language Passing
-To maintain clean code, editor panels (like `PropertiesPanel`) receive the language as an argument in their `show()` methods. **Never** attempt to read the global configuration file directly inside a UI panel; always propagate the language context from the main `app.rs`.
+To maintain clean code, retained RafUI surface builders and native hosts receive
+the language as an argument. **Never** attempt to read the global configuration
+file directly inside a surface; always propagate the language context from the
+owning native host.
 
 ### Dynamic Formatting
 If you need to insert variables into a translated string (e.g., "Project 'MyGame' saved"), use a base key and format it in Rust:

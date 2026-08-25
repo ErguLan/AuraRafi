@@ -18,6 +18,30 @@ pub struct BasicLine {
     pub depth_bias: f32,
 }
 
+/// A filled screen-space triangle used by renderer-owned overlays such as
+/// transform gizmo arrowheads.
+///
+/// Coordinates are target pixels with a top-left origin. Keeping this
+/// primitive in the backend-neutral command list lets the GPU path and the
+/// CPU recovery path render the same billboard geometry without exposing
+/// WGPU details to the editor.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BasicScreenTriangle {
+    pub points: [[f32; 2]; 3],
+    pub color: [u8; 4],
+}
+
+/// Per-instance transform and tint for a shared mesh batch.
+///
+/// The command list owns the small instance records, while the GPU executor
+/// reuses a bounded vertex buffer slot instead of creating one buffer per
+/// object or per frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BasicMeshInstance {
+    pub transform: Mat4,
+    pub color: [u8; 4],
+}
+
 /// Individual drawing and configuration commands.
 #[derive(Debug, Clone)]
 pub enum GraphicCommand {
@@ -33,6 +57,12 @@ pub enum GraphicCommand {
         transform: Mat4,
         /// Color tint (RGBA).
         color: [u8; 4],
+    },
+    /// Draw several transforms of one registered mesh in a single instanced
+    /// call when the backend supports it.
+    DrawMeshBatch {
+        mesh_id: usize,
+        instances: Vec<BasicMeshInstance>,
     },
     /// Draw a 3D line.
     DrawLine {
@@ -54,6 +84,8 @@ pub enum GraphicCommand {
         lines: Vec<BasicLine>,
         no_depth_test: bool,
     },
+    /// Draw filled screen-space overlay triangles.
+    DrawScreenTriangleBatch { triangles: Vec<BasicScreenTriangle> },
     /// Draw the coordinate grid.
     DrawGrid {
         /// Height of the grid on the Y axis.
@@ -72,6 +104,7 @@ pub struct BasicCommandList {
     meshes: Vec<Arc<BasicMesh>>,
     mesh_ids: std::collections::HashMap<usize, usize>,
     mesh_cacheable: Vec<bool>,
+    current_pipeline: BasicPipelineKind,
 }
 
 impl BasicCommandList {
@@ -82,6 +115,7 @@ impl BasicCommandList {
             meshes: Vec::new(),
             mesh_ids: std::collections::HashMap::new(),
             mesh_cacheable: Vec::new(),
+            current_pipeline: BasicPipelineKind::FlatColor,
         }
     }
 
@@ -121,16 +155,91 @@ impl BasicCommandList {
 
     /// Add a pipeline binding command.
     pub fn set_pipeline(&mut self, pipeline: BasicPipelineKind) {
+        if self.current_pipeline == pipeline {
+            return;
+        }
+        self.current_pipeline = pipeline;
         self.commands.push(GraphicCommand::SetPipeline(pipeline));
     }
 
     /// Add a mesh drawing command.
     pub fn draw_mesh(&mut self, mesh_id: usize, transform: Mat4, color: [u8; 4]) {
+        let instance = BasicMeshInstance { transform, color };
+        let can_extend_batch = matches!(
+            self.commands.last(),
+            Some(GraphicCommand::DrawMeshBatch {
+                mesh_id: batch_mesh_id,
+                instances,
+            }) if *batch_mesh_id == mesh_id
+                && color[3] == u8::MAX
+                && instances.iter().all(|instance| instance.color[3] == u8::MAX)
+        );
+        if can_extend_batch {
+            if let Some(GraphicCommand::DrawMeshBatch { instances, .. }) = self.commands.last_mut()
+            {
+                instances.push(instance);
+            }
+            return;
+        }
+
+        let can_promote_previous = matches!(
+            self.commands.last(),
+            Some(GraphicCommand::DrawMesh {
+                mesh_id: previous_mesh_id,
+                color: previous_color,
+                ..
+            }) if *previous_mesh_id == mesh_id
+                && color[3] == u8::MAX
+                && previous_color[3] == u8::MAX
+        );
+        if can_promote_previous {
+            let previous = self.commands.pop().expect("mesh command was just checked");
+            if let GraphicCommand::DrawMesh {
+                transform, color, ..
+            } = previous
+            {
+                self.commands.push(GraphicCommand::DrawMeshBatch {
+                    mesh_id,
+                    instances: vec![BasicMeshInstance { transform, color }, instance],
+                });
+                return;
+            }
+        }
+
         self.commands.push(GraphicCommand::DrawMesh {
             mesh_id,
             transform,
             color,
         });
+    }
+
+    /// Record a batch explicitly when a producer already grouped identical
+    /// mesh/material work. Singletons stay as the regular draw command so the
+    /// backend does not pay an instancing setup cost for one object.
+    pub fn draw_mesh_batch<I>(&mut self, mesh_id: usize, instances: I)
+    where
+        I: IntoIterator<Item = BasicMeshInstance>,
+    {
+        let instances = instances.into_iter().collect::<Vec<_>>();
+        if instances
+            .iter()
+            .any(|instance| instance.color[3] != u8::MAX)
+        {
+            for instance in instances {
+                self.draw_mesh(mesh_id, instance.transform, instance.color);
+            }
+            return;
+        }
+        match instances.len() {
+            0 => {}
+            1 => {
+                let instance = instances[0];
+                self.draw_mesh(mesh_id, instance.transform, instance.color);
+            }
+            _ => self
+                .commands
+                .push(GraphicCommand::DrawMeshBatch { mesh_id, instances }),
+        }
     }
 
     /// Add a line drawing command.
@@ -168,6 +277,21 @@ impl BasicCommandList {
         });
     }
 
+    /// Add a screen-space overlay triangle. Adjacent triangles are grouped so
+    /// a gizmo can submit its outline and fill with one backend draw call.
+    pub fn draw_screen_triangle(&mut self, triangle: BasicScreenTriangle) {
+        if let Some(GraphicCommand::DrawScreenTriangleBatch { triangles }) =
+            self.commands.last_mut()
+        {
+            triangles.push(triangle);
+            return;
+        }
+
+        self.commands.push(GraphicCommand::DrawScreenTriangleBatch {
+            triangles: vec![triangle],
+        });
+    }
+
     /// Add a grid drawing command.
     pub fn draw_grid(&mut self, grid_y: f32, spacing: f32, no_depth_test: bool) {
         self.commands.push(GraphicCommand::DrawGrid {
@@ -202,6 +326,7 @@ impl BasicCommandList {
         self.meshes.clear();
         self.mesh_ids.clear();
         self.mesh_cacheable.clear();
+        self.current_pipeline = BasicPipelineKind::FlatColor;
     }
 }
 
@@ -242,6 +367,28 @@ mod tests {
             &commands.commands()[1],
             GraphicCommand::DrawLineBatch { lines, no_depth_test: true }
                 if lines.len() == 1
+        ));
+    }
+
+    #[test]
+    fn adjacent_meshes_promote_to_an_instance_batch() {
+        let mut commands = BasicCommandList::new();
+        let mesh = Arc::new(BasicMesh::new(
+            vec![BasicVertex {
+                position: Vec3::ZERO,
+                normal: Vec3::Y,
+                uv: [0.0, 0.0],
+            }],
+            vec![0],
+        ));
+        let mesh_id = commands.register_mesh(mesh);
+        commands.draw_mesh(mesh_id, Mat4::IDENTITY, [255, 0, 0, 255]);
+        commands.draw_mesh(mesh_id, Mat4::from_translation(Vec3::X), [0, 255, 0, 255]);
+
+        assert!(matches!(
+            &commands.commands()[0],
+            GraphicCommand::DrawMeshBatch { mesh_id: id, instances }
+                if *id == mesh_id && instances.len() == 2
         ));
     }
 }
