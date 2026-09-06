@@ -54,6 +54,21 @@ pub enum UiAction {
         key: String,
         value: f32,
     },
+    SetColorHsv {
+        key: String,
+        hue: f32,
+        saturation: f32,
+        value: f32,
+    },
+    SetSelect {
+        key: String,
+        value: String,
+        index: usize,
+    },
+    SetSelectOpen {
+        id: String,
+        open: bool,
+    },
     SetText {
         key: String,
         value: String,

@@ -509,6 +509,32 @@ impl InputRouter {
         self.keyboard = None;
     }
 
+    /// Reconciles captures before a new frame is routed to any consumer.
+    ///
+    /// `finish_frame` normally releases these captures after the UI and
+    /// viewport have seen the snapshot. A native surface can nevertheless be
+    /// replaced between two consumers (for example when a dock tab changes)
+    /// or after a focus transition. Clearing captures that no longer have a
+    /// physical button down prevents an obsolete owner from starving every
+    /// following surface.
+    pub fn reconcile_input(&mut self, input: &InputSnapshot) {
+        if !input.window_focused {
+            self.cancel_all();
+            return;
+        }
+        for button in [
+            PointerButton::Primary,
+            PointerButton::Secondary,
+            PointerButton::Middle,
+            PointerButton::Back,
+            PointerButton::Forward,
+        ] {
+            if input.button_pressed(button) || !input.button_down(button) {
+                self.release_pointer_unchecked(button);
+            }
+        }
+    }
+
     /// Enforces release/focus invariants after all consumers process a frame.
     pub fn finish_frame(&mut self, input: &InputSnapshot) {
         if !input.window_focused {
@@ -526,5 +552,53 @@ impl InputRouter {
                 self.release_pointer_unchecked(button);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reconcile_input_releases_capture_when_a_new_press_replaces_a_stale_owner() {
+        let owner = InputOwner::ViewportGizmo;
+        let mut router = InputRouter::default();
+        assert!(router.try_capture_pointer(
+            PointerButton::Primary,
+            owner,
+            CaptureMode::Exclusive,
+            [10.0, 10.0],
+            1.0,
+        ));
+
+        let mut input = InputSnapshot::default();
+        input.pointer_buttons_down.insert(PointerButton::Primary);
+        input.pointer_pressed_buttons.insert(PointerButton::Primary);
+        router.reconcile_input(&input);
+
+        assert_eq!(router.pointer_owner(PointerButton::Primary), None);
+    }
+
+    #[test]
+    fn reconcile_input_cancels_every_capture_when_the_window_is_unfocused() {
+        let owner = InputOwner::ViewportCamera;
+        let mut router = InputRouter::default();
+        assert!(router.try_capture_pointer(
+            PointerButton::Middle,
+            owner,
+            CaptureMode::PerButton,
+            [0.0, 0.0],
+            1.0,
+        ));
+        assert!(router.try_capture_keyboard(owner));
+
+        let input = InputSnapshot {
+            window_focused: false,
+            ..InputSnapshot::default()
+        };
+        router.reconcile_input(&input);
+
+        assert!(!router.has_pointer_capture());
+        assert_eq!(router.keyboard_owner(), None);
     }
 }

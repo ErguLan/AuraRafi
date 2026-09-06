@@ -8,38 +8,45 @@ use serde::{Deserialize, Serialize};
 /// Permission mode for the Agent panel.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum AgentMode {
-    /// Ask for approval before destructive commands.
+    /// Native project perception only. Mutation tools are not advertised.
+    Inspect,
+    /// Read normally and preview mutations against disposable state.
+    #[serde(alias = "Passive")]
     #[default]
-    Passive,
-    /// Execute destructive commands immediately. The user must accept the risk.
+    Plan,
+    /// Execute mutations immediately through the shared command gateway.
     Active,
 }
 
 impl AgentMode {
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Passive => "Passive",
+            Self::Inspect => "Inspect",
+            Self::Plan => "Plan",
             Self::Active => "Active",
         }
     }
 
     pub fn label_es(&self) -> &'static str {
         match self {
-            Self::Passive => "Pasivo",
+            Self::Inspect => "Inspeccionar",
+            Self::Plan => "Plan",
             Self::Active => "Activo",
         }
     }
 
     pub fn description(&self) -> &'static str {
         match self {
-            Self::Passive => "Asks for approval before destructive or system-level commands.",
+            Self::Inspect => "Reads native project state without exposing mutation tools.",
+            Self::Plan => "Reads normally and previews mutations without changing the project.",
             Self::Active => "Executes commands immediately. Faster, but review the risk warning.",
         }
     }
 
     pub fn description_es(&self) -> &'static str {
         match self {
-            Self::Passive => "Pide aprobacion antes de comandos destructivos o de sistema.",
+            Self::Inspect => "Lee el estado nativo sin exponer herramientas de mutacion.",
+            Self::Plan => "Lee normalmente y previsualiza cambios sin modificar el proyecto.",
             Self::Active => {
                 "Ejecuta comandos inmediatamente. Mas rapido, pero revisa la advertencia de riesgo."
             }

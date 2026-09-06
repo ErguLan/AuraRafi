@@ -44,4 +44,8 @@ pub use mesh_provider::{MeshChunk, MeshProviderConfig, MeshProviderState, MeshPr
 pub use openai_client::{OpenAiClient, OpenAiConfig, DEFAULT_MAX_TOKENS};
 pub use provider::{AgentMode, AiModelShortcut, AiProvider, AiProviderConfig};
 pub use puerto::{ConnectionStatus, PuertoClient, PuertoConfig};
+pub use raf_core::{
+    AgentTaskEvent, AgentTaskHandle, AgentTaskId, AgentTaskManager, AgentTaskProgress,
+    AgentTaskSnapshot, AgentTaskStatus,
+};
 pub use tool_registry::{ToolDefinition, ToolParameter, ToolRegistry};

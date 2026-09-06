@@ -6,9 +6,10 @@
 use std::path::Path;
 
 use raf_render::api_graphic_basic::ui_surface::{
-    StudioUiPalette, UiAlign, UiEventBinding, UiEventKind, UiFlow, UiIcon, UiIconId, UiIconSize,
-    UiJustify, UiLayout, UiNode, UiNodeKind, UiOverflow, UiScrollAxis, UiSizeMode, UiSpacing,
-    UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurface,
+    StudioUiPalette, UiAccessibilityRole, UiAlign, UiCompactMode, UiEventBinding, UiEventKind,
+    UiFlow, UiFontWeight, UiIcon, UiIconId, UiIconSize, UiJustify, UiLayout, UiNode, UiNodeKind,
+    UiOverflow, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle, UiStylePatch, UiStyleRule,
+    UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurface, UiSurfaceMaterial, UiTextOverflow,
     UiTextRole, UiTextStyle, UiToggle,
 };
 
@@ -177,6 +178,7 @@ fn drag_preview_tab(preview: &BottomTabDragPreview) -> UiNode {
     let border_alpha = (180.0 + pulse * 75.0) as u8;
     UiNode::new("bottom.tab.drag-preview", UiNodeKind::Panel)
         .with_class("bottom-tab-drag-preview")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
@@ -213,6 +215,7 @@ pub fn build_drop_preview_surface(
         "editor.downbar.split_right"
     };
     let root = UiNode::new("bottom.drop-preview", UiNodeKind::Panel)
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             align_items: UiAlign::Center,
@@ -326,6 +329,7 @@ pub fn build_tab_context_menu_surface(
     let tokens = palette.tokens();
     let mut root = UiNode::new("bottom.tab-context", UiNodeKind::Menu)
         .with_class("bottom-tab-context")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 2.0,
@@ -592,7 +596,7 @@ pub fn build_console_surface(
         .with_class("bottom-panel")
         .with_layout(UiLayout::fill(UiFlow::Column))
         .with_style(palette.panel_style())
-        .with_child(console_toolbar(palette, console))
+        .with_child(console_toolbar(palette, console, filtered_count))
         .with_child(log_scroll);
     if input_enabled && console.input().trim_start().starts_with('/') {
         root = root.with_child(
@@ -627,7 +631,11 @@ pub fn console_visible_range(
     (range.start, range.end)
 }
 
-fn console_toolbar(palette: StudioUiPalette, console: &ConsolePanel) -> UiNode {
+fn console_toolbar(
+    palette: StudioUiPalette,
+    console: &ConsolePanel,
+    filtered_count: usize,
+) -> UiNode {
     let tokens = palette.tokens();
     let mut toolbar = UiNode::new("console.toolbar", UiNodeKind::Toolbar)
         .with_class("console-toolbar")
@@ -687,7 +695,16 @@ fn console_toolbar(palette: StudioUiPalette, console: &ConsolePanel) -> UiNode {
                 )),
         );
     }
-    toolbar
+    toolbar.with_child(
+        UiNode::new("console.count", UiNodeKind::Label)
+            .with_class("console-count")
+            .with_text_value(format!("{filtered_count} entries"))
+            .with_text_style(UiTextStyle::body(tokens.text_muted))
+            .with_layout(UiLayout {
+                grow: 1.0,
+                ..UiLayout::fit_content().with_text_safe_area(true)
+            }),
+    )
 }
 
 fn console_entry(
@@ -697,25 +714,27 @@ fn console_entry(
     expanded: bool,
 ) -> UiNode {
     let tokens = palette.tokens();
-    let color = match entry.level {
-        LogLevel::Info => tokens.text,
-        LogLevel::Warning => tokens.warning,
-        LogLevel::Error => tokens.danger,
+    let (level_icon, color) = match entry.level {
+        LogLevel::Info => (UiIconId::Console, tokens.text),
+        LogLevel::Warning => (UiIconId::Warning, tokens.warning),
+        LogLevel::Error => (UiIconId::Error, tokens.danger),
+    };
+    let row_class = match (entry.block.is_some(), entry.sender.is_some()) {
+        (true, _) => "console-entry console-block",
+        (false, true) => "console-entry console-entry-user",
+        (false, false) => "console-entry",
     };
     let mut row = UiNode::new(format!("console.entry.{id}"), UiNodeKind::Panel)
-        .with_class(if entry.block.is_some() {
-            "console-entry console-block"
-        } else {
-            "console-entry"
-        })
+        .with_class(row_class)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             align_items: UiAlign::Stretch,
             gap: 1.0,
-            ..UiLayout::fit_content()
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         });
 
     let mut header = UiNode::new(format!("console.entry.{id}.header"), UiNodeKind::Toolbar)
+        .with_class("console-entry-header")
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
@@ -725,6 +744,16 @@ fn console_entry(
             overflow: UiOverflow::Clip,
             ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
         })
+        .with_child(
+            UiNode::new(format!("console.entry.{id}.level"), UiNodeKind::Label)
+                .with_class("console-level-icon")
+                .with_icon(
+                    UiIcon::new(level_icon)
+                        .with_size(UiIconSize::Small)
+                        .with_tint(color),
+                )
+                .with_layout(UiLayout::fixed(16.0, 18.0)),
+        )
         .with_child(
             UiNode::new(format!("console.entry.{id}.timestamp"), UiNodeKind::Label)
                 .with_text_value(entry.timestamp.clone())
@@ -769,7 +798,7 @@ fn console_entry(
                 align_items: UiAlign::Stretch,
                 gap: 1.0,
                 padding: UiSpacing {
-                    left: 68.0,
+                    left: 98.0,
                     right: 4.0,
                     top: 0.0,
                     bottom: 2.0,
@@ -786,8 +815,11 @@ fn console_entry(
                 .with_text_value(line.clone())
                 .with_layout(UiLayout {
                     align_self: Some(UiAlign::Stretch),
+                    width_mode: UiSizeMode::Fill,
+                    overflow: UiOverflow::Clip,
                     ..UiLayout::fit_content()
                 })
+                .with_text_overflow(UiTextOverflow::Wrap)
                 .with_text_style(UiTextStyle {
                     role: UiTextRole::Monospace,
                     size_px: 10.0,
@@ -810,7 +842,7 @@ fn console_entry(
             .focusable()
             .with_event(UiEventBinding::command(
                 UiEventKind::Click,
-                format!("console.block.toggle.{id}"),
+                format!("console.block.toggle:{id}"),
             )),
         );
         if expanded {
@@ -818,6 +850,7 @@ fn console_entry(
                 UiNode::new(format!("console.entry.{id}.json"), UiNodeKind::Label)
                     .with_text_value(block.json.clone())
                     .with_layout(UiLayout {
+                        width_mode: UiSizeMode::Fill,
                         max_size: [0.0, 96.0],
                         align_self: Some(UiAlign::Stretch),
                         ..UiLayout::fit_content()
@@ -870,24 +903,25 @@ pub fn build_assets_surface(
         })
         .unwrap_or((0, total_rows));
 
-    let mut list = UiNode::scroll_view("assets.list", UiScrollAxis::Vertical)
-        .with_class("assets-list")
+    let mut grid = UiNode::scroll_view("assets.grid", UiScrollAxis::Vertical)
+        .with_class("assets-grid")
         .with_layout(UiLayout {
-            flow: UiFlow::Column,
+            flow: UiFlow::Row,
             grow: 1.0,
-            gap: ASSET_ROW_GAP,
-            padding: UiSpacing::xy(8.0, 8.0),
+            gap: ASSET_CARD_GAP,
+            padding: UiSpacing::xy(12.0, 12.0),
             overflow: UiOverflow::ScrollY,
+            compact: UiCompactMode::Wrap,
             ..UiLayout::default()
         });
     if start > 0 {
-        list = list.with_child(spacer(
+        grid = grid.with_child(spacer(
             "assets.top-spacer",
             asset_virtual_spacer_height(start),
         ));
     }
     for (source_index, row) in filtered_rows.iter().skip(start).take(end - start) {
-        list = list.with_child(asset_row(
+        grid = grid.with_child(asset_card(
             palette,
             *source_index,
             row.as_str(),
@@ -895,7 +929,7 @@ pub fn build_assets_surface(
         ));
     }
     if end < total_rows {
-        list = list.with_child(spacer(
+        grid = grid.with_child(spacer(
             "assets.bottom-spacer",
             asset_virtual_spacer_height(total_rows - end),
         ));
@@ -930,176 +964,86 @@ pub fn build_assets_surface(
                     .with_text_style(UiTextStyle::body(tokens.text_muted)),
             );
         }
-        list = list.with_child(empty);
+        grid = grid.with_child(empty);
     }
 
     let mut root = UiNode::new("assets.root", UiNodeKind::Panel)
         .with_class("bottom-panel")
-        .with_layout(UiLayout::fill(UiFlow::Column))
+        .with_layout(UiLayout::fill(UiFlow::Row))
         .with_style(palette.panel_style())
+        .with_child(asset_sidebar(palette, filter))
         .with_child(
-            UiNode::new("assets.toolbar", UiNodeKind::Toolbar)
-                .with_class("assets-toolbar")
-                .with_layout(UiLayout {
-                    flow: UiFlow::Row,
-                    align_items: UiAlign::Center,
-                    gap: 5.0,
-                    padding: UiSpacing::xy(8.0, 3.0),
-                    ..UiLayout::fixed(0.0, 34.0)
-                })
+            UiNode::new("assets.content", UiNodeKind::Panel)
+                .with_class("assets-content")
+                .with_layout(UiLayout::fill(UiFlow::Column))
                 .with_child(
-                    UiNode::text_input(
-                        "assets.search",
-                        raf_ui::UiTextInput {
-                            value_key: "assets.search".to_string(),
-                            placeholder_key: Some("app.search".to_string()),
-                            max_length: 256,
-                            multiline: false,
-                            password: false,
-                            submit_command: None,
-                        },
-                    )
-                    .with_class("asset-search")
-                    .with_icon(UiIcon::new(UiIconId::Search).with_size(UiIconSize::Small))
-                    .with_accessibility_label_key("app.search")
-                    .with_layout(UiLayout {
-                        grow: 1.0,
-                        min_size: [80.0, 28.0],
-                        ..UiLayout::fixed(0.0, 28.0)
-                    }),
+                    UiNode::new("assets.toolbar", UiNodeKind::Toolbar)
+                        .with_class("assets-toolbar")
+                        .with_layout(UiLayout {
+                            flow: UiFlow::Row,
+                            align_items: UiAlign::Center,
+                            gap: 6.0,
+                            padding: UiSpacing::xy(10.0, 4.0),
+                            ..UiLayout::fixed(0.0, 36.0)
+                        })
+                        .with_child(
+                            UiNode::new("assets.create-script", UiNodeKind::Button)
+                                .with_class("asset-action asset-create-script")
+                                .with_icon(UiIcon::new(UiIconId::Node).with_size(UiIconSize::Small))
+                                .with_text_key("app.create_script")
+                                .with_accessibility_label_key("app.create_script")
+                                .with_layout(UiLayout::fit_content().with_text_safe_area(true))
+                                .focusable()
+                                .with_event(UiEventBinding::command(
+                                    UiEventKind::Click,
+                                    "assets.create-script",
+                                ))
+                                .with_event(UiEventBinding::command(
+                                    UiEventKind::KeyPress("enter".to_string()),
+                                    "assets.create-script",
+                                ))
+                                .with_event(UiEventBinding::command(
+                                    UiEventKind::KeyPress("space".to_string()),
+                                    "assets.create-script",
+                                )),
+                        )
+                        .with_child(
+                            UiNode::new("assets.create-primitive", UiNodeKind::Button)
+                                .with_class("asset-action asset-create-primitive")
+                                .with_icon(UiIcon::new(UiIconId::Cube).with_size(UiIconSize::Small))
+                                .with_text_key("app.create_primitive")
+                                .with_accessibility_label_key("app.create_primitive")
+                                .with_layout(UiLayout::fit_content().with_text_safe_area(true))
+                                .focusable()
+                                .with_event(UiEventBinding::command(
+                                    UiEventKind::Click,
+                                    "assets.create-primitive.toggle",
+                                )),
+                        )
+                        .with_child(
+                            UiNode::new("assets.refresh", UiNodeKind::Button)
+                                .with_class("asset-action")
+                                .with_icon(UiIcon::new(UiIconId::Undo).with_size(UiIconSize::Small))
+                                .with_tooltip_key("app.refresh_assets")
+                                .with_accessibility_label_key("app.refresh_assets")
+                                .with_layout(UiLayout::fixed(28.0, 28.0))
+                                .focusable()
+                                .with_event(UiEventBinding::command(
+                                    UiEventKind::Click,
+                                    "assets.refresh",
+                                ))
+                                .with_event(UiEventBinding::command(
+                                    UiEventKind::KeyPress("enter".to_string()),
+                                    "assets.refresh",
+                                ))
+                                .with_event(UiEventBinding::command(
+                                    UiEventKind::KeyPress("space".to_string()),
+                                    "assets.refresh",
+                                )),
+                        ),
                 )
-                .with_child(
-                    UiNode::new("assets.open-folder", UiNodeKind::Button)
-                        .with_class("asset-action")
-                        .with_icon(UiIcon::new(UiIconId::Folder).with_size(UiIconSize::Small))
-                        .with_tooltip_key("app.open_folder")
-                        .with_accessibility_label_key("app.open_folder")
-                        .with_layout(UiLayout::fixed(28.0, 28.0))
-                        .focusable()
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::Click,
-                            "assets.open-folder",
-                        ))
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::KeyPress("enter".to_string()),
-                            "assets.open-folder",
-                        ))
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::KeyPress("space".to_string()),
-                            "assets.open-folder",
-                        )),
-                )
-                .with_child(
-                    UiNode::new("assets.refresh", UiNodeKind::Button)
-                        .with_class("asset-action")
-                        .with_icon(UiIcon::new(UiIconId::Undo).with_size(UiIconSize::Small))
-                        .with_tooltip_key("app.refresh_assets")
-                        .with_accessibility_label_key("app.refresh_assets")
-                        .with_layout(UiLayout::fixed(28.0, 28.0))
-                        .focusable()
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::Click,
-                            "assets.refresh",
-                        ))
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::KeyPress("enter".to_string()),
-                            "assets.refresh",
-                        ))
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::KeyPress("space".to_string()),
-                            "assets.refresh",
-                        )),
-                )
-                .with_child(
-                    UiNode::new("assets.create-script", UiNodeKind::Button)
-                        .with_class("asset-action asset-create-script")
-                        .with_icon(UiIcon::new(UiIconId::Node).with_size(UiIconSize::Small))
-                        .with_text_key("app.create_script")
-                        .with_accessibility_label_key("app.create_script")
-                        .with_layout(UiLayout::fit_content().with_text_safe_area(true))
-                        .focusable()
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::Click,
-                            "assets.create-script",
-                        ))
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::KeyPress("enter".to_string()),
-                            "assets.create-script",
-                        ))
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::KeyPress("space".to_string()),
-                            "assets.create-script",
-                        )),
-                )
-                .with_child(
-                    UiNode::new("assets.create-primitive", UiNodeKind::Button)
-                        .with_class("asset-action asset-create-primitive")
-                        .with_icon(UiIcon::new(UiIconId::Cube).with_size(UiIconSize::Small))
-                        .with_text_key("app.create_primitive")
-                        .with_accessibility_label_key("app.create_primitive")
-                        .with_layout(UiLayout::fit_content().with_text_safe_area(true))
-                        .focusable()
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::Click,
-                            "assets.create-primitive.toggle",
-                        )),
-                )
-                .with_child(
-                    UiNode::new("assets.create-file", UiNodeKind::Button)
-                        .with_class("asset-action asset-create-file")
-                        .with_icon(UiIcon::new(UiIconId::Add).with_size(UiIconSize::Small))
-                        .with_tooltip_key("app.create_file")
-                        .with_accessibility_label_key("app.create_file")
-                        .with_layout(UiLayout::fixed(28.0, 28.0))
-                        .focusable()
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::Click,
-                            "assets.create-file",
-                        )),
-                ),
+                .with_child(grid),
         );
-
-    root = root.with_child(
-        UiNode::new("assets.filters", UiNodeKind::Toolbar)
-            .with_class("assets-filters")
-            .with_layout(UiLayout {
-                flow: UiFlow::Row,
-                align_items: UiAlign::Center,
-                gap: 4.0,
-                padding: UiSpacing::xy(8.0, 1.0),
-                ..UiLayout::fixed(0.0, 29.0)
-            })
-            .with_child(
-                UiNode::new("assets.filters.icon", UiNodeKind::Label)
-                    .with_icon(UiIcon::new(UiIconId::Filter).with_size(UiIconSize::Small))
-                    .with_layout(UiLayout::fixed(18.0, 24.0)),
-            )
-            .with_child(asset_filter_button(
-                "all",
-                "app.all",
-                filter == AssetFilter::All,
-            ))
-            .with_child(asset_filter_button(
-                "images",
-                "app.images",
-                filter == AssetFilter::Images,
-            ))
-            .with_child(asset_filter_button(
-                "models",
-                "app.models",
-                filter == AssetFilter::Models,
-            ))
-            .with_child(asset_filter_button(
-                "audio",
-                "app.audio",
-                filter == AssetFilter::Audio,
-            ))
-            .with_child(asset_filter_button(
-                "scripts",
-                "app.scripts_filter",
-                filter == AssetFilter::Scripts,
-            )),
-    );
 
     if script_menu_open {
         root = root.with_child(script_template_popover(palette, script_name));
@@ -1107,133 +1051,248 @@ pub fn build_assets_surface(
     if file_menu_open {
         root = root.with_child(file_create_popover(palette, file_name));
     }
-    root = root.with_child(list);
 
     let mut surface = UiSurface::new("editor.bottom.assets", palette, root);
     surface.style_sheet = bottom_style_sheet(palette);
     surface
 }
 
-fn primitive_create_modal_root(palette: StudioUiPalette) -> UiNode {
+fn asset_sidebar(palette: StudioUiPalette, active: AssetFilter) -> UiNode {
     let tokens = palette.tokens();
-    UiNode::new("assets.primitive-modal-root", UiNodeKind::Overlay)
-        .with_class("asset-primitive-modal-root")
+    let mut sidebar = UiNode::new("assets.sidebar", UiNodeKind::Panel)
+        .with_class("assets-sidebar")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            align_items: UiAlign::Center,
-            justify_content: UiJustify::Center,
-            ..UiLayout::fill(UiFlow::Column)
+            basis: [ASSET_SIDEBAR_WIDTH, 0.0],
+            width_mode: UiSizeMode::Fixed,
+            height_mode: UiSizeMode::Fill,
+            min_size: [ASSET_SIDEBAR_WIDTH, 0.0],
+            gap: 2.0,
+            padding: UiSpacing::xy(8.0, 10.0),
+            ..UiLayout::default()
         })
         .with_style(UiStyle {
-            fill: [5, 8, 13, 238],
-            border: tokens.border,
-            text: tokens.text,
-            border_width: 0.0,
-            radius: 0.0,
-            opacity: 1.0,
-        })
-        .focusable()
-        .with_event(UiEventBinding::command(
-            UiEventKind::KeyPress("escape".to_string()),
-            "assets.create-primitive.cancel",
-        ))
-        .with_child(primitive_create_modal(palette))
-}
-
-fn primitive_create_modal(palette: StudioUiPalette) -> UiNode {
-    let tokens = palette.tokens();
-    let mut modal = UiNode::new("assets.primitive-modal", UiNodeKind::Panel)
-        .with_class("asset-primitive-modal")
-        .with_layout(UiLayout {
-            flow: UiFlow::Column,
-            gap: 8.0,
-            padding: UiSpacing::same(16.0),
-            ..UiLayout::fixed(420.0, 258.0).with_z_index(220)
-        })
-        .with_style(UiStyle {
-            fill: tokens.surface_raised,
+            fill: tokens.surface_alt,
             border: tokens.border,
             text: tokens.text,
             border_width: 1.0,
-            radius: 8.0,
+            radius: 0.0,
             opacity: 1.0,
         })
         .with_child(
-            UiNode::new("assets.primitive-modal.header", UiNodeKind::Toolbar)
-                .with_layout(UiLayout {
-                    flow: UiFlow::Row,
-                    align_items: UiAlign::Center,
-                    gap: 9.0,
-                    ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
-                })
-                .with_icon(
-                    UiIcon::new(UiIconId::Cube)
-                        .with_size(UiIconSize::Toolbar)
-                        .with_tint(tokens.accent),
-                )
-                .with_text_key("app.create_primitive")
-                .with_text_style(UiTextStyle::panel_title(tokens.text))
-                .with_child(
-                    UiNode::new("assets.primitive-modal.header.spacer", UiNodeKind::Panel)
-                        .with_layout(UiLayout {
-                            grow: 1.0,
-                            ..UiLayout::default()
-                        }),
-                )
-                .with_child(
-                    UiNode::new("assets.primitive-modal.close", UiNodeKind::Button)
-                        .with_icon(UiIcon::new(UiIconId::Close).with_size(UiIconSize::Small))
-                        .with_tooltip_key("app.cancel")
-                        .with_accessibility_label_key("app.cancel")
-                        .with_layout(UiLayout::fixed(26.0, 26.0))
-                        .focusable()
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::Click,
-                            "assets.create-primitive.cancel",
-                        )),
-                ),
+            UiNode::text_input(
+                "assets.search",
+                raf_ui::UiTextInput {
+                    value_key: "assets.search".to_string(),
+                    placeholder_key: Some("app.search".to_string()),
+                    max_length: 256,
+                    multiline: false,
+                    password: false,
+                    submit_command: None,
+                },
+            )
+            .with_class("asset-search")
+            .with_icon(UiIcon::new(UiIconId::Search).with_size(UiIconSize::Small))
+            .with_accessibility_label_key("app.search")
+            .with_layout(UiLayout {
+                grow: 1.0,
+                min_size: [0.0, 28.0],
+                ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
+            }),
         )
         .with_child(
-            UiNode::new("assets.primitive-modal.hint", UiNodeKind::Label)
-                .with_text_key("app.create_primitive_hint")
-                .with_text_style(UiTextStyle::body(tokens.text_muted))
-                .with_layout(UiLayout::fixed(0.0, 22.0).with_width_mode(UiSizeMode::Fill)),
+            UiNode::new("assets.sidebar.title", UiNodeKind::Label)
+                .with_text_key("app.assets_category_title")
+                .with_text_style(UiTextStyle {
+                    role: UiTextRole::PanelTitle,
+                    size_px: 10.0,
+                    line_height_px: 14.0,
+                    weight: UiFontWeight::Bold,
+                    color: tokens.text_muted,
+                    inherit_color: false,
+                })
+                .with_layout(UiLayout::fit_content()),
         );
-    for (row, primitives) in CREATEABLE_PRIMITIVES.chunks(2).enumerate() {
-        let mut group = UiNode::new(
-            format!("assets.primitive-modal.row.{row}"),
-            UiNodeKind::Toolbar,
-        )
+    sidebar = sidebar
+        .with_child(asset_category_row(
+            palette,
+            "all",
+            UiIconId::Assets,
+            "app.assets_category_all",
+            active == AssetFilter::All,
+        ))
+        .with_child(asset_category_row(
+            palette,
+            "models",
+            UiIconId::Folder,
+            "app.models",
+            active == AssetFilter::Models,
+        ))
+        .with_child(asset_category_row(
+            palette,
+            "images",
+            UiIconId::Shaded,
+            "app.images",
+            active == AssetFilter::Images,
+        ))
+        .with_child(asset_category_row(
+            palette,
+            "audio",
+            UiIconId::Play,
+            "app.audio",
+            active == AssetFilter::Audio,
+        ))
+        .with_child(asset_category_row(
+            palette,
+            "scripts",
+            UiIconId::Node,
+            "app.scripts_filter",
+            active == AssetFilter::Scripts,
+        ));
+    sidebar = sidebar.with_child(
+        UiNode::new("assets.sidebar.spacer", UiNodeKind::Panel).with_layout(UiLayout {
+            grow: 1.0,
+            ..UiLayout::default()
+        }),
+    );
+    sidebar
+}
+
+fn asset_category_row(
+    palette: StudioUiPalette,
+    id: &str,
+    icon: UiIconId,
+    label_key: &str,
+    active: bool,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let is_active = active;
+    let command = format!("assets.filter.{id}");
+    UiNode::new(format!("assets.sidebar.row.{id}"), UiNodeKind::Button)
+        .with_class(if is_active {
+            "asset-category asset-category-active"
+        } else {
+            "asset-category"
+        })
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
             gap: 8.0,
-            ..UiLayout::fixed(0.0, 60.0).with_width_mode(UiSizeMode::Fill)
+            padding: UiSpacing::xy(8.0, 4.0),
+            ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_style(UiStyle {
+            fill: if is_active {
+                tokens.surface
+            } else {
+                [0, 0, 0, 0]
+            },
+            border: if is_active {
+                tokens.focus
+            } else {
+                [0, 0, 0, 0]
+            },
+            text: if is_active {
+                tokens.text
+            } else {
+                tokens.text_muted
+            },
+            border_width: if is_active { 1.0 } else { 0.0 },
+            radius: if is_active { 3.0 } else { 0.0 },
+            opacity: 1.0,
+        })
+        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
+        .with_text_key(label_key)
+        .with_text_style(UiTextStyle::body(if is_active {
+            tokens.text
+        } else {
+            tokens.text_muted
+        }))
+        .with_text_overflow(UiTextOverflow::Ellipsis)
+        .with_tooltip_key(label_key)
+        .with_accessibility_label_key(label_key)
+        .with_accessibility_role(UiAccessibilityRole::Tab)
+        .with_accessibility_selected(is_active)
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command.clone()))
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("enter".to_string()),
+            command.clone(),
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("space".to_string()),
+            command,
+        ))
+}
+
+fn primitive_create_modal_root(palette: StudioUiPalette) -> UiNode {
+    let tokens = palette.tokens();
+    let mut popover = UiNode::new("assets.primitive-popover", UiNodeKind::Menu)
+        .with_class("asset-primitive-popover")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 6.0,
+            padding: UiSpacing::xy(10.0, 8.0),
+            align_self: Some(UiAlign::Stretch),
+            ..UiLayout::fixed(284.0, 0.0)
+                .with_height_mode(UiSizeMode::FitContent)
+                .with_z_index(40)
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface_raised,
+            border: tokens.accent,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: 5.0,
+            opacity: 1.0,
+        })
+        .with_accessibility_label_key("app.create_primitive")
+        .focusable()
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("escape".to_string()),
+            "assets.create-primitive.cancel",
+        ));
+    popover = popover.with_child(
+        UiNode::new("assets.primitive-popover.title", UiNodeKind::Label)
+            .with_text_key("app.create_primitive")
+            .with_text_style(UiTextStyle::panel_title(tokens.text))
+            .with_layout(UiLayout::fit_content()),
+    );
+    let mut grid =
+        UiNode::new("assets.primitive-popover.grid", UiNodeKind::Toolbar).with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            justify_content: UiJustify::Center,
+            gap: 6.0,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         });
-        for primitive in primitives {
-            group = group.with_child(asset_primitive_modal_option(palette, *primitive));
-        }
-        modal = modal.with_child(group);
+    for primitive in &CREATEABLE_PRIMITIVES {
+        grid = grid.with_child(asset_primitive_modal_option(palette, *primitive));
     }
-    modal.with_child(
-        UiNode::new("assets.primitive-modal.footer", UiNodeKind::Toolbar)
-            .with_layout(UiLayout {
-                flow: UiFlow::Row,
-                align_items: UiAlign::Center,
-                justify_content: UiJustify::End,
-                ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
-            })
-            .with_child(
-                UiNode::new("assets.primitive-modal.footer.cancel", UiNodeKind::Button)
-                    .with_text_key("app.cancel")
-                    .with_text_style(UiTextStyle::button(tokens.text_muted))
-                    .with_layout(UiLayout::fixed(82.0, 28.0).with_text_safe_area(true))
-                    .focusable()
-                    .with_event(UiEventBinding::command(
-                        UiEventKind::Click,
-                        "assets.create-primitive.cancel",
-                    )),
-            ),
+    popover = popover.with_child(grid);
+    popover.with_child(
+        UiNode::new("assets.primitive-popover.cancel", UiNodeKind::Button)
+            .with_class("asset-primitive-cancel")
+            .with_text_key("app.cancel")
+            .with_text_style(UiTextStyle::button(tokens.text_muted))
+            .with_layout(UiLayout::fit_content().with_text_safe_area(true))
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                "assets.create-primitive.cancel",
+            ))
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("enter".to_string()),
+                "assets.create-primitive.cancel",
+            ))
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("space".to_string()),
+                "assets.create-primitive.cancel",
+            ))
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("escape".to_string()),
+                "assets.create-primitive.cancel",
+            )),
     )
 }
 
@@ -1244,20 +1303,19 @@ fn asset_primitive_modal_option(
     let tokens = palette.tokens();
     UiNode::new(
         format!(
-            "assets.primitive-modal.option.{}",
+            "assets.primitive-popover.option.{}",
             primitive_slug(primitive)
         ),
         UiNodeKind::Button,
     )
-    .with_class("asset-primitive-modal-option")
+    .with_class("asset-primitive-popover-option")
     .with_layout(UiLayout {
-        flow: UiFlow::Row,
+        flow: UiFlow::Column,
         align_items: UiAlign::Center,
-        gap: 10.0,
-        padding: UiSpacing::xy(12.0, 0.0),
-        ..UiLayout::fixed(0.0, 60.0)
-            .with_width_mode(UiSizeMode::Fill)
-            .with_text_safe_area(true)
+        justify_content: UiJustify::Center,
+        gap: 4.0,
+        padding: UiSpacing::xy(4.0, 6.0),
+        ..UiLayout::fixed(56.0, 56.0)
     })
     .with_icon(
         UiIcon::new(match primitive {
@@ -1267,11 +1325,19 @@ fn asset_primitive_modal_option(
             raf_core::scene::Primitive::Plane => UiIconId::Plane,
             raf_core::scene::Primitive::Empty => UiIconId::Node,
         })
-        .with_size(UiIconSize::Toolbar)
+        .with_size(UiIconSize::Panel)
         .with_tint(tokens.accent),
     )
     .with_text_key(primitive_key(primitive))
-    .with_text_style(UiTextStyle::button(tokens.text))
+    .with_text_style(UiTextStyle {
+        role: UiTextRole::Label,
+        size_px: 9.0,
+        line_height_px: 11.0,
+        weight: UiFontWeight::Regular,
+        color: tokens.text,
+        inherit_color: false,
+    })
+    .with_text_overflow(UiTextOverflow::Ellipsis)
     .with_accessibility_label_key(primitive_key(primitive))
     .focusable()
     .with_event(UiEventBinding::command(
@@ -1283,6 +1349,10 @@ fn asset_primitive_modal_option(
 const ASSET_ROW_HEIGHT: f32 = 32.0;
 const ASSET_ROW_GAP: f32 = 3.0;
 const ASSET_ROW_ESTIMATE: f32 = ASSET_ROW_HEIGHT + ASSET_ROW_GAP;
+const ASSET_CARD_WIDTH: f32 = 108.0;
+const ASSET_CARD_HEIGHT: f32 = 110.0;
+const ASSET_CARD_GAP: f32 = 6.0;
+const ASSET_SIDEBAR_WIDTH: f32 = 184.0;
 
 fn asset_virtual_spacer_height(row_count: usize) -> f32 {
     if row_count == 0 {
@@ -1292,30 +1362,38 @@ fn asset_virtual_spacer_height(row_count: usize) -> f32 {
     }
 }
 
-fn asset_row(palette: StudioUiPalette, index: usize, row: &str, dragging: bool) -> UiNode {
+fn asset_card(palette: StudioUiPalette, index: usize, row: &str, dragging: bool) -> UiNode {
     let tokens = palette.tokens();
     let command = format!("assets.open:{row}");
     let drag_start = format!("assets.drag.start:{row}");
     let drag_end = format!("assets.drag.end:{row}");
     let class = if dragging {
-        "asset-row asset-row-dragging"
+        "asset-card asset-card-dragging"
     } else {
-        "asset-row"
+        "asset-card"
     };
-    UiNode::new(format!("assets.row.{index}"), UiNodeKind::Panel)
+    let display_name = asset_display_name(row);
+    UiNode::new(format!("assets.card.{index}"), UiNodeKind::Button)
         .with_class(class)
-        .with_text_value(asset_display_name(row))
         .with_layout(UiLayout {
-            flow: UiFlow::Row,
+            flow: UiFlow::Column,
             align_items: UiAlign::Center,
-            gap: 7.0,
-            padding: UiSpacing::xy(8.0, 3.0),
-            align_self: Some(UiAlign::Stretch),
-            ..UiLayout::fixed(0.0, ASSET_ROW_HEIGHT)
+            justify_content: UiJustify::Center,
+            gap: 6.0,
+            padding: UiSpacing::xy(6.0, 10.0),
+            ..UiLayout::fixed(ASSET_CARD_WIDTH, ASSET_CARD_HEIGHT)
         })
-        .with_icon(UiIcon::new(asset_icon(row)).with_size(UiIconSize::Small))
-        .with_text_style(UiTextStyle::body(tokens.text))
-        .interactive()
+        .with_style(UiStyle {
+            fill: tokens.surface,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: 4.0,
+            opacity: 1.0,
+        })
+        .with_tooltip_key(display_name.clone())
+        .with_accessibility_label_key(display_name.clone())
+        .with_accessibility_role(UiAccessibilityRole::Button)
         .focusable()
         .with_event(UiEventBinding::command(
             UiEventKind::DoubleClick,
@@ -1331,6 +1409,25 @@ fn asset_row(palette: StudioUiPalette, index: usize, row: &str, dragging: bool) 
         ))
         .with_event(UiEventBinding::command(UiEventKind::DragStart, drag_start))
         .with_event(UiEventBinding::command(UiEventKind::DragEnd, drag_end))
+        .with_child(
+            UiNode::new(format!("assets.card.{index}.icon"), UiNodeKind::Label)
+                .with_icon(UiIcon::new(asset_icon(row)).with_size(UiIconSize::Panel))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(
+            UiNode::new(format!("assets.card.{index}.label"), UiNodeKind::Label)
+                .with_text_value(display_name)
+                .with_text_style(UiTextStyle {
+                    role: UiTextRole::Label,
+                    size_px: 10.0,
+                    line_height_px: 13.0,
+                    weight: UiFontWeight::Regular,
+                    color: tokens.text,
+                    inherit_color: false,
+                })
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_layout(UiLayout::fixed(ASSET_CARD_WIDTH - 12.0, 26.0)),
+        )
 }
 
 fn asset_display_name(row: &str) -> String {
@@ -1344,6 +1441,7 @@ fn script_template_popover(palette: StudioUiPalette, _script_name: &str) -> UiNo
     let tokens = palette.tokens();
     UiNode::new("assets.script-popover", UiNodeKind::Menu)
         .with_class("asset-script-popover")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 5.0,
@@ -1458,6 +1556,7 @@ fn file_create_popover(palette: StudioUiPalette, file_name: &str) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new("assets.file-popover", UiNodeKind::Menu)
         .with_class("asset-file-popover")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 6.0,
@@ -1681,28 +1780,6 @@ pub fn build_project_surface(
     surface
 }
 
-fn asset_filter_button(id: &str, label_key: &str, active: bool) -> UiNode {
-    let command = format!("assets.filter.{id}");
-    UiNode::new(format!("assets.filter.{id}"), UiNodeKind::Button)
-        .with_class(if active {
-            "asset-filter asset-filter-active"
-        } else {
-            "asset-filter"
-        })
-        .with_text_key(label_key)
-        .with_layout(UiLayout::fit_content().with_text_safe_area(true))
-        .focusable()
-        .with_event(UiEventBinding::command(UiEventKind::Click, command.clone()))
-        .with_event(UiEventBinding::command(
-            UiEventKind::KeyPress("enter".to_string()),
-            command.clone(),
-        ))
-        .with_event(UiEventBinding::command(
-            UiEventKind::KeyPress("space".to_string()),
-            command,
-        ))
-}
-
 fn asset_matches(row: &str, query: &str, filter: AssetFilter) -> bool {
     let lower = row.to_lowercase();
     let query = query.trim().to_lowercase();
@@ -1781,10 +1858,17 @@ pub fn build_status_surface(palette: StudioUiPalette, status: &[String]) -> UiSu
                 .with_layout(UiLayout::fixed(1.0, 14.0)),
             );
         }
+        let layout = if item.starts_with("FPS: ") {
+            // FPS is patched as paint-only text. A fixed track keeps that
+            // update from invalidating the complete workbench layout.
+            UiLayout::fixed(76.0, 18.0)
+        } else {
+            UiLayout::fit_content()
+        };
         root = root.with_child(
             UiNode::new(format!("editor.status.item.{index}"), UiNodeKind::Label)
                 .with_text_value(item.clone())
-                .with_layout(UiLayout::fit_content())
+                .with_layout(layout)
                 .with_text_style(UiTextStyle::body(tokens.text_muted)),
         );
     }
@@ -2015,6 +2099,60 @@ fn bottom_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             )
             .when(UiStyleRuleState::Always),
             UiStyleRule::new(
+                UiStyleSelector::Class("console-entry".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-entry-user".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-input-row".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-json-button".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("console-json-button".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
                 UiStyleSelector::Class("console-filter-active".to_string()),
                 UiStylePatch {
                     fill: Some([116, 67, 24, 54]),
@@ -2056,82 +2194,76 @@ fn bottom_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             )
             .when(UiStyleRuleState::Hovered),
             UiStyleRule::new(
-                UiStyleSelector::Class("asset-row".to_string()),
+                UiStyleSelector::Class("asset-card".to_string()),
                 UiStylePatch {
                     fill: Some(tokens.surface),
                     border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(4.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-card".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent_hot),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-card".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.focus),
+                    border_width: Some(1.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-category".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
                     border_width: Some(0.0),
-                    radius: Some(2.0),
                     text: Some(tokens.text_muted),
                     ..UiStylePatch::default()
                 },
             )
             .when(UiStyleRuleState::Always),
             UiStyleRule::new(
-                UiStyleSelector::Class("asset-row".to_string()),
+                UiStyleSelector::Class("asset-category".to_string()),
                 UiStylePatch {
-                    fill: Some(tokens.surface_raised),
+                    fill: Some(tokens.canvas),
                     text: Some(tokens.text),
                     ..UiStylePatch::default()
                 },
             )
             .when(UiStyleRuleState::Hovered),
             UiStyleRule::new(
-                UiStyleSelector::Class("asset-row".to_string()),
+                UiStyleSelector::Class("asset-category-active".to_string()),
                 UiStylePatch {
-                    fill: Some(tokens.surface_raised),
+                    fill: Some(tokens.surface),
                     border: Some(tokens.focus),
                     border_width: Some(1.0),
                     text: Some(tokens.text),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Focused),
-            UiStyleRule::new(
-                UiStyleSelector::Class("asset-filter".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    text: Some(tokens.text_muted),
                     ..UiStylePatch::default()
                 },
             )
             .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("asset-filter-active".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    text: Some(tokens.text),
-                    ..UiStylePatch::default()
-                },
-            ),
-            UiStyleRule::new(
-                UiStyleSelector::Class("asset-filter".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("asset-filter".to_string()),
-                UiStylePatch {
-                    border: Some(tokens.focus),
-                    border_width: Some(1.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Focused),
             UiStyleRule::new(
                 UiStyleSelector::Class("asset-action".to_string()),
                 UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(2.0),
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(3.0),
                     text: Some(tokens.text_muted),
                     ..UiStylePatch::default()
                 },
@@ -2331,6 +2463,7 @@ fn bottom_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::console::ConsoleBlock;
 
     fn child<'a>(node: &'a UiNode, id: &str) -> &'a UiNode {
         if node.id == id {
@@ -2486,6 +2619,31 @@ mod tests {
     }
 
     #[test]
+    fn console_json_toggle_uses_the_command_consumed_by_the_workbench() {
+        let mut console = ConsolePanel::default();
+        console.entries.push(LogEntry {
+            id: 1,
+            level: LogLevel::Info,
+            message: "Result".to_string(),
+            timestamp: "12:00:00".to_string(),
+            sender: None,
+            block: Some(ConsoleBlock {
+                title: "Result".to_string(),
+                lines: vec!["ok".to_string()],
+                json: "{}".to_string(),
+            }),
+        });
+        let surface =
+            build_console_surface(StudioUiPalette::IndustrialDark, &console, false, &[], None);
+        let toggle = child(&surface.root, "console.entry.1.json-toggle");
+
+        assert!(toggle.event_handlers.iter().any(|binding| matches!(
+            &binding.action,
+            raf_ui::UiAction::Command { name } if name == "console.block.toggle:1"
+        )));
+    }
+
+    #[test]
     fn project_hierarchy_uses_padding_not_leading_spaces() {
         let surface = build_project_surface(
             StudioUiPalette::IndustrialDark,
@@ -2558,6 +2716,22 @@ mod tests {
         assert!(project.rect.height <= 28.0);
         assert!(selected.rect.y >= project.rect.y);
         assert!(selected.rect.x >= project.rect.x + project.rect.width);
+    }
+
+    #[test]
+    fn fps_status_uses_a_fixed_track_for_paint_only_updates() {
+        let surface = build_status_surface(
+            StudioUiPalette::IndustrialDark,
+            &["Project".to_string(), "FPS: 60".to_string()],
+        );
+        let fps = surface
+            .root
+            .find("editor.status.item.1")
+            .expect("FPS status item");
+
+        assert_eq!(fps.layout.width_mode, UiSizeMode::Fixed);
+        assert_eq!(fps.layout.height_mode, UiSizeMode::Fixed);
+        assert_eq!(fps.layout.basis, [76.0, 18.0]);
     }
 
     #[test]

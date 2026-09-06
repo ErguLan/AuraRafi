@@ -4,13 +4,14 @@
 //! ordinary `UiNode`s, so authors can still add classes, controls, and event
 //! bindings without introducing a second widget system.
 
+use crate::controls::{UiSelect, UiTextInput};
 use crate::events::{UiEventBinding, UiEventKind};
 use crate::geometry::UiSpacing;
 use crate::icons::{UiIcon, UiIconId, UiIconSize};
 use crate::layout::{UiAlign, UiFlow, UiJustify, UiLayout, UiSizeMode};
-use crate::node::{UiNode, UiNodeKind};
-use crate::style::{StudioUiPalette, UiStyle};
-use crate::text::{UiFontWeight, UiTextRole, UiTextStyle};
+use crate::node::{UiAccessibilityRole, UiNode, UiNodeKind};
+use crate::style::{StudioUiPalette, UiStyle, UiSurfaceMaterial};
+use crate::text::{UiFontWeight, UiTextOverflow, UiTextRole, UiTextStyle};
 
 pub fn icon_button(
     id: impl Into<String>,
@@ -21,6 +22,7 @@ pub fn icon_button(
         .with_class("icon-button")
         .with_layout(UiLayout::fixed(32.0, 32.0))
         .focusable()
+        .with_accessibility_role(UiAccessibilityRole::Button)
         .with_tooltip_key(tooltip_key)
         .with_accessibility_label_key("ui.icon_button")
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
@@ -97,6 +99,7 @@ pub fn segmented_option(
         .with_text_key(text_key)
         .with_text_style(UiTextStyle::button([237, 239, 242, 255]).inherit_theme_color())
         .focusable()
+        .with_accessibility_role(UiAccessibilityRole::Tab)
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
@@ -234,7 +237,27 @@ pub fn dropdown_trigger(
         )
         .with_tooltip_key(selected_label_key)
         .focusable()
+        .with_text_overflow(UiTextOverflow::Clip)
+        .with_accessibility_role(UiAccessibilityRole::Combobox)
+        .with_accessibility_expanded(expanded)
         .with_event(UiEventBinding::command(UiEventKind::Click, command.clone()));
+    trigger = trigger
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("ArrowDown".to_string()),
+            format!("{command}:next"),
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("ArrowUp".to_string()),
+            format!("{command}:previous"),
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("Home".to_string()),
+            format!("{command}:first"),
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("End".to_string()),
+            format!("{command}:last"),
+        ));
     if expanded {
         trigger = trigger.with_event(UiEventBinding::command(
             UiEventKind::KeyPress("escape".to_string()),
@@ -273,7 +296,177 @@ pub fn dropdown_option(
             tokens.text_muted
         }))
         .focusable()
+        .with_accessibility_role(UiAccessibilityRole::Option)
+        .with_accessibility_selected(selected)
+        .with_text_overflow(UiTextOverflow::Clip)
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
+}
+
+/// Complete retained Select trigger. The option list can be rendered by the
+/// owning surface in an overlay while the control keeps selection and
+/// keyboard behavior in one serializable contract.
+pub fn select_trigger(id: impl Into<String>, select: UiSelect, palette: StudioUiPalette) -> UiNode {
+    let id = id.into();
+    let is_open = select.open;
+    let tokens = palette.tokens();
+    let selected_label = select
+        .selected_option()
+        .map(|option| option.label_key.clone())
+        .unwrap_or_else(|| "app.select_empty".to_string());
+    UiNode::select(id.clone(), select)
+        .with_class("select-trigger")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 5.0,
+            padding: UiSpacing::xy(8.0, 0.0),
+            ..UiLayout::fixed(0.0, 29.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .focusable()
+        .with_accessibility_role(UiAccessibilityRole::Combobox)
+        .with_accessibility_expanded(is_open)
+        .with_child(
+            UiNode::new(format!("{id}.value"), UiNodeKind::Label)
+                .with_text_key(selected_label)
+                .with_text_style(UiTextStyle::body(tokens.text))
+                .with_layout(
+                    UiLayout::fit_content()
+                        .with_width_mode(UiSizeMode::Fill)
+                        .with_text_safe_area(true),
+                ),
+        )
+        .with_child(
+            UiNode::new(format!("{id}.chevron"), UiNodeKind::Label)
+                .with_icon(
+                    UiIcon::new(if is_open {
+                        UiIconId::ChevronDown
+                    } else {
+                        UiIconId::ChevronRight
+                    })
+                    .with_size(UiIconSize::Small)
+                    .with_tint(tokens.text_muted),
+                )
+                .with_layout(UiLayout::fixed(16.0, 18.0)),
+        )
+}
+
+/// Standard label/control/helper composition for editor forms. It stays a
+/// plain retained tree so callers can replace the control without introducing
+/// a second widget abstraction.
+pub fn form_field(
+    id: impl Into<String>,
+    label_key: impl Into<String>,
+    control: UiNode,
+    helper_key: Option<impl Into<String>>,
+    error_key: Option<impl Into<String>>,
+    palette: StudioUiPalette,
+) -> UiNode {
+    let id = id.into();
+    let tokens = palette.tokens();
+    let mut field = UiNode::new(id.clone(), UiNodeKind::Panel)
+        .with_class("form-field")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 3.0,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new(format!("{id}.label"), UiNodeKind::Label)
+                .with_text_key(label_key)
+                .with_text_style(UiTextStyle::panel_title(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(control);
+    if let Some(helper_key) = helper_key {
+        field = field.with_child(
+            UiNode::new(format!("{id}.helper"), UiNodeKind::Label)
+                .with_text_key(helper_key)
+                .with_class("form-field-helper")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        );
+    }
+    if let Some(error_key) = error_key {
+        field = field.with_child(
+            UiNode::new(format!("{id}.error"), UiNodeKind::Label)
+                .with_text_key(error_key)
+                .with_class("form-field-error")
+                .with_text_style(UiTextStyle::body([238, 116, 105, 255]))
+                .with_layout(UiLayout::fit_content()),
+        );
+    }
+    field
+}
+
+pub fn search_field(
+    id: impl Into<String>,
+    value_key: impl Into<String>,
+    placeholder_key: impl Into<String>,
+    submit_command: Option<String>,
+    palette: StudioUiPalette,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let input = UiTextInput {
+        value_key: value_key.into(),
+        placeholder_key: Some(placeholder_key.into()),
+        max_length: 512,
+        multiline: false,
+        password: false,
+        submit_command,
+    };
+    UiNode::text_input(id, input)
+        .with_class("search-field")
+        .with_layout(UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill))
+        .with_text_style(UiTextStyle::body(tokens.text))
+        .with_accessibility_role(UiAccessibilityRole::Textbox)
+}
+
+pub fn numeric_field(
+    id: impl Into<String>,
+    value_key: impl Into<String>,
+    submit_command: impl Into<String>,
+    palette: StudioUiPalette,
+) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::text_input(
+        id,
+        UiTextInput {
+            value_key: value_key.into(),
+            placeholder_key: Some("app.value".to_string()),
+            max_length: 32,
+            multiline: false,
+            password: false,
+            submit_command: Some(submit_command.into()),
+        },
+    )
+    .with_class("numeric-field")
+    .with_layout(UiLayout::fixed(0.0, 26.0).with_width_mode(UiSizeMode::Fill))
+    .with_text_style(UiTextStyle::body(tokens.text))
+    .with_accessibility_role(UiAccessibilityRole::Textbox)
+}
+
+pub fn password_field(
+    id: impl Into<String>,
+    value_key: impl Into<String>,
+    submit_command: Option<String>,
+    palette: StudioUiPalette,
+) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::text_input(
+        id,
+        UiTextInput {
+            value_key: value_key.into(),
+            placeholder_key: None,
+            max_length: 512,
+            multiline: false,
+            password: true,
+            submit_command,
+        },
+    )
+    .with_class("password-field")
+    .with_layout(UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill))
+    .with_text_style(UiTextStyle::body(tokens.text))
+    .with_accessibility_role(UiAccessibilityRole::Textbox)
 }
 
 pub fn editor_tab(
@@ -287,6 +480,7 @@ pub fn editor_tab(
         .with_text_key(text_key)
         .with_text_style(UiTextStyle::button([237, 239, 242, 255]).inherit_theme_color())
         .focusable()
+        .with_accessibility_role(UiAccessibilityRole::Tab)
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
@@ -314,16 +508,9 @@ pub fn tooltip_node(
     opacity: f32,
 ) -> UiNode {
     let tokens = palette.tokens();
-    let fill = match palette {
-        StudioUiPalette::IndustrialDark => [58, 61, 65, 236],
-        StudioUiPalette::PaperLight => [70, 73, 78, 232],
-    };
-    let border = match palette {
-        StudioUiPalette::IndustrialDark => [104, 108, 115, 228],
-        StudioUiPalette::PaperLight => [136, 140, 148, 224],
-    };
     UiNode::new(id, UiNodeKind::Tooltip)
         .with_class("tooltip")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_text_key(text_key)
         .with_layout(
             UiLayout::fit_content()
@@ -331,8 +518,8 @@ pub fn tooltip_node(
                 .with_height_mode(UiSizeMode::FitContent),
         )
         .with_style(UiStyle {
-            fill,
-            border,
+            fill: tokens.surface_raised,
+            border: tokens.border,
             text: tokens.text,
             border_width: 1.0,
             radius: 4.0,

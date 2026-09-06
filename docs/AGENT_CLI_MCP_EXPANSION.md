@@ -49,6 +49,9 @@ The foundation already exists:
   renderer;
 - `raf serve` exposes bounded JSONL over stdio;
 - `raf mcp serve` exposes MCP tools and resources over stdio;
+- the native Agent publishes bounded in-memory task snapshots and progress
+  events through the attached bridge; viewport capture publishes project-local
+  PNG evidence artifacts;
 - requests already carry confirmation, dry-run, revision, transaction,
   idempotency, session, and execution-budget metadata.
 
@@ -59,11 +62,51 @@ that owns the live scene document and undo history.
 The baby bridge is now implemented as the next stabilization slice: the
 editor publishes `.aura_rafi/agent_endpoint.json`, accepts a token-scoped
 handshake, and queues requests onto the UI thread. The endpoint owns no scene
-and no renderer state. Attached scene mutations now return a scoped undo token
-backed by the editor's real `SceneHistory`; the token is rejected after a
-project, session, or revision change. The remaining gate is a smoke project
-against a running editor and visual proof of response/diff/undo behavior; no
-Runtime is required for that gate.
+and no renderer state. Attached Game scene mutations now return a scoped undo
+token backed by the editor's real `SceneHistory`; the token is rejected after
+the scene fingerprint or attached revision changes. Electronics mutations
+still return revision/diff metadata without a scoped token until its document
+snapshot bridge is connected. The remaining gate is a smoke project against a
+running editor and visual proof of response/diff/undo behavior; no Runtime is
+required for that gate.
+
+The attached metadata boundary is now explicit as well. `engine.status`,
+`engine.context`, `capabilities.list/search`, `project.info`, `session.list`,
+and `workspace.describe` are answered by the bridge before domain dispatch.
+This prevents a Game or Electronics parser from receiving project inspection
+commands. `engine.context` is a bounded external-Agent view containing the
+live project, active session, revision, supported commands, workspace counts,
+and a compact Game scene outline. CLI and MCP expose the same context contract.
+
+## Current semantic perception contract
+
+The Agent must not discover a scene by reading every project file. The shared
+observation layer now exposes bounded, structured reads that are available to
+the native Agent, attached CLI, and MCP adapter:
+
+- `project.summary`: compact project, session, revision, scene, asset, script,
+  selection, and warning snapshot;
+- `scene.outline`, `scene.query`, and `scene.inspect`: stable UUID/ref-first
+  hierarchy and exact entity inspection with pagination;
+- `scene.spatial_map`: world-space extents, renderable bounds, and conservative
+  overlaps for a bounded scope;
+- `scene.design_audit`: feature and envelope checks for real-world profiles such
+  as `supermarket`, `parking`, `building`, and `outdoor`;
+- `assets.catalog`/`assets.inspect` and `scripts.catalog`: imported resources,
+  usage, references, and attached script relationships without crawling Agent
+  history or internal metadata;
+- `project.health` and `scene.verify`: focused identity, hierarchy, target,
+  transform, expected-name, count, and optional collision verification.
+
+These reads deliberately return semantic summaries, references, pagination,
+warnings, and verification status. Mesh vertices, renderer caches, and raw
+duplicated command output remain details on demand. A missing root or target is
+an explicit failed observation, never an empty successful result.
+
+For real-world authoring, `scene_build` and `scene_reconcile` accept a design
+profile and require the Agent to establish a named semantic root and envelope
+before secondary details. `scene_repair` accepts explicit audit-driven repairs
+inside a bounded root; it does not invent geometry from a prose description.
 
 ## Beta operating modes
 
@@ -186,9 +229,25 @@ Required behavior:
 - budgets bound tool calls, elapsed time, generated entities, filesystem reads,
   and result size for potato hardware.
 
+The durable agent state stores the revision clock and a document fingerprint in
+`.aura_rafi/agent_state.json` with a recoverable backup. Headless commands
+re-observe the loaded Game document before answering, so an external edit
+advances the revision instead of silently reusing stale optimistic-concurrency
+state. Failed commands do not consume an idempotency key, and attached hosts
+can enrich a successful transaction replay with the semantic document diff
+observed after the domain mutation.
+
 Long tasks must be cooperative and cancellable. They should yield progress
-events and avoid holding the UI thread, but durable MCP tasks and resume support
-remain part of the full v0.12 harness.
+events and avoid holding the UI thread. The current attached Agent run is
+observable through `task.list`, `task.get`, `task.events`, and `task.cancel`,
+but these records are bounded in-memory state: durable MCP tasks, persistence,
+and resume support remain part of the full v0.12 harness.
+
+The attached Game viewport also exposes `viewport.capture`. It reads the last
+frame already rendered by ApiGraphicBasic and stores a bounded PNG artifact in
+the project, so a vision-capable external agent can inspect the result without
+starting Play or Runtime. It is deliberately an observation, not a second
+renderer or a screenshot service.
 
 ## Example: Horse-Riding Simulator Request
 
@@ -219,16 +278,20 @@ turning on Play or Runtime.
 - external read tools plus a small game mutation allowlist;
 - real editor-owned transactions, scoped undo tokens, diffs, and verification;
 - CLI and MCP connection presets for external agents;
+- domain-aware CLI/MCP metadata and compact context tools;
+- semantic scene spatial/design audits, typed perception tools, compact result
+  contracts, durable revision observation, and bounded repair commands;
 - one deterministic golden game project for regression testing.
 
 ### Complete in v0.12
 
-- resumable/cancellable task protocol and progress streaming;
+- durable/resumable task protocol and cross-process progress streaming;
 - optional manually activated headless core host for closed-editor authoring,
   with renderer-free startup, project locks, budgets, and explicit shutdown;
 - game-first skills and toolpacks for terrain, characters, materials, animation,
   particles, prefabs, and validation as their engine systems become real;
-- evidence and artifact resources consumable by both MCP and the Agent UI;
+- richer evidence and artifact resources consumable by both MCP and the Agent UI
+  (the current viewport PNG path is the first attached slice);
 - richer policy profiles, command budgets, audit logs, checkpoints, and replay;
 - optional ACP support only if AuraRafi later becomes a visual client for full
   external coding agents rather than merely exposing engine tools.

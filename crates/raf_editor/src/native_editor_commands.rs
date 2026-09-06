@@ -7,6 +7,7 @@
 use raf_core::project::Project;
 use raf_core::scene::{Primitive, SceneGraph, SceneNodeId};
 
+use crate::color_math::{hsv_to_node_color, rgb_to_hsv, HsvColor};
 use crate::commands::game::{GameCommandContext, GameViewportPort, SceneSelectionState};
 use crate::commands::output::{CommandLevel, CommandOutput};
 use crate::commands::parser::{parse_console_input, ParsedInput};
@@ -106,6 +107,27 @@ fn parse_node_color(value: &str) -> Option<raf_core::scene::NodeColor> {
     ))
 }
 
+fn parse_collider_type(value: &str) -> Option<raf_core::scene::ColliderType> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "none" => Some(raf_core::scene::ColliderType::None),
+        "aabb" | "aabb collider" => Some(raf_core::scene::ColliderType::Aabb),
+        "convexhull" | "convex hull" => Some(raf_core::scene::ColliderType::ConvexHull),
+        "meshcollider" | "mesh collider" | "mesh" => {
+            Some(raf_core::scene::ColliderType::MeshCollider)
+        }
+        _ => None,
+    }
+}
+
+fn parse_body_type(value: &str) -> Option<raf_core::scene::RigidBodyType> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "static" => Some(raf_core::scene::RigidBodyType::Static),
+        "dynamic" => Some(raf_core::scene::RigidBodyType::Dynamic),
+        "kinematic" => Some(raf_core::scene::RigidBodyType::Kinematic),
+        _ => None,
+    }
+}
+
 fn apply_console_command(
     runtime: &mut NativeEditorRuntime,
     scene: &mut SceneGraph,
@@ -164,7 +186,11 @@ fn apply_console_command(
         }
     }
     if output.changed || !matches!(output.level, CommandLevel::Error) {
-        runtime.request_ui_frame();
+        if parsed.name != "game.describe_scene" {
+            runtime.request_canvas_frame();
+        } else {
+            runtime.request_ui_frame();
+        }
     }
     output
 }
@@ -199,6 +225,18 @@ pub(crate) fn apply_workbench_intents(
                 // Same ownership boundary as toggles: numeric project settings
                 // are applied and saved by the native application.
             }
+            NativeWorkbenchIntent::ProjectSettingText { .. } => {
+                // Text project settings are persisted by the native
+                // application after the workbench input boundary.
+            }
+            NativeWorkbenchIntent::ProjectSettingCommand(_) => {
+                // Project setting commands are persisted by the native
+                // application after the workbench input boundary.
+            }
+            NativeWorkbenchIntent::AgentSettingsChanged(_) => {
+                // Agent settings are copied to the global settings store by
+                // the native application after the workbench input boundary.
+            }
             NativeWorkbenchIntent::Viewport(action) => {
                 use crate::panels::viewport_toolbar_surface::ViewportToolbarAction;
                 use raf_render::gizmo::GizmoMode;
@@ -219,14 +257,6 @@ pub(crate) fn apply_workbench_intents(
                     ViewportToolbarAction::Solid => {
                         runtime.game_viewport_mut().render_style =
                             crate::panels::viewport_controller::NativeViewportRenderStyle::Solid
-                    }
-                    ViewportToolbarAction::Wireframe => {
-                        runtime.game_viewport_mut().render_style =
-                            crate::panels::viewport_controller::NativeViewportRenderStyle::Wireframe
-                    }
-                    ViewportToolbarAction::Preview => {
-                        runtime.game_viewport_mut().render_style =
-                            crate::panels::viewport_controller::NativeViewportRenderStyle::Preview
                     }
                     ViewportToolbarAction::TogglePolygons => {
                         let viewport = runtime.game_viewport_mut();
@@ -262,7 +292,7 @@ pub(crate) fn apply_workbench_intents(
                     // toolbar state before emitting this intent.
                     ViewportToolbarAction::SetBuildingStyle(_) => {}
                 }
-                runtime.request_ui_frame();
+                runtime.request_canvas_frame();
             }
             NativeWorkbenchIntent::InspectorCommit {
                 target,
@@ -270,7 +300,12 @@ pub(crate) fn apply_workbench_intents(
                 value,
             } => apply_inspector_commit(runtime, scene, target, &field, &value),
             NativeWorkbenchIntent::Command(command) => {
-                if let Some(raw_resize) = command.strip_prefix("layout.resize.") {
+                if let Some(target) =
+                    crate::panels::viewport_compass::ViewportCompassTarget::from_command(&command)
+                {
+                    runtime.game_viewport_mut().snap_compass_target(target);
+                    runtime.request_canvas_frame();
+                } else if let Some(raw_resize) = command.strip_prefix("layout.resize.") {
                     if let Some((side, raw_value)) = raw_resize.split_once(':') {
                         if let Ok(value) = raw_value.parse::<f32>() {
                             match side {
@@ -324,7 +359,7 @@ pub(crate) fn apply_workbench_intents(
                     }
                 } else if command == "hierarchy.clear-selection" {
                     runtime.game_viewport_mut().selected.clear();
-                    runtime.request_ui_frame();
+                    runtime.request_overlay_frame();
                 } else if let Some(raw_id) = command.strip_prefix("hierarchy.focus:") {
                     if let Ok(id) = raw_id.parse::<usize>() {
                         runtime.select_node(scene, SceneNodeId(id));
@@ -432,6 +467,30 @@ pub(crate) fn apply_workbench_intents(
                             });
                         }
                     }
+                } else if let Some(raw) = command.strip_prefix("inspector.collider:") {
+                    if let Some((raw_id, raw_kind)) = raw.split_once(':') {
+                        if let (Ok(id), Some(collider_type)) =
+                            (raw_id.parse::<usize>(), parse_collider_type(raw_kind))
+                        {
+                            runtime.mutate_scene(scene, |scene| {
+                                if let Some(node) = scene.get_mut(SceneNodeId(id)) {
+                                    node.collider.collider_type = collider_type;
+                                }
+                            });
+                        }
+                    }
+                } else if let Some(raw) = command.strip_prefix("inspector.body-type:") {
+                    if let Some((raw_id, raw_kind)) = raw.split_once(':') {
+                        if let (Ok(id), Some(body_type)) =
+                            (raw_id.parse::<usize>(), parse_body_type(raw_kind))
+                        {
+                            runtime.mutate_scene(scene, |scene| {
+                                if let Some(node) = scene.get_mut(SceneNodeId(id)) {
+                                    node.rigid_body.body_type = body_type;
+                                }
+                            });
+                        }
+                    }
                 } else if let Some(raw_id) = command.strip_prefix("inspector.visibility:") {
                     if let Ok(id) = raw_id.parse::<usize>() {
                         let id = SceneNodeId(id);
@@ -466,6 +525,67 @@ pub(crate) fn apply_workbench_intents(
                                 _ => {}
                             }
                         });
+                    }
+                } else if let Some(raw) = command.strip_prefix("inspector.color.hsv:") {
+                    let mut parts = raw.splitn(4, ':');
+                    let hue = parts.next().and_then(|value| value.parse::<f32>().ok());
+                    let saturation = parts.next().and_then(|value| value.parse::<f32>().ok());
+                    let value = parts.next().and_then(|value| value.parse::<f32>().ok());
+                    let Some(raw_id) = parts.next() else {
+                        continue;
+                    };
+                    if let (Some(hue), Some(saturation), Some(value), Ok(id)) =
+                        (hue, saturation, value, raw_id.parse::<usize>())
+                    {
+                        if hue.is_finite() && saturation.is_finite() && value.is_finite() {
+                            let id = SceneNodeId(id);
+                            runtime.mutate_scene(scene, |scene| {
+                                if let Some(node) = scene.get_mut(id) {
+                                    node.color = hsv_to_node_color(
+                                        HsvColor {
+                                            hue,
+                                            saturation,
+                                            value,
+                                        },
+                                        node.color.a,
+                                    );
+                                }
+                            });
+                        }
+                    }
+                } else if let Some(raw) = command.strip_prefix("inspector.color.hue:") {
+                    let Some((raw_hue, raw_id)) = raw.split_once(':') else {
+                        continue;
+                    };
+                    if let (Ok(hue), Ok(id)) = (raw_hue.parse::<f32>(), raw_id.parse::<usize>()) {
+                        if hue.is_finite() {
+                            let id = SceneNodeId(id);
+                            runtime.mutate_scene(scene, |scene| {
+                                if let Some(node) = scene.get_mut(id) {
+                                    let mut hsv = rgb_to_hsv(node.color);
+                                    hsv.hue = hue.rem_euclid(360.0);
+                                    node.color = hsv_to_node_color(hsv, node.color.a);
+                                }
+                            });
+                        }
+                    }
+                } else if let Some(raw) = command.strip_prefix("inspector.appearance.opacity:") {
+                    let Some((raw_percentage, raw_id)) = raw.split_once(':') else {
+                        continue;
+                    };
+                    if let (Ok(percentage), Ok(id)) =
+                        (raw_percentage.parse::<f32>(), raw_id.parse::<usize>())
+                    {
+                        if percentage.is_finite() {
+                            let alpha =
+                                (percentage.clamp(0.0, 100.0) / 100.0 * 255.0).round() as u8;
+                            let id = SceneNodeId(id);
+                            runtime.mutate_scene(scene, |scene| {
+                                if let Some(node) = scene.get_mut(id) {
+                                    node.color.a = alpha;
+                                }
+                            });
+                        }
                     }
                 } else if let Some(raw) = command.strip_prefix("inspector.color.range:") {
                     let mut parts = raw.splitn(3, ':');

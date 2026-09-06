@@ -5,6 +5,7 @@
 //! monolithic event handler.
 
 use super::*;
+use crate::console::LogLevel;
 
 impl NativeGameWorkbench {
     pub fn process_input<F>(
@@ -14,57 +15,94 @@ impl NativeGameWorkbench {
         scene: &SceneGraph,
         selected: &[SceneNodeId],
         project: Option<&Project>,
-        resolve: F,
+        mut resolve: F,
     ) -> (Vec<NativeWorkbenchIntent>, Vec<UiDispatchedAction>)
     where
         F: FnMut(&str) -> String,
     {
-        let agent_actions = if self.bottom_dock.has_active_tab("agent") {
-            self.agent_surface.process_input(
-                native_input,
-                router,
-                &self.agent_panel,
-                &self.agent_settings,
-                project,
-            )
-        } else {
-            Vec::new()
-        };
-        if !agent_actions.is_empty() {
-            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
-        }
-        for action in agent_actions {
-            match action {
-                AgentAction::Approve => self.pending_agent_decision = Some(true),
-                AgentAction::Deny => self.pending_agent_decision = Some(false),
-                action => self
-                    .agent_panel
-                    .apply_action(action, &mut self.agent_settings),
+        let search_open = self.search_surface.is_open();
+        let mut intents = Vec::new();
+        if search_open {
+            router.release_keyboard(self.owner());
+            for search_intent in self.search_surface.process_input(native_input, router) {
+                match search_intent {
+                    crate::panels::search_surface_host::SearchIntent::QueryChanged(_) => {
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                    crate::panels::search_surface_host::SearchIntent::Close => {
+                        self.restore_search_focus();
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                    crate::panels::search_surface_host::SearchIntent::Activate(result) => {
+                        self.search_surface.close();
+                        self.restore_search_focus();
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        match result.kind {
+                            SearchResultKind::Command(command) => {
+                                intents.push(NativeWorkbenchIntent::Command(command));
+                            }
+                            SearchResultKind::Hierarchy(id) => {
+                                intents.push(NativeWorkbenchIntent::Command(format!(
+                                    "hierarchy.focus:{}",
+                                    id.0
+                                )));
+                            }
+                            SearchResultKind::Project(_) => {
+                                intents.push(NativeWorkbenchIntent::Command(
+                                    "project.settings".to_string(),
+                                ));
+                            }
+                            SearchResultKind::Asset(asset) => {
+                                intents.push(NativeWorkbenchIntent::Command(format!(
+                                    "assets.open:{asset}"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+            if native_input
+                .snapshot()
+                .button_pressed(raf_core::PointerButton::Primary)
+                && !native_input
+                    .snapshot()
+                    .pointer_position
+                    .is_some_and(|point| self.search_surface.contains_point(point))
+            {
+                self.search_surface.close();
+                self.restore_search_focus();
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
         }
-        let pointer_over_agent = self.bottom_dock.has_active_tab("agent")
-            && native_input
-                .snapshot()
-                .pointer_position
-                .is_some_and(|pointer| self.agent_surface.rect().contains(pointer));
-        let main_host_has_capture = self.host.has_pointer_capture();
-        let actions = if pointer_over_agent && !main_host_has_capture {
-            // Agent is a topmost compositor layer. Do not let the full-window
-            // workbench underneath it consume passive hover, scroll, or a
-            // click-away while the pointer is inside the Agent rectangle.
-            router.release_keyboard(self.owner());
-            Vec::new()
-        } else {
-            self.host.process_routed_input(
+        let mut actions = Vec::new();
+        if !search_open {
+            // The compass is a true overlay. Give it the first chance to
+            // consume a pointer press so an underlying toolbar control cannot
+            // win when the two rectangles overlap in a compact viewport.
+            let compass_actions =
+                self.viewport_compass
+                    .process_input(native_input, router, &mut resolve);
+            let compass_clicked = compass_actions
+                .iter()
+                .any(|action| matches!(&action.action, UiAction::Command { .. }));
+            if compass_clicked {
+                // The compass is an overlay over the renderer-owned canvas.
+                // A click there must release any text/button focus from the
+                // main workbench before the viewport consumes the frame.
+                self.host.session_mut().interaction.focus.clear_focus();
+                router.cancel_owner(self.owner());
+            }
+            actions.extend(compass_actions);
+            actions.extend(self.host.process_routed_input(
                 self.rect.logical_size(),
                 native_input.scale_factor() as f32,
-                resolve,
+                &mut resolve,
                 native_input,
                 router,
                 self.owner(),
                 raf_ui::UiRect::new(self.rect.x, self.rect.y, self.rect.width, self.rect.height),
-            )
-        };
+            ));
+        }
         if native_input
             .snapshot()
             .button_pressed(raf_core::PointerButton::Primary)
@@ -79,10 +117,13 @@ impl NativeGameWorkbench {
             self.bottom_dock.close_context_menu();
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
-        let mut intents = Vec::new();
         for dispatched in &actions {
             match &dispatched.action {
                 UiAction::SetText { key, value } => match key.as_str() {
+                    "application-bar.command-search.value" => {
+                        self.search_surface.set_query(value.clone());
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
                     "assets.search" => {
                         self.assets_query = value.clone();
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -117,6 +158,27 @@ impl NativeGameWorkbench {
                         self.console.set_input(value.clone());
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
+                    "agent.input" => {
+                        self.agent_panel.apply_action(
+                            AgentAction::SetInput(value.clone()),
+                            &mut self.agent_settings,
+                        );
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                    "agent.new-model.label" => {
+                        self.agent_panel.apply_action(
+                            AgentAction::SetNewModelLabel(value.clone()),
+                            &mut self.agent_settings,
+                        );
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                    "agent.new-model.id" => {
+                        self.agent_panel.apply_action(
+                            AgentAction::SetNewModelId(value.clone()),
+                            &mut self.agent_settings,
+                        );
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
                     "inspector.name" => {
                         if let Some(id) = selected.first().copied() {
                             self.inspector_name_editing = Some((id, value.clone()));
@@ -132,6 +194,9 @@ impl NativeGameWorkbench {
                                     self.toolbar_revision.wrapping_add(1).max(1);
                             }
                         }
+                    }
+                    "project-settings.default_scene_name" => {
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     _ => {}
                 },
@@ -150,14 +215,163 @@ impl NativeGameWorkbench {
                             key: key.clone(),
                             value: *value,
                         });
+                    } else if key == "console.auto-scroll" {
+                        if self.console.set_auto_scroll(*value) {
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        }
                     } else if apply_settings_toggle(&mut self.agent_settings, key, *value) {
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
+                }
+                UiAction::SetSelect {
+                    key,
+                    value,
+                    index: _,
+                } => {
+                    if key == "agent.model" {
+                        let keep_open = self.agent_panel.model_menu_open;
+                        self.apply_agent_action(
+                            AgentAction::SelectModel(value.clone()),
+                            &mut intents,
+                            false,
+                        );
+                        if keep_open {
+                            self.agent_panel.model_menu_open = true;
+                        }
+                    } else if key == "agent.mode" {
+                        let mode = match value.as_str() {
+                            "inspect" => Some(AgentMode::Inspect),
+                            "plan" => Some(AgentMode::Plan),
+                            "active" => Some(AgentMode::Active),
+                            _ => None,
+                        };
+                        if let Some(mode) = mode {
+                            let keep_open = self.agent_panel.mode_menu_open;
+                            self.apply_agent_action(
+                                AgentAction::SetMode(mode),
+                                &mut intents,
+                                false,
+                            );
+                            if keep_open {
+                                self.agent_panel.mode_menu_open = true;
+                            }
+                        }
+                    } else if let (Some(target), Some(command_prefix)) = (
+                        selected.first().copied(),
+                        inspector_select_command_prefix(key),
+                    ) {
+                        intents.push(NativeWorkbenchIntent::Command(format!(
+                            "{command_prefix}:{}:{value}",
+                            target.0
+                        )));
+                        self.inspector_view.dropdown = None;
+                        self.inspector_view.color_picker = false;
+                        self.host
+                            .session_mut()
+                            .interaction
+                            .focus
+                            .request_focus(format!("{key}.trigger"));
+                    } else if let Some(action) = parse_viewport_toolbar_select_action(key, value) {
+                        let settings_changed = self.apply_toolbar_action(action);
+                        if settings_changed {
+                            intents.push(NativeWorkbenchIntent::AgentSettingsChanged(
+                                self.agent_settings.clone(),
+                            ));
+                        }
+                        if let ViewportToolbarAction::SetBuildingStyle(style) = action {
+                            intents.push(NativeWorkbenchIntent::ProjectSettingToggle {
+                                key: format!("project-settings.building-style.{}", style.slug()),
+                                value: true,
+                            });
+                        }
+                    }
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                }
+                UiAction::SetSelectOpen { id, open } => {
+                    let open = *open;
+                    if let Some(dropdown) = inspector_dropdown_from_trigger(id) {
+                        self.inspector_view.dropdown = open.then_some(dropdown);
+                        if open {
+                            self.inspector_view.color_picker = false;
+                        }
+                    }
+                    if !open {
+                        self.host
+                            .session_mut()
+                            .interaction
+                            .focus
+                            .request_focus(id.clone());
+                    }
+                    match id.as_str() {
+                        "agent.model.trigger" => {
+                            self.agent_panel.model_menu_open = open;
+                            if open {
+                                self.agent_panel.mode_menu_open = false;
+                                self.agent_panel.add_model_open = false;
+                            }
+                        }
+                        "agent.mode.trigger" => {
+                            self.agent_panel.mode_menu_open = open;
+                            if open {
+                                self.agent_panel.model_menu_open = false;
+                                self.agent_panel.add_model_open = false;
+                            }
+                        }
+                        "viewport.toolbar.view-mode.trigger" => {
+                            self.toolbar_state.view_menu_open = open;
+                            if open {
+                                self.toolbar_state.shading_menu_open = false;
+                                self.toolbar_state.building_menu_open = false;
+                                self.toolbar_state.primitive_menu_open = false;
+                            }
+                        }
+                        "viewport.toolbar.shading.trigger" => {
+                            self.toolbar_state.shading_menu_open = open;
+                            if open {
+                                self.toolbar_state.view_menu_open = false;
+                                self.toolbar_state.building_menu_open = false;
+                                self.toolbar_state.primitive_menu_open = false;
+                            }
+                        }
+                        "viewport.toolbar.building-style" => {
+                            self.toolbar_state.building_menu_open = open;
+                            if open {
+                                self.toolbar_state.view_menu_open = false;
+                                self.toolbar_state.shading_menu_open = false;
+                                self.toolbar_state.primitive_menu_open = false;
+                            }
+                        }
+                        _ => {}
+                    }
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
                 UiAction::SetRange { key, value } if key.starts_with("inspector.color.") => {
                     if let Some(target) = selected.first().copied() {
                         intents.push(NativeWorkbenchIntent::Command(format!(
                             "inspector.color.range:{key}:{value}:{}",
+                            target.0
+                        )));
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                }
+                UiAction::SetColorHsv {
+                    key,
+                    hue,
+                    saturation,
+                    value,
+                } if key == "inspector.color" => {
+                    if let Some(target) = selected.first().copied() {
+                        intents.push(NativeWorkbenchIntent::Command(format!(
+                            "inspector.color.hsv:{hue}:{saturation}:{value}:{}",
+                            target.0
+                        )));
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                }
+                UiAction::SetRange { key, value } if key == "inspector.appearance.opacity" => {
+                    if let Some(target) = selected.first().copied() {
+                        intents.push(NativeWorkbenchIntent::Command(format!(
+                            "inspector.appearance.opacity:{value}:{}",
                             target.0
                         )));
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -179,14 +393,50 @@ impl NativeGameWorkbench {
                     });
                     self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
+                UiAction::ScrollTo { id, offset } if id == "hierarchy.tree" => {
+                    let next = offset[1].max(0.0);
+                    if (next - self.hierarchy_scroll_offset).abs() > f32::EPSILON {
+                        self.hierarchy_scroll_offset = next;
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                }
+                UiAction::ScrollTo { id, offset } if id == "agent.history" => {
+                    if let Some(next) =
+                        next_agent_scroll_projection(self.agent_scroll_projection_offset, offset[1])
+                    {
+                        self.agent_scroll_projection_offset = next;
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                }
                 UiAction::Command { name } => {
+                    if name == crate::application_menu::command::SEARCH_OPEN {
+                        self.open_search();
+                        self.open_menu = None;
+                        continue;
+                    }
+                    if let Some(action) = parse_agent_action(name, self.agent_settings.language) {
+                        let reset_history = matches!(
+                            &action,
+                            AgentAction::NewChat
+                                | AgentAction::SelectSession(_)
+                                | AgentAction::DeleteSession(_)
+                        );
+                        self.apply_agent_action(action, &mut intents, reset_history);
+                        continue;
+                    }
                     if let Some(menu_id) = name.strip_prefix("application.menu.") {
                         self.open_menu = (self.open_menu.as_deref() != Some(menu_id))
                             .then(|| menu_id.to_string());
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
-                    self.open_menu = None;
+                    // Hierarchy rows publish hover/drag-over commands from
+                    // PointerMove. They are not menu selections and must not
+                    // dismiss an application menu merely because the cursor
+                    // crossed the panel on its way to the popup.
+                    if !matches!(&dispatched.event, raf_ui::UiEventKind::PointerMove) {
+                        self.open_menu = None;
+                    }
                     match name.as_str() {
                         "viewport.dropdown.view.toggle" => {
                             self.toolbar_state.view_menu_open = !self.toolbar_state.view_menu_open;
@@ -279,6 +529,27 @@ impl NativeGameWorkbench {
                             });
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         }
+                        continue;
+                    }
+                    if let Some(key) = name.strip_prefix("project-settings.commit_text:") {
+                        let value_key = format!("project-settings.{key}");
+                        let value = self
+                            .host
+                            .session()
+                            .interaction
+                            .controls
+                            .text(&value_key)
+                            .to_string();
+                        intents.push(NativeWorkbenchIntent::ProjectSettingText {
+                            key: value_key,
+                            value,
+                        });
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
+                    if name.starts_with("project-settings.") {
+                        intents.push(NativeWorkbenchIntent::ProjectSettingCommand(name.clone()));
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
                     if let Some(raw_id) = name.strip_prefix("nodes.drag.start.") {
@@ -497,6 +768,7 @@ impl NativeGameWorkbench {
                     }
                     if let Some(tab) = name.strip_prefix("hierarchy.open-bottom:") {
                         if self.bottom_dock.select(tab) {
+                            self.reset_input_state(router);
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         }
                         continue;
@@ -512,6 +784,34 @@ impl NativeGameWorkbench {
                         continue;
                     }
                     match name.as_str() {
+                        "console.filter.all" => {
+                            if self.console.set_filter_level(None) {
+                                self.toolbar_revision =
+                                    self.toolbar_revision.wrapping_add(1).max(1);
+                            }
+                            continue;
+                        }
+                        "console.filter.info" => {
+                            if self.console.set_filter_level(Some(LogLevel::Info)) {
+                                self.toolbar_revision =
+                                    self.toolbar_revision.wrapping_add(1).max(1);
+                            }
+                            continue;
+                        }
+                        "console.filter.warning" => {
+                            if self.console.set_filter_level(Some(LogLevel::Warning)) {
+                                self.toolbar_revision =
+                                    self.toolbar_revision.wrapping_add(1).max(1);
+                            }
+                            continue;
+                        }
+                        "console.filter.error" => {
+                            if self.console.set_filter_level(Some(LogLevel::Error)) {
+                                self.toolbar_revision =
+                                    self.toolbar_revision.wrapping_add(1).max(1);
+                            }
+                            continue;
+                        }
                         "console.submit" => {
                             if let Some(submission) = self.console.submit_input() {
                                 let text = submission.text;
@@ -524,6 +824,17 @@ impl NativeGameWorkbench {
                                 intents.push(NativeWorkbenchIntent::Command(format!(
                                     "console.submit:{text}"
                                 )));
+                            }
+                            continue;
+                        }
+                        _ if name.starts_with("console.block.toggle:") => {
+                            if let Some(raw_id) = name.strip_prefix("console.block.toggle:") {
+                                if let Ok(id) = raw_id.parse::<u64>() {
+                                    if self.console.toggle_json_disclosure(id) {
+                                        self.toolbar_revision =
+                                            self.toolbar_revision.wrapping_add(1).max(1);
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -652,13 +963,6 @@ impl NativeGameWorkbench {
                             self.project_catalog.refresh();
                             continue;
                         }
-                        "agent.open" => {
-                            if self.bottom_dock.select("agent") {
-                                self.toolbar_revision =
-                                    self.toolbar_revision.wrapping_add(1).max(1);
-                            }
-                            continue;
-                        }
                         "editor.settings" => {
                             intents.push(NativeWorkbenchIntent::OpenSettings {
                                 section: self.settings_section,
@@ -667,6 +971,7 @@ impl NativeGameWorkbench {
                         }
                         "project.settings" => {
                             if self.bottom_dock.select("project-settings") {
+                                self.reset_input_state(router);
                                 self.toolbar_revision =
                                     self.toolbar_revision.wrapping_add(1).max(1);
                             }
@@ -718,6 +1023,26 @@ impl NativeGameWorkbench {
                         self.assets_primitive_menu_open = false;
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
+                    if name.starts_with("inspector.primitive:")
+                        || name.starts_with("inspector.collider:")
+                        || name.starts_with("inspector.body-type:")
+                    {
+                        let trigger_id = if name.starts_with("inspector.primitive:") {
+                            "inspector.primitive.trigger"
+                        } else if name.starts_with("inspector.collider:") {
+                            "inspector.collider.trigger"
+                        } else {
+                            "inspector.body-type.trigger"
+                        };
+                        self.inspector_view.dropdown = None;
+                        self.inspector_view.color_picker = false;
+                        self.host
+                            .session_mut()
+                            .interaction
+                            .focus
+                            .request_focus(trigger_id);
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
                     if let Some(slug) = name.strip_prefix("inspector.section.toggle:") {
                         if let Some(section) = inspector_section_from_slug(slug) {
                             let expanded = !self.inspector_view.section(section);
@@ -736,10 +1061,42 @@ impl NativeGameWorkbench {
                     }
                     if name == "inspector.color.toggle" {
                         self.inspector_view.color_picker = !self.inspector_view.color_picker;
+                        self.inspector_view.dropdown = None;
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
+                    if let Some(hue) = name.strip_prefix("inspector.color.hue:") {
+                        let Some(target) = selected.first().copied() else {
+                            continue;
+                        };
+                        intents.push(NativeWorkbenchIntent::Command(format!(
+                            "inspector.color.hue:{hue}:{}",
+                            target.0
+                        )));
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
                     if let Some(slug) = name.strip_prefix("inspector.dropdown.toggle:") {
+                        if let Some((dropdown, navigation)) = slug.rsplit_once(':') {
+                            if matches!(navigation, "next" | "previous" | "first" | "last") {
+                                if matches!(dropdown, "primitive" | "collider" | "body-type") {
+                                    self.inspector_view.dropdown = match dropdown {
+                                        "primitive" => Some(InspectorDropdown::Primitive),
+                                        "collider" => Some(InspectorDropdown::Collider),
+                                        _ => Some(InspectorDropdown::BodyType),
+                                    };
+                                    if let Some(command) = inspector_dropdown_navigation_command(
+                                        scene, selected, dropdown, navigation,
+                                    ) {
+                                        intents.push(NativeWorkbenchIntent::Command(command));
+                                        self.inspector_view.dropdown = None;
+                                    }
+                                    self.toolbar_revision =
+                                        self.toolbar_revision.wrapping_add(1).max(1);
+                                }
+                                continue;
+                            }
+                        }
                         let next = match slug {
                             "primitive" => Some(InspectorDropdown::Primitive),
                             "collider" => Some(InspectorDropdown::Collider),
@@ -749,6 +1106,7 @@ impl NativeGameWorkbench {
                         self.inspector_view.dropdown = (self.inspector_view.dropdown != next)
                             .then_some(next)
                             .flatten();
+                        self.inspector_view.color_picker = false;
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
@@ -908,7 +1266,7 @@ impl NativeGameWorkbench {
                         }
                     }
                     if let Some(raw_id) = name.strip_prefix("hierarchy.drag.move:") {
-                        if raw_id.parse::<usize>().is_ok() {
+                        if raw_id.parse::<usize>().is_ok() && self.hierarchy_drag.is_some() {
                             let pointer = native_input
                                 .snapshot()
                                 .pointer_position
@@ -933,7 +1291,7 @@ impl NativeGameWorkbench {
                             continue;
                         }
                     }
-                    if name == "hierarchy.drag.over:root" {
+                    if name == "hierarchy.drag.over:root" && self.hierarchy_drag.is_some() {
                         if let Some(drag) = self.hierarchy_drag.as_mut() {
                             drag.pointer = native_input
                                 .snapshot()
@@ -974,6 +1332,7 @@ impl NativeGameWorkbench {
                     if let Some(raw_tab) = name.strip_prefix("bottom.tab.") {
                         if let Some((group_id, tab_id)) = raw_tab.split_once('|') {
                             if self.bottom_dock.select_in_group(group_id, tab_id) {
+                                self.reset_input_state(router);
                                 self.toolbar_revision =
                                     self.toolbar_revision.wrapping_add(1).max(1);
                             }
@@ -991,6 +1350,7 @@ impl NativeGameWorkbench {
                                     .unwrap_or([self.rect.x, self.rect.y]),
                             );
                             if self.bottom_dock.split_context(true) {
+                                self.reset_input_state(router);
                                 self.toolbar_revision =
                                     self.toolbar_revision.wrapping_add(1).max(1);
                                 self.bottom_dock.persist_project_layout();
@@ -1009,6 +1369,7 @@ impl NativeGameWorkbench {
                                     .unwrap_or([self.rect.x, self.rect.y]),
                             );
                             if self.bottom_dock.split_context(false) {
+                                self.reset_input_state(router);
                                 self.toolbar_revision =
                                     self.toolbar_revision.wrapping_add(1).max(1);
                                 self.bottom_dock.persist_project_layout();
@@ -1023,6 +1384,7 @@ impl NativeGameWorkbench {
                     }
                     if name == "bottom.context.reset" {
                         self.bottom_dock.reset_group(self.project_type);
+                        self.reset_input_state(router);
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
@@ -1085,6 +1447,7 @@ impl NativeGameWorkbench {
                             value,
                         });
                         self.inspector_view.color_picker = false;
+                        self.inspector_view.dropdown = None;
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
@@ -1098,6 +1461,21 @@ impl NativeGameWorkbench {
                             value: hex.to_string(),
                         });
                         self.inspector_view.color_picker = false;
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
+                    if let Some(hex) = name.strip_prefix("inspector.color.apply:") {
+                        let Some(target) = selected.first().copied() else {
+                            continue;
+                        };
+                        intents.push(NativeWorkbenchIntent::InspectorCommit {
+                            target,
+                            field: "color".to_string(),
+                            value: hex.to_string(),
+                        });
+                        // Hue changes are iterative: leave the picker open so
+                        // the user can refine channels in one pass.
+                        self.inspector_view.dropdown = None;
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
@@ -1115,6 +1493,22 @@ impl NativeGameWorkbench {
                             .controls
                             .text(&key)
                             .to_string();
+                        let value = if field.starts_with("position.") {
+                            value
+                                .trim()
+                                .parse::<f32>()
+                                .ok()
+                                .filter(|value| value.is_finite())
+                                .map(|value| {
+                                    self.agent_settings
+                                        .display_unit
+                                        .to_meters(value)
+                                        .to_string()
+                                })
+                                .unwrap_or(value)
+                        } else {
+                            value
+                        };
                         intents.push(NativeWorkbenchIntent::InspectorCommit {
                             target,
                             field,
@@ -1124,7 +1518,12 @@ impl NativeGameWorkbench {
                         continue;
                     }
                     if let Some(action) = parse_viewport_toolbar_action(&dispatched.action) {
-                        self.apply_toolbar_action(action);
+                        let settings_changed = self.apply_toolbar_action(action);
+                        if settings_changed {
+                            intents.push(NativeWorkbenchIntent::AgentSettingsChanged(
+                                self.agent_settings.clone(),
+                            ));
+                        }
                         intents.push(NativeWorkbenchIntent::Viewport(action));
                     } else {
                         self.hierarchy_empty_menu_open = false;
@@ -1135,6 +1534,19 @@ impl NativeGameWorkbench {
                     }
                 }
                 UiAction::OpenMenu { id } => {
+                    if let Some(raw_id) = id.strip_prefix("hierarchy.menu:") {
+                        if let Ok(id) = raw_id.parse::<usize>() {
+                            let target = SceneNodeId(id);
+                            self.open_menu = None;
+                            self.hierarchy_menu_target =
+                                Some((target, self.hierarchy_target_is_folder(target)));
+                            self.hierarchy_empty_menu_open = false;
+                            self.hierarchy_primitive_menu_open = false;
+                            self.hierarchy_menu_position = native_input.snapshot().pointer_position;
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                            continue;
+                        }
+                    }
                     self.open_menu = (self.open_menu.as_deref() != Some(id)).then(|| id.clone());
                     self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
@@ -1173,6 +1585,10 @@ impl NativeGameWorkbench {
             .snapshot()
             .key_pressed(raf_core::InputKey::Escape)
         {
+            if self.search_surface.is_open() {
+                self.search_surface.close();
+                self.restore_search_focus();
+            }
             self.open_menu = None;
             self.hierarchy_renaming = None;
             self.hierarchy_drag = None;
@@ -1186,18 +1602,35 @@ impl NativeGameWorkbench {
             self.toolbar_state.shading_menu_open = false;
             self.toolbar_state.primitive_menu_open = false;
             self.toolbar_state.building_menu_open = false;
+            self.inspector_view.dropdown = None;
+            self.inspector_view.color_picker = false;
+            if self.agent_panel.has_open_menu() {
+                self.agent_panel.close_menus();
+            }
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
         if snapshot.button_pressed(raf_core::PointerButton::Primary) {
-            let hovered = self.host.session().interaction.focus.hovered.as_deref();
+            if self.agent_panel.has_open_menu()
+                && !actions.iter().any(|action| {
+                    action.target_id.starts_with("agent.model")
+                        || action.target_id.starts_with("agent.mode")
+                        || action.target_id.starts_with("agent.add-model")
+                        || action.target_id.starts_with("agent.new-model")
+                })
+            {
+                self.agent_panel.close_menus();
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
+            let hovered = self.host.session().interaction.focus.hovered.clone();
             if self.hierarchy_renaming.is_some()
-                && !hovered.is_some_and(|id| id.starts_with("hierarchy.rename.control."))
+                && !hovered
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("hierarchy.rename.control."))
             {
                 self.hierarchy_renaming = None;
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
-            if self.inspector_name_editing.is_some()
-                && !hovered.is_some_and(|id| id == "inspector.name")
+            if self.inspector_name_editing.is_some() && hovered.as_deref() != Some("inspector.name")
             {
                 self.inspector_name_editing = None;
                 if let Some(id) = selected.first().copied() {
@@ -1210,6 +1643,21 @@ impl NativeGameWorkbench {
                     }
                 }
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
+            if self.inspector_view.dropdown.is_some() || self.inspector_view.color_picker {
+                let inside_inspector_popup = hovered.as_deref().is_some_and(|id| {
+                    id.starts_with("inspector.")
+                        && (id.contains("dropdown")
+                            || id.contains("color")
+                            || id.contains(".trigger")
+                            || id.contains(".menu")
+                            || id.contains(".option."))
+                });
+                if !inside_inspector_popup {
+                    self.inspector_view.dropdown = None;
+                    self.inspector_view.color_picker = false;
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                }
             }
         }
         if snapshot.button_pressed(raf_core::PointerButton::Primary)
@@ -1234,7 +1682,6 @@ impl NativeGameWorkbench {
             self.toolbar_state.shading_menu_open = false;
             self.toolbar_state.primitive_menu_open = false;
             self.toolbar_state.building_menu_open = false;
-            self.toolbar_state.building_menu_open = false;
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
         if self.open_menu.is_some()
@@ -1257,4 +1704,153 @@ impl NativeGameWorkbench {
         }
         (intents, actions)
     }
+
+    fn apply_agent_action(
+        &mut self,
+        action: AgentAction,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+        reset_history: bool,
+    ) {
+        let focus_new_model_label = matches!(&action, AgentAction::OpenAddModel);
+        if matches!(&action, AgentAction::Approve) {
+            self.pending_agent_decision = Some(true);
+        } else if matches!(&action, AgentAction::Deny) {
+            self.pending_agent_decision = Some(false);
+        }
+        self.agent_panel
+            .apply_action(action, &mut self.agent_settings);
+        if focus_new_model_label {
+            self.host
+                .session_mut()
+                .interaction
+                .focus
+                .request_focus("agent.new-model.label");
+        }
+        if reset_history {
+            self.agent_scroll_projection_offset = 0.0;
+            self.host
+                .session_mut()
+                .reset_interaction_for_surface_change(Some("agent.history"));
+        }
+        if self.agent_panel.take_open_settings_request() {
+            self.settings_section = SettingsSection::Ai;
+            intents.push(NativeWorkbenchIntent::OpenSettings {
+                section: SettingsSection::Ai,
+            });
+        }
+        if self.agent_panel.take_settings_changed() {
+            intents.push(NativeWorkbenchIntent::AgentSettingsChanged(
+                self.agent_settings.clone(),
+            ));
+        }
+        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+    }
+}
+
+fn parse_agent_action(name: &str, language: raf_core::Language) -> Option<AgentAction> {
+    let action = match name {
+        "agent.sidebar.toggle" => AgentAction::ToggleSidebar,
+        "agent.sidebar.close" => AgentAction::CloseSidebar,
+        "agent.new-chat" => AgentAction::NewChat,
+        "agent.model.toggle" => AgentAction::ToggleModelMenu,
+        "agent.mode.toggle" => AgentAction::ToggleModeMenu,
+        "agent.model.add" => AgentAction::OpenAddModel,
+        "agent.model.cancel" => AgentAction::CloseAddModel,
+        "agent.model.confirm" => AgentAction::AddModel,
+        "agent.open-settings" => AgentAction::OpenSettings,
+        "agent.submit" => AgentAction::Submit,
+        "agent.stop" => AgentAction::Stop,
+        "agent.approve" => AgentAction::Approve,
+        "agent.deny" => AgentAction::Deny,
+        "agent.mode.inspect" => AgentAction::SetMode(AgentMode::Inspect),
+        "agent.mode.passive" | "agent.mode.plan" => AgentAction::SetMode(AgentMode::Plan),
+        "agent.mode.active" => AgentAction::SetMode(AgentMode::Active),
+        _ => {
+            if let Some(raw) = name.strip_prefix("agent.session.select:") {
+                AgentAction::SelectSession(raw.parse().ok()?)
+            } else if let Some(raw) = name.strip_prefix("agent.session.delete:") {
+                AgentAction::DeleteSession(raw.parse().ok()?)
+            } else if let Some(raw) = name.strip_prefix("agent.model.select:") {
+                AgentAction::SelectModel(raw.to_string())
+            } else if let Some(key) = name.strip_prefix("agent.suggestion:") {
+                AgentAction::UseSuggestion(raf_core::i18n::t(key, language))
+            } else {
+                return None;
+            }
+        }
+    };
+    Some(action)
+}
+
+fn inspector_select_command_prefix(key: &str) -> Option<&'static str> {
+    match key {
+        "inspector.primitive" => Some("inspector.primitive"),
+        "inspector.collider" => Some("inspector.collider"),
+        "inspector.body-type" => Some("inspector.body-type"),
+        _ => None,
+    }
+}
+
+fn inspector_dropdown_from_trigger(id: &str) -> Option<InspectorDropdown> {
+    match id {
+        "inspector.primitive.trigger" => Some(InspectorDropdown::Primitive),
+        "inspector.collider.trigger" => Some(InspectorDropdown::Collider),
+        "inspector.body-type.trigger" => Some(InspectorDropdown::BodyType),
+        _ => None,
+    }
+}
+
+fn inspector_dropdown_navigation_command(
+    scene: &SceneGraph,
+    selected: &[SceneNodeId],
+    dropdown: &str,
+    navigation: &str,
+) -> Option<String> {
+    let id = selected.first().copied()?;
+    let node = scene.get(id)?;
+    let (current, labels): (&str, &[&str]) = match dropdown {
+        "primitive" => (
+            match node.primitive {
+                raf_core::scene::Primitive::Empty => "Empty",
+                raf_core::scene::Primitive::Cube => "Cube",
+                raf_core::scene::Primitive::Sphere => "Sphere",
+                raf_core::scene::Primitive::Plane => "Plane",
+                raf_core::scene::Primitive::Cylinder => "Cylinder",
+            },
+            &["Empty", "Cube", "Sphere", "Plane", "Cylinder"],
+        ),
+        "collider" => (
+            match node.collider.collider_type {
+                raf_core::scene::ColliderType::None => "None",
+                raf_core::scene::ColliderType::Aabb => "Aabb",
+                raf_core::scene::ColliderType::ConvexHull => "ConvexHull",
+                raf_core::scene::ColliderType::MeshCollider => "MeshCollider",
+            },
+            &["None", "Aabb", "ConvexHull", "MeshCollider"],
+        ),
+        "body-type" => (
+            match node.rigid_body.body_type {
+                raf_core::scene::RigidBodyType::Static => "Static",
+                raf_core::scene::RigidBodyType::Dynamic => "Dynamic",
+                raf_core::scene::RigidBodyType::Kinematic => "Kinematic",
+            },
+            &["Static", "Dynamic", "Kinematic"],
+        ),
+        _ => return None,
+    };
+    let current_index = labels.iter().position(|label| *label == current)?;
+    let next_index = match navigation {
+        "first" => 0,
+        "last" => labels.len().saturating_sub(1),
+        "next" => (current_index + 1) % labels.len(),
+        "previous" => (current_index + labels.len() - 1) % labels.len(),
+        _ => return None,
+    };
+    let value = labels[next_index];
+    Some(match dropdown {
+        "primitive" => format!("inspector.primitive:{}:{value}", id.0),
+        "collider" => format!("inspector.collider:{}:{value}", id.0),
+        "body-type" => format!("inspector.body-type:{}:{value}", id.0),
+        _ => return None,
+    })
 }

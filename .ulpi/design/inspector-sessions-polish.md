@@ -6,11 +6,12 @@ Sessions should read as a compact project control surface, not as a stack of
 generic cards. The active edge remains the only strong accent; structure comes
 from spacing, icon semantics, and a single intentional list scroll region.
 
-## Locked direction
+## Direction
 
 This pass binds to the existing `technical / utilitarian` RafUI language in
-`DESIGN.md`: near-black tinted surfaces, Ubuntu roles, 3/4px control radii,
-orange reserved for focus and primary creation, and no decorative motion.
+`.ai/STUDIO_GRADE_UI.md`: near-black tinted surfaces, Ubuntu roles, compact
+control radii, orange reserved for focus and primary creation, and purposeful
+motion only.
 
 ## Changes implemented
 
@@ -44,8 +45,10 @@ orange reserved for focus and primary creation, and no decorative motion.
 
 ## Pre-flight result
 
-- Identity lock: pass. Existing RafUI palette, typography, radius, and motion.
-- Anti-slop: pass. No gradients, glow, pills, nested cards, or decorative badges.
+- Visual consistency: pass. Uses the Studio Grade UI defaults for palette,
+  typography, radius, and motion.
+- Default review: pass. No gradient, glow, pill, nested card, or decorative
+  badge is needed for this brief.
 - State coverage: pass for active, inactive, hover, focus, disabled, empty, and narrow layouts.
 - Accessibility: pass for visible focus, localized labels, stable controls, and keyboard order.
 - Performance: pass by inspection for this UI-only pass; runtime FPS validation remains a live QA step.

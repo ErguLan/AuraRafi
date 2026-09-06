@@ -26,8 +26,12 @@ struct UiSurfaceLayoutKey {
     focus: UiFocusState,
     logical_size: [u32; 2],
     raster_scale_bits: u32,
+    text_scale_bits: u32,
+    theme_experimental_bits: u32,
     motion_value_bits: u32,
     clear_color: [u8; 4],
+    high_contrast: bool,
+    reduce_transparency: bool,
 }
 
 impl UiSurfaceLayoutKey {
@@ -44,8 +48,12 @@ impl UiSurfaceLayoutKey {
             focus: session.interaction.focus.clone(),
             logical_size: [logical_size[0].max(1), logical_size[1].max(1)],
             raster_scale_bits: raster_scale.clamp(1.0, 4.0).to_bits(),
+            text_scale_bits: session.text_scale().to_bits(),
+            theme_experimental_bits: session.environment_theme_experimental().to_bits(),
             motion_value_bits: session.transient_motion_revision(),
             clear_color,
+            high_contrast: session.high_contrast(),
+            reduce_transparency: session.reduce_transparency(),
         }
     }
 }
@@ -58,6 +66,7 @@ struct CachedLayout {
 
 struct CachedPaint {
     layout_revision: u64,
+    paint_revision: u64,
     atlas_revision: u64,
     resolved_text: Vec<String>,
     frame: Arc<UiSurfaceFrame>,
@@ -77,6 +86,7 @@ pub(super) struct UiSurfaceCompilationCache {
     layout: Option<CachedLayout>,
     paint: Option<CachedPaint>,
     next_layout_revision: u64,
+    paint_only_invalidated: bool,
     metrics: UiSurfaceCompileMetrics,
 }
 
@@ -84,6 +94,7 @@ impl UiSurfaceCompilationCache {
     pub fn invalidate(&mut self) {
         self.layout = None;
         self.paint = None;
+        self.paint_only_invalidated = false;
     }
 
     pub fn metrics(&self) -> UiSurfaceCompileMetrics {
@@ -142,6 +153,17 @@ impl UiSurfaceCompilationCache {
         frame
     }
 
+    pub fn patch_text_value(&mut self, id: &str, value: &str) {
+        self.paint = None;
+        if let Some(cached) = self.layout.as_mut() {
+            let frame = Arc::make_mut(&mut cached.frame);
+            if let Some(layout) = frame.layout_boxes.iter_mut().find(|layout| layout.id == id) {
+                layout.text_value = Some(value.to_string());
+            }
+        }
+        self.paint_only_invalidated = true;
+    }
+
     pub fn compile<F>(
         &mut self,
         surface: &UiSurface,
@@ -150,6 +172,32 @@ impl UiSurfaceCompilationCache {
         logical_size: [u32; 2],
         raster_scale: f32,
         clear_color: [u8; 4],
+        resolve: F,
+    ) -> UiSurfaceCompiledFrame
+    where
+        F: FnMut(&str) -> String,
+    {
+        self.compile_with_paint_revision(
+            surface,
+            session,
+            surface_revision,
+            logical_size,
+            raster_scale,
+            clear_color,
+            0,
+            resolve,
+        )
+    }
+
+    pub fn compile_with_paint_revision<F>(
+        &mut self,
+        surface: &UiSurface,
+        session: &mut UiSurfaceSession,
+        surface_revision: u64,
+        logical_size: [u32; 2],
+        raster_scale: f32,
+        clear_color: [u8; 4],
+        paint_revision: u64,
         mut resolve: F,
     ) -> UiSurfaceCompiledFrame
     where
@@ -163,6 +211,29 @@ impl UiSurfaceCompilationCache {
             raster_scale,
             clear_color,
         );
+        let layout_revision = self
+            .layout
+            .as_ref()
+            .expect("layout cache exists after compilation")
+            .revision;
+        let paint_only_invalidated = std::mem::take(&mut self.paint_only_invalidated);
+
+        // A retained frame already contains the resolved values and atlas
+        // revision that produced its paint list. Avoid walking every text
+        // request, hashing every string, and touching the atlas again when
+        // another editor surface merely asks for an idle present.
+        if let Some(cached) = self.paint.as_ref().filter(|cached| {
+            cached.layout_revision == layout_revision
+                && cached.paint_revision == paint_revision
+                && cached.atlas_revision == session.text_atlas.revision()
+        }) {
+            self.metrics.paint_cache_hit = true;
+            return UiSurfaceCompiledFrame {
+                frame: Arc::clone(&cached.frame),
+                draw_list: Arc::clone(&cached.draw_list),
+            };
+        }
+
         let needs_intrinsic_fit = cached_frame.layout_boxes.iter().any(|layout| {
             matches!(
                 layout.width_mode,
@@ -176,16 +247,12 @@ impl UiSurfaceCompilationCache {
                     | raf_ui::UiSizeMode::MaxContent
             )
         });
-        let layout_revision = self
-            .layout
-            .as_ref()
-            .expect("layout cache exists after compilation")
-            .revision;
         let resolved_text = { session.resolve_text_requests(&cached_frame, |key| resolve(key)) };
         session.sync_resolved_text(&cached_frame, &resolved_text);
         let atlas_revision = session.text_atlas.revision();
         self.metrics.paint_cache_hit = self.paint.as_ref().is_some_and(|cached| {
             cached.layout_revision == layout_revision
+                && cached.paint_revision == paint_revision
                 && cached.atlas_revision == atlas_revision
                 && cached.resolved_text == resolved_text
         });
@@ -199,30 +266,32 @@ impl UiSurfaceCompilationCache {
                 draw_list: Arc::clone(&cached.draw_list),
             };
         }
-        let frame = if needs_intrinsic_fit {
-            let intrinsic_sizes =
-                session.intrinsic_sizes_for_frame(&cached_frame, &resolved_text, raster_scale);
-            let frame = Arc::new(session.rebuild_layout_with_intrinsic_sizes(
-                surface,
-                logical_size[0],
-                logical_size[1],
-                clear_color,
-                raster_scale,
-                &intrinsic_sizes,
-            ));
-            // Input is processed before presentation on the next native
-            // frame. Keep the measured layout, hit regions and scroll metrics
-            // together so interaction never falls back to the provisional
-            // pre-text-fit extent while the renderer shows the intrinsic one.
-            if let Some(cached) = self.layout.as_mut() {
-                cached.frame = Arc::clone(&frame);
-            }
-            frame
-        } else {
-            Arc::clone(&cached_frame)
-        };
+        let frame =
+            if needs_intrinsic_fit && (!self.metrics.layout_cache_hit || !paint_only_invalidated) {
+                let intrinsic_sizes =
+                    session.intrinsic_sizes_for_frame(&cached_frame, &resolved_text, raster_scale);
+                let frame = Arc::new(session.rebuild_layout_with_intrinsic_sizes(
+                    surface,
+                    logical_size[0],
+                    logical_size[1],
+                    clear_color,
+                    raster_scale,
+                    &intrinsic_sizes,
+                ));
+                // Input is processed before presentation on the next native
+                // frame. Keep the measured layout, hit regions and scroll metrics
+                // together so interaction never falls back to the provisional
+                // pre-text-fit extent while the renderer shows the intrinsic one.
+                if let Some(cached) = self.layout.as_mut() {
+                    cached.frame = Arc::clone(&frame);
+                }
+                frame
+            } else {
+                Arc::clone(&cached_frame)
+            };
         let draw_list = if let Some(cached) = self.paint.as_ref().filter(|cached| {
             cached.layout_revision == layout_revision
+                && cached.paint_revision == paint_revision
                 && cached.atlas_revision == atlas_revision
                 && cached.resolved_text == resolved_text
         }) {
@@ -238,6 +307,7 @@ impl UiSurfaceCompilationCache {
             self.metrics.paint_builds = self.metrics.paint_builds.saturating_add(1);
             self.paint = Some(CachedPaint {
                 layout_revision,
+                paint_revision,
                 atlas_revision: session.text_atlas.revision(),
                 resolved_text,
                 frame: Arc::clone(&frame),
@@ -332,6 +402,54 @@ mod tests {
 
         assert!(!Arc::ptr_eq(&first.frame, &second.frame));
         assert_eq!(cache.metrics().layout_builds, 2);
+    }
+
+    #[test]
+    fn fixed_text_patch_reuses_layout_and_rebuilds_only_paint() {
+        let surface = UiSurface::new(
+            "paint-only",
+            StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root).with_child(
+                UiNode::new("value", UiNodeKind::Label)
+                    .with_text_value("before")
+                    .with_layout(UiLayout::fixed(180.0, 24.0)),
+            ),
+        );
+        let mut session = UiSurfaceSession::default();
+        let mut cache = UiSurfaceCompilationCache::default();
+
+        let _ = cache.compile(
+            &surface,
+            &mut session,
+            0,
+            [320, 120],
+            1.0,
+            [0, 0, 0, 255],
+            |key| key.to_string(),
+        );
+        cache.patch_text_value("value", "after");
+        let patched = cache.compile_with_paint_revision(
+            &surface,
+            &mut session,
+            0,
+            [320, 120],
+            1.0,
+            [0, 0, 0, 255],
+            1,
+            |key| key.to_string(),
+        );
+
+        assert_eq!(cache.metrics().layout_builds, 1);
+        assert_eq!(cache.metrics().paint_builds, 2);
+        assert_eq!(
+            patched
+                .frame
+                .layout_boxes
+                .iter()
+                .find(|layout| layout.id == "value")
+                .and_then(|layout| layout.text_value.as_deref()),
+            Some("after")
+        );
     }
 
     #[test]

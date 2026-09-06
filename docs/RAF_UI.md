@@ -5,6 +5,11 @@ contrato funcional del editor, workbenches, paneles e interacciones consulta
 [`EDITOR_RAFUI.md`](EDITOR_RAFUI.md). Para el contrato grafico consulta
 [`RENDERER.md`](RENDERER.md).
 
+Los defaults visuales y la politica para referencias, materiales y excepciones
+de diseño viven en [`.ai/STUDIO_GRADE_UI.md`](../.ai/STUDIO_GRADE_UI.md). Este
+documento conserva el contrato tecnico y no debe convertirse en otra guia de
+identidad visual.
+
 RafUI es la UI retenida oficial de AuraRafi. Las superficies describen
 presentacion; los hosts conservan estado temporal y los modulos de dominio
 ejecutan comandos, persistencia y undo/redo.
@@ -49,8 +54,19 @@ Theme tokens are semantic rather than panel-specific:
 Each `UiDocument` owns a serializable `UiTheme`. A user can alter tokens and
 metrics in one place, then use `root_style`, `panel_style`, `input_style`, and
 `accent_style` to make a whole interface follow it. `UiEnvironment` supplies
-viewport size, scale, dark/light preference, reduced-motion preference, and
-high-contrast preference without coupling documents to Winit or the native host.
+viewport size, scale, dark/light preference, reduced-motion preference,
+high-contrast preference, and reduce-transparency policy without coupling
+documents to Winit or the native host.
+
+`UiSurfaceMaterial` separates surface intent from backend paint policy.
+`Opaque` is the default; `TranslucentChrome`, `TranslucentRaised`,
+`ModalSurface`, and `BackdropScrim` are reserved for bounded editor chrome.
+Attach them with `UiNode::with_material`. ApiGraphicBasic resolves their fill
+and border alpha before producing `UiSurfaceDrawList`, so text and functional
+icons stay crisp and the GPU and CPU compositors consume identical colors.
+High contrast, the explicit Reduce transparency preference, and the Potato
+quality budget resolve translucent surfaces to an opaque treatment. This beta
+does not allocate blur textures, copy the framebuffer, or add a render pass.
 
 ## Layout
 
@@ -85,6 +101,32 @@ width; otherwise it stacks controls in reading order.
 `ScrollView` containers apply clipping in both GPU and CPU compositors. A
 child outside the clip rectangle cannot receive hit tests or draw over another
 panel.
+
+### Contrato de flujo e incidentes de solapamiento
+
+RafUI usa vocabulario parecido a CSS, pero no tiene DOM ni el algoritmo de
+layout de un navegador. Cada contenedor debe declarar su flujo y su contrato de
+tamano. Los hijos normales participan en `Row` o `Column`; `rect` absoluto se
+reserva para overlays o geometria que deliberadamente sale del flujo.
+
+El tamano intrinseco se resuelve en ambos ejes:
+
+- `Row` suma el ancho de sus hijos y reserva como alto el mayor alto requerido;
+- `Column` suma el alto de sus hijos y reserva como ancho el mayor ancho requerido;
+- el `gap` solo se suma en el eje principal;
+- padding, minimos, maximos y mediciones del atlas forman parte del tamano final.
+
+Este contrato evita el incidente donde un `Row` con alto `FitContent` reservaba
+cero pixeles, sus hijos se pintaban fuera de esa caja y el siguiente hermano
+comenzaba en la misma coordenada vertical. Las superficies no deben ocultar un
+fallo equivalente con offsets manuales. Para toolbars, tabs y filas densas se
+permite una altura fija o minima cuando sea una restriccion real de diseno; para
+contenido localizado o variable se usa `FitContent`.
+
+Toda correccion de layout compartido debe incluir una prueba de cajas resueltas
+que compruebe que el siguiente hermano comienza despues del borde final del
+anterior. La prueba automatica cubre geometria; la aceptacion visual en la
+ventana GPU, DPI y tema reales sigue siendo una puerta separada.
 
 ## Controls
 
@@ -122,7 +164,7 @@ small value appears frozen.
 
 The editor downbar starts as one ordered tab group, can reorder tabs horizontally
 and split through edge dragging up to three groups. Dragging shows a transient
-orange/purple target preview; only release mutates the layout. Empty source
+semantic-accent target preview; only release mutates the layout. Empty source
 groups are removed and the layout is persisted per project. Loading repairs
 duplicate tab IDs globally, restores missing tabs and the active tab, and saves
 the repaired layout. Layout files from an older dock contract are reset once to
@@ -179,6 +221,39 @@ cache hits, upload bytes, paint runs, and draw calls. Do not recreate a
 `UiSurfaceFrame`, draw list, vertex buffer, or texture merely because the
 window requested another idle present.
 
+### Texto largo, scroll y atlas
+
+Un historial virtualizado no debe convertir cada mensaje largo visible en una
+sola solicitud de texto ilimitada. Transcripciones, logs y resultados de tools
+se dividen en bloques de texto acotados y solo se construye el rango visible
+con overscan. El scroll puede actualizarse cada evento, pero la proyeccion del
+documento pesado se cuantiza para no reconstruir layout, paint y atlas por cada
+pixel recorrido.
+
+La virtualizacion se aplica en dos niveles: entre mensajes y dentro de un solo
+mensaje sobredimensionado. Que una tarjeta cruce el viewport no autoriza a
+rasterizar todos sus bloques; los bloques fuera de vista se representan con
+spacers de altura estable. Esto evita que un unico resultado de tool llene el
+atlas, haga desaparecer labels posteriores o provoque un repack grande al
+cruzarlo con scroll rapido.
+
+Diagnosticos que cambian con frecuencia, como FPS, usan una pista de tamano fijo
+y actualizacion paint-only. Nunca deben cambiar la revision estructural de una
+superficie pesada. Un contador dinamico que reconstruye el workbench puede
+convertir un overflow puntual del atlas en rasterizacion y uploads recurrentes.
+
+Restaurar un historial valido es una operacion de lectura y no fuerza una
+reescritura completa al arrancar. Las escrituras siguen fuera del hilo de UI y
+se compactan al snapshot mas reciente por proyecto para que cambios rapidos de
+sesion no creen una cola de serializacion o sincronizacion de OneDrive.
+
+El atlas conserva las solicitudes del documento vigente y compacta entradas
+obsoletas; navegar hacia abajo no debe hacer crecer indefinidamente su conjunto
+de glifos o texturas. Para diagnosticar tirones se inspeccionan por separado
+reconstrucciones de documento, cache hits, solicitudes/ocupacion del atlas,
+uploads, tiempo de presentacion y numero de nodos visibles. Un contador de FPS
+estable no descarta trabajo excesivo dentro de un frame.
+
 ### Application Menus
 
 `UiNodeKind::Menu` is only for an in-surface context or overflow menu.
@@ -220,13 +295,12 @@ only when the available content width can no longer fit both regions. This
 avoids the common nested-scroll failure where a sidebar is clipped or controls
 collapse into an implicit zero-height track.
 
-The active visual vocabulary is near-black with white/neutral text and a warm
-orange accent in dark mode. `PaperLight` uses the same structural tokens with
-light surfaces when the user selects Light. The Hub reuses the editor brand
-and settings resources and uses high-resolution neutral game/electronics
-preview PNGs through `UiSurfaceImageStore`. They are generated by the local
-`tools/ui_assets/generate_editor_icons.py` utility at development time; image
-generation is never a runtime dependency.
+The Hub resolves its visual vocabulary through the active Studio Grade UI guide
+and semantic theme tokens. `PaperLight` and the dark palette preserve the same
+information hierarchy when the user changes mode. The Hub uses high-resolution
+game/electronics preview assets through `UiSurfaceImageStore`. They are
+generated by local development utilities; image generation is never a runtime
+dependency.
 
 On high-density displays, the Hub keeps document layout and pointer input in
 logical points while allocating its WGPU target texture in physical pixels.
@@ -251,19 +325,30 @@ an unnecessary present loop in the launcher.
 `AppScreen::Settings` mounts the retained settings surface from the existing
 `EngineSettings` draft and renders it through the native ApiGraphicBasic host.
 
-The settings document has a fixed navigation rail, a single scrollable content
-region, and a fixed Save/Cancel footer. Its sections are Appearance,
-Performance, Editor, Viewport, Scripting, AI, and Platform. Appearance applies
-theme and scale to the local draft immediately; all other controls also update
-only that draft. Save commits it through the existing RON persistence path;
-Cancel and Escape retain the existing unsaved-change confirmation behavior.
+The settings document is a movable floating modal over the active Hub or
+workbench. It uses a dimmed backdrop, a compact drag header, global search, a
+grouped navigation rail, one scrollable property workspace, and an explicit
+Cancel/Apply/Save footer. Its sections are Appearance, Performance, Editor,
+Viewport, Electronics, Scripting, AI, and Platform. Game and Electronics
+preferences are separated so CAD-only controls do not leak into the game
+workflow. The modal stays within the window and re-clamps after resize.
+
+Settings controls update only an EngineSettings draft until Apply or Save.
+Theme, typography, accessibility, reduce-transparency, and the experimental
+warm tint preview flow through the same UiEnvironment used by the workbench. Save commits
+the validated draft through the existing RON persistence path; Cancel and
+Escape preserve unsaved values instead of discarding them implicitly. Dropdowns
+use the shared RafUI Select contract with keyboard navigation, typeahead,
+selection state, and click-away close behavior.
 
 The migration keeps existing fields connected: render policy and FPS limit,
-grid/autosave/units, viewport camera and gizmo controls, prepared scripting
-preferences, supported OpenRouter/OpenAI provider settings, Agent mode, and
-target-platform flags. API keys are represented by transient password input
-state and never become document text. The legacy settings recipe is not the
-normal settings route.
+grid/autosave/units, viewport camera and gizmo controls, Electronics grid/snap
+presentation, prepared scripting preferences, supported AI provider settings,
+Agent mode, and target-platform flags. API keys are represented by transient
+password input state and are redacted from disk when credential persistence is
+disabled. The global console switch remains a capability gate; each project
+keeps its own command permission. Nodes are intentionally not exposed here
+while that product area is being redesigned.
 
 Settings ownership, draft/save lifecycle, validation boundaries, DPI behavior,
 and the split between app, retained document, host, and ApiGraphicBasic

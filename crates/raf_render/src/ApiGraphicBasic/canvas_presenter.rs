@@ -214,7 +214,7 @@ impl DirectCanvasPresenter {
         source_size: [u32; 2],
         clear_color: [u8; 4],
     ) {
-        let source = self.prepare_output(device, queue, output, source_size);
+        let source = self.prepare_output(device, queue, &output, source_size);
         let Some(source) = source else {
             return;
         };
@@ -258,13 +258,13 @@ impl DirectCanvasPresenter {
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        output: SceneFrameOutput,
+        output: &SceneFrameOutput,
         source_size: [u32; 2],
     ) -> Option<PreparedCanvasSource> {
         let view = match output {
             SceneFrameOutput::GpuTexture { view, .. } => view.arc(),
             SceneFrameOutput::CpuPixels(pixels) => {
-                self.upload_cpu_pixels(device, queue, &pixels, source_size)?
+                self.upload_cpu_pixels(device, queue, pixels, source_size)?
             }
         };
         Some(PreparedCanvasSource { view })

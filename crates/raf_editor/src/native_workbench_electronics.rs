@@ -10,6 +10,8 @@ use crate::electronics_controller::{ElectronicsSelectionKind, NativeElectronicsE
 use crate::panels::electronics_navigator_surface::{
     ElectronicsLibraryEntry, ElectronicsNavigatorEntry,
 };
+use crate::panels::electronics_surface::{ElectronicsAnalysisLine, ElectronicsAnalysisTone};
+use raf_core::{i18n, Language};
 use raf_electronics::CadSurfaceKind;
 use raf_render::api_graphic_basic::ui_surface::UiIconId;
 
@@ -155,59 +157,152 @@ pub(crate) struct ElectronicsWorkbenchData {
     pub library: Vec<ElectronicsLibraryEntry>,
 }
 
-pub(crate) fn analysis_lines(editor: &NativeElectronicsEditor, tab: &str) -> Vec<String> {
+pub(crate) fn analysis_lines(
+    editor: &NativeElectronicsEditor,
+    tab: &str,
+    language: Language,
+) -> Vec<ElectronicsAnalysisLine> {
+    let label = |key: &str| i18n::t(key, language);
+    let metric = |key: &str, value: usize| {
+        ElectronicsAnalysisLine::normal(format!("{}: {value}", label(key)))
+    };
     match tab {
         "drc" => {
             let mut lines = vec![
-                format!("Components: {}", editor.schematic().components.len()),
-                format!("Wires: {}", editor.schematic().wires.len()),
-                format!("Nets: {}", editor.schematic().netlist().nets.len()),
+                metric(
+                    "electronics.analysis.components",
+                    editor.schematic().components.len(),
+                ),
+                metric("electronics.analysis.wires", editor.schematic().wires.len()),
+                metric(
+                    "electronics.analysis.nets",
+                    editor.schematic().netlist().nets.len(),
+                ),
             ];
             if editor.analysis_running() {
-                lines.push("Status: running".to_string());
-                lines.push("DRC is running in the background. Cancel to stop it.".to_string());
+                lines.push(ElectronicsAnalysisLine::with_tone(
+                    format!(
+                        "{}: {}",
+                        label("electronics.analysis.status"),
+                        label("electronics.analysis.running")
+                    ),
+                    ElectronicsAnalysisTone::Running,
+                ));
+                lines.push(ElectronicsAnalysisLine::with_tone(
+                    label("electronics.analysis.drc_running"),
+                    ElectronicsAnalysisTone::Running,
+                ));
             } else if let Some(report) = editor.drc_report() {
-                lines.push(format!(
-                    "Status: {} | errors: {} | warnings: {} | info: {}",
-                    if report.passed() {
-                        "passed"
-                    } else {
-                        "issues found"
-                    },
-                    report.errors.len(),
-                    report.warnings.len(),
-                    report.info.len(),
+                let tone = if report.passed() {
+                    ElectronicsAnalysisTone::Passed
+                } else {
+                    ElectronicsAnalysisTone::Issues
+                };
+                let result = if report.passed() {
+                    label("electronics.analysis.passed")
+                } else {
+                    label("electronics.analysis.issues_found")
+                };
+                lines.push(ElectronicsAnalysisLine::with_tone(
+                    format!(
+                        "{}: {} | {}: {} | {}: {} | {}: {}",
+                        label("electronics.analysis.status"),
+                        result,
+                        label("electronics.analysis.errors"),
+                        report.errors.len(),
+                        label("electronics.analysis.warnings"),
+                        report.warnings.len(),
+                        label("electronics.analysis.info"),
+                        report.info.len(),
+                    ),
+                    tone,
                 ));
             } else {
-                lines.push("Status: not run".to_string());
+                lines.push(ElectronicsAnalysisLine::with_tone(
+                    format!(
+                        "{}: {}",
+                        label("electronics.analysis.status"),
+                        label("electronics.analysis.not_run")
+                    ),
+                    ElectronicsAnalysisTone::Normal,
+                ));
             }
             if editor.drc_lines().is_empty() {
-                lines.push("Run a design check to inspect the current schematic.".to_string());
+                lines.push(ElectronicsAnalysisLine::normal(label(
+                    "electronics.analysis.run_design_check",
+                )));
             } else {
-                lines.extend(editor.drc_lines().iter().cloned());
+                lines.extend(editor.drc_lines().iter().cloned().map(classify_report_line));
             }
             lines
         }
         "simulation" => {
             let mut lines = vec![
-                format!("Components: {}", editor.schematic().components.len()),
-                format!("Nets: {}", editor.schematic().netlist().nets.len()),
+                metric(
+                    "electronics.analysis.components",
+                    editor.schematic().components.len(),
+                ),
+                metric(
+                    "electronics.analysis.nets",
+                    editor.schematic().netlist().nets.len(),
+                ),
             ];
             if editor.analysis_running() {
-                lines.push("Status: running".to_string());
-                lines.push(
-                    "DC simulation is running in the background. Cancel to stop it.".to_string(),
-                );
+                lines.push(ElectronicsAnalysisLine::with_tone(
+                    format!(
+                        "{}: {}",
+                        label("electronics.analysis.status"),
+                        label("electronics.analysis.running")
+                    ),
+                    ElectronicsAnalysisTone::Running,
+                ));
+                lines.push(ElectronicsAnalysisLine::with_tone(
+                    label("electronics.analysis.simulation_running"),
+                    ElectronicsAnalysisTone::Running,
+                ));
             } else if editor.simulation_lines().is_empty() {
-                lines.push("Status: not run".to_string());
-                lines.push("Run the DC solver to inspect voltage and current.".to_string());
+                lines.push(ElectronicsAnalysisLine::with_tone(
+                    format!(
+                        "{}: {}",
+                        label("electronics.analysis.status"),
+                        label("electronics.analysis.not_run")
+                    ),
+                    ElectronicsAnalysisTone::Normal,
+                ));
+                lines.push(ElectronicsAnalysisLine::normal(label(
+                    "electronics.analysis.run_dc_solver",
+                )));
             } else {
-                lines.extend(editor.simulation_lines().iter().cloned());
+                lines.extend(
+                    editor
+                        .simulation_lines()
+                        .iter()
+                        .cloned()
+                        .map(classify_report_line),
+                );
             }
             lines
         }
-        _ => vec!["Analysis tab unavailable.".to_string()],
+        _ => vec![ElectronicsAnalysisLine::normal(label(
+            "electronics.analysis.unavailable",
+        ))],
     }
+}
+
+fn classify_report_line(text: String) -> ElectronicsAnalysisLine {
+    let normalized = text.to_ascii_lowercase();
+    let tone = if normalized.contains("running") {
+        ElectronicsAnalysisTone::Running
+    } else if normalized.contains("passed") || normalized.contains("converged") {
+        ElectronicsAnalysisTone::Passed
+    } else if normalized.contains("issues") || normalized.contains("not converged") {
+        ElectronicsAnalysisTone::Issues
+    } else if normalized.contains("cancelled") || normalized.contains("failed") {
+        ElectronicsAnalysisTone::Failed
+    } else {
+        ElectronicsAnalysisTone::Normal
+    };
+    ElectronicsAnalysisLine::with_tone(text, tone)
 }
 
 impl ElectronicsWorkbenchData {
@@ -235,6 +330,7 @@ impl ElectronicsWorkbenchData {
                         component.footprint,
                         component.layer.display_name()
                     ),
+                    secondary_key: None,
                     command: format!("electronics.navigator.select.{index}"),
                     icon: electronics_icon_for_category("pcb"),
                     active: editor.selection().is_some_and(|selection| {
@@ -254,6 +350,7 @@ impl ElectronicsWorkbenchData {
                 .map(|(index, component)| ElectronicsNavigatorEntry {
                     label: format!("{}  {}", component.designator, component.value),
                     secondary: component.category.clone(),
+                    secondary_key: None,
                     command: format!("electronics.navigator.select.{index}"),
                     icon: electronics_icon_for_category(&component.category),
                     active: editor.selection().is_some_and(|selection| {
@@ -273,6 +370,7 @@ impl ElectronicsWorkbenchData {
                 .map(|(index, trace)| ElectronicsNavigatorEntry {
                     label: format!("Trace #{}", index + 1),
                     secondary: trace.net.clone(),
+                    secondary_key: None,
                     command: format!("electronics.navigator.select-trace.{index}"),
                     icon: UiIconId::Move,
                     active: editor.selection().is_some_and(|selection| {
@@ -290,6 +388,7 @@ impl ElectronicsWorkbenchData {
                 .map(|(index, wire)| ElectronicsNavigatorEntry {
                     label: format!("Wire #{}", index + 1),
                     secondary: wire.net.clone(),
+                    secondary_key: None,
                     command: format!("electronics.navigator.select-wire.{index}"),
                     icon: UiIconId::Move,
                     active: editor.selection().is_some_and(|selection| {
@@ -366,5 +465,21 @@ fn electronics_icon_for_category(category: &str) -> UiIconId {
         "power" => UiIconId::Add,
         "magnet" => UiIconId::Move,
         _ => UiIconId::Schematic,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn analysis_metrics_follow_the_requested_locale() {
+        let editor = NativeElectronicsEditor::empty("Test");
+        let english = analysis_lines(&editor, "drc", Language::English);
+        let spanish = analysis_lines(&editor, "drc", Language::Spanish);
+
+        assert!(english[0].text.starts_with("Components:"));
+        assert!(spanish[0].text.starts_with("Componentes:"));
+        assert_ne!(english[0].text, spanish[0].text);
     }
 }

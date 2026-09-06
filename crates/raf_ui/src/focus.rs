@@ -100,6 +100,18 @@ impl UiInputState {
             .any(|pressed| pressed.eq_ignore_ascii_case(&lower))
     }
 
+    /// Returns how many press edges for `key` reached this frame. Native
+    /// bridges may retain more than one edge when a user taps a text-editing
+    /// key twice before the next redraw; the boolean query above intentionally
+    /// remains compatible with existing controls.
+    pub fn key_press_count(&self, key: &str) -> usize {
+        let lower = key.to_ascii_lowercase();
+        self.pressed_keys
+            .iter()
+            .filter(|pressed| pressed.eq_ignore_ascii_case(&lower))
+            .count()
+    }
+
     pub fn key_pressed_any(&self, keys: &[&str]) -> bool {
         keys.iter().any(|key| self.key_pressed(key))
     }

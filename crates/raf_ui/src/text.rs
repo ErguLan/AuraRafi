@@ -27,6 +27,22 @@ pub enum UiTextRole {
     Monospace,
 }
 
+/// Overflow policy for a retained text request. The renderer remains free to
+/// choose its raster implementation, but every backend receives the same
+/// single-line/wrap contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UiTextOverflow {
+    Wrap,
+    Clip,
+    Ellipsis,
+}
+
+impl Default for UiTextOverflow {
+    fn default() -> Self {
+        Self::Wrap
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct UiTextStyle {
     pub role: UiTextRole,
@@ -76,6 +92,20 @@ impl UiTextStyle {
         self.inherit_color = true;
         self
     }
+
+    /// Scales semantic typography while preserving role, weight, and color.
+    /// Raster density is applied later by `UiTextAtlasRequest::scaled_for_raster`.
+    pub fn scaled_for_ui(&self, scale: f32) -> Self {
+        let scale = if scale.is_finite() {
+            scale.clamp(0.5, 3.0)
+        } else {
+            1.0
+        };
+        let mut style = *self;
+        style.size_px = (style.size_px * scale).max(1.0);
+        style.line_height_px = (style.line_height_px * scale).max(1.0);
+        style
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -84,6 +114,10 @@ pub struct UiTextAtlasRequest {
     pub text_key: String,
     pub style: UiTextStyle,
     pub max_width: f32,
+    #[serde(default)]
+    pub overflow: UiTextOverflow,
+    #[serde(default)]
+    pub single_line: bool,
 }
 
 impl UiTextAtlasRequest {
@@ -98,7 +132,22 @@ impl UiTextAtlasRequest {
             text_key: text_key.into(),
             style,
             max_width: max_width.max(0.0),
+            overflow: UiTextOverflow::Wrap,
+            single_line: false,
         }
+    }
+
+    pub fn with_overflow(mut self, overflow: UiTextOverflow) -> Self {
+        self.overflow = overflow;
+        self
+    }
+
+    pub fn with_single_line(mut self, single_line: bool) -> Self {
+        self.single_line = single_line;
+        if single_line && self.overflow == UiTextOverflow::Wrap {
+            self.overflow = UiTextOverflow::Clip;
+        }
+        self
     }
 
     /// Scales only raster inputs. Layout and pointer coordinates remain in
@@ -132,5 +181,7 @@ mod tests {
         assert_eq!(scaled.style.weight, request.style.weight);
         assert_eq!(scaled.style.size_px, 18.0);
         assert_eq!(scaled.max_width, 270.0);
+        assert_eq!(scaled.overflow, request.overflow);
+        assert_eq!(scaled.single_line, request.single_line);
     }
 }

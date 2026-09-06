@@ -65,7 +65,10 @@ impl Frustum {
                 extract(r3 - r0), // Right
                 extract(r3 + r1), // Bottom
                 extract(r3 - r1), // Top
-                extract(r3 + r2), // Near
+                // Glam's non-`_gl` projection constructors use a zero-to-one
+                // depth range, so the near boundary is row 2 rather than the
+                // OpenGL-style row 3 + row 2 extraction.
+                extract(r2),      // Near
                 extract(r3 - r2), // Far
             ],
         }

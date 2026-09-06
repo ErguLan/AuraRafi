@@ -115,6 +115,8 @@ Shared:
 - `/transaction.undo token=<undo-token>` (attached CLI/MCP only; requires
   `confirm=true` and the exact issuing revision)
 - `/project.info`, `/project.save`
+- `/scene.outline`, `/scene.query`, `/scene.spatial_map`, `/scene.design_audit`,
+  `/scene.inspect`, `/scene.verify`
 - `/workspace.read`, `/workspace.search`
 
 Games:
@@ -123,7 +125,73 @@ Games:
 - `/game.delete`, `/game.duplicate`
 - `/game.set_transform`, `/game.move`, `/game.rotate`, `/game.scale`
 - `/game.color`, `/game.arrange_grid`
-- `/game.generate_prefab`, `/game.describe_scene`, `/game.focus`
+- `/game.generate_prefab`, `/game.update`, `/game.batch`
+- `/game.create_group`, `/game.reparent`, `/game.build`, `/game.reconcile`, `/game.repair`
+- `/game.describe_scene`, `/game.focus`
+
+The native Agent uses a semantic tool layer over these commands. Its compact
+tools are `project_summary`, `scene_outline`, `scene_query`,
+`scene_spatial_map`, `scene_design_audit`, `scene_inspect`, `selection_get`, `assets_catalog`,
+`asset_inspect`, `scripts_catalog`, `project_health`, and `scene_verify`.
+Authoring tools such as `scene_build`, `scene_reconcile`, `scene_repair`, `scene_create_group`, `scene_create`,
+`scene_update`, `scene_reparent`, `scene_delete`, `scene_duplicate`,
+`scene_arrange`, `scene_instantiate_prefab`, and `scene_batch` are only
+advertised when the project domain and prompt require them. `scene_build`
+creates groups before entities, accepts child groups in any order, and accepts
+group references by name or path;
+`scene_batch` accepts 1-512 ordered operations and commits atomically.
+`scene_reconcile` requires a unique `stable_key` for every desired group/entity;
+rerunning the same payload updates those nodes in place and preserves
+unmentioned nodes. `game.build` and `game.reconcile` accept an optional
+`design_profile` (`generic`, `real_world`, `building`, `supermarket`, `parking`,
+or `outdoor`). Real-world profiles reject an incomplete envelope before the
+atomic mutation, so a blockout cannot silently be reported as a finished place.
+
+`game.add`, `game.update`, and `game.set_transform` accept the legacy scalar
+fields (`x`, `y`, `z`, `rx`, `ry`, `rz`, `sx`, `sy`, `sz`) and the native Agent
+shape (`transform.position`, `transform.rotation_deg`, `transform.scale`).
+Colors can be sent as `color=#RRGGBB`, `color=#RRGGBBAA`, or a 3/4-channel
+`color_rgba` array. The command kernel preserves these values and rejects
+malformed vectors or channels instead of silently falling back to defaults.
+`scene_verify` can receive an optional `expected` object with `primitive`,
+`transform`, and `color_rgba`; verification fails when the effective scene
+state does not match it. Mutation results expose the effective entity values,
+including local and world position, parent, path, primitive, scale, and color.
+
+`scene.spatial_map` is the bounded layout perception command. It returns the
+visible renderable entities in a scope, conservative world-space AABBs, the
+aggregate extents of the inspected scope, and optional overlap pairs. Use
+`root=<uuid|ref|name|path>` to avoid unrelated legacy scene roots and follow
+`next_cursor` when the result is paginated. It reports overlap evidence; it
+does not mutate or automatically move the scene.
+
+`scene.design_audit` is a read-only semantic check for real-world authoring.
+It infers candidates for `floor`, `enclosure`, `entrance`, `circulation`,
+`roof`, `primary_modules`, and `details` from names, tags, roles and stable
+keys. Pass `design_profile=supermarket` or `design_profile=parking` to select
+the matching envelope automatically, or pass `required_features=[...]` when
+the requested place has a specific contract. Treat a failed audit as a repair
+request rather than a completed build.
+
+`scene.repair` applies explicit operations from an audit or spatial inspection
+as one atomic batch inside an optional root scope. It never infers geometry
+from prose, so the Agent must inspect the reported target and send concrete
+update/reparent/create/delete operations.
+
+Attached Agent observation and task commands:
+
+- `/viewport.capture` captures the last rendered Game viewport to a bounded PNG
+  artifact under `.aura_rafi/agent_artifacts/`. It never enters Play mode and
+  requires the native Game viewport to have rendered a frame.
+- `/task.list`, `/task.get id=<task-id>`, `/task.events since=<sequence>`, and
+  `/task.cancel id=<task-id>` expose the native Agent run lifecycle to an
+  attached CLI/MCP client. Task progress is in-memory and bounded to the
+  editor process; it is cooperative cancellation, not durable resume.
+
+The native Agent receives the same task snapshot in its status strip while a
+run is thinking, executing tools, or waiting for approval. `task.cancel` only
+requests cancellation at a safe runtime boundary; it does not kill an
+in-flight provider network request.
 
 Prefab examples include `kind=platform`, `kind=tower`, `kind=gate` and
 `kind=boat`.
@@ -161,6 +229,41 @@ For external authoring setup and Windows examples, see
 `docs/CLI_MCP_QUICKSTART.md` and the reusable `.ai/skills/raf-game-authoring/`
 skill.
 
+## Agent Scene Build
+
+The native Agent exposes scene_build, scene_reconcile, scene_create_group, and
+scene_reparent for modular authoring. scene_build creates groups first and
+entities second in one atomic operation, while scene_reconcile applies a keyed
+desired state without duplicating existing nodes. scene_batch accepts 1-512
+ordered operations.
+Nested transform and color objects remain structured through the gateway.
+
+Prefer this payload for generated structures:
+
+    {
+      "groups": [
+        {"name": "Structure"},
+        {"name": "Products", "parent": "Structure"}
+      ],
+      "entities": [
+        {
+          "kind": "cube",
+          "name": "Floor",
+          "parent": "Structure",
+          "transform": {
+            "position": [0, 0, 0],
+            "rotation_deg": [0, 0, 0],
+            "scale": [4, 0.2, 2]
+          },
+          "color_rgba": [60, 150, 90, 255]
+        }
+      ]
+    }
+
+Mutation postconditions compare the effective primitive, parent, transform, and
+color. A mismatch is reported as a failed tool result so the Agent inspects and
+repairs instead of claiming success.
+
 ## Output Contract
 
 Every command returns:
@@ -170,8 +273,19 @@ Every command returns:
 - a machine-readable JSON payload
 - a `changed` flag
 
-Mutating commands push an undo snapshot before the document change is recorded.
-They mark the active project dirty but do not save automatically.
+Observation responses may also include `artifacts`, `references`, `revision`,
+and bounded metrics. The human-facing Agent card should show the summary first;
+raw command lines, large geometry data, and full JSON remain expandable details.
+The CLI human output and the Agent/MCP model-facing text use the same compact
+line filter: renderer dumps such as `Command executed:`, mesh vertices, and
+duplicated raw JSON are omitted from the summary while the structured response
+remains available to callers that explicitly request details.
+
+Editor-owned mutating commands push an undo snapshot before the document change
+is recorded. Attached/headless adapters record the revision and semantic diff,
+but never advertise an undo token they cannot restore. Mutations mark the
+active project dirty but do not save automatically; use `/project.save` or
+`/project.checkpoint` for an explicit checkpoint.
 
 Game outputs include entity ids, names, transform, color, primitive type, mesh
 counts and local bounds. Electronics outputs include designators, ids, values,
@@ -183,6 +297,12 @@ board size, placement, trace points, layers and airwire routing details.
 `/workspace.read` and `/workspace.search` only read inside the active project
 folder. They do not read the whole AuraRafi repository unless the active project
 itself is intentionally located there.
+
+Normal workspace search skips engine/Agent metadata such as `.ai`,
+`.aura_rafi`, `.codex`, `.grok`, `agent_history.ron`, and
+`agent_endpoint.json`. Pass `include_internal=true` only when an explicit
+diagnostic needs those files. Scene, asset, and script perception should use
+the native Agent tools instead of workspace search.
 
 Limits:
 

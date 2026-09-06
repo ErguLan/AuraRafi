@@ -14,6 +14,10 @@ pub struct NativeUiInputBridge {
     snapshot: InputSnapshot,
     scale_factor: f64,
     clipboard_paste: Option<String>,
+    /// Text-editing key presses are kept as events in addition to the bitset
+    /// snapshot. Winit can deliver two quick press/release cycles before the
+    /// next redraw; a bitset would collapse them into one `Delete` press.
+    pending_text_key_presses: Vec<InputKey>,
 }
 
 impl Default for NativeUiInputBridge {
@@ -22,6 +26,7 @@ impl Default for NativeUiInputBridge {
             snapshot: InputSnapshot::default(),
             scale_factor: 1.0,
             clipboard_paste: None,
+            pending_text_key_presses: Vec::new(),
         }
     }
 }
@@ -30,6 +35,7 @@ impl NativeUiInputBridge {
     pub fn begin_frame(&mut self) {
         self.snapshot.clear_transient();
         self.clipboard_paste = None;
+        self.pending_text_key_presses.clear();
     }
 
     pub fn ingest(&mut self, event: &WindowEvent) -> bool {
@@ -58,6 +64,7 @@ impl NativeUiInputBridge {
                 self.snapshot.window_focused = *focused;
                 if !focused {
                     self.snapshot.cancel_all();
+                    self.pending_text_key_presses.clear();
                 }
                 true
             }
@@ -98,6 +105,9 @@ impl NativeUiInputBridge {
                 if let Some(key) = event_key(event.physical_key, &event.logical_key) {
                     match event.state {
                         ElementState::Pressed => {
+                            if is_text_edit_key(key) {
+                                self.pending_text_key_presses.push(key);
+                            }
                             if !self.snapshot.keys_down.contains(key) {
                                 self.snapshot.keys_pressed.insert(key);
                             }
@@ -246,7 +256,7 @@ impl NativeUiInputBridge {
             pointer_released_buttons: released,
             pointer_pressed_outside: any_press && !pointer_inside && !retained_pointer_capture,
             pressed_keys: if receives_keyboard {
-                ui_pressed_keys(&self.snapshot)
+                ui_pressed_keys(&self.snapshot, &self.pending_text_key_presses)
             } else {
                 Vec::new()
             },
@@ -346,6 +356,25 @@ mod tests {
         let state = bridge.ui_state_for_owner(UiRect::new(0.0, 0.0, 240.0, 120.0), owner, &router);
 
         assert_eq!(state.scroll_delta, [0.0, 24.0]);
+    }
+
+    #[test]
+    fn native_text_key_edges_preserve_fast_delete_taps_until_the_frame_is_consumed() {
+        let mut bridge = NativeUiInputBridge::default();
+        bridge.snapshot_mut().keys_pressed.insert(InputKey::Delete);
+        bridge.snapshot_mut().keys_down.insert(InputKey::Delete);
+        bridge.pending_text_key_presses = vec![InputKey::Delete, InputKey::Delete];
+
+        let owner = InputOwner::RetainedUi(InputRegionId::from_static("test.text"));
+        let mut router = InputRouter::default();
+        assert!(router.try_capture_keyboard(owner));
+        let state = bridge.ui_state_for_owner(UiRect::new(0.0, 0.0, 240.0, 120.0), owner, &router);
+
+        assert_eq!(state.key_press_count("delete"), 2);
+        bridge.begin_frame();
+        assert!(bridge.pending_text_key_presses.is_empty());
+        assert!(!bridge.snapshot().key_pressed(InputKey::Delete));
+        assert!(bridge.snapshot().key_down(InputKey::Delete));
     }
 }
 
@@ -489,7 +518,7 @@ fn key_code(code: KeyCode) -> Option<InputKey> {
     })
 }
 
-fn ui_pressed_keys(snapshot: &InputSnapshot) -> Vec<String> {
+fn ui_pressed_keys(snapshot: &InputSnapshot, pending_text_key_presses: &[InputKey]) -> Vec<String> {
     const UI_KEYS: &[(InputKey, &str)] = &[
         (InputKey::A, "a"),
         (InputKey::C, "c"),
@@ -498,6 +527,7 @@ fn ui_pressed_keys(snapshot: &InputSnapshot) -> Vec<String> {
         (InputKey::Z, "z"),
         (InputKey::Escape, "escape"),
         (InputKey::Enter, "enter"),
+        (InputKey::Space, "space"),
         (InputKey::Tab, "tab"),
         (InputKey::Backspace, "backspace"),
         (InputKey::Delete, "delete"),
@@ -509,18 +539,45 @@ fn ui_pressed_keys(snapshot: &InputSnapshot) -> Vec<String> {
         (InputKey::ArrowRight, "arrowright"),
     ];
     let mut keys = Vec::with_capacity(4);
+
+    // Preserve every text-editing edge that arrived since the last consumed
+    // frame. The semantic set below remains the fallback for callers that
+    // populate `InputSnapshot` directly (for example headless embedders).
+    for key in pending_text_key_presses {
+        if let Some((_, name)) = UI_KEYS.iter().find(|(candidate, _)| candidate == key) {
+            keys.push((*name).to_string());
+        }
+    }
     for (key, name) in UI_KEYS {
-        if snapshot.key_pressed(*key) {
+        if snapshot.key_pressed(*key)
+            && (!is_text_edit_key(*key) || !pending_text_key_presses.contains(key))
+        {
             keys.push((*name).to_string());
         }
     }
     keys
 }
 
+fn is_text_edit_key(key: InputKey) -> bool {
+    matches!(
+        key,
+        InputKey::Backspace
+            | InputKey::Delete
+            | InputKey::Home
+            | InputKey::End
+            | InputKey::ArrowUp
+            | InputKey::ArrowDown
+            | InputKey::ArrowLeft
+            | InputKey::ArrowRight
+    )
+}
+
 fn ui_down_keys(snapshot: &InputSnapshot) -> Vec<String> {
     const UI_KEYS: &[(InputKey, &str)] = &[
         (InputKey::Backspace, "backspace"),
         (InputKey::Delete, "delete"),
+        (InputKey::ArrowUp, "arrowup"),
+        (InputKey::ArrowDown, "arrowdown"),
         (InputKey::ArrowLeft, "arrowleft"),
         (InputKey::ArrowRight, "arrowright"),
         (InputKey::Home, "home"),

@@ -1,9 +1,9 @@
-use crate::controls::UiControl;
+use crate::controls::{UiColorPickerHit, UiControl};
 use crate::events::{UiAction, UiCursorIcon, UiEventKind, UiPointerButton};
 use crate::focus::{UiFocusPolicy, UiFocusState, UiInputState, UiModifiers};
 use crate::geometry::UiRect;
 use crate::hit_test::{hit_test, UiHitRegion, UiHitTestMode};
-use crate::node::{UiNode, UiNodeKind};
+use crate::node::{UiAccessibilityRole, UiNode, UiNodeKind};
 use crate::state::UiControlState;
 
 const DRAG_THRESHOLD_PX: f32 = 4.0;
@@ -47,6 +47,9 @@ pub struct UiInteractionState {
     text_repeat_key: Option<String>,
     text_repeat_next_seconds: f64,
     scrollbar_grab_offset: Option<f32>,
+    select_typeahead_target: Option<String>,
+    select_typeahead: String,
+    select_typeahead_at_seconds: f64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -100,22 +103,36 @@ impl UiInteractionState {
         self.active_pointer_target.is_some()
     }
 
+    /// Returns whether a held text-editing key needs another frame for
+    /// keyboard repeat. Native hosts use this to keep event-driven windows
+    /// alive while a key remains down.
+    pub fn has_active_text_repeat(&self) -> bool {
+        self.text_repeat_key.is_some()
+    }
+
     /// Returns whether this retained surface currently owns text-entry input.
     ///
-    /// Buttons, hierarchy rows, toggles and ranges may be focusable for
-    /// keyboard accessibility, but they must not freeze viewport navigation
-    /// merely because they remain focused after a click. Only a focused text
-    /// input owns the editor's typing boundary.
+    /// Text inputs and focused actionable controls own the small keyboard
+    /// boundary needed for native activation. Passive panels deliberately do
+    /// not capture the editor's global navigation shortcuts.
     pub fn captures_keyboard_input(&self, root: &UiNode) -> bool {
         self.focus
             .focused
             .as_deref()
             .and_then(|id| find_node(root, id))
             .is_some_and(|node| {
-                node.kind == UiNodeKind::TextInput
-                    && node.focusable
+                node.focusable
                     && !node.disabled
-                    && node.control.text_input().is_some()
+                    && (node.control.text_input().is_some()
+                        || matches!(node.kind, UiNodeKind::Button | UiNodeKind::TextInput)
+                        || node.text_selectable
+                        || matches!(
+                            &node.control,
+                            UiControl::Toggle(_)
+                                | UiControl::Range(_)
+                                | UiControl::Select(_)
+                                | UiControl::ColorPicker(_)
+                        ))
             })
     }
 
@@ -130,6 +147,8 @@ impl UiInteractionState {
         self.hovered_since_seconds = None;
         self.last_text_click = None;
         self.last_pointer_click = None;
+        self.select_typeahead_target = None;
+        self.select_typeahead.clear();
         self.last_modifiers = UiModifiers::default();
         self.text_repeat_key = None;
         self.text_repeat_next_seconds = 0.0;
@@ -180,6 +199,13 @@ impl UiInteractionState {
         {
             return UiCursorIcon::ResizeVertical;
         }
+        if node
+            .classes
+            .iter()
+            .any(|class| class == "settings-modal-resize-handle")
+        {
+            return UiCursorIcon::ResizeNorthWestSouthEast;
+        }
         // Focusability is a keyboard-navigation property, not a promise that
         // the pointer is over a clickable control. Panels, scroll containers,
         // and the native title drag region may be focusable/interactive while
@@ -191,7 +217,13 @@ impl UiInteractionState {
         {
             return UiCursorIcon::Default;
         }
-        let value_control = matches!(node.control, UiControl::Toggle(_) | UiControl::Range(_));
+        let value_control = matches!(
+            &node.control,
+            UiControl::Toggle(_)
+                | UiControl::Range(_)
+                | UiControl::ColorPicker(_)
+                | UiControl::Select(_)
+        );
         if node.kind == UiNodeKind::Button || !node.event_handlers.is_empty() || value_control {
             return UiCursorIcon::PointingHand;
         }
@@ -218,12 +250,46 @@ impl UiInteractionState {
         hit_regions: &[UiHitRegion],
         input: &UiInputState,
         focus_policy: &UiFocusPolicy,
-        mut text_hit_test: F,
+        text_hit_test: F,
     ) -> Vec<UiDispatchedAction>
     where
         F: FnMut(&str, &str, [f32; 2]) -> Option<usize>,
     {
+        self.update_with_text_hit_test_and_vertical(
+            root,
+            hit_regions,
+            input,
+            focus_policy,
+            text_hit_test,
+            |_, _| Vec::new(),
+        )
+    }
+
+    /// Variant that also supplies visual line ranges for multiline keyboard
+    /// navigation. Keeping the old method above preserves the backend-neutral
+    /// API for callers that only need proportional hit testing.
+    pub fn update_with_text_hit_test_and_vertical<F, G>(
+        &mut self,
+        root: &UiNode,
+        hit_regions: &[UiHitRegion],
+        input: &UiInputState,
+        focus_policy: &UiFocusPolicy,
+        mut text_hit_test: F,
+        mut visual_lines: G,
+    ) -> Vec<UiDispatchedAction>
+    where
+        F: FnMut(&str, &str, [f32; 2]) -> Option<usize>,
+        G: FnMut(&str, &str) -> Vec<(usize, usize)>,
+    {
         self.last_modifiers = input.modifiers;
+        if self
+            .text_repeat_key
+            .as_deref()
+            .is_some_and(|key| !input.key_down(key))
+        {
+            self.text_repeat_key = None;
+            self.text_repeat_next_seconds = 0.0;
+        }
         let hovered = input
             .pointer_position
             .and_then(|point| hit_test(hit_regions, point, UiHitTestMode::InteractiveOnly));
@@ -236,6 +302,8 @@ impl UiInteractionState {
             self.focus.clear_focus();
             self.focus.set_active(None);
             self.last_text_click = None;
+            self.select_typeahead_target = None;
+            self.select_typeahead.clear();
         }
 
         if previous_hovered != hovered_id {
@@ -256,7 +324,17 @@ impl UiInteractionState {
         }
 
         let primary_down = input.button_down(UiPointerButton::Primary);
-        if primary_down && !self.pointer_was_down {
+        // A native event loop can deliver a press and its matching release
+        // before the next redraw. Use the explicit transient edges as well as
+        // the held-button state so a short click is never lost when that
+        // happens. The derived edges keep the legacy `pointer_down` API fully
+        // compatible with headless callers and existing embedders.
+        let primary_pressed = input.button_pressed(UiPointerButton::Primary)
+            || (primary_down && !self.pointer_was_down);
+        let primary_released = input.button_released(UiPointerButton::Primary)
+            || (!primary_down && self.pointer_was_down);
+        if primary_pressed {
+            dispatch_select_click_away(root, hovered_id.as_deref(), &mut dispatched);
             self.active_pointer_target = hovered_id.clone();
             self.active_drag_start_actions.clear();
             self.active_drag_move_actions.clear();
@@ -327,10 +405,48 @@ impl UiInteractionState {
                             });
                         }
                     }
+                } else if let Some(text) = selectable_text_for_node(root, &hit.id) {
+                    if let Some(point) = input.pointer_position {
+                        let index = text_hit_test(&hit.id, text, point)
+                            .unwrap_or_else(|| proportional_text_index(text, hit.rect, point));
+                        let is_double_click = self.last_text_click.as_ref().is_some_and(|last| {
+                            last.target_id == hit.id
+                                && input.time_seconds - last.time_seconds >= 0.0
+                                && input.time_seconds - last.time_seconds
+                                    <= DOUBLE_CLICK_TIME_SECONDS
+                                && distance_squared(last.position, point)
+                                    <= DOUBLE_CLICK_DISTANCE_PX * DOUBLE_CLICK_DISTANCE_PX
+                        });
+                        if is_double_click {
+                            let range = word_range_at(text, index);
+                            self.controls
+                                .set_selectable_cursor(&hit.id, text, range.start, false);
+                            self.controls
+                                .set_selectable_cursor(&hit.id, text, range.end, true);
+                            self.text_selection_target = Some(hit.id.clone());
+                            self.last_text_click = None;
+                        } else {
+                            self.controls
+                                .set_selectable_cursor(&hit.id, text, index, false);
+                            self.text_selection_target = Some(hit.id.clone());
+                            self.last_text_click = Some(UiTextClick {
+                                target_id: hit.id.clone(),
+                                position: point,
+                                time_seconds: input.time_seconds,
+                            });
+                        }
+                    }
                 } else {
                     // A click on another control breaks the double-click
                     // sequence; returning to the field must start a new one.
                     self.last_text_click = None;
+                    if find_node(root, &hit.id)
+                        .and_then(|node| node.control.select())
+                        .is_none()
+                    {
+                        self.select_typeahead_target = None;
+                        self.select_typeahead.clear();
+                    }
                 }
                 dispatch(
                     root,
@@ -352,8 +468,17 @@ impl UiInteractionState {
                     UiEventKind::PointerDown(UiPointerButton::Primary),
                     &mut dispatched,
                 );
+                dispatch_color_picker_value(
+                    root,
+                    hit_regions,
+                    &hit.id,
+                    input.pointer_position,
+                    UiEventKind::PointerDown(UiPointerButton::Primary),
+                    &mut dispatched,
+                );
             }
-        } else if primary_down && self.pointer_was_down && pointer_moved {
+        }
+        if primary_down && self.pointer_was_down && pointer_moved {
             if let (Some(text_target), Some(point)) = (
                 self.text_selection_target.as_deref(),
                 input.pointer_position,
@@ -371,6 +496,17 @@ impl UiInteractionState {
                     });
                     if let Some(index) = index {
                         self.controls.set_cursor(value_key, index, true);
+                    }
+                } else if let Some(text) = selectable_text_for_node(root, text_target) {
+                    let index = text_hit_test(text_target, text, point).or_else(|| {
+                        hit_regions
+                            .iter()
+                            .find(|region| region.id == text_target)
+                            .map(|region| proportional_text_index(text, region.rect, point))
+                    });
+                    if let Some(index) = index {
+                        self.controls
+                            .set_selectable_cursor(text_target, text, index, true);
                     }
                 }
             }
@@ -423,9 +559,18 @@ impl UiInteractionState {
                         UiEventKind::DragMove,
                         &mut dispatched,
                     );
+                    dispatch_color_picker_value(
+                        root,
+                        hit_regions,
+                        id,
+                        input.pointer_position,
+                        UiEventKind::DragMove,
+                        &mut dispatched,
+                    );
                 }
             }
-        } else if !primary_down && self.pointer_was_down {
+        }
+        if primary_released {
             if let Some(id) = self.active_pointer_target.as_deref() {
                 dispatch(
                     root,
@@ -465,6 +610,7 @@ impl UiInteractionState {
                         }
                     }
                     dispatch_toggle_value(root, id, &mut dispatched);
+                    dispatch_select_open(root, id, &mut dispatched);
                 }
             }
             self.cancel_pointer_gesture();
@@ -539,15 +685,65 @@ impl UiInteractionState {
         }
 
         if let Some(focused) = self.focus.focused.clone() {
-            if let Some(input_control) =
+            if let Some(_tab) = find_node(root, &focused)
+                .filter(|node| node.accessibility_role == UiAccessibilityRole::Tab)
+            {
+                if input.key_pressed("enter") || input.key_pressed("space") {
+                    dispatch(root, &focused, UiEventKind::Click, &mut dispatched);
+                }
+                let direction =
+                    if input.key_pressed_any(&["arrowright", "right", "arrowdown", "down"]) {
+                        Some(true)
+                    } else if input.key_pressed_any(&["arrowleft", "left", "arrowup", "up"]) {
+                        Some(false)
+                    } else if input.key_pressed("home") {
+                        Some(false)
+                    } else if input.key_pressed("end") {
+                        Some(true)
+                    } else {
+                        None
+                    };
+                if let Some(forward) = direction {
+                    let mut tabs = Vec::new();
+                    collect_focusable_tabs(root, &mut tabs);
+                    if let Some(position) = tabs.iter().position(|id| id == &focused) {
+                        let next = if input.key_pressed("home") {
+                            tabs.first()
+                        } else if input.key_pressed("end") {
+                            tabs.last()
+                        } else if forward {
+                            tabs.get(position + 1).or_else(|| tabs.first())
+                        } else {
+                            position
+                                .checked_sub(1)
+                                .and_then(|index| tabs.get(index))
+                                .or_else(|| tabs.last())
+                        };
+                        if let Some(next) = next {
+                            self.focus.request_focus(next.clone());
+                        }
+                    }
+                }
+            } else if let Some(input_control) =
                 find_node(root, &focused).and_then(|node| node.control.text_input())
             {
                 let value_key = input_control.value_key.as_str();
+                self.controls
+                    .set_ime_preedit(value_key, input.ime_preedit.clone());
                 let mut text_changed = false;
                 let mut text_event = None;
                 let word_modifier = input.modifiers.control || input.modifiers.command;
                 if word_modifier && input.key_pressed("a") {
                     self.controls.select_all(value_key);
+                } else if word_modifier && input.modifiers.shift && input.key_pressed("z") {
+                    text_changed = self.controls.redo(value_key);
+                    text_event = Some("redo".to_string());
+                } else if word_modifier && input.key_pressed("z") {
+                    text_changed = self.controls.undo(value_key);
+                    text_event = Some("undo".to_string());
+                } else if word_modifier && input.key_pressed("y") {
+                    text_changed = self.controls.redo(value_key);
+                    text_event = Some("redo".to_string());
                 } else if word_modifier && input.key_pressed("c") {
                     let selected = self.controls.selected_text(value_key);
                     if !selected.is_empty() {
@@ -575,38 +771,107 @@ impl UiInteractionState {
                                 .append_text(value_key, paste, input_control.max_length);
                         text_event = Some("paste".to_string());
                     }
-                } else if (input.key_pressed("backspace") || input.key_down("backspace"))
-                    && self.text_repeat_due(input, "backspace")
-                    && if word_modifier {
-                        self.controls.delete_backward_word(value_key)
-                    } else {
-                        self.controls.backspace(value_key)
-                    }
+                } else if let Some(repeat_count) = self.text_repeat_count_any(input, &["backspace"])
                 {
-                    text_changed = true;
-                    text_event = Some("backspace".to_string());
-                } else if (input.key_pressed("delete") || input.key_down("delete"))
-                    && self.text_repeat_due(input, "delete")
-                    && if word_modifier {
-                        self.controls.delete_forward_word(value_key)
-                    } else {
-                        self.controls.delete_forward(value_key)
+                    let mut changed = false;
+                    for _ in 0..repeat_count {
+                        changed |= if word_modifier {
+                            self.controls.delete_backward_word(value_key)
+                        } else {
+                            self.controls.backspace(value_key)
+                        };
                     }
+                    if changed {
+                        text_changed = true;
+                        text_event = Some("backspace".to_string());
+                    }
+                } else if let Some(repeat_count) = self.text_repeat_count_any(input, &["delete"]) {
+                    let mut changed = false;
+                    for _ in 0..repeat_count {
+                        changed |= if word_modifier {
+                            self.controls.delete_forward_word(value_key)
+                        } else {
+                            self.controls.delete_forward(value_key)
+                        };
+                    }
+                    if changed {
+                        text_changed = true;
+                        text_event = Some("delete".to_string());
+                    }
+                } else if word_modifier && self.text_repeat_due_any(input, &["arrowleft", "left"]) {
+                    self.controls
+                        .move_cursor_by_word(value_key, -1, input.modifiers.shift);
+                } else if word_modifier && self.text_repeat_due_any(input, &["arrowright", "right"])
                 {
-                    text_changed = true;
-                    text_event = Some("delete".to_string());
-                } else if input.key_pressed_any(&["arrowleft", "left"]) {
+                    self.controls
+                        .move_cursor_by_word(value_key, 1, input.modifiers.shift);
+                } else if self.text_repeat_due_any(input, &["arrowleft", "left"]) {
                     self.controls
                         .move_cursor(value_key, -1, input.modifiers.shift);
-                } else if input.key_pressed_any(&["arrowright", "right"]) {
+                } else if self.text_repeat_due_any(input, &["arrowright", "right"]) {
                     self.controls
                         .move_cursor(value_key, 1, input.modifiers.shift);
+                } else if input_control.multiline
+                    && self.text_repeat_due_any(input, &["arrowup", "up"])
+                {
+                    let lines = visual_lines(value_key, self.controls.text(value_key));
+                    if lines.is_empty() {
+                        self.controls
+                            .move_cursor_vertical(value_key, -1, input.modifiers.shift);
+                    } else {
+                        self.controls.move_cursor_vertical_with_lines(
+                            value_key,
+                            -1,
+                            input.modifiers.shift,
+                            &lines,
+                        );
+                    }
+                } else if input_control.multiline
+                    && self.text_repeat_due_any(input, &["arrowdown", "down"])
+                {
+                    let lines = visual_lines(value_key, self.controls.text(value_key));
+                    if lines.is_empty() {
+                        self.controls
+                            .move_cursor_vertical(value_key, 1, input.modifiers.shift);
+                    } else {
+                        self.controls.move_cursor_vertical_with_lines(
+                            value_key,
+                            1,
+                            input.modifiers.shift,
+                            &lines,
+                        );
+                    }
                 } else if input.key_pressed("home") {
-                    self.controls
-                        .move_cursor_to_edge(value_key, false, input.modifiers.shift);
+                    if input_control.multiline {
+                        self.controls.move_cursor_to_line_edge(
+                            value_key,
+                            false,
+                            input.modifiers.shift,
+                        );
+                    } else {
+                        self.controls
+                            .move_cursor_to_edge(value_key, false, input.modifiers.shift);
+                    }
                 } else if input.key_pressed("end") {
-                    self.controls
-                        .move_cursor_to_edge(value_key, true, input.modifiers.shift);
+                    if input_control.multiline {
+                        self.controls.move_cursor_to_line_edge(
+                            value_key,
+                            true,
+                            input.modifiers.shift,
+                        );
+                    } else {
+                        self.controls
+                            .move_cursor_to_edge(value_key, true, input.modifiers.shift);
+                    }
+                }
+                if input.key_pressed("enter") && input_control.multiline {
+                    if self
+                        .controls
+                        .append_text(value_key, "\n", input_control.max_length)
+                    {
+                        text_changed = true;
+                        text_event = Some("newline".to_string());
+                    }
                 }
                 if text_changed {
                     dispatched.push(UiDispatchedAction {
@@ -652,16 +917,192 @@ impl UiInteractionState {
                         });
                     }
                 }
+            } else if let Some(node) = find_node(root, &focused).filter(|node| node.text_selectable)
+            {
+                let text = node.text_value.as_deref().unwrap_or_default();
+                let word_modifier = input.modifiers.control || input.modifiers.command;
+                if word_modifier && input.key_pressed("a") {
+                    self.controls.select_all_selectable(&focused, text);
+                } else if word_modifier && input.key_pressed("c") {
+                    let selected = self.controls.selected_selectable_text(&focused, text);
+                    if !selected.is_empty() {
+                        dispatched.push(UiDispatchedAction {
+                            target_id: focused.clone(),
+                            event: UiEventKind::KeyPress("copy".to_string()),
+                            action: UiAction::SetClipboard { text: selected },
+                        });
+                    }
+                } else if input.key_pressed_any(&["arrowleft", "left"]) {
+                    self.controls
+                        .move_selectable_cursor(&focused, text, -1, input.modifiers.shift);
+                } else if input.key_pressed_any(&["arrowright", "right"]) {
+                    self.controls
+                        .move_selectable_cursor(&focused, text, 1, input.modifiers.shift);
+                } else if input.key_pressed("home") {
+                    self.controls.move_selectable_cursor_to_edge(
+                        &focused,
+                        text,
+                        false,
+                        input.modifiers.shift,
+                    );
+                } else if input.key_pressed("end") {
+                    self.controls.move_selectable_cursor_to_edge(
+                        &focused,
+                        text,
+                        true,
+                        input.modifiers.shift,
+                    );
+                }
+            } else if let Some(select) =
+                find_node(root, &focused).and_then(|node| node.control.select())
+            {
+                if self.select_typeahead_target.as_deref() != Some(focused.as_str()) {
+                    self.select_typeahead_target = Some(focused.clone());
+                    self.select_typeahead.clear();
+                }
+                if !input.text_input.is_empty() {
+                    if input.time_seconds - self.select_typeahead_at_seconds > 0.8 {
+                        self.select_typeahead.clear();
+                    }
+                    self.select_typeahead
+                        .push_str(&input.text_input.to_lowercase());
+                    self.select_typeahead_at_seconds = input.time_seconds;
+                    let query = self.select_typeahead.as_str();
+                    if let Some((index, option)) =
+                        select.options.iter().enumerate().find(|(_, option)| {
+                            !option.disabled
+                                && (option.value.to_lowercase().starts_with(query)
+                                    || option.label_key.to_lowercase().starts_with(query))
+                        })
+                    {
+                        dispatched.push(UiDispatchedAction {
+                            target_id: focused.clone(),
+                            event: UiEventKind::TextInput(input.text_input.clone()),
+                            action: UiAction::SetSelect {
+                                key: select.value_key.clone(),
+                                value: option.value.clone(),
+                                index,
+                            },
+                        });
+                    }
+                }
+                let key = if input.key_pressed_any(&["arrowdown", "down"]) {
+                    Some(true)
+                } else if input.key_pressed_any(&["arrowup", "up"]) {
+                    Some(false)
+                } else {
+                    None
+                };
+                if let Some(forward) = key {
+                    if let Some(index) = select.next_enabled_index(select.active_index, forward) {
+                        if let Some(option) = select.options.get(index) {
+                            dispatched.push(UiDispatchedAction {
+                                target_id: focused.clone(),
+                                event: UiEventKind::KeyPress(if forward {
+                                    "arrowdown".to_string()
+                                } else {
+                                    "arrowup".to_string()
+                                }),
+                                action: UiAction::SetSelect {
+                                    key: select.value_key.clone(),
+                                    value: option.value.clone(),
+                                    index,
+                                },
+                            });
+                        }
+                    }
+                } else if input.key_pressed("home") || input.key_pressed("end") {
+                    let index = if input.key_pressed("home") {
+                        select.options.iter().position(|option| !option.disabled)
+                    } else {
+                        select.options.iter().rposition(|option| !option.disabled)
+                    };
+                    if let Some(index) = index {
+                        if let Some(option) = select.options.get(index) {
+                            dispatched.push(UiDispatchedAction {
+                                target_id: focused.clone(),
+                                event: UiEventKind::KeyPress(if input.key_pressed("home") {
+                                    "home".to_string()
+                                } else {
+                                    "end".to_string()
+                                }),
+                                action: UiAction::SetSelect {
+                                    key: select.value_key.clone(),
+                                    value: option.value.clone(),
+                                    index,
+                                },
+                            });
+                        }
+                    }
+                } else if input.key_pressed("escape") && select.open {
+                    dispatched.push(UiDispatchedAction {
+                        target_id: focused.clone(),
+                        event: UiEventKind::KeyPress("escape".to_string()),
+                        action: UiAction::SetSelectOpen {
+                            id: focused.clone(),
+                            open: false,
+                        },
+                    });
+                } else if input.key_pressed("enter") || input.key_pressed("space") {
+                    dispatched.push(UiDispatchedAction {
+                        target_id: focused.clone(),
+                        event: UiEventKind::KeyPress("enter".to_string()),
+                        action: UiAction::SetSelectOpen {
+                            id: focused.clone(),
+                            open: !select.open,
+                        },
+                    });
+                }
             } else if let Some(toggle) =
                 find_node(root, &focused).and_then(|node| node.control.toggle())
             {
                 if input.key_pressed("space") || input.key_pressed("enter") {
                     dispatched.push(UiDispatchedAction {
                         target_id: focused.clone(),
-                        event: UiEventKind::KeyPress("space".to_string()),
+                        event: UiEventKind::KeyPress(if input.key_pressed("enter") {
+                            "enter".to_string()
+                        } else {
+                            "space".to_string()
+                        }),
                         action: UiAction::SetToggle {
                             key: toggle.value_key.clone(),
                             value: !toggle.value,
+                        },
+                    });
+                }
+            } else if let Some(picker) =
+                find_node(root, &focused).and_then(|node| node.control.color_picker())
+            {
+                let mut saturation = picker.saturation;
+                let mut value = picker.value;
+                let step = 0.01;
+                if input.key_pressed_any(&["arrowleft", "left"]) {
+                    saturation = (saturation - step).clamp(0.0, 1.0);
+                } else if input.key_pressed_any(&["arrowright", "right"]) {
+                    saturation = (saturation + step).clamp(0.0, 1.0);
+                } else if input.key_pressed_any(&["arrowup", "up"]) {
+                    value = (value + step).clamp(0.0, 1.0);
+                } else if input.key_pressed_any(&["arrowdown", "down"]) {
+                    value = (value - step).clamp(0.0, 1.0);
+                } else if input.key_pressed("home") {
+                    saturation = 0.0;
+                } else if input.key_pressed("end") {
+                    saturation = 1.0;
+                } else {
+                    saturation = picker.saturation;
+                    value = picker.value;
+                }
+                if (saturation - picker.saturation).abs() > f32::EPSILON
+                    || (value - picker.value).abs() > f32::EPSILON
+                {
+                    dispatched.push(UiDispatchedAction {
+                        target_id: focused.clone(),
+                        event: UiEventKind::KeyPress("color-picker".to_string()),
+                        action: UiAction::SetColorHsv {
+                            key: picker.value_key.clone(),
+                            hue: picker.hue,
+                            saturation,
+                            value,
                         },
                     });
                 }
@@ -689,6 +1130,24 @@ impl UiInteractionState {
                         },
                     });
                 }
+            } else if let Some(button) = find_node(root, &focused)
+                .filter(|node| node.kind == UiNodeKind::Button && !node.disabled)
+            {
+                if let Some(key) = input
+                    .pressed_keys
+                    .iter()
+                    .find(|key| matches!(key.as_str(), "enter" | "space"))
+                {
+                    let has_explicit_binding = button.event_handlers.iter().any(|binding| {
+                        matches!(&binding.event, UiEventKind::KeyPress(binding_key)
+                            if binding_key.eq_ignore_ascii_case(key))
+                    });
+                    if !has_explicit_binding {
+                        // Keyboard activation reuses the existing Click
+                        // bindings so hosts do not need a second command path.
+                        dispatch(root, &focused, UiEventKind::Click, &mut dispatched);
+                    }
+                }
             }
             for key in &input.pressed_keys {
                 dispatch(
@@ -708,25 +1167,57 @@ impl UiInteractionState {
             }
         }
 
-        self.pointer_was_down = primary_down;
+        // `cancel_pointer_gesture` clears this during a release. Do not
+        // overwrite that result when a coalesced press/release pair reports
+        // the final physical state as still down.
+        self.pointer_was_down = if primary_released {
+            false
+        } else {
+            primary_down
+        };
         self.last_pointer_position = input.pointer_position;
         dispatched
     }
 
-    fn text_repeat_due(&mut self, input: &UiInputState, key: &str) -> bool {
-        if input.key_pressed(key) {
-            self.text_repeat_key = Some(key.to_string());
-            self.text_repeat_next_seconds = input.time_seconds + TEXT_REPEAT_DELAY_SECONDS;
-            return true;
+    fn text_repeat_due_any(&mut self, input: &UiInputState, keys: &[&str]) -> bool {
+        self.text_repeat_count_any(input, keys).is_some()
+    }
+
+    /// Returns the number of edit operations due for this frame.
+    ///
+    /// `pressed_keys` is usually a set-like list, but the native bridge keeps
+    /// repeated text-editing edges as duplicate entries so fast taps are not
+    /// lost between redraws. A held key uses the retained timer instead.
+    fn text_repeat_count_any(&mut self, input: &UiInputState, keys: &[&str]) -> Option<usize> {
+        if let Some(key) = keys
+            .iter()
+            .copied()
+            .find(|key| input.key_press_count(key) > 0)
+        {
+            let count = input.key_press_count(key);
+            if input.key_down(key) {
+                self.text_repeat_key = Some(key.to_string());
+                self.text_repeat_next_seconds = input.time_seconds + TEXT_REPEAT_DELAY_SECONDS;
+            } else {
+                self.text_repeat_key = None;
+                self.text_repeat_next_seconds = 0.0;
+            }
+            return Some(count);
         }
-        if !input.key_down(key) || self.text_repeat_key.as_deref() != Some(key) {
-            return false;
+
+        if keys
+            .iter()
+            .copied()
+            .find(|key| input.key_down(key) && self.text_repeat_key.as_deref() == Some(*key))
+            .is_some()
+        {
+            if input.time_seconds < self.text_repeat_next_seconds {
+                return None;
+            }
+            self.text_repeat_next_seconds = input.time_seconds + TEXT_REPEAT_INTERVAL_SECONDS;
+            return Some(1);
         }
-        if input.time_seconds < self.text_repeat_next_seconds {
-            return false;
-        }
-        self.text_repeat_next_seconds = input.time_seconds + TEXT_REPEAT_INTERVAL_SECONDS;
-        true
+        None
     }
 }
 
@@ -807,14 +1298,25 @@ fn word_range_at(text: &str, index: usize) -> std::ops::Range<usize> {
         return 0..0;
     }
     let index = index.min(chars.len() - 1);
-    let word_character = |character: char| character.is_alphanumeric() || character == '_';
-    let kind = word_character(chars[index]);
+    // Keep words, whitespace and punctuation as separate tokens. Treating
+    // every non-alphanumeric character as one bucket made a double-click on
+    // punctuation select an arbitrary run of spaces and symbols together.
+    let token_kind = |character: char| {
+        if character.is_whitespace() {
+            0u8
+        } else if character.is_alphanumeric() || character == '_' {
+            1u8
+        } else {
+            2u8
+        }
+    };
+    let kind = token_kind(chars[index]);
     let mut start = index;
-    while start > 0 && word_character(chars[start - 1]) == kind {
+    while start > 0 && token_kind(chars[start - 1]) == kind {
         start -= 1;
     }
     let mut end = index + 1;
-    while end < chars.len() && word_character(chars[end]) == kind {
+    while end < chars.len() && token_kind(chars[end]) == kind {
         end += 1;
     }
     start..end
@@ -830,6 +1332,20 @@ fn dispatch_toggle_value(root: &UiNode, target_id: &str, dispatched: &mut Vec<Ui
         action: UiAction::SetToggle {
             key: toggle.value_key.clone(),
             value: !toggle.value,
+        },
+    });
+}
+
+fn dispatch_select_open(root: &UiNode, target_id: &str, dispatched: &mut Vec<UiDispatchedAction>) {
+    let Some(select) = find_node(root, target_id).and_then(|node| node.control.select()) else {
+        return;
+    };
+    dispatched.push(UiDispatchedAction {
+        target_id: target_id.to_string(),
+        event: UiEventKind::Click,
+        action: UiAction::SetSelectOpen {
+            id: target_id.to_string(),
+            open: !select.open,
         },
     });
 }
@@ -857,10 +1373,21 @@ fn dispatch_range_value(
     ) else {
         return;
     };
-    let fraction = if region.rect.width <= f32::EPSILON {
-        0.0
-    } else {
-        (pointer_position[0] - region.rect.x) / region.rect.width
+    let fraction = match range.orientation {
+        crate::UiRangeOrientation::Horizontal => {
+            if region.rect.width <= f32::EPSILON {
+                0.0
+            } else {
+                (pointer_position[0] - region.rect.x) / region.rect.width
+            }
+        }
+        crate::UiRangeOrientation::Vertical => {
+            if region.rect.height <= f32::EPSILON {
+                0.0
+            } else {
+                1.0 - (pointer_position[1] - region.rect.y) / region.rect.height
+            }
+        }
     };
     dispatched.push(UiDispatchedAction {
         target_id: target_id.to_string(),
@@ -868,6 +1395,47 @@ fn dispatch_range_value(
         action: UiAction::SetRange {
             key: range.value_key.clone(),
             value: range.value_from_fraction(fraction),
+        },
+    });
+}
+
+fn dispatch_color_picker_value(
+    root: &UiNode,
+    hit_regions: &[UiHitRegion],
+    target_id: &str,
+    pointer_position: Option<[f32; 2]>,
+    event: UiEventKind,
+    dispatched: &mut Vec<UiDispatchedAction>,
+) {
+    let (Some(picker), Some(pointer_position), Some(region)) = (
+        find_node(root, target_id).and_then(|node| node.control.color_picker()),
+        pointer_position,
+        hit_regions.iter().find(|region| region.id == target_id),
+    ) else {
+        return;
+    };
+    if region.rect.width <= f32::EPSILON || region.rect.height <= f32::EPSILON {
+        return;
+    }
+    let local_position = [
+        pointer_position[0] - region.rect.x,
+        pointer_position[1] - region.rect.y,
+    ];
+    let Some(hit) = picker.hit_test(local_position, [region.rect.width, region.rect.height]) else {
+        return;
+    };
+    let (hue, saturation, value) = match hit {
+        UiColorPickerHit::Hue(hue) => (hue, picker.saturation, picker.value),
+        UiColorPickerHit::SaturationValue { saturation, value } => (picker.hue, saturation, value),
+    };
+    dispatched.push(UiDispatchedAction {
+        target_id: target_id.to_string(),
+        event,
+        action: UiAction::SetColorHsv {
+            key: picker.value_key.clone(),
+            hue,
+            saturation,
+            value,
         },
     });
 }
@@ -946,6 +1514,54 @@ fn dispatch(
     }
 }
 
+fn dispatch_select_click_away(
+    root: &UiNode,
+    hovered_id: Option<&str>,
+    dispatched: &mut Vec<UiDispatchedAction>,
+) {
+    let mut open_selects = Vec::new();
+    collect_open_selects(root, &mut open_selects);
+    for (select_id, popup_id) in open_selects {
+        let inside_trigger = hovered_id.is_some_and(|target_id| {
+            root.find(&select_id)
+                .is_some_and(|node| node_contains_id(node, target_id))
+        });
+        let inside_popup = popup_id.as_deref().is_some_and(|popup_id| {
+            hovered_id.is_some_and(|target_id| {
+                root.find(popup_id)
+                    .is_some_and(|node| node_contains_id(node, target_id))
+            })
+        });
+        if !inside_trigger && !inside_popup {
+            dispatched.push(UiDispatchedAction {
+                target_id: select_id.clone(),
+                event: UiEventKind::PointerDown(UiPointerButton::Primary),
+                action: UiAction::SetSelectOpen {
+                    id: select_id,
+                    open: false,
+                },
+            });
+        }
+    }
+}
+
+fn collect_open_selects(node: &UiNode, output: &mut Vec<(String, Option<String>)>) {
+    if let Some(select) = node.control.select().filter(|select| select.open) {
+        output.push((node.id.clone(), select.popup_id.clone()));
+    }
+    for child in &node.children {
+        collect_open_selects(child, output);
+    }
+}
+
+fn node_contains_id(node: &UiNode, target_id: &str) -> bool {
+    node.id == target_id
+        || node
+            .children
+            .iter()
+            .any(|child| node_contains_id(child, target_id))
+}
+
 fn captured_actions(root: &UiNode, target_id: &str, event: &UiEventKind) -> Vec<UiAction> {
     find_node(root, target_id)
         .into_iter()
@@ -987,6 +1603,21 @@ fn find_node<'a>(node: &'a UiNode, id: &str) -> Option<&'a UiNode> {
         return Some(node);
     }
     node.children.iter().find_map(|child| find_node(child, id))
+}
+
+fn selectable_text_for_node<'a>(root: &'a UiNode, id: &str) -> Option<&'a str> {
+    find_node(root, id)
+        .filter(|node| node.text_selectable)
+        .and_then(|node| node.text_value.as_deref())
+}
+
+fn collect_focusable_tabs(node: &UiNode, ids: &mut Vec<String>) {
+    if node.accessibility_role == UiAccessibilityRole::Tab && node.focusable && !node.disabled {
+        ids.push(node.id.clone());
+    }
+    for child in &node.children {
+        collect_focusable_tabs(child, ids);
+    }
 }
 
 #[cfg(test)]
@@ -1062,6 +1693,35 @@ mod tests {
                 name: "file.save".to_string()
             }
         );
+    }
+
+    #[test]
+    fn coalesced_press_and_release_still_dispatches_a_click() {
+        let root = UiNode::new("root", UiNodeKind::Root)
+            .with_layout(UiLayout::default())
+            .with_child(button("save", "file.save"));
+        let regions = vec![region("save", 0.0)];
+        let mut state = UiInteractionState::default();
+
+        let actions = state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                pointer_position: Some([12.0, 12.0]),
+                pointer_pressed_buttons: vec![UiPointerButton::Primary],
+                pointer_released_buttons: vec![UiPointerButton::Primary],
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+
+        assert!(actions.iter().any(|action| {
+            action.action
+                == UiAction::Command {
+                    name: "file.save".to_string(),
+                }
+        }));
+        assert!(!state.has_pointer_capture());
     }
 
     #[test]
@@ -1281,6 +1941,72 @@ mod tests {
     }
 
     #[test]
+    fn dragging_selectable_text_selects_it_and_ctrl_c_emits_clipboard_action() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(
+            UiNode::new("message", UiNodeKind::Label)
+                .with_text_value("hello agent")
+                .selectable_text(),
+        );
+        let regions = [UiHitRegion {
+            id: "message".to_string(),
+            kind: UiNodeKind::Label,
+            rect: UiRect::new(0.0, 0.0, 120.0, 30.0),
+            clip_rect: UiRect::new(0.0, 0.0, 120.0, 30.0),
+            z_index: 1,
+            interactive: true,
+            focusable: true,
+            disabled: false,
+        }];
+        let mut state = UiInteractionState::default();
+
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                pointer_position: Some([0.0, 12.0]),
+                pointer_down: true,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                pointer_position: Some([55.0, 12.0]),
+                pointer_down: true,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+
+        assert_eq!(
+            state
+                .controls
+                .selected_selectable_text("message", "hello agent"),
+            "hello"
+        );
+
+        let actions = state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                pressed_keys: vec!["C".to_string()],
+                modifiers: UiModifiers {
+                    control: true,
+                    ..UiModifiers::default()
+                },
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert!(actions.iter().any(|action| matches!(
+            &action.action,
+            UiAction::SetClipboard { text } if text == "hello"
+        )));
+    }
+
+    #[test]
     fn double_click_selects_the_word_under_the_pointer() {
         let root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::text_input(
             "query",
@@ -1308,6 +2034,151 @@ mod tests {
     }
 
     #[test]
+    fn held_delete_repeats_until_release() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::text_input(
+            "query",
+            crate::UiTextInput::new("query.value"),
+        ));
+        let regions = [text_region("query", 120.0)];
+        let mut state = UiInteractionState::default();
+        state.controls.set_text("query.value", "abcd", 64);
+        state.controls.set_cursor("query.value", 0, false);
+        state.focus.request_focus("query");
+
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                pressed_keys: vec!["delete".to_string()],
+                keys_down: vec!["delete".to_string()],
+                time_seconds: 0.0,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert_eq!(state.controls.text("query.value"), "bcd");
+
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                keys_down: vec!["delete".to_string()],
+                time_seconds: 0.46,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert_eq!(state.controls.text("query.value"), "cd");
+
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                time_seconds: 0.5,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert!(!state.has_active_text_repeat());
+    }
+
+    #[test]
+    fn delete_consumes_coalesced_press_edges_and_keeps_repeating() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::text_input(
+            "query",
+            crate::UiTextInput::new("query.value"),
+        ));
+        let regions = [text_region("query", 120.0)];
+        let mut state = UiInteractionState::default();
+        state.controls.set_text("query.value", "abcdef", 64);
+        state.controls.set_cursor("query.value", 0, false);
+        state.focus.request_focus("query");
+
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                // Two press/release cycles can arrive before one redraw. A
+                // boolean key query must not collapse them into one edit.
+                pressed_keys: vec!["delete".to_string(), "delete".to_string()],
+                keys_down: vec!["delete".to_string()],
+                time_seconds: 0.0,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert_eq!(state.controls.text("query.value"), "cdef");
+
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                keys_down: vec!["delete".to_string()],
+                time_seconds: 0.46,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert_eq!(state.controls.text("query.value"), "def");
+
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                keys_down: vec!["delete".to_string()],
+                time_seconds: 0.50,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert_eq!(state.controls.text("query.value"), "ef");
+
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                time_seconds: 0.51,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert!(!state.has_active_text_repeat());
+    }
+
+    #[test]
+    fn backspace_consumes_coalesced_press_edges() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::text_input(
+            "query",
+            crate::UiTextInput::new("query.value"),
+        ));
+        let regions = [text_region("query", 120.0)];
+        let mut state = UiInteractionState::default();
+        state.controls.set_text("query.value", "abcdef", 64);
+        state.controls.set_cursor("query.value", 6, false);
+        state.focus.request_focus("query");
+
+        state.update(
+            &root,
+            &regions,
+            &UiInputState {
+                pressed_keys: vec!["backspace".to_string(), "backspace".to_string()],
+                keys_down: vec!["backspace".to_string()],
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+
+        assert_eq!(state.controls.text("query.value"), "abcd");
+    }
+
+    #[test]
+    fn double_click_keeps_punctuation_separate_from_words_and_spaces() {
+        assert_eq!(word_range_at("hello,  world", 1), 0..5);
+        assert_eq!(word_range_at("hello,  world", 5), 5..6);
+        assert_eq!(word_range_at("hello,  world", 6), 6..8);
+    }
+
+    #[test]
     fn cursor_hint_distinguishes_textboxes_from_actionable_controls() {
         let text_root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::text_input(
             "query",
@@ -1318,6 +2189,16 @@ mod tests {
         assert_eq!(
             text_state.cursor_hint(&text_root),
             crate::UiCursorIcon::Text
+        );
+
+        let resize_root = UiNode::new("root", UiNodeKind::Root).with_child(
+            UiNode::new("resize", UiNodeKind::Button).with_class("settings-modal-resize-handle"),
+        );
+        let mut resize_state = UiInteractionState::default();
+        resize_state.focus.set_hovered(Some("resize".to_string()));
+        assert_eq!(
+            resize_state.cursor_hint(&resize_root),
+            crate::UiCursorIcon::ResizeNorthWestSouthEast
         );
 
         let button_root = UiNode::new("root", UiNodeKind::Root).with_child(button("save", "save"));
@@ -1353,13 +2234,104 @@ mod tests {
     }
 
     #[test]
-    fn focused_button_does_not_capture_viewport_keyboard_input() {
-        let root = UiNode::new("root", UiNodeKind::Root)
-            .with_child(UiNode::new("save", UiNodeKind::Button).focusable());
+    fn focused_button_captures_keyboard_input_for_activation() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(button("save", "file.save"));
         let mut state = UiInteractionState::default();
         state.focus.request_focus("save");
 
-        assert!(!state.captures_keyboard_input(&root));
+        assert!(state.captures_keyboard_input(&root));
+
+        let actions = state.update(
+            &root,
+            &[],
+            &UiInputState {
+                pressed_keys: vec!["enter".to_string()],
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action.action,
+            UiAction::Command { ref name } if name == "file.save"
+        )));
+    }
+
+    #[test]
+    fn focused_select_emits_navigation_and_toggle_actions() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::select(
+            "quality",
+            crate::UiSelect::new(
+                "settings.quality",
+                vec![
+                    crate::UiSelectOption::new("low", "quality.low"),
+                    crate::UiSelectOption::new("high", "quality.high"),
+                ],
+                0,
+            ),
+        ));
+        let mut state = UiInteractionState::default();
+        state.focus.request_focus("quality");
+
+        let down = state.update(
+            &root,
+            &[],
+            &UiInputState {
+                pressed_keys: vec!["arrowdown".to_string()],
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert!(down.iter().any(|action| matches!(
+            action.action,
+            UiAction::SetSelect { ref key, ref value, index: 1 }
+                if key == "settings.quality" && value == "high"
+        )));
+
+        let enter = state.update(
+            &root,
+            &[],
+            &UiInputState {
+                pressed_keys: vec!["enter".to_string()],
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert!(enter.iter().any(|action| matches!(
+            action.action,
+            UiAction::SetSelectOpen { ref id, open: true } if id == "quality"
+        )));
+    }
+
+    #[test]
+    fn focused_select_supports_typeahead_without_requiring_a_second_widget() {
+        let root = UiNode::new("root", UiNodeKind::Root).with_child(UiNode::select(
+            "quality",
+            crate::UiSelect::new(
+                "settings.quality",
+                vec![
+                    crate::UiSelectOption::new("low", "quality.low"),
+                    crate::UiSelectOption::new("high", "quality.high"),
+                ],
+                0,
+            ),
+        ));
+        let mut state = UiInteractionState::default();
+        state.focus.request_focus("quality");
+        let actions = state.update(
+            &root,
+            &[],
+            &UiInputState {
+                text_input: "h".to_string(),
+                time_seconds: 1.0,
+                ..UiInputState::default()
+            },
+            &UiFocusPolicy::default(),
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action.action,
+            UiAction::SetSelect { ref key, ref value, index: 1 }
+                if key == "settings.quality" && value == "high"
+        )));
     }
 
     #[test]

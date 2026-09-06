@@ -9,8 +9,8 @@ use raf_render::api_graphic_basic::ui_surface::{
 use raf_ui::{
     UiAction, UiAlign, UiEventBinding, UiEventKind, UiFlow, UiFontWeight, UiJustify, UiLayout,
     UiNode, UiNodeKind, UiOverflow, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle, UiStylePatch,
-    UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiTextInput, UiTextRole,
-    UiTextStyle,
+    UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurfaceMaterial, UiTextInput,
+    UiTextOverflow, UiTextRole, UiTextStyle,
 };
 
 use super::hierarchy_model::{HierarchyRow, HierarchyView};
@@ -237,11 +237,12 @@ fn empty_context_menu(
     );
     let mut menu = UiNode::new("hierarchy.empty-context-menu", UiNodeKind::Menu)
         .with_class("hierarchy-context-menu")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: CONTEXT_MENU_GAP,
             padding: UiSpacing::same(CONTEXT_MENU_PADDING),
-            overflow: UiOverflow::Clip,
+            overflow: UiOverflow::ScrollY,
             ..UiLayout::absolute(authored_rect).with_z_index(220)
         })
         .with_style(UiStyle {
@@ -315,10 +316,12 @@ fn empty_primitive_menu(
     );
     let mut menu = UiNode::new("hierarchy.empty-primitive-menu", UiNodeKind::Menu)
         .with_class("hierarchy-context-menu hierarchy-primitive-menu")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 5.0,
             padding: UiSpacing::same(8.0),
+            overflow: UiOverflow::ScrollY,
             ..UiLayout::absolute(authored_rect).with_z_index(230)
         })
         .with_style(UiStyle {
@@ -1054,6 +1057,11 @@ fn row_node(
                 })
                 .with_size(UiIconSize::Small),
             )
+            .with_tooltip_key(if row.expanded {
+                "app.collapse_menu"
+            } else {
+                "app.expand_menu"
+            })
             .focusable()
             .with_event(UiEventBinding::command(
                 UiEventKind::Click,
@@ -1109,6 +1117,8 @@ fn row_node(
         ..UiLayout::fixed(0.0, row_height - 2.0)
     })
     .with_text_value(row.name.clone())
+    .with_text_overflow(UiTextOverflow::Ellipsis)
+    .with_tooltip_value(row.name.clone())
     .with_text_style(compact_body_style(if is_selected {
         [255, 247, 232, 255]
     } else {
@@ -1340,11 +1350,12 @@ fn context_menu(
     };
     let mut menu = UiNode::new("hierarchy.context-menu", UiNodeKind::Menu)
         .with_class("hierarchy-context-menu")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: CONTEXT_MENU_GAP,
             padding: UiSpacing::same(CONTEXT_MENU_PADDING),
-            overflow: UiOverflow::Clip,
+            overflow: UiOverflow::ScrollY,
             ..UiLayout::absolute(authored_menu_rect).with_z_index(220)
         })
         .with_style(UiStyle {
@@ -1469,9 +1480,10 @@ pub(crate) fn empty_context_menu_rect(
     surface_size: [f32; 2],
 ) -> raf_ui::UiRect {
     let button_count = 3 + usize::from(can_paste);
-    let height = CONTEXT_MENU_PADDING * 2.0
+    let natural_height = CONTEXT_MENU_PADDING * 2.0
         + CONTEXT_MENU_TITLE_HEIGHT
         + button_count as f32 * (CONTEXT_MENU_BUTTON_HEIGHT + CONTEXT_MENU_GAP);
+    let height = bounded_menu_height(natural_height, surface_size[1]);
     let point = position.unwrap_or([CONTEXT_MENU_MARGIN, 130.0]);
     let x = clamp_menu_axis(point[0], surface_size[0].max(0.0), EMPTY_CONTEXT_MENU_WIDTH);
     let y = clamp_menu_axis(point[1], surface_size[1].max(0.0), height);
@@ -1489,7 +1501,8 @@ pub(crate) fn empty_primitive_menu_rect(
     } else {
         (main.x - EMPTY_PRIMITIVE_MENU_WIDTH - 6.0).max(CONTEXT_MENU_MARGIN)
     };
-    let height = 38.0 + CREATEABLE_PRIMITIVES.len() as f32 * 36.0;
+    let natural_height = 38.0 + CREATEABLE_PRIMITIVES.len() as f32 * 36.0;
+    let height = bounded_menu_height(natural_height, surface_size[1]);
     let y = clamp_menu_axis(main.y, surface_size[1].max(0.0), height);
     raf_ui::UiRect::new(x, y, EMPTY_PRIMITIVE_MENU_WIDTH, height)
 }
@@ -1500,15 +1513,21 @@ pub(crate) fn context_menu_rect(
     surface_size: [f32; 2],
 ) -> raf_ui::UiRect {
     let button_count = CONTEXT_MENU_BASE_BUTTON_COUNT + if is_folder { 1 } else { 0 };
-    let height = CONTEXT_MENU_PADDING * 2.0
+    let natural_height = CONTEXT_MENU_PADDING * 2.0
         + CONTEXT_MENU_TITLE_HEIGHT
         + button_count as f32 * (CONTEXT_MENU_BUTTON_HEIGHT + CONTEXT_MENU_GAP);
     let viewport_width = surface_size[0].max(0.0);
     let viewport_height = surface_size[1].max(0.0);
+    let height = bounded_menu_height(natural_height, viewport_height);
     let point = position.unwrap_or([CONTEXT_MENU_MARGIN, 130.0]);
     let x = clamp_menu_axis(point[0], viewport_width, CONTEXT_MENU_WIDTH);
     let y = clamp_menu_axis(point[1], viewport_height, height);
     raf_ui::UiRect::new(x, y, CONTEXT_MENU_WIDTH, height)
+}
+
+fn bounded_menu_height(natural_height: f32, viewport_height: f32) -> f32 {
+    let available = (viewport_height.max(0.0) - CONTEXT_MENU_MARGIN * 2.0).max(1.0);
+    natural_height.min(available).max(1.0)
 }
 
 fn clamp_menu_axis(value: f32, viewport: f32, extent: f32) -> f32 {
@@ -1989,6 +2008,37 @@ mod tests {
         assert_eq!(row.children.len(), 5);
         assert!(row.children.iter().all(|tab| tab.text_key.is_some()));
         assert!(total_width + row.layout.padding.left + row.layout.padding.right <= 414.0);
+    }
+
+    #[test]
+    fn hierarchy_row_primary_target_opens_its_context_menu() {
+        let row = row_node(
+            StudioUiPalette::IndustrialDark,
+            &row(Primitive::Cube, false),
+            &[],
+            None,
+            26.0,
+            14.0,
+            true,
+            true,
+            true,
+            None,
+        );
+        let target = find_node(&row, "hierarchy.row.0.select").expect("row target");
+
+        assert!(target.event_handlers.iter().any(|binding| matches!(
+            &binding.action,
+            raf_ui::UiAction::OpenMenu { id } if id == "hierarchy.menu:0"
+        )));
+        assert_eq!(target.tooltip_value.as_deref(), Some("node"));
+    }
+
+    #[test]
+    fn hierarchy_context_menu_is_bounded_inside_small_viewports() {
+        let rect = context_menu_rect(Some([12.0, 190.0]), true, [240.0, 200.0]);
+
+        assert!(rect.height < 200.0);
+        assert!(rect.bottom() <= 192.0);
     }
 
     #[test]

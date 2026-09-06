@@ -213,7 +213,7 @@ impl CadScene {
                 CadLayerKind::Schematic,
                 CadPickPriority::Wire,
                 orthogonal_wire_points(wire.start, wire.end),
-                [112, 224, 136, 255],
+                [216, 221, 227, 255],
             );
             object.net = Some(wire.net.clone());
             scene.objects.push(object);
@@ -297,7 +297,10 @@ impl CadScene {
                 pcb_layer_to_cad(trace.layer),
                 CadPickPriority::Copper,
                 trace.points.clone(),
-                [212, 119, 26, 255],
+                match trace.layer {
+                    PcbLayer::BottomCopper => [104, 158, 194, 255],
+                    PcbLayer::TopCopper => [207, 150, 91, 255],
+                },
             );
             object.net = Some(trace.net.clone());
             scene.objects.push(object);
@@ -406,13 +409,14 @@ fn push_schematic_component(objects: &mut Vec<CadObject>, component: &Electronic
         return;
     }
     let body_size = schematic_component_body_size(component);
+    let rotated_body_size = rotate_extent(body_size, component.rotation);
     let mut body = CadObject::rect(
         format!("component:{}", component.id),
         Some(component.id),
         CadObjectKind::Component,
         CadLayerKind::Schematic,
         CadPickPriority::Component,
-        CadRect::new(component.position, body_size),
+        CadRect::new(component.position, rotated_body_size),
         component.appearance.color,
     );
     body.label = Some(format!("{} {}", component.designator, component.value));
@@ -420,16 +424,17 @@ fn push_schematic_component(objects: &mut Vec<CadObject>, component: &Electronic
 
     for pin in &component.pins {
         let pin_center = component_pin_world_position(component, pin);
+        let pin_size = rotate_extent(Vec2::new(10.0, 10.0), component.rotation);
         let mut object = CadObject::rect(
             format!("pin:{}:{}", component.id, pin.id),
             Some(component.id),
             CadObjectKind::Pin,
             CadLayerKind::Schematic,
             CadPickPriority::Pin,
-            CadRect::new(pin_center, Vec2::new(10.0, 10.0)),
+            CadRect::new(pin_center, pin_size),
             [112, 224, 136, 255],
         );
-        object.line_paths = schematic_pin_paths(pin_center);
+        object.line_paths = schematic_pin_paths(pin_center, component.rotation);
         object.label = Some(pin.name.clone());
         if !pin.net.trim().is_empty() {
             object.net = Some(pin.net.clone());
@@ -438,15 +443,19 @@ fn push_schematic_component(objects: &mut Vec<CadObject>, component: &Electronic
     }
 }
 
-fn schematic_pin_paths(center: Vec2) -> Vec<Vec<Vec2>> {
+fn schematic_pin_paths(center: Vec2, rotation_degrees: f32) -> Vec<Vec<Vec2>> {
     let half = 5.0;
-    vec![vec![
-        center + Vec2::new(-half, -half),
-        center + Vec2::new(half, -half),
-        center + Vec2::new(half, half),
-        center + Vec2::new(-half, half),
-        center + Vec2::new(-half, -half),
-    ]]
+    let corners_local = [
+        Vec2::new(-half, -half),
+        Vec2::new(half, -half),
+        Vec2::new(half, half),
+        Vec2::new(-half, half),
+        Vec2::new(-half, -half),
+    ];
+    vec![corners_local
+        .iter()
+        .map(|local| center + rotate_vec2(*local, rotation_degrees))
+        .collect()]
 }
 
 fn schematic_component_body_size(component: &ElectronicComponent) -> Vec2 {
@@ -460,6 +469,22 @@ fn schematic_component_body_size(component: &ElectronicComponent) -> Vec2 {
             )
         });
     Vec2::new(pin_extent.x + 40.0, pin_extent.y + 28.0)
+}
+
+/// Returns the footprint-sized body extent used by the schematic scene after
+/// applying the component rotation. Native editors use this same value for
+/// placement previews so the ghost and the committed symbol share geometry.
+pub fn schematic_component_size(component: &ElectronicComponent) -> Vec2 {
+    rotate_extent(schematic_component_body_size(component), component.rotation)
+}
+
+fn rotate_extent(size: Vec2, rotation_degrees: f32) -> Vec2 {
+    let normalized = ((rotation_degrees % 360.0) + 360.0) % 360.0;
+    if (normalized - 90.0).abs() < 0.01 || (normalized - 270.0).abs() < 0.01 {
+        Vec2::new(size.y, size.x)
+    } else {
+        size
+    }
 }
 
 fn cad_object_contains(object: &CadObject, point: Vec2) -> bool {
@@ -626,6 +651,88 @@ mod tests {
         let mut changed = scene.clone();
         changed.objects[0].color_rgba[0] ^= 0xff;
         assert_ne!(first, changed.stable_fingerprint());
+    }
+
+    #[test]
+    fn rotated_component_swaps_body_dimensions_in_cad_scene() {
+        let mut schematic = Schematic::new("Rotated body");
+        let mut resistor = ElectronicComponent::resistor("10k");
+        resistor.position = Vec2::new(100.0, 100.0);
+        resistor.rotation = 90.0;
+        schematic.add_component(resistor);
+
+        let scene = CadScene::from_schematic(&schematic);
+        let body = scene
+            .objects
+            .iter()
+            .find(|object| object.kind == CadObjectKind::Component)
+            .expect("component CAD object");
+
+        let rect = body.rect.expect("body rect");
+        let unrotated = ElectronicComponent::resistor("10k");
+        let expected_unrotated = schematic_component_body_size(&unrotated);
+        assert!(
+            (rect.size.x - expected_unrotated.y).abs() < 0.01
+                && (rect.size.y - expected_unrotated.x).abs() < 0.01,
+            "rotated 90 degree body should swap width/height, got {:?}",
+            rect.size
+        );
+    }
+
+    #[test]
+    fn unrotated_component_keeps_axis_aligned_body() {
+        let mut schematic = Schematic::new("Axis body");
+        let mut resistor = ElectronicComponent::resistor("10k");
+        resistor.position = Vec2::new(100.0, 100.0);
+        schematic.add_component(resistor);
+
+        let scene = CadScene::from_schematic(&schematic);
+        let body = scene
+            .objects
+            .iter()
+            .find(|object| object.kind == CadObjectKind::Component)
+            .expect("component CAD object");
+        let rect = body.rect.expect("body rect");
+
+        let unrotated = ElectronicComponent::resistor("10k");
+        let expected = schematic_component_body_size(&unrotated);
+        assert_eq!(rect.size, expected);
+    }
+
+    #[test]
+    fn pin_line_paths_rotate_with_their_component() {
+        let mut schematic = Schematic::new("Rotated pin");
+        let mut resistor = ElectronicComponent::resistor("10k");
+        resistor.position = Vec2::new(100.0, 100.0);
+        resistor.rotation = 90.0;
+        let pin_id = resistor.pins[0].id;
+        let component_id = resistor.id;
+        schematic.add_component(resistor);
+
+        let scene = CadScene::from_schematic(&schematic);
+        let pin = scene
+            .objects
+            .iter()
+            .find(|object| {
+                object.kind == CadObjectKind::Pin
+                    && object.source_id == Some(component_id)
+                    && object.id.ends_with(&pin_id.to_string())
+            })
+            .expect("rotated pin CAD object");
+
+        let path = &pin.line_paths[0];
+        let center = component_pin_world_position(
+            &schematic.components[0],
+            &schematic.components[0].pins[0],
+        );
+        let expected_radius = (5.0_f32) * 2.0_f32.sqrt();
+        for point in path {
+            let distance = point.distance(center);
+            assert!(
+                (distance - expected_radius).abs() < 0.01,
+                "rotated pin corners must stay on a circle of radius {expected_radius} around the pin center, got {distance} for {point:?} vs center {center:?}"
+            );
+        }
     }
 
     #[test]

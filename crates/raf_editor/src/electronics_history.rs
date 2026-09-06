@@ -5,7 +5,7 @@
 //! of the active CAD mode. Snapshots are captured only when an action commits;
 //! no document is serialized or cloned from the frame loop.
 
-use raf_electronics::{PcbLayout, Schematic};
+use raf_electronics::{pcb_fingerprint, schematic_fingerprint, PcbLayout, Schematic};
 
 #[derive(Debug, Clone)]
 pub struct ElectronicsDocumentSnapshot {
@@ -96,13 +96,15 @@ fn documents_differ(
     before: &ElectronicsDocumentSnapshot,
     current: &ElectronicsDocumentSnapshot,
 ) -> bool {
-    ron::ser::to_string(&before.schematic).ok() != ron::ser::to_string(&current.schematic).ok()
-        || ron::ser::to_string(&before.pcb).ok() != ron::ser::to_string(&current.pcb).ok()
+    schematic_fingerprint(&before.schematic) != schematic_fingerprint(&current.schematic)
+        || pcb_fingerprint(&before.pcb) != pcb_fingerprint(&current.pcb)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Vec2;
+    use raf_electronics::component::ElectronicComponent;
 
     #[test]
     fn unchanged_documents_do_not_create_history_entries() {
@@ -137,5 +139,21 @@ mod tests {
         assert!(history.redo(&mut schematic, &mut pcb));
         assert_eq!(schematic.name, "after");
         assert_eq!(pcb.name, "after");
+    }
+
+    #[test]
+    fn fingerprint_detects_fine_position_changes() {
+        let mut before = Schematic::new("Move");
+        let mut r1 = ElectronicComponent::resistor("10k");
+        r1.position = Vec2::new(100.0, 100.0);
+        before.add_component(r1);
+
+        let mut after = before.clone();
+        after.components[0].position = Vec2::new(100.0, 120.0);
+
+        assert_ne!(
+            schematic_fingerprint(&before),
+            schematic_fingerprint(&after)
+        );
     }
 }

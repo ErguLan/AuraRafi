@@ -56,6 +56,7 @@ pub fn search(command: &ParsedCommand, project_root: &Path) -> CommandOutput {
         return CommandOutput::error("Workspace search", "Search query is empty.");
     }
     let max_results = usize_arg(command, "max_results", DEFAULT_SEARCH_LIMIT).min(250);
+    let include_internal = command.bool_arg("include_internal");
     let root = match project_root.canonicalize() {
         Ok(path) => path,
         Err(_) => return CommandOutput::error("Workspace search", "Project root is invalid."),
@@ -63,7 +64,14 @@ pub fn search(command: &ParsedCommand, project_root: &Path) -> CommandOutput {
 
     let mut visited = 0usize;
     let mut results = Vec::new();
-    search_dir(&root, query, max_results, &mut visited, &mut results);
+    search_dir(
+        &root,
+        query,
+        max_results,
+        include_internal,
+        &mut visited,
+        &mut results,
+    );
 
     let mut lines = vec![
         format!("project_root: {}", root.display()),
@@ -102,6 +110,7 @@ fn search_dir(
     dir: &Path,
     query: &str,
     max_results: usize,
+    include_internal: bool,
     visited: &mut usize,
     results: &mut Vec<SearchResult>,
 ) {
@@ -120,11 +129,18 @@ fn search_dir(
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or("");
-        if should_skip(name) {
+        if should_skip(name, include_internal) {
             continue;
         }
         if path.is_dir() {
-            search_dir(&path, query, max_results, visited, results);
+            search_dir(
+                &path,
+                query,
+                max_results,
+                include_internal,
+                visited,
+                results,
+            );
         } else if path.is_file() {
             *visited += 1;
             if is_likely_binary(&path) {
@@ -188,11 +204,15 @@ fn display_relative(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
-fn should_skip(name: &str) -> bool {
+fn should_skip(name: &str, include_internal: bool) -> bool {
     matches!(
         name,
         ".git" | "target" | "target_gnu" | "node_modules" | ".cache"
-    )
+    ) || (!include_internal
+        && matches!(
+            name,
+            ".ai" | ".aura_rafi" | ".codex" | ".grok" | "agent_history.ron" | "agent_endpoint.json"
+        ))
 }
 
 fn is_likely_binary(path: &Path) -> bool {
@@ -228,5 +248,13 @@ mod tests {
         let root = Path::new("C:/tmp/example_project");
         let bad = resolve_project_path(root, "../outside.txt");
         assert!(bad.is_err());
+    }
+
+    #[test]
+    fn ordinary_search_skips_agent_internal_state() {
+        assert!(should_skip(".ai", false));
+        assert!(should_skip("agent_history.ron", false));
+        assert!(!should_skip(".ai", true));
+        assert!(!should_skip("player.rhai", false));
     }
 }

@@ -10,12 +10,19 @@ use raf_core::scene::{
     NodeColor, Primitive, SceneGraph, SceneNodeId, SceneVariable, VariableValue,
 };
 use raf_core::session::{ProjectSessionKind, ProjectSessionRegistry};
-use raf_render::api_graphic_basic::ui_surface::{StudioUiPalette, UiIcon, UiIconId, UiSurface};
-use raf_ui::{
-    UiAlign, UiEventBinding, UiEventKind, UiFlow, UiLayout, UiNode, UiNodeKind, UiOverflow,
-    UiRange, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle, UiStylePatch, UiStyleRule,
-    UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiTextInput, UiTextStyle, UiToggle,
+use raf_core::units::DisplayUnit;
+use raf_render::api_graphic_basic::ui_surface::{
+    StudioUiPalette, UiIcon, UiIconId, UiImage, UiImageFit, UiImageSource, UiSurface,
 };
+use raf_ui::components::select_trigger;
+use raf_ui::{
+    UiAlign, UiColorPicker, UiEventBinding, UiEventKind, UiFlow, UiLayout, UiNode, UiNodeKind,
+    UiOverflow, UiRange, UiRect, UiScrollAxis, UiSelect, UiSelectOption, UiSizeMode, UiSpacing,
+    UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet,
+    UiSurfaceMaterial, UiTextInput, UiTextOverflow, UiTextStyle, UiToggle,
+};
+
+use crate::color_math::rgb_to_hsv;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InspectorDropdown {
@@ -118,6 +125,26 @@ pub fn build_inspector_surface(
     transition: f32,
     view: InspectorViewState,
 ) -> UiSurface {
+    build_inspector_surface_with_unit(
+        palette,
+        scene,
+        selected,
+        sessions,
+        transition,
+        view,
+        DisplayUnit::Metric,
+    )
+}
+
+pub fn build_inspector_surface_with_unit(
+    palette: StudioUiPalette,
+    scene: &SceneGraph,
+    selected: Option<SceneNodeId>,
+    sessions: &ProjectSessionRegistry,
+    transition: f32,
+    view: InspectorViewState,
+    display_unit: DisplayUnit,
+) -> UiSurface {
     let mut root_style = palette.panel_style();
     root_style.opacity = (0.55 + transition.clamp(0.0, 1.0) * 0.45).clamp(0.0, 1.0);
     let root = UiNode::new("inspector.root", UiNodeKind::Root)
@@ -132,7 +159,14 @@ pub fn build_inspector_surface(
         .with_style(root_style)
         .with_child(header(palette))
         .with_child(tabs(palette, view.tab))
-        .with_child(content(palette, scene, selected, sessions, view));
+        .with_child(content(
+            palette,
+            scene,
+            selected,
+            sessions,
+            view,
+            display_unit,
+        ));
 
     let mut surface = UiSurface::new("editor.inspector", palette, root);
     surface.style_sheet = inspector_style_sheet(palette);
@@ -231,6 +265,7 @@ fn content(
     selected: Option<SceneNodeId>,
     sessions: &ProjectSessionRegistry,
     view: InspectorViewState,
+    display_unit: DisplayUnit,
 ) -> UiNode {
     if view.tab == InspectorTab::Sessions {
         return sessions_content(palette, sessions);
@@ -324,9 +359,9 @@ fn content(
     ));
     if view.transform {
         scroll = scroll
-            .with_child(vector_row(palette, "position", node.position))
-            .with_child(vector_row(palette, "rotation", node.rotation))
-            .with_child(vector_row(palette, "scale", node.scale))
+            .with_child(vector_row(palette, "position", node.position, display_unit))
+            .with_child(vector_row(palette, "rotation", node.rotation, display_unit))
+            .with_child(vector_row(palette, "scale", node.scale, display_unit))
             .with_child(transform_actions(palette, id));
     }
 
@@ -337,18 +372,28 @@ fn content(
         view.appearance,
     ));
     if view.appearance {
+        let (primitive_options, primitive_selected_index) = primitive_options(node.primitive);
         scroll = scroll
             .with_child(dropdown_field(
                 palette,
                 "inspector.primitive",
                 "app.primitive_type",
-                primitive_label_key(node.primitive),
                 InspectorDropdown::Primitive,
                 view.dropdown,
-                primitive_options(id, node.primitive),
+                primitive_options,
+                primitive_selected_index,
             ))
             .with_child(section_label(palette, "app.material"))
-            .with_child(color_picker(palette, node.color, view.color_picker));
+            .with_child(color_picker(palette, node.color, view.color_picker))
+            .with_child(range_labeled(
+                palette,
+                "app.opacity",
+                "inspector.appearance.opacity",
+                f32::from(node.color.a) / 255.0 * 100.0,
+                0.0,
+                100.0,
+                1.0,
+            ));
     }
 
     scroll = scroll.with_child(section_title(
@@ -383,7 +428,13 @@ fn content(
             view.physics,
         ));
         if view.physics {
-            scroll = scroll.with_child(physics_section(palette, id, node, view.dropdown));
+            scroll = scroll.with_child(physics_section(
+                palette,
+                id,
+                node,
+                view.dropdown,
+                display_unit,
+            ));
         }
     }
 
@@ -976,8 +1027,41 @@ fn status_button(
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
-fn vector_row(palette: StudioUiPalette, label: &str, value: Vec3) -> UiNode {
+fn vector_row(
+    palette: StudioUiPalette,
+    label: &str,
+    value: Vec3,
+    display_unit: DisplayUnit,
+) -> UiNode {
     let values = [value.x, value.y, value.z];
+    let unit = match label {
+        "position" => display_unit.distance_suffix(),
+        "rotation" => "deg",
+        "scale" => "x",
+        _ => "",
+    };
+    let label_line = UiNode::new(
+        format!("inspector.vector.{label}.label-line"),
+        UiNodeKind::Toolbar,
+    )
+    .with_layout(UiLayout {
+        flow: UiFlow::Row,
+        align_items: UiAlign::Center,
+        gap: 4.0,
+        ..UiLayout::fixed(0.0, 18.0).with_width_mode(UiSizeMode::Fill)
+    })
+    .with_child(
+        UiNode::new(format!("inspector.vector.{label}.label"), UiNodeKind::Label)
+            .with_text_key(format!("app.{label}"))
+            .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
+            .with_layout(UiLayout::fit_content()),
+    )
+    .with_child(
+        UiNode::new(format!("inspector.vector.{label}.unit"), UiNodeKind::Label)
+            .with_text_value(format!("({unit})"))
+            .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
+            .with_layout(UiLayout::fit_content()),
+    );
     let row = UiNode::new(format!("inspector.vector.{label}"), UiNodeKind::Panel)
         .with_class("inspector-vector")
         .with_layout(UiLayout {
@@ -985,12 +1069,7 @@ fn vector_row(palette: StudioUiPalette, label: &str, value: Vec3) -> UiNode {
             gap: 3.0,
             ..UiLayout::fixed(0.0, 58.0).with_width_mode(UiSizeMode::Fill)
         })
-        .with_child(
-            UiNode::new(format!("inspector.vector.{label}.label"), UiNodeKind::Label)
-                .with_text_key(format!("app.{label}"))
-                .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
-                .with_layout(UiLayout::fit_content()),
-        );
+        .with_child(label_line);
     let mut controls = UiNode::new(
         format!("inspector.vector.{label}.controls"),
         UiNodeKind::Toolbar,
@@ -1059,40 +1138,47 @@ fn numeric_text_key(label: &str, axis: &str) -> String {
     format!("inspector.{label}.{axis}.text")
 }
 
-fn primitive_options(id: SceneNodeId, current: Primitive) -> Vec<(&'static str, String, bool)> {
-    [
+fn primitive_options(current: Primitive) -> (Vec<UiSelectOption>, usize) {
+    let primitives = [
         Primitive::Empty,
         Primitive::Cube,
         Primitive::Sphere,
         Primitive::Plane,
         Primitive::Cylinder,
-    ]
-    .into_iter()
-    .map(|primitive| {
-        (
-            primitive_label_key(primitive),
-            format!("inspector.primitive:{}:{}", id.0, primitive.label()),
-            primitive == current,
-        )
-    })
-    .collect()
+    ];
+    let selected_index = primitives
+        .iter()
+        .position(|primitive| *primitive == current)
+        .unwrap_or(0);
+    let options = primitives
+        .into_iter()
+        .map(|primitive| {
+            UiSelectOption::new(
+                primitive.label().to_ascii_lowercase(),
+                primitive_label_key(primitive),
+            )
+        })
+        .collect();
+    (options, selected_index)
 }
 
 fn dropdown_field(
     palette: StudioUiPalette,
     id: &str,
     label_key: &str,
-    selected_key: &str,
     dropdown: InspectorDropdown,
     open: Option<InspectorDropdown>,
-    options: Vec<(&'static str, String, bool)>,
+    options: Vec<UiSelectOption>,
+    selected_index: usize,
 ) -> UiNode {
     let is_open = open == Some(dropdown);
-    let slug = match dropdown {
-        InspectorDropdown::Primitive => "primitive",
-        InspectorDropdown::Collider => "collider",
-        InspectorDropdown::BodyType => "body-type",
-    };
+    let value_key = id.to_string();
+    let trigger_id = format!("{id}.trigger");
+    let popup_id = format!("{id}.menu");
+    let select = UiSelect::new(value_key.clone(), options.clone(), selected_index)
+        .with_popup_id(popup_id.clone());
+    let mut select = select;
+    select.open = is_open;
     let mut field = UiNode::new(format!("{id}.field"), UiNodeKind::Panel).with_layout(UiLayout {
         flow: UiFlow::Column,
         gap: 3.0,
@@ -1101,38 +1187,65 @@ fn dropdown_field(
     field = field
         .with_child(section_label(palette, label_key))
         .with_child(
-            raf_ui::components::dropdown_trigger(
-                format!("{id}.trigger"),
-                selected_key,
-                format!("inspector.dropdown.toggle:{slug}"),
-                is_open,
-                palette,
-            )
-            .with_class("inspector-dropdown-trigger"),
+            select_trigger(trigger_id.clone(), select, palette)
+                .with_class("inspector-dropdown-trigger")
+                .with_layout(UiLayout::fixed(0.0, 29.0).with_width_mode(UiSizeMode::Fill))
+                .with_accessibility_label_key(label_key),
         );
     if is_open {
+        let menu_height = (options.len() as f32 * 28.0 + 8.0).clamp(36.0, 196.0);
         let mut menu = UiNode::new(format!("{id}.menu"), UiNodeKind::Menu)
             .with_class("inspector-dropdown-menu")
+            .with_material(UiSurfaceMaterial::TranslucentRaised)
+            .with_style(UiStyle {
+                fill: palette.tokens().surface_raised,
+                border: palette.tokens().border,
+                text: palette.tokens().text,
+                border_width: 1.0,
+                radius: 4.0,
+                opacity: 1.0,
+            })
             .with_layout(UiLayout {
                 flow: UiFlow::Column,
                 gap: 1.0,
                 padding: UiSpacing::same(3.0),
-                ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                ..UiLayout::absolute(UiRect::new(0.0, 29.0, 252.0, menu_height)).with_z_index(24)
             });
-        for (index, (key, command, selected)) in options.into_iter().enumerate() {
+        for (index, option) in options.iter().enumerate() {
+            let selected = index == selected_index;
             menu = menu.with_child(
-                raf_ui::components::dropdown_option(
-                    format!("{id}.option.{index}"),
-                    key,
-                    command,
-                    selected,
-                    palette,
-                )
-                .with_class(if selected {
-                    "inspector-dropdown-option-selected"
-                } else {
-                    "inspector-dropdown-option"
-                }),
+                UiNode::new(format!("{id}.option.{}", option.value), UiNodeKind::Button)
+                    .with_class(if selected {
+                        "inspector-dropdown-option-selected"
+                    } else {
+                        "inspector-dropdown-option"
+                    })
+                    .with_layout(UiLayout::fixed(0.0, 27.0).with_width_mode(UiSizeMode::Fill))
+                    .with_text_key(option.label_key.clone())
+                    .with_text_style(UiTextStyle::body(if selected {
+                        palette.tokens().text
+                    } else {
+                        palette.tokens().text_muted
+                    }))
+                    .with_text_overflow(UiTextOverflow::Ellipsis)
+                    .with_accessibility_role(raf_ui::UiAccessibilityRole::Option)
+                    .with_accessibility_selected(selected)
+                    .focusable()
+                    .with_event(UiEventBinding {
+                        event: UiEventKind::Click,
+                        action: raf_ui::UiAction::SetSelect {
+                            key: value_key.clone(),
+                            value: option.value.clone(),
+                            index,
+                        },
+                    })
+                    .with_event(UiEventBinding {
+                        event: UiEventKind::Click,
+                        action: raf_ui::UiAction::SetSelectOpen {
+                            id: trigger_id.clone(),
+                            open: false,
+                        },
+                    }),
             );
         }
         field = field.with_child(menu);
@@ -1140,15 +1253,30 @@ fn dropdown_field(
     field
 }
 
-fn color_picker(palette: StudioUiPalette, color: NodeColor, open: bool) -> UiNode {
-    let tokens = palette.tokens();
-    let hex = format!(
+const COLOR_PICKER_POPOVER_PADDING: f32 = 10.0;
+const COLOR_PICKER_POPOVER_GAP: f32 = 7.0;
+const COLOR_PICKER_VISUAL_SIZE: f32 = 220.0;
+const COLOR_PICKER_IMAGE_SIZE: f32 = UiColorPicker::CANVAS_SIZE;
+const COLOR_PICKER_SQUARE_START: f32 = UiColorPicker::SQUARE_START;
+const COLOR_PICKER_SQUARE_SIDE: f32 = UiColorPicker::SQUARE_SIDE;
+const COLOR_PICKER_RING_RADIUS: f32 =
+    (UiColorPicker::RING_INNER_RADIUS + UiColorPicker::RING_OUTER_RADIUS) * 0.5;
+const COLOR_PICKER_POPOVER_WIDTH: f32 = 304.0;
+const COLOR_PICKER_POPOVER_HEIGHT: f32 = 382.0;
+
+fn color_hex(color: NodeColor) -> String {
+    format!(
         "#{:02X}{:02X}{:02X}{:02X}",
         color.r, color.g, color.b, color.a
-    );
+    )
+}
+
+fn color_picker(palette: StudioUiPalette, color: NodeColor, open: bool) -> UiNode {
+    let tokens = palette.tokens();
+    let hex = color_hex(color);
     let mut picker = UiNode::new("inspector.color", UiNodeKind::Panel).with_layout(UiLayout {
         flow: UiFlow::Column,
-        gap: 4.0,
+        gap: 6.0,
         ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
     });
     let mut trigger = UiNode::new("inspector.color.trigger", UiNodeKind::Button)
@@ -1156,13 +1284,13 @@ fn color_picker(palette: StudioUiPalette, color: NodeColor, open: bool) -> UiNod
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
-            gap: 8.0,
-            padding: UiSpacing::xy(7.0, 0.0),
-            ..UiLayout::fixed(0.0, 31.0).with_width_mode(UiSizeMode::Fill)
+            gap: 9.0,
+            padding: UiSpacing::xy(8.0, 0.0),
+            ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
             UiNode::new("inspector.color.swatch", UiNodeKind::Panel)
-                .with_layout(UiLayout::fixed(38.0, 20.0))
+                .with_layout(UiLayout::fixed(44.0, 22.0))
                 .with_style(UiStyle {
                     fill: [color.r, color.g, color.b, color.a.max(32)],
                     border: tokens.border,
@@ -1209,11 +1337,26 @@ fn color_picker(palette: StudioUiPalette, color: NodeColor, open: bool) -> UiNod
     if open {
         let mut popover = UiNode::new("inspector.color.popover", UiNodeKind::Menu)
             .with_class("inspector-color-popover")
+            .with_material(UiSurfaceMaterial::TranslucentRaised)
+            .with_style(UiStyle {
+                fill: tokens.surface_raised,
+                border: tokens.border,
+                text: tokens.text,
+                border_width: 1.0,
+                radius: 5.0,
+                opacity: 1.0,
+            })
             .with_layout(UiLayout {
                 flow: UiFlow::Column,
-                gap: 4.0,
-                padding: UiSpacing::same(7.0),
-                ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                gap: COLOR_PICKER_POPOVER_GAP,
+                padding: UiSpacing::same(COLOR_PICKER_POPOVER_PADDING),
+                ..UiLayout::absolute(UiRect::new(
+                    0.0,
+                    36.0,
+                    COLOR_PICKER_POPOVER_WIDTH,
+                    COLOR_PICKER_POPOVER_HEIGHT,
+                ))
+                .with_z_index(24)
             });
         popover = popover.with_child(
             UiNode::text_input(
@@ -1227,63 +1370,16 @@ fn color_picker(palette: StudioUiPalette, color: NodeColor, open: bool) -> UiNod
                     submit_command: Some("inspector.color.hex.commit".to_string()),
                 },
             )
-            .with_class("inspector-number-input")
+            .with_class("inspector-color-hex-input")
             .with_layout(UiLayout::fixed(0.0, 27.0).with_width_mode(UiSizeMode::Fill))
             .with_text_style(UiTextStyle::body(tokens.text)),
         );
-        let mut presets =
-            UiNode::new("inspector.color.presets", UiNodeKind::Toolbar).with_layout(UiLayout {
-                flow: UiFlow::Row,
-                gap: 4.0,
-                ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
-            });
-        for (index, preset) in [
-            [245, 246, 248, 255],
-            [32, 35, 40, 255],
-            [220, 62, 62, 255],
-            [236, 126, 20, 255],
-            [232, 195, 58, 255],
-            [73, 178, 103, 255],
-            [72, 126, 214, 255],
-            [152, 88, 196, 255],
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let hex = format!("{:02X}{:02X}{:02X}", preset[0], preset[1], preset[2]);
-            presets = presets.with_child(
-                UiNode::new(
-                    format!("inspector.color.preset.{index}"),
-                    UiNodeKind::Button,
-                )
-                .with_layout(UiLayout {
-                    grow: 1.0,
-                    min_size: [22.0, 24.0],
-                    ..UiLayout::fixed(0.0, 24.0)
-                })
-                .with_style(UiStyle {
-                    fill: preset,
-                    border: tokens.border,
-                    text: tokens.text,
-                    border_width: 1.0,
-                    radius: 3.0,
-                    opacity: 1.0,
-                })
-                .with_tooltip_value(format!("#{hex}"))
-                .with_accessibility_label_key("app.color")
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
-                    format!("inspector.color.preset:{hex}"),
-                )),
-            );
-        }
-        popover = popover.with_child(presets);
+        let hsv = rgb_to_hsv(color);
+        popover = popover.with_child(color_picker_visual(palette, hsv));
         for (channel, key, value) in [
             ("r", "app.color_r", color.r),
             ("g", "app.color_g", color.g),
             ("b", "app.color_b", color.b),
-            ("a", "app.color_a", color.a),
         ] {
             popover = popover.with_child(range_labeled(
                 palette,
@@ -1298,6 +1394,124 @@ fn color_picker(palette: StudioUiPalette, color: NodeColor, open: bool) -> UiNod
         picker = picker.with_child(popover);
     }
     picker
+}
+
+fn color_picker_visual(palette: StudioUiPalette, hsv: crate::color_math::HsvColor) -> UiNode {
+    let tokens = palette.tokens();
+    let scale = COLOR_PICKER_VISUAL_SIZE / COLOR_PICKER_IMAGE_SIZE;
+    let center = COLOR_PICKER_IMAGE_SIZE * 0.5 * scale;
+    let ring_radius = COLOR_PICKER_RING_RADIUS * scale;
+    let square_start = COLOR_PICKER_SQUARE_START * scale;
+    let square_extent = (COLOR_PICKER_SQUARE_SIDE * scale - scale).max(0.0);
+    let hue_angle = hsv.hue.to_radians() - std::f32::consts::FRAC_PI_2;
+    let hue_marker_center = [
+        center + hue_angle.cos() * ring_radius,
+        center + hue_angle.sin() * ring_radius,
+    ];
+    let saturation_marker_center = [
+        square_start + hsv.saturation * square_extent,
+        square_start + (1.0 - hsv.value) * square_extent,
+    ];
+    let marker_size = 14.0;
+    let visual = UiNode::new("inspector.color.visual", UiNodeKind::Panel)
+        .with_class("inspector-color-visual")
+        .with_layout(UiLayout {
+            align_self: Some(UiAlign::Center),
+            ..UiLayout::fixed(COLOR_PICKER_VISUAL_SIZE, COLOR_PICKER_VISUAL_SIZE)
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface_alt,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: 5.0,
+            opacity: 1.0,
+        })
+        .with_child(
+            UiNode::image(
+                "inspector.color.visual.image",
+                UiImage {
+                    source: UiImageSource::new(format!(
+                        "builtin://color-picker/hsv/{:.0}",
+                        hsv.hue
+                    )),
+                    fit: UiImageFit::Contain,
+                    tint: None,
+                },
+            )
+            .with_layout(UiLayout::fixed(
+                COLOR_PICKER_VISUAL_SIZE,
+                COLOR_PICKER_VISUAL_SIZE,
+            )),
+        )
+        .with_child(
+            UiNode::color_picker(
+                "inspector.color.visual.surface",
+                UiColorPicker::new("inspector.color", hsv.hue, hsv.saturation, hsv.value),
+            )
+            .with_class("inspector-color-surface")
+            .with_layout(
+                UiLayout::absolute(UiRect::new(
+                    0.0,
+                    0.0,
+                    COLOR_PICKER_VISUAL_SIZE,
+                    COLOR_PICKER_VISUAL_SIZE,
+                ))
+                .with_z_index(3),
+            )
+            .with_style(UiStyle::transparent())
+            .with_tooltip_key("app.material")
+            .with_accessibility_label_key("app.material"),
+        );
+
+    let marker_style = |border: [u8; 4], width: f32, radius: f32| UiStyle {
+        fill: [0, 0, 0, 0],
+        border,
+        text: tokens.text,
+        border_width: width,
+        radius,
+        opacity: 1.0,
+    };
+    visual
+        .with_child(
+            UiNode::new("inspector.color.visual.sv-marker.outer", UiNodeKind::Panel)
+                .with_layout(
+                    UiLayout::absolute(UiRect::new(
+                        saturation_marker_center[0] - marker_size * 0.5,
+                        saturation_marker_center[1] - marker_size * 0.5,
+                        marker_size,
+                        marker_size,
+                    ))
+                    .with_z_index(5),
+                )
+                .with_style(marker_style([0, 0, 0, 230], 3.0, marker_size * 0.5)),
+        )
+        .with_child(
+            UiNode::new("inspector.color.visual.sv-marker.inner", UiNodeKind::Panel)
+                .with_layout(
+                    UiLayout::absolute(UiRect::new(
+                        saturation_marker_center[0] - 5.0,
+                        saturation_marker_center[1] - 5.0,
+                        10.0,
+                        10.0,
+                    ))
+                    .with_z_index(6),
+                )
+                .with_style(marker_style(tokens.text, 2.0, 5.0)),
+        )
+        .with_child(
+            UiNode::new("inspector.color.visual.hue-marker", UiNodeKind::Panel)
+                .with_layout(
+                    UiLayout::absolute(UiRect::new(
+                        hue_marker_center[0] - 7.0,
+                        hue_marker_center[1] - 7.0,
+                        14.0,
+                        14.0,
+                    ))
+                    .with_z_index(6),
+                )
+                .with_style(marker_style(tokens.text, 2.0, 7.0)),
+        )
 }
 
 fn variables_section(
@@ -1418,41 +1632,54 @@ fn audio_section(
         )
 }
 
-fn physics_section(
-    palette: StudioUiPalette,
-    id: SceneNodeId,
-    node: &raf_core::scene::SceneNode,
-    open_dropdown: Option<InspectorDropdown>,
-) -> UiNode {
-    let collider_options = [
+fn collider_options(current: raf_core::scene::ColliderType) -> (Vec<UiSelectOption>, usize) {
+    let kinds = [
         raf_core::scene::ColliderType::None,
         raf_core::scene::ColliderType::Aabb,
         raf_core::scene::ColliderType::ConvexHull,
         raf_core::scene::ColliderType::MeshCollider,
-    ]
-    .into_iter()
-    .map(|kind| {
-        (
-            collider_label_key(kind),
-            format!("inspector.collider:{}:{}", id.0, kind_label(kind)),
-            node.collider.collider_type == kind,
-        )
-    })
-    .collect();
-    let body_options = [
+    ];
+    let selected_index = kinds.iter().position(|kind| *kind == current).unwrap_or(0);
+    let options = kinds
+        .into_iter()
+        .map(|kind| {
+            UiSelectOption::new(
+                kind_label(kind).to_ascii_lowercase(),
+                collider_label_key(kind),
+            )
+        })
+        .collect();
+    (options, selected_index)
+}
+
+fn body_type_options(current: raf_core::scene::RigidBodyType) -> (Vec<UiSelectOption>, usize) {
+    let kinds = [
         raf_core::scene::RigidBodyType::Static,
         raf_core::scene::RigidBodyType::Dynamic,
         raf_core::scene::RigidBodyType::Kinematic,
-    ]
-    .into_iter()
-    .map(|kind| {
-        (
-            body_type_label_key(kind),
-            format!("inspector.body-type:{}:{}", id.0, body_type_label(kind)),
-            node.rigid_body.body_type == kind,
-        )
-    })
-    .collect();
+    ];
+    let selected_index = kinds.iter().position(|kind| *kind == current).unwrap_or(0);
+    let options = kinds
+        .into_iter()
+        .map(|kind| {
+            UiSelectOption::new(
+                body_type_label(kind).to_ascii_lowercase(),
+                body_type_label_key(kind),
+            )
+        })
+        .collect();
+    (options, selected_index)
+}
+
+fn physics_section(
+    palette: StudioUiPalette,
+    _id: SceneNodeId,
+    node: &raf_core::scene::SceneNode,
+    open_dropdown: Option<InspectorDropdown>,
+    display_unit: DisplayUnit,
+) -> UiNode {
+    let (collider_options, collider_selected_index) = collider_options(node.collider.collider_type);
+    let (body_options, body_selected_index) = body_type_options(node.rigid_body.body_type);
     UiNode::new("inspector.physics", UiNodeKind::Panel)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
@@ -1481,19 +1708,19 @@ fn physics_section(
             palette,
             "inspector.collider",
             "app.collider_type",
-            collider_label_key(node.collider.collider_type),
             InspectorDropdown::Collider,
             open_dropdown,
             collider_options,
+            collider_selected_index,
         ))
         .with_child(dropdown_field(
             palette,
             "inspector.body-type",
             "app.body_type",
-            body_type_label_key(node.rigid_body.body_type),
             InspectorDropdown::BodyType,
             open_dropdown,
             body_options,
+            body_selected_index,
         ))
         .with_child(range_labeled(
             palette,
@@ -1504,7 +1731,12 @@ fn physics_section(
             1.0,
             0.01,
         ))
-        .with_child(vector_row(palette, "velocity", node.rigid_body.velocity))
+        .with_child(vector_row(
+            palette,
+            "velocity",
+            node.rigid_body.velocity,
+            display_unit,
+        ))
 }
 
 fn section_label(palette: StudioUiPalette, key: &str) -> UiNode {
@@ -1542,6 +1774,20 @@ fn range_labeled(
                     UiEventKind::PointerUp(raf_ui::UiPointerButton::Primary),
                     "inspector.range.end",
                 )),
+        )
+        .with_child(
+            UiNode::new(format!("{value_key}.value"), UiNodeKind::Label)
+                .with_class("inspector-range-value")
+                .with_text_value(
+                    if value_key.ends_with(".a") || value_key.ends_with(".opacity") {
+                        format!("{:.0}%", value / max.max(1.0) * 100.0)
+                    } else {
+                        format!("{value:.0}")
+                    },
+                )
+                .with_text_overflow(UiTextOverflow::Clip)
+                .with_text_style(UiTextStyle::button(palette.tokens().text_muted))
+                .with_layout(UiLayout::fixed(42.0, 24.0).with_text_safe_area(true)),
         )
 }
 
@@ -1866,6 +2112,18 @@ pub(crate) fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 tokens.text,
             ),
             class_rule(
+                "inspector-color-hex-input",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text,
+            ),
+            class_rule(
+                "inspector-color-visual",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text,
+            ),
+            class_rule(
                 "inspector-status-on",
                 tokens.surface_alt,
                 tokens.border,
@@ -1990,6 +2248,23 @@ pub(crate) fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 UiStyleSelector::Class("inspector-number-input".to_string()),
                 UiStylePatch {
                     border: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-color-hex-input".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-color-surface".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent_hot),
+                    border_width: Some(1.0),
                     ..UiStylePatch::default()
                 },
             )

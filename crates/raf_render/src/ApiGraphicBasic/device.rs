@@ -46,6 +46,18 @@ pub enum SceneFrameOutput {
     },
 }
 
+/// A compact RGBA8 snapshot of the last rendered scene frame.
+///
+/// This is intentionally backend-neutral: native Agent perception and
+/// artifact exporters must not know whether the frame came from the CPU
+/// rasterizer or a private WGPU target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SceneFrameCapture {
+    pub width: u32,
+    pub height: u32,
+    pub rgba8: Vec<u8>,
+}
+
 /// A backend-neutral scene texture result with a WGPU view for native
 /// presentation hosts.
 #[derive(Clone)]
@@ -189,6 +201,7 @@ pub struct BasicDevice {
     memory_budget: GraphicsMemoryBudget,
     framebuffer: Framebuffer,
     gpu_scene: Option<GpuSceneState>,
+    last_scene_frame_ready: bool,
     last_frame_metrics: SceneFrameMetrics,
     // Private wgpu instances (only populated if running in GPU mode)
     wgpu_instance: Option<wgpu::Instance>,
@@ -220,6 +233,7 @@ impl BasicDevice {
                         shared_graphics_context.device().as_ref(),
                         config.memory_budget,
                     )),
+                    last_scene_frame_ready: false,
                     last_frame_metrics: SceneFrameMetrics::default(),
                     wgpu_instance: None,
                     wgpu_adapter: None,
@@ -243,6 +257,7 @@ impl BasicDevice {
                     memory_budget: config.memory_budget,
                     framebuffer: Framebuffer::new(1, 1),
                     gpu_scene: Some(GpuSceneState::new(&gpu_state.device, config.memory_budget)),
+                    last_scene_frame_ready: false,
                     last_frame_metrics: SceneFrameMetrics::default(),
                     wgpu_instance: Some(gpu_state.instance),
                     wgpu_adapter: Some(gpu_state.adapter),
@@ -262,6 +277,7 @@ impl BasicDevice {
             memory_budget: config.memory_budget,
             framebuffer: Framebuffer::new(1, 1),
             gpu_scene: None,
+            last_scene_frame_ready: false,
             last_frame_metrics: SceneFrameMetrics::default(),
             wgpu_instance: None,
             wgpu_adapter: None,
@@ -289,10 +305,156 @@ impl BasicDevice {
 
     /// Execute a scene frame recorded through `BasicCommandList`.
     pub fn execute_scene_frame(&mut self, frame: &SceneRenderFrame) -> SceneFrameOutput {
-        match self.backend {
+        let output = match self.backend {
             BasicBackendType::GpuHardware => self.execute_gpu_scene_frame(frame),
             BasicBackendType::CpuSoftware => self.execute_cpu_scene_frame(frame),
+        };
+        self.last_scene_frame_ready = true;
+        output
+    }
+
+    /// Read the last scene target without changing the current editor frame.
+    ///
+    /// CPU frames are already resident in the software framebuffer. GPU
+    /// frames are copied from the private scene target through a padded
+    /// staging buffer because WebGPU requires `bytes_per_row` alignment.
+    pub fn capture_last_scene_rgba(&self) -> Result<SceneFrameCapture, String> {
+        if !self.last_scene_frame_ready {
+            return Err("The graphics device has not rendered a scene frame yet.".to_string());
         }
+        match self.backend {
+            BasicBackendType::CpuSoftware => {
+                let width = self.framebuffer.width();
+                let height = self.framebuffer.height();
+                if width == 0 || height == 0 {
+                    return Err("The CPU scene framebuffer has no rendered pixels.".to_string());
+                }
+                let rgba8 = self.framebuffer.pixels().to_vec();
+                let expected = (width as usize)
+                    .checked_mul(height as usize)
+                    .and_then(|pixels| pixels.checked_mul(4))
+                    .ok_or_else(|| {
+                        "The CPU scene framebuffer dimensions overflowed.".to_string()
+                    })?;
+                if rgba8.len() != expected {
+                    return Err(
+                        "The CPU scene framebuffer has an invalid RGBA8 length.".to_string()
+                    );
+                }
+                Ok(SceneFrameCapture {
+                    width,
+                    height,
+                    rgba8,
+                })
+            }
+            BasicBackendType::GpuHardware => self.capture_gpu_scene_rgba(),
+        }
+    }
+
+    fn capture_gpu_scene_rgba(&self) -> Result<SceneFrameCapture, String> {
+        let gpu_scene = self
+            .gpu_scene
+            .as_ref()
+            .ok_or_else(|| "The GPU scene renderer is not initialized.".to_string())?;
+        let target = gpu_scene
+            .target
+            .as_ref()
+            .ok_or_else(|| "The Game viewport has not rendered a frame yet.".to_string())?;
+        let device = self
+            .wgpu_device
+            .as_ref()
+            .ok_or_else(|| "The GPU device is not available for readback.".to_string())?;
+        let queue = self
+            .wgpu_queue
+            .as_ref()
+            .ok_or_else(|| "The GPU queue is not available for readback.".to_string())?;
+
+        let width = target.width;
+        let height = target.height;
+        if width == 0 || height == 0 {
+            return Err("The GPU scene target has no rendered pixels.".to_string());
+        }
+        let unpadded_row = width
+            .checked_mul(4)
+            .ok_or_else(|| "The GPU scene row size overflowed.".to_string())?;
+        let padded_row = unpadded_row
+            .checked_add(255)
+            .map(|row| row / 256 * 256)
+            .ok_or_else(|| "The GPU scene row alignment overflowed.".to_string())?;
+        let buffer_size = (padded_row as u64)
+            .checked_mul(height as u64)
+            .ok_or_else(|| "The GPU scene readback size overflowed.".to_string())?;
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ApiGraphicBasic.AgentViewportReadback"),
+            size: buffer_size,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("ApiGraphicBasic.AgentViewportReadbackEncoder"),
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::ImageCopyTexture {
+                texture: &target._color_texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::ImageCopyBuffer {
+                buffer: &readback,
+                layout: wgpu::ImageDataLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit(std::iter::once(encoder.finish()));
+
+        let mapped = Arc::new(std::sync::Mutex::new(None));
+        let mapped_result = Arc::clone(&mapped);
+        readback
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                *mapped_result.lock().expect("scene readback callback lock") = Some(result);
+            });
+        let _ = device.poll(wgpu::Maintain::Wait);
+        let map_result = mapped
+            .lock()
+            .expect("scene readback result lock")
+            .take()
+            .ok_or_else(|| "The GPU scene readback callback did not complete.".to_string())?;
+        map_result.map_err(|error| format!("The GPU scene readback failed: {error}"))?;
+
+        let row_bytes = unpadded_row as usize;
+        let padded_row_bytes = padded_row as usize;
+        let output_len = row_bytes
+            .checked_mul(height as usize)
+            .ok_or_else(|| "The GPU scene output size overflowed.".to_string())?;
+        let mut rgba8 = Vec::with_capacity(output_len);
+        {
+            let mapped_range = readback.slice(..).get_mapped_range();
+            for row in mapped_range
+                .chunks_exact(padded_row_bytes)
+                .take(height as usize)
+            {
+                rgba8.extend_from_slice(&row[..row_bytes]);
+            }
+        }
+        readback.unmap();
+        if rgba8.len() != output_len {
+            return Err("The GPU scene readback returned an invalid RGBA8 length.".to_string());
+        }
+        Ok(SceneFrameCapture {
+            width,
+            height,
+            rgba8,
+        })
     }
 
     /// Execute the commands list and output pixel values.
@@ -1957,6 +2119,7 @@ mod tests {
             shared_graphics_context: None,
             ..BasicDeviceConfig::default()
         });
+        assert!(device.capture_last_scene_rgba().is_err());
         let output = device.execute_scene_frame(&frame);
         let SceneFrameOutput::CpuPixels(pixels) = output else {
             panic!("expected cpu pixel output");
@@ -1967,6 +2130,11 @@ mod tests {
         assert_eq!(pixels[1], 34);
         assert_eq!(pixels[2], 56);
         assert_eq!(pixels[3], 255);
+        let capture = device
+            .capture_last_scene_rgba()
+            .expect("rendered CPU frame should be capturable");
+        assert_eq!((capture.width, capture.height), (2, 1));
+        assert_eq!(capture.rgba8, pixels);
         assert_eq!(
             device.capabilities().backend,
             GraphicsBackendId::CpuSoftware

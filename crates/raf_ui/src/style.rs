@@ -1,8 +1,24 @@
 use serde::{Deserialize, Serialize};
 
+use crate::controls::UiControl;
 use crate::environment::UiColorMode;
 use crate::focus::UiFocusState;
 use crate::node::{UiNode, UiNodeKind};
+
+/// Semantic material requested by retained UI chrome.
+///
+/// RafUI records intent only. ApiGraphicBasic resolves the effective fill and
+/// border alpha for the active palette, accessibility preferences, and render
+/// budget before producing the shared CPU/GPU draw list.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiSurfaceMaterial {
+    #[default]
+    Opaque,
+    TranslucentChrome,
+    TranslucentRaised,
+    ModalSurface,
+    BackdropScrim,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiStyle {
@@ -103,16 +119,20 @@ impl<'a> UiVisualState<'a> {
         self.active_id == Some(id)
     }
 
-    fn is_selected(self, id: &str) -> bool {
-        self.selected_id == Some(id)
+    fn is_selected(self, node: &UiNode) -> bool {
+        self.selected_id == Some(node.id.as_str())
+            || node.accessibility_selected == Some(true)
+            || matches!(&node.control, UiControl::Toggle(toggle) if toggle.value)
     }
 
-    fn is_open(self, id: &str) -> bool {
-        self.open_id == Some(id)
+    fn is_open(self, node: &UiNode) -> bool {
+        self.open_id == Some(node.id.as_str())
+            || node.accessibility_expanded == Some(true)
+            || matches!(&node.control, UiControl::Select(select) if select.open)
     }
 
-    fn is_invalid(self, id: &str) -> bool {
-        self.invalid_id == Some(id)
+    fn is_invalid(self, node: &UiNode) -> bool {
+        self.invalid_id == Some(node.id.as_str()) || node.invalid
     }
 }
 
@@ -153,9 +173,9 @@ impl UiStyleRuleState {
             Self::Focused => !node.disabled && state.is_focused(&node.id),
             Self::Active => !node.disabled && state.is_active(&node.id),
             Self::Disabled => node.disabled,
-            Self::Selected => !node.disabled && state.is_selected(&node.id),
-            Self::Open => !node.disabled && state.is_open(&node.id),
-            Self::Invalid => state.is_invalid(&node.id),
+            Self::Selected => !node.disabled && state.is_selected(node),
+            Self::Open => !node.disabled && state.is_open(node),
+            Self::Invalid => state.is_invalid(node),
         }
     }
 }
@@ -229,6 +249,13 @@ impl UiStyleSheet {
                 resolved.border = lift_focus_color(resolved.border);
                 resolved.border_width = resolved.border_width.max(1.0);
             }
+        }
+        if state.is_invalid(node) && !self.has_state_rule(node, state, UiStyleRuleState::Invalid) {
+            // A validation state must remain visible even when a surface did
+            // not author a dedicated invalid rule. Surfaces can still
+            // override this fallback through the normal cascade.
+            resolved.border = [203, 73, 73, 255];
+            resolved.border_width = resolved.border_width.max(1.0);
         }
         resolved
     }
@@ -315,6 +342,10 @@ fn default_corner_radius() -> f32 {
 
 fn default_spacing() -> f32 {
     8.0
+}
+
+fn default_info_token() -> [u8; 4] {
+    [70, 115, 220, 255]
 }
 
 impl Default for UiThemeMetrics {
@@ -439,6 +470,7 @@ impl StudioUiPalette {
                 focus: [255, 166, 61, 255],
                 selection: [232, 133, 28, 72],
                 positive: [78, 162, 102, 255],
+                info: [70, 115, 220, 255],
                 warning: [224, 160, 42, 255],
                 danger: [203, 73, 73, 255],
                 skeleton: [48, 48, 48, 255],
@@ -457,6 +489,7 @@ impl StudioUiPalette {
                 focus: [178, 82, 16, 255],
                 selection: [224, 116, 24, 58],
                 positive: [53, 126, 74, 255],
+                info: [44, 95, 184, 255],
                 warning: [170, 111, 19, 255],
                 danger: [177, 57, 57, 255],
                 skeleton: [222, 222, 222, 255],
@@ -555,6 +588,10 @@ pub struct UiTokens {
     pub focus: [u8; 4],
     pub selection: [u8; 4],
     pub positive: [u8; 4],
+    /// Informational accent, used by blue world-axis affordances and other
+    /// non-destructive status UI.
+    #[serde(default = "default_info_token")]
+    pub info: [u8; 4],
     pub warning: [u8; 4],
     pub danger: [u8; 4],
     pub skeleton: [u8; 4],

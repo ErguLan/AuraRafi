@@ -54,9 +54,36 @@ impl Default for UiColorMode {
 pub struct UiEnvironment {
     pub viewport_size: [f32; 2],
     pub scale_factor: f32,
+    /// User-selected base text size. Platform scale remains separate so a
+    /// 125% display does not get confused with an intentional accessibility
+    /// preference.
+    #[serde(default = "default_font_size")]
+    pub font_size: f32,
+    /// Optional user UI multiplier applied to semantic typography. Geometry
+    /// continues to use the host's logical coordinates and is rasterized at
+    /// the platform density by ApiGraphicBasic.
+    #[serde(default = "default_ui_scale")]
+    pub ui_scale: f32,
+    /// Optional experimental warm tint applied by the retained presentation
+    /// layer. It is deliberately an environment preference so every surface
+    /// can preview the same result without inventing a second palette.
+    #[serde(default)]
+    pub theme_experimental: f32,
     pub color_mode: UiColorMode,
     pub prefers_reduced_motion: bool,
     pub high_contrast: bool,
+    /// Requests opaque UI materials without conflating transparency with
+    /// animation. Hosts may also enable this for a constrained render budget.
+    #[serde(default)]
+    pub reduce_transparency: bool,
+}
+
+fn default_font_size() -> f32 {
+    14.0
+}
+
+fn default_ui_scale() -> f32 {
+    1.0
 }
 
 impl UiEnvironment {
@@ -85,6 +112,13 @@ impl UiEnvironment {
     /// filtering step when the retained surface is placed by the host.
     pub fn raster_scale(self) -> f32 {
         self.scale_factor.clamp(1.0, 4.0)
+    }
+
+    /// Resolves the semantic typography multiplier without changing the
+    /// logical hit-test coordinate system. The bounds keep extreme persisted
+    /// values from making fixed-size editor controls unusable.
+    pub fn text_scale(self) -> f32 {
+        (self.font_size.max(1.0) / default_font_size() * self.ui_scale.max(0.1)).clamp(0.75, 2.5)
     }
 
     /// Returns the text-atlas density for a retained surface.
@@ -197,9 +231,13 @@ impl Default for UiEnvironment {
         Self {
             viewport_size: [1.0, 1.0],
             scale_factor: 1.0,
+            font_size: default_font_size(),
+            ui_scale: default_ui_scale(),
+            theme_experimental: 0.0,
             color_mode: UiColorMode::System,
             prefers_reduced_motion: false,
             high_contrast: false,
+            reduce_transparency: false,
         }
     }
 }

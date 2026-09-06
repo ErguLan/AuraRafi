@@ -1,6 +1,6 @@
 # AI Context Map
 
-This is the short entry point for humans and coding agents. Read these five
+This is the short entry point for humans and coding agents. Read these six
 files before changing behavior across the editor, UI, renderer, or engine:
 
 1. [`Agent.md`](../Agent.md): repository rules, language conventions, and
@@ -9,11 +9,16 @@ files before changing behavior across the editor, UI, renderer, or engine:
    what is transitional, and what must not be presented as complete.
 3. [`docs/ARCHITECTURE.md`](ARCHITECTURE.md): ownership boundaries and the
    active data/render paths.
-4. [`docs/STABILIZATION_STATUS.md`](STABILIZATION_STATUS.md): the current
-   stabilization target, risks, and verification state.
+4. [`.ai/STUDIO_GRADE_UI.md`](../.ai/STUDIO_GRADE_UI.md): product-wide visual
+   defaults, reference handling, and UI quality criteria.
 5. The domain document that matches the change:
    [`APIGRAPHICBASIC.md`](APIGRAPHICBASIC.md), [`RENDERER.md`](RENDERER.md),
    [`RAF_UI.md`](RAF_UI.md), or [`EDITOR_RAFUI.md`](EDITOR_RAFUI.md).
+
+`docs/STABILIZATION_STATUS.md` is a project status record. It is not a visual
+authority and is not part of the default design-reading chain. Consult it only
+when the task specifically concerns historical stabilization status or its
+verification record.
 
 ## Working model
 
@@ -37,17 +42,17 @@ files before changing behavior across the editor, UI, renderer, or engine:
 - **Viewport baseline (2026-07-19).** The active scene path has CPU/GPU line
   batching, bounded persistent mesh reuse, physical-pixel targets, world-scale
   culling, and orthographic 3D View2D. `Sprite2D` is only a legacy alias to
-  `Plane`; advanced effects remain disabled during stabilization.
+  `Plane`; advanced effects remain separate, explicitly scoped capabilities.
 
 ## Change routing
 
 | If the change affects... | Start here | Then verify |
 | --- | --- | --- |
 | Renderer, viewport, WGPU, CPU fallback | `docs/APIGRAPHICBASIC.md` | `docs/RENDERER.md`, renderer tests |
-| RAFUI core or editor shell | `docs/RAF_UI.md` | `docs/EDITOR_RAFUI.md`, focused UI/editor checks |
+| RAFUI core or editor shell | `.ai/STUDIO_GRADE_UI.md` and `docs/RAF_UI.md` | `docs/EDITOR_RAFUI.md`, focused UI/editor checks |
 | Project status or scope | `docs/STABILIZATION_STATUS.md` | `docs/ROADMAP.md` |
 | Cross-domain behavior | `docs/ARCHITECTURE.md` | update every contradicted domain document |
 
-If the five files do not answer a question, inspect the closest code boundary
+If the six files do not answer a question, inspect the closest code boundary
 and document the answer in the relevant domain document. Do not invent a
 second source of truth.

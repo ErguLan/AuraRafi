@@ -278,6 +278,7 @@ mod tests {
                 .into_iter()
                 .collect(),
             positional: Vec::new(),
+            structured_args: None,
         };
         assert_eq!(
             find_session_id(&command, &registry),

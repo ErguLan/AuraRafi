@@ -59,9 +59,6 @@ pub struct ProjectSettings {
     /// Show the properties panel while editing this project.
     #[serde(default = "default_true")]
     pub show_properties_panel: bool,
-    /// Whether complement tabs are available for this project.
-    #[serde(default = "default_true")]
-    pub enable_complements: bool,
     /// Whether this project accepts manual slash commands from the console.
     #[serde(default)]
     pub enable_console_commands: bool,
@@ -127,6 +124,15 @@ pub struct ProjectSettings {
     /// building style. 1.0 places objects on whole meters.
     #[serde(default = "default_building_snap_step")]
     pub building_snap_step: f32,
+    /// Base schematic snap/grid spacing in millimeters for this project.
+    #[serde(default = "default_electronics_grid_step_mm")]
+    pub electronics_schematic_grid_step_mm: f32,
+    /// Base PCB snap/grid spacing in millimeters for this project.
+    #[serde(default = "default_electronics_grid_step_mm")]
+    pub electronics_pcb_grid_step_mm: f32,
+    /// Whether Electronics placement and routing snap to the project grid.
+    #[serde(default = "default_true")]
+    pub electronics_snap_to_grid: bool,
 }
 
 /// Building assist style for the Game viewport editor.
@@ -165,12 +171,15 @@ fn default_building_snap_step() -> f32 {
     1.0
 }
 
+fn default_electronics_grid_step_mm() -> f32 {
+    20.0
+}
+
 impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
             show_hierarchy_panel: true,
             show_properties_panel: true,
-            enable_complements: true,
             enable_console_commands: false,
             allow_gpu_features: false,
             enable_audio: true,
@@ -191,6 +200,9 @@ impl Default for ProjectSettings {
             auto_attach_scripts: false,
             building_style: BuildingStyle::Free,
             building_snap_step: default_building_snap_step(),
+            electronics_schematic_grid_step_mm: default_electronics_grid_step_mm(),
+            electronics_pcb_grid_step_mm: default_electronics_grid_step_mm(),
+            electronics_snap_to_grid: true,
         }
     }
 }
@@ -229,10 +241,10 @@ impl Project {
         parent_dir: &Path,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let project_dir = parent_dir.join(name);
-        std::fs::create_dir_all(&project_dir)?;
-        std::fs::create_dir_all(project_dir.join("assets"))?;
-        std::fs::create_dir_all(project_dir.join("scenes"))?;
-        std::fs::create_dir_all(project_dir.join("scripts"))?;
+        create_project_directory(&project_dir, "project directory")?;
+        create_project_directory(&project_dir.join("assets"), "assets directory")?;
+        create_project_directory(&project_dir.join("scenes"), "scenes directory")?;
+        create_project_directory(&project_dir.join("scripts"), "scripts directory")?;
 
         let now = Utc::now();
         let project = Self {
@@ -247,10 +259,18 @@ impl Project {
         };
 
         let sessions = ProjectSessionRegistry::new(project_type);
-        sessions
-            .save(&project_dir)
-            .map_err(|error| format!("could not initialize sessions: {error}"))?;
-        project.save()?;
+        sessions.save(&project_dir).map_err(|error| {
+            format!(
+                "could not initialize sessions in '{}': {error}",
+                project_dir.display()
+            )
+        })?;
+        project.save().map_err(|error| {
+            format!(
+                "could not write project metadata '{}': {error}",
+                project_dir.join(Self::META_FILE).display()
+            )
+        })?;
         Ok(project)
     }
 
@@ -342,9 +362,50 @@ impl RecentProjects {
     }
 }
 
+fn create_project_directory(
+    path: &Path,
+    description: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(path).map_err(|error| {
+        format!(
+            "could not create {description} '{}': {error}",
+            path.display()
+        )
+        .into()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_create_initializes_files_and_reports_the_failing_path() {
+        let root = std::env::temp_dir().join(format!("raf-project-create-{}", Uuid::new_v4()));
+        let project = Project::create("Working", ProjectType::Game, &root)
+            .expect("project should be created in a writable directory");
+
+        assert!(project.path.join(Project::META_FILE).is_file());
+        assert!(project.path.join("assets").is_dir());
+        assert!(project.path.join("scenes").is_dir());
+        assert!(project.path.join("scripts").is_dir());
+        assert!(project
+            .path
+            .join(ProjectSessionRegistry::FILE_NAME)
+            .is_file());
+
+        let blocked_parent = root.join("not-a-directory");
+        std::fs::write(&blocked_parent, "blocker").expect("create blocker file");
+        let expected_path = blocked_parent.join("Broken");
+        let error = Project::create("Broken", ProjectType::Game, &blocked_parent)
+            .expect_err("a file cannot be used as the parent directory")
+            .to_string();
+
+        assert!(error.contains("could not create project directory"));
+        assert!(error.contains(&expected_path.to_string_lossy().to_string()));
+
+        std::fs::remove_dir_all(&root).expect("remove isolated test project");
+    }
 
     #[test]
     fn world_streaming_defaults_are_lightweight_and_persisted() {

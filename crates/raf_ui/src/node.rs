@@ -1,13 +1,36 @@
 use serde::{Deserialize, Serialize};
 
 use crate::controls::{
-    UiControl, UiImage, UiRange, UiScrollAxis, UiSkeleton, UiTextInput, UiToggle,
+    UiColorPicker, UiControl, UiImage, UiRange, UiScrollAxis, UiSelect, UiSkeleton, UiTextInput,
+    UiToggle,
 };
 use crate::events::UiEventBinding;
 use crate::icons::UiIcon;
 use crate::layout::UiLayout;
-use crate::style::UiStyle;
-use crate::text::UiTextStyle;
+use crate::style::{UiStyle, UiSurfaceMaterial};
+use crate::text::{UiTextOverflow, UiTextStyle};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiAccessibilityRole {
+    Generic,
+    Button,
+    Checkbox,
+    Slider,
+    Textbox,
+    Combobox,
+    Option,
+    Menu,
+    MenuItem,
+    Tab,
+    Dialog,
+    Status,
+}
+
+impl Default for UiAccessibilityRole {
+    fn default() -> Self {
+        Self::Generic
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiNodeKind {
@@ -45,12 +68,21 @@ pub struct UiNode {
     pub classes: Vec<String>,
     pub layout: UiLayout,
     pub style: UiStyle,
+    #[serde(default)]
+    pub material: UiSurfaceMaterial,
     pub children: Vec<UiNode>,
     pub interactive: bool,
+    /// Marks a literal text node as selectable without turning it into an
+    /// editable text input. Hosts can use the shared RafUI selection and
+    /// clipboard path for logs, documentation, chat messages, and inspectors.
+    #[serde(default)]
+    pub text_selectable: bool,
     #[serde(default)]
     pub focusable: bool,
     #[serde(default)]
     pub disabled: bool,
+    #[serde(default)]
+    pub invalid: bool,
     #[serde(default)]
     pub tooltip_key: Option<String>,
     /// Literal tooltip text for runtime values that must not pass through i18n.
@@ -63,7 +95,19 @@ pub struct UiNode {
     #[serde(default)]
     pub text_style: Option<UiTextStyle>,
     #[serde(default)]
+    pub text_overflow: UiTextOverflow,
+    #[serde(default)]
     pub event_handlers: Vec<UiEventBinding>,
+    #[serde(default)]
+    pub accessibility_role: UiAccessibilityRole,
+    #[serde(default)]
+    pub accessibility_description_key: Option<String>,
+    #[serde(default)]
+    pub accessibility_expanded: Option<bool>,
+    #[serde(default)]
+    pub accessibility_checked: Option<bool>,
+    #[serde(default)]
+    pub accessibility_selected: Option<bool>,
     #[serde(default)]
     pub control: UiControl,
 }
@@ -78,16 +122,25 @@ impl UiNode {
             classes: Vec::new(),
             layout: UiLayout::default(),
             style: UiStyle::transparent(),
+            material: UiSurfaceMaterial::Opaque,
             children: Vec::new(),
             interactive: false,
+            text_selectable: false,
             focusable: false,
             disabled: false,
+            invalid: false,
             tooltip_key: None,
             tooltip_value: None,
             accessibility_label_key: None,
             icon: None,
             text_style: None,
+            text_overflow: UiTextOverflow::Wrap,
             event_handlers: Vec::new(),
+            accessibility_role: UiAccessibilityRole::Generic,
+            accessibility_description_key: None,
+            accessibility_expanded: None,
+            accessibility_checked: None,
+            accessibility_selected: None,
             control: UiControl::None,
         }
     }
@@ -106,6 +159,14 @@ impl UiNode {
 
     pub fn range(id: impl Into<String>, range: UiRange) -> Self {
         Self::new(id, UiNodeKind::Panel).with_control(UiControl::Range(range))
+    }
+
+    pub fn color_picker(id: impl Into<String>, picker: UiColorPicker) -> Self {
+        Self::new(id, UiNodeKind::Panel).with_control(UiControl::ColorPicker(picker))
+    }
+
+    pub fn select(id: impl Into<String>, select: UiSelect) -> Self {
+        Self::new(id, UiNodeKind::Button).with_control(UiControl::Select(select))
     }
 
     pub fn scroll_view(id: impl Into<String>, axis: UiScrollAxis) -> Self {
@@ -150,8 +211,23 @@ impl UiNode {
         self
     }
 
+    pub fn with_material(mut self, material: UiSurfaceMaterial) -> Self {
+        self.material = material;
+        self
+    }
+
     pub fn interactive(mut self) -> Self {
         self.interactive = true;
+        self
+    }
+
+    /// Makes the node's rendered literal text selectable and copyable while
+    /// keeping it read-only. The text should be supplied with `with_text_value`
+    /// so the renderer and input system observe the same content.
+    pub fn selectable_text(mut self) -> Self {
+        self.text_selectable = true;
+        self.interactive = true;
+        self.focusable = true;
         self
     }
 
@@ -163,6 +239,11 @@ impl UiNode {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    pub fn invalid(mut self, invalid: bool) -> Self {
+        self.invalid = invalid;
         self
     }
 
@@ -193,9 +274,42 @@ impl UiNode {
         self
     }
 
+    pub fn with_text_overflow(mut self, overflow: UiTextOverflow) -> Self {
+        self.text_overflow = overflow;
+        self
+    }
+
     pub fn with_event(mut self, binding: UiEventBinding) -> Self {
         self.event_handlers.push(binding);
         self.interactive = true;
+        self
+    }
+
+    pub fn with_accessibility_role(mut self, role: UiAccessibilityRole) -> Self {
+        self.accessibility_role = role;
+        self
+    }
+
+    pub fn with_accessibility_description_key(
+        mut self,
+        description_key: impl Into<String>,
+    ) -> Self {
+        self.accessibility_description_key = Some(description_key.into());
+        self
+    }
+
+    pub fn with_accessibility_expanded(mut self, expanded: bool) -> Self {
+        self.accessibility_expanded = Some(expanded);
+        self
+    }
+
+    pub fn with_accessibility_checked(mut self, checked: bool) -> Self {
+        self.accessibility_checked = Some(checked);
+        self
+    }
+
+    pub fn with_accessibility_selected(mut self, selected: bool) -> Self {
+        self.accessibility_selected = Some(selected);
         self
     }
 
@@ -205,10 +319,16 @@ impl UiNode {
             UiControl::TextInput(_)
             | UiControl::Toggle(_)
             | UiControl::Range(_)
+            | UiControl::ColorPicker(_)
+            | UiControl::Select(_)
             | UiControl::ScrollView { .. } => {
                 self.focusable = matches!(
                     &self.control,
-                    UiControl::TextInput(_) | UiControl::Toggle(_) | UiControl::Range(_)
+                    UiControl::TextInput(_)
+                        | UiControl::Toggle(_)
+                        | UiControl::Range(_)
+                        | UiControl::ColorPicker(_)
+                        | UiControl::Select(_)
                 );
                 self.interactive = true;
             }
@@ -220,5 +340,24 @@ impl UiNode {
     pub fn with_child(mut self, child: UiNode) -> Self {
         self.children.push(child);
         self
+    }
+
+    /// Finds a node by its retained identity without exposing a second tree
+    /// representation to hosts. Native adapters use this for focus/IME
+    /// coordination while authored surfaces remain declarative.
+    pub fn find(&self, id: &str) -> Option<&UiNode> {
+        if self.id == id {
+            return Some(self);
+        }
+        self.children.iter().find_map(|child| child.find(id))
+    }
+
+    pub fn find_mut(&mut self, id: &str) -> Option<&mut UiNode> {
+        if self.id == id {
+            return Some(self);
+        }
+        self.children
+            .iter_mut()
+            .find_map(|child| child.find_mut(id))
     }
 }

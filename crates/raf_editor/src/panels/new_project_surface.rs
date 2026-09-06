@@ -187,7 +187,10 @@ pub fn build_new_project_surface(
                 })
                 .with_child(
                     UiNode::new("new-project.title", UiNodeKind::Label)
-                        .with_text_value("New Game Project".to_string())
+                        .with_text_key(match project_type {
+                            ProjectType::Game => "app.new_game_project",
+                            ProjectType::Electronics => "app.new_electronics_project",
+                        })
                         .with_text_style(UiTextStyle::panel_title(tokens.text)),
                 )
                 .with_child(
@@ -195,7 +198,7 @@ pub fn build_new_project_surface(
                         "new-project.name",
                         UiTextInput {
                             value_key: "new-project.name".to_string(),
-                            placeholder_key: Some("Project name".to_string()),
+                            placeholder_key: Some("app.hub_project_name_placeholder".to_string()),
                             max_length: 256,
                             multiline: false,
                             password: false,
@@ -209,7 +212,7 @@ pub fn build_new_project_surface(
                         "new-project.path",
                         UiTextInput {
                             value_key: "new-project.path".to_string(),
-                            placeholder_key: Some("Project location".to_string()),
+                            placeholder_key: Some("app.choose_location".to_string()),
                             max_length: 1024,
                             multiline: false,
                             password: false,
@@ -227,12 +230,12 @@ pub fn build_new_project_surface(
                         })
                         .with_child(type_button(
                             "new-project.game",
-                            "Game",
+                            "app.hub_game_kind",
                             project_type == ProjectType::Game,
                         ))
                         .with_child(type_button(
                             "new-project.electronics",
-                            "Electronics",
+                            "app.hub_electronics_kind",
                             project_type == ProjectType::Electronics,
                         )),
                 )
@@ -244,9 +247,12 @@ pub fn build_new_project_surface(
                             gap: 8.0,
                             ..UiLayout::fixed(0.0, 40.0).with_width_mode(UiSizeMode::Fill)
                         })
-                        .with_child(command_button("new-project.choose-path", "Choose folder"))
-                        .with_child(command_button("new-project.cancel", "Cancel"))
-                        .with_child(command_button("new-project.create", "Create project")),
+                        .with_child(command_button(
+                            "new-project.choose-path",
+                            "app.choose_location",
+                        ))
+                        .with_child(command_button("new-project.cancel", "app.cancel"))
+                        .with_child(command_button("new-project.create", "app.create_project")),
                 ),
         );
     let mut surface = UiSurface::new("new-project", palette, root);

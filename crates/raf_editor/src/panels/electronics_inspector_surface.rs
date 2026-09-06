@@ -38,6 +38,9 @@ pub fn build_electronics_inspector_surface(
     let model = if fields.is_empty() {
         None
     } else {
+        let editable_value = field_value(fields, "Editable")
+            .map(|value| value == "true")
+            .unwrap_or(true);
         Some(ElectronicsInspectorModel {
             title: title.to_string(),
             kind: field_value(fields, "Category")
@@ -49,10 +52,8 @@ pub fn build_electronics_inspector_surface(
             rotation: field_value(fields, "Rotation").unwrap_or("-").to_string(),
             footprint: field_value(fields, "Footprint").unwrap_or("-").to_string(),
             pins: pins.to_vec(),
-            locked: false,
-            editable_value: field_value(fields, "Editable")
-                .map(|value| value == "true")
-                .unwrap_or(true),
+            locked: !editable_value,
+            editable_value,
             identity_label: field_value(fields, "Identity label")
                 .unwrap_or("Value")
                 .to_string(),
@@ -92,14 +93,14 @@ fn tabs(palette: StudioUiPalette, active: InspectorTab) -> UiNode {
         .with_child(tab_button(
             palette,
             "electronics.inspector.properties-tab",
-            "PROPERTIES",
+            "app.properties",
             "inspector.tab:properties",
             active == InspectorTab::Properties,
         ))
         .with_child(tab_button(
             palette,
             "electronics.inspector.sessions-tab",
-            "SESSIONS",
+            "app.sessions",
             "inspector.tab:sessions",
             active == InspectorTab::Sessions,
         ))
@@ -124,7 +125,7 @@ fn tab_button(
             padding: UiSpacing::xy(8.0, 0.0),
             ..UiLayout::fixed(0.0, 28.0)
         })
-        .with_text_value(label.to_string())
+        .with_text_key(label)
         .with_text_style(UiTextStyle::button(if active {
             palette.tokens().text
         } else {
@@ -132,7 +133,7 @@ fn tab_button(
         }))
         .with_tooltip_key(if active {
             "electronics.tooltip.inspector.active"
-        } else if label == "PROPERTIES" {
+        } else if label == "app.properties" {
             "electronics.tooltip.inspector.properties"
         } else {
             "electronics.tooltip.inspector.sessions"
@@ -169,7 +170,7 @@ fn header(palette: StudioUiPalette) -> UiNode {
         )
         .with_child(
             UiNode::new("electronics.inspector.header.title", UiNodeKind::Label)
-                .with_text_value("INSPECTOR".to_string())
+                .with_text_key("app.electronics_inspector")
                 .with_text_style(UiTextStyle {
                     role: UiTextRole::PanelTitle,
                     size_px: 13.0,
@@ -199,7 +200,7 @@ fn empty_panel(palette: StudioUiPalette) -> UiNode {
         )
         .with_child(
             UiNode::new("electronics.inspector.empty.title", UiNodeKind::Label)
-                .with_text_value("No selection".to_string())
+                .with_text_key("app.electronics_no_selection")
                 .with_text_style(UiTextStyle {
                     role: UiTextRole::PanelTitle,
                     size_px: 14.0,
@@ -211,9 +212,7 @@ fn empty_panel(palette: StudioUiPalette) -> UiNode {
         )
         .with_child(
             UiNode::new("electronics.inspector.empty.body", UiNodeKind::Label)
-                .with_text_value(
-                    "Select a component, pin, wire, trace or pad on the canvas.".to_string(),
-                )
+                .with_text_key("app.electronics_inspector_select_hint")
                 .with_text_style(body_style(tokens.text_muted)),
         )
 }
@@ -282,7 +281,14 @@ fn selected_panel(palette: StudioUiPalette, model: &ElectronicsInspectorModel) -
             ("Position", model.position.as_str()),
             ("Rotation", model.rotation.as_str()),
             ("Footprint", model.footprint.as_str()),
-            ("State", if model.locked { "Locked" } else { "Editable" }),
+            (
+                "State",
+                if model.locked {
+                    "app.electronics_locked"
+                } else {
+                    "app.electronics_editable"
+                },
+            ),
         ],
     ));
 
@@ -296,6 +302,20 @@ fn selected_panel(palette: StudioUiPalette, model: &ElectronicsInspectorModel) -
         })
         .with_child(section_title(palette, "PINS"));
     for (index, (name, net)) in model.pins.iter().enumerate() {
+        let mut net_node = UiNode::new(
+            format!("electronics.inspector.pin.{index}.net"),
+            UiNodeKind::Label,
+        )
+        .with_text_style(body_style(tokens.text_muted))
+        .with_layout(UiLayout {
+            grow: 1.0,
+            ..UiLayout::fit_content()
+        });
+        net_node = if net.is_empty() {
+            net_node.with_text_key("app.electronics_unconnected")
+        } else {
+            net_node.with_text_value(net.clone())
+        };
         pins = pins.with_child(
             UiNode::new(
                 format!("electronics.inspector.pin.{index}"),
@@ -314,22 +334,7 @@ fn selected_panel(palette: StudioUiPalette, model: &ElectronicsInspectorModel) -
                 .with_text_value(name.clone())
                 .with_text_style(body_style(tokens.text)),
             )
-            .with_child(
-                UiNode::new(
-                    format!("electronics.inspector.pin.{index}.net"),
-                    UiNodeKind::Label,
-                )
-                .with_text_value(if net.is_empty() {
-                    "Unconnected".to_string()
-                } else {
-                    net.clone()
-                })
-                .with_text_style(body_style(tokens.text_muted))
-                .with_layout(UiLayout {
-                    grow: 1.0,
-                    ..UiLayout::fit_content()
-                }),
-            ),
+            .with_child(net_node),
         );
     }
     panel = panel.with_child(pins);
@@ -360,14 +365,7 @@ fn editable_identity(palette: StudioUiPalette, model: &ElectronicsInspectorModel
             ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         })
         .with_child(section_title(palette, "IDENTITY"))
-        .with_child(
-            UiNode::new(
-                "electronics.inspector.identity.value-label",
-                UiNodeKind::Label,
-            )
-            .with_text_value(model.identity_label.clone())
-            .with_text_style(body_style(tokens.text_muted)),
-        )
+        .with_child(identity_label(palette, &model.identity_label))
         .with_child(if model.editable_value {
             UiNode::text_input(
                 "electronics.inspector.value",
@@ -394,9 +392,35 @@ fn editable_identity(palette: StudioUiPalette, model: &ElectronicsInspectorModel
                 .with_layout(UiLayout::fixed(0.0, 24.0).with_width_mode(UiSizeMode::Fill))
         })
         .with_child(
-            UiNode::new("electronics.inspector.identity.category", UiNodeKind::Label)
-                .with_text_value(format!("Category  {}", model.category))
+            UiNode::new(
+                "electronics.inspector.identity.category",
+                UiNodeKind::Toolbar,
+            )
+            .with_layout(UiLayout {
+                flow: UiFlow::Row,
+                gap: 5.0,
+                ..UiLayout::fixed(0.0, 20.0).with_width_mode(UiSizeMode::Fill)
+            })
+            .with_child(
+                UiNode::new(
+                    "electronics.inspector.identity.category.label",
+                    UiNodeKind::Label,
+                )
+                .with_text_key("app.electronics_category")
                 .with_text_style(body_style(tokens.text_muted)),
+            )
+            .with_child(
+                UiNode::new(
+                    "electronics.inspector.identity.category.value",
+                    UiNodeKind::Label,
+                )
+                .with_text_value(model.category.clone())
+                .with_text_style(body_style(tokens.text_muted))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fit_content()
+                }),
+            ),
         )
 }
 
@@ -414,6 +438,24 @@ fn section(palette: StudioUiPalette, title: &str, fields: &[(&str, &str)]) -> Ui
     })
     .with_child(section_title(palette, title));
     for (index, (label, value)) in fields.iter().enumerate() {
+        let label_node = field_label_node(palette, title, index, label);
+        let mut value_node = UiNode::new(
+            format!(
+                "electronics.inspector.{}.field.{index}.value",
+                title.to_lowercase()
+            ),
+            UiNodeKind::Label,
+        )
+        .with_text_style(body_style(palette.tokens().text))
+        .with_layout(UiLayout {
+            grow: 1.0,
+            ..UiLayout::fit_content()
+        });
+        value_node = if value.starts_with("app.") {
+            value_node.with_text_key(*value)
+        } else {
+            value_node.with_text_value((*value).to_string())
+        };
         section = section.with_child(
             UiNode::new(
                 format!(
@@ -427,32 +469,8 @@ fn section(palette: StudioUiPalette, title: &str, fields: &[(&str, &str)]) -> Ui
                 gap: 6.0,
                 ..UiLayout::fixed(0.0, 24.0).with_width_mode(UiSizeMode::Fill)
             })
-            .with_child(
-                UiNode::new(
-                    format!(
-                        "electronics.inspector.{}.field.{index}.label",
-                        title.to_lowercase()
-                    ),
-                    UiNodeKind::Label,
-                )
-                .with_text_value((*label).to_string())
-                .with_text_style(body_style(palette.tokens().text_muted)),
-            )
-            .with_child(
-                UiNode::new(
-                    format!(
-                        "electronics.inspector.{}.field.{index}.value",
-                        title.to_lowercase()
-                    ),
-                    UiNodeKind::Label,
-                )
-                .with_text_value((*value).to_string())
-                .with_text_style(body_style(palette.tokens().text))
-                .with_layout(UiLayout {
-                    grow: 1.0,
-                    ..UiLayout::fit_content()
-                }),
-            ),
+            .with_child(label_node)
+            .with_child(value_node),
         );
     }
     section
@@ -463,9 +481,60 @@ fn section_title(palette: StudioUiPalette, title: &str) -> UiNode {
         format!("electronics.inspector.section-title.{title}"),
         UiNodeKind::Label,
     )
-    .with_text_value(title.to_uppercase())
+    .with_text_key(inspector_section_key(title))
     .with_text_style(body_style(palette.tokens().text_muted))
     .with_layout(UiLayout::fixed(0.0, 18.0).with_width_mode(UiSizeMode::Fill))
+}
+
+fn identity_label(palette: StudioUiPalette, label: &str) -> UiNode {
+    let node = UiNode::new(
+        "electronics.inspector.identity.value-label",
+        UiNodeKind::Label,
+    )
+    .with_text_style(body_style(palette.tokens().text_muted));
+    if let Some(key) = inspector_field_key(label) {
+        node.with_text_key(key)
+    } else {
+        node.with_text_value(label.to_string())
+    }
+}
+
+fn field_label_node(palette: StudioUiPalette, section: &str, index: usize, label: &str) -> UiNode {
+    let node = UiNode::new(
+        format!(
+            "electronics.inspector.{}.field.{index}.label",
+            section.to_lowercase()
+        ),
+        UiNodeKind::Label,
+    )
+    .with_text_style(body_style(palette.tokens().text_muted));
+    if let Some(key) = inspector_field_key(label) {
+        node.with_text_key(key)
+    } else {
+        node.with_text_value(label.to_string())
+    }
+}
+
+fn inspector_section_key(title: &str) -> &'static str {
+    match title.to_ascii_lowercase().as_str() {
+        "placement" => "app.electronics_placement",
+        "pins" => "app.electronics_pins",
+        "identity" => "app.electronics_identity",
+        _ => "app.electronics_properties",
+    }
+}
+
+fn inspector_field_key(label: &str) -> Option<&'static str> {
+    match label.to_ascii_lowercase().as_str() {
+        "value" => Some("app.value"),
+        "position" => Some("app.position"),
+        "rotation" => Some("app.rotation"),
+        "footprint" => Some("app.schematic_footprint"),
+        "state" => Some("app.electronics_state"),
+        "category" => Some("app.electronics_category"),
+        "net" => Some("app.schematic_net"),
+        _ => None,
+    }
 }
 
 fn body_style(color: [u8; 4]) -> UiTextStyle {

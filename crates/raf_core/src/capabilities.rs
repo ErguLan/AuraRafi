@@ -48,6 +48,17 @@ impl CapabilityDefinition {
             || name.ends_with(".describe")
             || name.contains(".describe_")
             || name.ends_with(".search")
+            || name.ends_with(".outline")
+            || name.ends_with(".inspect")
+            || name.ends_with(".catalog")
+            || name.ends_with(".health")
+            || name.ends_with(".verify")
+            || name.ends_with(".capture")
+            || name == "scene.spatial_map"
+            || name == "scene.design_audit"
+            || name == "task.get"
+            || name == "task.events"
+            || name == "selection.get"
             || name == "workspace.read"
             || name == "workspace.search"
     }
@@ -55,7 +66,7 @@ impl CapabilityDefinition {
     pub fn risk(&self) -> &'static str {
         if self.is_read_only() {
             "read"
-        } else if self.name == "undo" || self.name == "redo" {
+        } else if matches!(self.name.as_str(), "undo" | "redo" | "transaction.undo") {
             "reversible_write"
         } else {
             "write"

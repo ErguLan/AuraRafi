@@ -1,6 +1,6 @@
 ---
 feature: startup-splash
-binds_to: DESIGN.md
+binds_to: .ai/STUDIO_GRADE_UI.md
 register: product
 aesthetic_direction: technical / utilitarian, startup ignition variant
 ---
@@ -13,7 +13,7 @@ The editor should arrive as a compact tool booting up, not as a mostly empty
 full-sized workbench. The mark is the one focal point. The progress bar proves
 that the engine is preparing resources before the Hub is usable.
 
-## Locked Screen Contract
+## Screen Contract
 
 - The startup viewport is a compact `720 x 600` logical-point, borderless,
   non-resizable window. It centers itself on the primary monitor.
@@ -23,8 +23,9 @@ that the engine is preparing resources before the Hub is usable.
 - One `560 x 500` surface panel contains the existing engine mark, `RAFI`, the
   orange signature rule, localized loading state, progress bar, `Engine`, and
   the build version.
-- The old marketing sentence and Yoll credit are absent. No decorative glow,
-  purple gradient, extra cards, fake status indicators, or invented controls.
+- The old marketing sentence and Yoll credit are absent. Avoid decorative glow,
+  gradients, extra cards, fake status indicators, or invented controls unless a
+  future brief explicitly gives them a real product purpose.
 - Only semantic RafUI palette tokens are used. The orange rule and progress
   fill are the existing product signature.
 
@@ -87,10 +88,10 @@ that the engine is preparing resources before the Hub is usable.
 
 ## Design Pre-Flight
 
-- Identity lock: pass. Uses only existing RafUI palette, type, spacing, and
-  orange signature.
-- Anti-slop: pass. No gradient, glow, generic hero, fake copy, or decorative
-  status furniture.
+- Visual consistency: pass. Uses the Studio Grade UI defaults for palette, type,
+  spacing, and the orange signature.
+- Default review: pass. No unsupported effect, fake copy, or decorative status
+  furniture is needed for this brief.
 - State coverage: pass. Warming, ready, resource fallback, and slow storage
   recovery are defined.
 - Accessibility: pass. No interactive controls, visible text progress, and

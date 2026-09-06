@@ -38,6 +38,7 @@ local endpoint at `.aura_rafi/agent_endpoint.json`. Then run:
 raf editors --json
 raf attach status --json
 raf attach capabilities --json
+raf attach context --json
 ```
 
 `raf editors` walks the recent-projects registry, probes each published
@@ -53,8 +54,68 @@ Pass `--project PATH` to target a specific editor when several are open.
 
 Attached `engine.status` is domain-agnostic: it reports the editor state,
 project type, entity count, and capabilities without touching a domain
-executor. `game.batch` runs up to 64 game operations in one round trip, each
+executor. `game.batch` runs up to 512 game operations in one round trip, each
 through the normal gateway (history and idempotency preserved).
+
+Attached metadata commands are also domain-agnostic: `project info`,
+`session list`, `workspace describe`, and `context` read the live project
+without being routed into a Game or Electronics parser. `context` is the
+preferred compact input for an external Agent: it includes the project,
+active session, revision, supported commands, bounded workspace counts, and a
+bounded Game scene outline when one is mounted.
+
+For visual feedback, an attached Game editor can expose the last rendered
+viewport without entering Play mode:
+
+```text
+raf attach --project D:\Games\HorseDemo viewport capture --json
+```
+
+The response references a PNG saved inside the project at
+`.aura_rafi/agent_artifacts/`. This is an observation of the current rendered
+editor frame, not a new render request. The editor must have rendered the Game
+viewport at least once.
+
+For layout perception without reading project files, query the semantic scene
+map:
+
+```text
+raf attach --project D:\Games\HorseDemo scene spatial --json --params '{"root":"Store","check_collisions":true}'
+```
+
+The response contains bounded world-space extents, renderable entities and
+conservative overlap pairs. Use the returned `next_cursor` for large scopes;
+the command is read-only and does not alter the scene.
+
+After a build, ask for a design audit so an agent can detect a blockout that
+has objects but does not read as a place:
+
+```text
+raf attach --project D:\Games\HorseDemo scene design-audit --json --params '{"root":"Store","design_profile":"supermarket"}'
+```
+
+An audit failure is structured evidence for the next repair pass. It does not
+modify the scene by itself.
+
+Use `scene repair` only after an audit has identified concrete targets. It
+accepts explicit `scene_update`, `scene_reparent`, `scene_create`, or
+`scene_delete` operations and applies them atomically inside the requested
+root; it never guesses geometry from prose:
+
+```text
+raf attach --project D:\Games\HorseDemo scene repair --json --params '{"root":"Store","operations":[{"name":"scene_update","params":{"target":"Wall_Back","transform":{"position":[0,2,-4]}}}]}' --confirm
+```
+
+The native Agent run can also be observed or cancelled from an attached host:
+
+```text
+raf attach --project D:\Games\HorseDemo task list --json
+raf attach --project D:\Games\HorseDemo task events --since 0 --json
+raf attach --project D:\Games\HorseDemo task cancel --id <task-id> --json
+```
+
+These task records are bounded and in-memory for the current editor process;
+they are not durable jobs or resumable sessions. Cancellation is cooperative.
 
 The handshake checks project identity, session, protocol version, and the
 local session token. It uses loopback only; no public server is started.
@@ -72,15 +133,43 @@ raf attach --project D:\Games\HorseDemo command game.add --json --params '{"prim
 raf attach --project D:\Games\HorseDemo command game.add --json --params '{"primitive":"cube","name":"Stable","position":[0,0,0]}' --confirm --idempotency-key stable-001
 ```
 
-The response includes the new revision, a structured scene diff, verification
-checks, and an `undo_token`. To roll back that exact attached edit:
+For an attached Game project, the response includes the new revision, a
+structured scene diff, verification checks, and a scoped `undo_token`. To roll
+back that exact edit:
 
 ```text
 raf attach --project D:\Games\HorseDemo command transaction.undo --json --params '{"token":"<undo_token>"}' --confirm
 ```
 
-The token is rejected if another edit, session switch, or project change has
-advanced the document. This prevents an AI from undoing somebody else's work.
+The token is rejected if another scene edit, session switch, project change,
+or attached revision has advanced the document. This prevents an AI from
+undoing somebody else's work. Electronics attached mutations currently expose
+revision and diff evidence but no scoped undo token.
+
+## Modular scene authoring
+
+For a modular authoring pass, prefer one atomic game.build request. For a real
+place, set a design profile so an incomplete blockout is rejected before it
+changes the scene. Create the envelope and circulation groups first, then the
+floor, walls/roof and entrances, and only then repeated modules and details:
+
+    raf attach --project D:\Games\HorseDemo command game.build --json --params '{"design_profile":"supermarket","groups":[{"name":"Structure"},{"name":"Products","parent":"Structure"}],"entities":[{"kind":"cube","name":"Floor","parent":"Structure","transform":{"position":[0,0,0],"scale":[4,0.2,2]},"color_rgba":[60,150,90,255]},{"kind":"cube","name":"Wall_Back","parent":"Structure","transform":{"position":[0,2,-4],"scale":[8,2,0.2]},"color_rgba":[180,180,180,255]},{"kind":"cube","name":"Entrance","parent":"Structure","transform":{"position":[0,1,4],"scale":[2,2,0.2]},"color_rgba":[80,120,160,255]},{"kind":"cube","name":"Aisle_Main","parent":"Structure","transform":{"position":[0,0.2,0],"scale":[1,0.1,6]},"color_rgba":[220,180,60,255]},{"kind":"cube","name":"Shelf_Left","parent":"Products","transform":{"position":[-2,1,0],"scale":[0.4,2,3]},"color_rgba":[120,90,50,255]}]}' --confirm --idempotency-key shelf-build-001
+
+Supported profiles are `generic`, `real_world`, `building`, `supermarket`,
+`parking`, and `outdoor`. The profile checks names, roles, stable keys and tags;
+it does not invent missing geometry. If it rejects the request, add the missing
+feature and preview again.
+
+game.create_group and game.reparent are available when a build needs to be
+assembled or reorganized in separate steps. Groups in game.build may reference
+parents by name or path even when the child appears first. The attached response
+reports the effective parent, transform, primitive, color, and live entity count.
+
+For repeatable AI workflows, use `game.reconcile` with a `stable_key` on every
+group and entity. Re-running the same desired state updates those nodes in place
+instead of duplicating them:
+
+    raf attach --project D:\Games\HorseDemo command game.reconcile --json --params '{"groups":[{"name":"Shelves","stable_key":"store.shelves"}],"entities":[{"kind":"cube","name":"Shelf_Left","stable_key":"store.shelf.left","parent":"key:store.shelves"}]}' --confirm --idempotency-key shelves-reconcile-001
 
 ## 5. Create and validate scripts
 
@@ -109,13 +198,19 @@ raf mcp serve --attach D:\Games\HorseDemo
 Codex, Claude Code, OpenCode, or another MCP client should launch that command
 as a local stdio server. The MCP adapter is thin: it forwards to the same
 command catalog and attached endpoint instead of implementing a second engine.
+It exposes `raf_context` and `raf_capabilities` in addition to the generic
+`raf_command`. It also exposes typed `raf_viewport_capture` and
+`raf_task_*` observation tools; attached results include readable text plus a
+structured `EngineCommandResponse` with compact model-facing lines and raw
+detail fields kept available to JSON callers.
 
 ## Safety rules
 
 - Always inspect, preview, confirm, apply, and inspect the result.
 - Send `expected_revision` and a stable `idempotency_key` for mutations.
-- Treat `undo_token` as scoped and short-lived; do not persist it as a project
-  secret.
+- Treat a Game `undo_token` as scoped and short-lived; do not persist it as a
+  project secret. Use the editor's normal Undo/Redo for Electronics until its
+  snapshot bridge exposes the same token contract.
 - Keep generated entities, files, and tool calls within explicit budgets.
 - Do not request Play, Stop, Runtime, arbitrary shell access, or arbitrary host
   filesystem access through the engine tools.

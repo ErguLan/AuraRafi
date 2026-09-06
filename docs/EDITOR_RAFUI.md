@@ -12,12 +12,15 @@ Para cualquier cambio de interfaz, consultar en este orden:
 2. `.ai/SYSTEM_TRUTH.md` para los limites arquitectonicos actuales.
 3. `docs/RAF_UI.md` para el contrato tecnico de RafUI.
 4. Este documento para el shell, workbenches y paneles del editor.
-5. `.ulpi/design/DESIGN.md` para tokens, tipografia, color y lenguaje visual.
+5. `.ai/STUDIO_GRADE_UI.md` para defaults visuales, jerarquia, materiales y
+   criterios de calidad.
 6. `docs/APIGRAPHICBASIC.md` y `docs/RENDERER.md` para la ruta grafica.
 
 Los documentos dentro de `docs/archive/`, `.ai/archive/` y
 `.ulpi/design/archive/` son contexto historico o propuestas. No son
-autoridad de implementacion.
+autoridad de implementacion. Un brief vigente dentro de `.ulpi/design/` puede
+refinar una pantalla concreta, pero no redefine la arquitectura ni la
+identidad global por accidente.
 
 ## Alcance del editor
 
@@ -181,8 +184,10 @@ La UI no debe bloquear el viewport mientras espera resultados.
 ## Settings
 
 Settings es compartido cuando una opcion afecta al editor completo: tema,
-escala, reduced motion, atajos globales, idioma, providers y preferencias de
-renderizado que ya existan.
+escala, reduced motion, contraste, idioma, providers y preferencias de
+renderizado que ya existan. Se presenta como un modal flotante movible sobre
+el Hub o el workbench, con busqueda, navegacion agrupada y un unico espacio de
+propiedades desplazable.
 
 Las opciones exclusivas de Hierarchy, Inspector, Game o Electronics deben
 permanecer en su contexto o en una subseccion claramente etiquetada. No se
@@ -190,8 +195,11 @@ duplican opciones antiguas: se adapta la opcion existente si su comportamiento
 tambien aplica al panel nuevo y se documenta la migracion.
 
 Toda opcion debe tener estado draft, aplicar/cancelar y persistencia coherente
-con el host actual. No se agrega una opcion solo para ocultar un bug de layout
-que debe corregirse en la superficie o el host.
+con el host actual. Las preferencias de Game y Electronics se separan en la
+UI cuando su dominio difiere; el grid y snap compartidos siguen siendo
+preferencias del editor. Nodes queda fuera de este contrato mientras se
+rediseña su producto. No se agrega una opcion solo para ocultar un bug de
+layout que debe corregirse en la superficie o el host.
 
 ## Interaccion y foco
 

@@ -6,6 +6,7 @@
 
 use crate::chat::ChatMessage;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
@@ -38,12 +39,19 @@ impl AgentHistoryWriter {
             .name("agent-history-writer".to_string())
             .spawn(move || {
                 while let Ok(request) = receiver.recv() {
-                    if let Err(error) = request.history.save(&request.project_root) {
-                        tracing::warn!(
-                            project = %request.project_root.display(),
-                            %error,
-                            "failed to persist Agent history"
-                        );
+                    let mut latest_by_project = HashMap::new();
+                    latest_by_project.insert(request.project_root, request.history);
+                    for pending in receiver.try_iter() {
+                        latest_by_project.insert(pending.project_root, pending.history);
+                    }
+                    for (project_root, history) in latest_by_project {
+                        if let Err(error) = history.save(&project_root) {
+                            tracing::warn!(
+                                project = %project_root.display(),
+                                %error,
+                                "failed to persist Agent history"
+                            );
+                        }
                     }
                 }
             })

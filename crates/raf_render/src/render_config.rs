@@ -88,8 +88,8 @@ pub struct RenderConfig {
     pub gpu_deform_enabled: bool,
 
     // -- Performance limits --
-    /// Maximum triangles per frame before quality auto-reduction.
-    /// Default: 10000 (generous for potato).
+    /// Advisory triangle workload used to size optional systems and tooling.
+    /// It is never permission to discard visible editor geometry.
     pub max_triangles: u32,
     /// Frame budget in milliseconds. If exceeded, auto-reduce detail.
     /// Default: 33 (30fps minimum).
@@ -191,6 +191,15 @@ impl Default for RenderConfig {
 }
 
 impl RenderConfig {
+    /// Fixed lightweight profile for the active editor stabilization path.
+    ///
+    /// GPU hardware remains the preferred ApiGraphicBasic executor, including
+    /// integrated GPUs. This profile only disables optional expensive work and
+    /// lowers the preferred surface scale; it does not cap scene visibility.
+    pub fn editor_lightweight() -> Self {
+        Self::potato()
+    }
+
     /// Build a config from the persisted project preset.
     pub fn for_preset(preset: RenderPreset) -> Self {
         match preset {
@@ -476,6 +485,17 @@ mod tests {
         assert_eq!(profile.post_process_passes, 0);
         assert_eq!(profile.particle_budget, 0);
         assert_eq!(profile.estimated_surface_pixels(100, 80), 60 * 75);
+    }
+
+    #[test]
+    fn editor_lightweight_profile_keeps_optional_work_disabled() {
+        let config = RenderConfig::editor_lightweight();
+        let profile = config.resource_profile();
+
+        assert!(!config.shadows_enabled);
+        assert!(!config.bloom_enabled);
+        assert!(!config.pbr_enabled);
+        assert_eq!(profile.preferred_surface_scale, 0.75);
     }
 
     #[test]

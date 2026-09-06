@@ -21,18 +21,19 @@ pub struct ViewportTransformController {
     drag_start_pos: Option<Vec3>,
     drag_start_scale: Option<Vec3>,
     drag_start_rotation: Option<Vec3>,
+    drag_start_world_pos: Option<Vec3>,
+    drag_start_world_scale: Vec3,
+    drag_world_axes: [Vec3; 3],
+    drag_parent_inverse: Mat4,
+    drag_presentation_scale: f32,
     /// Accumulated rotation delta (radians) per axis during the current drag.
     ///
-    /// The previous implementation computed rotation from the absolute mouse
-    /// delta since drag start (`start_rotation + delta * 45`). When the mouse
-    /// crossed the screen-space origin of the axis, the projection flipped
-    /// sign and the object "went backwards". By accumulating the incremental
-    /// delta every frame instead, the rotation keeps going in the same
-    /// direction no matter how far the mouse travels.
+    /// Each frame contributes the shortest signed delta between two angular
+    /// parameters on the projected rotation ring. This can grow beyond one
+    /// complete turn without wrapping the authored transform.
     accumulated_rotation: Vec3,
-    /// Last pointer position recorded during a drag, used to compute the
-    /// incremental delta for rotation.
-    last_drag_mouse: Option<[f32; 2]>,
+    /// Last angular parameter on the active ring, in radians.
+    last_rotation_parameter: Option<f32>,
 }
 
 /// One frame of gizmo drag math computed against an arbitrary gizmo origin.
@@ -59,8 +60,13 @@ impl Default for ViewportTransformController {
             drag_start_pos: None,
             drag_start_scale: None,
             drag_start_rotation: None,
+            drag_start_world_pos: None,
+            drag_start_world_scale: Vec3::ONE,
+            drag_world_axes: [Vec3::X, Vec3::Y, Vec3::Z],
+            drag_parent_inverse: Mat4::IDENTITY,
+            drag_presentation_scale: 1.0,
             accumulated_rotation: Vec3::ZERO,
-            last_drag_mouse: None,
+            last_rotation_parameter: None,
         }
     }
 }
@@ -139,13 +145,14 @@ impl ViewportTransformController {
             self.hover_scale_sign = 0.0;
             return;
         };
-        let Some(_node) = scene.get(id) else {
+        let Some(_) = scene.get(id) else {
             self.gizmo.active_axis = GizmoAxis::None;
             self.hover_scale_sign = 0.0;
             return;
         };
-        let node = scene.get(id).expect("checked above");
-        let entity_pos = scene.world_matrix(id).col(3).truncate();
+        let world = scene.world_matrix(id);
+        let entity_pos = world.col(3).truncate();
+        let (entity_axes, entity_scale) = picking::gizmo_scale_basis(world);
 
         let gizmo_hit = match self.gizmo.mode {
             GizmoMode::Rotate => picking::pick_gizmo_rotation_ring_scaled(
@@ -165,10 +172,11 @@ impl ViewportTransformController {
                 vp_h,
             ),
             GizmoMode::Scale => {
-                let hit = picking::pick_gizmo_scale_handle_scaled(
+                let hit = picking::pick_gizmo_scale_handle_scaled_oriented(
                     pointer_local,
                     entity_pos,
-                    node.scale,
+                    entity_scale,
+                    entity_axes,
                     presentation_scale,
                     view_proj,
                     vp_w,
@@ -216,7 +224,13 @@ impl ViewportTransformController {
         let Some(node) = scene.get(id) else {
             return;
         };
-        let entity_pos = scene.world_matrix(id).col(3).truncate();
+        let world = scene.world_matrix(id);
+        let entity_pos = world.col(3).truncate();
+        let (entity_axes, entity_scale) = picking::gizmo_scale_basis(world);
+        let parent_inverse = node
+            .parent
+            .map(|parent| stable_inverse(scene.world_matrix(parent)))
+            .unwrap_or(Mat4::IDENTITY);
 
         let gizmo_hit = match self.gizmo.mode {
             GizmoMode::Rotate => picking::pick_gizmo_rotation_ring_scaled(
@@ -236,10 +250,11 @@ impl ViewportTransformController {
                 vp_h,
             ),
             GizmoMode::Scale => {
-                let picked = picking::pick_gizmo_scale_handle_scaled(
+                let picked = picking::pick_gizmo_scale_handle_scaled_oriented(
                     pointer_local,
                     entity_pos,
-                    node.scale,
+                    entity_scale,
+                    entity_axes,
                     presentation_scale,
                     view_proj,
                     vp_w,
@@ -274,8 +289,26 @@ impl ViewportTransformController {
             self.drag_start_pos = Some(node.position);
             self.drag_start_scale = Some(node.scale);
             self.drag_start_rotation = Some(node.rotation);
+            self.drag_start_world_pos = Some(entity_pos);
+            self.drag_start_world_scale = entity_scale;
+            self.drag_world_axes = entity_axes;
+            self.drag_parent_inverse = parent_inverse;
+            self.drag_presentation_scale = presentation_scale.max(0.1);
             self.accumulated_rotation = Vec3::ZERO;
-            self.last_drag_mouse = Some(pointer_local);
+            self.last_rotation_parameter = if self.gizmo.mode == GizmoMode::Rotate {
+                picking::rotation_ring_parameter_scaled(
+                    pointer_local,
+                    entity_pos,
+                    axis_idx,
+                    self.drag_presentation_scale,
+                    view_proj,
+                    vp_w,
+                    vp_h,
+                    None,
+                )
+            } else {
+                None
+            };
         }
     }
 
@@ -297,45 +330,62 @@ impl ViewportTransformController {
         let Some(start_mouse) = self.drag_start_mouse else {
             return false;
         };
-
-        let axis_dir = match self.drag_axis {
-            GizmoAxis::X => Vec3::X,
-            GizmoAxis::Y => Vec3::Y,
-            GizmoAxis::Z => Vec3::Z,
-            GizmoAxis::None => return false,
+        let Some(axis_index) = gizmo_axis_index(self.drag_axis) else {
+            return false;
         };
+        let axis_dir = axis_vector(axis_index);
+
+        if self.gizmo.mode == GizmoMode::Rotate {
+            let Some(rotation_radians) =
+                self.advance_rotation_drag(view_proj, current_mouse, vp_w, vp_h)
+            else {
+                return false;
+            };
+            if let (Some(node), Some(start_rotation)) =
+                (scene.get_mut(id), self.drag_start_rotation)
+            {
+                // SceneNode stores editor Euler values in degrees. The ring
+                // math remains radians and is converted only at this boundary.
+                let mut delta_degrees = rotation_radians.to_degrees();
+                if snap_to_ctrl {
+                    const SNAP_DEGREES: f32 = 15.0;
+                    delta_degrees = (delta_degrees / SNAP_DEGREES).round() * SNAP_DEGREES;
+                }
+                let mut final_rotation = start_rotation;
+                set_axis_component(
+                    &mut final_rotation,
+                    axis_index,
+                    axis_component(start_rotation, axis_index) + delta_degrees,
+                );
+                node.rotation = final_rotation;
+            }
+            return true;
+        }
+
         let face_sign = if self.gizmo.mode == GizmoMode::Scale {
-            self.drag_scale_sign.signum().max(-1.0)
+            normalized_sign(self.drag_scale_sign)
         } else {
             1.0
         };
-        let face_dir = axis_dir * if face_sign == 0.0 { 1.0 } else { face_sign };
+        let world_axis = if self.gizmo.mode == GizmoMode::Scale {
+            normalized_axis_or(self.drag_world_axes[axis_index], axis_dir)
+        } else {
+            axis_dir
+        };
+        let face_dir = world_axis * face_sign;
 
-        let entity_pos = self.drag_start_pos.unwrap_or(Vec3::ZERO);
+        let entity_pos = self
+            .drag_start_world_pos
+            .or(self.drag_start_pos)
+            .unwrap_or(Vec3::ZERO);
         let handle_origin_world = if self.gizmo.mode == GizmoMode::Scale {
-            let start_scale = self
-                .drag_start_scale
-                .unwrap_or(Vec3::ONE)
-                .abs()
-                .max(Vec3::splat(0.05));
-            let handle_offset = Vec3::new(
-                if self.drag_axis == GizmoAxis::X {
-                    start_scale.x * 0.5 * face_dir.x.signum()
-                } else {
-                    0.0
-                },
-                if self.drag_axis == GizmoAxis::Y {
-                    start_scale.y * 0.5 * face_dir.y.signum()
-                } else {
-                    0.0
-                },
-                if self.drag_axis == GizmoAxis::Z {
-                    start_scale.z * 0.5 * face_dir.z.signum()
-                } else {
-                    0.0
-                },
-            );
-            entity_pos + handle_offset
+            picking::gizmo_scale_handle_world_position(
+                entity_pos,
+                self.drag_start_world_scale,
+                self.drag_world_axes,
+                axis_index,
+                face_sign,
+            )
         } else {
             entity_pos
         };
@@ -369,66 +419,39 @@ impl ViewportTransformController {
                     self.drag_start_scale,
                     self.drag_start_pos,
                 ) {
-                    let start_axis_scale = match self.drag_axis {
-                        GizmoAxis::X => start_scale.x.abs().max(0.01),
-                        GizmoAxis::Y => start_scale.y.abs().max(0.01),
-                        GizmoAxis::Z => start_scale.z.abs().max(0.01),
-                        GizmoAxis::None => return false,
-                    };
-
-                    let new_axis_scale = (start_axis_scale + delta).max(0.01);
+                    let start_axis_value = axis_component(start_scale, axis_index);
+                    let start_axis_scale = start_axis_value.abs().max(0.01);
+                    let start_world_axis_scale =
+                        axis_component(self.drag_start_world_scale, axis_index)
+                            .abs()
+                            .max(0.01);
+                    let local_delta = delta * (start_axis_scale / start_world_axis_scale);
+                    let new_axis_scale = (start_axis_scale + local_delta).max(0.01);
                     let snapped = if snap_to_ctrl {
                         let step = 0.5;
-                        (new_axis_scale / step).round() * step
+                        ((new_axis_scale / step).round() * step).max(0.01)
                     } else {
                         new_axis_scale
                     };
                     if uniform_scale {
                         let factor = (snapped / start_axis_scale).max(0.05);
-                        node.scale = (start_scale * factor).max(Vec3::splat(0.01));
+                        node.scale = scale_with_min_magnitude(start_scale * factor, 0.01);
                     } else {
-                        let axis_delta = snapped - start_axis_scale;
-                        node.scale = (start_scale + axis_dir * axis_delta).max(Vec3::splat(0.01));
-                        node.position = start_pos + face_dir * (axis_delta * 0.5);
+                        let local_axis_delta = snapped - start_axis_scale;
+                        let mut next_scale = start_scale;
+                        let authored_sign = if start_axis_value < 0.0 { -1.0 } else { 1.0 };
+                        set_axis_component(&mut next_scale, axis_index, snapped * authored_sign);
+                        node.scale = scale_with_min_magnitude(next_scale, 0.01);
+
+                        let world_axis_delta =
+                            local_axis_delta * (start_world_axis_scale / start_axis_scale);
+                        let world_offset = world_axis * (world_axis_delta * 0.5 * face_sign);
+                        let local_offset = self.drag_parent_inverse.transform_vector3(world_offset);
+                        node.position = start_pos + local_offset;
                     }
                 }
             }
-            GizmoMode::Rotate => {
-                if let (Some(node), Some(start_rotation)) =
-                    (scene.get_mut(id), self.drag_start_rotation)
-                {
-                    // Accumulate incremental rotation instead of computing from
-                    // the absolute mouse delta. The previous code used
-                    // `start_rotation + delta * 45` where `delta` was the
-                    // projection of (current - start). When the mouse passed
-                    // the screen-space axis origin, the projection flipped and
-                    // the object rotated backwards. By accumulating the
-                    // per-frame delta we keep rotating in the same direction.
-                    let last = self.last_drag_mouse.unwrap_or(start_mouse);
-                    let inc_projection =
-                        pointer_axis_projection(last, current_mouse, &axis_screen_dir, axis_len);
-                    let inc_delta = inc_projection * (orbit_distance / (vp_w.min(vp_h) * 0.5));
-                    let inc_radians = inc_delta * std::f32::consts::FRAC_PI_4; // 45 deg base
-                    self.accumulated_rotation += axis_dir * inc_radians;
-
-                    let mut final_rotation = start_rotation + self.accumulated_rotation;
-
-                    // Snap to 15 degrees when Ctrl is held (Blender/Unity style).
-                    if snap_to_ctrl {
-                        const SNAP_STEP: f32 = std::f32::consts::PI / 12.0; // 15 deg
-                        if self.drag_axis == GizmoAxis::X {
-                            final_rotation.x = (final_rotation.x / SNAP_STEP).round() * SNAP_STEP;
-                        } else if self.drag_axis == GizmoAxis::Y {
-                            final_rotation.y = (final_rotation.y / SNAP_STEP).round() * SNAP_STEP;
-                        } else if self.drag_axis == GizmoAxis::Z {
-                            final_rotation.z = (final_rotation.z / SNAP_STEP).round() * SNAP_STEP;
-                        }
-                    }
-
-                    node.rotation = final_rotation;
-                    self.last_drag_mouse = Some(current_mouse);
-                }
-            }
+            GizmoMode::Rotate => unreachable!("rotation returns before linear drag math"),
         }
 
         true
@@ -518,15 +541,19 @@ impl ViewportTransformController {
                 vp_w,
                 vp_h,
             ),
-            GizmoMode::Scale => picking::pick_gizmo_scale_handle(
-                pointer_local,
-                origin,
-                entity_scale,
-                view_proj,
-                vp_w,
-                vp_h,
-            )
-            .map(|(axis_idx, distance, _)| (axis_idx, distance)),
+            GizmoMode::Scale => {
+                let hit = picking::pick_gizmo_scale_handle_scaled(
+                    pointer_local,
+                    origin,
+                    entity_scale,
+                    presentation_scale,
+                    view_proj,
+                    vp_w,
+                    vp_h,
+                );
+                self.drag_scale_sign = hit.map(|(_, _, sign)| sign).unwrap_or(1.0);
+                hit.map(|(axis_idx, distance, _)| (axis_idx, distance))
+            }
         };
         if let Some((axis_idx, _)) = gizmo_hit {
             self.drag_axis = [GizmoAxis::X, GizmoAxis::Y, GizmoAxis::Z][axis_idx];
@@ -535,8 +562,26 @@ impl ViewportTransformController {
             self.drag_start_pos = Some(origin);
             self.drag_start_scale = Some(entity_scale);
             self.drag_start_rotation = Some(Vec3::ZERO);
+            self.drag_start_world_pos = Some(origin);
+            self.drag_start_world_scale = entity_scale.abs().max(Vec3::splat(0.01));
+            self.drag_world_axes = [Vec3::X, Vec3::Y, Vec3::Z];
+            self.drag_parent_inverse = Mat4::IDENTITY;
+            self.drag_presentation_scale = presentation_scale.max(0.1);
             self.accumulated_rotation = Vec3::ZERO;
-            self.last_drag_mouse = Some(pointer_local);
+            self.last_rotation_parameter = if self.gizmo.mode == GizmoMode::Rotate {
+                picking::rotation_ring_parameter_scaled(
+                    pointer_local,
+                    origin,
+                    axis_idx,
+                    self.drag_presentation_scale,
+                    view_proj,
+                    vp_w,
+                    vp_h,
+                    None,
+                )
+            } else {
+                None
+            };
         }
     }
 
@@ -554,52 +599,42 @@ impl ViewportTransformController {
         vp_w: f32,
         vp_h: f32,
     ) -> Option<AxisDragOutcome> {
-        if self.drag_axis == GizmoAxis::None {
-            return None;
-        }
+        let axis_index = gizmo_axis_index(self.drag_axis)?;
         let start_mouse = self.drag_start_mouse?;
-        let axis_dir = match self.drag_axis {
-            GizmoAxis::X => Vec3::X,
-            GizmoAxis::Y => Vec3::Y,
-            GizmoAxis::Z => Vec3::Z,
-            GizmoAxis::None => return None,
-        };
+        if self.gizmo.mode == GizmoMode::Rotate {
+            return self
+                .advance_rotation_drag(view_proj, current_mouse, vp_w, vp_h)
+                .map(|rotation_radians| AxisDragOutcome {
+                    axis_delta: 0.0,
+                    rotation_radians,
+                });
+        }
+
+        let axis_dir = axis_vector(axis_index);
         let face_sign = if self.gizmo.mode == GizmoMode::Scale {
-            let sign = self.drag_scale_sign.signum();
-            if sign == 0.0 {
-                1.0
-            } else {
-                sign
-            }
+            normalized_sign(self.drag_scale_sign)
         } else {
             1.0
         };
-        let face_dir = axis_dir * face_sign;
+        let world_axis = if self.gizmo.mode == GizmoMode::Scale {
+            normalized_axis_or(self.drag_world_axes[axis_index], axis_dir)
+        } else {
+            axis_dir
+        };
+        let face_dir = world_axis * face_sign;
 
-        let entity_pos = self.drag_start_pos.unwrap_or(Vec3::ZERO);
+        let entity_pos = self
+            .drag_start_world_pos
+            .or(self.drag_start_pos)
+            .unwrap_or(Vec3::ZERO);
         let handle_origin_world = if self.gizmo.mode == GizmoMode::Scale {
-            let start_scale = self
-                .drag_start_scale
-                .unwrap_or(Vec3::ONE)
-                .abs()
-                .max(Vec3::splat(0.05));
-            Vec3::new(
-                if self.drag_axis == GizmoAxis::X {
-                    start_scale.x * 0.5 * face_dir.x.signum()
-                } else {
-                    0.0
-                },
-                if self.drag_axis == GizmoAxis::Y {
-                    start_scale.y * 0.5 * face_dir.y.signum()
-                } else {
-                    0.0
-                },
-                if self.drag_axis == GizmoAxis::Z {
-                    start_scale.z * 0.5 * face_dir.z.signum()
-                } else {
-                    0.0
-                },
-            ) + entity_pos
+            picking::gizmo_scale_handle_world_position(
+                entity_pos,
+                self.drag_start_world_scale,
+                self.drag_world_axes,
+                axis_index,
+                face_sign,
+            )
         } else {
             entity_pos
         };
@@ -613,29 +648,41 @@ impl ViewportTransformController {
         let delta = pointer_axis_projection(start_mouse, current_mouse, &axis_screen_dir, axis_len)
             * (orbit_distance / (vp_w.min(vp_h) * 0.5));
 
-        match self.gizmo.mode {
-            GizmoMode::Rotate => {
-                let last = self.last_drag_mouse.unwrap_or(start_mouse);
-                let inc_projection =
-                    pointer_axis_projection(last, current_mouse, &axis_screen_dir, axis_len);
-                let inc_delta = inc_projection * (orbit_distance / (vp_w.min(vp_h) * 0.5));
-                let inc_radians = inc_delta * std::f32::consts::FRAC_PI_4;
-                self.accumulated_rotation += axis_dir * inc_radians;
-                self.last_drag_mouse = Some(current_mouse);
-                Some(AxisDragOutcome {
-                    axis_delta: 0.0,
-                    rotation_radians: match self.drag_axis {
-                        GizmoAxis::X => self.accumulated_rotation.x,
-                        GizmoAxis::Y => self.accumulated_rotation.y,
-                        _ => self.accumulated_rotation.z,
-                    },
-                })
+        Some(AxisDragOutcome {
+            axis_delta: delta,
+            rotation_radians: 0.0,
+        })
+    }
+
+    fn advance_rotation_drag(
+        &mut self,
+        view_proj: &Mat4,
+        current_mouse: [f32; 2],
+        vp_w: f32,
+        vp_h: f32,
+    ) -> Option<f32> {
+        let axis_index = gizmo_axis_index(self.drag_axis)?;
+        let origin = self.drag_start_world_pos.or(self.drag_start_pos)?;
+        let current_parameter = picking::rotation_ring_parameter_scaled(
+            current_mouse,
+            origin,
+            axis_index,
+            self.drag_presentation_scale,
+            view_proj,
+            vp_w,
+            vp_h,
+            self.last_rotation_parameter,
+        );
+
+        if let Some(current_parameter) = current_parameter {
+            if let Some(previous_parameter) = self.last_rotation_parameter {
+                let increment = wrapped_rotation_delta(previous_parameter, current_parameter);
+                self.accumulated_rotation += axis_vector(axis_index) * increment;
             }
-            GizmoMode::Translate | GizmoMode::Scale => Some(AxisDragOutcome {
-                axis_delta: delta,
-                rotation_radians: 0.0,
-            }),
+            self.last_rotation_parameter = Some(current_parameter);
         }
+
+        Some(axis_component(self.accumulated_rotation, axis_index))
     }
 
     pub fn end_drag(&mut self) {
@@ -647,8 +694,13 @@ impl ViewportTransformController {
         self.drag_start_pos = None;
         self.drag_start_scale = None;
         self.drag_start_rotation = None;
+        self.drag_start_world_pos = None;
+        self.drag_start_world_scale = Vec3::ONE;
+        self.drag_world_axes = [Vec3::X, Vec3::Y, Vec3::Z];
+        self.drag_parent_inverse = Mat4::IDENTITY;
+        self.drag_presentation_scale = 1.0;
         self.accumulated_rotation = Vec3::ZERO;
-        self.last_drag_mouse = None;
+        self.last_rotation_parameter = None;
     }
 }
 
@@ -676,4 +728,171 @@ fn screen_axis_basis(
 fn pointer_axis_projection(from: [f32; 2], to: [f32; 2], dir: &[f32; 2], len: f32) -> f32 {
     let delta = [to[0] - from[0], to[1] - from[1]];
     (delta[0] * dir[0] + delta[1] * dir[1]) / len
+}
+
+fn gizmo_axis_index(axis: GizmoAxis) -> Option<usize> {
+    match axis {
+        GizmoAxis::X => Some(0),
+        GizmoAxis::Y => Some(1),
+        GizmoAxis::Z => Some(2),
+        GizmoAxis::None => None,
+    }
+}
+
+fn axis_vector(axis_index: usize) -> Vec3 {
+    [Vec3::X, Vec3::Y, Vec3::Z][axis_index.min(2)]
+}
+
+fn axis_component(vector: Vec3, axis_index: usize) -> f32 {
+    match axis_index {
+        0 => vector.x,
+        1 => vector.y,
+        _ => vector.z,
+    }
+}
+
+fn set_axis_component(vector: &mut Vec3, axis_index: usize, value: f32) {
+    match axis_index {
+        0 => vector.x = value,
+        1 => vector.y = value,
+        _ => vector.z = value,
+    }
+}
+
+fn wrapped_rotation_delta(previous: f32, current: f32) -> f32 {
+    (current - previous + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU)
+        - std::f32::consts::PI
+}
+
+fn normalized_axis_or(axis: Vec3, fallback: Vec3) -> Vec3 {
+    let length = axis.length();
+    if length.is_finite() && length > 1e-5 {
+        axis / length
+    } else {
+        fallback
+    }
+}
+
+fn normalized_sign(value: f32) -> f32 {
+    if value < 0.0 {
+        -1.0
+    } else {
+        1.0
+    }
+}
+
+fn stable_inverse(matrix: Mat4) -> Mat4 {
+    let determinant = matrix.determinant();
+    if determinant.is_finite() && determinant.abs() > 1e-8 {
+        matrix.inverse()
+    } else {
+        Mat4::IDENTITY
+    }
+}
+
+fn scale_with_min_magnitude(scale: Vec3, minimum: f32) -> Vec3 {
+    Vec3::new(
+        signed_min_magnitude(scale.x, minimum),
+        signed_min_magnitude(scale.y, minimum),
+        signed_min_magnitude(scale.z, minimum),
+    )
+}
+
+fn signed_min_magnitude(value: f32, minimum: f32) -> f32 {
+    if value < 0.0 {
+        -value.abs().max(minimum)
+    } else {
+        value.abs().max(minimum)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raf_core::scene::graph::Primitive;
+
+    #[test]
+    fn rotation_drag_accumulates_forward_across_the_pi_boundary() {
+        let mut scene = SceneGraph::default();
+        let id = scene.add_root_with_primitive("Rotating", Primitive::Cube);
+        let mut controller = ViewportTransformController::default();
+        controller.set_mode(GizmoMode::Rotate);
+        controller.drag_axis = GizmoAxis::Z;
+        controller.drag_start_mouse = Some(rotation_ring_screen_point(179.0f32.to_radians()));
+        controller.drag_start_pos = Some(Vec3::ZERO);
+        controller.drag_start_world_pos = Some(Vec3::ZERO);
+        controller.drag_start_rotation = Some(Vec3::ZERO);
+        controller.drag_presentation_scale = 1.0;
+        controller.last_rotation_parameter = Some(179.0f32.to_radians());
+
+        assert!(controller.apply_drag(
+            &mut scene,
+            Some(id),
+            &Mat4::IDENTITY,
+            rotation_ring_screen_point(-179.0f32.to_radians()),
+            5.0,
+            false,
+            false,
+            800.0,
+            600.0,
+        ));
+
+        let rotation = scene.get(id).unwrap().rotation.z;
+        assert!(
+            (rotation - 2.0).abs() < 1e-3,
+            "expected +2 degrees, got {rotation}"
+        );
+    }
+
+    #[test]
+    fn scale_drag_uses_the_rotated_face_axis() {
+        let mut scene = SceneGraph::default();
+        let id = scene.add_root_with_primitive("Scaled", Primitive::Cube);
+        scene.get_mut(id).unwrap().rotation.z = 45.0;
+        let world = scene.world_matrix(id);
+        let origin = world.col(3).truncate();
+        let (axes, world_scale) = picking::gizmo_scale_basis(world);
+        let handle = picking::gizmo_scale_handle_world_position(origin, world_scale, axes, 0, 1.0);
+        let start = transform::project_point(handle, &Mat4::IDENTITY, 800.0, 600.0)
+            .unwrap()
+            .0;
+        let (screen_axis, screen_axis_len) =
+            screen_axis_basis(handle, axes[0], &Mat4::IDENTITY, 800.0, 600.0).unwrap();
+        let current = [
+            start[0] + screen_axis[0] / screen_axis_len * 30.0,
+            start[1] + screen_axis[1] / screen_axis_len * 30.0,
+        ];
+
+        let mut controller = ViewportTransformController::default();
+        controller.set_mode(GizmoMode::Scale);
+        controller.begin_drag_scaled(&scene, Some(id), &Mat4::IDENTITY, start, 800.0, 600.0, 1.0);
+        assert_eq!(controller.drag_axis(), GizmoAxis::X);
+        assert!(controller.apply_drag(
+            &mut scene,
+            Some(id),
+            &Mat4::IDENTITY,
+            current,
+            5.0,
+            false,
+            false,
+            800.0,
+            600.0,
+        ));
+
+        let node = scene.get(id).unwrap();
+        assert!((node.scale.x - 1.5).abs() < 1e-3);
+        assert!((node.scale.y - 1.0).abs() < 1e-3);
+        assert!((node.position - axes[0] * 0.25).length() < 1e-3);
+    }
+
+    fn rotation_ring_screen_point(angle: f32) -> [f32; 2] {
+        let world = Vec3::new(
+            angle.cos() * picking::GIZMO_ROTATION_RADIUS,
+            angle.sin() * picking::GIZMO_ROTATION_RADIUS,
+            0.0,
+        );
+        transform::project_point(world, &Mat4::IDENTITY, 800.0, 600.0)
+            .unwrap()
+            .0
+    }
 }

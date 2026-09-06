@@ -8,9 +8,10 @@ use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiIcon, UiIconId, UiIconSize, UiSurface,
 };
 use raf_ui::{
-    UiAlign, UiEventBinding, UiEventKind, UiFlow, UiJustify, UiLayout, UiNode, UiNodeKind,
-    UiOverflow, UiResponsiveRule, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle, UiStylePatch,
-    UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiTextInput, UiTextStyle,
+    UiAccessibilityRole, UiAlign, UiEventBinding, UiEventKind, UiFlow, UiJustify, UiLayout, UiNode,
+    UiNodeKind, UiOverflow, UiResponsiveRule, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle,
+    UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiTextInput,
+    UiTextStyle,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -150,6 +151,8 @@ pub fn build_search_surface_with_state(
             radius: 10.0,
             opacity: 0.99,
         })
+        .with_accessibility_role(UiAccessibilityRole::Dialog)
+        .with_accessibility_label_key("app.search_everywhere")
         .with_child(search_header(palette))
         .with_child(search_summary(palette, query, results.len(), state))
         .with_child(list);

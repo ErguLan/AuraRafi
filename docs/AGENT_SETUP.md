@@ -28,12 +28,16 @@ The sidebar can be toggled open/closed with the `<` / `>` button.
 2. Choose the provider you want to use:
    - **OpenRouter**: enter your API key and pick a model id (or add a model
      shortcut in the Agent panel).
-   - **Puerto**: point to your OpenClawd / OpenClaw gateway URL.
-   - **OpenAI / GenAI / Claude**: enter the API key and model id.
+   - **OpenAI**: enter the API key and model id.
+   - **OpenRouter**: enter the API key and model id, or use a compatible
+     gateway URL.
+   - Puerto, GenAI and Claude remain readable as legacy provider values, but
+     are not exposed as verified native editor transports in this release.
 3. Set that provider as the default with **Set as default**.
 4. Select the **Agent mode**:
-   - **Passive**: every tool call stops and asks for approval.
-   - **Active**: tool calls run immediately. Faster, but review the risk warning.
+   - **Inspect**: native project reads only; mutation tools are hidden.
+   - **Plan**: reads run normally and mutations are previewed without changing the project.
+   - **Active**: mutations run immediately through the shared command gateway.
 5. (Optional) Open the **Agent** panel and click **+ Add model** to create
    shortcuts for the models you use most. These are saved globally.
 6. Open or create a project.
@@ -41,18 +45,18 @@ The sidebar can be toggled open/closed with the `<` / `>` button.
 
 ## How tool calls work
 
-When the model decides to act, it calls one or more tools. Each tool maps to an
-AuraRafi command in the canonical catalog. The engine executes the command and
-returns structured output with `changed`, revision, diff, warnings and (when
-available) an undo token. The Agent may use that evidence to choose the next
-step. Every command output is also logged to the Console panel so you can
-inspect it or revert it through the host.
+Before the first provider request, the editor supplies a compact snapshot of
+the active project, scene hierarchy, selection, assets, scripts, session and
+revision. The model then calls contextual tools. Semantic Game tools map to
+the canonical command gateway only at the final adapter, and return structured
+`summary`, `data`, stable references, revision, diff and verification evidence.
+Large mesh/debug payloads are kept out of the normal transcript.
 
-## Approval flow (Passive mode)
+## Preview and execution flow
 
-1. The Agent shows the list of commands it wants to run.
-2. Click **Approve** to execute them and continue.
-3. Click **Deny** to skip them and let the model react to the denial.
+1. Use **Inspect** when you only want the Agent to explain what is mounted.
+2. Use **Plan** to review the resulting summaries and preview diffs.
+3. Use **Active** when the request is ready to modify the project.
 
 ## Chat sessions
 

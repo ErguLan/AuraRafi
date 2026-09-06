@@ -12,11 +12,10 @@ This file defines the strict, non-negotiable rules for code quality, behavior, a
 ---
 
 ## 2. Structural & Architectural Modularity
-* **SLIM app.rs AND RAFUI-FIRST PROTOCOL**: Do not write raw drawing calls,
-  menu trees, or panel-specific business logic directly inside
-  `crates/raf_editor/src/app.rs`.
-  * `app.rs` acts as a route coordinator, state registry, command boundary,
-    persistence owner, and auto-save controller.
+* **SLIM NATIVE HOSTS AND RAFUI-FIRST PROTOCOL**: Do not write raw drawing
+  calls, menu trees, or panel-specific business logic into a monolithic editor
+  coordinator. The active boundary is the native Winit application,
+  workbench, focused surfaces and their hosts.
   * New editor surfaces belong in a focused `*_surface.rs` document builder and
     a `*_surface_host.rs` action/presentation host. The document owns semantic
     nodes, layout, classes, text keys, and event bindings; the host maps typed
@@ -90,7 +89,8 @@ work must load and follow `.ai/APIGRAPHICBASIC.md`.
 ## 7. RafUI Design And Interaction Rules
 
 All new retained UI work must follow `docs/RAF_UI.md`, `docs/EDITOR_RAFUI.md`, and
-`.ulpi/design/DESIGN.md`.
+`.ai/STUDIO_GRADE_UI.md`. Feature briefs under `.ulpi/design/` may refine a
+specific task, but they do not replace the product-wide visual guide.
 
 * **ONE AUTHORITATIVE MODEL**: A RafUI document describes presentation only.
   Scene, CAD, asset, project, and provider state remain in their established
@@ -109,10 +109,14 @@ All new retained UI work must follow `docs/RAF_UI.md`, `docs/EDITOR_RAFUI.md`, a
   surfaces. RafUI may own surrounding chrome and overlays, but a minimap,
   selection, wire/traces, and status must read the same live domain document
   and transform as their canvas.
-* **DESIGN TOKENS ONLY**: Use semantic `UiTheme` / `StudioUiPalette` tokens,
-  stable spacing, and the approved radius/elevation scale. No per-panel raw
-  colors, blue/purple gradients, fake glass, decorative blur, generic
-  dashboard widgets, or invented product/account data.
+* **DESIGN TOKENS BY DEFAULT**: Use semantic `UiTheme` / `StudioUiPalette`
+  tokens, stable spacing, and the approved radius/elevation scale. Do not
+  scatter raw per-panel colors or invent product/account data. A current user
+  brief or supplied visual reference may intentionally introduce a different
+  palette, gradient, or material treatment when the exception is scoped,
+  accessible, measurable, and recorded in `.ai/STUDIO_GRADE_UI.md` or the
+  task-specific brief. Fake functionality, fake data, and unbounded effects
+  remain prohibited.
 * **WINDOW AND PANEL RULES**: Keep OS titlebar behavior native. Fixed rails,
   top command rows, center renderer surfaces, and fixed bottom docks are not
   generic scroll views. Use one intentional scroll container per long content
@@ -134,8 +138,8 @@ All new retained UI work must follow `docs/RAF_UI.md`, `docs/EDITOR_RAFUI.md`, a
   structural rails, stable toolbars, and explicit design constraints.
 * **MODULE BOUNDARY**: Tooltip recipes, overlay placement, motion, components,
   diagnostics, and density helpers live in their owning modules. Do not grow
-  `app.rs`, a surface bridge, or a single panel file with cross-cutting UI
-  infrastructure.
+  a native application coordinator, a surface bridge, or a single panel file
+  with cross-cutting UI infrastructure.
 * **MOTION BY DEFAULT, EFFECTS BY JUSTIFICATION**: State-changing interface
   interactions should have purposeful transitions by default, especially menu
   entry, selection, dragging, reordering, docking, panel creation/removal, and

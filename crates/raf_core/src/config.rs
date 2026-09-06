@@ -8,9 +8,8 @@ use crate::ai::{AgentMode, AiModelShortcut, AiProvider, AiProviderConfig};
 use crate::units::DisplayUnit;
 use serde::{Deserialize, Serialize};
 
-/// Minimum and maximum number of Agent messages rendered in one retained page.
-/// The page is intentionally large enough to keep a normal conversation in
-/// one wheel-scrollable viewport before manual pagination is needed.
+/// Persisted compatibility bounds for the retired manual Agent page control.
+/// The native transcript now chooses its rendered window from scroll position.
 pub const AGENT_MESSAGE_PAGE_SIZE_MIN: u32 = 20;
 pub const AGENT_MESSAGE_PAGE_SIZE_MAX: u32 = 64;
 pub const AGENT_MESSAGE_PAGE_SIZE_DEFAULT: u32 = 24;
@@ -46,8 +45,19 @@ impl Default for Theme {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ViewportRenderMode {
     Solid,
+    /// Removed from the editor UI. Kept only so older RON settings can still
+    /// be read and migrated to `Solid` without resetting the full config.
     Wireframe,
+    /// Removed from the editor UI. Kept only for the same migration path as
+    /// [`ViewportRenderMode::Wireframe`].
     Preview,
+}
+
+impl ViewportRenderMode {
+    /// Returns the only viewport mode currently supported by the editor.
+    pub const fn normalized(self) -> Self {
+        Self::Solid
+    }
 }
 
 impl Default for ViewportRenderMode {
@@ -264,6 +274,15 @@ pub struct EngineSettings {
     pub theme: Theme,
     #[serde(default)]
     pub theme_experimental: f32,
+    /// Disables retained UI transitions for users who prefer reduced motion.
+    #[serde(default)]
+    pub prefers_reduced_motion: bool,
+    /// Raises foreground and border contrast across retained UI surfaces.
+    #[serde(default)]
+    pub high_contrast: bool,
+    /// Replaces translucent editor chrome with opaque semantic surfaces.
+    #[serde(default)]
+    pub reduce_transparency: bool,
     pub font_size: f32,
     pub ui_scale: f32,
     /// When true, the editor detects the system DPI at startup and applies
@@ -455,9 +474,8 @@ pub struct EngineSettings {
     #[serde(default = "default_agent_model_shortcuts")]
     pub agent_model_shortcuts: Vec<AiModelShortcut>,
 
-    /// Legacy persisted page-size preference. The native Agent now renders a
-    /// continuous scroll surface, but keeping this field preserves old project
-    /// settings files and avoids a migration break.
+    /// Retained compatibility preference from the former manual page control.
+    /// Native Agent rendering is now automatic and scroll-driven.
     #[serde(default = "default_agent_message_page_size")]
     pub agent_message_page_size: u32,
 
@@ -639,6 +657,9 @@ impl Default for EngineSettings {
         Self {
             theme: Theme::Dark,
             theme_experimental: 0.0,
+            prefers_reduced_motion: false,
+            high_contrast: false,
+            reduce_transparency: false,
             font_size: 14.0,
             ui_scale: 1.0,
             auto_ui_scale: true,
@@ -698,7 +719,7 @@ impl Default for EngineSettings {
             ai_providers: default_ai_providers(),
             ai_persist_credentials: true,
             default_ai_provider: AiProvider::OpenRouter,
-            agent_mode: AgentMode::Passive,
+            agent_mode: AgentMode::Plan,
             agent_model_shortcuts: default_agent_model_shortcuts(),
             agent_message_page_size: AGENT_MESSAGE_PAGE_SIZE_DEFAULT,
             agent_streaming_enabled: true,
@@ -769,6 +790,7 @@ impl EngineSettings {
                 settings.normalize_ai_providers();
                 settings.normalize_agent_message_page_size();
                 settings.normalize_agent_max_response_tokens();
+                settings.viewport_render_mode = settings.viewport_render_mode.normalized();
                 settings
             }
             Err(_) => Self::default(),
@@ -892,5 +914,23 @@ mod tests {
             .ai_providers
             .iter()
             .all(|config| config.provider.is_editor_supported()));
+    }
+
+    #[test]
+    fn load_normalizes_removed_viewport_render_modes() {
+        for legacy_mode in [ViewportRenderMode::Wireframe, ViewportRenderMode::Preview] {
+            let directory = std::env::temp_dir().join(format!(
+                "aurarafi-viewport-mode-test-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let mut settings = EngineSettings::default();
+            settings.viewport_render_mode = legacy_mode;
+
+            settings.save(&directory).expect("save legacy settings");
+            let loaded = EngineSettings::load(&directory);
+
+            assert_eq!(loaded.viewport_render_mode, ViewportRenderMode::Solid);
+            std::fs::remove_dir_all(&directory).expect("remove temporary settings");
+        }
     }
 }

@@ -14,7 +14,7 @@ use raf_render::api_graphic_basic::EditorUiLayer;
 use raf_ui::{UiMotionSpec, UiRect, UiTween};
 
 use crate::application_bar_surface::{
-    build_application_bar_surface, build_application_menu_popup_surface, AgentBarStatus,
+    build_application_bar_surface, build_application_menu_popup_surface,
     APPLICATION_MENU_POPUP_WIDTH,
 };
 use crate::application_menu::{build_application_menu, ApplicationMenuState};
@@ -40,13 +40,7 @@ impl ApplicationBarHost {
         project_name: &str,
         project_type: ProjectType,
     ) -> Self {
-        let surface = build_application_bar_surface(
-            palette,
-            project_name,
-            project_type,
-            None,
-            AgentBarStatus::Ready,
-        );
+        let surface = build_application_bar_surface(palette, project_name, project_type, None);
         let menu_surface = build_application_menu_popup_surface(
             palette,
             &build_application_menu(ApplicationMenuState {
@@ -100,7 +94,6 @@ impl ApplicationBarHost {
         project_name: &str,
         project_type: ProjectType,
         menu_state: ApplicationMenuState,
-        agent_status: AgentBarStatus,
         rect: EditorRect,
         now_seconds: f64,
     ) {
@@ -115,7 +108,6 @@ impl ApplicationBarHost {
             project_name,
             project_type,
             self.open_menu.as_deref(),
-            agent_status,
         ));
         if let Some(menu_id) = self.open_menu.as_deref() {
             if let Some(menu) = build_application_menu(menu_state)

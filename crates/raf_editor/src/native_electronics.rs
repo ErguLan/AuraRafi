@@ -5,6 +5,8 @@
 //! ownership live in `electronics_controller`; this type only owns the
 //! presentation target and retained CAD frame.
 
+use std::sync::Arc;
+
 use glam::Vec2;
 use raf_electronics::CadScene;
 use raf_render::api_graphic_basic::cad_surface::{
@@ -84,7 +86,7 @@ impl NativeElectronicsCanvas {
         runtime.activate_surface(self.surface);
         let output = runtime.render_scene_frame(&frame.frame);
         Some(EditorCanvasLayer {
-            output,
+            output: Arc::new(output),
             source_size: [frame.frame.width, frame.frame.height],
             target_rect,
         })

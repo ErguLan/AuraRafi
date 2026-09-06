@@ -9,24 +9,30 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
-use raf_core::config::EngineSettings;
+use raf_core::ai::AgentMode;
+use raf_core::config::{EngineSettings, RenderQuality, Theme};
 use raf_core::project::{Project, ProjectType};
 use raf_core::scene::{SceneGraph, SceneNodeId};
 use raf_core::session::{ProjectSessionRegistry, SessionId};
-use raf_core::{InputRegionId, InputRouter};
+use raf_core::{
+    AgentTaskEvent, AgentTaskId, AgentTaskSnapshot, InputRegionId, InputRouter, TransactionLedger,
+};
 use raf_nodes::{NodeGraph, NodeId};
 use raf_render::api_graphic_basic::ui_surface::{
     DirectUiSurfaceHost, NativeGraphicsContext, NativeUiInputBridge, StudioUiPalette, UiAction,
-    UiDispatchedAction, UiFlow, UiLayout, UiNode, UiNodeKind, UiStyle, UiStyleSheet, UiSurface,
+    UiDispatchedAction, UiFlow, UiIconId, UiLayout, UiNode, UiNodeKind, UiStyle, UiStyleSheet,
+    UiSurface,
 };
 use raf_render::api_graphic_basic::EditorUiLayer;
-use raf_ui::{UiMotionSpec, UiRect, UiTween, UiWindowCommand};
+use raf_render::bridge::RenderRuntime;
+use raf_ui::{UiColorMode, UiEnvironment, UiMotionSpec, UiRect, UiTween, UiWindowCommand};
 
+use crate::agent_context::AgentObservationContext;
 use crate::agent_executor::{AgentEditorAction, AgentProjectContext, AgentToolExecutor};
 use crate::application_bar_host::{register_bar_images, register_electronics_images};
 use crate::application_bar_surface::{
     application_menu_popup_height, build_application_bar_surface,
-    build_application_menu_popup_surface, AgentBarStatus, APPLICATION_MENU_POPUP_WIDTH,
+    build_application_menu_popup_surface, APPLICATION_MENU_POPUP_WIDTH,
 };
 use crate::application_menu::{build_application_menu, ApplicationMenuState, ApplicationView};
 use crate::commands::catalog::CommandCatalog;
@@ -36,7 +42,6 @@ use crate::console::ConsolePanel;
 use crate::editor_layout::{EditorFrameLayout, EditorRect};
 use crate::electronics_controller::{ElectronicsTool, NativeElectronicsEditor};
 use crate::electronics_minimap;
-use crate::panels::agent_surface::AgentSurfaceHost;
 use crate::panels::ai_chat::{AgentAction, AgentPanel, AgentReadiness};
 use crate::panels::editor_bottom_dock_host::EditorBottomDockHost;
 use crate::panels::editor_bottom_dock_surface::{
@@ -56,12 +61,18 @@ use crate::panels::hierarchy_surface::{
     build_hierarchy_context_overlay_surface, build_hierarchy_surface,
 };
 use crate::panels::inspector_surface::{
-    build_inspector_surface, InspectorDropdown, InspectorTab, InspectorViewState,
+    build_inspector_surface_with_unit, InspectorDropdown, InspectorTab, InspectorViewState,
 };
 use crate::panels::nodes_surface::build_nodes_surface_with_zoom;
+use crate::panels::search_surface::{SearchResult, SearchResultKind, SearchSurfaceState};
+use crate::panels::search_surface_host::SearchSurfaceHost;
+use crate::panels::viewport_compass::{
+    ViewportCompassConfig, ViewportCompassHost, ViewportCompassState,
+};
 use crate::panels::viewport_toolbar_surface::{
-    build_viewport_toolbar_surface, parse_viewport_toolbar_action, ViewportRenderStyle,
-    ViewportTool, ViewportToolbarAction, ViewportToolbarState, ViewportViewMode,
+    build_viewport_toolbar_surface, parse_viewport_toolbar_action,
+    parse_viewport_toolbar_select_action, ViewportRenderStyle, ViewportTool, ViewportToolbarAction,
+    ViewportToolbarState, ViewportViewMode,
 };
 use crate::project_catalog::ProjectCatalog;
 use crate::settings_surface::SettingsSection;
@@ -85,12 +96,20 @@ pub(crate) use helpers::{
     numeric_commit_field, set_inspector_section, unique_session_name,
 };
 pub(crate) use settings::{
-    ai_provider_from_id, apply_settings_command, apply_settings_range, apply_settings_text,
-    apply_settings_toggle,
+    ai_provider_from_id, apply_settings_command, apply_settings_range, apply_settings_select,
+    apply_settings_text, apply_settings_toggle, is_settings_numeric_text_key,
 };
 
 const WORKBENCH_CLEAR: [u8; 4] = [0, 0, 0, 0];
 const DEFAULT_PROJECT_NAME: &str = "Untitled Game";
+const AGENT_SCROLL_PROJECTION_STEP: f32 = 96.0;
+
+fn next_agent_scroll_projection(current: f32, next: f32) -> Option<f32> {
+    let next = next.max(0.0);
+    let delta = (next - current).abs();
+    (delta > f32::EPSILON && (next <= f32::EPSILON || delta >= AGENT_SCROLL_PROJECTION_STEP))
+        .then_some(next)
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum NativeWorkbenchIntent {
@@ -109,6 +128,12 @@ pub enum NativeWorkbenchIntent {
         key: String,
         value: f32,
     },
+    ProjectSettingText {
+        key: String,
+        value: String,
+    },
+    ProjectSettingCommand(String),
+    AgentSettingsChanged(EngineSettings),
     Viewport(ViewportToolbarAction),
     Command(String),
     InspectorCommit {
@@ -148,13 +173,14 @@ pub struct NativeGameWorkbench {
     electronics_overlay_key: Option<(u64, u64, [u32; 2], bool)>,
     electronics_overlay_canvas: EditorRect,
     electronics_overlay_active: bool,
-    agent_surface: AgentSurfaceHost,
+    search_surface: SearchSurfaceHost,
+    viewport_compass: ViewportCompassHost,
     agent_panel: AgentPanel,
     agent_settings: EngineSettings,
     agent_catalog: CommandCatalog,
     agent_readiness: AgentReadiness,
     pending_agent_decision: Option<bool>,
-    pending_settings_section: Option<SettingsSection>,
+    agent_canvas_changed: bool,
     settings_section: SettingsSection,
     project_catalog: ProjectCatalog,
     last_catalog_revision: u64,
@@ -172,6 +198,7 @@ pub struct NativeGameWorkbench {
     hierarchy_model: HierarchyModel,
     hierarchy_folder_ids: HashSet<SceneNodeId>,
     hierarchy_query: String,
+    hierarchy_scroll_offset: f32,
     hierarchy_active_tab: String,
     electronics_navigator_tab: String,
     electronics_library_query: String,
@@ -182,6 +209,7 @@ pub struct NativeGameWorkbench {
     hierarchy_drag: Option<HierarchyDragState>,
     inspector_name_editing: Option<(SceneNodeId, String)>,
     inspector_view: InspectorViewState,
+    inspector_transform_drag_active: bool,
     toolbar_state: ViewportToolbarState,
     bottom_dock: EditorBottomDockHost,
     inspector_sessions: ProjectSessionRegistry,
@@ -191,9 +219,13 @@ pub struct NativeGameWorkbench {
     last_toolbar_revision: u64,
     last_console_revision: u64,
     last_electronics_revision: u64,
+    last_agent_revision: u64,
+    agent_scroll_projection_offset: f32,
     open_menu: Option<String>,
+    search_restore_focus: Option<String>,
     menu_motion: UiTween,
     drag_motion: UiTween,
+    agent_motion: UiTween,
     last_sync_time_seconds: f64,
     presented_fps: f32,
     last_status_fps: u32,
@@ -250,18 +282,14 @@ impl NativeGameWorkbench {
             electronics_overlay_key: None,
             electronics_overlay_canvas: EditorRect::default(),
             electronics_overlay_active: false,
-            agent_surface: AgentSurfaceHost::new(
-                graphics,
-                InputRegionId::from_static("native.editor.agent"),
-                rect,
-                palette,
-            ),
+            search_surface: SearchSurfaceHost::new(graphics, rect, palette),
+            viewport_compass: ViewportCompassHost::new(graphics, palette),
             agent_panel: AgentPanel::default(),
             agent_settings: EngineSettings::default(),
             agent_catalog: CommandCatalog::builtin(),
             agent_readiness: AgentReadiness::ProviderDisabled,
             pending_agent_decision: None,
-            pending_settings_section: None,
+            agent_canvas_changed: false,
             settings_section: SettingsSection::Appearance,
             project_catalog: ProjectCatalog::default(),
             last_catalog_revision: 0,
@@ -279,6 +307,7 @@ impl NativeGameWorkbench {
             hierarchy_model: HierarchyModel::default(),
             hierarchy_folder_ids: HashSet::new(),
             hierarchy_query: String::new(),
+            hierarchy_scroll_offset: 0.0,
             hierarchy_active_tab: "hierarchy".to_string(),
             electronics_navigator_tab: "library".to_string(),
             electronics_library_query: String::new(),
@@ -289,6 +318,7 @@ impl NativeGameWorkbench {
             hierarchy_drag: None,
             inspector_name_editing: None,
             inspector_view: InspectorViewState::default(),
+            inspector_transform_drag_active: false,
             toolbar_state: default_toolbar_state(),
             bottom_dock: EditorBottomDockHost::default(),
             inspector_sessions: ProjectSessionRegistry::new(ProjectType::Game),
@@ -298,9 +328,13 @@ impl NativeGameWorkbench {
             last_toolbar_revision: 0,
             last_console_revision: 0,
             last_electronics_revision: 0,
+            last_agent_revision: 0,
+            agent_scroll_projection_offset: 0.0,
             open_menu: None,
+            search_restore_focus: None,
             menu_motion: UiTween::new(0.0, UiMotionSpec::dock()),
             drag_motion: UiTween::new(0.0, UiMotionSpec::dock()),
+            agent_motion: UiTween::new(1.0, UiMotionSpec::dock()),
             last_sync_time_seconds: 0.0,
             presented_fps: 0.0,
             last_status_fps: 0,
@@ -342,11 +376,128 @@ impl NativeGameWorkbench {
     }
 
     pub fn cursor_hint(&self) -> raf_ui::UiCursorIcon {
-        self.host.cursor_hint()
+        if self.viewport_compass.has_interactive_hover() {
+            self.viewport_compass.cursor_hint()
+        } else {
+            self.host.cursor_hint()
+        }
+    }
+
+    /// Exposes the compass presentation knobs without coupling future settings
+    /// code to the retained host or to the viewport camera bridge.
+    pub fn viewport_compass_config(&self) -> ViewportCompassConfig {
+        self.viewport_compass.config()
+    }
+
+    pub fn set_viewport_compass_config(&mut self, config: ViewportCompassConfig) {
+        self.viewport_compass.set_config(config);
+    }
+
+    pub fn focused_text_rect(&self) -> Option<UiRect> {
+        if self.search_surface.is_open() {
+            if let Some(rect) = self.search_surface.focused_text_rect() {
+                let origin = self.search_surface.rect();
+                return Some(UiRect::new(
+                    rect.x + origin.x,
+                    rect.y + origin.y,
+                    rect.width,
+                    rect.height,
+                ));
+            }
+        }
+        if let Some(rect) = self.host.focused_text_rect() {
+            return Some(rect);
+        }
+        None
+    }
+
+    /// Returns the last retained workbench control that owned focus. Native
+    /// modal hosts use this to return keyboard focus to the same place after
+    /// a settings dialog is closed.
+    pub fn focused_control_id(&self) -> Option<String> {
+        self.host.session().interaction.focus.focused.clone()
+    }
+
+    /// Restores focus only when the retained workbench still contains the
+    /// requested node. A project/context transition must never focus a stale
+    /// node from the previous surface.
+    pub fn restore_focus(&mut self, id: impl Into<String>) {
+        let id = id.into();
+        if self.host.surface().root.find(&id).is_some() {
+            self.host.session_mut().interaction.focus.request_focus(id);
+        }
+    }
+
+    pub fn open_search(&mut self) {
+        self.search_restore_focus = self.host.session().interaction.focus.focused.clone();
+        self.search_surface.set_query(
+            self.host
+                .session()
+                .interaction
+                .controls
+                .text("application-bar.command-search.value"),
+        );
+        self.host.session_mut().interaction.focus.clear_focus();
+        self.search_surface.open();
+        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+    }
+
+    pub fn restore_search_focus(&mut self) {
+        if let Some(id) = self.search_restore_focus.take() {
+            self.host.session_mut().interaction.focus.request_focus(id);
+        }
+    }
+
+    /// Clears transient UI input before the workbench changes context or the
+    /// viewport becomes the active keyboard target. A focused Agent control
+    /// must not keep the shared router owner after the user returns to the
+    /// canvas.
+    pub fn reset_input_state(&mut self, router: &mut raf_core::InputRouter) {
+        self.search_surface.close();
+        self.search_restore_focus = None;
+        self.open_menu = None;
+        self.agent_panel.close_menus();
+        self.host
+            .session_mut()
+            .reset_interaction_for_surface_change(None);
+        self.viewport_compass.clear_focus(router);
+        router.cancel_owner(self.owner());
+        router.cancel_owner(self.search_surface.owner());
+    }
+
+    /// Releases a retained control after a press lands on the passive
+    /// viewport. RafUI's workbench surface covers the whole editor window, so
+    /// that press cannot be represented as a normal outside click by the
+    /// retained input state alone.
+    pub fn clear_input_focus(&mut self, router: &mut raf_core::InputRouter) {
+        self.search_surface.close();
+        self.search_restore_focus = None;
+        self.host.session_mut().interaction.focus.clear_focus();
+        self.viewport_compass.clear_focus(router);
+        router.cancel_owner(self.owner());
+        router.cancel_owner(self.search_surface.owner());
+    }
+
+    /// Lets viewport navigation reclaim a stale retained-UI keyboard capture.
+    /// A real text input remains authoritative: typing W/A/S/D/Q/E there must
+    /// never move the scene camera. Buttons and other actionable controls do
+    /// not need to keep the global navigation keys captured after activation.
+    pub fn release_non_text_keyboard_capture(&mut self, router: &mut InputRouter) {
+        if self.search_surface.is_open() || self.focused_text_rect().is_some() {
+            return;
+        }
+
+        self.host.session_mut().interaction.focus.clear_focus();
+        self.viewport_compass.clear_focus(router);
+        if let Some(owner) = router.keyboard_owner() {
+            if matches!(owner, raf_core::InputOwner::RetainedUi(_)) {
+                router.cancel_owner(owner);
+            }
+        }
     }
 
     pub fn has_interactive_hover(&self) -> bool {
-        self.host.has_interactive_hover()
+        self.host.has_interactive_hover() || self.viewport_compass.has_interactive_hover()
     }
 
     pub fn log_console_output(&mut self, output: crate::commands::CommandOutput) {
@@ -378,20 +529,75 @@ impl NativeGameWorkbench {
         changed
     }
 
-    pub fn take_settings_request(&mut self) -> Option<SettingsSection> {
-        self.pending_settings_section.take()
-    }
-
     pub fn engine_settings(&self) -> &EngineSettings {
         &self.agent_settings
     }
 
-    pub fn set_engine_settings(&mut self, settings: EngineSettings) {
+    pub fn set_engine_settings(&mut self, mut settings: EngineSettings) {
+        settings.viewport_render_mode = settings.viewport_render_mode.normalized();
         if self.agent_settings == settings {
             return;
         }
         self.agent_settings = settings;
+        self.palette = match self.agent_settings.theme {
+            Theme::Light => StudioUiPalette::PaperLight,
+            Theme::Dark | Theme::System => StudioUiPalette::IndustrialDark,
+        };
+        self.toolbar_state.grid_visible = self.agent_settings.grid_visible;
+        self.toolbar_state.labels_visible = self.agent_settings.show_viewport_labels;
+        self.toolbar_state.render_style = ViewportRenderStyle::Solid;
+        let mut environment = UiEnvironment::new(
+            self.rect.width.max(1.0).round() as u32,
+            self.rect.height.max(1.0).round() as u32,
+        );
+        environment.color_mode = match self.agent_settings.theme {
+            Theme::Light => UiColorMode::Light,
+            Theme::Dark => UiColorMode::Dark,
+            Theme::System => UiColorMode::System,
+        };
+        environment.prefers_reduced_motion = self.agent_settings.prefers_reduced_motion;
+        environment.high_contrast = self.agent_settings.high_contrast;
+        environment.reduce_transparency = self.agent_settings.reduce_transparency
+            || self.agent_settings.render_quality == RenderQuality::Potato;
+        environment.font_size = self.agent_settings.font_size.clamp(10.0, 24.0);
+        environment.theme_experimental = self.agent_settings.theme_experimental.clamp(0.0, 100.0);
+        environment.ui_scale = if self.agent_settings.auto_ui_scale {
+            1.0
+        } else {
+            self.agent_settings.ui_scale.clamp(0.5, 3.0)
+        };
+        self.host.set_environment(environment);
+        self.electronics_overlay_host.set_environment(environment);
+        self.search_surface.set_environment(environment);
+        self.viewport_compass.set_environment(environment);
         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+    }
+
+    pub fn set_viewport_size(&mut self, logical_size: [f32; 2]) {
+        let mut environment = UiEnvironment::new(
+            logical_size[0].max(1.0).round() as u32,
+            logical_size[1].max(1.0).round() as u32,
+        );
+        environment.color_mode = match self.agent_settings.theme {
+            Theme::Light => UiColorMode::Light,
+            Theme::Dark => UiColorMode::Dark,
+            Theme::System => UiColorMode::System,
+        };
+        environment.prefers_reduced_motion = self.agent_settings.prefers_reduced_motion;
+        environment.high_contrast = self.agent_settings.high_contrast;
+        environment.reduce_transparency = self.agent_settings.reduce_transparency
+            || self.agent_settings.render_quality == RenderQuality::Potato;
+        environment.font_size = self.agent_settings.font_size.clamp(10.0, 24.0);
+        environment.theme_experimental = self.agent_settings.theme_experimental.clamp(0.0, 100.0);
+        environment.ui_scale = if self.agent_settings.auto_ui_scale {
+            1.0
+        } else {
+            self.agent_settings.ui_scale.clamp(0.5, 3.0)
+        };
+        self.host.set_environment(environment);
+        self.electronics_overlay_host.set_environment(environment);
+        self.search_surface.set_environment(environment);
+        self.viewport_compass.set_environment(environment);
     }
 
     pub fn set_project_info(&mut self, name: impl Into<String>, project_type: ProjectType) {
@@ -405,6 +611,7 @@ impl NativeGameWorkbench {
         self.electronics_overlay_canvas = EditorRect::default();
         self.electronics_overlay_active = false;
         self.hierarchy_query.clear();
+        self.hierarchy_scroll_offset = 0.0;
         self.hierarchy_active_tab = "hierarchy".to_string();
         self.hierarchy_bookmarks = [false; 3];
         self.hierarchy_renaming = None;
@@ -464,7 +671,7 @@ impl NativeGameWorkbench {
         self.electronics_overlay_active = true;
     }
 
-    pub fn sync(
+    pub(crate) fn sync(
         &mut self,
         layout: EditorFrameLayout,
         scene: &SceneGraph,
@@ -476,9 +683,19 @@ impl NativeGameWorkbench {
         selected_graph_node: Option<NodeId>,
         project: Option<&Project>,
         now_seconds: f64,
+        compass: ViewportCompassState,
         electronics: Option<&NativeElectronicsEditor>,
     ) {
         self.rect = layout.window;
+        self.viewport_compass.sync(
+            self.palette,
+            layout.canvas,
+            compass,
+            self.project_type == ProjectType::Game,
+        );
+        self.agent_readiness =
+            self.agent_panel
+                .prepare(&self.agent_settings, project, &self.agent_catalog);
         if self
             .inspector_name_editing
             .as_ref()
@@ -490,8 +707,14 @@ impl NativeGameWorkbench {
             .set_target(self.open_menu.as_ref().map_or(0.0, |_| 1.0));
         let delta = (now_seconds - self.last_sync_time_seconds).clamp(0.0, 0.25) as f32;
         self.last_sync_time_seconds = now_seconds;
-        self.menu_motion.advance(delta, false);
-        self.drag_motion.advance(delta, false);
+        let hierarchy_motion_disabled =
+            !self.agent_settings.hierarchy_animations || self.agent_settings.prefers_reduced_motion;
+        self.menu_motion.advance(delta, hierarchy_motion_disabled);
+        self.drag_motion.advance(delta, hierarchy_motion_disabled);
+        self.agent_motion
+            .set_target(self.agent_panel.sidebar_open.then_some(1.0).unwrap_or(0.0));
+        self.agent_motion
+            .advance(delta as f32, self.agent_settings.prefers_reduced_motion);
         self.hierarchy_folder_ids = scene
             .iter()
             .filter_map(|(id, node)| node.is_folder.then_some(id))
@@ -523,55 +746,60 @@ impl NativeGameWorkbench {
             self.assets_refresh_requested = false;
         }
         let catalog_changed = self.project_catalog.poll();
-        self.agent_readiness =
-            self.agent_panel
-                .prepare(&self.agent_settings, project, &self.agent_catalog);
         self.bottom_dock.sync_project_layout(project);
-        if let Some(dock_content_rect) = self.dock_content_rect_for_tab(layout, "agent") {
-            self.agent_surface.sync(
-                dock_content_rect,
-                self.palette,
-                &self.agent_panel,
-                &self.agent_settings,
-                project,
-                self.agent_readiness,
-                now_seconds,
-            );
-        }
+        self.sync_search_surface(layout, scene, project);
         let fingerprint = scene.render_fingerprint();
         let node_fingerprint = node_graph_fingerprint(node_graph, selected_graph_node);
         let selection_changed = self.last_selection != selected;
+        if self.project_type == ProjectType::Game && selection_changed {
+            if self.agent_settings.hierarchy_expand_on_select {
+                if let Some(id) = selected.first().copied() {
+                    self.hierarchy_model.expand_parent_chain(scene, id);
+                }
+            }
+            if self.agent_settings.hierarchy_auto_reveal_selection {
+                self.reveal_hierarchy_selection(layout.left_panel, scene, selected);
+            }
+        }
         let layout_changed = self.last_layout != Some(layout);
-        let status_fps = if self.agent_settings.show_fps_counter {
-            self.presented_fps
-                .is_finite()
-                .then_some(self.presented_fps.round().max(0.0) as u32)
-                .unwrap_or(0)
-        } else {
-            0
-        };
+        let status_fps =
+            if self.project_type == ProjectType::Game && self.agent_settings.show_fps_counter {
+                self.presented_fps
+                    .is_finite()
+                    .then_some(self.presented_fps.round().max(0.0) as u32)
+                    .unwrap_or(0)
+            } else {
+                0
+            };
         let status_fps_changed = status_fps != self.last_status_fps
             && (self.last_status_fps == 0
                 || now_seconds - self.last_status_refresh_seconds >= 0.25);
         let electronics_revision = electronics.map_or(0, NativeElectronicsEditor::ui_revision);
-        if !selection_changed
-            && !layout_changed
-            && self.toolbar_revision == self.last_toolbar_revision
-            && self.last_scene_fingerprint == fingerprint
-            && self.last_hierarchy_fingerprint == hierarchy_fingerprint
-            && self.last_node_fingerprint == node_fingerprint
-            && self.last_history_state == (can_undo, can_redo, can_paste)
-            && self.last_console_revision == self.console.revision()
-            && self.last_electronics_revision == electronics_revision
-            && !catalog_changed
-            && self.last_catalog_revision == self.project_catalog.revision()
-            && self.menu_motion.is_settled()
-            && self.drag_motion.is_settled()
-            && !status_fps_changed
-        {
+        let agent_revision = self.agent_panel.visual_revision();
+        let surface_changed = selection_changed
+            || layout_changed
+            || self.toolbar_revision != self.last_toolbar_revision
+            || self.last_scene_fingerprint != fingerprint
+            || self.last_hierarchy_fingerprint != hierarchy_fingerprint
+            || self.last_node_fingerprint != node_fingerprint
+            || self.last_history_state != (can_undo, can_redo, can_paste)
+            || self.last_console_revision != self.console.revision()
+            || self.last_electronics_revision != electronics_revision
+            || self.last_agent_revision != agent_revision
+            || catalog_changed
+            || self.last_catalog_revision != self.project_catalog.revision()
+            || !self.menu_motion.is_settled()
+            || !self.drag_motion.is_settled()
+            || !self.agent_motion.is_settled();
+        if !surface_changed {
+            if status_fps_changed && self.project_type == ProjectType::Game {
+                self.host
+                    .patch_text_value("editor.status.item.4", format!("FPS: {status_fps}"));
+                self.last_status_fps = status_fps;
+                self.last_status_refresh_seconds = now_seconds;
+            }
             return;
         }
-
         let surface = self.build_surface(
             layout,
             scene,
@@ -588,6 +816,11 @@ impl NativeGameWorkbench {
         self.host.session_mut().interaction.controls.set_text(
             "assets.search",
             &self.assets_query,
+            256,
+        );
+        self.host.session_mut().interaction.controls.set_text(
+            "application-bar.command-search.value",
+            self.search_surface.query(),
             256,
         );
         self.host.session_mut().interaction.controls.set_text(
@@ -653,7 +886,29 @@ impl NativeGameWorkbench {
             self.console.input(),
             4096,
         );
-        self.seed_inspector_values(scene, selected);
+        self.host.session_mut().interaction.controls.set_text(
+            "agent.input",
+            &self.agent_panel.input_text,
+            16_384,
+        );
+        self.host.session_mut().interaction.controls.set_text(
+            "agent.new-model.label",
+            &self.agent_panel.new_model_label,
+            256,
+        );
+        self.host.session_mut().interaction.controls.set_text(
+            "agent.new-model.id",
+            &self.agent_panel.new_model_id,
+            256,
+        );
+        if let Some(project) = project {
+            self.seed_project_settings_values(project);
+        }
+        if self.agent_settings.inspector_live_transform_updates
+            || !self.inspector_transform_drag_active
+        {
+            self.seed_inspector_values(scene, selected);
+        }
         if let Some((id, value)) = self.hierarchy_renaming.as_ref() {
             self.host.session_mut().interaction.controls.set_text(
                 &format!("hierarchy.rename.{id}", id = id.0),
@@ -671,13 +926,140 @@ impl NativeGameWorkbench {
         self.last_history_state = (can_undo, can_redo, can_paste);
         self.last_console_revision = self.console.revision();
         self.last_electronics_revision = electronics_revision;
+        self.last_agent_revision = agent_revision;
         self.last_catalog_revision = self.project_catalog.revision();
         self.last_status_fps = status_fps;
         self.last_status_refresh_seconds = now_seconds;
     }
 
+    fn hierarchy_tree_viewport_height(&self, left: EditorRect) -> f32 {
+        self.host
+            .layout_rect("hierarchy.tree")
+            .map(|rect| rect.height)
+            .unwrap_or_else(|| (left.height - 130.0).max(1.0))
+            .max(1.0)
+    }
+
+    fn reveal_hierarchy_selection(
+        &mut self,
+        left_panel: Option<EditorRect>,
+        scene: &SceneGraph,
+        selected: &[SceneNodeId],
+    ) {
+        let Some(left) = left_panel else {
+            return;
+        };
+        let Some(selected_id) = selected.first().copied() else {
+            return;
+        };
+        let row_height = self.agent_settings.hierarchy_row_height.max(1.0);
+        let viewport_height = self.hierarchy_tree_viewport_height(left);
+        let view = self.hierarchy_model.refresh(
+            scene,
+            &self.hierarchy_query,
+            self.agent_settings.hierarchy_show_hidden,
+            self.hierarchy_scroll_offset,
+            viewport_height,
+            row_height,
+        );
+        let Some(index) = self
+            .hierarchy_model
+            .row_ids()
+            .position(|id| id == selected_id)
+        else {
+            return;
+        };
+        let selected_top = index as f32 * row_height;
+        let selected_bottom = selected_top + row_height;
+        let max_offset = (view.total_rows as f32 * row_height - viewport_height).max(0.0);
+        let current = self.hierarchy_scroll_offset.clamp(0.0, max_offset);
+        let next = if selected_top < current {
+            selected_top
+        } else if selected_bottom > current + viewport_height {
+            selected_bottom - viewport_height
+        } else {
+            current
+        }
+        .clamp(0.0, max_offset);
+        if (next - self.hierarchy_scroll_offset).abs() > f32::EPSILON {
+            self.hierarchy_scroll_offset = next;
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
+    }
+
+    fn sync_search_surface(
+        &mut self,
+        layout: EditorFrameLayout,
+        scene: &SceneGraph,
+        project: Option<&Project>,
+    ) {
+        if !self.search_surface.is_open() {
+            return;
+        }
+        let query = self.search_surface.query().trim().to_ascii_lowercase();
+        let matches = |label: &str, detail: &str| {
+            query.is_empty()
+                || label.to_ascii_lowercase().contains(&query)
+                || detail.to_ascii_lowercase().contains(&query)
+        };
+        let mut results = Vec::new();
+        for command in &self.agent_catalog.commands {
+            let label = format!("/{}", command.name);
+            let detail = command.category.clone();
+            if matches(&label, &detail) {
+                results.push(SearchResult {
+                    label,
+                    detail,
+                    kind: SearchResultKind::Command(format!("console.submit:/{}", command.name)),
+                    icon: UiIconId::Menu,
+                });
+            }
+        }
+        if let Some(project) = project {
+            let detail = project.path.display().to_string();
+            if matches(&project.name, &detail) {
+                results.push(SearchResult {
+                    label: project.name.clone(),
+                    detail,
+                    kind: SearchResultKind::Project(project.name.clone()),
+                    icon: UiIconId::Project,
+                });
+            }
+        }
+        for (id, node) in scene.iter() {
+            if matches(&node.name, "Hierarchy") {
+                results.push(SearchResult {
+                    label: node.name.clone(),
+                    detail: format!("Hierarchy / {}", id.0),
+                    kind: SearchResultKind::Hierarchy(id),
+                    icon: UiIconId::Cube,
+                });
+            }
+        }
+        let width = self.rect.width.min(620.0).max(320.0);
+        let height = ((self.rect.height - 120.0).max(1.0)).min(480.0).max(180.0);
+        self.search_surface
+            .set_results(results, SearchSurfaceState::Ready);
+        self.search_surface.sync(
+            self.palette,
+            EditorRect::new(
+                (self.rect.width - width) * 0.5,
+                layout.application_bar.height + 8.0,
+                width,
+                height,
+            ),
+        );
+    }
+
     pub fn set_presented_fps(&mut self, presented_fps: f32) {
         self.presented_fps = presented_fps;
+    }
+
+    pub fn set_inspector_transform_drag_active(&mut self, active: bool) {
+        if self.inspector_transform_drag_active != active {
+            self.inspector_transform_drag_active = active;
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
     }
 
     /// Applies the session actions emitted by the shared Inspector surface.
@@ -757,6 +1139,7 @@ impl NativeGameWorkbench {
             name: command_name.to_string(),
             args,
             positional,
+            structured_args: None,
         };
         let mut events = Vec::new();
         let output = crate::commands::sessions::execute(
@@ -790,18 +1173,64 @@ impl NativeGameWorkbench {
     pub fn has_active_ui_motion(&self) -> bool {
         !self.menu_motion.is_settled()
             || !self.drag_motion.is_settled()
-            || self.agent_surface.has_active_motion(&self.agent_panel)
+            || !self.agent_motion.is_settled()
             || self.host.has_active_motion()
+            || self.viewport_compass.has_active_motion()
+    }
+
+    pub fn has_active_text_repeat(&self) -> bool {
+        self.host.has_active_text_repeat()
+            || self.viewport_compass.has_active_text_repeat()
+            || self.search_surface.has_active_text_repeat()
     }
 
     pub fn needs_ui_frame(&self) -> bool {
         self.toolbar_revision != self.last_toolbar_revision
-            || self.agent_surface.needs_surface_sync()
             || self.agent_panel.has_live_output()
             || self.has_active_ui_motion()
+            || self.has_active_text_repeat()
             || self.bottom_dock.drag().is_some()
             || self.bottom_dock.resize().is_some()
             || self.panel_resize.is_some()
+            || !self.agent_motion.is_settled()
+    }
+
+    /// Returns the last immutable asset snapshot for the attached Agent
+    /// bridge. The catalog worker owns filesystem discovery; callers only
+    /// borrow published rows and never scan from the editor frame.
+    pub(crate) fn agent_assets(&self) -> &[String] {
+        self.project_catalog.assets()
+    }
+
+    pub(crate) fn agent_catalog_pending(&self) -> bool {
+        self.project_catalog.is_pending()
+    }
+
+    pub(crate) fn agent_catalog_error(&self) -> Option<&str> {
+        self.project_catalog.error()
+    }
+
+    pub(crate) fn agent_task_snapshot_by_id(&self, id: AgentTaskId) -> Option<AgentTaskSnapshot> {
+        self.agent_panel.runtime.task_snapshot_by_id(id)
+    }
+
+    pub(crate) fn agent_task_snapshots(&self) -> Vec<AgentTaskSnapshot> {
+        self.agent_panel.runtime.task_snapshots()
+    }
+
+    pub(crate) fn agent_task_events_since(&self, sequence: u64) -> Vec<AgentTaskEvent> {
+        self.agent_panel.runtime.task_events_since(sequence)
+    }
+
+    pub(crate) fn cancel_agent_task(&mut self, id: AgentTaskId) -> bool {
+        let Some(snapshot) = self.agent_panel.runtime.task_snapshot() else {
+            return false;
+        };
+        if snapshot.id != id || snapshot.status.is_terminal() || !snapshot.cancellable {
+            return false;
+        }
+        self.agent_panel.runtime.cancel();
+        true
     }
 
     /// Advances the non-blocking Agent runtime on the editor thread. The
@@ -811,16 +1240,14 @@ impl NativeGameWorkbench {
         &mut self,
         scene: &mut SceneGraph,
         viewport: &mut crate::panels::viewport_controller::NativeGameViewportController,
+        graphics: &mut RenderRuntime,
         electronics: Option<&mut NativeElectronicsEditor>,
         project: Option<&Project>,
+        ledger: &mut TransactionLedger,
     ) -> Vec<AgentEditorAction> {
         self.agent_readiness =
             self.agent_panel
                 .prepare(&self.agent_settings, project, &self.agent_catalog);
-        if self.agent_panel.take_open_settings_request() {
-            self.pending_settings_section = Some(SettingsSection::Ai);
-            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
-        }
         if !matches!(self.agent_readiness, AgentReadiness::Ready) {
             return Vec::new();
         }
@@ -828,16 +1255,49 @@ impl NativeGameWorkbench {
             selected_node: viewport.selected.first().copied(),
             selected_nodes: viewport.selected.clone(),
         };
+        let active_session = self
+            .inspector_sessions
+            .active()
+            .map(|session| session.name.clone())
+            .unwrap_or_else(|| "Main".to_string());
+        let snapshot = AgentObservationContext {
+            scene,
+            selection: &selection,
+            project,
+            assets: self.project_catalog.assets(),
+            active_session: &active_session,
+            revision: ledger.revision(),
+            catalog_pending: self.project_catalog.is_pending(),
+            catalog_error: self.project_catalog.error(),
+        }
+        .snapshot();
+        self.agent_panel.start_pending_run(
+            &snapshot,
+            &self.agent_catalog,
+            project.map(|project| project.project_type),
+            self.agent_settings.agent_mode,
+        );
         let mut editor_actions = Vec::new();
+        let mut canvas_changed = false;
+        let language = self.agent_panel.language;
         let mut executor = AgentToolExecutor {
             scene,
             selection: &mut selection,
             viewport,
+            graphics,
             electronics,
             project: AgentProjectContext::from_project(project),
+            project_info: project,
+            project_assets: self.project_catalog.assets(),
+            active_session: &active_session,
+            catalog_pending: self.project_catalog.is_pending(),
+            catalog_error: self.project_catalog.error(),
             catalog: &self.agent_catalog,
-            tool_name_map: self.agent_panel.tool_name_map.clone(),
+            language,
+            routes: self.agent_panel.tool_routes.clone(),
+            ledger,
             editor_actions: &mut editor_actions,
+            canvas_changed: &mut canvas_changed,
         };
         if let Some(approve) = self.pending_agent_decision.take() {
             if approve {
@@ -847,6 +1307,7 @@ impl NativeGameWorkbench {
             }
         }
         self.agent_panel.poll(&mut executor);
+        self.agent_canvas_changed |= canvas_changed;
         viewport.selected = selection.selected_nodes;
         if viewport.selected.is_empty() {
             if let Some(id) = selection.selected_node {
@@ -854,6 +1315,10 @@ impl NativeGameWorkbench {
             }
         }
         editor_actions
+    }
+
+    pub fn take_agent_canvas_changed(&mut self) -> bool {
+        std::mem::take(&mut self.agent_canvas_changed)
     }
 
     fn hierarchy_target_is_folder(&self, id: SceneNodeId) -> bool {
@@ -892,41 +1357,6 @@ impl NativeGameWorkbench {
             .collect()
     }
 
-    fn dock_content_rect_for_tab(
-        &self,
-        layout: EditorFrameLayout,
-        tab_id: &str,
-    ) -> Option<EditorRect> {
-        let group_id = self
-            .bottom_dock
-            .group_containing_active_tab(tab_id)?
-            .id
-            .clone();
-        let group_rect = self
-            .dock_group_rects(layout)
-            .into_iter()
-            .find(|(id, _)| id == &group_id)
-            .map(|(_, rect)| rect)?;
-        let tab_height = group_rect.height.min(34.0).max(1.0);
-        (group_rect.height > tab_height + 1.0).then_some(EditorRect::new(
-            group_rect.x,
-            group_rect.y + tab_height,
-            group_rect.width,
-            (group_rect.height - tab_height).max(1.0),
-        ))
-    }
-
-    pub fn agent_compositor_layer(
-        &mut self,
-        scale_factor: f32,
-        target_size: [u32; 2],
-    ) -> Option<EditorUiLayer<'_>> {
-        self.bottom_dock.has_active_tab("agent").then(|| {
-            self.agent_surface
-                .compositor_layer(scale_factor, target_size)
-        })
-    }
-
     pub fn compositor_layers(
         &mut self,
         scale_factor: f32,
@@ -942,6 +1372,12 @@ impl NativeGameWorkbench {
             raster_scale,
         };
         let mut layers = vec![main];
+        if self.viewport_compass.active() {
+            layers.push(
+                self.viewport_compass
+                    .compositor_layer(scale_factor, target_size),
+            );
+        }
         if self.electronics_overlay_active {
             layers.push(EditorUiLayer {
                 host: &mut self.electronics_overlay_host,
@@ -952,9 +1388,9 @@ impl NativeGameWorkbench {
                 raster_scale,
             });
         }
-        if self.bottom_dock.has_active_tab("agent") {
+        if self.search_surface.is_open() {
             layers.push(
-                self.agent_surface
+                self.search_surface
                     .compositor_layer(scale_factor, target_size),
             );
         }
@@ -962,11 +1398,10 @@ impl NativeGameWorkbench {
     }
 
     pub fn captures_keyboard_input(&self) -> bool {
-        if self.bottom_dock.has_active_tab("agent") {
-            self.agent_surface.host().captures_keyboard_input()
-                || self.host.captures_keyboard_input()
+        if self.search_surface.is_open() {
+            true
         } else {
-            self.host.captures_keyboard_input()
+            self.host.captures_keyboard_input() || self.viewport_compass.captures_keyboard_input()
         }
     }
 
@@ -991,9 +1426,14 @@ impl NativeGameWorkbench {
             ("scale", node.scale.to_array()),
         ] {
             for (axis, value) in [("x", values[0]), ("y", values[1]), ("z", values[2])] {
+                let display_value = if label == "position" {
+                    self.agent_settings.display_unit.from_meters(value)
+                } else {
+                    value
+                };
                 controls.set_text(
                     format!("inspector.{label}.{axis}.text"),
-                    format!("{value:.4}"),
+                    format!("{display_value:.4}"),
                     24,
                 );
             }
@@ -1006,6 +1446,48 @@ impl NativeGameWorkbench {
             ),
             9,
         );
+    }
+
+    fn seed_project_settings_values(&mut self, project: &Project) {
+        let focused = self.host.session().interaction.focus.focused.clone();
+        let controls = &mut self.host.session_mut().interaction.controls;
+        let values = [
+            (
+                "project-settings.building-snap-step.text",
+                "project-settings.building-snap-step.value",
+                format!("{:.2}", project.settings.building_snap_step),
+            ),
+            (
+                "project-settings.depth-resolution-scale.text",
+                "project-settings.depth-resolution-scale.value",
+                format!("{:.2}", project.settings.depth_resolution_scale),
+            ),
+            (
+                "project-settings.stream-region-size.text",
+                "project-settings.stream-region-size.value",
+                format!("{:.0}", project.settings.world_stream_region_size),
+            ),
+            (
+                "project-settings.stream-radius.text",
+                "project-settings.stream-radius.value",
+                project.settings.world_stream_load_radius.to_string(),
+            ),
+            (
+                "project-settings.stream-lod-bias.text",
+                "project-settings.stream-lod-bias.value",
+                project.settings.world_stream_lod_bias.to_string(),
+            ),
+            (
+                "project-settings.default_scene_name",
+                "project-settings.default-scene.control",
+                project.settings.default_scene_name.clone(),
+            ),
+        ];
+        for (key, node_id, value) in values {
+            if !controls.has_text(key) || focused.as_deref() != Some(node_id) {
+                controls.set_text(key, value, 256);
+            }
+        }
     }
 
     fn finish_bottom_drag(&mut self) -> bool {
@@ -1021,7 +1503,7 @@ impl NativeGameWorkbench {
         true
     }
 
-    fn apply_toolbar_action(&mut self, action: ViewportToolbarAction) {
+    fn apply_toolbar_action(&mut self, action: ViewportToolbarAction) -> bool {
         let state = &mut self.toolbar_state;
         match action {
             ViewportToolbarAction::Select => {
@@ -1042,14 +1524,6 @@ impl NativeGameWorkbench {
             }
             ViewportToolbarAction::Solid => {
                 state.render_style = ViewportRenderStyle::Solid;
-                state.shading_menu_open = false;
-            }
-            ViewportToolbarAction::Wireframe => {
-                state.render_style = ViewportRenderStyle::Wireframe;
-                state.shading_menu_open = false;
-            }
-            ViewportToolbarAction::Preview => {
-                state.render_style = ViewportRenderStyle::Preview;
                 state.shading_menu_open = false;
             }
             ViewportToolbarAction::TogglePolygons => {
@@ -1080,6 +1554,42 @@ impl NativeGameWorkbench {
                 state.primitive_menu_open = false;
             }
         }
+        let settings_changed = match action {
+            ViewportToolbarAction::Solid => {
+                let next = raf_core::config::ViewportRenderMode::Solid;
+                let changed = self.agent_settings.viewport_render_mode != next;
+                self.agent_settings.viewport_render_mode = next;
+                changed
+            }
+            ViewportToolbarAction::ToggleGrid => {
+                let next = self.toolbar_state.grid_visible;
+                let changed = self.agent_settings.grid_visible != next;
+                self.agent_settings.grid_visible = next;
+                changed
+            }
+            ViewportToolbarAction::ToggleLabels => {
+                let next = self.toolbar_state.labels_visible;
+                let changed = self.agent_settings.show_viewport_labels != next;
+                self.agent_settings.show_viewport_labels = next;
+                changed
+            }
+            _ => false,
+        };
         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        settings_changed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_virtual_window_does_not_rebuild_for_every_scroll_pixel() {
+        assert_eq!(next_agent_scroll_projection(0.0, 1.0), None);
+        assert_eq!(next_agent_scroll_projection(0.0, 95.0), None);
+        assert_eq!(next_agent_scroll_projection(0.0, 96.0), Some(96.0));
+        assert_eq!(next_agent_scroll_projection(96.0, 40.0), None);
+        assert_eq!(next_agent_scroll_projection(96.0, 0.0), Some(0.0));
     }
 }

@@ -5,6 +5,7 @@
 //! become a second state/controller implementation.
 
 use super::*;
+use crate::panels::agent_surface::build_agent_surface;
 use crate::panels::editor_bottom_dock_surface::{build_console_surface, build_project_surface};
 use crate::panels::electronics_context_menu_surface::build_electronics_context_menu_surface;
 use crate::panels::electronics_surface::build_electronics_analysis_surface;
@@ -36,9 +37,10 @@ impl NativeGameWorkbench {
             let height = rect.height.max(0.0);
             let root_id = format!("{}.host", surface.id);
             let wrapper = UiNode::new(root_id, UiNodeKind::Root)
-                .with_layout(UiLayout::absolute(UiRect::new(
-                    rect.x, rect.y, width, height,
-                )))
+                .with_layout(raf_ui::UiLayout {
+                    overflow: raf_ui::UiOverflow::Clip,
+                    ..UiLayout::absolute(UiRect::new(rect.x, rect.y, width, height))
+                })
                 .with_style(UiStyle::transparent())
                 .with_child(surface.root);
             roots.push(wrapper);
@@ -51,7 +53,6 @@ impl NativeGameWorkbench {
                 &self.project_name,
                 self.project_type,
                 self.open_menu.as_deref(),
-                AgentBarStatus::Ready,
             ),
             layout.application_bar,
         );
@@ -108,13 +109,15 @@ impl NativeGameWorkbench {
                     left,
                 );
             } else {
+                let hierarchy_row_height = self.agent_settings.hierarchy_row_height.max(1.0);
+                let hierarchy_tree_height = self.hierarchy_tree_viewport_height(left);
                 let view = self.hierarchy_model.refresh(
                     scene,
                     &self.hierarchy_query,
                     self.agent_settings.hierarchy_show_hidden,
-                    0.0,
-                    left.height,
-                    26.0,
+                    self.hierarchy_scroll_offset,
+                    hierarchy_tree_height,
+                    hierarchy_row_height,
                 );
                 append(
                     build_hierarchy_surface(
@@ -130,8 +133,8 @@ impl NativeGameWorkbench {
                         hierarchy_menu_label,
                         self.hierarchy_menu_position,
                         [left.width, left.height],
-                        26.0,
-                        18.0,
+                        hierarchy_row_height,
+                        self.agent_settings.hierarchy_indent_width,
                         self.agent_settings.hierarchy_show_icons,
                         self.agent_settings.hierarchy_show_visibility,
                         self.agent_settings.hierarchy_show_locked,
@@ -179,6 +182,7 @@ impl NativeGameWorkbench {
                     electronics.is_some_and(NativeElectronicsEditor::can_undo),
                     electronics.is_some_and(NativeElectronicsEditor::can_redo),
                     electronics.is_some_and(|editor| editor.selection().is_some()),
+                    electronics.is_some_and(NativeElectronicsEditor::can_rotate_selection),
                 )
             } else {
                 build_viewport_toolbar_surface(self.palette, self.toolbar_state)
@@ -224,7 +228,10 @@ impl NativeGameWorkbench {
                 let data = electronics
                     .and_then(electronics_model::inspector_data)
                     .unwrap_or(electronics_model::ElectronicsInspectorData {
-                        title: "No selection".to_string(),
+                        title: raf_core::i18n::t(
+                            "app.electronics_no_selection",
+                            self.agent_panel.language,
+                        ),
                         fields: Vec::new(),
                         pins: Vec::new(),
                     });
@@ -241,13 +248,14 @@ impl NativeGameWorkbench {
                 );
             } else {
                 append(
-                    build_inspector_surface(
+                    build_inspector_surface_with_unit(
                         self.palette,
                         scene,
                         selected.first().copied(),
                         &self.inspector_sessions,
                         1.0,
                         self.inspector_view,
+                        self.agent_settings.display_unit,
                     ),
                     right,
                 );
@@ -306,6 +314,7 @@ impl NativeGameWorkbench {
         });
         let dock_groups = self.bottom_dock.groups().to_vec();
         let dock_group_rects = self.dock_group_rects(layout);
+        let agent_scroll_offset = self.agent_scroll_projection_offset;
         for (group_id, group_rect) in &dock_group_rects {
             let Some(group) = dock_groups.iter().find(|group| group.id == *group_id) else {
                 continue;
@@ -331,7 +340,16 @@ impl NativeGameWorkbench {
             );
             match group.active_tab.as_str() {
                 "console" => append(
-                    build_console_surface(self.palette, &self.console, true, &[], None),
+                    build_console_surface(
+                        self.palette,
+                        &self.console,
+                        project.map_or(self.agent_settings.command_console_enabled, |project| {
+                            self.agent_settings.command_console_enabled
+                                && project.settings.enable_console_commands
+                        }),
+                        &[],
+                        None,
+                    ),
                     content_rect,
                 ),
                 "project" => append(
@@ -353,12 +371,15 @@ impl NativeGameWorkbench {
                     content_rect,
                 ),
                 "agent" => append(
-                    UiSurface::new(
-                        "editor.bottom.agent.placeholder",
+                    build_agent_surface(
                         self.palette,
-                        UiNode::new("editor.bottom.agent.placeholder.root", UiNodeKind::Root)
-                            .with_layout(UiLayout::fill(UiFlow::None))
-                            .with_style(UiStyle::transparent()),
+                        &self.agent_panel,
+                        &self.agent_settings,
+                        self.agent_readiness,
+                        self.project_type,
+                        [content_rect.width, content_rect.height],
+                        agent_scroll_offset,
+                        self.agent_motion.value(),
                     ),
                     content_rect,
                 ),
@@ -367,9 +388,20 @@ impl NativeGameWorkbench {
                         self.palette,
                         "DESIGN RULE CHECK",
                         &electronics
-                            .map(|editor| electronics_model::analysis_lines(editor, "drc"))
+                            .map(|editor| {
+                                electronics_model::analysis_lines(
+                                    editor,
+                                    "drc",
+                                    self.agent_panel.language,
+                                )
+                            })
                             .unwrap_or_else(|| {
-                                vec!["Electronics document unavailable.".to_string()]
+                                vec![crate::panels::electronics_surface::ElectronicsAnalysisLine::normal(
+                                    raf_core::i18n::t(
+                                        "electronics.analysis.unavailable",
+                                        self.agent_panel.language,
+                                    ),
+                                )]
                             }),
                     ),
                     content_rect,
@@ -379,9 +411,20 @@ impl NativeGameWorkbench {
                         self.palette,
                         "SIMULATION",
                         &electronics
-                            .map(|editor| electronics_model::analysis_lines(editor, "simulation"))
+                            .map(|editor| {
+                                electronics_model::analysis_lines(
+                                    editor,
+                                    "simulation",
+                                    self.agent_panel.language,
+                                )
+                            })
                             .unwrap_or_else(|| {
-                                vec!["Electronics document unavailable.".to_string()]
+                                vec![crate::panels::electronics_surface::ElectronicsAnalysisLine::normal(
+                                    raf_core::i18n::t(
+                                        "electronics.analysis.unavailable",
+                                        self.agent_panel.language,
+                                    ),
+                                )]
                             }),
                     ),
                     content_rect,
@@ -474,13 +517,17 @@ impl NativeGameWorkbench {
             }
         }
 
-        append(
-            build_status_surface(
-                self.palette,
-                &status_items(self, selected, scene, electronics),
-            ),
-            layout.status_bar,
-        );
+        if self.project_type != ProjectType::Electronics
+            || self.agent_settings.electronics_show_status
+        {
+            append(
+                build_status_surface(
+                    self.palette,
+                    &status_items(self, selected, scene, electronics),
+                ),
+                layout.status_bar,
+            );
+        }
 
         if let Some(context) = self.bottom_dock.context_menu().cloned() {
             let menu_width = 244.0;
@@ -513,7 +560,7 @@ impl NativeGameWorkbench {
             theme: raf_ui::UiTheme::raf_ui(),
             root,
             style_sheet: UiStyleSheet { rules },
-            retained_tooltips: false,
+            retained_tooltips: self.project_type == ProjectType::Electronics,
         }
     }
 }
@@ -525,6 +572,8 @@ fn status_items(
     electronics: Option<&NativeElectronicsEditor>,
 ) -> Vec<String> {
     if workbench.project_type == ProjectType::Electronics {
+        let language = workbench.agent_panel.language;
+        let translate = |key: &str| raf_core::i18n::t(key, language);
         let (components, connections, nets) = electronics
             .map(|editor| {
                 electronics_model::ElectronicsWorkbenchData::from_editor(Some(editor)).counts
@@ -533,26 +582,44 @@ fn status_items(
         let surface = electronics
             .map(NativeElectronicsEditor::active_surface)
             .map(|surface| match surface {
-                raf_electronics::CadSurfaceKind::Schematic => "Schematic",
-                raf_electronics::CadSurfaceKind::Pcb => "PCB",
+                raf_electronics::CadSurfaceKind::Schematic => {
+                    translate("app.electronics_schematic_tab")
+                }
+                raf_electronics::CadSurfaceKind::Pcb => translate("app.electronics_pcb_tab"),
             })
-            .unwrap_or("Schematic");
+            .unwrap_or_else(|| translate("app.electronics_schematic_tab"));
         let selected_kind = electronics
             .and_then(NativeElectronicsEditor::selection)
-            .map(|selection| format!("Selected: {:?}", selection.kind))
-            .unwrap_or_else(|| "No selection".to_string());
+            .map(|selection| {
+                format!(
+                    "{}: {}",
+                    translate("app.electronics_selection"),
+                    translate(electronics_selection_key(selection.kind))
+                )
+            })
+            .unwrap_or_else(|| translate("app.electronics_no_selection"));
+        let grid_step = electronics
+            .map(NativeElectronicsEditor::grid_step)
+            .unwrap_or(workbench.agent_settings.electronics_grid_step_mm);
         vec![
             workbench.project_name.clone(),
-            surface.to_string(),
+            surface,
             selected_kind,
-            format!("Components: {components}"),
-            format!("Connections: {connections}"),
-            format!("Nets: {nets}"),
-            "Grid: 20 mm".to_string(),
+            format!("{}: {components}", translate("app.schematic_components")),
+            format!(
+                "{}: {connections}",
+                translate("app.electronics_connections")
+            ),
+            format!("{}: {nets}", translate("app.schematic_nets")),
+            format!(
+                "{}: {:.0} mm",
+                translate("app.electronics_grid_status"),
+                grid_step
+            ),
             if electronics.is_some_and(NativeElectronicsEditor::is_dirty) {
-                "Modified".to_string()
+                translate("app.electronics_modified")
             } else {
-                "Saved".to_string()
+                translate("app.electronics_saved")
             },
         ]
     } else {
@@ -567,5 +634,19 @@ fn status_items(
                 "FPS: hidden".to_string()
             },
         ]
+    }
+}
+
+fn electronics_selection_key(
+    kind: crate::electronics_controller::ElectronicsSelectionKind,
+) -> &'static str {
+    match kind {
+        crate::electronics_controller::ElectronicsSelectionKind::Component => {
+            "app.electronics_component"
+        }
+        crate::electronics_controller::ElectronicsSelectionKind::Pin => "app.electronics_pin",
+        crate::electronics_controller::ElectronicsSelectionKind::Wire => "app.electronics_wire",
+        crate::electronics_controller::ElectronicsSelectionKind::Trace => "app.electronics_trace",
+        crate::electronics_controller::ElectronicsSelectionKind::Other => "app.electronics_other",
     }
 }

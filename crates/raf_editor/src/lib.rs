@@ -7,12 +7,15 @@
 //! wiring, domain commands, the beta downbar, and full-client Game/Electronics
 //! canvas hosts. The engine and renderer remain independent.
 
+pub(crate) mod agent_artifacts;
+pub mod agent_context;
 pub mod agent_executor;
 pub mod application_bar_host;
 pub mod application_bar_surface;
 pub mod application_menu;
 pub mod attached;
 pub mod building_mode;
+pub(crate) mod color_math;
 pub mod commands;
 pub mod console;
 pub mod editor_command_registry;

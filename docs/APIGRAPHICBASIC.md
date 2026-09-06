@@ -111,6 +111,17 @@ vertex buffers and batches only adjacent compatible paint work so stacking
 order remains correct. UI must not create a second command-list path or
 compatibility host.
 
+The alpha-only material beta is resolved here, not in backend-specific panel
+code. RafUI carries a `UiSurfaceMaterial` role on each authored node;
+ApiGraphicBasic converts that role to palette-aware fill and border alpha before
+the shared draw list is compiled. High contrast, Reduce transparency, and the
+Potato render budget use the opaque fallback. WGPU uses its existing alpha
+blend state and CPU recovery uses the same source-over colors, so the beta adds
+no persistent texture, framebuffer copy, or extra submit. GPU diagnostics expose
+translucent solid-quad count and estimated submitted pixel coverage; CPU
+diagnostics expose written translucent solid pixels. Frame-time p95 and visual
+parity remain promotion measurements, not reasons to add a second paint path.
+
 RafUI must not create a second GPU renderer, own WGPU textures, or draw a
 scene/CAD canvas as generic controls. The Viewport, Schematic, and PCB remain
 renderer-owned center surfaces; RafUI owns their docks, command rows, menus,

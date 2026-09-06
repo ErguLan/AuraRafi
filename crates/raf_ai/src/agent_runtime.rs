@@ -9,14 +9,130 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use crate::chat::{ChatMessage, MessageRole};
-use crate::openai_client::{OpenAiClient, OpenAiConfig, OpenAiMessage, OpenAiTool, ToolCall};
+use crate::openai_client::{
+    FunctionCall, OpenAiClient, OpenAiConfig, OpenAiMessage, OpenAiTool, ToolCall,
+};
 use chrono::Utc;
+use raf_core::{AgentTaskEvent, AgentTaskId, AgentTaskManager, AgentTaskSnapshot, AgentTaskStatus};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
+/// Whether a tool observes state or can mutate the open project.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentToolKind {
+    Read,
+    Mutation,
+}
+
+/// Execution policy selected by the editor for the current Agent run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolExecutionMode {
+    /// Only native read tools may run.
+    Inspect,
+    /// Reads run normally; mutations execute against a disposable preview.
+    Preview,
+    /// Mutations are applied to the active project.
+    Apply,
+}
+
+/// Provider-neutral result returned by every native Agent tool.
+///
+/// The compact JSON representation is sent back to the model and persisted in
+/// chat history. Renderer/debug details stay in `details` and are intentionally
+/// omitted when they would only duplicate `data`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AgentToolResult {
+    pub ok: bool,
+    pub summary: String,
+    #[serde(default, skip_serializing_if = "Value::is_null")]
+    pub data: Value,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub references: Vec<String>,
+    #[serde(default)]
+    pub changed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diff: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verification: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<String>,
+    #[serde(default)]
+    pub preview: bool,
+}
+
+impl AgentToolResult {
+    pub fn success(summary: impl Into<String>, data: Value) -> Self {
+        Self {
+            ok: true,
+            summary: summary.into(),
+            data,
+            references: Vec::new(),
+            changed: false,
+            revision: None,
+            diff: None,
+            verification: None,
+            warnings: Vec::new(),
+            details: Vec::new(),
+            preview: false,
+        }
+    }
+
+    fn model_content(&self, max_chars: usize) -> String {
+        let mut compact = self.clone();
+        compact.data = compact_json_value(compact.data, 6, 64, 2_048);
+        if let Some(diff) = compact.diff.take() {
+            compact.diff = Some(compact_json_value(diff, 5, 48, 1_024));
+        }
+        compact.details.truncate(12);
+        compact.details = compact
+            .details
+            .into_iter()
+            .map(|line| truncate_chars(line, 320))
+            .collect();
+        let encoded = serde_json::to_string(&compact).unwrap_or_else(|error| {
+            format!(
+                "{{\"ok\":false,\"summary\":\"Agent tool result serialization failed: {error}\"}}"
+            )
+        });
+        if encoded.chars().count() <= max_chars {
+            return encoded;
+        }
+        let fallback = Self {
+            ok: compact.ok,
+            summary: truncate_chars(compact.summary, max_chars.saturating_sub(120)),
+            data: serde_json::json!({"truncated": true}),
+            references: compact.references.into_iter().take(16).collect(),
+            changed: compact.changed,
+            revision: compact.revision,
+            diff: None,
+            verification: compact.verification,
+            warnings: Vec::new(),
+            details: Vec::new(),
+            preview: compact.preview,
+        };
+        serde_json::to_string(&fallback).unwrap_or_else(|_| "{\"ok\":false}".to_string())
+    }
+}
+
 /// Executor for tools invoked by the agent.
 pub trait ToolExecutor {
-    fn execute(&mut self, name: &str, arguments: Value) -> Result<String, String>;
+    fn kind(&self, _name: &str) -> AgentToolKind {
+        AgentToolKind::Mutation
+    }
+
+    fn execute(
+        &mut self,
+        call_id: &str,
+        name: &str,
+        arguments: Value,
+        mode: ToolExecutionMode,
+    ) -> Result<AgentToolResult, String>;
+
     fn describe(&self, name: &str) -> String {
         format!("Execute {}", name)
     }
@@ -71,6 +187,13 @@ impl AgentStatus {
             Self::Thinking | Self::ExecutingTools | Self::AwaitingApproval
         )
     }
+
+    /// Whether the editor must keep presenting frames without user input.
+    /// Awaiting approval blocks submission but is event-driven, so it must not
+    /// keep the whole editor in a continuous repaint loop.
+    pub fn needs_continuous_frame(&self) -> bool {
+        matches!(self, Self::Thinking | Self::ExecutingTools)
+    }
 }
 
 /// Events emitted for UI observation.
@@ -80,6 +203,7 @@ pub enum AgentEvent {
     ToolCallsRequested(Vec<PendingToolCall>),
     ToolResult { id: String, result: String },
     StatusChanged(AgentStatus, Option<String>),
+    TaskProgress(AgentTaskSnapshot),
 }
 
 /// Shared cell for passing background-thread results back to the runtime.
@@ -88,13 +212,13 @@ struct PendingResponse {
     stream_rx: mpsc::Receiver<String>,
     _handle: JoinHandle<()>,
     tools: Vec<OpenAiTool>,
-    active_mode: bool,
+    execution_mode: ToolExecutionMode,
 }
 
 /// A queued sequence of tool calls that must preserve editor mutation order.
 struct PendingToolExecution {
     tools: Vec<OpenAiTool>,
-    active_mode: bool,
+    execution_mode: ToolExecutionMode,
 }
 
 /// The Agent runtime with non-blocking design.
@@ -114,7 +238,15 @@ pub struct AgentRuntime {
     last_tool_execution: Option<Instant>,
     pending: Option<PendingResponse>,
     pending_tool_execution: Option<PendingToolExecution>,
+    /// Ephemeral provider context loaded through a native read tool before a
+    /// run starts. It is sent once to the provider and is intentionally not
+    /// persisted as a fake chat exchange.
+    request_context: Vec<OpenAiMessage>,
     streaming_message_index: Option<usize>,
+    message_revision: u64,
+    task_manager: AgentTaskManager,
+    task_id: Option<AgentTaskId>,
+    task_event_cursor: u64,
 }
 
 impl AgentRuntime {
@@ -137,11 +269,17 @@ impl AgentRuntime {
             last_tool_execution: None,
             pending: None,
             pending_tool_execution: None,
+            request_context: Vec::new(),
             streaming_message_index: None,
+            message_revision: 0,
+            task_manager: AgentTaskManager::new(),
+            task_id: None,
+            task_event_cursor: 0,
         }
     }
 
     pub fn clear(&mut self) {
+        let had_messages = !self.messages.is_empty();
         self.cancel_background();
         self.messages.clear();
         self.pending_calls.clear();
@@ -152,7 +290,12 @@ impl AgentRuntime {
         self.tool_calls_executed = 0;
         self.last_tool_execution = None;
         self.pending_tool_execution = None;
+        self.request_context.clear();
         self.streaming_message_index = None;
+        self.cancel_active_task();
+        if had_messages {
+            self.bump_message_revision();
+        }
     }
 
     pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
@@ -163,10 +306,48 @@ impl AgentRuntime {
                     return;
                 }
                 first.content = prompt;
+                self.bump_message_revision();
                 return;
             }
         }
         self.messages.insert(0, ChatMessage::system(&prompt));
+        self.bump_message_revision();
+    }
+
+    /// Seed the next provider request with the result of a native read tool.
+    ///
+    /// The project snapshot is therefore represented as an actual tool
+    /// exchange instead of being duplicated in the system prompt or rendered
+    /// as a user-visible chat message. The context is consumed by the first
+    /// request of the run and is not persisted in the chat history.
+    pub fn set_initial_tool_context(
+        &mut self,
+        name: impl Into<String>,
+        arguments: Value,
+        result: AgentToolResult,
+    ) {
+        let call_id = format!("context-{}", Uuid::new_v4());
+        let arguments = serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string());
+        let assistant = OpenAiMessage {
+            role: "assistant".to_string(),
+            content: serde_json::json!(" "),
+            tool_calls: Some(vec![ToolCall {
+                id: call_id.clone(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: name.into(),
+                    arguments,
+                },
+            }]),
+            tool_call_id: None,
+        };
+        let tool = OpenAiMessage {
+            role: "tool".to_string(),
+            content: Value::String(result.model_content(self.max_tool_result_chars)),
+            tool_calls: None,
+            tool_call_id: Some(call_id),
+        };
+        self.request_context = vec![assistant, tool];
     }
 
     /// Start a new agent run. The user message is added immediately and a
@@ -176,7 +357,7 @@ impl AgentRuntime {
         &mut self,
         user_message: impl Into<String>,
         tools: &[OpenAiTool],
-        active_mode: bool,
+        execution_mode: ToolExecutionMode,
     ) {
         let content = user_message.into();
         self.cancel_background();
@@ -188,8 +369,10 @@ impl AgentRuntime {
         self.tool_calls_executed = 0;
         self.last_tool_execution = None;
         self.streaming_message_index = None;
+        self.start_task();
         self.push_message(ChatMessage::user(&content));
-        self.spawn_next_request(tools, active_mode);
+        self.spawn_next_request(tools, execution_mode);
+        self.sync_task();
     }
 
     /// Sets bounded limits for one editor request. These limits make a model's
@@ -215,13 +398,15 @@ impl AgentRuntime {
     /// `executor` is only needed when tool calls must be executed (active mode).
     /// Returns the current `AgentStatus`.
     pub fn poll(&mut self, executor: Option<&mut dyn ToolExecutor>) -> AgentStatus {
-        match self.status {
+        let status = match self.status {
             AgentStatus::Thinking => self.check_pending(executor),
             AgentStatus::ExecutingTools => self.execute_next_tool(executor),
             AgentStatus::AwaitingApproval | AgentStatus::Done | AgentStatus::Error => {
                 self.status.clone()
             }
-        }
+        };
+        self.sync_task();
+        status
     }
 
     /// Check if the background thread is done and process the response.
@@ -249,19 +434,27 @@ impl AgentRuntime {
 
         // Thread is done; take ownership of the pending data.
         let PendingResponse {
-            tools, active_mode, ..
+            tools,
+            execution_mode,
+            ..
         } = self.pending.take().unwrap();
 
         match result {
-            Ok(message) => self.handle_assistant_message(message, executor, &tools, active_mode),
+            Ok(message) => self.handle_assistant_message(message, executor, &tools, execution_mode),
             Err(error) => {
                 self.last_error = Some(error.clone());
                 self.status = AgentStatus::Error;
                 let error_message = format!("Error: {}", error);
                 if let Some(index) = self.streaming_message_index.take() {
-                    if let Some(message) = self.messages.get_mut(index) {
+                    let updated = if let Some(message) = self.messages.get_mut(index) {
                         message.content = error_message;
                         message.tool_calls = None;
+                        true
+                    } else {
+                        false
+                    };
+                    if updated {
+                        self.bump_message_revision();
                     }
                 } else {
                     self.push_message(ChatMessage::assistant(&error_message));
@@ -278,7 +471,7 @@ impl AgentRuntime {
         message: OpenAiMessage,
         executor: Option<&mut dyn ToolExecutor>,
         tools: &[OpenAiTool],
-        active_mode: bool,
+        execution_mode: ToolExecutionMode,
     ) -> AgentStatus {
         let text = match &message.content {
             Value::String(text) => text.clone(),
@@ -330,36 +523,26 @@ impl AgentRuntime {
             self.pending_calls = pending.clone();
             self.emit(AgentEvent::ToolCallsRequested(pending));
 
-            if active_mode {
-                if executor.is_some() {
-                    self.begin_tool_execution(tools, true);
-                    AgentStatus::ExecutingTools
-                } else {
-                    let error = "No tool executor is available for active agent mode.".to_string();
-                    self.last_error = Some(error.clone());
-                    self.status = AgentStatus::Error;
-                    self.emit(AgentEvent::StatusChanged(AgentStatus::Error, Some(error)));
-                    AgentStatus::Error
-                }
+            if executor.is_some() {
+                self.begin_tool_execution(tools, execution_mode);
+                AgentStatus::ExecutingTools
             } else {
-                self.status = AgentStatus::AwaitingApproval;
-                self.emit(AgentEvent::StatusChanged(
-                    AgentStatus::AwaitingApproval,
-                    None,
-                ));
-                AgentStatus::AwaitingApproval
+                let error = "No native tool executor is available for this Agent run.".to_string();
+                self.last_error = Some(error.clone());
+                self.status = AgentStatus::Error;
+                self.emit(AgentEvent::StatusChanged(AgentStatus::Error, Some(error)));
+                AgentStatus::Error
             }
         } else {
             self.upsert_assistant_message(text, None);
             self.status = AgentStatus::Done;
-            self.turn_count = 0;
             self.emit(AgentEvent::StatusChanged(AgentStatus::Done, None));
             AgentStatus::Done
         }
     }
 
     /// Spawn a background thread for the next API request.
-    fn spawn_next_request(&mut self, tools: &[OpenAiTool], active_mode: bool) {
+    fn spawn_next_request(&mut self, tools: &[OpenAiTool], execution_mode: ToolExecutionMode) {
         self.turn_count += 1;
         if self.turn_count > self.max_turns {
             let error = "I reached the maximum number of steps for this request.".to_string();
@@ -370,8 +553,9 @@ impl AgentRuntime {
             return;
         }
 
-        let openai_messages: Vec<OpenAiMessage> =
+        let mut openai_messages: Vec<OpenAiMessage> =
             self.messages.iter().map(message_to_openai).collect();
+        openai_messages.extend(std::mem::take(&mut self.request_context));
 
         let client = self.client.clone();
         let result = Arc::new(Mutex::new(None));
@@ -398,7 +582,7 @@ impl AgentRuntime {
             stream_rx,
             _handle: handle,
             tools: tools.to_vec(),
-            active_mode,
+            execution_mode,
         });
         self.status = AgentStatus::Thinking;
     }
@@ -417,7 +601,7 @@ impl AgentRuntime {
         for call in &mut self.pending_calls {
             call.approved = Some(true);
         }
-        self.begin_tool_execution(tools, false);
+        self.begin_tool_execution(tools, ToolExecutionMode::Apply);
     }
 
     /// Deny pending tool calls and continue the run.
@@ -437,18 +621,21 @@ impl AgentRuntime {
         }
         self.flush_pending_as_tool_messages();
         self.pending_calls.clear();
-        self.spawn_next_request(tools, false);
+        self.spawn_next_request(tools, ToolExecutionMode::Inspect);
     }
 
     pub fn cancel(&mut self) {
         self.cancel_background();
         self.pending_calls.clear();
         self.pending_tool_execution = None;
+        self.request_context.clear();
         self.status = AgentStatus::Done;
         self.turn_count = 0;
         self.tool_calls_executed = 0;
         self.last_tool_execution = None;
         self.streaming_message_index = None;
+        self.cancel_active_task();
+        self.sync_task_events();
     }
 
     fn append_stream_delta(&mut self, delta: &str) {
@@ -463,16 +650,30 @@ impl AgentRuntime {
             self.streaming_message_index = Some(index);
             index
         };
-        if let Some(message) = self.messages.get_mut(index) {
+        let changed = if let Some(message) = self.messages.get_mut(index) {
             message.content.push_str(delta);
+            true
+        } else {
+            false
+        };
+        if changed {
+            self.bump_message_revision();
         }
     }
 
     fn upsert_assistant_message(&mut self, text: String, tool_calls: Option<Value>) {
         if let Some(index) = self.streaming_message_index.take() {
-            if let Some(message) = self.messages.get_mut(index) {
-                message.content = text;
-                message.tool_calls = tool_calls;
+            if index < self.messages.len() {
+                let changed = {
+                    let message = &mut self.messages[index];
+                    let changed = message.content != text || message.tool_calls != tool_calls;
+                    message.content = text;
+                    message.tool_calls = tool_calls;
+                    changed
+                };
+                if changed {
+                    self.bump_message_revision();
+                }
                 return;
             }
         }
@@ -486,10 +687,10 @@ impl AgentRuntime {
         });
     }
 
-    fn begin_tool_execution(&mut self, tools: &[OpenAiTool], active_mode: bool) {
+    fn begin_tool_execution(&mut self, tools: &[OpenAiTool], execution_mode: ToolExecutionMode) {
         self.pending_tool_execution = Some(PendingToolExecution {
             tools: tools.to_vec(),
-            active_mode,
+            execution_mode,
         });
         self.last_tool_execution = None;
         self.status = AgentStatus::ExecutingTools;
@@ -516,6 +717,11 @@ impl AgentRuntime {
         }
 
         let max_tool_result_chars = self.max_tool_result_chars;
+        let execution_mode = self
+            .pending_tool_execution
+            .as_ref()
+            .map(|pending| pending.execution_mode)
+            .unwrap_or(ToolExecutionMode::Inspect);
         self.last_tool_execution = Some(Instant::now());
         let executed = self
             .pending_calls
@@ -527,9 +733,23 @@ impl AgentRuntime {
                 } else if let Some(error) = call.argument_error.as_deref() {
                     format!("Error: {error}")
                 } else {
-                    match executor.execute(&call.name, call.arguments.clone()) {
-                        Ok(output) => format!("Command executed:\n{}", output),
+                    if execution_mode == ToolExecutionMode::Inspect
+                        && executor.kind(&call.name) == AgentToolKind::Mutation
+                    {
+                        format!(
+                            "{{\"ok\":false,\"summary\":\"Tool '{}' is not available in Inspect mode.\"}}",
+                            call.name
+                        )
+                    } else {
+                        match executor.execute(
+                            &call.id,
+                            &call.name,
+                            call.arguments.clone(),
+                            execution_mode,
+                        ) {
+                        Ok(output) => output.model_content(max_tool_result_chars),
                         Err(error) => format!("Error: {}", error),
+                        }
                     }
                 };
                 let result = truncate_tool_result(result, max_tool_result_chars);
@@ -548,7 +768,7 @@ impl AgentRuntime {
         };
         self.flush_pending_as_tool_messages();
         self.pending_calls.clear();
-        self.spawn_next_request(&continuation.tools, continuation.active_mode);
+        self.spawn_next_request(&continuation.tools, continuation.execution_mode);
         self.status.clone()
     }
 
@@ -582,7 +802,185 @@ impl AgentRuntime {
 
     fn push_message(&mut self, message: ChatMessage) {
         self.messages.push(message.clone());
+        self.bump_message_revision();
         self.emit(AgentEvent::MessageAdded(message));
+    }
+
+    pub fn message_revision(&self) -> u64 {
+        self.message_revision
+    }
+
+    /// Returns the current bounded lifecycle state for the active run.
+    ///
+    /// The snapshot is transport-neutral and can be exposed by native UI,
+    /// attached CLI, or MCP without exposing the provider thread internals.
+    pub fn task_snapshot(&self) -> Option<AgentTaskSnapshot> {
+        self.task_id.and_then(|id| self.task_manager.snapshot(id))
+    }
+
+    /// Returns a retained task by id, including a completed or cancelled
+    /// run. External attached clients use this with `task.list` pagination
+    /// without being limited to the currently active run.
+    pub fn task_snapshot_by_id(&self, id: AgentTaskId) -> Option<AgentTaskSnapshot> {
+        self.task_manager.snapshot(id)
+    }
+
+    /// Returns task lifecycle events retained after `sequence`.
+    pub fn task_events_since(&self, sequence: u64) -> Vec<AgentTaskEvent> {
+        self.task_manager.events_since(sequence)
+    }
+
+    pub fn task_snapshots(&self) -> Vec<AgentTaskSnapshot> {
+        self.task_manager.list()
+    }
+
+    fn start_task(&mut self) {
+        self.cancel_active_task();
+        self.task_event_cursor = self
+            .task_manager
+            .events_since(0)
+            .last()
+            .map_or(0, |event| event.sequence);
+        let handle = self
+            .task_manager
+            .start_running("agent.run", "Agent run", None, true);
+        self.task_id = Some(handle.id());
+        self.task_event_cursor = self
+            .task_manager
+            .snapshot(handle.id())
+            .map_or(self.task_event_cursor, |snapshot| {
+                snapshot.sequence.saturating_sub(1)
+            });
+    }
+
+    fn cancel_active_task(&mut self) {
+        if let Some(id) = self.task_id {
+            let _ = self.task_manager.cancel(id);
+        }
+    }
+
+    fn sync_task(&mut self) {
+        let Some(id) = self.task_id else {
+            return;
+        };
+
+        let (status, stage, completed, total, message) = match self.status {
+            AgentStatus::Thinking => (
+                AgentTaskStatus::Running,
+                "thinking",
+                self.turn_count.saturating_sub(1) as u32,
+                None,
+                "Waiting for the model response.".to_string(),
+            ),
+            AgentStatus::ExecutingTools => (
+                AgentTaskStatus::Running,
+                "executing_tools",
+                self.tool_calls_executed as u32,
+                Some(
+                    self.tool_calls_executed.saturating_add(
+                        self.pending_calls
+                            .iter()
+                            .filter(|call| call.result.is_none())
+                            .count(),
+                    ) as u32,
+                ),
+                format!(
+                    "{} tool call(s) completed; {} pending.",
+                    self.tool_calls_executed,
+                    self.pending_calls
+                        .iter()
+                        .filter(|call| call.result.is_none())
+                        .count()
+                ),
+            ),
+            AgentStatus::AwaitingApproval => (
+                AgentTaskStatus::WaitingApproval,
+                "waiting_approval",
+                0,
+                Some(self.pending_calls.len() as u32),
+                "Waiting for tool approval.".to_string(),
+            ),
+            AgentStatus::Done => (
+                AgentTaskStatus::Completed,
+                "completed",
+                self.turn_count as u32,
+                None,
+                "Agent run completed.".to_string(),
+            ),
+            AgentStatus::Error => (
+                AgentTaskStatus::Failed,
+                "failed",
+                self.tool_calls_executed as u32,
+                None,
+                self.last_error
+                    .clone()
+                    .unwrap_or_else(|| "Agent run failed.".to_string()),
+            ),
+        };
+
+        let current = self.task_manager.snapshot(id);
+        if current.as_ref().is_some_and(|snapshot| {
+            snapshot.status == status
+                && snapshot.progress.stage == stage
+                && snapshot.progress.completed == completed
+                && snapshot.progress.total == total
+                && snapshot.progress.message == message
+        }) {
+            self.sync_task_events();
+            return;
+        }
+
+        match status {
+            AgentTaskStatus::Completed => {
+                if current
+                    .as_ref()
+                    .is_some_and(|snapshot| !snapshot.status.is_terminal())
+                {
+                    let _ = self.task_manager.complete(
+                        id,
+                        Some(serde_json::json!({
+                            "turns": self.turn_count,
+                            "tool_calls": self.tool_calls_executed,
+                            "messages": self.messages.len(),
+                        })),
+                    );
+                }
+            }
+            AgentTaskStatus::Failed => {
+                if current
+                    .as_ref()
+                    .is_some_and(|snapshot| !snapshot.status.is_terminal())
+                {
+                    let _ = self.task_manager.fail(id, message);
+                }
+            }
+            AgentTaskStatus::WaitingApproval => {
+                let _ = self.task_manager.set_status(id, status);
+                let _ = self
+                    .task_manager
+                    .update_progress(id, stage, completed, total, message);
+            }
+            AgentTaskStatus::Running => {
+                let _ = self.task_manager.set_status(id, status);
+                let _ = self
+                    .task_manager
+                    .update_progress(id, stage, completed, total, message);
+            }
+            AgentTaskStatus::Queued | AgentTaskStatus::Cancelled => {}
+        }
+        self.sync_task_events();
+    }
+
+    fn sync_task_events(&mut self) {
+        let events = self.task_manager.events_since(self.task_event_cursor);
+        for event in events {
+            self.task_event_cursor = self.task_event_cursor.max(event.sequence);
+            self.emit(AgentEvent::TaskProgress(event.task));
+        }
+    }
+
+    fn bump_message_revision(&mut self) {
+        self.message_revision = self.message_revision.wrapping_add(1);
     }
 
     fn emit(&mut self, event: AgentEvent) {
@@ -648,6 +1046,59 @@ fn truncate_tool_result(mut result: String, max_chars: usize) -> String {
     result
 }
 
+fn truncate_chars(value: String, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value;
+    }
+    let mut truncated = value.chars().take(max_chars).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+fn compact_json_value(value: Value, depth: usize, max_items: usize, max_string: usize) -> Value {
+    if depth == 0 {
+        return match value {
+            Value::Array(values) => serde_json::json!({"count": values.len(), "truncated": true}),
+            Value::Object(values) => {
+                serde_json::json!({"fields": values.len(), "truncated": true})
+            }
+            Value::String(value) => Value::String(truncate_chars(value, max_string)),
+            other => other,
+        };
+    }
+    match value {
+        Value::String(value) => Value::String(truncate_chars(value, max_string)),
+        Value::Array(values) => {
+            let total = values.len();
+            let mut values = values
+                .into_iter()
+                .take(max_items)
+                .map(|value| compact_json_value(value, depth - 1, max_items, max_string))
+                .collect::<Vec<_>>();
+            if total > max_items {
+                values.push(serde_json::json!({
+                    "truncated": true,
+                    "remaining": total - max_items
+                }));
+            }
+            Value::Array(values)
+        }
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .take(max_items)
+                .map(|(key, value)| {
+                    (
+                        key,
+                        compact_json_value(value, depth - 1, max_items, max_string),
+                    )
+                })
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
 pub fn assistant_with_tool_calls(text: &str, calls: &[ToolCall]) -> OpenAiMessage {
     OpenAiMessage {
         role: "assistant".to_string(),
@@ -668,9 +1119,18 @@ mod tests {
     }
 
     impl ToolExecutor for RecordingExecutor {
-        fn execute(&mut self, name: &str, _arguments: Value) -> Result<String, String> {
+        fn execute(
+            &mut self,
+            _call_id: &str,
+            name: &str,
+            _arguments: Value,
+            _mode: ToolExecutionMode,
+        ) -> Result<AgentToolResult, String> {
             self.calls.push(name.to_string());
-            Ok(format!("completed {name}"))
+            Ok(AgentToolResult::success(
+                format!("completed {name}"),
+                Value::Null,
+            ))
         }
     }
 
@@ -684,7 +1144,7 @@ mod tests {
         ];
         runtime.pending_tool_execution = Some(PendingToolExecution {
             tools: Vec::new(),
-            active_mode: true,
+            execution_mode: ToolExecutionMode::Apply,
         });
         runtime.status = AgentStatus::ExecutingTools;
         let mut executor = RecordingExecutor::default();
@@ -727,9 +1187,10 @@ mod tests {
         let mut runtime = AgentRuntime::new(OpenAiConfig::default());
         let message = assistant_with_tool_calls("", &[tool_call("bad", "{not-json")]);
 
-        let status = runtime.handle_assistant_message(message, None, &[], false);
+        let status =
+            runtime.handle_assistant_message(message, None, &[], ToolExecutionMode::Inspect);
 
-        assert_eq!(status, AgentStatus::AwaitingApproval);
+        assert_eq!(status, AgentStatus::Error);
         assert!(runtime.pending_calls[0].argument_error.is_some());
         assert_eq!(runtime.pending_calls[0].arguments, Value::Null);
     }
@@ -741,7 +1202,8 @@ mod tests {
         let message =
             assistant_with_tool_calls("", &[tool_call("first", "{}"), tool_call("second", "{}")]);
 
-        let status = runtime.handle_assistant_message(message, None, &[], false);
+        let status =
+            runtime.handle_assistant_message(message, None, &[], ToolExecutionMode::Inspect);
 
         assert_eq!(status, AgentStatus::Error);
         assert!(runtime
@@ -777,11 +1239,47 @@ mod tests {
             },
             None,
             &[],
-            false,
+            ToolExecutionMode::Inspect,
         );
 
         assert_eq!(status, AgentStatus::Done);
         assert_eq!(runtime.messages.len(), 1);
         assert!(runtime.streaming_message_index.is_none());
+    }
+
+    #[test]
+    fn structured_tool_result_does_not_repeat_console_boilerplate() {
+        let result = AgentToolResult::success("Created shelf", serde_json::json!({"id": 12}));
+        let encoded = result.model_content(1_024);
+
+        assert!(encoded.contains("Created shelf"));
+        assert!(!encoded.contains("Command executed"));
+    }
+
+    #[test]
+    fn initial_tool_context_is_ephemeral_and_provider_shaped() {
+        let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+        runtime.set_initial_tool_context(
+            "project_summary",
+            serde_json::json!({}),
+            AgentToolResult::success("Project loaded", serde_json::json!({"entities": 3})),
+        );
+
+        assert!(runtime.messages.is_empty());
+        assert_eq!(runtime.request_context.len(), 2);
+        assert_eq!(runtime.request_context[0].role, "assistant");
+        assert_eq!(
+            runtime.request_context[0]
+                .tool_calls
+                .as_ref()
+                .and_then(|calls| calls.first())
+                .map(|call| call.function.name.as_str()),
+            Some("project_summary")
+        );
+        assert_eq!(runtime.request_context[1].role, "tool");
+        assert!(runtime.request_context[1].tool_call_id.is_some());
+
+        runtime.clear();
+        assert!(runtime.request_context.is_empty());
     }
 }

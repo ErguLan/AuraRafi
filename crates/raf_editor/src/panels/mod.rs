@@ -33,6 +33,7 @@ pub mod search_surface;
 pub mod search_surface_host;
 pub mod settings_surface_host;
 pub mod viewport;
+pub mod viewport_compass;
 pub mod viewport_controller;
 pub mod viewport_grid;
 pub mod viewport_interaction;

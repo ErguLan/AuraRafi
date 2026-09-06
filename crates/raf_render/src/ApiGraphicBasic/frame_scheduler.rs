@@ -265,6 +265,10 @@ impl DynamicResolutionController {
 pub struct FrameScheduler {
     profile: FramePacingProfile,
     budget: FramePacingBudget,
+    /// Optional user ceiling from EngineSettings. `Some(0)` means uncapped
+    /// while the window is focused; `None` keeps the profile default.
+    #[serde(default)]
+    frame_limit: Option<u16>,
     pending: FrameInvalidation,
     continuous: FrameInvalidation,
     window_focused: bool,
@@ -285,6 +289,7 @@ impl FrameScheduler {
         Self {
             profile,
             budget: FramePacingBudget::for_profile(profile),
+            frame_limit: None,
             pending: FrameInvalidation::WINDOW | FrameInvalidation::EXPLICIT,
             continuous: FrameInvalidation::NONE,
             window_focused: true,
@@ -301,6 +306,24 @@ impl FrameScheduler {
 
     pub fn budget(&self) -> FramePacingBudget {
         self.budget
+    }
+
+    pub fn frame_limit(&self) -> Option<u16> {
+        self.frame_limit
+    }
+
+    pub fn set_frame_limit(&mut self, fps_limit: u32) {
+        let next = if fps_limit == 0 {
+            Some(0)
+        } else {
+            Some(fps_limit.clamp(15, 240) as u16)
+        };
+        if self.frame_limit == next {
+            return;
+        }
+        self.frame_limit = next;
+        self.next_present_seconds = 0.0;
+        self.request(FrameInvalidation::EXPLICIT);
     }
 
     pub fn metrics(&self) -> FrameSchedulerMetrics {
@@ -444,13 +467,26 @@ impl FrameScheduler {
     }
 
     fn target_fps(&self, activity: FrameActivity) -> u16 {
-        if !self.window_focused {
-            return self.budget.background_fps;
+        if activity == FrameActivity::Benchmark {
+            return 0;
         }
-        match activity {
+        if !self.window_focused {
+            let background_limit = self
+                .frame_limit
+                .filter(|limit| *limit > 0)
+                .unwrap_or(u16::MAX);
+            return self.budget.background_fps.min(background_limit);
+        }
+        let profile_fps = match activity {
             FrameActivity::Idle | FrameActivity::Interactive => self.budget.foreground_fps,
             FrameActivity::Passive => self.budget.passive_fps,
             FrameActivity::Benchmark => 0,
+        };
+        match self.frame_limit {
+            Some(0) => 0,
+            Some(limit) if profile_fps == 0 => limit,
+            Some(limit) => profile_fps.min(limit),
+            None => profile_fps,
         }
     }
 }

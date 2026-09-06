@@ -21,11 +21,13 @@ use crate::api_graphic_basic::canvas_presenter::CanvasTargetRect;
 pub struct DirectUiSurfaceHost {
     surface: UiSurface,
     surface_revision: u64,
+    paint_revision: u64,
     session: UiSurfaceSession,
     compositor: UiSurfaceGpuRenderer,
     images: UiSurfaceImageStore,
     clear_color: [u8; 4],
     compilation: UiSurfaceCompilationCache,
+    last_gpu_metrics: UiSurfaceGpuMetrics,
 }
 
 impl DirectUiSurfaceHost {
@@ -38,11 +40,13 @@ impl DirectUiSurfaceHost {
         Self {
             surface,
             surface_revision: 0,
+            paint_revision: 0,
             session: UiSurfaceSession::default(),
             compositor: UiSurfaceGpuRenderer::new(device, color_format),
             images: UiSurfaceImageStore::default(),
             clear_color,
             compilation: UiSurfaceCompilationCache::default(),
+            last_gpu_metrics: UiSurfaceGpuMetrics::default(),
         }
     }
 
@@ -52,6 +56,7 @@ impl DirectUiSurfaceHost {
 
     pub fn surface_mut(&mut self) -> &mut UiSurface {
         self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
+        self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
         &mut self.surface
     }
 
@@ -59,7 +64,45 @@ impl DirectUiSurfaceHost {
         if self.surface != surface {
             self.surface = surface;
             self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
+            self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
         }
+    }
+
+    /// Updates a fixed-size text node without invalidating the retained
+    /// geometry. Hosts use this for diagnostics and other dynamic labels whose
+    /// content cannot change the layout contract.
+    pub fn patch_text_value(&mut self, id: &str, value: impl Into<String>) -> bool {
+        self.patch_text_value_with_layout(id, value, false)
+    }
+
+    pub fn patch_text_value_with_layout(
+        &mut self,
+        id: &str,
+        value: impl Into<String>,
+        layout_affects: bool,
+    ) -> bool {
+        let value = value.into();
+        let changed = {
+            let Some(node) = self.surface.root.find_mut(id) else {
+                return false;
+            };
+            if node.text_value.as_deref() == Some(value.as_str()) {
+                false
+            } else {
+                node.text_value = Some(value.clone());
+                true
+            }
+        };
+        if !changed {
+            return false;
+        }
+        if layout_affects {
+            self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
+        } else {
+            self.compilation.patch_text_value(id, &value);
+        }
+        self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
+        true
     }
 
     pub fn session(&self) -> &UiSurfaceSession {
@@ -77,6 +120,15 @@ impl DirectUiSurfaceHost {
         self.compilation.layout_rect(id)
     }
 
+    /// Returns the latest logical rect for the focused text input. The
+    /// platform shell uses it to place native IME candidate windows next to
+    /// the caret without making RafUI depend on Winit.
+    pub fn focused_text_rect(&self) -> Option<raf_ui::UiRect> {
+        let id = self.session.interaction.focus.focused.as_deref()?;
+        self.surface.root.find(id)?.control.text_input()?;
+        self.layout_rect(id)
+    }
+
     pub fn has_pointer_capture(&self) -> bool {
         self.session.interaction.has_pointer_capture()
     }
@@ -90,7 +142,11 @@ impl DirectUiSurfaceHost {
     }
 
     pub fn has_active_motion(&self) -> bool {
-        self.session.has_active_motion()
+        self.surface.retained_tooltips && self.session.has_active_motion()
+    }
+
+    pub fn has_active_text_repeat(&self) -> bool {
+        self.session.has_active_text_repeat()
     }
 
     pub fn captures_keyboard_input(&self) -> bool {
@@ -105,8 +161,7 @@ impl DirectUiSurfaceHost {
     }
 
     pub fn set_environment(&mut self, environment: UiEnvironment) {
-        self.session
-            .set_reduced_motion(environment.prefers_reduced_motion);
+        self.session.set_environment(environment);
     }
 
     pub fn images(&self) -> &UiSurfaceImageStore {
@@ -115,6 +170,14 @@ impl DirectUiSurfaceHost {
 
     pub fn images_mut(&mut self) -> &mut UiSurfaceImageStore {
         &mut self.images
+    }
+
+    pub fn compilation_metrics(&self) -> UiSurfaceCompileMetrics {
+        self.compilation.metrics()
+    }
+
+    pub fn last_gpu_metrics(&self) -> UiSurfaceGpuMetrics {
+        self.last_gpu_metrics
     }
 
     pub fn build_frame<F>(&mut self, size: [u32; 2], resolve: F) -> UiSurfaceFrame
@@ -265,13 +328,14 @@ impl DirectUiSurfaceHost {
         F: FnMut(&str) -> String,
     {
         let raster_scale = raster_scale.clamp(1.0, 4.0);
-        let compiled = self.compilation.compile(
+        let compiled = self.compilation.compile_with_paint_revision(
             &self.surface,
             &mut self.session,
             self.surface_revision,
             logical_size,
             raster_scale,
             self.clear_color,
+            self.paint_revision,
             |key| resolve(key),
         );
         for quad in &compiled.draw_list.images {
@@ -288,6 +352,7 @@ impl DirectUiSurfaceHost {
             &self.images,
             self.clear_color,
         );
+        self.last_gpu_metrics = metrics;
         DirectUiSurfaceFrame {
             frame: compiled.frame,
             draw_list: compiled.draw_list,
@@ -313,13 +378,14 @@ impl DirectUiSurfaceHost {
         F: FnMut(&str) -> String,
     {
         let raster_scale = raster_scale.clamp(1.0, 4.0);
-        let compiled = self.compilation.compile(
+        let compiled = self.compilation.compile_with_paint_revision(
             &self.surface,
             &mut self.session,
             self.surface_revision,
             logical_size,
             raster_scale,
             self.clear_color,
+            self.paint_revision,
             |key| resolve(key),
         );
         for quad in &compiled.draw_list.images {
@@ -338,6 +404,7 @@ impl DirectUiSurfaceHost {
             &self.images,
             load,
         );
+        self.last_gpu_metrics = metrics;
         DirectUiSurfaceFrame {
             frame: compiled.frame,
             draw_list: compiled.draw_list,

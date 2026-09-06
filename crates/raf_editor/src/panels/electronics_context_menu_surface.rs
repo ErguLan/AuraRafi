@@ -3,7 +3,7 @@
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiEventBinding, UiEventKind, UiFlow, UiIcon, UiIconId, UiIconSize, UiLayout,
     UiNode, UiNodeKind, UiSizeMode, UiSpacing, UiStylePatch, UiStyleRule, UiStyleRuleState,
-    UiStyleSelector, UiStyleSheet, UiSurface,
+    UiStyleSelector, UiStyleSheet, UiSurface, UiSurfaceMaterial,
 };
 use raf_ui::{UiAlign, UiFontWeight, UiTextRole, UiTextStyle};
 
@@ -24,6 +24,7 @@ pub fn build_electronics_context_menu_surface(
 ) -> UiSurface {
     let mut root = UiNode::new("electronics.context-menu", UiNodeKind::Menu)
         .with_class("electronics-context-menu")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 2.0,

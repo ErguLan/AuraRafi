@@ -232,6 +232,24 @@ impl ConsolePanel {
         }
     }
 
+    pub fn set_auto_scroll(&mut self, enabled: bool) -> bool {
+        if self.auto_scroll == enabled {
+            return false;
+        }
+        self.auto_scroll = enabled;
+        self.touch_content();
+        true
+    }
+
+    pub fn set_filter_level(&mut self, level: Option<LogLevel>) -> bool {
+        if self.filter_level == level {
+            return false;
+        }
+        self.filter_level = level;
+        self.touch_content();
+        true
+    }
+
     pub fn submit_input(&mut self) -> Option<ConsoleSubmission> {
         let text = self.input.trim().to_string();
         if text.is_empty() {
@@ -346,5 +364,16 @@ mod tests {
         let entries = console.filtered_entries().collect::<Vec<_>>();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].0, 1);
+    }
+
+    #[test]
+    fn console_view_options_change_the_content_revision() {
+        let mut console = ConsolePanel::default();
+        let initial_revision = console.revision();
+
+        assert!(console.set_auto_scroll(false));
+        assert!(console.set_filter_level(Some(LogLevel::Info)));
+        assert!(!console.set_filter_level(Some(LogLevel::Info)));
+        assert!(console.revision() > initial_revision);
     }
 }

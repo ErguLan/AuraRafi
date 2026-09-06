@@ -10,6 +10,9 @@ use raf_core::config::EngineSettings;
 pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, value: bool) -> bool {
     match key {
         "settings.simple_mode" => settings.simple_mode = value,
+        "settings.prefers_reduced_motion" => settings.prefers_reduced_motion = value,
+        "settings.high_contrast" => settings.high_contrast = value,
+        "settings.reduce_transparency" => settings.reduce_transparency = value,
         "settings.show_fps_counter" => settings.show_fps_counter = value,
         "settings.auto_ui_scale" | "settings.auto-ui-scale" => settings.auto_ui_scale = value,
         "settings.vsync" => settings.vsync = value,
@@ -56,16 +59,20 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
             settings.language = raf_core::config::Language::Spanish
         }
         "settings.quality.potato" if value => {
-            settings.render_quality = raf_core::config::RenderQuality::Potato
+            settings.render_quality = raf_core::config::RenderQuality::Potato;
+            settings.render_preset = raf_core::config::RenderPreset::Potato;
         }
         "settings.quality.low" if value => {
-            settings.render_quality = raf_core::config::RenderQuality::Low
+            settings.render_quality = raf_core::config::RenderQuality::Low;
+            settings.render_preset = raf_core::config::RenderPreset::Low;
         }
         "settings.quality.medium" if value => {
-            settings.render_quality = raf_core::config::RenderQuality::Medium
+            settings.render_quality = raf_core::config::RenderQuality::Medium;
+            settings.render_preset = raf_core::config::RenderPreset::Medium;
         }
         "settings.quality.high" if value => {
-            settings.render_quality = raf_core::config::RenderQuality::High
+            settings.render_quality = raf_core::config::RenderQuality::High;
+            settings.render_preset = raf_core::config::RenderPreset::High;
         }
         "settings.render_execution_policy.auto" if value => {
             settings.render_execution_policy = raf_core::config::RenderExecutionPolicy::Auto
@@ -82,14 +89,11 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         "settings.units.imperial" if value => {
             settings.display_unit = raf_core::units::DisplayUnit::Imperial
         }
+        "settings.units.game" if value => {
+            settings.display_unit = raf_core::units::DisplayUnit::Game
+        }
         "settings.viewport_render_mode.solid" if value => {
             settings.viewport_render_mode = raf_core::config::ViewportRenderMode::Solid
-        }
-        "settings.viewport_render_mode.wireframe" if value => {
-            settings.viewport_render_mode = raf_core::config::ViewportRenderMode::Wireframe
-        }
-        "settings.viewport_render_mode.preview" if value => {
-            settings.viewport_render_mode = raf_core::config::ViewportRenderMode::Preview
         }
         "settings.script_language.rhai" if value => {
             settings.default_script_language = raf_core::config::ScriptLanguage::Rhai
@@ -100,11 +104,18 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         "settings.script_language.nodes" if value => {
             settings.default_script_language = raf_core::config::ScriptLanguage::Nodes
         }
-        "settings.agent_mode.passive" if value => {
-            settings.agent_mode = raf_core::ai::AgentMode::Passive
+        "settings.agent_mode.inspect" if value => {
+            settings.agent_mode = raf_core::ai::AgentMode::Inspect
         }
-        "settings.agent_mode.active" if value => {
-            settings.agent_mode = raf_core::ai::AgentMode::Active
+        "settings.agent_mode.passive" | "settings.agent_mode.plan" if value => {
+            settings.agent_mode = raf_core::ai::AgentMode::Plan
+        }
+        "settings.agent_mode.active" => {
+            settings.agent_mode = if value {
+                raf_core::ai::AgentMode::Active
+            } else {
+                raf_core::ai::AgentMode::Plan
+            }
         }
         "settings.platform.desktop" if value => {
             settings.target_platform = raf_core::config::TargetPlatform::Desktop
@@ -121,7 +132,9 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         "settings.platform.console" if value => {
             settings.target_platform = raf_core::config::TargetPlatform::Console
         }
-        "settings.fps_unlimited" if value => settings.fps_limit = 0,
+        "settings.fps_unlimited" => {
+            settings.fps_limit = if value { 0 } else { 60 };
+        }
         key if key.starts_with("settings.ai_provider.") && key.split('.').count() == 3 => {
             let Some(provider) = ai_provider_from_key(key) else {
                 return false;
@@ -142,8 +155,26 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
 
 pub(crate) fn apply_settings_command(settings: &mut EngineSettings, key: &str) -> bool {
     match key {
-        "settings.agent_mode.passive" => settings.agent_mode = raf_core::ai::AgentMode::Passive,
-        "settings.agent_mode.active" => settings.agent_mode = raf_core::ai::AgentMode::Active,
+        "settings.theme.dark"
+        | "settings.theme.light"
+        | "settings.theme.system"
+        | "settings.language.english"
+        | "settings.language.spanish"
+        | "settings.units.metric"
+        | "settings.units.imperial"
+        | "settings.units.game" => apply_settings_toggle(settings, key, true),
+        "settings.agent_mode.inspect" => {
+            settings.agent_mode = raf_core::ai::AgentMode::Inspect;
+            true
+        }
+        "settings.agent_mode.passive" | "settings.agent_mode.plan" => {
+            settings.agent_mode = raf_core::ai::AgentMode::Plan;
+            true
+        }
+        "settings.agent_mode.active" => {
+            settings.agent_mode = raf_core::ai::AgentMode::Active;
+            true
+        }
         key if key.starts_with("settings.ai_provider.default.") => {
             let Some(provider) =
                 ai_provider_from_id(key.trim_start_matches("settings.ai_provider.default."))
@@ -151,6 +182,111 @@ pub(crate) fn apply_settings_command(settings: &mut EngineSettings, key: &str) -
                 return false;
             };
             settings.default_ai_provider = provider;
+            true
+        }
+        key if key.starts_with("settings.ai_model.default:") => {
+            let Some(index) = key
+                .trim_start_matches("settings.ai_model.default:")
+                .parse::<usize>()
+                .ok()
+            else {
+                return false;
+            };
+            let Some(shortcut) = settings.agent_model_shortcuts.get(index) else {
+                return false;
+            };
+            settings.default_agent_model = shortcut.label.clone();
+            settings.default_ai_provider = shortcut.provider;
+            true
+        }
+        key if key.starts_with("settings.ai_model.remove:") => {
+            let Some(index) = key
+                .trim_start_matches("settings.ai_model.remove:")
+                .parse::<usize>()
+                .ok()
+            else {
+                return false;
+            };
+            if index >= settings.agent_model_shortcuts.len() {
+                return false;
+            }
+            let removed = settings.agent_model_shortcuts.remove(index);
+            if settings.default_agent_model == removed.label {
+                settings.default_agent_model.clear();
+            }
+            true
+        }
+        _ => return false,
+    }
+}
+
+pub(crate) fn apply_settings_select(settings: &mut EngineSettings, key: &str, value: &str) -> bool {
+    match key {
+        "settings.quality" => {
+            settings.render_quality = match value {
+                "potato" => {
+                    settings.render_preset = raf_core::config::RenderPreset::Potato;
+                    raf_core::config::RenderQuality::Potato
+                }
+                "low" => {
+                    settings.render_preset = raf_core::config::RenderPreset::Low;
+                    raf_core::config::RenderQuality::Low
+                }
+                "medium" => {
+                    settings.render_preset = raf_core::config::RenderPreset::Medium;
+                    raf_core::config::RenderQuality::Medium
+                }
+                "high" => {
+                    settings.render_preset = raf_core::config::RenderPreset::High;
+                    raf_core::config::RenderQuality::High
+                }
+                _ => return false,
+            };
+        }
+        "settings.render_execution_policy" => {
+            settings.render_execution_policy = match value {
+                "auto" => raf_core::config::RenderExecutionPolicy::Auto,
+                "cpu_only" => raf_core::config::RenderExecutionPolicy::CpuOnly,
+                "gpu_preferred" => raf_core::config::RenderExecutionPolicy::GpuPreferred,
+                _ => return false,
+            };
+        }
+        "settings.viewport_render_mode" => {
+            settings.viewport_render_mode = match value {
+                "solid" => raf_core::config::ViewportRenderMode::Solid,
+                _ => return false,
+            };
+        }
+        "settings.default_script_language" => {
+            settings.default_script_language = match value {
+                "rhai" => raf_core::config::ScriptLanguage::Rhai,
+                "cpp" => raf_core::config::ScriptLanguage::Cpp,
+                _ => return false,
+            };
+        }
+        "settings.target_platform" => {
+            settings.target_platform = match value {
+                "desktop" => raf_core::config::TargetPlatform::Desktop,
+                "mobile" => raf_core::config::TargetPlatform::Mobile,
+                "web" => raf_core::config::TargetPlatform::Web,
+                "cloud" => raf_core::config::TargetPlatform::Cloud,
+                "console" => raf_core::config::TargetPlatform::Console,
+                _ => return false,
+            };
+        }
+        "settings.default_ai_provider" => {
+            let Some(provider) = ai_provider_from_id(value) else {
+                return false;
+            };
+            settings.default_ai_provider = provider;
+        }
+        "settings.agent_mode" => {
+            settings.agent_mode = match value {
+                "inspect" => raf_core::ai::AgentMode::Inspect,
+                "plan" => raf_core::ai::AgentMode::Plan,
+                "active" => raf_core::ai::AgentMode::Active,
+                _ => return false,
+            };
         }
         _ => return false,
     }
@@ -208,6 +344,33 @@ pub(crate) fn apply_settings_range(settings: &mut EngineSettings, key: &str, val
     true
 }
 
+pub(crate) fn is_settings_numeric_text_key(key: &str) -> bool {
+    let Some(key) = key.strip_suffix(".text") else {
+        return false;
+    };
+    matches!(
+        key,
+        "settings.theme_experimental"
+            | "settings.font_size"
+            | "settings.ui_scale"
+            | "settings.fps_limit"
+            | "settings.grid_size"
+            | "settings.grid_load_distance"
+            | "settings.electronics_grid_step_mm"
+            | "settings.electronics_grid_opacity"
+            | "settings.auto_save"
+            | "settings.hierarchy_row_height"
+            | "settings.hierarchy_indent_width"
+            | "settings.wasd_speed"
+            | "settings.gizmo_growth_scale"
+            | "settings.move_sensitivity"
+            | "settings.rotate_sensitivity"
+            | "settings.scale_sensitivity"
+            | "settings.script_timeout_ms"
+            | "settings.agent_max_response_tokens"
+    )
+}
+
 pub(crate) fn apply_settings_text(settings: &mut EngineSettings, key: &str, value: &str) -> bool {
     if key == "settings.script_external_editor" {
         settings.script_external_editor_cmd = value.to_string();
@@ -251,5 +414,145 @@ pub(crate) fn ai_provider_from_id(id: &str) -> Option<AiProvider> {
         "genai" => Some(AiProvider::GenAI),
         "claude" => Some(AiProvider::Claude),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raf_core::config::{Language, Theme};
+    use raf_core::units::DisplayUnit;
+
+    #[test]
+    fn segmented_settings_commands_update_the_draft() {
+        let mut settings = EngineSettings::default();
+
+        assert!(apply_settings_command(
+            &mut settings,
+            "settings.theme.light"
+        ));
+        assert_eq!(settings.theme, Theme::Light);
+        assert!(apply_settings_command(
+            &mut settings,
+            "settings.language.spanish"
+        ));
+        assert_eq!(settings.language, Language::Spanish);
+        assert!(apply_settings_command(
+            &mut settings,
+            "settings.units.imperial"
+        ));
+        assert_eq!(settings.display_unit, DisplayUnit::Imperial);
+        assert!(apply_settings_command(&mut settings, "settings.units.game"));
+        assert_eq!(settings.display_unit, DisplayUnit::Game);
+        assert!(!apply_settings_command(
+            &mut settings,
+            "settings.units.unknown"
+        ));
+    }
+
+    #[test]
+    fn reduce_transparency_toggle_updates_the_settings_draft() {
+        let mut settings = EngineSettings::default();
+
+        assert!(apply_settings_toggle(
+            &mut settings,
+            "settings.reduce_transparency",
+            true
+        ));
+        assert!(settings.reduce_transparency);
+    }
+
+    #[test]
+    fn numeric_settings_are_finite_and_clamped_at_the_adapter_boundary() {
+        let mut settings = EngineSettings::default();
+
+        assert!(apply_settings_range(
+            &mut settings,
+            "settings.font_size",
+            999.0
+        ));
+        assert_eq!(settings.font_size, 24.0);
+        assert!(apply_settings_range(
+            &mut settings,
+            "settings.agent_max_response_tokens",
+            1.0
+        ));
+        assert_eq!(
+            settings.agent_max_response_tokens,
+            raf_core::config::AGENT_MAX_RESPONSE_TOKENS_MIN
+        );
+        assert!(!apply_settings_range(
+            &mut settings,
+            "settings.ui_scale",
+            f32::NAN
+        ));
+        assert!(is_settings_numeric_text_key("settings.grid_size.text"));
+        assert!(!is_settings_numeric_text_key("settings.grid_size"));
+        assert!(!is_settings_numeric_text_key(
+            "settings.agent_message_page_size.text"
+        ));
+    }
+
+    #[test]
+    fn provider_text_and_select_adapters_keep_the_provider_identity() {
+        let mut settings = EngineSettings::default();
+        let provider = settings
+            .ai_providers
+            .first()
+            .map(|config| config.provider)
+            .expect("default settings include an AI provider");
+        let id = match provider {
+            AiProvider::Puerto => "puerto",
+            AiProvider::OpenRouter => "openrouter",
+            AiProvider::OpenAI => "openai",
+            AiProvider::GenAI => "genai",
+            AiProvider::Claude => "claude",
+        };
+
+        assert!(apply_settings_text(
+            &mut settings,
+            &format!("settings.ai_provider.{id}.model"),
+            "test-model"
+        ));
+        assert_eq!(
+            settings.ai_providers.first().expect("provider").model,
+            "test-model"
+        );
+        assert!(apply_settings_select(
+            &mut settings,
+            "settings.default_ai_provider",
+            id
+        ));
+        assert_eq!(settings.default_ai_provider, provider);
+    }
+
+    #[test]
+    fn removed_viewport_render_modes_are_not_selectable() {
+        let mut settings = EngineSettings::default();
+
+        assert!(!apply_settings_select(
+            &mut settings,
+            "settings.viewport_render_mode",
+            "wireframe"
+        ));
+        assert!(!apply_settings_select(
+            &mut settings,
+            "settings.viewport_render_mode",
+            "preview"
+        ));
+        assert!(!apply_settings_toggle(
+            &mut settings,
+            "settings.viewport_render_mode.wireframe",
+            true
+        ));
+        assert!(!apply_settings_toggle(
+            &mut settings,
+            "settings.viewport_render_mode.preview",
+            true
+        ));
+        assert_eq!(
+            settings.viewport_render_mode,
+            raf_core::config::ViewportRenderMode::Solid
+        );
     }
 }

@@ -11,15 +11,18 @@ use raf_electronics::{CadObject, CadObjectKind, CadScene};
 use crate::electronics_controller::{CadCamera, ElectronicsSelection};
 
 pub const IMAGE_KEY: &str = "electronics://minimap";
-pub const IMAGE_SIZE: [u32; 2] = [440, 280];
+// Render at 2x the presentation size so the viewport frame and thin nets stay
+// crisp on high-density displays. The retained image is still presented at a
+// compact 220px width, so this does not change the layout contract.
+pub const IMAGE_SIZE: [u32; 2] = [880, 560];
 
 const BACKGROUND: [u8; 4] = [10, 12, 16, 246];
 const BORDER: [u8; 4] = [74, 82, 96, 255];
 const VIEWPORT: [u8; 4] = [255, 172, 64, 255];
 const COMPONENT: [u8; 4] = [190, 112, 34, 230];
 const COMPONENT_SELECTED: [u8; 4] = [255, 196, 96, 255];
-const PIN: [u8; 4] = [154, 222, 170, 235];
-const WIRE: [u8; 4] = [112, 224, 136, 235];
+const PIN: [u8; 4] = [216, 221, 227, 235];
+const WIRE: [u8; 4] = [216, 221, 227, 235];
 const TRACE: [u8; 4] = [212, 119, 26, 245];
 const AIRWIRE: [u8; 4] = [198, 204, 216, 180];
 const DRC: [u8; 4] = [255, 112, 112, 255];
@@ -77,6 +80,12 @@ impl Map {
         let padding = span * 0.08 + Vec2::splat(4.0);
         min -= padding;
         max += padding;
+        let center = (min + max) * 0.5;
+        let span = max - min;
+        let aspect = width.saturating_sub(1).max(1) as f32 / height.saturating_sub(1).max(1) as f32;
+        let span = Vec2::new(span.x.max(span.y * aspect), span.y.max(span.x / aspect));
+        min = center - span * 0.5;
+        max = center + span * 0.5;
         Self {
             min,
             max,
@@ -201,6 +210,14 @@ fn draw_paths(pixels: &mut [u8], map: &Map, object: &CadObject, color: [u8; 4], 
 fn overview_bounds(scene: &CadScene) -> Option<(Vec2, Vec2)> {
     let mut bounds: Option<(Vec2, Vec2)> = None;
     for object in &scene.objects {
+        if object.id.ends_with("preview")
+            || matches!(
+                object.kind,
+                CadObjectKind::NetLabel | CadObjectKind::DrcMarker
+            )
+        {
+            continue;
+        }
         if let Some(rect) = object.rect {
             include(&mut bounds, rect.center - rect.size.abs() * 0.5);
             include(&mut bounds, rect.center + rect.size.abs() * 0.5);
@@ -215,6 +232,28 @@ fn overview_bounds(scene: &CadScene) -> Option<(Vec2, Vec2)> {
         }
     }
     bounds
+}
+
+/// Shared canvas-local rectangle for presentation and pointer routing.
+pub fn overlay_rect(size: Vec2) -> raf_ui::UiRect {
+    let width = 220.0_f32.min((size.x - 24.0).max(1.0));
+    let height =
+        (width * IMAGE_SIZE[1] as f32 / IMAGE_SIZE[0] as f32).min((size.y - 24.0).max(1.0));
+    raf_ui::UiRect::new(
+        (size.x - width - 12.0).max(0.0),
+        (size.y - height - 12.0).max(0.0),
+        width,
+        height,
+    )
+}
+
+pub fn world_at(scene: &CadScene, local: Vec2, size: Vec2) -> Option<Vec2> {
+    let (min, max) = overview_bounds(scene)?;
+    let map = Map::new(min, max, IMAGE_SIZE[0] as usize, IMAGE_SIZE[1] as usize);
+    let rect = overlay_rect(size);
+    let fraction = ((local - Vec2::new(rect.x, rect.y)) / Vec2::new(rect.width, rect.height))
+        .clamp(Vec2::ZERO, Vec2::ONE);
+    Some(map.min + fraction * (map.max - map.min))
 }
 
 fn include(bounds: &mut Option<(Vec2, Vec2)>, point: Vec2) {

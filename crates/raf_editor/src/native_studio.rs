@@ -22,7 +22,7 @@ use crate::folder_picker;
 use crate::settings_surface::SettingsSection;
 use crate::studio_surface::{
     build_hub_surface_with_model, hub_visible_featured, hub_visible_projects, hub_visible_recent,
-    HubSurfaceFilter, HubSurfaceModel, HubSurfaceProject,
+    HubProjectCreateError, HubSurfaceFilter, HubSurfaceModel, HubSurfaceProject,
 };
 use raf_ui::UiWindowCommand;
 
@@ -52,17 +52,20 @@ pub struct NativeStudioSurface {
     model: HubSurfaceModel,
     last_model: Option<HubSurfaceModel>,
     pointer_position: Option<[f32; 2]>,
+    palette: raf_render::api_graphic_basic::ui_surface::StudioUiPalette,
+    language: Language,
 }
 
 impl NativeStudioSurface {
-    pub fn new(graphics: &NativeGraphicsContext<'_>, rect: EditorRect) -> Self {
+    pub fn new(
+        graphics: &NativeGraphicsContext<'_>,
+        rect: EditorRect,
+        palette: raf_render::api_graphic_basic::ui_surface::StudioUiPalette,
+    ) -> Self {
         let mut model = discover_hub_model();
         model.create_path = default_project_location().to_string_lossy().to_string();
         model.create_active = true;
-        let surface = build_hub_surface_with_model(
-            raf_render::api_graphic_basic::ui_surface::StudioUiPalette::IndustrialDark,
-            &model,
-        );
+        let surface = build_hub_surface_with_model(palette, &model);
         let mut host = graphics.create_ui_host(surface, HUB_CLEAR);
         load_hub_images(host.images_mut());
         Self {
@@ -72,6 +75,8 @@ impl NativeStudioSurface {
             model,
             last_model: None,
             pointer_position: None,
+            palette,
+            language: Language::English,
         }
     }
 
@@ -79,15 +84,18 @@ impl NativeStudioSurface {
         InputOwner::RetainedUi(self.region)
     }
 
-    pub fn sync(&mut self, layout: EditorFrameLayout) {
+    pub fn sync(
+        &mut self,
+        layout: EditorFrameLayout,
+        palette: raf_render::api_graphic_basic::ui_surface::StudioUiPalette,
+    ) {
         self.rect = layout.window;
-        if self.last_model.as_ref() == Some(&self.model) {
+        let palette_changed = self.palette != palette;
+        self.palette = palette;
+        if self.last_model.as_ref() == Some(&self.model) && !palette_changed {
             return;
         }
-        let surface = build_hub_surface_with_model(
-            raf_render::api_graphic_basic::ui_surface::StudioUiPalette::IndustrialDark,
-            &self.model,
-        );
+        let surface = build_hub_surface_with_model(palette, &self.model);
         self.host.set_surface(surface);
         self.host.session_mut().interaction.controls.set_text(
             "hub.create.name",
@@ -107,7 +115,20 @@ impl NativeStudioSurface {
         self.last_model = Some(self.model.clone());
     }
 
-    pub fn set_create_error(&mut self, error: bool) {
+    pub fn set_environment(&mut self, environment: raf_ui::UiEnvironment) {
+        self.host.set_environment(environment);
+    }
+
+    pub fn set_language(&mut self, language: Language) {
+        if self.language == language {
+            return;
+        }
+        self.language = language;
+        self.last_model = None;
+    }
+
+    pub fn set_create_error(&mut self, detail: impl Into<String>) {
+        let error = Some(HubProjectCreateError::CreationFailed(detail.into()));
         if self.model.create_error == error {
             return;
         }
@@ -121,7 +142,7 @@ impl NativeStudioSurface {
         // In-memory project mutations update the cached model; returning here
         // never performs an implicit filesystem scan. A missing or slow
         // project path therefore cannot stall the editor event loop.
-        self.model.create_error = false;
+        self.model.create_error = None;
         self.model.filter = HubSurfaceFilter::All;
         self.model.context_project = None;
         self.model.context_menu_position = None;
@@ -147,6 +168,10 @@ impl NativeStudioSurface {
         self.host.has_active_motion()
     }
 
+    pub fn has_active_text_repeat(&self) -> bool {
+        self.host.has_active_text_repeat()
+    }
+
     pub fn process_input(
         &mut self,
         input: &NativeUiInputBridge,
@@ -154,10 +179,11 @@ impl NativeStudioSurface {
     ) -> Vec<NativeStudioIntent> {
         self.pointer_position = input.snapshot().pointer_position;
         let model = self.model.clone();
+        let language = self.language;
         let actions = self.host.process_routed_input(
             self.rect.logical_size(),
             input.scale_factor() as f32,
-            |key| resolve_hub_text(key, &model),
+            |key| resolve_hub_text(key, &model, language),
             input,
             router,
             self.owner(),
@@ -200,8 +226,14 @@ impl NativeStudioSurface {
     ) {
         match dispatched.action {
             UiAction::SetText { key, value } => match key.as_str() {
-                "hub.create.name" => self.model.create_name = value,
-                "hub.create.path" => self.model.create_path = value,
+                "hub.create.name" => {
+                    self.model.create_name = value;
+                    self.model.create_error = None;
+                }
+                "hub.create.path" => {
+                    self.model.create_path = value;
+                    self.model.create_error = None;
+                }
                 "hub.search" => self.model.search_query = value,
                 _ => {}
             },
@@ -221,19 +253,24 @@ impl NativeStudioSurface {
                 }),
                 "hub.new" => {
                     self.model.create_active = true;
-                    self.model.create_error = false;
+                    self.model.create_error = None;
+                    self.host
+                        .session_mut()
+                        .interaction
+                        .focus
+                        .request_focus("hub.create.name");
                 }
                 "hub.new-game" => {
                     self.model.create_active = true;
                     self.model.create_project_type = ProjectType::Game;
                     self.model.create_type_menu_open = false;
-                    self.model.create_error = false;
+                    self.model.create_error = None;
                 }
                 "hub.new-electronics" => {
                     self.model.create_active = true;
                     self.model.create_project_type = ProjectType::Electronics;
                     self.model.create_type_menu_open = false;
-                    self.model.create_error = false;
+                    self.model.create_error = None;
                 }
                 "hub.projects" | "hub.view-all" => {
                     self.model.filter = HubSurfaceFilter::All;
@@ -288,7 +325,10 @@ impl NativeStudioSurface {
                     self.model.context_project = None;
                     self.model.context_menu_position = None;
                 }
-                "hub.create.type-menu" => self.model.create_type_menu_open = true,
+                "hub.create.type-menu" => {
+                    self.model.create_type_menu_open = !self.model.create_type_menu_open;
+                    self.model.create_active = true;
+                }
                 "hub.create.game" => {
                     self.model.create_project_type = ProjectType::Game;
                     self.model.create_type_menu_open = false;
@@ -301,20 +341,25 @@ impl NativeStudioSurface {
                     let current = self.model.create_path.clone();
                     if let Some(path) = folder_picker::pick_folder(&current) {
                         self.model.create_path = path.to_string_lossy().to_string();
+                        self.model.create_error = None;
                     }
                 }
                 "hub.create.submit" => {
                     let name = self.model.create_name.trim().to_string();
                     let parent = PathBuf::from(self.model.create_path.trim());
-                    if valid_project_name(&name) && !parent.as_os_str().is_empty() {
-                        self.model.create_error = false;
+                    if name.is_empty() {
+                        self.model.create_error = Some(HubProjectCreateError::NameRequired);
+                    } else if !valid_project_name(&name) {
+                        self.model.create_error = Some(HubProjectCreateError::NameInvalid);
+                    } else if parent.as_os_str().is_empty() {
+                        self.model.create_error = Some(HubProjectCreateError::LocationRequired);
+                    } else {
+                        self.model.create_error = None;
                         intents.push(NativeStudioIntent::Create {
                             name,
                             parent,
                             project_type: self.model.create_project_type,
                         });
-                    } else {
-                        self.model.create_error = true;
                     }
                 }
                 _ => {}
@@ -621,38 +666,57 @@ fn load_hub_images(store: &mut UiSurfaceImageStore) {
     }
 }
 
-pub fn resolve_hub_text(key: &str, model: &HubSurfaceModel) -> String {
+pub fn resolve_hub_text(key: &str, model: &HubSurfaceModel, language: Language) -> String {
     match key {
         "hub.brand" => "AuraRafi".to_string(),
         "hub.version" => format!("v{}", env!("CARGO_PKG_VERSION")),
         "hub.stats" => format!(
             "{} {} | {} {} | {} {}",
             model.total_projects,
-            t("app.hub_total_projects", Language::English),
+            t("app.hub_total_projects", language),
             model.game_projects,
-            t("app.hub_game_kind", Language::English),
+            t("app.hub_game_kind", language),
             model.electronics_projects,
-            t("app.hub_electronics_kind", Language::English),
+            t("app.hub_electronics_kind", language),
         ),
         "hub.results" => format!(
             "{} {}",
             hub_visible_projects(model).len(),
-            t("app.hub_results_label", Language::English)
+            t("app.hub_results_label", language)
         ),
         "hub.create.type" => match model.create_project_type {
-            ProjectType::Game => t("app.hub_game_kind", Language::English),
-            ProjectType::Electronics => t("app.hub_electronics_kind", Language::English),
+            ProjectType::Game => t("app.hub_game_kind", language),
+            ProjectType::Electronics => t("app.hub_electronics_kind", language),
+        },
+        "hub.create.error" => match model.create_error.as_ref() {
+            Some(HubProjectCreateError::NameRequired) => {
+                t("app.project_create_name_required", language)
+            }
+            Some(HubProjectCreateError::NameInvalid) => {
+                t("app.project_create_name_invalid", language)
+            }
+            Some(HubProjectCreateError::LocationRequired) => {
+                t("app.project_create_location_required", language)
+            }
+            Some(HubProjectCreateError::CreationFailed(detail)) => {
+                format!("{} {detail}", t("app.project_create_failed", language))
+            }
+            None => String::new(),
         },
         "hub.context.title" => model
             .context_project
             .as_ref()
             .map(|project| project.name.clone())
             .unwrap_or_default(),
-        _ => resolve_dynamic_project_text(key, model).unwrap_or_else(|| t(key, Language::English)),
+        _ => resolve_dynamic_project_text(key, model, language).unwrap_or_else(|| t(key, language)),
     }
 }
 
-fn resolve_dynamic_project_text(key: &str, model: &HubSurfaceModel) -> Option<String> {
+fn resolve_dynamic_project_text(
+    key: &str,
+    model: &HubSurfaceModel,
+    language: Language,
+) -> Option<String> {
     let visible_projects = hub_visible_projects(model);
     let visible_recent = hub_visible_recent(model);
     let featured = hub_visible_featured(model, &visible_projects);
@@ -662,12 +726,12 @@ fn resolve_dynamic_project_text(key: &str, model: &HubSurfaceModel) -> Option<St
         return match field {
             "name" => Some(project.name.clone()),
             "kind" => Some(match project.project_type {
-                ProjectType::Game => t("app.hub_type_game_label", Language::English),
-                ProjectType::Electronics => t("app.hub_type_electronics_label", Language::English),
+                ProjectType::Game => t("app.hub_type_game_label", language),
+                ProjectType::Electronics => t("app.hub_type_electronics_label", language),
             }),
             "last-opened" => Some(format!(
                 "{} {}",
-                t("app.hub_last_opened", Language::English),
+                t("app.hub_last_opened", language),
                 project.last_opened_label
             )),
             _ => None,
@@ -688,12 +752,12 @@ fn resolve_dynamic_project_text(key: &str, model: &HubSurfaceModel) -> Option<St
         return match field {
             "name" => Some(project.name.clone()),
             "kind" => Some(match project.project_type {
-                ProjectType::Game => t("app.hub_type_game_label", Language::English),
-                ProjectType::Electronics => t("app.hub_type_electronics_label", Language::English),
+                ProjectType::Game => t("app.hub_type_game_label", language),
+                ProjectType::Electronics => t("app.hub_type_electronics_label", language),
             }),
             "meta" => Some(format!(
                 "{} {}",
-                t("app.hub_last_opened", Language::English),
+                t("app.hub_last_opened", language),
                 project.last_opened_label
             )),
             _ => None,
@@ -705,8 +769,8 @@ fn resolve_dynamic_project_text(key: &str, model: &HubSurfaceModel) -> Option<St
         return match field {
             "name" => Some(project.name.clone()),
             "kind" => Some(match project.project_type {
-                ProjectType::Game => t("app.hub_type_game_label", Language::English),
-                ProjectType::Electronics => t("app.hub_type_electronics_label", Language::English),
+                ProjectType::Game => t("app.hub_type_game_label", language),
+                ProjectType::Electronics => t("app.hub_type_electronics_label", language),
             }),
             "meta" => Some(project.last_opened_label.clone()),
             _ => None,
@@ -714,8 +778,8 @@ fn resolve_dynamic_project_text(key: &str, model: &HubSurfaceModel) -> Option<St
     }
     match key {
         "hub.featured.kind" => featured.as_ref().map(|project| match project.project_type {
-            ProjectType::Game => t("app.hub_type_game_label", Language::English),
-            ProjectType::Electronics => t("app.hub_type_electronics_label", Language::English),
+            ProjectType::Game => t("app.hub_type_game_label", language),
+            ProjectType::Electronics => t("app.hub_type_electronics_label", language),
         }),
         "hub.featured.name" => featured.as_ref().map(|project| project.name.clone()),
         "hub.featured.path" => featured
@@ -724,7 +788,7 @@ fn resolve_dynamic_project_text(key: &str, model: &HubSurfaceModel) -> Option<St
         "hub.featured.meta" => featured.as_ref().map(|project| {
             format!(
                 "{} | {}",
-                t("app.hub_last_opened", Language::English),
+                t("app.hub_last_opened", language),
                 project.last_opened_label
             )
         }),

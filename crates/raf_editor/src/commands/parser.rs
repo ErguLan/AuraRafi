@@ -14,6 +14,10 @@ pub struct ParsedCommand {
     pub name: String,
     pub args: BTreeMap<String, String>,
     pub positional: Vec<String>,
+    /// Original structured request parameters when the command came through
+    /// the JSON command protocol. Console input keeps this as `None` and
+    /// continues using the legacy string arguments.
+    pub structured_args: Option<Value>,
 }
 
 impl ParsedCommand {
@@ -35,6 +39,10 @@ impl ParsedCommand {
             .map(|value| matches!(value, "true" | "1" | "yes" | "on"))
             .unwrap_or(false)
     }
+
+    pub fn structured_arg(&self, name: &str) -> Option<&Value> {
+        self.structured_args.as_ref()?.get(name)
+    }
 }
 
 pub fn parse_console_input(input: &str) -> Result<ParsedInput, String> {
@@ -54,6 +62,7 @@ pub fn parse_console_input(input: &str) -> Result<ParsedInput, String> {
             name: "help".to_string(),
             args: BTreeMap::new(),
             positional: Vec::new(),
+            structured_args: None,
         }));
     }
 
@@ -97,6 +106,7 @@ pub fn parse_console_input(input: &str) -> Result<ParsedInput, String> {
         name: name.to_ascii_lowercase(),
         args,
         positional,
+        structured_args: None,
     }))
 }
 
@@ -112,9 +122,13 @@ fn tokenize(input: &str) -> Result<Vec<String>, String> {
     let mut current = String::new();
     let mut quote: Option<char> = None;
     let mut escaped = false;
+    let mut structured_depth = 0usize;
 
     for ch in input.chars() {
         if escaped {
+            if structured_depth > 0 {
+                current.push('\\');
+            }
             current.push(ch);
             escaped = false;
             continue;
@@ -126,10 +140,28 @@ fn tokenize(input: &str) -> Result<Vec<String>, String> {
         }
 
         match quote {
-            Some(active) if ch == active => quote = None,
+            Some(active) if ch == active => {
+                if structured_depth > 0 {
+                    current.push(ch);
+                }
+                quote = None;
+            }
             Some(_) => current.push(ch),
-            None if ch == '"' || ch == '\'' => quote = Some(ch),
-            None if ch.is_whitespace() => {
+            None if ch == '"' || ch == '\'' => {
+                if structured_depth > 0 {
+                    current.push(ch);
+                }
+                quote = Some(ch);
+            }
+            None if ch == '{' || ch == '[' => {
+                structured_depth = structured_depth.saturating_add(1);
+                current.push(ch);
+            }
+            None if ch == '}' || ch == ']' => {
+                structured_depth = structured_depth.saturating_sub(1);
+                current.push(ch);
+            }
+            None if ch.is_whitespace() && structured_depth == 0 => {
                 if !current.is_empty() {
                     tokens.push(std::mem::take(&mut current));
                 }
@@ -140,6 +172,9 @@ fn tokenize(input: &str) -> Result<Vec<String>, String> {
 
     if quote.is_some() {
         return Err("Unclosed quote in command input.".to_string());
+    }
+    if structured_depth != 0 {
+        return Err("Unclosed structured JSON value in command input.".to_string());
     }
 
     if escaped {
@@ -198,6 +233,24 @@ mod tests {
             ParsedInput::Command(command) => {
                 assert_eq!(command.arg("primitive"), Some("sphere"));
                 assert_eq!(command.arg("x"), Some("1"));
+            }
+            ParsedInput::Message(_) => panic!("expected command"),
+        }
+    }
+
+    #[test]
+    fn keeps_structured_argument_spaces_inside_one_value() {
+        let parsed = parse_console_input(
+            "/game.add primitive=cube name=Shelf transform={\"position\": [1, 2, 3], \"scale\": [2, 1, 1]} color_rgba=[10, 20, 30, 255]",
+        )
+        .unwrap();
+        match parsed {
+            ParsedInput::Command(command) => {
+                assert_eq!(
+                    command.arg("transform"),
+                    Some("{\"position\": [1, 2, 3], \"scale\": [2, 1, 1]}")
+                );
+                assert_eq!(command.arg("color_rgba"), Some("[10, 20, 30, 255]"));
             }
             ParsedInput::Message(_) => panic!("expected command"),
         }

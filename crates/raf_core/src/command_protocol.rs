@@ -25,6 +25,7 @@ pub enum CommandSource {
     Console,
     Cli,
     Mcp,
+    Agent,
     Plugin,
     Ipc,
 }
@@ -237,6 +238,9 @@ mod tests {
         request.budget = Some(ExecutionBudget {
             max_tool_calls: Some(4),
             max_milliseconds: Some(500),
+            max_scene_operations: Some(32),
+            max_scene_entities: Some(512),
+            max_result_bytes: Some(16_384),
             profile: Some("potato".to_string()),
         });
         let encoded = encode_line(&request).unwrap();

@@ -22,6 +22,7 @@ pub fn build_electronics_toolbar_surface(
     can_undo: bool,
     can_redo: bool,
     has_selection: bool,
+    can_rotate: bool,
 ) -> UiSurface {
     let mut root = UiNode::new("electronics.toolbar", UiNodeKind::Toolbar)
         .with_class("electronics-toolbar")
@@ -69,7 +70,7 @@ pub fn build_electronics_toolbar_surface(
                 palette,
                 "electronics.wire",
                 "Wire",
-                UiIconId::Schematic,
+                UiIconId::Wire,
                 tool == ElectronicsTool::Wire,
             ))
             .with_child(tool_button(
@@ -85,14 +86,14 @@ pub fn build_electronics_toolbar_surface(
                 palette,
                 "electronics.route",
                 "Route",
-                UiIconId::Move,
+                UiIconId::Route,
                 tool == ElectronicsTool::Route,
             ))
             .with_child(tool_button(
                 palette,
                 "electronics.board-outline",
                 "Board",
-                UiIconId::Pcb,
+                UiIconId::BoardOutline,
                 tool == ElectronicsTool::BoardOutline,
             ))
             .with_child(tool_button(
@@ -122,13 +123,13 @@ pub fn build_electronics_toolbar_surface(
             palette,
             "electronics.zoom-out",
             "Zoom out",
-            UiIconId::Scale,
+            UiIconId::ZoomOut,
         ))
         .with_child(icon_button(
             palette,
             "electronics.zoom-in",
             "Zoom in",
-            UiIconId::Add,
+            UiIconId::ZoomIn,
         ))
         .with_child(separator("electronics.toolbar.options-separator"))
         .with_child(toggle_button(
@@ -151,13 +152,13 @@ pub fn build_electronics_toolbar_surface(
             "electronics.rotate",
             "Rotate",
             UiIconId::Rotate,
-            !has_selection,
+            !can_rotate,
         ))
         .with_child(action_icon_button(
             palette,
             "edit.delete",
             "Delete",
-            UiIconId::Close,
+            UiIconId::Trash,
             !has_selection,
         ))
         .with_child(action_icon_button(
@@ -234,7 +235,7 @@ fn toggle_button(
 fn button(
     palette: StudioUiPalette,
     command: &str,
-    label: &str,
+    _label: &str,
     icon: UiIconId,
     active: bool,
     class: &str,
@@ -254,7 +255,7 @@ fn button(
             ..UiLayout::fit_content().with_text_safe_area(true)
         })
         .with_icon(UiIcon::new(icon).with_size(UiIconSize::Toolbar))
-        .with_text_value(label.to_string())
+        .with_text_key(label_key(command))
         .with_text_style(UiTextStyle {
             role: UiTextRole::Button,
             size_px: 11.0,
@@ -322,6 +323,22 @@ fn tooltip_key(command: &str) -> &'static str {
     }
 }
 
+fn label_key(command: &str) -> &'static str {
+    match command {
+        "electronics.mode.schematic" => "electronics.toolbar.schematic",
+        "electronics.mode.pcb" => "electronics.toolbar.pcb",
+        "electronics.select" => "electronics.toolbar.select",
+        "electronics.pan" => "electronics.toolbar.pan",
+        "electronics.wire" => "electronics.toolbar.wire",
+        "electronics.place" => "electronics.toolbar.place",
+        "electronics.route" => "electronics.toolbar.route",
+        "electronics.board-outline" => "electronics.toolbar.board",
+        "electronics.grid.toggle" => "electronics.toolbar.grid",
+        "electronics.labels.toggle" => "electronics.toolbar.labels",
+        _ => "electronics.tooltip.command",
+    }
+}
+
 fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
     let tokens = palette.tokens();
     let classes = [
@@ -357,7 +374,7 @@ fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
         ),
         (
             "electronics-toolbar-active",
-            [116, 67, 24, 100],
+            tokens.surface_raised,
             tokens.accent,
             tokens.text,
         ),
@@ -429,6 +446,7 @@ mod tests {
             true,
             true,
             false,
+            false,
         );
 
         assert_buttons_have_tooltips(&surface.root);
@@ -454,11 +472,16 @@ mod tests {
             false,
             false,
             true,
+            true,
         );
         assert_buttons_have_tooltips(&surface.root);
         assert!(surface.root.children.iter().any(|node| {
             node.id == "electronics.toolbar.electronics.pcb.sync"
                 && node.tooltip_key.as_deref() == Some("electronics.tooltip.pcb_sync")
+        }));
+        assert!(surface.root.children.iter().any(|node| {
+            node.id == "electronics.toolbar.electronics.route"
+                && node.icon.is_some_and(|icon| icon.id == UiIconId::Route)
         }));
     }
 }

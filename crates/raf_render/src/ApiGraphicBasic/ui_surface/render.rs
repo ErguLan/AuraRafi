@@ -1,9 +1,10 @@
 use std::collections::HashMap;
 
 use super::{
-    UiAlign, UiCompactMode, UiControl, UiFlow, UiHitRegion, UiJustify, UiLayout, UiNode,
-    UiNodeKind, UiPositionMode, UiRect, UiSizeMode, UiStyle, UiStyleSheet, UiTextAtlasRequest,
-    UiTextEditState, UiTextStyle, UiVisualState,
+    UiAccessibilityRole, UiAlign, UiCompactMode, UiControl, UiFlow, UiHitRegion, UiJustify,
+    UiLayout, UiNode, UiNodeKind, UiPositionMode, UiRect, UiSizeMode, UiStyle, UiStyleSheet,
+    UiSurfaceMaterial, UiTextAtlasRequest, UiTextEditState, UiTextOverflow, UiTextStyle,
+    UiVisualState,
 };
 
 /// Retained interaction/layout output. Visual geometry is compiled separately
@@ -45,19 +46,29 @@ pub struct UiLayoutBox {
     pub content_rect: UiRect,
     pub clip_rect: UiRect,
     pub interactive: bool,
+    pub text_selectable: bool,
     pub focusable: bool,
     pub disabled: bool,
+    pub invalid: bool,
     pub accessibility_label_key: Option<String>,
+    pub accessibility_role: super::UiAccessibilityRole,
+    pub accessibility_description_key: Option<String>,
+    pub accessibility_expanded: Option<bool>,
+    pub accessibility_checked: Option<bool>,
+    pub accessibility_selected: Option<bool>,
     pub z_index: i16,
     pub width_mode: UiSizeMode,
     pub height_mode: UiSizeMode,
     pub style: UiStyle,
+    pub material: UiSurfaceMaterial,
     pub text_style: Option<UiTextStyle>,
+    pub text_overflow: UiTextOverflow,
     pub icon: Option<raf_ui::UiIcon>,
     pub control: UiControl,
     /// Snapshot of the focused text editor state used by presentation to draw
     /// a caret without coupling the draw list to the mutable control store.
     pub text_edit: Option<UiTextEditState>,
+    pub ime_preedit: Option<String>,
 }
 
 pub(super) fn build_surface_frame(
@@ -68,6 +79,7 @@ pub(super) fn build_surface_frame(
     width: u32,
     height: u32,
     _clear_color: [u8; 4],
+    text_scale: f32,
 ) -> UiSurfaceFrame {
     build_surface_frame_with_intrinsic_sizes(
         root,
@@ -77,6 +89,7 @@ pub(super) fn build_surface_frame(
         width,
         height,
         _clear_color,
+        text_scale,
         &HashMap::new(),
     )
 }
@@ -89,6 +102,7 @@ pub(super) fn build_surface_frame_with_intrinsic_sizes(
     width: u32,
     height: u32,
     _clear_color: [u8; 4],
+    text_scale: f32,
     intrinsic_sizes: &HashMap<String, [f32; 2]>,
 ) -> UiSurfaceFrame {
     let root_rect = UiRect::new(0.0, 0.0, width as f32, height as f32);
@@ -111,6 +125,7 @@ pub(super) fn build_surface_frame_with_intrinsic_sizes(
         &mut text_requests,
         &mut focus_order,
         &mut scroll_metrics,
+        text_scale,
         intrinsic_sizes,
     );
 
@@ -121,6 +136,22 @@ pub(super) fn build_surface_frame_with_intrinsic_sizes(
         focus_order,
         tooltip_anchor: None,
         scroll_metrics,
+    }
+}
+
+fn effective_accessibility_role(node: &UiNode) -> UiAccessibilityRole {
+    if node.accessibility_role != UiAccessibilityRole::Generic {
+        return node.accessibility_role;
+    }
+    match &node.control {
+        UiControl::TextInput(_) => UiAccessibilityRole::Textbox,
+        UiControl::Toggle(_) => UiAccessibilityRole::Checkbox,
+        UiControl::Range(_) => UiAccessibilityRole::Slider,
+        UiControl::ColorPicker(_) => UiAccessibilityRole::Slider,
+        UiControl::Select(_) => UiAccessibilityRole::Combobox,
+        UiControl::None if node.kind == UiNodeKind::Button => UiAccessibilityRole::Button,
+        UiControl::None if node.kind == UiNodeKind::Menu => UiAccessibilityRole::Menu,
+        _ => UiAccessibilityRole::Generic,
     }
 }
 
@@ -138,6 +169,7 @@ fn record_node(
     text_requests: &mut Vec<UiTextAtlasRequest>,
     focus_order: &mut Vec<String>,
     scroll_metrics: &mut Vec<UiScrollMetrics>,
+    text_scale: f32,
     intrinsic_sizes: &HashMap<String, [f32; 2]>,
 ) {
     let resolved_layout = node.layout.resolved_for(assigned_rect.width);
@@ -173,17 +205,59 @@ fn record_node(
             ),
         ),
         Some(explicit_rect) => constrain_rect(&layout, explicit_rect),
-        // A flow parent may intentionally compress a child below its requested
-        // minimum when the surface is physically narrower than all tracks.
-        // Re-applying the minimum here would make siblings overlap.
+        // Flexible flow tracks may be compressed by their parent. Fixed and
+        // intrinsic tracks are kept at the size used to resolve their own
+        // children, so a compressed parent cannot make a later sibling paint
+        // over them.
         None => constrain_assigned_rect(&layout, assigned_rect, node, intrinsic_sizes),
     };
     let z_index = parent_z_index.saturating_add(layout.z_index);
     let style = style_sheet.resolve_with_state(node, visual_state);
+    let accessibility_role = effective_accessibility_role(node);
+    let accessibility_checked = node
+        .accessibility_checked
+        .or_else(|| node.control.toggle().map(|toggle| toggle.value));
+    let accessibility_expanded = node
+        .accessibility_expanded
+        .or_else(|| node.control.select().map(|select| select.open));
+    let accessibility_selected = node.accessibility_selected;
     let content_rect = rect.shrink(layout.padding);
-    let text_edit = node.control.text_input().and_then(|input| {
+    // Menus, popovers and floating panels are window-level visual layers even
+    // when their declarative owner lives inside a scroll view. Let the popup
+    // clip to its own bounds so an open dropdown is not cut off by an
+    // inspector/list ancestor. The compositor still clamps to the target.
+    let breaks_ancestor_clip = matches!(
+        node.kind,
+        UiNodeKind::Overlay | UiNodeKind::Menu | UiNodeKind::Tooltip | UiNodeKind::FloatingPanel
+    );
+    let node_clip = if breaks_ancestor_clip {
+        rect
+    } else {
+        parent_clip
+    };
+    let text_edit = if visual_state.focused_id == Some(node.id.as_str()) {
+        node.control
+            .text_input()
+            .map(|input| control_state.text_edit(input.value_key.as_str()))
+            .or_else(|| {
+                node.text_selectable.then(|| {
+                    control_state.selectable_text_edit(
+                        &node.id,
+                        node.text_value.as_deref().unwrap_or_default(),
+                    )
+                })
+            })
+    } else {
+        None
+    };
+    let ime_preedit = node.control.text_input().and_then(|input| {
         (visual_state.focused_id == Some(node.id.as_str()))
-            .then(|| control_state.text_edit(input.value_key.as_str()))
+            .then(|| {
+                control_state
+                    .ime_preedit(input.value_key.as_str())
+                    .to_string()
+            })
+            .filter(|value| !value.is_empty())
     });
     boxes.push(UiLayoutBox {
         id: node.id.clone(),
@@ -194,19 +268,29 @@ fn record_node(
         tooltip_value: node.tooltip_value.clone(),
         rect,
         content_rect,
-        clip_rect: parent_clip,
+        clip_rect: node_clip,
         interactive: node.interactive,
+        text_selectable: node.text_selectable,
         focusable: node.focusable,
         disabled: node.disabled,
+        invalid: node.invalid,
         accessibility_label_key: node.accessibility_label_key.clone(),
+        accessibility_role,
+        accessibility_description_key: node.accessibility_description_key.clone(),
+        accessibility_expanded,
+        accessibility_checked,
+        accessibility_selected,
         z_index,
         width_mode: layout.width_mode,
         height_mode: layout.height_mode,
         style: style.clone(),
+        material: node.material,
         text_style: node.text_style,
+        text_overflow: node.text_overflow,
         icon: node.icon,
         control: node.control.clone(),
         text_edit,
+        ime_preedit,
     });
     if node.focusable && !node.disabled {
         focus_order.push(node.id.clone());
@@ -215,7 +299,7 @@ fn record_node(
         id: node.id.clone(),
         kind: node.kind,
         rect,
-        clip_rect: parent_clip,
+        clip_rect: node_clip,
         z_index,
         interactive: node.interactive,
         focusable: node.focusable,
@@ -233,11 +317,20 @@ fn record_node(
     if let Some(text_key) = text_key {
         let mut text_style = node
             .text_style
-            .unwrap_or_else(|| UiTextStyle::body(style.text));
+            .unwrap_or_else(|| UiTextStyle::body(style.text))
+            .scaled_for_ui(text_scale);
         if text_style.inherit_color {
             text_style.color = style.text;
         }
         text_style.color = apply_opacity(text_style.color, style.opacity);
+        if let Some(input) = node.control.text_input() {
+            if control_state.text(&input.value_key).is_empty()
+                && control_state.ime_preedit(&input.value_key).is_empty()
+                && input.placeholder_key.is_some()
+            {
+                text_style.color[3] = text_style.color[3].min(156);
+            }
+        }
         let icon_inset = node
             .icon
             .map(|icon| 6.0 + f32::from(icon.size.logical_pixels()) + 6.0)
@@ -266,16 +359,26 @@ fn record_node(
         } else {
             256.0
         };
-        text_requests.push(UiTextAtlasRequest::new(
+        let request = UiTextAtlasRequest::new(
             node.id.clone(),
             text_key.to_string(),
             text_style,
             text_max_width,
-        ));
+        )
+        .with_overflow(node.text_overflow)
+        .with_single_line(
+            node.control
+                .text_input()
+                .is_some_and(|input| !input.multiline)
+                || matches!(node.kind, UiNodeKind::Button | UiNodeKind::Toolbar),
+        );
+        text_requests.push(request);
     }
 
     let content = content_rect;
-    let child_clip = if layout.overflow.clips_children() || node.control.scroll_axis().is_some() {
+    let child_clip = if breaks_ancestor_clip {
+        rect
+    } else if layout.overflow.clips_children() || node.control.scroll_axis().is_some() {
         parent_clip.intersection(content)
     } else {
         parent_clip
@@ -294,7 +397,7 @@ fn record_node(
     let mut flow_content = child_content;
     if let Some(axis) = node.control.scroll_axis() {
         if axis.scrolls_vertically() && flow == UiFlow::Column {
-            flow_content.height = flow_content.height.max(intrinsic_flow_main_size_with_map(
+            flow_content.height = flow_content.height.max(intrinsic_flow_size_with_map(
                 node,
                 &layout,
                 false,
@@ -302,7 +405,7 @@ fn record_node(
             ));
         }
         if axis.scrolls_horizontally() && flow == UiFlow::Row {
-            flow_content.width = flow_content.width.max(intrinsic_flow_main_size_with_map(
+            flow_content.width = flow_content.width.max(intrinsic_flow_size_with_map(
                 node,
                 &layout,
                 true,
@@ -366,6 +469,7 @@ fn record_node(
                     text_requests,
                     focus_order,
                     scroll_metrics,
+                    text_scale,
                     intrinsic_sizes,
                 );
             }
@@ -386,6 +490,7 @@ fn record_node(
             text_requests,
             focus_order,
             scroll_metrics,
+            text_scale,
             intrinsic_sizes,
         ),
         UiFlow::Column => record_flow_children(
@@ -404,6 +509,7 @@ fn record_node(
             text_requests,
             focus_order,
             scroll_metrics,
+            text_scale,
             intrinsic_sizes,
         ),
         UiFlow::RowWrap => record_wrapped_children(
@@ -421,6 +527,7 @@ fn record_node(
             text_requests,
             focus_order,
             scroll_metrics,
+            text_scale,
             intrinsic_sizes,
         ),
         UiFlow::Grid => record_grid_children(
@@ -438,6 +545,7 @@ fn record_node(
             text_requests,
             focus_order,
             scroll_metrics,
+            text_scale,
             intrinsic_sizes,
         ),
     }
@@ -576,17 +684,27 @@ fn push_scrollbar_box(
         content_rect: visual_rect,
         clip_rect,
         interactive: true,
+        text_selectable: false,
         focusable: false,
         disabled: false,
+        invalid: false,
         accessibility_label_key: None,
+        accessibility_role: super::UiAccessibilityRole::Generic,
+        accessibility_description_key: None,
+        accessibility_expanded: None,
+        accessibility_checked: None,
+        accessibility_selected: None,
         z_index,
         width_mode: UiSizeMode::Fixed,
         height_mode: UiSizeMode::Fixed,
         style,
+        material: UiSurfaceMaterial::Opaque,
         text_style: None,
+        text_overflow: UiTextOverflow::Clip,
         icon: None,
         control: UiControl::None,
         text_edit: None,
+        ime_preedit: None,
     });
     hit_regions.push(UiHitRegion {
         id,
@@ -616,6 +734,7 @@ fn record_flow_children(
     text_requests: &mut Vec<UiTextAtlasRequest>,
     focus_order: &mut Vec<String>,
     scroll_metrics: &mut Vec<UiScrollMetrics>,
+    text_scale: f32,
     intrinsic_sizes: &HashMap<String, [f32; 2]>,
 ) {
     let flow_children = node
@@ -679,6 +798,7 @@ fn record_flow_children(
             text_requests,
             focus_order,
             scroll_metrics,
+            text_scale,
             intrinsic_sizes,
         );
     }
@@ -699,6 +819,7 @@ fn record_wrapped_children(
     text_requests: &mut Vec<UiTextAtlasRequest>,
     focus_order: &mut Vec<String>,
     scroll_metrics: &mut Vec<UiScrollMetrics>,
+    text_scale: f32,
     intrinsic_sizes: &HashMap<String, [f32; 2]>,
 ) {
     let gap = parent_layout.gap.max(0.0);
@@ -795,6 +916,7 @@ fn record_wrapped_children(
             text_requests,
             focus_order,
             scroll_metrics,
+            text_scale,
             intrinsic_sizes,
         );
     }
@@ -815,6 +937,7 @@ fn record_grid_children(
     text_requests: &mut Vec<UiTextAtlasRequest>,
     focus_order: &mut Vec<String>,
     scroll_metrics: &mut Vec<UiScrollMetrics>,
+    text_scale: f32,
     intrinsic_sizes: &HashMap<String, [f32; 2]>,
 ) {
     let gap = parent_layout.gap.max(0.0);
@@ -879,6 +1002,7 @@ fn record_grid_children(
             text_requests,
             focus_order,
             scroll_metrics,
+            text_scale,
             intrinsic_sizes,
         );
     }
@@ -1055,8 +1179,9 @@ fn wrap_main_size(layout: &UiLayout, available: f32, intrinsic: Option<[f32; 2]>
 }
 
 /// Resolves one row or column track without allowing sibling rectangles to
-/// overlap. Minimums are honored while the host has room; otherwise every
-/// item compresses proportionally, which is the only physically valid result.
+/// overlap. Flexible tracks compress when the host is smaller than the
+/// requested content; fixed and intrinsic tracks remain rigid because their
+/// descendants resolve against that authored size.
 fn resolve_flow_main_sizes(
     children: &[FlowChild<'_>],
     row: bool,
@@ -1084,9 +1209,35 @@ fn resolve_flow_main_sizes(
         if requested_total <= f32::EPSILON {
             return vec![available / children.len() as f32; children.len()];
         }
+        let rigid = children
+            .iter()
+            .enumerate()
+            .map(|(index, child)| {
+                flow_track_is_rigid(&child.layout, axis).then_some(requested[index])
+            })
+            .collect::<Vec<_>>();
+        let rigid_total = rigid.iter().flatten().sum::<f32>();
+        if rigid_total > available {
+            // The content itself is taller/wider than the host. Let the
+            // parent overflow/scroll it instead of returning rectangles that
+            // are smaller than the dimensions their children will resolve to.
+            return requested;
+        }
+        let flexible_total = requested_total - rigid_total;
+        if flexible_total <= f32::EPSILON {
+            return requested;
+        }
+        let flexible_scale = (available - rigid_total).max(0.0) / flexible_total;
         return requested
             .iter()
-            .map(|size| size * available / requested_total)
+            .enumerate()
+            .map(|(index, size)| {
+                if rigid[index].is_some() {
+                    *size
+                } else {
+                    *size * flexible_scale
+                }
+            })
             .collect();
     }
 
@@ -1128,6 +1279,19 @@ fn resolve_flow_main_sizes(
     sizes
 }
 
+fn flow_track_is_rigid(layout: &UiLayout, axis: usize) -> bool {
+    let mode = if axis == 0 {
+        layout.width_mode
+    } else {
+        layout.height_mode
+    };
+    match mode {
+        UiSizeMode::Fixed => layout.basis[axis] > f32::EPSILON,
+        UiSizeMode::FitContent | UiSizeMode::MinContent | UiSizeMode::MaxContent => true,
+        UiSizeMode::Auto | UiSizeMode::Fill => false,
+    }
+}
+
 /// Calculates the main-axis size a flow child needs before its parent applies
 /// free-space growth. This gives scroll views a real content extent instead
 /// of collapsing containers that only have flow children.
@@ -1138,16 +1302,37 @@ fn flow_main_requirement_with_map(
     intrinsic: Option<[f32; 2]>,
     intrinsic_sizes: Option<&HashMap<String, [f32; 2]>>,
 ) -> f32 {
+    flow_dimension_requirement_with_map(node, layout, row, intrinsic, intrinsic_sizes, true)
+}
+
+fn flow_cross_requirement_with_map(
+    node: &UiNode,
+    layout: &UiLayout,
+    row: bool,
+    intrinsic: Option<[f32; 2]>,
+    intrinsic_sizes: Option<&HashMap<String, [f32; 2]>>,
+) -> f32 {
+    flow_dimension_requirement_with_map(node, layout, row, intrinsic, intrinsic_sizes, false)
+}
+
+fn flow_dimension_requirement_with_map(
+    node: &UiNode,
+    layout: &UiLayout,
+    row: bool,
+    intrinsic: Option<[f32; 2]>,
+    intrinsic_sizes: Option<&HashMap<String, [f32; 2]>>,
+    collapse_growing_main_axis: bool,
+) -> f32 {
     let axis = if row { 0 } else { 1 };
     let explicit = layout.basis[axis].max(layout.min_size[axis]).max(0.0);
-    if explicit > f32::EPSILON || layout.grow > 0.0 {
+    if explicit > f32::EPSILON || (collapse_growing_main_axis && layout.grow > 0.0) {
         return explicit;
     }
 
     if let Some(intrinsic) = intrinsic.map(|size| size[if row { 0 } else { 1 }]) {
         return intrinsic.max(0.0);
     }
-    let child_intrinsic = intrinsic_flow_main_size_with_map(node, layout, row, intrinsic_sizes);
+    let child_intrinsic = intrinsic_flow_size_with_map(node, layout, row, intrinsic_sizes);
     if child_intrinsic > f32::EPSILON {
         return child_intrinsic;
     }
@@ -1176,17 +1361,21 @@ fn flow_main_requirement_with_map(
     0.0
 }
 
-fn intrinsic_flow_main_size_with_map(
+fn intrinsic_flow_size_with_map(
     node: &UiNode,
     layout: &UiLayout,
     row: bool,
     intrinsic_sizes: Option<&HashMap<String, [f32; 2]>>,
 ) -> f32 {
-    let matching_flow = matches!(
+    let main_axis = matches!(
         (layout.flow, row),
         (UiFlow::Row, true) | (UiFlow::Column, false)
     );
-    if !matching_flow {
+    let cross_axis = matches!(
+        (layout.flow, row),
+        (UiFlow::Row, false) | (UiFlow::Column, true)
+    );
+    if !main_axis && !cross_axis {
         return 0.0;
     }
 
@@ -1204,19 +1393,20 @@ fn intrinsic_flow_main_size_with_map(
     } else {
         layout.padding.top + layout.padding.bottom
     };
-    let children_size = children
-        .iter()
-        .map(|child| {
-            flow_main_requirement_with_map(
-                child,
-                &child.layout,
-                row,
-                intrinsic_sizes.and_then(|sizes| sizes.get(&child.id).copied()),
-                intrinsic_sizes,
-            )
-        })
-        .sum::<f32>();
-    children_size + layout.gap.max(0.0) * children.len().saturating_sub(1) as f32 + padding
+    let child_sizes = children.iter().map(|child| {
+        let intrinsic = intrinsic_sizes.and_then(|sizes| sizes.get(&child.id).copied());
+        if main_axis {
+            flow_main_requirement_with_map(child, &child.layout, row, intrinsic, intrinsic_sizes)
+        } else {
+            flow_cross_requirement_with_map(child, &child.layout, row, intrinsic, intrinsic_sizes)
+        }
+    });
+    let children_size = if main_axis {
+        child_sizes.sum::<f32>() + layout.gap.max(0.0) * children.len().saturating_sub(1) as f32
+    } else {
+        child_sizes.fold(0.0, f32::max)
+    };
+    children_size + padding
 }
 
 fn constrain_rect(layout: &super::UiLayout, rect: UiRect) -> UiRect {
@@ -1275,39 +1465,13 @@ fn intrinsic_node_dimension(
     } else {
         layout.padding.top + layout.padding.bottom
     };
-    let child_extent = if axis == 0 && layout.flow == UiFlow::Row {
-        node.children
-            .iter()
-            .map(|child| {
-                flow_main_requirement_with_map(
-                    child,
-                    &child.layout,
-                    true,
-                    Some(intrinsic_sizes).and_then(|sizes| sizes.get(&child.id).copied()),
-                    Some(intrinsic_sizes),
-                )
-            })
-            .sum::<f32>()
-            + layout.gap.max(0.0) * node.children.len().saturating_sub(1) as f32
-    } else if axis == 1 && layout.flow == UiFlow::Column {
-        node.children
-            .iter()
-            .map(|child| {
-                flow_main_requirement_with_map(
-                    child,
-                    &child.layout,
-                    false,
-                    Some(intrinsic_sizes).and_then(|sizes| sizes.get(&child.id).copied()),
-                    Some(intrinsic_sizes),
-                )
-            })
-            .sum::<f32>()
-            + layout.gap.max(0.0) * node.children.len().saturating_sub(1) as f32
-    } else {
-        0.0
-    };
+    // A retained flow owns both dimensions. Main-axis content is additive;
+    // cross-axis content is the largest child. Without the cross-axis case a
+    // fit-content row can reserve zero height while its children still paint,
+    // allowing the next sibling to occupy the same vertical track.
+    let child_extent = intrinsic_flow_size_with_map(node, layout, axis == 0, Some(intrinsic_sizes));
     if child_extent > 0.0 {
-        return child_extent + padding;
+        return child_extent;
     }
     if let Some(size) = intrinsic_sizes.get(&node.id) {
         // The measured map already contains this node's authored/effective
@@ -1373,9 +1537,39 @@ mod tests {
             );
 
         assert_eq!(
-            intrinsic_flow_main_size_with_map(&section, &section.layout, false, None),
+            intrinsic_flow_size_with_map(&section, &section.layout, false, None),
             120.0
         );
+    }
+
+    #[test]
+    fn fixed_flow_tracks_keep_their_authored_extent_when_the_host_is_shorter() {
+        let surface = super::super::UiSurface::new(
+            "fixed-overflow",
+            super::super::StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root)
+                .with_layout(UiLayout::fill(UiFlow::Column))
+                .with_child(
+                    UiNode::new("first", UiNodeKind::Panel).with_layout(UiLayout::fixed(0.0, 80.0)),
+                )
+                .with_child(
+                    UiNode::new("second", UiNodeKind::Panel)
+                        .with_layout(UiLayout::fixed(0.0, 80.0)),
+                ),
+        );
+        let frame = surface.build_frame(220, 100, [0, 0, 0, 255]);
+        let first = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "first")
+            .expect("first fixed track");
+        let second = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "second")
+            .expect("second fixed track");
+
+        assert!(second.rect.y >= first.rect.bottom());
     }
 
     #[test]
@@ -1633,6 +1827,56 @@ mod tests {
     }
 
     #[test]
+    fn fit_content_row_reserves_cross_axis_height_for_its_tallest_child() {
+        let surface = super::super::UiSurface::new(
+            "fit-content-row-cross-axis",
+            super::super::StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root)
+                .with_layout(UiLayout::fill(UiFlow::Column))
+                .with_child(
+                    UiNode::new("toolbar", UiNodeKind::Panel)
+                        .with_layout(UiLayout {
+                            flow: UiFlow::Row,
+                            gap: 8.0,
+                            ..UiLayout::fit_content()
+                                .with_width_mode(UiSizeMode::Fill)
+                                .with_height_mode(UiSizeMode::FitContent)
+                        })
+                        .with_child(
+                            UiNode::new("toolbar.label", UiNodeKind::Label)
+                                .with_layout(UiLayout::fixed(120.0, 24.0)),
+                        )
+                        .with_child(
+                            UiNode::new("toolbar.action", UiNodeKind::Button)
+                                .with_layout(UiLayout::fixed(44.0, 40.0)),
+                        ),
+                )
+                .with_child(
+                    UiNode::new("next", UiNodeKind::Panel).with_layout(UiLayout::fixed(0.0, 18.0)),
+                ),
+        );
+        let frame = surface.build_frame(320, 120, [0, 0, 0, 255]);
+        let toolbar = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "toolbar")
+            .expect("fit-content row");
+        let action = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "toolbar.action")
+            .expect("tall row child");
+        let next = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "next")
+            .expect("following sibling");
+
+        assert!(toolbar.rect.height >= action.rect.height);
+        assert!(next.rect.y >= toolbar.rect.y + toolbar.rect.height);
+    }
+
+    #[test]
     fn absolute_child_offsets_are_relative_to_the_parent_content() {
         let root = UiNode::new("root", UiNodeKind::Root).with_child(
             UiNode::new("slider", UiNodeKind::Panel)
@@ -1650,6 +1894,7 @@ mod tests {
             240,
             120,
             [0, 0, 0, 255],
+            1.0,
         );
         let fill = frame
             .layout_boxes
@@ -1687,6 +1932,7 @@ mod tests {
             240,
             80,
             [0, 0, 0, 255],
+            1.0,
         );
         let first = frame
             .layout_boxes
@@ -1719,6 +1965,7 @@ mod tests {
             80,
             48,
             [0, 0, 0, 255],
+            1.0,
         );
         let button = frame
             .layout_boxes

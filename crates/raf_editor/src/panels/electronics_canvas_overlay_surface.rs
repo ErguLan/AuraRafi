@@ -25,6 +25,7 @@ const LABEL_GAP: f32 = 4.0;
 const MIN_LABEL_WIDTH: f32 = 24.0;
 const MAX_LABEL_WIDTH: f32 = 180.0;
 const COMPONENT_Z_INDEX: i16 = 0;
+const COMPONENT_PREVIEW_Z_INDEX: i16 = 4;
 const MINIMAP_Z_INDEX: i16 = 5;
 const LABEL_Z_INDEX: i16 = 10;
 const HINT_Z_INDEX: i16 = 20;
@@ -57,8 +58,16 @@ pub fn build_electronics_canvas_overlay_surface(
         if object.kind != CadObjectKind::Component {
             continue;
         }
-        let (Some(rect), Some(source_id)) = (object.rect, object.source_id) else {
+        let Some(rect) = object.rect else {
             continue;
+        };
+        let is_placement_preview = object.id == "component-placement-preview";
+        let asset_key = match object.source_id {
+            Some(source_id) => editor.component_asset_key(source_id),
+            None if is_placement_preview => editor
+                .placement_preview_asset_key()
+                .unwrap_or("electronics://library/generic.png"),
+            None => continue,
         };
         let screen_center = camera.screen_from_world(rect.center, canvas_size);
         let raw_size = rect.size.abs() * camera.zoom;
@@ -72,14 +81,19 @@ pub fn build_electronics_canvas_overlay_surface(
             UiNode::image(
                 format!("electronics.canvas.component-image.{index}"),
                 UiImage {
-                    source: UiImageSource::new(editor.component_asset_key(source_id)),
+                    source: UiImageSource::new(asset_key),
                     fit: UiImageFit::Contain,
-                    tint: None,
+                    tint: is_placement_preview.then_some([255, 255, 255, 156]),
                 },
             )
             .with_layout(
-                UiLayout::absolute(UiRect::new(x, y, image_size.x, image_size.y))
-                    .with_z_index(COMPONENT_Z_INDEX),
+                UiLayout::absolute(UiRect::new(x, y, image_size.x, image_size.y)).with_z_index(
+                    if is_placement_preview {
+                        COMPONENT_PREVIEW_Z_INDEX
+                    } else {
+                        COMPONENT_Z_INDEX
+                    },
+                ),
             ),
         );
     }
@@ -164,8 +178,7 @@ pub fn build_electronics_canvas_overlay_surface(
         }
     }
 
-    let minimap_width = 220.0_f32.min((canvas.width - 24.0).max(96.0));
-    let minimap_height = minimap_width * 0.6364;
+    let minimap_rect = crate::electronics_minimap::overlay_rect(canvas_size);
     root = root.with_child(
         UiNode::image(
             "electronics.canvas.minimap",
@@ -175,15 +188,7 @@ pub fn build_electronics_canvas_overlay_surface(
                 tint: None,
             },
         )
-        .with_layout(
-            UiLayout::absolute(UiRect::new(
-                (canvas.width - minimap_width - 12.0).max(12.0),
-                (canvas.height - minimap_height - 12.0).max(12.0),
-                minimap_width,
-                minimap_height,
-            ))
-            .with_z_index(MINIMAP_Z_INDEX),
-        ),
+        .with_layout(UiLayout::absolute(minimap_rect).with_z_index(MINIMAP_Z_INDEX)),
     );
 
     let hint_width: f32 = 320.0;
@@ -210,7 +215,7 @@ pub fn build_electronics_canvas_overlay_surface(
                 radius: 4.0,
                 opacity: 0.96,
             })
-            .with_text_value(tool_hint(editor.tool()).to_string())
+            .with_text_key(tool_hint_key(editor.tool()))
             .with_text_style(UiTextStyle {
                 role: UiTextRole::Body,
                 size_px: 11.0,
@@ -224,20 +229,14 @@ pub fn build_electronics_canvas_overlay_surface(
     UiSurface::new("electronics.canvas.labels", palette, root)
 }
 
-fn tool_hint(tool: ElectronicsTool) -> &'static str {
+fn tool_hint_key(tool: ElectronicsTool) -> &'static str {
     match tool {
-        ElectronicsTool::Select => {
-            "Select: click an item; drag to move; Space + drag, right-drag or middle-drag to pan"
-        }
-        ElectronicsTool::Pan => "Pan: right-drag, middle-drag, or Space + left-drag",
-        ElectronicsTool::Wire => {
-            "Wire: click a pin to start, click an endpoint to finish; Esc cancels"
-        }
-        ElectronicsTool::Route => "Route: click an airwire to create a trace; Esc cancels",
-        ElectronicsTool::Place => {
-            "Place: choose a library item, then click the canvas; Esc cancels"
-        }
-        ElectronicsTool::BoardOutline => "Board outline: click two opposite corners; Esc cancels",
+        ElectronicsTool::Select => "electronics.hint.select",
+        ElectronicsTool::Pan => "electronics.hint.pan",
+        ElectronicsTool::Wire => "electronics.hint.wire",
+        ElectronicsTool::Route => "electronics.hint.route",
+        ElectronicsTool::Place => "electronics.hint.place",
+        ElectronicsTool::BoardOutline => "electronics.hint.board_outline",
     }
 }
 

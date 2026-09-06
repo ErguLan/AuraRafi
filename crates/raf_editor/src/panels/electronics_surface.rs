@@ -8,16 +8,47 @@ use raf_render::api_graphic_basic::ui_surface::{
 use raf_ui::{UiAlign, UiFontWeight, UiTextRole, UiTextStyle, UiTokens};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ElectronicsAnalysisTone {
+    Normal,
+    Running,
+    Passed,
+    Issues,
+    Failed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ElectronicsAnalysisLine {
+    pub text: String,
+    pub tone: ElectronicsAnalysisTone,
+}
+
+impl ElectronicsAnalysisLine {
+    pub(crate) fn normal(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            tone: ElectronicsAnalysisTone::Normal,
+        }
+    }
+
+    pub(crate) fn with_tone(text: impl Into<String>, tone: ElectronicsAnalysisTone) -> Self {
+        Self {
+            text: text.into(),
+            tone,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElectronicsAnalysisSurfaceAction {
     RunDrc,
     RunSimulation,
     Clear,
 }
 
-pub fn build_electronics_analysis_surface(
+pub(crate) fn build_electronics_analysis_surface(
     palette: StudioUiPalette,
     title: &str,
-    lines: &[String],
+    lines: &[ElectronicsAnalysisLine],
 ) -> UiSurface {
     let tokens = palette.tokens();
     let is_simulation = title.to_ascii_lowercase().contains("simulation");
@@ -50,7 +81,7 @@ pub fn build_electronics_analysis_surface(
                 )
                 .with_child(
                     UiNode::new("electronics.analysis.header.title", UiNodeKind::Label)
-                        .with_text_value(title.to_string())
+                        .with_text_key(analysis_title_key(title))
                         .with_text_style(UiTextStyle {
                             role: UiTextRole::PanelTitle,
                             size_px: 12.0,
@@ -72,14 +103,14 @@ pub fn build_electronics_analysis_surface(
             ..UiLayout::fill(UiFlow::Column)
         });
     for (index, line) in lines.iter().enumerate() {
-        let line_color = analysis_line_color(tokens, line);
+        let line_color = analysis_line_color(tokens, line.tone);
         lines_view = lines_view.with_child(
             UiNode::new(
                 format!("electronics.analysis.line.{index}"),
                 UiNodeKind::Label,
             )
             .with_class("electronics-analysis-line")
-            .with_text_value(line.clone())
+            .with_text_value(line.text.clone())
             .with_text_style(UiTextStyle {
                 role: UiTextRole::Body,
                 size_px: 11.0,
@@ -92,28 +123,39 @@ pub fn build_electronics_analysis_surface(
         );
     }
     root = root.with_child(lines_view);
-    let is_running = lines.iter().any(|line| line == "Status: running");
-    let has_result = lines
+    let is_running = lines
         .iter()
-        .any(|line| line.starts_with("Status:") && line != "Status: not run");
-    let (command, label) = if is_running {
-        ("electronics.analysis.cancel", "Cancel")
+        .any(|line| line.tone == ElectronicsAnalysisTone::Running);
+    let has_result = lines.iter().any(|line| {
+        matches!(
+            line.tone,
+            ElectronicsAnalysisTone::Passed
+                | ElectronicsAnalysisTone::Issues
+                | ElectronicsAnalysisTone::Failed
+        )
+    });
+    let (command, label_key) = if is_running {
+        ("electronics.analysis.cancel", "electronics.analysis.cancel")
     } else if is_simulation {
         (
             "electronics.analysis.simulation",
             if has_result {
-                "Re-run simulation"
+                "electronics.analysis.rerun_simulation"
             } else {
-                "Simulate"
+                "electronics.analysis.simulate"
             },
         )
     } else {
         (
             "electronics.analysis.drc",
-            if has_result { "Re-run DRC" } else { "Run DRC" },
+            if has_result {
+                "electronics.analysis.rerun_drc"
+            } else {
+                "electronics.analysis.run_drc"
+            },
         )
     };
-    root = root.with_child(action(command, label));
+    root = root.with_child(action(command, label_key));
     let mut surface = UiSurface::new("electronics.analysis", palette, root);
     surface.style_sheet = UiStyleSheet {
         rules: vec![
@@ -146,25 +188,17 @@ pub fn build_electronics_analysis_surface(
     surface
 }
 
-fn analysis_line_color(tokens: UiTokens, line: &str) -> [u8; 4] {
-    if !line.starts_with("Status:") {
-        return tokens.text_muted;
-    }
-    let status = line.to_ascii_lowercase();
-    if status.contains("passed") || status.contains("converged") {
-        [112, 224, 136, 255]
-    } else if status.contains("issues") || status.contains("not converged") {
-        [255, 172, 64, 255]
-    } else if status.contains("running") {
-        [120, 190, 255, 255]
-    } else if status.contains("cancelled") || status.contains("failed") {
-        [255, 128, 128, 255]
-    } else {
-        tokens.text_muted
+fn analysis_line_color(tokens: UiTokens, tone: ElectronicsAnalysisTone) -> [u8; 4] {
+    match tone {
+        ElectronicsAnalysisTone::Passed => [112, 224, 136, 255],
+        ElectronicsAnalysisTone::Issues => [255, 172, 64, 255],
+        ElectronicsAnalysisTone::Running => [120, 190, 255, 255],
+        ElectronicsAnalysisTone::Failed => [255, 128, 128, 255],
+        ElectronicsAnalysisTone::Normal => tokens.text_muted,
     }
 }
 
-fn action(id: &str, text: &str) -> UiNode {
+fn action(id: &str, text_key: &str) -> UiNode {
     let tooltip = if id == "electronics.analysis.cancel" {
         "electronics.tooltip.analysis.cancel"
     } else if id == "electronics.analysis.simulation" {
@@ -179,12 +213,20 @@ fn action(id: &str, text: &str) -> UiNode {
                 .with_width_mode(UiSizeMode::Fill)
                 .with_text_safe_area(true),
         )
-        .with_text_value(text.to_string())
+        .with_text_key(text_key)
         .with_text_style(UiTextStyle::button([245, 245, 246, 255]))
         .with_tooltip_key(tooltip)
         .with_accessibility_label_key(tooltip)
         .focusable()
         .with_event(UiEventBinding::command(UiEventKind::Click, id))
+}
+
+fn analysis_title_key(title: &str) -> &'static str {
+    if title.to_ascii_lowercase().contains("simulation") {
+        "electronics.analysis.simulation_title"
+    } else {
+        "electronics.analysis.drc_title"
+    }
 }
 
 fn class_rule(class: &str, fill: [u8; 4], border: [u8; 4], text: [u8; 4]) -> UiStyleRule {

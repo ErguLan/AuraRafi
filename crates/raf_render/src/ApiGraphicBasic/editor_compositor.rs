@@ -4,12 +4,15 @@
 //! presentation command buffer. Upper editor layers provide owned outputs and
 //! logical rectangles without importing WGPU types.
 
+use std::sync::Arc;
+
 use super::canvas_presenter::{CanvasTargetRect, DirectCanvasPresenter, PreparedCanvasSource};
 use super::device::SceneFrameOutput;
 use super::ui_surface::{DirectUiSurfaceFrame, DirectUiSurfaceHost, NativeGraphicsContext};
 
+#[derive(Clone)]
 pub struct EditorCanvasLayer {
-    pub output: SceneFrameOutput,
+    pub output: Arc<SceneFrameOutput>,
     pub source_size: [u32; 2],
     pub target_rect: CanvasTargetRect,
 }
@@ -94,7 +97,7 @@ impl NativeEditorCompositor {
     {
         let prepared_canvas = canvas_layer.and_then(|layer| {
             self.canvas
-                .prepare_output(device, queue, layer.output, layer.source_size)
+                .prepare_output(device, queue, layer.output.as_ref(), layer.source_size)
                 .map(|source| (source, layer.target_rect))
         });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {

@@ -4,6 +4,8 @@
 //! the document and the tiny host here preserves the splash UX while the
 //! native Winit application initializes the Hub.
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use raf_core::config::Language;
 use raf_core::i18n::t;
 use raf_render::api_graphic_basic::ui_surface::{
@@ -12,18 +14,24 @@ use raf_render::api_graphic_basic::ui_surface::{
 use raf_render::api_graphic_basic::EditorUiLayer;
 use raf_ui::{
     UiAlign, UiFlow, UiFontWeight, UiImage, UiImageFit, UiImageSource, UiJustify, UiLayout, UiNode,
-    UiNodeKind, UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleSelector, UiStyleSheet,
-    UiTextRole, UiTextStyle,
+    UiNodeKind, UiSizeMode, UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleSelector,
+    UiStyleSheet, UiTextOverflow, UiTextRole, UiTextStyle,
 };
 
 use crate::editor_layout::EditorRect;
 
 const CLEAR: [u8; 4] = [8, 11, 15, 255];
+const LOADING_MESSAGES: [&str; 3] = [
+    "Even the IDE we used to build this engine is heavier than the engine itself.",
+    "Work in progress.",
+    "World and UI design matter just as much as gameplay.",
+];
 
 pub struct LoadingSurfaceHost {
     rect: EditorRect,
     host: DirectUiSurfaceHost,
     last_key: Option<LoadingKey>,
+    loading_message: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -40,7 +48,8 @@ impl LoadingSurfaceHost {
         rect: EditorRect,
         palette: StudioUiPalette,
     ) -> Self {
-        let surface = build_surface(palette, 0.0, Language::English);
+        let loading_message = select_loading_message();
+        let surface = build_surface(palette, 0.0, Language::English, loading_message);
         let mut host = graphics.create_ui_host(surface, CLEAR);
         if let Ok(decoded) = image::load_from_memory(include_bytes!("../../../../editor/icon.png"))
         {
@@ -55,6 +64,7 @@ impl LoadingSurfaceHost {
             rect,
             host,
             last_key: None,
+            loading_message,
         }
     }
 
@@ -75,9 +85,17 @@ impl LoadingSurfaceHost {
         if self.last_key.as_ref() == Some(&key) {
             return;
         }
-        self.host
-            .set_surface(build_surface(palette, progress, language));
+        self.host.set_surface(build_surface(
+            palette,
+            progress,
+            language,
+            self.loading_message,
+        ));
         self.last_key = Some(key);
+    }
+
+    pub fn set_environment(&mut self, environment: raf_ui::UiEnvironment) {
+        self.host.set_environment(environment);
     }
 
     pub fn compositor_layer(
@@ -94,7 +112,20 @@ impl LoadingSurfaceHost {
     }
 }
 
-fn build_surface(palette: StudioUiPalette, progress: f32, language: Language) -> UiSurface {
+fn select_loading_message() -> &'static str {
+    let tick = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as usize)
+        .unwrap_or_default();
+    LOADING_MESSAGES[tick % LOADING_MESSAGES.len()]
+}
+
+fn build_surface(
+    palette: StudioUiPalette,
+    progress: f32,
+    language: Language,
+    loading_message: &'static str,
+) -> UiSurface {
     let tokens = palette.tokens();
     let progress = progress.clamp(0.0, 1.0);
     let progress_label = format!("{:.0}%", progress * 100.0);
@@ -130,8 +161,8 @@ fn build_surface(palette: StudioUiPalette, progress: f32, language: Language) ->
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             align_items: UiAlign::Center,
-            gap: 8.0,
-            padding: UiSpacing::xy(36.0, 28.0),
+            gap: 4.0,
+            padding: UiSpacing::xy(36.0, 20.0),
             ..UiLayout::fixed(620.0, 500.0)
         })
         .with_child(
@@ -157,6 +188,34 @@ fn build_surface(palette: StudioUiPalette, progress: f32, language: Language) ->
                     color: tokens.text,
                     inherit_color: false,
                 }),
+        )
+        .with_child(
+            UiNode::new("loading.message.row", UiNodeKind::Panel)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Row,
+                    justify_content: UiJustify::Center,
+                    align_items: UiAlign::Center,
+                    ..UiLayout::fixed(548.0, 48.0)
+                })
+                .with_child(
+                    UiNode::new("loading.message", UiNodeKind::Label)
+                        .with_text_value(loading_message)
+                        .with_layout(UiLayout {
+                            width_mode: UiSizeMode::FitContent,
+                            height_mode: UiSizeMode::FitContent,
+                            max_size: [540.0, 48.0],
+                            ..UiLayout::default()
+                        })
+                        .with_text_overflow(UiTextOverflow::Wrap)
+                        .with_text_style(UiTextStyle {
+                            role: UiTextRole::Body,
+                            size_px: 19.0,
+                            line_height_px: 0.0,
+                            weight: UiFontWeight::Regular,
+                            color: tokens.text,
+                            inherit_color: false,
+                        }),
+                ),
         )
         .with_child(
             UiNode::new("loading.signature", UiNodeKind::Panel)

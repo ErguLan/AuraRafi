@@ -22,6 +22,8 @@ pub struct UiSurfaceDiagnostics {
     pub invalid_clip_regions: usize,
     pub duplicate_ids: usize,
     pub missing_accessibility_labels: usize,
+    pub semantic_regions: usize,
+    pub missing_accessibility_roles: usize,
     pub focus_order: usize,
     pub max_z_index: i16,
     pub density: UiDensityContract,
@@ -101,6 +103,20 @@ impl UiSurfaceDiagnostics {
                         && layout.text_key.is_none()
                 })
                 .count(),
+            semantic_regions: frame
+                .layout_boxes
+                .iter()
+                .filter(|layout| layout.accessibility_role != raf_ui::UiAccessibilityRole::Generic)
+                .count(),
+            missing_accessibility_roles: frame
+                .layout_boxes
+                .iter()
+                .filter(|layout| {
+                    layout.interactive
+                        && !layout.disabled
+                        && layout.accessibility_role == raf_ui::UiAccessibilityRole::Generic
+                })
+                .count(),
             focus_order: frame.focus_order.len(),
             max_z_index: frame
                 .layout_boxes
@@ -117,6 +133,7 @@ impl UiSurfaceDiagnostics {
             || self.invalid_clip_regions > 0
             || self.duplicate_ids > 0
             || self.missing_accessibility_labels > 0
+            || self.missing_accessibility_roles > 0
     }
 }
 

@@ -24,6 +24,7 @@ pub struct AttachedClient {
     stream: TcpStream,
     welcome: AttachWelcome,
     project_path: PathBuf,
+    last_context: Option<Value>,
 }
 
 impl std::fmt::Debug for AttachedClient {
@@ -32,6 +33,7 @@ impl std::fmt::Debug for AttachedClient {
             .debug_struct("AttachedClient")
             .field("welcome", &self.welcome)
             .field("project_path", &self.project_path)
+            .field("has_context", &self.last_context.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -108,6 +110,7 @@ impl AttachedClient {
             stream,
             welcome,
             project_path,
+            last_context: None,
         })
     }
 
@@ -135,7 +138,50 @@ impl AttachedClient {
                 "path": self.project_path,
                 "attached": true,
             })),
+            "raf://context" => Ok(self.last_context.clone().unwrap_or_else(|| {
+                json!({
+                    "attached": true,
+                    "project": {
+                        "id": self.welcome.project_id,
+                        "path": self.welcome.project_path,
+                    },
+                    "revision": self.welcome.revision,
+                    "context_loaded": false,
+                })
+            })),
             _ => Err(format!("Unknown Rafi resource: {uri}")),
+        }
+    }
+
+    /// Keep MCP resources and follow-up CLI output aligned with the live
+    /// editor after a command advances the document revision.
+    fn refresh_from_response(&mut self, response: &EngineCommandResponse) {
+        self.welcome.revision = response.revision;
+        let Some(data) = response.data.as_object() else {
+            return;
+        };
+        if let Some(capabilities) = data.get("capabilities").and_then(Value::as_array) {
+            self.welcome.capabilities = capabilities
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect();
+        }
+        if let Some(project) = data.get("project").and_then(Value::as_object) {
+            self.welcome.project_path = project
+                .get("path")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .or_else(|| self.welcome.project_path.clone());
+        }
+        if let Some(session) = data.get("session").and_then(Value::as_object) {
+            self.welcome.session_name = session
+                .get("name")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+        }
+        if data.get("scene").is_some() && data.get("project").is_some() {
+            self.last_context = Some(response.data.clone());
         }
     }
 }
@@ -152,7 +198,10 @@ impl CommandEndpoint for AttachedClient {
             return EngineCommandResponse::error(request.id, "Attached transport", error);
         }
         match read_frame(&mut reader) {
-            Ok(IpcFrame::Response(response)) => response,
+            Ok(IpcFrame::Response(response)) => {
+                self.refresh_from_response(&response);
+                response
+            }
             Ok(IpcFrame::Error { message }) => {
                 EngineCommandResponse::error(request.id, "Attached transport", message)
             }

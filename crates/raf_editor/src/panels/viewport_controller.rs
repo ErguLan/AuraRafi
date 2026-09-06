@@ -6,6 +6,7 @@
 
 use glam::{Quat, Vec3};
 use raf_core::config::EngineSettings;
+use raf_core::project::ProjectSettings;
 use raf_core::scene::{SceneGraph, SceneNodeId};
 use raf_core::{InputKey, InputOwner, InputRouter, InputSnapshot, PointerButton};
 use raf_render::api_graphic_basic::device::SceneFrameOutput;
@@ -16,11 +17,12 @@ use raf_render::bridge::{
 };
 use raf_render::gizmo::{GizmoAxis, GizmoMode};
 use raf_render::render_config::RenderConfig;
-use raf_render::scene_renderer::{RenderMode, RenderOptions, SceneRenderFrame, GRID_Y};
+use raf_render::scene_renderer::{RenderOptions, SceneRenderFrame, GRID_Y};
 use raf_render::WorldStreamConfig;
 
 use crate::building_mode::{self, Aabb};
 use crate::commands::game::GameViewportPort;
+use crate::panels::viewport_compass::ViewportCompassTarget;
 
 /// Ctrl-held translation quantum inherited from the single-axis gizmo path.
 const CTRL_TRANSLATE_SNAP: f32 = 1.0;
@@ -62,8 +64,6 @@ pub enum NativeViewportMode {
 pub enum NativeViewportRenderStyle {
     #[default]
     Solid,
-    Wireframe,
-    Preview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -79,6 +79,10 @@ pub struct NativeViewportUpdate {
     pub selection_changed: bool,
     pub gesture_finished: bool,
     pub needs_redraw: bool,
+    /// True while the camera has a persistent navigation input (keyboard fly
+    /// keys or a held orbit/pan button). The runtime uses this to keep frames
+    /// flowing even when the OS emits no repeated key event.
+    pub camera_motion: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -101,6 +105,7 @@ pub struct NativeGameViewportController {
     pub edit_mode: NativeViewportEditMode,
     pub selected: Vec<SceneNodeId>,
     pub grid_visible: bool,
+    pub snap_to_grid: bool,
     pub grid_spacing: f32,
     pub grid_load_distance: f32,
     pub show_labels: bool,
@@ -110,6 +115,7 @@ pub struct NativeGameViewportController {
     pub invert_mouse_x: bool,
     pub invert_mouse_y: bool,
     pub invert_ws: bool,
+    pub focus_lock_enabled: bool,
     pub move_sensitivity: f32,
     pub rotate_sensitivity: f32,
     pub scale_sensitivity: f32,
@@ -119,6 +125,9 @@ pub struct NativeGameViewportController {
     /// Engine setting: render and honor the gizmo while several entities are
     /// selected. When false the gizmo stays single-selection only.
     pub multi_select_gizmo_enabled: bool,
+    /// Percentage of distance-based gizmo growth. Zero keeps a fixed handle
+    /// size; one hundred restores the full camera-distance response.
+    pub gizmo_growth_scale: f32,
     /// Project building style: quantized, collision-aware authoring.
     pub building_organized: bool,
     /// Fixed metric quantum used by the organized style (meters).
@@ -144,6 +153,7 @@ impl Default for NativeGameViewportController {
             edit_mode: NativeViewportEditMode::Object,
             selected: Vec::new(),
             grid_visible: true,
+            snap_to_grid: true,
             grid_spacing: 1.0,
             grid_load_distance: 15.0,
             show_labels: true,
@@ -153,6 +163,7 @@ impl Default for NativeGameViewportController {
             invert_mouse_x: false,
             invert_mouse_y: true,
             invert_ws: false,
+            focus_lock_enabled: true,
             move_sensitivity: 3.5,
             rotate_sensitivity: 3.5,
             scale_sensitivity: 3.5,
@@ -160,9 +171,10 @@ impl Default for NativeGameViewportController {
             wasd_speed_boost: 1.0,
             uniform_scale_by_default: false,
             multi_select_gizmo_enabled: true,
+            gizmo_growth_scale: 0.0,
             building_organized: false,
             building_snap_step: 1.0,
-            render_config: RenderConfig::default(),
+            render_config: RenderConfig::editor_lightweight(),
             world_stream_config: WorldStreamConfig::default(),
             bridge: ViewportBridge::default(),
             free_drag: None,
@@ -193,15 +205,43 @@ impl NativeGameViewportController {
     /// values consumed by camera and gizmo input, so they must be synchronized
     /// explicitly before processing a frame.
     pub fn apply_engine_settings(&mut self, settings: &EngineSettings) {
+        self.grid_visible = settings.grid_visible;
+        self.snap_to_grid = settings.snap_to_grid;
+        self.grid_spacing = settings.grid_size.clamp(0.1, 10.0);
+        self.grid_load_distance = settings.grid_load_distance.clamp(0.0, 500.0);
+        self.show_labels = settings.show_viewport_labels;
+        self.render_style = NativeViewportRenderStyle::Solid;
+        self.solid_show_surface_edges = settings.solid_show_surface_edges;
+        self.solid_xray_mode = settings.solid_xray_mode;
+        self.solid_face_tonality = settings.solid_face_tonality;
+        self.render_config = RenderConfig::editor_lightweight();
         self.invert_mouse_x = settings.invert_mouse_x;
         self.invert_mouse_y = settings.invert_mouse_y;
         self.invert_ws = settings.invert_ws;
+        self.focus_lock_enabled = settings.focus_lock_enabled;
         self.wasd_speed = settings.wasd_speed.clamp(0.05, 5.0);
         self.move_sensitivity = settings.move_gizmo_sensitivity.clamp(0.25, 4.0);
         self.rotate_sensitivity = settings.rotate_gizmo_sensitivity.clamp(0.25, 4.0);
         self.scale_sensitivity = settings.scale_gizmo_sensitivity.clamp(0.25, 4.0);
         self.uniform_scale_by_default = settings.uniform_scale_by_default;
         self.multi_select_gizmo_enabled = settings.multi_select_gizmo_enabled;
+        self.gizmo_growth_scale = settings.gizmo_growth_scale.clamp(0.0, 100.0);
+    }
+
+    /// Applies project-local runtime/render policy after the global engine
+    /// preferences. Keeping this merge here makes Project Settings affect the
+    /// same viewport path that already consumes the engine settings instead
+    /// of leaving the controls as persisted-but-inert metadata.
+    pub fn apply_project_settings(&mut self, settings: &ProjectSettings) {
+        self.building_organized =
+            settings.building_style == raf_core::project::BuildingStyle::Organized;
+        self.building_snap_step = settings.building_snap_step.clamp(0.5, 2.0);
+
+        // The editor intentionally stays on one lightweight profile during
+        // renderer stabilization. Project presets remain persisted for future
+        // runtime use but do not switch viewport behavior yet.
+        self.render_config = RenderConfig::editor_lightweight();
+        self.world_stream_config = WorldStreamConfig::from_project_settings(settings);
     }
 
     pub fn process_input(
@@ -232,7 +272,17 @@ impl NativeGameViewportController {
 
         if self.edit_mode == NativeViewportEditMode::Object {
             if let Some(pointer) = before_capture.pointer_local {
-                if let Some((origin, scale_ref)) = self.gizmo_anchor(scene) {
+                if self.selected.len() == 1 {
+                    self.bridge.update_transform_hover_scaled(
+                        scene,
+                        self.selected.first().copied(),
+                        &view_proj,
+                        pointer,
+                        size[0],
+                        size[1],
+                        self.gizmo_presentation_scale(),
+                    );
+                } else if let Some((origin, scale_ref)) = self.gizmo_anchor(scene) {
                     self.bridge.update_transform_hover_world(
                         origin,
                         scale_ref,
@@ -313,6 +363,7 @@ impl NativeGameViewportController {
         }
 
         let routed = ViewportInputFrame::from_snapshot(input, router, rect, self.viewport_active);
+        update.camera_motion = routed.has_camera_motion();
         update.scene_changed |= self.update_primary_gesture(routed, scene, &view_proj, size);
         update.needs_redraw |= self.update_camera(routed);
 
@@ -337,10 +388,16 @@ impl NativeGameViewportController {
             }
         }
 
+        let camera_transition_was_active = self.bridge.has_camera_transition();
+        let camera_transition_active = self.bridge.update_camera_transitions(input.delta_seconds);
+        update.camera_motion |= camera_transition_active;
         update.needs_redraw |= update.scene_changed
             || update.selection_changed
             || routed.requires_continuous_redraw()
-            || self.bridge.update_smooth_focus();
+            // Keep one final frame queued so the renderer and compass both
+            // receive the exact settled orientation.
+            || camera_transition_was_active
+            || camera_transition_active;
         update
     }
 
@@ -394,6 +451,22 @@ impl NativeGameViewportController {
         );
     }
 
+    pub fn transform_drag_active(&self) -> bool {
+        self.gesture_active()
+    }
+
+    /// Applies an orientation-gizmo snap through the same live camera bridge
+    /// used by mouse orbiting and keyboard navigation.
+    pub fn snap_compass_target(&mut self, target: ViewportCompassTarget) {
+        if let Some(axis) = target.axis() {
+            self.bridge.snap_view_to_axis(axis);
+        } else {
+            self.bridge.reset_isometric_view();
+        }
+        self.bridge
+            .update_camera(self.mode == NativeViewportMode::View2d);
+    }
+
     fn apply_tool_shortcuts(&mut self, input: ViewportInputFrame, scene: &SceneGraph) {
         if !input.keyboard_enabled
             || input.button_down(PointerButton::Primary)
@@ -409,7 +482,7 @@ impl NativeGameViewportController {
             self.set_gizmo_mode(GizmoMode::Scale);
         } else if input.key_pressed(InputKey::C) {
             self.bridge.gizmo_mut().visible = false;
-        } else if input.key_pressed(InputKey::F) {
+        } else if input.key_pressed(InputKey::F) && self.focus_lock_enabled {
             self.focus_selection(scene);
         } else if input.key_pressed(InputKey::Tab) && !self.selected.is_empty() {
             self.edit_mode = match self.edit_mode {
@@ -525,7 +598,11 @@ impl NativeGameViewportController {
                     size[1],
                 );
                 if moved {
-                    self.constrain_single_gizmo_drag(scene);
+                    if self.building_organized {
+                        self.constrain_single_gizmo_drag(scene);
+                    } else if self.snap_to_grid {
+                        self.snap_single_gizmo_drag(scene);
+                    }
                 }
                 moved
             };
@@ -581,6 +658,12 @@ impl NativeGameViewportController {
             let (resolved, clamped) = self.resolve_free_drag_delta(scene, &drag.members, delta);
             self.collision_contact |= clamped;
             resolved
+        } else if self.snap_to_grid {
+            Vec3::new(
+                building_mode::snap_scalar(delta.x, self.grid_spacing),
+                building_mode::snap_scalar(delta.y, self.grid_spacing),
+                building_mode::snap_scalar(delta.z, self.grid_spacing),
+            )
         } else {
             delta
         };
@@ -806,8 +889,13 @@ impl NativeGameViewportController {
                     if let Some(start_union) = gesture.start_union {
                         delta = building_mode::clamp_translation(start_union, &walls, axis, delta);
                     }
-                } else if snap_to_ctrl {
-                    delta = building_mode::snap_scalar(delta, CTRL_TRANSLATE_SNAP);
+                } else if snap_to_ctrl || self.snap_to_grid {
+                    let step = if self.snap_to_grid {
+                        self.grid_spacing
+                    } else {
+                        CTRL_TRANSLATE_SNAP
+                    };
+                    delta = building_mode::snap_scalar(delta, step);
                 }
                 let offset = axis_direction(axis) * delta;
                 for mover in &gesture.movers {
@@ -840,7 +928,7 @@ impl NativeGameViewportController {
                         set_axis_of(
                             &mut node.rotation,
                             axis,
-                            axis_of(mover.start_rotation, axis) + theta,
+                            axis_of(mover.start_rotation, axis) + theta.to_degrees(),
                         );
                     }
                 }
@@ -911,6 +999,36 @@ impl NativeGameViewportController {
         self.constrain_axis_drag(scene, mode, axis);
     }
 
+    fn snap_single_gizmo_drag(&self, scene: &mut SceneGraph) {
+        let Some(gesture) = self.gesture_start.as_ref() else {
+            return;
+        };
+        let Some(mover) = gesture.movers.first() else {
+            return;
+        };
+        let axis = match self.bridge.active_drag_axis() {
+            GizmoAxis::X => 0usize,
+            GizmoAxis::Y => 1usize,
+            GizmoAxis::Z => 2usize,
+            GizmoAxis::None => return,
+        };
+        let Some(node) = scene.get_mut(mover.id) else {
+            return;
+        };
+        match self.bridge.gizmo().mode {
+            GizmoMode::Translate => {
+                let raw = axis_of(node.position, axis) - axis_of(mover.start_pos, axis);
+                let snapped = building_mode::snap_scalar(raw, self.grid_spacing);
+                set_axis_of(
+                    &mut node.position,
+                    axis,
+                    axis_of(mover.start_pos, axis) + snapped,
+                );
+            }
+            GizmoMode::Rotate | GizmoMode::Scale => {}
+        }
+    }
+
     /// Constraint core shared by the live gesture path and tests. `mode` and
     /// `axis` describe the active gizmo drag; gesture state must already be
     /// captured.
@@ -951,9 +1069,10 @@ impl NativeGameViewportController {
                 }
             }
             GizmoMode::Rotate => {
-                let raw =
+                let raw_degrees =
                     axis_of(node.rotation, axis_index) - axis_of(mover.start_rotation, axis_index);
-                let snapped = building_mode::snap_scalar(raw, ROTATE_SNAP_STEP);
+                let snapped =
+                    building_mode::snap_scalar(raw_degrees.to_radians(), ROTATE_SNAP_STEP);
                 let clamped = building_mode::clamp_rotation(
                     start_union,
                     gesture.pivot,
@@ -966,7 +1085,7 @@ impl NativeGameViewportController {
                     set_axis_of(
                         &mut node.rotation,
                         axis_index,
-                        axis_of(mover.start_rotation, axis_index) + clamped,
+                        axis_of(mover.start_rotation, axis_index) + clamped.to_degrees(),
                     );
                 }
             }
@@ -1067,11 +1186,6 @@ impl NativeGameViewportController {
             && self.gesture_active()
             && self.mode == NativeViewportMode::View3d;
         RenderOptions {
-            mode: match self.render_style {
-                NativeViewportRenderStyle::Solid => RenderMode::Solid,
-                NativeViewportRenderStyle::Wireframe => RenderMode::Wireframe,
-                NativeViewportRenderStyle::Preview => RenderMode::Preview,
-            },
             show_grid_3d: (self.grid_visible || organized_gesture_grid)
                 && self.mode == NativeViewportMode::View3d,
             grid_spacing: self.grid_spacing,
@@ -1085,7 +1199,6 @@ impl NativeGameViewportController {
             primary_selected: self.selected.first().map(|id| id.0 as u64),
             grid_y: GRID_Y,
             grid_no_depth_test: false,
-            triangle_budget: self.render_config.max_triangles,
             world_streaming_enabled: self.world_stream_config.enabled,
             world_stream_region_size: self.world_stream_config.region_size,
             world_stream_load_radius: self.world_stream_config.load_radius,
@@ -1110,6 +1223,7 @@ impl NativeGameViewportController {
                     active_scale_sign: self.bridge.highlighted_gizmo_scale_sign(),
                     origin,
                     entity_scale: scale_ref,
+                    entity_axes: [Vec3::X, Vec3::Y, Vec3::Z],
                     presentation_scale: self.gizmo_presentation_scale(),
                 }
                 .append_to(frame);
@@ -1117,15 +1231,18 @@ impl NativeGameViewportController {
             return;
         }
         let id = self.selected[0];
-        let Some(node) = scene.get(id) else {
+        let Some(_) = scene.get(id) else {
             return;
         };
+        let world = scene.world_matrix(id);
+        let (entity_axes, entity_scale) = raf_render::picking::gizmo_scale_basis(world);
         GizmoRenderSpec {
             mode: self.bridge.gizmo().mode,
             active_axis: self.bridge.highlighted_gizmo_axis(),
             active_scale_sign: self.bridge.highlighted_gizmo_scale_sign(),
-            origin: scene.world_matrix(id).col(3).truncate(),
-            entity_scale: node.scale,
+            origin: world.col(3).truncate(),
+            entity_scale,
+            entity_axes,
             presentation_scale: self.gizmo_presentation_scale(),
         }
         .append_to(frame);
@@ -1194,7 +1311,9 @@ impl NativeGameViewportController {
         if self.bridge.gizmo().mode == GizmoMode::Scale {
             1.0
         } else {
-            (self.bridge.orbit_distance() / 5.0).max(1.0)
+            let distance_factor = (self.bridge.orbit_distance() / 5.0).max(1.0);
+            let growth = self.gizmo_growth_scale.clamp(0.0, 100.0) / 100.0;
+            1.0 + (distance_factor - 1.0) * growth
         }
     }
 }
@@ -1384,12 +1503,12 @@ mod tests {
         let mut controller = organized_controller(mover);
         controller.capture_gesture_start(&scene);
         if let Some(node) = scene.get_mut(mover) {
-            node.rotation.y = 0.83;
+            node.rotation.y = 47.5;
         }
         controller.constrain_axis_drag(&mut scene, GizmoMode::Rotate, GizmoAxis::Y);
         let rotation = scene.get(mover).unwrap().rotation.y;
         assert!(
-            (rotation - 0.785398).abs() < 1e-3,
+            (rotation - 45.0).abs() < 1e-3,
             "isolated entity must rotate to the 45-degree snap, got {rotation}"
         );
     }
@@ -1407,12 +1526,12 @@ mod tests {
         let mut controller = organized_controller(mover);
         controller.capture_gesture_start(&scene);
         if let Some(node) = scene.get_mut(mover) {
-            node.rotation.y = std::f32::consts::FRAC_PI_2;
+            node.rotation.y = 90.0;
         }
         controller.constrain_axis_drag(&mut scene, GizmoMode::Rotate, GizmoAxis::Y);
         let rotation = scene.get(mover).unwrap().rotation.y;
         assert!(
-            (rotation - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
+            (rotation - 90.0).abs() < 1e-3,
             "pre-swallowed floor must not lock rotation, got {rotation}"
         );
     }

@@ -7,8 +7,8 @@
 use raf_core::config::RenderExecutionPolicy;
 
 use crate::api_graphic_basic::device::{
-    BasicBackendType, BasicDevice, BasicDeviceConfig, SceneFrameMetrics, SceneFrameOutput,
-    SharedGraphicsContext,
+    BasicBackendType, BasicDevice, BasicDeviceConfig, SceneFrameCapture, SceneFrameMetrics,
+    SceneFrameOutput, SharedGraphicsContext,
 };
 use crate::api_graphic_basic::{
     FrameInvalidation, FramePacingProfile, FramePermit, FrameScheduler, FrameSchedulerMetrics,
@@ -207,6 +207,10 @@ impl RenderRuntime {
         self.scheduler.set_profile(profile);
     }
 
+    pub fn set_frame_limit(&mut self, fps_limit: u32) {
+        self.scheduler.set_frame_limit(fps_limit);
+    }
+
     pub fn request_frame(&mut self, reason: FrameInvalidation) {
         self.scheduler.request(reason);
     }
@@ -236,6 +240,15 @@ impl RenderRuntime {
             .as_mut()
             .map(|device| device.execute_scene_frame(frame))
             .unwrap_or_else(|| SceneFrameOutput::CpuPixels(Vec::new()))
+    }
+
+    /// Capture the last rendered scene target for Agent perception or an
+    /// explicit evidence artifact. It never renders or mutates the scene.
+    pub fn capture_last_scene_rgba(&self) -> Result<SceneFrameCapture, String> {
+        self.device
+            .as_ref()
+            .ok_or_else(|| "The graphics device has not rendered a scene frame yet.".to_string())?
+            .capture_last_scene_rgba()
     }
 
     fn ensure_device(&mut self) {

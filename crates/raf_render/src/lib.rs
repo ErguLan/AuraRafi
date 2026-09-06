@@ -18,6 +18,7 @@ pub mod geometry;
 pub mod math;
 pub mod render_pipeline;
 pub mod scene_renderer;
+pub mod scene_visibility;
 
 // --- Core renderer and compatibility exports ---
 // The active editor path is ApiGraphicBasic + SceneRenderer with GPU-first

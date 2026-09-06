@@ -31,7 +31,6 @@ pub mod command {
     pub const PROJECT_OPEN_FOLDER: &str = "project.open_folder";
     pub const PROJECT_CLOSE: &str = "project.close";
     pub const HELP_KEYBOARD_SHORTCUTS: &str = "help.keyboard_shortcuts";
-    pub const AGENT_OPEN: &str = "agent.open";
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

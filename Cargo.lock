@@ -2491,7 +2491,6 @@ dependencies = [
  "fluent-bundle",
  "glam",
  "hecs",
- "libloading",
  "ron",
  "serde",
  "serde_json",

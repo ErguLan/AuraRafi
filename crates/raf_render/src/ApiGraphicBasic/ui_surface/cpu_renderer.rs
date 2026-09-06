@@ -6,14 +6,18 @@
 
 use super::{
     UiImageFit, UiRect, UiSurfaceDrawList, UiSurfaceImageQuad, UiSurfaceImageStore,
-    UiSurfacePaintCommand, UiTextAtlas,
+    UiSurfacePaintCommand, UiSurfaceStroke, UiTextAtlas,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UiSurfaceCpuMetrics {
     pub solid_pixels: u64,
+    pub stroke_pixels: u64,
     pub text_pixels: u64,
     pub image_pixels: u64,
+    /// Pixels written by translucent solid quads. This is measured from the
+    /// same draw list used by the GPU presenter.
+    pub translucent_solid_pixels: u64,
 }
 
 /// Reusable CPU RGBA compositor for `UiSurfaceDrawList`.
@@ -61,8 +65,17 @@ impl UiSurfaceCpuRenderer {
             match *command {
                 UiSurfacePaintCommand::Solid { index, .. } => {
                     if let Some(quad) = draw_list.solids.get(index) {
-                        metrics.solid_pixels +=
+                        let written =
                             self.draw_solid(quad.rect, quad.clip_rect, quad.radius, quad.color);
+                        metrics.solid_pixels += written;
+                        if quad.color[3] > 0 && quad.color[3] < 255 {
+                            metrics.translucent_solid_pixels += written;
+                        }
+                    }
+                }
+                UiSurfacePaintCommand::Stroke { index, .. } => {
+                    if let Some(stroke) = draw_list.strokes.get(index) {
+                        metrics.stroke_pixels += self.draw_stroke(stroke);
                     }
                 }
                 UiSurfacePaintCommand::Text { index, .. } => {
@@ -93,6 +106,55 @@ impl UiSurfaceCpuRenderer {
                     continue;
                 }
                 if self.blend_pixel(x, y, color, 255) {
+                    written += 1;
+                }
+            }
+        }
+        written
+    }
+
+    fn draw_stroke(&mut self, stroke: &UiSurfaceStroke) -> u64 {
+        let half_width = stroke.width.max(0.0) * 0.5;
+        if half_width <= 0.0 {
+            return 0;
+        }
+        let bounds_rect = UiRect::new(
+            stroke.start[0].min(stroke.end[0]) - half_width - 1.0,
+            stroke.start[1].min(stroke.end[1]) - half_width - 1.0,
+            (stroke.start[0].max(stroke.end[0]) - stroke.start[0].min(stroke.end[0]))
+                + (half_width + 1.0) * 2.0,
+            (stroke.start[1].max(stroke.end[1]) - stroke.start[1].min(stroke.end[1]))
+                + (half_width + 1.0) * 2.0,
+        );
+        let Some(bounds) = pixel_bounds(bounds_rect.intersection(stroke.clip_rect), self.size)
+        else {
+            return 0;
+        };
+
+        let dx = stroke.end[0] - stroke.start[0];
+        let dy = stroke.end[1] - stroke.start[1];
+        let length_squared = dx * dx + dy * dy;
+        let mut written = 0;
+        for y in bounds.y_start..bounds.y_end {
+            for x in bounds.x_start..bounds.x_end {
+                let point = [x as f32 + 0.5, y as f32 + 0.5];
+                let t = if length_squared > f32::EPSILON {
+                    ((point[0] - stroke.start[0]) * dx + (point[1] - stroke.start[1]) * dy)
+                        / length_squared
+                } else {
+                    0.0
+                }
+                .clamp(0.0, 1.0);
+                let closest = [stroke.start[0] + dx * t, stroke.start[1] + dy * t];
+                let distance =
+                    ((point[0] - closest[0]).powi(2) + (point[1] - closest[1]).powi(2)).sqrt();
+                // A small analytic coverage ramp keeps the CPU recovery path
+                // from turning diagonal ticks into hard stair steps.
+                let coverage = ((half_width + 0.75 - distance) / 1.5).clamp(0.0, 1.0);
+                if coverage <= 0.0 {
+                    continue;
+                }
+                if self.blend_pixel(x, y, stroke.color, (coverage * 255.0).round() as u8) {
                     written += 1;
                 }
             }
@@ -375,7 +437,7 @@ mod tests {
             ..UiSurfaceDrawList::default()
         };
         let mut renderer = UiSurfaceCpuRenderer::new();
-        renderer.render(
+        let metrics = renderer.render(
             &list,
             &UiTextAtlas::default(),
             &UiSurfaceImageStore::default(),
@@ -387,6 +449,7 @@ mod tests {
         assert!((126..=129).contains(&pixel[0]));
         assert_eq!(pixel[1], 0);
         assert_eq!(pixel[3], 255);
+        assert_eq!(metrics.translucent_solid_pixels, 4);
     }
 
     #[test]
@@ -415,6 +478,40 @@ mod tests {
             &renderer.pixels()[(4 * 4)..(4 * 4 + 4)],
             &[255, 128, 0, 255]
         );
+    }
+
+    #[test]
+    fn software_compositor_rasterizes_a_vector_stroke_without_gaps() {
+        let list = UiSurfaceDrawList {
+            strokes: vec![UiSurfaceStroke {
+                start: [3.0, 4.0],
+                end: [16.0, 15.0],
+                clip_rect: UiRect::new(0.0, 0.0, 20.0, 20.0),
+                color: [237, 239, 242, 255],
+                width: 3.0,
+                z_index: 0,
+            }],
+            paint_order: vec![UiSurfacePaintCommand::Stroke {
+                index: 0,
+                z_index: 0,
+                sequence: 0,
+            }],
+            ..UiSurfaceDrawList::default()
+        };
+        let mut renderer = UiSurfaceCpuRenderer::new();
+        let metrics = renderer.render(
+            &list,
+            &UiTextAtlas::default(),
+            &UiSurfaceImageStore::default(),
+            [20, 20],
+            [0, 0, 0, 255],
+        );
+
+        assert!(metrics.stroke_pixels > 0);
+        assert!(renderer
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[0] > 0 && pixel[1] > 0 && pixel[2] > 0));
     }
 
     #[test]

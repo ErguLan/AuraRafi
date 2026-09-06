@@ -277,7 +277,9 @@ fn check_wire_endpoints(
     errors: &mut Vec<DrcIssue>,
     warnings: &mut Vec<DrcIssue>,
 ) {
-    const ENDPOINT_TOLERANCE: f32 = 2.0;
+    // Five percent of the 20-unit schematic grid. Anything beyond that and
+    // the visual is unmistakably detached from a pin or junction.
+    const ENDPOINT_TOLERANCE: f32 = 1.0;
 
     for (wire_index, wire) in schematic.wires.iter().enumerate() {
         for (endpoint_name, point, anchor) in [
@@ -482,6 +484,59 @@ mod tests {
             .warnings
             .iter()
             .any(|issue| issue.rule == "dangling_wire_endpoint"));
+    }
+
+    #[test]
+    fn wire_meeting_another_wire_endpoint_is_not_dangling() {
+        let mut sch = Schematic::new("Junction");
+        // Two components whose pins sit on a shared junction point.
+        // The wire that connects them ends exactly on the second pin,
+        // so neither endpoint should be flagged as dangling.
+        let mut r1 = ElectronicComponent::resistor("10k");
+        r1.position = Vec2::new(0.0, 0.0);
+        let r1_pin2 = r1.pins[1].id;
+        let r1_id = r1.id;
+        sch.add_component(r1);
+
+        let mut r2 = ElectronicComponent::resistor("4.7k");
+        r2.position = Vec2::new(80.0, 0.0);
+        let r2_pin1 = r2.pins[0].id;
+        let r2_id = r2.id;
+        sch.add_component(r2);
+
+        let p1 = crate::schematic::component_pin_world_position(
+            &sch.components.iter().find(|c| c.id == r1_id).unwrap(),
+            &sch.components
+                .iter()
+                .find(|c| c.id == r1_id)
+                .unwrap()
+                .pins
+                .iter()
+                .find(|p| p.id == r1_pin2)
+                .unwrap(),
+        );
+        let p2 = crate::schematic::component_pin_world_position(
+            &sch.components.iter().find(|c| c.id == r2_id).unwrap(),
+            &sch.components
+                .iter()
+                .find(|c| c.id == r2_id)
+                .unwrap()
+                .pins
+                .iter()
+                .find(|p| p.id == r2_pin1)
+                .unwrap(),
+        );
+        sch.add_wire(p1, p2, "N_LINK");
+
+        let report = run_drc(&sch);
+        assert!(
+            !report
+                .warnings
+                .iter()
+                .any(|issue| issue.rule == "dangling_wire_endpoint"),
+            "wire between two exact pins must not be flagged as dangling, got {:?}",
+            report.warnings
+        );
     }
 
     #[test]

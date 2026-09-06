@@ -12,9 +12,9 @@ use raf_render::api_graphic_basic::ui_surface::{
 };
 use raf_render::api_graphic_basic::EditorUiLayer;
 use raf_ui::{
-    UiAlign, UiEventBinding, UiEventKind, UiFlow, UiJustify, UiLayout, UiNode, UiNodeKind,
-    UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet,
-    UiTextStyle,
+    UiAccessibilityRole, UiAlign, UiEventBinding, UiEventKind, UiFlow, UiJustify, UiLayout, UiNode,
+    UiNodeKind, UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector,
+    UiStyleSheet, UiTextStyle,
 };
 
 use crate::editor_layout::EditorRect;
@@ -56,6 +56,10 @@ impl ExitConfirmationSurfaceHost {
         }
         self.host.set_surface(build_surface(palette));
         self.last_rect = Some(rect);
+    }
+
+    pub fn set_environment(&mut self, environment: raf_ui::UiEnvironment) {
+        self.host.set_environment(environment);
     }
 
     pub fn process_input(
@@ -171,6 +175,8 @@ fn build_surface(palette: StudioUiPalette) -> UiSurface {
             radius: 0.0,
             opacity: 1.0,
         })
+        .with_accessibility_role(UiAccessibilityRole::Dialog)
+        .with_accessibility_label_key("app.unsaved_changes_title")
         .with_child(card);
 
     let mut surface = UiSurface::new("exit-confirmation", palette, root);

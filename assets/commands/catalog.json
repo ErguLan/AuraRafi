@@ -88,7 +88,7 @@
     },
     {
       "name": "project.save",
-      "aliases": ["save"],
+      "aliases": ["save", "checkpoint", "project.checkpoint"],
       "domain": "shared",
       "category": "project",
       "description_key": "commands.project_save.desc",
@@ -120,6 +120,205 @@
       "examples": ["/search query=player"]
     },
     {
+      "name": "scene.outline",
+      "aliases": ["scene.tree"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scene_outline.desc",
+      "parameters": [
+        {"name": "root", "kind": "string", "required": false, "description_key": "commands.param.root"},
+        {"name": "depth", "kind": "usize", "required": false, "description_key": "commands.param.depth"},
+        {"name": "cursor", "kind": "usize", "required": false, "default": "0", "description_key": "commands.param.cursor"},
+        {"name": "limit", "kind": "usize", "required": false, "default": "48", "description_key": "commands.param.limit"}
+      ],
+      "examples": ["/scene.outline"]
+    },
+    {
+      "name": "scene.query",
+      "aliases": ["scene.search"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scene_query.desc",
+      "parameters": [
+        {"name": "query", "kind": "string", "required": false, "description_key": "commands.param.query"},
+        {"name": "primitive", "kind": "enum", "required": false, "description_key": "commands.param.primitive"},
+        {"name": "selected_only", "kind": "bool", "required": false, "default": "false"},
+        {"name": "include_hidden", "kind": "bool", "required": false, "default": "true"},
+        {"name": "cursor", "kind": "usize", "required": false, "default": "0", "description_key": "commands.param.cursor"},
+        {"name": "limit", "kind": "usize", "required": false, "default": "48", "description_key": "commands.param.limit"}
+      ],
+      "examples": ["/scene.query {\"query\":\"shelf\"}"]
+    },
+    {
+      "name": "scene.inspect",
+      "aliases": [],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scene_inspect.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": false, "description_key": "commands.param.target"}
+      ],
+      "examples": ["/scene.inspect target=Shelf_Left"]
+    },
+    {
+      "name": "scene.spatial_map",
+      "aliases": ["scene.spatial", "scene.bounds"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scene_spatial_map.desc",
+      "parameters": [
+        {"name": "root", "kind": "string", "required": false, "description_key": "commands.param.root"},
+        {"name": "include_hidden", "kind": "bool", "required": false, "default": "false"},
+        {"name": "check_collisions", "kind": "bool", "required": false, "default": "true"},
+        {"name": "cursor", "kind": "usize", "required": false, "default": "0", "description_key": "commands.param.cursor"},
+        {"name": "limit", "kind": "usize", "required": false, "default": "48", "description_key": "commands.param.limit"}
+      ],
+      "examples": ["/scene.spatial_map root=Store check_collisions=true"]
+    },
+    {
+      "name": "scene.design_audit",
+      "aliases": ["scene.layout_audit", "scene.design_check"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scene_design_audit.desc",
+      "parameters": [
+        {"name": "root", "kind": "string", "required": false, "description_key": "commands.param.root"},
+        {"name": "design_profile", "kind": "enum", "required": false, "description_key": "commands.param.design_profile"},
+        {"name": "required_features", "kind": "array", "required": false, "description_key": "commands.param.required_features"}
+      ],
+      "examples": ["/scene.design_audit root=Store required_features=[floor,enclosure,entrance,circulation]"]
+    },
+    {
+      "name": "selection.get",
+      "aliases": ["selection"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.selection_get.desc",
+      "parameters": [],
+      "examples": ["/selection.get"]
+    },
+    {
+      "name": "viewport.capture",
+      "aliases": ["viewport.screenshot"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.viewport_capture.desc",
+      "parameters": [
+        {"name": "refresh", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.refresh"}
+      ],
+      "examples": ["/viewport.capture"]
+    },
+    {
+      "name": "task.list",
+      "aliases": ["tasks"],
+      "domain": "shared",
+      "category": "agent_tasks",
+      "description_key": "commands.task_list.desc",
+      "parameters": [],
+      "examples": ["/task.list"]
+    },
+    {
+      "name": "task.get",
+      "aliases": [],
+      "domain": "shared",
+      "category": "agent_tasks",
+      "description_key": "commands.task_get.desc",
+      "parameters": [
+        {"name": "id", "kind": "string", "required": true, "description_key": "commands.param.task_id"}
+      ],
+      "examples": ["/task.get id=<task_id>"]
+    },
+    {
+      "name": "task.events",
+      "aliases": [],
+      "domain": "shared",
+      "category": "agent_tasks",
+      "description_key": "commands.task_events.desc",
+      "parameters": [
+        {"name": "since", "kind": "usize", "required": false, "default": "0", "description_key": "commands.param.sequence"}
+      ],
+      "examples": ["/task.events since=12"]
+    },
+    {
+      "name": "task.cancel",
+      "aliases": [],
+      "domain": "shared",
+      "category": "agent_tasks",
+      "description_key": "commands.task_cancel.desc",
+      "parameters": [
+        {"name": "id", "kind": "string", "required": true, "description_key": "commands.param.task_id"}
+      ],
+      "examples": ["/task.cancel id=<task_id>"]
+    },
+    {
+      "name": "assets.catalog",
+      "aliases": ["assets.search"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.assets_catalog.desc",
+      "parameters": [
+        {"name": "query", "kind": "string", "required": false, "description_key": "commands.param.query"},
+        {"name": "kind", "kind": "enum", "required": false, "description_key": "commands.param.kind"},
+        {"name": "usage", "kind": "enum", "required": false, "default": "all", "description_key": "commands.param.usage"},
+        {"name": "cursor", "kind": "usize", "required": false, "default": "0", "description_key": "commands.param.cursor"},
+        {"name": "limit", "kind": "usize", "required": false, "default": "48", "description_key": "commands.param.limit"}
+      ],
+      "examples": ["/assets.catalog usage=unused"]
+    },
+    {
+      "name": "assets.inspect",
+      "aliases": ["asset.inspect"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.asset_inspect.desc",
+      "parameters": [
+        {"name": "target", "kind": "path", "required": true, "description_key": "commands.param.target"}
+      ],
+      "examples": ["/assets.inspect target=assets/shelf.glb"]
+    },
+    {
+      "name": "scripts.catalog",
+      "aliases": ["scripts.search"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scripts_catalog.desc",
+      "parameters": [
+        {"name": "query", "kind": "string", "required": false, "description_key": "commands.param.query"},
+        {"name": "cursor", "kind": "usize", "required": false, "default": "0", "description_key": "commands.param.cursor"},
+        {"name": "limit", "kind": "usize", "required": false, "default": "48", "description_key": "commands.param.limit"}
+      ],
+      "examples": ["/scripts.catalog"]
+    },
+    {
+      "name": "project.health",
+      "aliases": ["diagnostics"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.project_health.desc",
+      "parameters": [
+        {"name": "root", "kind": "string", "required": false, "description_key": "commands.param.root"},
+        {"name": "strict", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.strict"}
+      ],
+      "examples": ["/project.health"]
+    },
+    {
+      "name": "scene.verify",
+      "aliases": ["game.validate_layout"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scene_verify.desc",
+      "parameters": [
+        {"name": "root", "kind": "string", "required": false, "description_key": "commands.param.root"},
+        {"name": "target", "kind": "string", "required": false, "description_key": "commands.param.target"},
+        {"name": "targets", "kind": "array", "required": false, "description_key": "commands.param.targets"},
+        {"name": "expected_count", "kind": "usize", "required": false, "description_key": "commands.param.expected_count"},
+        {"name": "expected_names", "kind": "array", "required": false, "description_key": "commands.param.expected_names"},
+        {"name": "strict", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.strict"},
+        {"name": "check_collisions", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.check_collisions"}
+      ],
+      "examples": ["/scene.verify expected_count=12"]
+    },
+    {
       "name": "game.add",
       "aliases": ["add", "spawn"],
       "domain": "game",
@@ -128,11 +327,97 @@
       "parameters": [
         {"name": "primitive", "kind": "enum", "required": false, "default": "cube", "description_key": "commands.param.primitive"},
         {"name": "name", "kind": "string", "required": false, "description_key": "commands.param.name"},
+        {"name": "parent", "kind": "string", "required": false, "description_key": "commands.param.parent"},
+        {"name": "transform", "kind": "object", "required": false, "description_key": "commands.param.transform"},
         {"name": "x", "kind": "f32", "required": false, "default": "0"},
         {"name": "y", "kind": "f32", "required": false, "default": "0"},
-        {"name": "z", "kind": "f32", "required": false, "default": "0"}
+        {"name": "z", "kind": "f32", "required": false, "default": "0"},
+        {"name": "rx", "kind": "f32", "required": false, "default": "0"},
+        {"name": "ry", "kind": "f32", "required": false, "default": "0"},
+        {"name": "rz", "kind": "f32", "required": false, "default": "0"},
+        {"name": "sx", "kind": "f32", "required": false, "default": "1"},
+        {"name": "sy", "kind": "f32", "required": false, "default": "1"},
+        {"name": "sz", "kind": "f32", "required": false, "default": "1"},
+        {"name": "color", "kind": "color", "required": false, "description_key": "commands.param.color"},
+        {"name": "color_rgba", "kind": "array", "required": false, "description_key": "commands.param.color_rgba"},
+        {"name": "semantic_role", "kind": "string", "required": false, "description_key": "commands.param.semantic_role"},
+        {"name": "stable_key", "kind": "string", "required": false, "description_key": "commands.param.stable_key"},
+        {"name": "tags", "kind": "array", "required": false, "description_key": "commands.param.tags"},
+        {"name": "agent_origin", "kind": "string", "required": false, "description_key": "commands.param.agent_origin"}
       ],
       "examples": ["/game.add primitive=cube name=Block x=0 y=1 z=0"]
+    },
+    {
+      "name": "game.create_group",
+      "aliases": ["scene.group", "scene.folder"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_create_group.desc",
+      "parameters": [
+        {"name": "name", "kind": "string", "required": true, "description_key": "commands.param.name"},
+        {"name": "parent", "kind": "string", "required": false, "description_key": "commands.param.parent"},
+        {"name": "transform", "kind": "object", "required": false, "description_key": "commands.param.transform"},
+        {"name": "semantic_role", "kind": "string", "required": false, "description_key": "commands.param.semantic_role"},
+        {"name": "stable_key", "kind": "string", "required": false, "description_key": "commands.param.stable_key"},
+        {"name": "tags", "kind": "array", "required": false, "description_key": "commands.param.tags"},
+        {"name": "agent_origin", "kind": "string", "required": false, "description_key": "commands.param.agent_origin"}
+      ],
+      "examples": ["/game.create_group name=Store", "/game.create_group name=Shelves parent=Store"]
+    },
+    {
+      "name": "game.reparent",
+      "aliases": ["scene.reparent"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_reparent.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true, "description_key": "commands.param.target"},
+        {"name": "parent", "kind": "string", "required": false, "description_key": "commands.param.parent"},
+        {"name": "preserve_world", "kind": "bool", "required": false, "default": "true", "description_key": "commands.param.preserve_world"}
+      ],
+      "examples": ["/game.reparent target=Shelf parent=Store", "/game.reparent target=Shelf parent=root"]
+    },
+    {
+      "name": "game.build",
+      "aliases": ["scene.build"],
+      "domain": "game",
+      "category": "generation",
+      "description_key": "commands.game_build.desc",
+      "parameters": [
+        {"name": "parent", "kind": "string", "required": false, "description_key": "commands.param.parent"},
+        {"name": "design_profile", "kind": "enum", "required": false, "description_key": "commands.param.design_profile"},
+        {"name": "groups", "kind": "array", "required": false, "description_key": "commands.param.groups"},
+        {"name": "entities", "kind": "array", "required": false, "description_key": "commands.param.entities"}
+      ],
+      "examples": [
+        "/game.build {\"groups\":[{\"name\":\"Structure\"}],\"entities\":[{\"kind\":\"cube\",\"name\":\"Floor\",\"parent\":\"Structure\",\"transform\":{\"position\":[0,0,0],\"scale\":[4,0.2,2]},\"color_rgba\":[90,120,220,255]}]}"
+      ]
+    },
+    {
+      "name": "game.reconcile",
+      "aliases": ["scene.reconcile"],
+      "domain": "game",
+      "category": "generation",
+      "description_key": "commands.game_reconcile.desc",
+      "parameters": [
+        {"name": "parent", "kind": "string", "required": false, "description_key": "commands.param.parent"},
+        {"name": "design_profile", "kind": "enum", "required": false, "description_key": "commands.param.design_profile"},
+        {"name": "groups", "kind": "array", "required": false, "description_key": "commands.param.groups"},
+        {"name": "entities", "kind": "array", "required": false, "description_key": "commands.param.entities"}
+      ],
+      "examples": ["/game.reconcile {\"groups\":[{\"name\":\"Shelves\",\"stable_key\":\"store.shelves\"}],\"entities\":[{\"kind\":\"cube\",\"name\":\"Shelf\",\"stable_key\":\"store.shelf.left\"}]} "]
+    },
+    {
+      "name": "game.repair",
+      "aliases": ["scene.repair"],
+      "domain": "game",
+      "category": "generation",
+      "description_key": "commands.game_repair.desc",
+      "parameters": [
+        {"name": "root", "kind": "string", "required": false, "description_key": "commands.param.root"},
+        {"name": "operations", "kind": "array", "required": true, "description_key": "commands.param.operations"}
+      ],
+      "examples": ["/game.repair {\"root\":\"key:store.main\",\"operations\":[{\"name\":\"scene_update\",\"params\":{\"target\":\"key:store.wall.back\",\"transform\":{\"position\":[0,2,-4]}}}]} "]
     },
     {
       "name": "game.select",
@@ -186,7 +471,17 @@
       "category": "scene",
       "description_key": "commands.game_set_transform.desc",
       "parameters": [
-        {"name": "target", "kind": "string", "required": false}
+        {"name": "target", "kind": "string", "required": false},
+        {"name": "transform", "kind": "object", "required": false, "description_key": "commands.param.transform"},
+        {"name": "x", "kind": "f32", "required": false},
+        {"name": "y", "kind": "f32", "required": false},
+        {"name": "z", "kind": "f32", "required": false},
+        {"name": "rx", "kind": "f32", "required": false},
+        {"name": "ry", "kind": "f32", "required": false},
+        {"name": "rz", "kind": "f32", "required": false},
+        {"name": "sx", "kind": "f32", "required": false},
+        {"name": "sy", "kind": "f32", "required": false},
+        {"name": "sz", "kind": "f32", "required": false}
       ],
       "examples": ["/game.set_transform target=Player x=1 y=2 z=0 sx=2 sy=1 sz=2"]
     },
@@ -280,6 +575,47 @@
         {"name": "target", "kind": "string", "required": false}
       ],
       "examples": ["/game.focus target=Player"]
+    },
+    {
+      "name": "game.update",
+      "aliases": ["game.edit"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_update.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true, "description_key": "commands.param.target"},
+        {"name": "name", "kind": "string", "required": false},
+        {"name": "transform", "kind": "object", "required": false, "description_key": "commands.param.transform"},
+        {"name": "x", "kind": "f32", "required": false},
+        {"name": "y", "kind": "f32", "required": false},
+        {"name": "z", "kind": "f32", "required": false},
+        {"name": "rx", "kind": "f32", "required": false},
+        {"name": "ry", "kind": "f32", "required": false},
+        {"name": "rz", "kind": "f32", "required": false},
+        {"name": "sx", "kind": "f32", "required": false},
+        {"name": "sy", "kind": "f32", "required": false},
+        {"name": "sz", "kind": "f32", "required": false},
+        {"name": "color", "kind": "color", "required": false, "description_key": "commands.param.color"},
+        {"name": "color_rgba", "kind": "array", "required": false, "description_key": "commands.param.color_rgba"},
+        {"name": "visible", "kind": "bool", "required": false},
+        {"name": "locked", "kind": "bool", "required": false},
+        {"name": "semantic_role", "kind": "string", "required": false, "description_key": "commands.param.semantic_role"},
+        {"name": "stable_key", "kind": "string", "required": false, "description_key": "commands.param.stable_key"},
+        {"name": "tags", "kind": "array", "required": false, "description_key": "commands.param.tags"},
+        {"name": "agent_origin", "kind": "string", "required": false, "description_key": "commands.param.agent_origin"}
+      ],
+      "examples": ["/game.update target=Player x=1 y=2 z=0"]
+    },
+    {
+      "name": "game.batch",
+      "aliases": ["game.transaction"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_batch.desc",
+      "parameters": [
+        {"name": "operations", "kind": "array", "required": true, "description_key": "commands.param.operations"}
+      ],
+      "examples": ["/game.batch {\"operations\":[{\"name\":\"game.add\",\"params\":{\"primitive\":\"cube\",\"name\":\"Shelf\"}}]}"]
     },
     {
       "name": "electronics.add_part",

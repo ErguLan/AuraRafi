@@ -171,7 +171,9 @@ animation budgets.
 
 The profile is advisory rather than a hidden auto-switch. Panels and runtime
 systems can inspect it to stay within the selected tier, while CPU fallback and
-explicit project gates still decide what actually runs.
+explicit project gates still decide what actually runs. In particular,
+`max_triangles` sizes optional work and diagnostics; the editor never uses it
+to remove otherwise visible entities.
 
 ## Studio UI Surface
 
@@ -204,6 +206,9 @@ renderer resolves active language strings into glyphs.
     ui_surface/              retained UI render adapter for raf_ui nodes
     cad_surface.rs           retained electronics CAD scene adapter
   -----------------------------------------------
+  raf_render  -  scene_visibility.rs
+    conservative bounds     frustum + streamed-region submission policy
+  -----------------------------------------------
   raf_render  -  scene_renderer.rs
     geometry/                MeshData + primitive constructors
     math/                    transform, frustum, ray
@@ -225,12 +230,14 @@ The steps below describe the scene viewport CPU reference path. This is the
 path that remains easiest to reason about when validating depth correctness,
 selection overlays, and fallback behavior.
 
-1. Frustum cull: discard entities outside the 6-plane frustum.
+1. Build conservative transformed bounds and discard only entities fully
+   outside the 6-plane frustum or an explicitly enabled streamed region.
 2. Collect `RenderJob`s: primitive, model matrix, color, transparency flag.
 3. Sort: opaques front-to-back, transparents back-to-front.
 4. Per triangle:
    a. MVP transform to clip space.
-   b. Near-plane clip.
+   b. Allocation-free near-plane clip; crossing triangles are split, not
+      discarded.
    c. Perspective divide to NDC.
    d. Viewport transform to screen coordinates.
    e. Flat shading via transformed normals and light direction.
@@ -252,16 +259,11 @@ selection overlays, and fallback behavior.
 | Depth Z | `(ndc_z + 1) * 0.5` normalized to [0,1] |
 | Flat shade | `ambient + diffuse * max(0, dot(worldNormal, lightDir))` |
 
-## Render Modes
+## Viewport Shading
 
-| Mode | Fill | Wire | Use case |
-|------|:-:|:-:|---------|
-| Solid | Yes | selected only | Default editing |
-| Wireframe | No | all | Topology inspection |
-| Preview | Yes | all | Final look + structure |
-
-`RenderOptions` also controls `solid_show_surface_edges`, `solid_xray_mode`,
-`solid_face_tonality`, `selection_outline`, and `selection_outline_color`.
+The active editor viewport has one Lit path. `RenderOptions` controls optional
+surface edges, xray opacity, face tonality, and selection outlines without
+switching to alternate scene renderers.
 
 ## Transparency
 
@@ -434,6 +436,7 @@ crates/raf_render/src/
     mesh_data.rs              MeshData struct
     primitives.rs             cube/cylinder/sphere/plane
   math/
+    clip.rs                   allocation-free near-plane triangle clipping
     transform.rs              MVP, project_point, screen_to_world_ray
     frustum.rs                6-plane frustum culling
     ray.rs                    Ray, ray_sphere, ray_triangle
@@ -441,6 +444,7 @@ crates/raf_render/src/
     framebuffer.rs            RGBA + depth buffer
     rasterizer.rs             scanline fill, line draw, blended path
   scene_renderer.rs           scene viewport frame construction / CPU reference path
+  scene_visibility.rs         transformed bounds + conservative submission policy
   camera.rs                   perspective + orthographic
   gizmo.rs                    gizmo data model + hit test
   picking.rs                  entity picking + gizmo projection

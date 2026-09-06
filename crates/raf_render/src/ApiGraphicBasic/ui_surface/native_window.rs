@@ -256,6 +256,39 @@ impl NativeUiWindowHost {
         self.configuration.height
     }
 
+    /// Applies the editor's VSync preference to the native swapchain. The
+    /// surface capabilities remain authoritative because some platforms do
+    /// not expose an immediate present mode.
+    pub fn set_vsync(&mut self, enabled: bool) {
+        let capabilities = self.surface.get_capabilities(&self.adapter);
+        let desired = if enabled {
+            wgpu::PresentMode::Fifo
+        } else {
+            wgpu::PresentMode::Immediate
+        };
+        let present_mode = capabilities
+            .present_modes
+            .iter()
+            .copied()
+            .find(|mode| *mode == desired)
+            .or_else(|| {
+                capabilities
+                    .present_modes
+                    .iter()
+                    .copied()
+                    .find(|mode| *mode == wgpu::PresentMode::Fifo)
+            })
+            .or_else(|| capabilities.present_modes.first().copied());
+        let Some(present_mode) = present_mode else {
+            return;
+        };
+        if self.configuration.present_mode == present_mode {
+            return;
+        }
+        self.configuration.present_mode = present_mode;
+        self.surface.configure(&self.device, &self.configuration);
+    }
+
     /// Installs the shared application command tree through a platform-owned
     /// menu adapter. The native event loop later drains stable command IDs and
     /// dispatches them at the application boundary.

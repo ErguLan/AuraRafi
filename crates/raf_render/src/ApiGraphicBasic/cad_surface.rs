@@ -40,14 +40,14 @@ impl Default for CadSurfaceOptions {
             grid_step: 20.0,
             grid_color: [180, 186, 200, 14],
             major_grid_color: [220, 226, 240, 30],
-            axis_color: [212, 119, 26, 46],
+            axis_color: [220, 226, 240, 40],
             symbol_color: [245, 245, 246, 255],
             trace_width: 3.0,
             wire_width: 2.0,
             selected_object_ids: Vec::new(),
             selected_source_ids: Vec::new(),
             selection_color: [255, 172, 64, 255],
-            selection_width: 2.25,
+            selection_width: 1.0,
         }
     }
 }
@@ -293,6 +293,15 @@ fn record_selection_outline(
             width,
             options.selection_color,
         );
+        // Keep the conductor visible inside its thin selection halo.
+        record_line(
+            commands,
+            segment[0],
+            segment[1],
+            z - 0.01,
+            base_width,
+            object_line_color(object),
+        );
     }
 }
 
@@ -429,12 +438,14 @@ fn record_object(
     // can batch them without the editor repainting the static geometry.
     for path in &object.line_paths {
         for segment in path.windows(2) {
-            let line_color =
-                if schematic && !matches!(object.kind, CadObjectKind::Pin | CadObjectKind::Pad) {
-                    options.symbol_color
-                } else {
-                    object_line_color(object)
-                };
+            let line_color = if schematic
+                && object.color_rgba[3] == u8::MAX
+                && !matches!(object.kind, CadObjectKind::Pin | CadObjectKind::Pad)
+            {
+                options.symbol_color
+            } else {
+                object_line_color(object)
+            };
             record_line(commands, segment[0], segment[1], z - 0.015, 2.0, line_color);
         }
     }
@@ -585,12 +596,7 @@ fn object_fill(object: &CadObject) -> [u8; 4] {
 }
 
 fn object_line_color(object: &CadObject) -> [u8; 4] {
-    match object.kind {
-        CadObjectKind::Wire => [112, 224, 136, 255],
-        CadObjectKind::Trace => [212, 119, 26, 255],
-        CadObjectKind::Airwire => [245, 245, 246, 180],
-        _ => object.color_rgba,
-    }
+    object.color_rgba
 }
 
 fn object_border(object: &CadObject) -> [u8; 4] {
@@ -819,7 +825,7 @@ mod tests {
                 _ => None,
             })
             .flatten()
-            .filter(|line| line.color == [112, 224, 136, 255])
+            .filter(|line| line.color == [216, 221, 227, 255])
             .count();
 
         // The diagonal wire is represented by the same deterministic elbow

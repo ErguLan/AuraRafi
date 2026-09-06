@@ -7,7 +7,10 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use raf_ui::{UiIcon, UiIconId};
+use raf_ui::{UiColorPicker, UiIcon, UiIconId};
+
+const COLOR_PICKER_SOURCE_PREFIX: &str = "builtin://color-picker/hsv/";
+const COLOR_PICKER_IMAGE_SIZE: usize = UiColorPicker::CANVAS_SIZE as usize;
 
 #[derive(Debug, Clone)]
 pub struct UiSurfaceImageData {
@@ -103,9 +106,26 @@ impl UiSurfaceImageStore {
         key
     }
 
-    /// Resolves a draw-list source without making product surfaces understand
-    /// how built-in icons are rasterized.
+    /// Resolves generated UI sources without making product surfaces understand
+    /// how renderer-owned pixels are rasterized.
     pub fn ensure_builtin_key(&mut self, key: &str) {
+        if let Some(hue) = key
+            .strip_prefix(COLOR_PICKER_SOURCE_PREFIX)
+            .and_then(|value| value.parse::<f32>().ok())
+            .filter(|hue| hue.is_finite())
+        {
+            if !self.images.contains_key(key) {
+                let _ = self.insert_rgba(
+                    key.to_string(),
+                    [
+                        COLOR_PICKER_IMAGE_SIZE as u32,
+                        COLOR_PICKER_IMAGE_SIZE as u32,
+                    ],
+                    color_picker_pixels(hue),
+                );
+            }
+            return;
+        }
         let Some(id) = key.strip_prefix("builtin://icon/") else {
             return;
         };
@@ -114,6 +134,47 @@ impl UiSurfaceImageStore {
         };
         let _ = self.ensure_builtin_icon(UiIcon::new(id));
     }
+}
+
+/// Generates the static part of the HSV editor used by the Inspector.
+///
+/// The image is keyed by hue, so a surface rebuild only uploads a new texture
+/// when the hue changes. Saturation/value remain interactive retained ranges
+/// layered above this image; the GPU and CPU hosts therefore share the same
+/// pixels without embedding editor-specific painting in either backend.
+fn color_picker_pixels(hue: f32) -> Vec<u8> {
+    const SQUARE_START: usize = UiColorPicker::SQUARE_START as usize;
+    const SQUARE_SIDE: usize = UiColorPicker::SQUARE_SIDE as usize;
+    let mut pixels = vec![0_u8; COLOR_PICKER_IMAGE_SIZE * COLOR_PICKER_IMAGE_SIZE * 4];
+
+    for y in 0..COLOR_PICKER_IMAGE_SIZE {
+        for x in 0..COLOR_PICKER_IMAGE_SIZE {
+            let dx = x as f32 + 0.5 - COLOR_PICKER_IMAGE_SIZE as f32 * 0.5;
+            let dy = y as f32 + 0.5 - COLOR_PICKER_IMAGE_SIZE as f32 * 0.5;
+            let distance = (dx * dx + dy * dy).sqrt();
+            let pixel = &mut pixels[(y * COLOR_PICKER_IMAGE_SIZE + x) * 4..][..4];
+
+            if (UiColorPicker::RING_INNER_RADIUS..=UiColorPicker::RING_OUTER_RADIUS)
+                .contains(&distance)
+            {
+                let ring_hue = (dy.atan2(dx).to_degrees() + 90.0).rem_euclid(360.0);
+                let rgb = UiColorPicker::hsv_to_rgb_bytes(ring_hue, 1.0, 1.0);
+                let edge = (distance - UiColorPicker::RING_INNER_RADIUS)
+                    .min(UiColorPicker::RING_OUTER_RADIUS - distance);
+                let alpha = (edge.clamp(0.0, 1.0) * 255.0).round() as u8;
+                pixel.copy_from_slice(&[rgb[0], rgb[1], rgb[2], alpha]);
+            } else if (SQUARE_START..SQUARE_START + SQUARE_SIDE).contains(&x)
+                && (SQUARE_START..SQUARE_START + SQUARE_SIDE).contains(&y)
+            {
+                let saturation = (x - SQUARE_START) as f32 / (SQUARE_SIDE - 1) as f32;
+                let value = 1.0 - (y - SQUARE_START) as f32 / (SQUARE_SIDE - 1) as f32;
+                let rgb = UiColorPicker::hsv_to_rgb_bytes(hue, saturation, value);
+                pixel.copy_from_slice(&[rgb[0], rgb[1], rgb[2], 255]);
+            }
+        }
+    }
+
+    pixels
 }
 
 pub fn builtin_icon_key(id: UiIconId) -> String {
@@ -169,6 +230,12 @@ fn builtin_icon_png(id: UiIconId) -> Option<&'static [u8]> {
         UiIconId::Agent => Some(include_bytes!("../../../assets/ui_icons/png/agent.png")),
         UiIconId::Schematic => Some(include_bytes!("../../../assets/ui_icons/png/schematic.png")),
         UiIconId::Pcb => Some(include_bytes!("../../../assets/ui_icons/png/pcb.png")),
+        UiIconId::Wire
+        | UiIconId::Route
+        | UiIconId::BoardOutline
+        | UiIconId::ZoomIn
+        | UiIconId::ZoomOut
+        | UiIconId::Trash => None,
         UiIconId::Settings => Some(include_bytes!("../../../assets/ui_icons/png/settings.png")),
         UiIconId::Menu => Some(include_bytes!("../../../assets/ui_icons/png/menu.png")),
         UiIconId::Warning => Some(include_bytes!("../../../assets/ui_icons/png/warning.png")),
@@ -221,6 +288,12 @@ fn icon_id_from_key(key: &str) -> Option<UiIconId> {
         UiIconId::Agent,
         UiIconId::Schematic,
         UiIconId::Pcb,
+        UiIconId::Wire,
+        UiIconId::Route,
+        UiIconId::BoardOutline,
+        UiIconId::ZoomIn,
+        UiIconId::ZoomOut,
+        UiIconId::Trash,
         UiIconId::Settings,
         UiIconId::Menu,
         UiIconId::Warning,
@@ -563,6 +636,53 @@ fn builtin_icon_pixels(id: UiIconId) -> Vec<u8> {
             circle(&mut pixels, [16.0, 40.0], 3.0, 2.0);
             circle(&mut pixels, [46.0, 22.0], 3.0, 2.0);
         }
+        UiIconId::Wire => {
+            line(&mut pixels, [10.0, 32.0], [22.0, 32.0], stroke);
+            line(&mut pixels, [22.0, 32.0], [32.0, 20.0], stroke);
+            line(&mut pixels, [32.0, 20.0], [42.0, 20.0], stroke);
+            line(&mut pixels, [42.0, 20.0], [54.0, 32.0], stroke);
+            circle(&mut pixels, [10.0, 32.0], 3.0, 2.0);
+            circle(&mut pixels, [54.0, 32.0], 3.0, 2.0);
+        }
+        UiIconId::Route => {
+            line(&mut pixels, [10.0, 46.0], [24.0, 46.0], stroke);
+            line(&mut pixels, [24.0, 46.0], [24.0, 20.0], stroke);
+            line(&mut pixels, [24.0, 20.0], [52.0, 20.0], stroke);
+            circle(&mut pixels, [10.0, 46.0], 3.0, 2.0);
+            circle(&mut pixels, [52.0, 20.0], 3.0, 2.0);
+        }
+        UiIconId::BoardOutline => {
+            line(&mut pixels, [16.0, 12.0], [48.0, 12.0], stroke);
+            line(&mut pixels, [48.0, 12.0], [52.0, 16.0], stroke);
+            line(&mut pixels, [52.0, 16.0], [52.0, 48.0], stroke);
+            line(&mut pixels, [52.0, 48.0], [48.0, 52.0], stroke);
+            line(&mut pixels, [48.0, 52.0], [16.0, 52.0], stroke);
+            line(&mut pixels, [16.0, 52.0], [12.0, 48.0], stroke);
+            line(&mut pixels, [12.0, 48.0], [12.0, 16.0], stroke);
+            line(&mut pixels, [12.0, 16.0], [16.0, 12.0], stroke);
+        }
+        UiIconId::ZoomIn => {
+            circle(&mut pixels, [28.0, 28.0], 15.0, stroke);
+            line(&mut pixels, [39.0, 39.0], [53.0, 53.0], stroke);
+            line(&mut pixels, [20.0, 28.0], [36.0, 28.0], stroke);
+            line(&mut pixels, [28.0, 20.0], [28.0, 36.0], stroke);
+        }
+        UiIconId::ZoomOut => {
+            circle(&mut pixels, [28.0, 28.0], 15.0, stroke);
+            line(&mut pixels, [39.0, 39.0], [53.0, 53.0], stroke);
+            line(&mut pixels, [20.0, 28.0], [36.0, 28.0], stroke);
+        }
+        UiIconId::Trash => {
+            line(&mut pixels, [18.0, 20.0], [46.0, 20.0], stroke);
+            line(&mut pixels, [24.0, 20.0], [24.0, 14.0], stroke);
+            line(&mut pixels, [24.0, 14.0], [40.0, 14.0], stroke);
+            line(&mut pixels, [40.0, 14.0], [40.0, 20.0], stroke);
+            line(&mut pixels, [21.0, 20.0], [24.0, 51.0], stroke);
+            line(&mut pixels, [24.0, 51.0], [40.0, 51.0], stroke);
+            line(&mut pixels, [40.0, 51.0], [43.0, 20.0], stroke);
+            line(&mut pixels, [29.0, 27.0], [30.0, 44.0], 2.5);
+            line(&mut pixels, [35.0, 27.0], [34.0, 44.0], 2.5);
+        }
         UiIconId::Settings => {
             circle(&mut pixels, [32.0, 32.0], 9.0, stroke);
             for angle in [0.0_f32, 1.047, 2.094, 3.141, 4.188, 5.235] {
@@ -640,6 +760,23 @@ mod tests {
     }
 
     #[test]
+    fn color_picker_asset_contains_hue_ring_and_hsv_square() {
+        let mut store = UiSurfaceImageStore::default();
+        let key = "builtin://color-picker/hsv/0";
+        store.ensure_builtin_key(key);
+        let image = store.get(key).expect("color picker image");
+
+        assert_eq!(image.size, [256, 256]);
+        let pixel = |x: usize, y: usize| {
+            let index = (y * 256 + x) * 4;
+            &image.pixels[index..index + 4]
+        };
+        assert!(pixel(128, 20)[3] > 0, "hue ring should be visible");
+        assert!(pixel(63, 63)[3] > 0, "HSV square should be visible");
+        assert_eq!(pixel(128, 20)[0], 255, "zero hue should start at red");
+    }
+
+    #[test]
     fn every_semantic_icon_has_a_generated_runtime_asset() {
         let icons = [
             UiIconId::Select,
@@ -682,6 +819,12 @@ mod tests {
             UiIconId::Agent,
             UiIconId::Schematic,
             UiIconId::Pcb,
+            UiIconId::Wire,
+            UiIconId::Route,
+            UiIconId::BoardOutline,
+            UiIconId::ZoomIn,
+            UiIconId::ZoomOut,
+            UiIconId::Trash,
             UiIconId::Settings,
             UiIconId::Menu,
             UiIconId::Warning,
@@ -690,11 +833,15 @@ mod tests {
         ];
 
         for icon in icons {
-            let bytes = builtin_icon_png(icon).expect("generated icon PNG");
-            let image = image::load_from_memory(bytes)
-                .expect("generated icon PNG decodes")
-                .to_rgba8();
-            assert_eq!(image.dimensions(), (64, 64), "{}", icon.key());
+            let mut store = UiSurfaceImageStore::default();
+            let key = store.ensure_builtin_icon(UiIcon::new(icon));
+            let image = store.get(&key).expect("generated icon asset");
+            assert_eq!(image.size, [64, 64], "{}", icon.key());
+            assert!(
+                image.pixels.chunks_exact(4).any(|pixel| pixel[3] > 0),
+                "{} must not be transparent",
+                icon.key()
+            );
         }
     }
 }

@@ -3,12 +3,16 @@
 //! Winit feeds an `InputSnapshot`; RafUI surfaces and the active canvas share
 //! this router, while ApiGraphicBasic owns frame pacing and composition.
 
+use std::sync::Arc;
+use std::time::Instant;
+
+use raf_core::config::EngineSettings;
 use raf_core::project::ProjectType;
 use raf_core::scene::SceneGraph;
-use raf_core::{InputRouter, InputSnapshot};
+use raf_core::{InputRouter, InputSnapshot, Revision, UndoToken};
 use raf_render::api_graphic_basic::{
     DynamicResolutionController, EditorCanvasLayer, FrameInvalidation, FramePacingProfile,
-    FramePermit,
+    FramePermit, SceneFrameCapture,
 };
 use raf_render::bridge::{GraphicsSurfaceKind, RenderRuntime, ViewportInputRect};
 
@@ -18,6 +22,17 @@ use crate::editor_layout::{
 };
 use crate::panels::viewport_controller::{NativeGameViewportController, NativeViewportUpdate};
 use crate::scene_history::SceneHistory;
+
+fn canvas_requires_render(reasons: FrameInvalidation) -> bool {
+    reasons.intersects(
+        FrameInvalidation::WINDOW
+            | FrameInvalidation::DOCUMENT
+            | FrameInvalidation::CAMERA
+            | FrameInvalidation::SIMULATION
+            | FrameInvalidation::ASSET_UPLOAD
+            | FrameInvalidation::EXPLICIT,
+    )
+}
 
 pub struct NativeEditorRuntime {
     input_router: InputRouter,
@@ -30,12 +45,31 @@ pub struct NativeEditorRuntime {
     dynamic_resolution: DynamicResolutionController,
     project_type: ProjectType,
     active_frame: Option<FramePermit>,
+    cached_game_canvas: Option<CachedGameCanvas>,
+    canvas_renders: u64,
+    canvas_cache_hits: u64,
+    frame_started_at: Option<Instant>,
+    last_frame_cpu_ms: f32,
     command_registry: EditorCommandRegistry,
     history: SceneHistory,
+    attached_undo: Option<AttachedSceneUndo>,
     clipboard: Vec<raf_core::scene::SceneNodeId>,
     node_graph: raf_nodes::NodeGraph,
     selected_graph_node: Option<raf_nodes::NodeId>,
     node_drag: Option<(raf_nodes::NodeId, [f32; 2], [f32; 2])>,
+}
+
+#[derive(Clone)]
+struct CachedGameCanvas {
+    device_generation: u64,
+    layer: EditorCanvasLayer,
+}
+
+struct AttachedSceneUndo {
+    token: UndoToken,
+    revision_after: Revision,
+    before: SceneGraph,
+    after_fingerprint: u64,
 }
 
 impl NativeEditorRuntime {
@@ -55,8 +89,14 @@ impl NativeEditorRuntime {
             dynamic_resolution: DynamicResolutionController::default(),
             project_type: ProjectType::Game,
             active_frame: None,
+            cached_game_canvas: None,
+            canvas_renders: 0,
+            canvas_cache_hits: 0,
+            frame_started_at: None,
+            last_frame_cpu_ms: 0.0,
             command_registry: EditorCommandRegistry::default(),
             history: SceneHistory::default(),
+            attached_undo: None,
             clipboard: Vec::new(),
             node_graph: raf_nodes::NodeGraph::new("Main"),
             selected_graph_node: None,
@@ -158,10 +198,71 @@ impl NativeEditorRuntime {
         &self.history
     }
 
+    /// Record the snapshot owned by an attached Game command after the
+    /// command gateway has confirmed that the scene changed. The normal
+    /// editor history also receives the snapshot, so Ctrl+Z remains useful;
+    /// the extra token is only for the exact external transaction.
+    pub fn record_attached_scene_change(
+        &mut self,
+        before: SceneGraph,
+        scene: &SceneGraph,
+        revision_after: Revision,
+    ) -> Option<UndoToken> {
+        if crate::scene_history::scene_fingerprint(&before)
+            == crate::scene_history::scene_fingerprint(scene)
+        {
+            return None;
+        }
+        self.history.record_if_changed(before.clone(), scene);
+        let token = UndoToken::new();
+        self.attached_undo = Some(AttachedSceneUndo {
+            token,
+            revision_after,
+            before,
+            after_fingerprint: crate::scene_history::scene_fingerprint(scene),
+        });
+        Some(token)
+    }
+
+    pub fn can_undo_attached_scene(
+        &self,
+        scene: &SceneGraph,
+        token: UndoToken,
+        current_revision: Revision,
+    ) -> bool {
+        self.attached_undo.as_ref().is_some_and(|undo| {
+            undo.token == token
+                && undo.revision_after == current_revision
+                && undo.after_fingerprint == crate::scene_history::scene_fingerprint(scene)
+        })
+    }
+
+    pub fn undo_attached_scene(
+        &mut self,
+        scene: &mut SceneGraph,
+        token: UndoToken,
+        current_revision: Revision,
+    ) -> bool {
+        let Some(undo) = self.attached_undo.take() else {
+            return false;
+        };
+        let valid = undo.token == token
+            && undo.revision_after == current_revision
+            && undo.after_fingerprint == crate::scene_history::scene_fingerprint(scene);
+        if !valid {
+            self.attached_undo = Some(undo);
+            return false;
+        }
+        *scene = undo.before;
+        self.retain_valid_selection(scene);
+        self.request_document_frame();
+        true
+    }
+
     pub fn select_node(&mut self, scene: &SceneGraph, id: raf_core::scene::SceneNodeId) {
         if scene.is_valid_node(id) {
             self.game_viewport.selected = vec![id];
-            self.request_ui_frame();
+            self.request_overlay_frame();
         }
     }
 
@@ -188,7 +289,7 @@ impl NativeEditorRuntime {
         } else {
             self.game_viewport.selected = vec![id];
         }
-        self.request_ui_frame();
+        self.request_overlay_frame();
     }
 
     pub fn select_node_range(
@@ -214,7 +315,7 @@ impl NativeEditorRuntime {
             .copied()
             .filter(|id| scene.is_valid_node(*id))
             .collect();
-        self.request_ui_frame();
+        self.request_overlay_frame();
     }
 
     pub fn focus_selection(&mut self, scene: &SceneGraph) {
@@ -400,7 +501,7 @@ impl NativeEditorRuntime {
             }
         }
         self.game_viewport.selected = selected;
-        self.request_ui_frame();
+        self.request_overlay_frame();
     }
 
     pub fn reparent_to_root(&mut self, scene: &mut SceneGraph, id: raf_core::scene::SceneNodeId) {
@@ -450,7 +551,7 @@ impl NativeEditorRuntime {
             .copied()
             .filter(|id| scene.is_valid_node(*id))
             .collect();
-        self.request_ui_frame();
+        self.request_overlay_frame();
     }
 
     /// Dispatches application shortcuts through the same registry used by
@@ -526,13 +627,16 @@ impl NativeEditorRuntime {
             return;
         }
         self.project_type = project_type;
+        self.cached_game_canvas = None;
         self.graphics.request_frame(FrameInvalidation::UI);
     }
 
     pub fn reset_document(&mut self) {
+        self.cached_game_canvas = None;
         self.game_viewport.selected.clear();
         self.game_viewport.bridge_mut().reset_isometric_view();
         self.history = SceneHistory::default();
+        self.attached_undo = None;
         self.clipboard.clear();
         self.graphics.request_frame(
             FrameInvalidation::DOCUMENT | FrameInvalidation::UI | FrameInvalidation::CAMERA,
@@ -541,6 +645,19 @@ impl NativeEditorRuntime {
 
     pub fn graphics_mut(&mut self) -> &mut RenderRuntime {
         &mut self.graphics
+    }
+
+    /// Split the two native Game viewport resources for one Agent frame. The
+    /// borrow is explicit so capture and scene commands cannot accidentally
+    /// create a second renderer or a parallel viewport state.
+    pub fn game_viewport_and_graphics_mut(
+        &mut self,
+    ) -> (&mut NativeGameViewportController, &mut RenderRuntime) {
+        (&mut self.game_viewport, &mut self.graphics)
+    }
+
+    pub fn capture_last_viewport_rgba(&self) -> Result<SceneFrameCapture, String> {
+        self.graphics.capture_last_scene_rgba()
     }
 
     pub fn layout(&self) -> EditorFrameLayout {
@@ -558,6 +675,7 @@ impl NativeEditorRuntime {
     pub fn set_layout_request(&mut self, request: EditorLayoutRequest) {
         self.layout_request = request;
         self.layout = EditorFrameLayout::compute(request);
+        self.cached_game_canvas = None;
         self.graphics.request_frame(FrameInvalidation::WINDOW);
     }
 
@@ -566,6 +684,7 @@ impl NativeEditorRuntime {
     pub fn resize_left_panel(&mut self, width: f32) {
         self.layout_request.left_width = width.clamp(224.0, 760.0);
         self.layout = EditorFrameLayout::compute(self.layout_request);
+        self.cached_game_canvas = None;
         self.graphics
             .request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
     }
@@ -575,6 +694,7 @@ impl NativeEditorRuntime {
     pub fn resize_right_panel(&mut self, width: f32) {
         self.layout_request.right_width = width.clamp(260.0, 760.0);
         self.layout = EditorFrameLayout::compute(self.layout_request);
+        self.cached_game_canvas = None;
         self.graphics
             .request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
     }
@@ -585,6 +705,7 @@ impl NativeEditorRuntime {
         self.layout_request.bottom_height =
             height.clamp(EDITOR_DOCK_MIN_HEIGHT, EDITOR_DOCK_MAX_HEIGHT);
         self.layout = EditorFrameLayout::compute(self.layout_request);
+        self.cached_game_canvas = None;
         self.graphics
             .request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
     }
@@ -596,6 +717,7 @@ impl NativeEditorRuntime {
         }
         self.layout_request.bottom_expanded = expanded;
         self.layout = EditorFrameLayout::compute(self.layout_request);
+        self.cached_game_canvas = None;
         self.graphics
             .request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
     }
@@ -603,6 +725,7 @@ impl NativeEditorRuntime {
     pub fn toggle_bottom_dock(&mut self) {
         self.layout_request.bottom_expanded = !self.layout_request.bottom_expanded;
         self.layout = EditorFrameLayout::compute(self.layout_request);
+        self.cached_game_canvas = None;
         self.graphics
             .request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
     }
@@ -610,6 +733,7 @@ impl NativeEditorRuntime {
     pub fn toggle_left_panel(&mut self) {
         self.layout_request.left_visible = !self.layout_request.left_visible;
         self.layout = EditorFrameLayout::compute(self.layout_request);
+        self.cached_game_canvas = None;
         self.graphics
             .request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
     }
@@ -617,6 +741,7 @@ impl NativeEditorRuntime {
     pub fn toggle_right_panel(&mut self) {
         self.layout_request.right_visible = !self.layout_request.right_visible;
         self.layout = EditorFrameLayout::compute(self.layout_request);
+        self.cached_game_canvas = None;
         self.graphics
             .request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
     }
@@ -629,6 +754,7 @@ impl NativeEditorRuntime {
             self.target_size[1] as f32 / self.scale_factor,
         ];
         self.layout = EditorFrameLayout::compute(self.layout_request);
+        self.cached_game_canvas = None;
         self.graphics.request_frame(FrameInvalidation::WINDOW);
     }
 
@@ -636,6 +762,25 @@ impl NativeEditorRuntime {
         self.graphics.set_frame_pacing_profile(profile);
         self.dynamic_resolution
             .reset(self.graphics.scheduler().budget());
+    }
+
+    pub fn apply_engine_settings(
+        &mut self,
+        settings: &EngineSettings,
+        advanced_gpu_features_allowed: bool,
+    ) {
+        self.game_viewport.apply_engine_settings(settings);
+        self.graphics.configure(
+            settings.render_execution_policy,
+            advanced_gpu_features_allowed,
+        );
+        self.graphics.set_frame_limit(settings.fps_limit);
+        self.graphics
+            .request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
+    }
+
+    pub fn set_frame_limit(&mut self, fps_limit: u32) {
+        self.graphics.set_frame_limit(fps_limit);
     }
 
     pub fn update_game_input(
@@ -654,6 +799,7 @@ impl NativeEditorRuntime {
             self.history.record_if_changed(before, scene);
         }
         if update.scene_changed {
+            self.cached_game_canvas = None;
             self.graphics.request_frame(FrameInvalidation::DOCUMENT);
         }
         if update.selection_changed {
@@ -661,16 +807,20 @@ impl NativeEditorRuntime {
                 .request_frame(FrameInvalidation::OVERLAY | FrameInvalidation::UI);
         }
         if update.needs_redraw {
+            self.cached_game_canvas = None;
             self.graphics.request_frame(FrameInvalidation::CAMERA);
         }
         self.graphics.set_continuous_frame_reason(
             FrameInvalidation::POINTER_CAPTURE,
             self.input_router.has_pointer_capture(),
         );
+        self.graphics
+            .set_continuous_frame_reason(FrameInvalidation::CAMERA, update.camera_motion);
         update
     }
 
     fn request_document_frame(&mut self) {
+        self.cached_game_canvas = None;
         self.graphics
             .request_frame(FrameInvalidation::DOCUMENT | FrameInvalidation::UI);
     }
@@ -748,14 +898,35 @@ impl NativeEditorRuntime {
         self.graphics.request_frame(FrameInvalidation::UI);
     }
 
+    pub fn request_canvas_frame(&mut self) {
+        self.cached_game_canvas = None;
+        self.graphics
+            .request_frame(FrameInvalidation::DOCUMENT | FrameInvalidation::UI);
+    }
+
+    pub fn request_overlay_frame(&mut self) {
+        self.graphics
+            .request_frame(FrameInvalidation::OVERLAY | FrameInvalidation::UI);
+    }
+
     pub fn request_animation_frame(&mut self) {
         self.graphics
             .request_frame(FrameInvalidation::ANIMATION | FrameInvalidation::UI);
     }
 
+    pub fn set_window_focused(&mut self, focused: bool) {
+        self.graphics.scheduler_mut().set_window_focused(focused);
+        self.request_ui_frame();
+    }
+
     pub fn set_continuous_ui_motion(&mut self, active: bool) {
         self.graphics
             .set_continuous_frame_reason(FrameInvalidation::ANIMATION, active);
+    }
+
+    pub fn set_continuous_text_input(&mut self, active: bool) {
+        self.graphics
+            .set_continuous_frame_reason(FrameInvalidation::UI, active);
     }
 
     /// Returns the measured presentation rate of the completed editor frames.
@@ -769,6 +940,9 @@ impl NativeEditorRuntime {
             return true;
         }
         self.active_frame = self.graphics.next_frame(now_seconds);
+        if self.active_frame.is_some() {
+            self.frame_started_at = Some(Instant::now());
+        }
         self.active_frame.is_some()
     }
 
@@ -791,14 +965,34 @@ impl NativeEditorRuntime {
             ((canvas_target.width as f32) * scale).round().max(1.0) as u32,
             ((canvas_target.height as f32) * scale).round().max(1.0) as u32,
         ];
+        let device_generation = self.graphics.snapshot().device_generation;
+        let must_render = self
+            .active_frame
+            .is_none_or(|permit| canvas_requires_render(permit.reasons));
+        if !must_render {
+            if let Some(cached) = self.cached_game_canvas.as_ref().filter(|cached| {
+                cached.device_generation == device_generation
+                    && cached.layer.source_size == source_size
+                    && cached.layer.target_rect == canvas_target
+            }) {
+                self.canvas_cache_hits = self.canvas_cache_hits.saturating_add(1);
+                return Some(cached.layer.clone());
+            }
+        }
+        self.canvas_renders = self.canvas_renders.saturating_add(1);
         let output = self
             .game_viewport
             .render(&mut self.graphics, scene, source_size);
-        Some(EditorCanvasLayer {
-            output,
+        let layer = EditorCanvasLayer {
+            output: Arc::new(output),
             source_size,
             target_rect: canvas_target,
-        })
+        };
+        self.cached_game_canvas = Some(CachedGameCanvas {
+            device_generation,
+            layer: layer.clone(),
+        });
+        Some(layer)
     }
 
     pub fn finish_frame(
@@ -810,18 +1004,30 @@ impl NativeEditorRuntime {
         let Some(permit) = self.active_frame.take() else {
             return;
         };
+        let measured_frame_cpu_ms = self
+            .frame_started_at
+            .take()
+            .map(|started_at| started_at.elapsed().as_secs_f32() * 1000.0)
+            .filter(|value| value.is_finite())
+            .unwrap_or(frame_cpu_ms.max(0.0));
+        self.last_frame_cpu_ms = measured_frame_cpu_ms;
         self.dynamic_resolution.update(
             self.graphics.scheduler().budget(),
             permit.activity,
-            frame_cpu_ms,
+            measured_frame_cpu_ms,
             frame_gpu_ms,
         );
-        self.graphics
-            .finish_frame(permit, presented_at_seconds, frame_cpu_ms, frame_gpu_ms);
+        self.graphics.finish_frame(
+            permit,
+            presented_at_seconds,
+            measured_frame_cpu_ms,
+            frame_gpu_ms,
+        );
     }
 
     pub fn cancel_frame(&mut self) {
         if let Some(permit) = self.active_frame.take() {
+            self.frame_started_at = None;
             self.graphics.request_frame(permit.reasons);
         }
     }
@@ -830,5 +1036,56 @@ impl NativeEditorRuntime {
         self.graphics
             .scheduler()
             .seconds_until_next_frame(now_seconds)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raf_core::{InputKey, InputSnapshot};
+
+    #[test]
+    fn overlay_frame_reuses_the_scene_canvas() {
+        assert!(!canvas_requires_render(
+            FrameInvalidation::OVERLAY | FrameInvalidation::UI
+        ));
+        assert!(canvas_requires_render(
+            FrameInvalidation::DOCUMENT | FrameInvalidation::UI
+        ));
+        assert!(canvas_requires_render(FrameInvalidation::EXPLICIT));
+    }
+
+    #[test]
+    fn held_wasd_keeps_camera_frames_continuous() {
+        let mut runtime = NativeEditorRuntime::new(EditorLayoutRequest::game([1440.0, 900.0]));
+        let mut scene = SceneGraph::default();
+        let mut input = InputSnapshot::default();
+        runtime.game_viewport_mut().wasd_speed = 0.5;
+        input.keys_down.insert(InputKey::W);
+        input.delta_seconds = 1.0 / 60.0;
+        let target_before = runtime.game_viewport().bridge().camera_target();
+
+        let update = runtime.update_game_input(&input, &mut scene);
+        let target_after = runtime.game_viewport().bridge().camera_target();
+
+        assert!(update.camera_motion);
+        assert!(
+            target_before.distance(target_after) > 0.05,
+            "a sub-unit WASD multiplier must still produce visible movement per frame"
+        );
+        assert!(runtime
+            .graphics()
+            .scheduler()
+            .pending()
+            .contains(FrameInvalidation::CAMERA));
+
+        assert!(runtime.begin_frame(0.0));
+        runtime.finish_input_frame(&input);
+        runtime.finish_frame(0.0, 0.0, 0.0);
+        assert!(runtime
+            .graphics()
+            .scheduler()
+            .pending()
+            .contains(FrameInvalidation::CAMERA));
     }
 }

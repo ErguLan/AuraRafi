@@ -10,9 +10,10 @@ use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiIcon, UiIconId, UiIconSize, UiSurface,
 };
 use raf_ui::{
-    UiAction, UiAlign, UiEventBinding, UiEventKind, UiFlow, UiJustify, UiLayout, UiNode,
-    UiNodeKind, UiRect, UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState,
-    UiStyleSelector, UiStyleSheet, UiTextStyle,
+    UiAccessibilityRole, UiAction, UiAlign, UiEventBinding, UiEventKind, UiFlow, UiJustify,
+    UiLayout, UiNode, UiNodeKind, UiRect, UiSelect, UiSelectOption, UiSpacing, UiStyle,
+    UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurfaceMaterial,
+    UiTextOverflow, UiTextStyle,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -23,8 +24,6 @@ pub enum ViewportToolbarAction {
     Scale,
     Focus,
     Solid,
-    Wireframe,
-    Preview,
     TogglePolygons,
     ToggleGrid,
     ToggleLabels,
@@ -63,8 +62,6 @@ pub enum ViewportTool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewportRenderStyle {
     Solid,
-    Wireframe,
-    Preview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +73,10 @@ pub enum ViewportViewMode {
 const TOP_BAR_HEIGHT: f32 = 46.0;
 const RAIL_TOP: f32 = 54.0;
 const RAIL_WIDTH: f32 = 42.0;
+const DROPDOWN_MIN_WIDTH: f32 = 152.0;
+const DROPDOWN_OPTION_HEIGHT: f32 = 27.0;
+const DROPDOWN_GAP: f32 = 4.0;
+const DROPDOWN_PADDING: f32 = 8.0;
 /// Eight tool buttons, two separators and padding: the building-style dropdown
 /// sits below Create primitive at the bottom of the rail.
 const RAIL_HEIGHT: f32 = 308.0;
@@ -93,9 +94,6 @@ pub fn build_viewport_toolbar_surface(
     if state.primitive_menu_open {
         root = root.with_child(primitive_menu(palette));
     }
-    if state.building_menu_open {
-        root = root.with_child(building_style_menu(palette, state.building_style));
-    }
 
     let mut surface = UiSurface::new("editor.viewport.toolbar", palette, root);
     surface.style_sheet = viewport_toolbar_style_sheet(palette);
@@ -109,6 +107,7 @@ fn top_toolbar(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode 
     let labels_width = if state.compact { 34.0 } else { 68.0 };
     let mut row = UiNode::new("viewport.toolbar.top", UiNodeKind::Toolbar)
         .with_class("viewport-toolbar-top")
+        .with_material(UiSurfaceMaterial::TranslucentChrome)
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
@@ -117,17 +116,12 @@ fn top_toolbar(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode 
             ..UiLayout::absolute(UiRect::new(0.0, 0.0, width, TOP_BAR_HEIGHT))
         })
         .with_style(UiStyle {
-            fill: [
-                tokens.surface_raised[0],
-                tokens.surface_raised[1],
-                tokens.surface_raised[2],
-                184,
-            ],
+            fill: tokens.surface_raised,
             border: tokens.border,
             text: tokens.text,
             border_width: 1.0,
             radius: 5.0,
-            opacity: 0.78,
+            opacity: 1.0,
         });
     row = row
         .with_child(view_dropdown(
@@ -187,34 +181,24 @@ fn top_toolbar(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode 
     row
 }
 
-fn view_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width: f32) -> UiNode {
+fn toolbar_select_trigger(
+    palette: StudioUiPalette,
+    id: &str,
+    value_key: &str,
+    options: Vec<UiSelectOption>,
+    selected_index: usize,
+    open: bool,
+    selected_icon: UiIconId,
+    label_key: &str,
+    width: f32,
+    compact: bool,
+    popup_id: &str,
+) -> UiNode {
     let tokens = palette.tokens();
-    let menu_width = if state.compact { 126.0 } else { 132.0 };
-    let selected_icon = match state.view_mode {
-        ViewportViewMode::View2d => UiIconId::View2d,
-        ViewportViewMode::View3d => UiIconId::View3d,
-    };
-    let mode_label_key = match state.view_mode {
-        ViewportViewMode::View2d => "app.viewport_2d_short",
-        ViewportViewMode::View3d => "app.viewport_3d_short",
-    };
-    let trigger_fill = if state.view_menu_open {
-        [116, 67, 24, 154]
-    } else {
-        [
-            tokens.surface_alt[0],
-            tokens.surface_alt[1],
-            tokens.surface_alt[2],
-            176,
-        ]
-    };
-    let trigger_border = if state.view_menu_open {
-        tokens.accent
-    } else {
-        tokens.border
-    };
-    let mut trigger = UiNode::new("viewport.toolbar.view-mode.trigger", UiNodeKind::Button)
-        .with_class(if state.view_menu_open {
+    let mut select = UiSelect::new(value_key, options, selected_index).with_popup_id(popup_id);
+    select.open = open;
+    let mut trigger = UiNode::select(id, select)
+        .with_class(if open {
             "viewport-toolbar-button-active"
         } else {
             "viewport-toolbar-button"
@@ -222,7 +206,7 @@ fn view_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width: f
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
-            justify_content: if state.compact {
+            justify_content: if compact {
                 UiJustify::Center
             } else {
                 UiJustify::Start
@@ -232,8 +216,17 @@ fn view_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width: f
             ..UiLayout::absolute(UiRect::new(0.0, 0.0, width, 30.0))
         })
         .with_style(UiStyle {
-            fill: trigger_fill,
-            border: trigger_border,
+            fill: if open {
+                [116, 67, 24, 154]
+            } else {
+                [
+                    tokens.surface_alt[0],
+                    tokens.surface_alt[1],
+                    tokens.surface_alt[2],
+                    176,
+                ]
+            },
+            border: if open { tokens.accent } else { tokens.border },
             text: tokens.text,
             border_width: 1.0,
             radius: 3.0,
@@ -242,193 +235,21 @@ fn view_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width: f
         .with_icon(
             UiIcon::new(selected_icon)
                 .with_size(UiIconSize::Toolbar)
-                .with_tint(if state.view_menu_open {
+                .with_tint(if open {
                     [255, 247, 232, 255]
                 } else {
                     tokens.text_muted
                 }),
         )
-        .with_tooltip_key(mode_label_key)
-        .with_accessibility_label_key(mode_label_key)
-        .focusable()
-        .with_event(UiEventBinding::command(
-            UiEventKind::Click,
-            "viewport.dropdown.view.toggle",
-        ));
-    if !state.compact {
-        trigger = trigger.with_child(
-            UiNode::new("viewport.toolbar.view-mode.label", UiNodeKind::Label)
-                .with_text_key(mode_label_key)
-                .with_text_style(UiTextStyle::button(tokens.text_muted))
-                .with_layout(UiLayout {
-                    grow: 1.0,
-                    ..UiLayout::fit_content().with_text_safe_area(true)
-                }),
-        );
-    }
-    trigger = trigger.with_child(
-        UiNode::new("viewport.toolbar.view-mode.chevron", UiNodeKind::Label)
-            .with_icon(
-                UiIcon::new(if state.view_menu_open {
-                    UiIconId::ChevronDown
-                } else {
-                    UiIconId::ChevronRight
-                })
-                .with_size(UiIconSize::Small)
-                .with_tint(tokens.text_muted),
-            )
-            .with_layout(UiLayout::fixed(16.0, 18.0)),
-    );
-
-    let mut group = UiNode::new("viewport.toolbar.view-mode", UiNodeKind::Panel)
-        .with_layout(UiLayout::fixed(width, 30.0))
-        .with_style(UiStyle::transparent())
-        .with_child(trigger);
-    if state.view_menu_open {
-        let options = [
-            (
-                "app.viewport_2d_short",
-                "viewport.view-2d",
-                matches!(state.view_mode, ViewportViewMode::View2d),
-            ),
-            (
-                "app.viewport_3d_short",
-                "viewport.view-3d",
-                matches!(state.view_mode, ViewportViewMode::View3d),
-            ),
-        ];
-        let mut menu = UiNode::new("viewport.toolbar.view-mode.menu", UiNodeKind::Menu)
-            .with_class("viewport-toolbar-menu")
-            .with_layout(UiLayout {
-                flow: UiFlow::Column,
-                gap: 2.0,
-                padding: UiSpacing::same(3.0),
-                ..UiLayout::absolute(UiRect::new(0.0, 32.0, menu_width, 63.0)).with_z_index(120)
-            })
-            .with_style(UiStyle {
-                fill: [
-                    tokens.surface_raised[0],
-                    tokens.surface_raised[1],
-                    tokens.surface_raised[2],
-                    244,
-                ],
-                border: tokens.border,
-                text: tokens.text,
-                border_width: 1.0,
-                radius: 4.0,
-                opacity: 1.0,
-            })
-            .focusable()
-            .with_event(UiEventBinding::command(
-                UiEventKind::KeyPress("escape".to_string()),
-                "viewport.dropdown.view.cancel",
-            ));
-        for (index, (label_key, command, selected)) in options.into_iter().enumerate() {
-            menu = menu.with_child(
-                raf_ui::components::dropdown_option(
-                    format!("viewport.toolbar.view-mode.option.{index}"),
-                    label_key,
-                    command,
-                    selected,
-                    palette,
-                )
-                .with_style(UiStyle {
-                    fill: if selected {
-                        [116, 67, 24, 154]
-                    } else {
-                        [
-                            tokens.surface_alt[0],
-                            tokens.surface_alt[1],
-                            tokens.surface_alt[2],
-                            190,
-                        ]
-                    },
-                    border: if selected {
-                        tokens.accent
-                    } else {
-                        tokens.border
-                    },
-                    text: if selected {
-                        tokens.text
-                    } else {
-                        tokens.text_muted
-                    },
-                    border_width: 1.0,
-                    radius: 2.0,
-                    opacity: 1.0,
-                }),
-            );
-        }
-        group = group.with_child(menu);
-    }
-    group
-}
-
-fn shading_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width: f32) -> UiNode {
-    let tokens = palette.tokens();
-    let (label_key, icon) = match state.render_style {
-        ViewportRenderStyle::Solid => ("app.viewport_lit_short", UiIconId::Shaded),
-        ViewportRenderStyle::Wireframe => ("app.viewport_wireframe", UiIconId::Wireframe),
-        ViewportRenderStyle::Preview => ("app.viewport_preview", UiIconId::View3d),
-    };
-    let fill = if state.shading_menu_open {
-        [116, 67, 24, 154]
-    } else {
-        [
-            tokens.surface_alt[0],
-            tokens.surface_alt[1],
-            tokens.surface_alt[2],
-            176,
-        ]
-    };
-    let border = if state.shading_menu_open {
-        tokens.accent
-    } else {
-        tokens.border
-    };
-    let mut trigger = UiNode::new("viewport.toolbar.shading.trigger", UiNodeKind::Button)
-        .with_class(if state.shading_menu_open {
-            "viewport-toolbar-button-active"
-        } else {
-            "viewport-toolbar-button"
-        })
-        .with_layout(UiLayout {
-            flow: UiFlow::Row,
-            align_items: UiAlign::Center,
-            justify_content: if state.compact {
-                UiJustify::Center
-            } else {
-                UiJustify::Start
-            },
-            gap: 5.0,
-            padding: UiSpacing::xy(6.0, 4.0),
-            ..UiLayout::absolute(UiRect::new(0.0, 0.0, width, 30.0))
-        })
-        .with_style(UiStyle {
-            fill,
-            border,
-            text: tokens.text,
-            border_width: 1.0,
-            radius: 3.0,
-            opacity: 1.0,
-        })
-        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Toolbar).with_tint(
-            if state.shading_menu_open {
-                [255, 247, 232, 255]
-            } else {
-                tokens.text_muted
-            },
-        ))
         .with_tooltip_key(label_key)
         .with_accessibility_label_key(label_key)
+        .with_accessibility_role(UiAccessibilityRole::Combobox)
+        .with_accessibility_expanded(open)
         .focusable()
-        .with_event(UiEventBinding::command(
-            UiEventKind::Click,
-            "viewport.dropdown.shading.toggle",
-        ));
-    if !state.compact {
+        .with_text_overflow(UiTextOverflow::Ellipsis);
+    if !compact {
         trigger = trigger.with_child(
-            UiNode::new("viewport.toolbar.shading.label", UiNodeKind::Label)
+            UiNode::new(format!("{id}.label"), UiNodeKind::Label)
                 .with_text_key(label_key)
                 .with_text_style(UiTextStyle::button(tokens.text_muted))
                 .with_layout(UiLayout {
@@ -437,10 +258,10 @@ fn shading_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width
                 }),
         );
     }
-    trigger = trigger.with_child(
-        UiNode::new("viewport.toolbar.shading.chevron", UiNodeKind::Label)
+    trigger.with_child(
+        UiNode::new(format!("{id}.chevron"), UiNodeKind::Label)
             .with_icon(
-                UiIcon::new(if state.shading_menu_open {
+                UiIcon::new(if open {
                     UiIconId::ChevronDown
                 } else {
                     UiIconId::ChevronRight
@@ -448,68 +269,177 @@ fn shading_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width
                 .with_size(UiIconSize::Small)
                 .with_tint(tokens.text_muted),
             )
-            .with_layout(UiLayout::fixed(14.0, 18.0)),
-    );
+            .with_layout(UiLayout::fixed(16.0, 18.0)),
+    )
+}
 
+fn select_popup_option(
+    palette: StudioUiPalette,
+    id: impl Into<String>,
+    label_key: &str,
+    value_key: &str,
+    value: &str,
+    index: usize,
+    selected: bool,
+    trigger_id: &str,
+) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class(if selected {
+            "dropdown-option-selected"
+        } else {
+            "dropdown-option"
+        })
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            justify_content: UiJustify::Start,
+            padding: UiSpacing::xy(8.0, 0.0),
+            // Options deliberately sit one layer above their popup surface.
+            // This keeps the label and selected fill visible in every
+            // compositor backend, including nested/anchored menus.
+            ..UiLayout::fixed(0.0, DROPDOWN_OPTION_HEIGHT)
+                .with_width_mode(raf_ui::UiSizeMode::Fill)
+                .with_z_index(1)
+        })
+        .with_text_key(label_key)
+        .with_text_style(UiTextStyle::body(if selected {
+            tokens.text
+        } else {
+            tokens.text_muted
+        }))
+        .with_style(UiStyle {
+            fill: if selected {
+                [116, 67, 24, 154]
+            } else {
+                [
+                    tokens.surface_alt[0],
+                    tokens.surface_alt[1],
+                    tokens.surface_alt[2],
+                    190,
+                ]
+            },
+            border: if selected {
+                tokens.accent
+            } else {
+                tokens.border
+            },
+            text: if selected {
+                tokens.text
+            } else {
+                tokens.text_muted
+            },
+            border_width: 1.0,
+            radius: 2.0,
+            opacity: 1.0,
+        })
+        .with_text_overflow(UiTextOverflow::Ellipsis)
+        .with_accessibility_role(UiAccessibilityRole::Option)
+        .with_accessibility_selected(selected)
+        .focusable()
+        .with_event(UiEventBinding {
+            event: UiEventKind::Click,
+            action: UiAction::SetSelect {
+                key: value_key.to_string(),
+                value: value.to_string(),
+                index,
+            },
+        })
+        .with_event(UiEventBinding {
+            event: UiEventKind::Click,
+            action: UiAction::SetSelectOpen {
+                id: trigger_id.to_string(),
+                open: false,
+            },
+        })
+}
+
+fn view_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width: f32) -> UiNode {
+    let options = vec![
+        UiSelectOption::new("2d", "app.viewport_2d_short"),
+        UiSelectOption::new("3d", "app.viewport_3d_short"),
+    ];
+    let selected_index = match state.view_mode {
+        ViewportViewMode::View2d => 0,
+        ViewportViewMode::View3d => 1,
+    };
+    let (selected_icon, label_key) = match state.view_mode {
+        ViewportViewMode::View2d => (UiIconId::View2d, "app.viewport_2d_short"),
+        ViewportViewMode::View3d => (UiIconId::View3d, "app.viewport_3d_short"),
+    };
+    let trigger_id = "viewport.toolbar.view-mode.trigger";
+    let popup_id = "viewport.toolbar.view-mode.menu";
+    let trigger = toolbar_select_trigger(
+        palette,
+        trigger_id,
+        "viewport.view_mode",
+        options.clone(),
+        selected_index,
+        state.view_menu_open,
+        selected_icon,
+        label_key,
+        width,
+        state.compact,
+        popup_id,
+    );
+    let mut group = UiNode::new("viewport.toolbar.view-mode", UiNodeKind::Panel)
+        .with_layout(UiLayout::fixed(width, 30.0))
+        .with_style(UiStyle::transparent())
+        .with_child(trigger);
+    if state.view_menu_open {
+        group = group.with_child(toolbar_dropdown_menu(
+            palette,
+            popup_id,
+            "viewport-toolbar-menu",
+            UiRect::new(0.0, 32.0, 0.0, 0.0),
+            options.as_slice(),
+            "viewport.view_mode",
+            selected_index,
+            trigger_id,
+            "viewport.toolbar.view-mode.option",
+            None,
+        ));
+    }
+    group
+}
+
+fn shading_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width: f32) -> UiNode {
+    let options = vec![UiSelectOption::new("solid", "app.viewport_lit_short")];
+    let selected_index = 0;
+    let label_key = "app.viewport_lit_short";
+    let icon = UiIconId::Shaded;
+    let trigger_id = "viewport.toolbar.shading.trigger";
+    let popup_id = "viewport.toolbar.shading.menu";
+    let trigger = toolbar_select_trigger(
+        palette,
+        trigger_id,
+        "viewport.render_style",
+        options.clone(),
+        selected_index,
+        state.shading_menu_open,
+        icon,
+        label_key,
+        width,
+        state.compact,
+        popup_id,
+    );
     let mut group = UiNode::new("viewport.toolbar.shading", UiNodeKind::Panel)
         .with_layout(UiLayout::fixed(width, 30.0))
         .with_style(UiStyle::transparent())
         .with_child(trigger);
     if state.shading_menu_open {
-        let options = [
-            (
-                "app.viewport_lit_short",
-                "viewport.render.solid",
-                matches!(state.render_style, ViewportRenderStyle::Solid),
-            ),
-            (
-                "app.viewport_wireframe",
-                "viewport.render.wireframe",
-                matches!(state.render_style, ViewportRenderStyle::Wireframe),
-            ),
-            (
-                "app.viewport_preview",
-                "viewport.render.preview",
-                matches!(state.render_style, ViewportRenderStyle::Preview),
-            ),
-        ];
-        let mut menu = UiNode::new("viewport.toolbar.shading.menu", UiNodeKind::Menu)
-            .with_class("viewport-toolbar-menu")
-            .with_layout(UiLayout {
-                flow: UiFlow::Column,
-                gap: 2.0,
-                padding: UiSpacing::same(3.0),
-                ..UiLayout::absolute(UiRect::new(0.0, 32.0, width.max(126.0), 96.0))
-                    .with_z_index(140)
-            })
-            .with_style(UiStyle {
-                fill: [
-                    tokens.surface_raised[0],
-                    tokens.surface_raised[1],
-                    tokens.surface_raised[2],
-                    244,
-                ],
-                border: tokens.border,
-                text: tokens.text,
-                border_width: 1.0,
-                radius: 4.0,
-                opacity: 1.0,
-            })
-            .focusable()
-            .with_event(UiEventBinding::command(
-                UiEventKind::KeyPress("escape".to_string()),
-                "viewport.dropdown.shading.cancel",
-            ));
-        for (index, (option_key, command, selected)) in options.into_iter().enumerate() {
-            menu = menu.with_child(raf_ui::components::dropdown_option(
-                format!("viewport.toolbar.shading.option.{index}"),
-                option_key,
-                command,
-                selected,
-                palette,
-            ));
-        }
-        group = group.with_child(menu);
+        group = group.with_child(toolbar_dropdown_menu(
+            palette,
+            popup_id,
+            "viewport-toolbar-menu",
+            UiRect::new(0.0, 32.0, 0.0, 0.0),
+            options.as_slice(),
+            "viewport.render_style",
+            selected_index,
+            trigger_id,
+            "viewport.toolbar.shading.option",
+            None,
+        ));
     }
     group
 }
@@ -517,6 +447,7 @@ fn shading_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width
 fn tool_rail(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode {
     let mut rail = UiNode::new("viewport.toolbar.rail", UiNodeKind::Toolbar)
         .with_class("viewport-toolbar-rail")
+        .with_material(UiSurfaceMaterial::TranslucentChrome)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             align_items: UiAlign::Center,
@@ -525,17 +456,12 @@ fn tool_rail(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode {
             ..UiLayout::absolute(UiRect::new(0.0, RAIL_TOP, RAIL_WIDTH, RAIL_HEIGHT))
         })
         .with_style(UiStyle {
-            fill: [
-                palette.tokens().surface_raised[0],
-                palette.tokens().surface_raised[1],
-                palette.tokens().surface_raised[2],
-                184,
-            ],
+            fill: palette.tokens().surface_raised,
             border: palette.tokens().border,
             text: palette.tokens().text,
             border_width: 1.0,
             radius: 5.0,
-            opacity: 0.78,
+            opacity: 1.0,
         });
     rail = rail
         .with_child(toolbar_button(
@@ -618,16 +544,10 @@ fn tool_rail(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode {
             "viewport.toolbar.rail.separator-building",
             RAIL_WIDTH - 8.0,
         ))
-        .with_child(toolbar_button(
-            palette,
-            "viewport.toolbar.building-style",
-            "app.building_style",
-            UiIconId::Grid,
-            "viewport.dropdown.building.toggle",
-            state.building_menu_open || state.building_style == BuildingStyle::Organized,
-            false,
-            RAIL_WIDTH - 8.0,
-        ));
+        // Keep the mode control in the rail's final slot. Its popup is built
+        // by the same owner group, so it follows this button if the rail is
+        // resized or its spacing changes.
+        .with_child(building_style_dropdown(palette, state));
     rail
 }
 
@@ -635,6 +555,7 @@ fn primitive_menu(palette: StudioUiPalette) -> UiNode {
     let tokens = palette.tokens();
     let mut menu = UiNode::new("viewport.toolbar.primitive-menu", UiNodeKind::Menu)
         .with_class("viewport-primitive-menu")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 4.0,
@@ -672,92 +593,126 @@ fn primitive_menu(palette: StudioUiPalette) -> UiNode {
     menu
 }
 
-/// Dropdown listing the two building styles. Anchored beside the rail button
-/// directly below Create primitive.
-fn building_style_menu(palette: StudioUiPalette, style: BuildingStyle) -> UiNode {
+fn toolbar_dropdown_menu(
+    palette: StudioUiPalette,
+    popup_id: &str,
+    class: &str,
+    mut rect: UiRect,
+    options: &[UiSelectOption],
+    value_key: &str,
+    selected_index: usize,
+    trigger_id: &str,
+    option_id_prefix: &str,
+    title_key: Option<&str>,
+) -> UiNode {
     let tokens = palette.tokens();
-    let options = [
-        (
-            "app.building_style_free",
-            "viewport.building.free",
-            style == BuildingStyle::Free,
-        ),
-        (
-            "app.building_style_professional",
-            "viewport.building.professional",
-            style == BuildingStyle::Organized,
-        ),
-    ];
-    let mut menu = UiNode::new("viewport.toolbar.building-menu", UiNodeKind::Menu)
-        .with_class("viewport-building-menu")
+    let title_height = title_key.map_or(0.0, |_| 24.0);
+    let option_height = options.len() as f32 * DROPDOWN_OPTION_HEIGHT;
+    let child_count = options.len() + usize::from(title_key.is_some());
+    let flow_gaps = child_count.saturating_sub(1) as f32 * DROPDOWN_GAP;
+    let height = DROPDOWN_PADDING * 2.0 + title_height + option_height + flow_gaps;
+    let width = rect.width.max(DROPDOWN_MIN_WIDTH);
+    rect.width = width;
+    rect.height = rect.height.max(height);
+    let z_index = if title_key.is_some() { 240 } else { 140 };
+    let mut menu = UiNode::new(popup_id, UiNodeKind::Menu)
+        .with_class(class)
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 4.0,
-            padding: UiSpacing::same(8.0),
-            ..UiLayout::absolute(UiRect::new(
-                RAIL_WIDTH + 8.0,
-                RAIL_TOP + RAIL_HEIGHT - 34.0,
-                188.0,
-                102.0,
-            ))
-            .with_z_index(240)
+            gap: DROPDOWN_GAP,
+            padding: UiSpacing::same(DROPDOWN_PADDING),
+            ..UiLayout::absolute(rect).with_z_index(z_index)
         })
         .with_style(UiStyle {
             fill: tokens.surface_raised,
             border: tokens.border,
             text: tokens.text,
             border_width: 1.0,
-            radius: 7.0,
+            radius: 4.0,
             opacity: 1.0,
         })
-        .focusable()
-        .with_event(UiEventBinding::command(
-            UiEventKind::KeyPress("escape".to_string()),
-            "viewport.dropdown.building.cancel",
-        ))
-        .with_child(
-            UiNode::new("viewport.building-menu.title", UiNodeKind::Label)
-                .with_text_key("app.building_style")
-                .with_text_style(UiTextStyle::panel_title(tokens.text))
-                .with_layout(UiLayout::fixed(0.0, 24.0).with_width_mode(raf_ui::UiSizeMode::Fill)),
-        );
-    for (index, (label_key, command, selected)) in options.into_iter().enumerate() {
+        .with_accessibility_role(UiAccessibilityRole::Menu);
+    if let Some(title_key) = title_key {
         menu = menu.with_child(
-            raf_ui::components::dropdown_option(
-                format!("viewport.building-option.{index}"),
-                label_key,
-                command,
-                selected,
-                palette,
-            )
-            .with_style(UiStyle {
-                fill: if selected {
-                    [116, 67, 24, 154]
-                } else {
-                    [
-                        tokens.surface_alt[0],
-                        tokens.surface_alt[1],
-                        tokens.surface_alt[2],
-                        190,
-                    ]
-                },
-                border: if selected {
-                    tokens.accent
-                } else {
-                    tokens.border
-                },
-                text: if selected {
-                    tokens.text
-                } else {
-                    tokens.text_muted
-                },
-                border_width: 1.0,
-                radius: 2.0,
-                opacity: 1.0,
-            }),
+            UiNode::new(format!("{popup_id}.title"), UiNodeKind::Label)
+                .with_text_key(title_key)
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_layout(
+                    UiLayout::fixed(0.0, title_height).with_width_mode(raf_ui::UiSizeMode::Fill),
+                ),
         );
     }
+    for (index, option) in options.iter().enumerate() {
+        menu = menu.with_child(select_popup_option(
+            palette,
+            format!("{option_id_prefix}.{index}"),
+            &option.label_key,
+            value_key,
+            &option.value,
+            index,
+            index == selected_index,
+            trigger_id,
+        ));
+    }
     menu
+}
+
+/// Builds the building-style trigger and its popup as one retained subtree.
+/// The menu offset is relative to this group, never to the viewport window.
+fn building_style_dropdown(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode {
+    let options = vec![
+        UiSelectOption::new("free", "app.building_style_free"),
+        UiSelectOption::new("professional", "app.building_style_professional"),
+    ];
+    let selected_index = usize::from(state.building_style == BuildingStyle::Organized);
+    let trigger_id = "viewport.toolbar.building-style";
+    let mut group = UiNode::new("viewport.toolbar.building-style.group", UiNodeKind::Panel)
+        .with_layout(UiLayout::fixed(RAIL_WIDTH - 8.0, 30.0))
+        .with_style(UiStyle::transparent())
+        .with_child(toolbar_select_trigger(
+            palette,
+            trigger_id,
+            "viewport.building_style",
+            options.clone(),
+            selected_index,
+            state.building_menu_open,
+            UiIconId::Grid,
+            "app.building_style",
+            RAIL_WIDTH - 8.0,
+            true,
+            "viewport.toolbar.building-menu",
+        ));
+    if state.building_menu_open {
+        group = group.with_child(
+            toolbar_dropdown_menu(
+                palette,
+                "viewport.toolbar.building-menu",
+                "viewport-building-menu",
+                UiRect::new(RAIL_WIDTH + 8.0, 0.0, 188.0, 0.0),
+                options.as_slice(),
+                "viewport.building_style",
+                selected_index,
+                trigger_id,
+                "viewport.building-option",
+                Some("app.building_style"),
+            )
+            .with_style(UiStyle {
+                fill: palette.tokens().surface_raised,
+                border: palette.tokens().border,
+                text: palette.tokens().text,
+                border_width: 1.0,
+                radius: 7.0,
+                opacity: 1.0,
+            })
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("escape".to_string()),
+                "viewport.dropdown.building.cancel",
+            )),
+        );
+    }
+    group
 }
 
 fn viewport_primitive_option(palette: StudioUiPalette, primitive: Primitive) -> UiNode {
@@ -945,8 +900,6 @@ pub fn parse_viewport_toolbar_action(action: &UiAction) -> Option<ViewportToolba
         "viewport.scale" => Some(ViewportToolbarAction::Scale),
         "viewport.focus" => Some(ViewportToolbarAction::Focus),
         "viewport.render.solid" => Some(ViewportToolbarAction::Solid),
-        "viewport.render.wireframe" => Some(ViewportToolbarAction::Wireframe),
-        "viewport.render.preview" => Some(ViewportToolbarAction::Preview),
         "viewport.toggle-polygons" => Some(ViewportToolbarAction::TogglePolygons),
         "viewport.toggle-grid" => Some(ViewportToolbarAction::ToggleGrid),
         "viewport.toggle-labels" => Some(ViewportToolbarAction::ToggleLabels),
@@ -967,6 +920,27 @@ pub fn parse_viewport_toolbar_action(action: &UiAction) -> Option<ViewportToolba
     }
 }
 
+/// Parses the shared Select contract used by the compact viewport menus.
+/// Command strings for the remaining viewport actions stay supported so
+/// attached/native callers do not need to migrate in lockstep.
+pub fn parse_viewport_toolbar_select_action(
+    key: &str,
+    value: &str,
+) -> Option<ViewportToolbarAction> {
+    match (key, value) {
+        ("viewport.view_mode", "2d") => Some(ViewportToolbarAction::View2d),
+        ("viewport.view_mode", "3d") => Some(ViewportToolbarAction::View3d),
+        ("viewport.render_style", "solid") => Some(ViewportToolbarAction::Solid),
+        ("viewport.building_style", "free") => {
+            Some(ViewportToolbarAction::SetBuildingStyle(BuildingStyle::Free))
+        }
+        ("viewport.building_style", "professional") => Some(
+            ViewportToolbarAction::SetBuildingStyle(BuildingStyle::Organized),
+        ),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -976,6 +950,10 @@ mod tests {
             return Some(node);
         }
         node.children.iter().find_map(|child| find_node(child, id))
+    }
+
+    fn child_index(node: &UiNode, id: &str) -> Option<usize> {
+        node.children.iter().position(|child| child.id == id)
     }
 
     fn state(compact: bool) -> ViewportToolbarState {
@@ -1006,6 +984,12 @@ mod tests {
         assert_eq!(rail.layout.rect, Some(UiRect::new(0.0, 54.0, 42.0, 308.0)));
         assert!(find_node(&surface.root, "viewport.toolbar.select").is_some());
         assert!(find_node(&surface.root, "viewport.toolbar.view-mode").is_some());
+        assert_eq!(child_index(rail, "viewport.toolbar.select"), Some(0));
+        assert_eq!(
+            child_index(rail, "viewport.toolbar.building-style.group"),
+            Some(rail.children.len() - 1),
+            "building style belongs to the final rail slot"
+        );
     }
 
     #[test]
@@ -1019,6 +1003,10 @@ mod tests {
         assert!(find_node(&surface.root, "viewport.toolbar.building-menu").is_some());
         assert!(find_node(&surface.root, "viewport.building-option.0").is_some());
         assert!(find_node(&surface.root, "viewport.building-option.1").is_some());
+        let menu =
+            find_node(&surface.root, "viewport.toolbar.building-menu").expect("building menu");
+        assert_eq!(menu.layout.position_mode, raf_ui::UiPositionMode::Absolute);
+        assert_eq!(menu.layout.rect.map(|rect| rect.x), Some(RAIL_WIDTH + 8.0));
         assert!(
             find_node(&surface.root, "viewport.toolbar.building-style").is_some(),
             "trigger button stays in the rail"
@@ -1054,6 +1042,9 @@ mod tests {
         assert!(find_node(&surface.root, "viewport.toolbar.view-mode.option.1").is_some());
         assert!(find_node(&surface.root, "viewport.toolbar.view-2d").is_none());
         assert!(find_node(&surface.root, "viewport.toolbar.view-3d").is_none());
+        let menu = find_node(&surface.root, "viewport.toolbar.view-mode.menu").expect("view menu");
+        assert_eq!(menu.layout.flow, UiFlow::Column);
+        assert_eq!(menu.layout.rect.map(|rect| rect.height), Some(74.0));
     }
 
     #[test]
@@ -1067,5 +1058,21 @@ mod tests {
         assert!(find_node(&surface.root, "viewport.toolbar.polygons").is_some());
         assert!(find_node(&surface.root, "viewport.toolbar.solid").is_none());
         assert!(find_node(&surface.root, "viewport.toolbar.preview").is_none());
+        let menu = find_node(&surface.root, "viewport.toolbar.shading.menu").expect("shading menu");
+        assert_eq!(menu.layout.flow, UiFlow::Column);
+        assert_eq!(menu.layout.rect.map(|rect| rect.height), Some(43.0));
+        assert!(find_node(&surface.root, "viewport.toolbar.shading.option.0").is_some());
+        assert_eq!(
+            find_node(&surface.root, "viewport.toolbar.shading.option.0")
+                .and_then(|node| node.text_key.as_deref()),
+            Some("app.viewport_lit_short")
+        );
+        assert!(find_node(&surface.root, "viewport.toolbar.shading.option.1").is_none());
+        assert!(find_node(&surface.root, "viewport.toolbar.shading.option.2").is_none());
+        assert!(parse_viewport_toolbar_action(&UiAction::Command {
+            name: "viewport.render.wireframe".to_string(),
+        })
+        .is_none());
+        assert!(parse_viewport_toolbar_select_action("viewport.render_style", "preview").is_none());
     }
 }

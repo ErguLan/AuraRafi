@@ -26,13 +26,14 @@ pub mod text;
 pub mod window;
 
 pub use components::{
-    editor_tab, empty_state, floating_action_rail, icon_button, icon_button_with_icon,
-    inspector_field, panel_header, segmented_option, technical_toolbar, tooltip_node, tree_row,
-    tree_row_with_icon,
+    editor_tab, empty_state, floating_action_rail, form_field, icon_button, icon_button_with_icon,
+    inspector_field, numeric_field, panel_header, password_field, search_field, segmented_option,
+    select_trigger, technical_toolbar, tooltip_node, tree_row, tree_row_with_icon,
 };
 pub use controls::{
-    UiControl, UiImage, UiImageFit, UiImageSource, UiRange, UiScrollAxis, UiSkeleton,
-    UiSkeletonShape, UiTextInput, UiToggle,
+    UiColorPicker, UiColorPickerHit, UiControl, UiImage, UiImageFit, UiImageSource, UiRange,
+    UiRangeOrientation, UiScrollAxis, UiSelect, UiSelectOption, UiSkeleton, UiSkeletonShape,
+    UiTextInput, UiToggle, UiTogglePresentation,
 };
 pub use docking::{
     BottomDockLayout, DockDropTarget, DockLayout, DockLayoutEntry, DockLayoutFrame, DockPanel,
@@ -58,7 +59,7 @@ pub use layout::{
 };
 pub use menu::{UiApplicationMenu, UiMenu, UiMenuActivation, UiMenuCommand, UiMenuItem};
 pub use motion::{UiEasing, UiMotionSpec, UiTween};
-pub use node::{UiNode, UiNodeKind};
+pub use node::{UiAccessibilityRole, UiNode, UiNodeKind};
 pub use overlays::{
     place_overlay, UiOverlayLayer, UiOverlayManager, UiOverlayPlacement, UiOverlayRequest,
     UiPlacement,
@@ -66,7 +67,7 @@ pub use overlays::{
 pub use state::{UiControlState, UiTextEditState, UiVirtualRange};
 pub use style::{
     StudioUiPalette, UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector,
-    UiStyleSheet, UiTheme, UiThemeMetrics, UiTokens, UiVisualState,
+    UiStyleSheet, UiSurfaceMaterial, UiTheme, UiThemeMetrics, UiTokens, UiVisualState,
 };
-pub use text::{UiFontWeight, UiTextAtlasRequest, UiTextRole, UiTextStyle};
+pub use text::{UiFontWeight, UiTextAtlasRequest, UiTextOverflow, UiTextRole, UiTextStyle};
 pub use window::{UiResizeEdge, UiWindowCommand, UiWindowHitTest};

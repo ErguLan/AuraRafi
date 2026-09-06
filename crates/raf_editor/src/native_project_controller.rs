@@ -27,8 +27,18 @@ pub(crate) fn game_capabilities(project_type: ProjectType) -> Vec<String> {
         "game.move",
         "game.rotate",
         "game.scale",
+        "game.color",
+        "game.arrange_grid",
+        "game.generate_prefab",
         "game.describe_scene",
         "game.focus",
+        "game.update",
+        "game.batch",
+        "game.create_group",
+        "game.reparent",
+        "game.build",
+        "game.reconcile",
+        "game.repair",
     ]
     .into_iter()
     .map(str::to_string)
@@ -61,6 +71,49 @@ pub(crate) fn electronics_capabilities() -> Vec<String> {
     .into_iter()
     .map(str::to_string)
     .collect()
+}
+
+/// Commands that can be queried without selecting a domain executor.
+///
+/// The attached endpoint is project-scoped, but status/capability/session
+/// inspection is not a Game or Electronics mutation. Keeping this list here
+/// prevents the transport boundary from accidentally routing metadata into a
+/// domain parser.
+pub(crate) fn project_capabilities(project_type: ProjectType) -> Vec<String> {
+    let mut capabilities = vec![
+        "engine.status".to_string(),
+        "engine.context".to_string(),
+        "scene.outline".to_string(),
+        "scene.query".to_string(),
+        "scene.spatial_map".to_string(),
+        "scene.design_audit".to_string(),
+        "scene.inspect".to_string(),
+        "selection.get".to_string(),
+        "assets.catalog".to_string(),
+        "assets.inspect".to_string(),
+        "scripts.catalog".to_string(),
+        "project.health".to_string(),
+        "scene.verify".to_string(),
+        "capabilities.list".to_string(),
+        "capabilities.search".to_string(),
+        "project.info".to_string(),
+        "project.save".to_string(),
+        "session.list".to_string(),
+        "workspace.describe".to_string(),
+        "task.list".to_string(),
+        "task.get".to_string(),
+        "task.events".to_string(),
+        "task.cancel".to_string(),
+    ];
+    if project_type == ProjectType::Game {
+        capabilities.push("viewport.capture".to_string());
+        capabilities.push("transaction.undo".to_string());
+    }
+    capabilities.extend(match project_type {
+        ProjectType::Game => game_capabilities(project_type),
+        ProjectType::Electronics => electronics_capabilities(),
+    });
+    capabilities
 }
 
 pub(crate) fn initial_scene(project: Option<&Project>) -> SceneGraph {

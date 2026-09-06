@@ -10,7 +10,7 @@ use crate::api_graphic_basic::command_list::{BasicCommandList, BasicScreenTriang
 use crate::gizmo::{GizmoAxis, GizmoMode};
 use crate::gizmo_visual::{append_arrowhead, GizmoVisualProfile};
 use crate::picking::{
-    gizmo_scale_handle_radius, project_gizmo_arrow_scaled, project_gizmo_scale_handles,
+    gizmo_scale_handle_radius, project_gizmo_arrow_scaled, project_gizmo_scale_handles_oriented,
     GIZMO_ARROWS, GIZMO_LENGTH, GIZMO_ROTATION_RADIUS,
 };
 use crate::scene_renderer::SceneRenderFrame;
@@ -26,6 +26,8 @@ pub struct GizmoRenderSpec {
     pub active_scale_sign: f32,
     pub origin: Vec3,
     pub entity_scale: Vec3,
+    /// World directions of the entity's transformed local X/Y/Z axes.
+    pub entity_axes: [Vec3; 3],
     pub presentation_scale: f32,
 }
 
@@ -92,9 +94,10 @@ impl GizmoRenderSpec {
     }
 
     fn record_scale(self, frame: &mut SceneRenderFrame) {
-        let handles = project_gizmo_scale_handles(
+        let handles = project_gizmo_scale_handles_oriented(
             self.origin,
             self.entity_scale,
+            self.entity_axes,
             &frame.view_proj,
             frame.width as f32,
             frame.height as f32,
@@ -192,6 +195,7 @@ mod tests {
             active_scale_sign: 0.0,
             origin: Vec3::ZERO,
             entity_scale: Vec3::ONE,
+            entity_axes: [Vec3::X, Vec3::Y, Vec3::Z],
             presentation_scale: 1.0,
         }
         .append_to(&mut frame);
@@ -223,6 +227,7 @@ mod tests {
             active_scale_sign: 0.0,
             origin: Vec3::ZERO,
             entity_scale: Vec3::ONE,
+            entity_axes: [Vec3::X, Vec3::Y, Vec3::Z],
             presentation_scale: 1.0,
         }
         .append_to(&mut frame);

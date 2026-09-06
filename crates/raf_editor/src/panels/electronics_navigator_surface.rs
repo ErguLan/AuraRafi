@@ -18,6 +18,7 @@ use raf_ui::{
 pub struct ElectronicsNavigatorEntry {
     pub label: String,
     pub secondary: String,
+    pub secondary_key: Option<&'static str>,
     pub command: String,
     pub icon: UiIconId,
     pub active: bool,
@@ -92,7 +93,7 @@ fn header(palette: StudioUiPalette, schematic_name: &str) -> UiNode {
         )
         .with_child(
             UiNode::new("electronics.navigator.header.title", UiNodeKind::Label)
-                .with_text_value("PROJECT".to_string())
+                .with_text_key("app.electronics_project")
                 .with_text_style(UiTextStyle {
                     role: UiTextRole::PanelTitle,
                     size_px: 13.0,
@@ -116,7 +117,7 @@ fn header(palette: StudioUiPalette, schematic_name: &str) -> UiNode {
             "electronics.navigator.add",
             UiIconId::Add,
             "electronics.navigator.tab:library",
-            "Open component library",
+            "app.electronics_open_library",
         ))
 }
 
@@ -129,11 +130,15 @@ fn tabs(palette: StudioUiPalette, active: &str) -> UiNode {
             padding: UiSpacing::xy(2.0, 2.0),
             ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
         });
-    for (id, label, icon) in [
-        ("project", "Project", UiIconId::Project),
-        ("library", "Library", UiIconId::Assets),
-        ("components", "Components", UiIconId::Schematic),
-        ("wires", "Wires", UiIconId::Move),
+    for (id, label_key, icon) in [
+        ("project", "app.electronics_project_tab", UiIconId::Project),
+        ("library", "app.electronics_library", UiIconId::Assets),
+        (
+            "components",
+            "app.schematic_components",
+            UiIconId::Schematic,
+        ),
+        ("wires", "app.schematic_wires", UiIconId::Move),
     ] {
         let active_tab = active == id;
         let tab = UiNode::new(
@@ -147,7 +152,7 @@ fn tabs(palette: StudioUiPalette, active: &str) -> UiNode {
             ""
         })
         .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
-        .with_text_value(label.to_string())
+        .with_text_key(label_key)
         .with_text_style(body_style(if active_tab {
             palette.tokens().text
         } else {
@@ -158,8 +163,8 @@ fn tabs(palette: StudioUiPalette, active: &str) -> UiNode {
             min_size: [48.0, 26.0],
             ..UiLayout::fixed(0.0, 26.0)
         })
-        .with_tooltip_value(format!("{} view", label))
-        .with_accessibility_label_key(label)
+        .with_tooltip_key(label_key)
+        .with_accessibility_label_key(label_key)
         .focusable()
         .with_event(UiEventBinding::command(
             UiEventKind::Click,
@@ -179,10 +184,10 @@ fn summary(palette: StudioUiPalette, counts: (usize, usize, usize)) -> UiNode {
             gap: 4.0,
             ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
         });
-    for (id, label, value) in [
-        ("components", "Components", counts.0),
-        ("wires", "Wires", counts.1),
-        ("nets", "Nets", counts.2),
+    for (id, label_key, value) in [
+        ("components", "app.schematic_components", counts.0),
+        ("wires", "app.schematic_wires", counts.1),
+        ("nets", "app.schematic_nets", counts.2),
     ] {
         row = row.with_child(
             UiNode::new(format!("electronics.summary.{id}"), UiNodeKind::Panel)
@@ -208,7 +213,7 @@ fn summary(palette: StudioUiPalette, counts: (usize, usize, usize)) -> UiNode {
                 )
                 .with_child(
                     UiNode::new(format!("electronics.summary.{id}.label"), UiNodeKind::Label)
-                        .with_text_value(label.to_string())
+                        .with_text_key(label_key)
                         .with_text_style(body_style(tokens.text_muted)),
                 ),
         );
@@ -221,7 +226,7 @@ fn search(query: &str) -> UiNode {
         "electronics.library.search",
         UiTextInput {
             value_key: "electronics.library.search".to_string(),
-            placeholder_key: Some("Search components...".to_string()),
+            placeholder_key: Some("app.electronics_search_components".to_string()),
             max_length: 256,
             multiline: false,
             password: false,
@@ -279,13 +284,13 @@ fn library_list(
     }
     if visible_count == 0 {
         let message = if query.is_empty() {
-            "No components available"
+            "app.electronics_no_components"
         } else {
-            "No components match this search"
+            "app.electronics_no_components_match"
         };
         list = list.with_child(
             UiNode::new("electronics.library.empty", UiNodeKind::Label)
-                .with_text_value(message.to_string())
+                .with_text_key(message)
                 .with_text_style(body_style(palette.tokens().text_muted))
                 .with_layout(
                     UiLayout::fixed(0.0, 34.0)
@@ -378,6 +383,18 @@ fn library_card(palette: StudioUiPalette, entry: &ElectronicsLibraryEntry) -> Ui
     .focusable()
     .with_tooltip_value(entry.description.clone())
     .with_event(UiEventBinding::command(
+        UiEventKind::DragStart,
+        format!("electronics.library.drag.start.{}", entry.index),
+    ))
+    .with_event(UiEventBinding::command(
+        UiEventKind::DragMove,
+        format!("electronics.library.drag.move.{}", entry.index),
+    ))
+    .with_event(UiEventBinding::command(
+        UiEventKind::DragEnd,
+        format!("electronics.library.drag.end.{}", entry.index),
+    ))
+    .with_event(UiEventBinding::command(
         UiEventKind::Click,
         format!("electronics.place.template.{}", entry.index),
     ))
@@ -402,12 +419,16 @@ fn document_list(
         });
     if active_tab == "project" {
         list = list
-            .with_child(section_label("SCHEMATIC", tokens.text_muted))
+            .with_child(section_label(
+                "app.electronics_schematic_section",
+                tokens.text_muted,
+            ))
             .with_child(document_row(
                 palette,
                 &ElectronicsNavigatorEntry {
                     label: schematic_name.to_string(),
-                    secondary: "Active document".to_string(),
+                    secondary: String::new(),
+                    secondary_key: Some("app.electronics_active_document"),
                     command: "electronics.navigator.tab:components".to_string(),
                     icon: UiIconId::Schematic,
                     active: true,
@@ -426,7 +447,7 @@ fn document_list(
     if entries.is_empty() && active_tab != "project" {
         list = list.with_child(
             UiNode::new("electronics.document.empty", UiNodeKind::Label)
-                .with_text_value("No items in this view".to_string())
+                .with_text_key("app.electronics_no_items")
                 .with_text_style(body_style(tokens.text_muted))
                 .with_layout(UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)),
         );
@@ -440,6 +461,15 @@ fn document_row(
     index: usize,
 ) -> UiNode {
     let tokens = palette.tokens();
+    let secondary_id = format!("electronics.document.row.{index}.secondary");
+    let mut secondary = UiNode::new(secondary_id, UiNodeKind::Label)
+        .with_text_style(body_style(tokens.text_muted))
+        .with_layout(UiLayout::fixed(0.0, 16.0).with_width_mode(UiSizeMode::Fill));
+    secondary = if let Some(key) = entry.secondary_key {
+        secondary.with_text_key(key)
+    } else {
+        secondary.with_text_value(entry.secondary.clone())
+    };
     UiNode::new(
         format!("electronics.document.row.{index}"),
         UiNodeKind::Button,
@@ -487,15 +517,7 @@ fn document_row(
             .with_text_style(body_style(tokens.text))
             .with_layout(UiLayout::fixed(0.0, 16.0).with_width_mode(UiSizeMode::Fill)),
         )
-        .with_child(
-            UiNode::new(
-                format!("electronics.document.row.{index}.secondary"),
-                UiNodeKind::Label,
-            )
-            .with_text_value(entry.secondary.clone())
-            .with_text_style(body_style(tokens.text_muted))
-            .with_layout(UiLayout::fixed(0.0, 16.0).with_width_mode(UiSizeMode::Fill)),
-        ),
+        .with_child(secondary),
     )
     .focusable()
     .with_tooltip_value(format!("{} - {}", entry.label, entry.secondary))
@@ -506,20 +528,23 @@ fn document_row(
     ))
 }
 
-fn section_label(label: &str, color: [u8; 4]) -> UiNode {
-    UiNode::new(format!("electronics.section.{label}"), UiNodeKind::Label)
-        .with_text_value(label.to_string())
-        .with_text_style(body_style(color))
-        .with_layout(UiLayout::fixed(0.0, 22.0).with_width_mode(UiSizeMode::Fill))
+fn section_label(label_key: &str, color: [u8; 4]) -> UiNode {
+    UiNode::new(
+        format!("electronics.section.{label_key}"),
+        UiNodeKind::Label,
+    )
+    .with_text_key(label_key)
+    .with_text_style(body_style(color))
+    .with_layout(UiLayout::fixed(0.0, 22.0).with_width_mode(UiSizeMode::Fill))
 }
 
-fn icon_button(id: &str, icon: UiIconId, command: &str, tooltip: &str) -> UiNode {
+fn icon_button(id: &str, icon: UiIconId, command: &str, tooltip_key: &str) -> UiNode {
     UiNode::new(id, UiNodeKind::Button)
         .with_class("electronics-icon-button")
         .with_layout(UiLayout::fixed(26.0, 26.0))
         .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
-        .with_tooltip_value(tooltip.to_string())
-        .with_accessibility_label_key(tooltip)
+        .with_tooltip_key(tooltip_key)
+        .with_accessibility_label_key(tooltip_key)
         .focusable()
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
@@ -718,5 +743,21 @@ mod tests {
         let description = find_node(&surface.root, "electronics.library.card.0.description")
             .expect("library card description");
         assert_eq!(description.text_value.as_deref(), Some("Standard resistor"));
+        assert!(card.event_handlers.iter().any(|event| {
+            event.event == UiEventKind::DragStart
+                && matches!(
+                    &event.action,
+                    raf_ui::UiAction::Command { name }
+                        if name == "electronics.library.drag.start.0"
+                )
+        }));
+        assert!(card.event_handlers.iter().any(|event| {
+            event.event == UiEventKind::DragEnd
+                && matches!(
+                    &event.action,
+                    raf_ui::UiAction::Command { name }
+                        if name == "electronics.library.drag.end.0"
+                )
+        }));
     }
 }

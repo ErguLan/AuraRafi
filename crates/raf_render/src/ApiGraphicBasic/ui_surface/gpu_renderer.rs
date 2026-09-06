@@ -14,12 +14,14 @@ use bytemuck::{Pod, Zeroable};
 use crate::api_graphic_basic::canvas_presenter::CanvasTargetRect;
 
 use super::{
-    UiSurfaceDrawList, UiSurfaceImageStore, UiSurfacePaintCommand, UiTextAtlas, UiTextAtlasRect,
+    UiRect, UiSurfaceDrawList, UiSurfaceImageStore, UiSurfacePaintCommand, UiTextAtlas,
+    UiTextAtlasRect,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UiSurfaceGpuMetrics {
     pub solid_vertices: u32,
+    pub stroke_vertices: u32,
     pub text_vertices: u32,
     pub image_vertices: u32,
     pub atlas_uploads: u32,
@@ -28,6 +30,11 @@ pub struct UiSurfaceGpuMetrics {
     pub buffer_upload_bytes: u64,
     pub paint_runs: u32,
     pub draw_calls: u32,
+    /// Number of submitted solid quads that require alpha blending.
+    pub translucent_solid_quads: u32,
+    /// Approximate physical-pixel coverage submitted by translucent solids.
+    /// Overlapping quads are intentionally counted independently.
+    pub estimated_translucent_pixels: u64,
 }
 
 #[repr(C)]
@@ -65,6 +72,7 @@ struct VertexBatch<T> {
 struct UiSurfaceGpuGeometryCache {
     fingerprint: u64,
     solid_batch: VertexBatch<SolidVertex>,
+    stroke_batch: VertexBatch<SolidVertex>,
     text_batch: VertexBatch<TextVertex>,
     image_batch: VertexBatch<TextVertex>,
 }
@@ -72,6 +80,7 @@ struct UiSurfaceGpuGeometryCache {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum UiSurfacePaintKind {
     Solid,
+    Stroke,
     Text,
     Image(String),
 }
@@ -114,6 +123,8 @@ pub struct UiSurfaceGpuRenderer {
     atlas_size: [u16; 2],
     solid_buffer: Option<wgpu::Buffer>,
     solid_capacity: u64,
+    stroke_buffer: Option<wgpu::Buffer>,
+    stroke_capacity: u64,
     text_buffer: Option<wgpu::Buffer>,
     text_capacity: u64,
     image_buffer: Option<wgpu::Buffer>,
@@ -231,6 +242,8 @@ impl UiSurfaceGpuRenderer {
             atlas_size: [0, 0],
             solid_buffer: None,
             solid_capacity: 0,
+            stroke_buffer: None,
+            stroke_capacity: 0,
             text_buffer: None,
             text_capacity: 0,
             image_buffer: None,
@@ -349,6 +362,14 @@ impl UiSurfaceGpuRenderer {
         let logical_width = logical_size[0].max(1);
         let logical_height = logical_size[1].max(1);
         let mut metrics = UiSurfaceGpuMetrics::default();
+        (
+            metrics.translucent_solid_quads,
+            metrics.estimated_translucent_pixels,
+        ) = estimate_translucent_solids(
+            draw_list,
+            [logical_width, logical_height],
+            [width, height],
+        );
         metrics.atlas_uploads = u32::from(self.sync_atlas(device, queue, atlas));
         let mut uploaded_image_keys = HashSet::new();
         for quad in &draw_list.images {
@@ -392,6 +413,14 @@ impl UiSurfaceGpuRenderer {
                     height,
                     true,
                 ),
+                stroke_batch: stroke_vertices(
+                    draw_list,
+                    logical_width,
+                    logical_height,
+                    width,
+                    height,
+                    true,
+                ),
                 text_batch: text_vertices(
                     draw_list,
                     logical_width,
@@ -411,12 +440,21 @@ impl UiSurfaceGpuRenderer {
                 ),
             };
             metrics.solid_vertices = geometry.solid_batch.vertices.len() as u32;
+            metrics.stroke_vertices = geometry.stroke_batch.vertices.len() as u32;
             metrics.text_vertices = geometry.text_batch.vertices.len() as u32;
             metrics.image_vertices = geometry.image_batch.vertices.len() as u32;
             if !geometry.solid_batch.vertices.is_empty() {
                 self.ensure_solid_buffer(device, geometry.solid_batch.vertices.len());
                 if let Some(buffer) = self.solid_buffer.as_ref() {
                     let bytes = bytemuck::cast_slice(&geometry.solid_batch.vertices);
+                    queue.write_buffer(buffer, 0, bytes);
+                    metrics.buffer_upload_bytes += bytes.len() as u64;
+                }
+            }
+            if !geometry.stroke_batch.vertices.is_empty() {
+                self.ensure_stroke_buffer(device, geometry.stroke_batch.vertices.len());
+                if let Some(buffer) = self.stroke_buffer.as_ref() {
+                    let bytes = bytemuck::cast_slice(&geometry.stroke_batch.vertices);
                     queue.write_buffer(buffer, 0, bytes);
                     metrics.buffer_upload_bytes += bytes.len() as u64;
                 }
@@ -440,6 +478,7 @@ impl UiSurfaceGpuRenderer {
             self.geometry_cache = Some(geometry);
         } else if let Some(geometry) = self.geometry_cache.as_ref() {
             metrics.solid_vertices = geometry.solid_batch.vertices.len() as u32;
+            metrics.stroke_vertices = geometry.stroke_batch.vertices.len() as u32;
             metrics.text_vertices = geometry.text_batch.vertices.len() as u32;
             metrics.image_vertices = geometry.image_batch.vertices.len() as u32;
         }
@@ -483,6 +522,10 @@ impl UiSurfaceGpuRenderer {
                 .solid_buffer
                 .as_ref()
                 .filter(|_| !geometry.solid_batch.vertices.is_empty());
+            let stroke_buffer = self
+                .stroke_buffer
+                .as_ref()
+                .filter(|_| !geometry.stroke_batch.vertices.is_empty());
             let text_buffer = self
                 .text_buffer
                 .as_ref()
@@ -497,6 +540,16 @@ impl UiSurfaceGpuRenderer {
                 match &run.kind {
                     UiSurfacePaintKind::Solid => {
                         let Some(buffer) = solid_buffer else {
+                            continue;
+                        };
+                        if active_pipeline != Some(&run.kind) {
+                            pass.set_pipeline(&self.solid_pipeline);
+                            pass.set_vertex_buffer(0, buffer.slice(..));
+                            active_pipeline = Some(&run.kind);
+                        }
+                    }
+                    UiSurfacePaintKind::Stroke => {
+                        let Some(buffer) = stroke_buffer else {
                             continue;
                         };
                         if active_pipeline != Some(&run.kind) {
@@ -752,6 +805,20 @@ impl UiSurfaceGpuRenderer {
         }));
     }
 
+    fn ensure_stroke_buffer(&mut self, device: &wgpu::Device, vertex_count: usize) {
+        let required = (vertex_count * std::mem::size_of::<SolidVertex>()) as u64;
+        if self.stroke_buffer.is_some() && self.stroke_capacity >= required {
+            return;
+        }
+        self.stroke_capacity = required.next_power_of_two().max(256);
+        self.stroke_buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ApiGraphicBasic.UiSurfaceStrokeVertices"),
+            size: self.stroke_capacity,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        }));
+    }
+
     fn ensure_text_buffer(&mut self, device: &wgpu::Device, vertex_count: usize) {
         let required = (vertex_count * std::mem::size_of::<TextVertex>()) as u64;
         if self.text_buffer.is_some() && self.text_capacity >= required {
@@ -781,6 +848,34 @@ impl UiSurfaceGpuRenderer {
     }
 }
 
+fn estimate_translucent_solids(
+    draw_list: &UiSurfaceDrawList,
+    logical_size: [u32; 2],
+    physical_size: [u32; 2],
+) -> (u32, u64) {
+    let bounds = UiRect::new(0.0, 0.0, logical_size[0] as f32, logical_size[1] as f32);
+    let scale_x = physical_size[0] as f64 / f64::from(logical_size[0].max(1));
+    let scale_y = physical_size[1] as f64 / f64::from(logical_size[1].max(1));
+    let mut quads = 0_u32;
+    let mut pixels = 0_u64;
+    for quad in &draw_list.solids {
+        if quad.color[3] == 0 || quad.color[3] == 255 {
+            continue;
+        }
+        let clipped = quad.rect.intersection(quad.clip_rect).intersection(bounds);
+        if clipped.is_empty() {
+            continue;
+        }
+        quads = quads.saturating_add(1);
+        let area = f64::from(clipped.width.max(0.0))
+            * f64::from(clipped.height.max(0.0))
+            * scale_x
+            * scale_y;
+        pixels = pixels.saturating_add(area.round().max(0.0) as u64);
+    }
+    (quads, pixels)
+}
+
 fn build_paint_runs(
     draw_list: &UiSurfaceDrawList,
     geometry: &UiSurfaceGpuGeometryCache,
@@ -800,6 +895,21 @@ fn build_paint_runs(
                 ui_scissor_rect(Some(quad.clip_rect), target_size, logical_size).map(|scissor| {
                     UiSurfacePaintRun {
                         kind: UiSurfacePaintKind::Solid,
+                        range: range.clone(),
+                        scissor,
+                    }
+                })
+            }
+            UiSurfacePaintCommand::Stroke { index, .. } => {
+                let (Some(stroke), Some(range)) = (
+                    draw_list.strokes.get(index),
+                    geometry.stroke_batch.ranges.get(index),
+                ) else {
+                    continue;
+                };
+                ui_scissor_rect(Some(stroke.clip_rect), target_size, logical_size).map(|scissor| {
+                    UiSurfacePaintRun {
+                        kind: UiSurfacePaintKind::Stroke,
                         range: range.clone(),
                         scissor,
                     }
@@ -876,6 +986,16 @@ fn retained_geometry_fingerprint(
         quad.z_index.hash(&mut hasher);
         quad.radius.to_bits().hash(&mut hasher);
     }
+    for stroke in &draw_list.strokes {
+        stroke.start[0].to_bits().hash(&mut hasher);
+        stroke.start[1].to_bits().hash(&mut hasher);
+        stroke.end[0].to_bits().hash(&mut hasher);
+        stroke.end[1].to_bits().hash(&mut hasher);
+        hash_rect(stroke.clip_rect, &mut hasher);
+        stroke.color.hash(&mut hasher);
+        stroke.width.to_bits().hash(&mut hasher);
+        stroke.z_index.hash(&mut hasher);
+    }
     for quad in &draw_list.text {
         hash_rect(quad.rect, &mut hasher);
         hash_rect(quad.clip_rect, &mut hasher);
@@ -909,6 +1029,16 @@ fn retained_geometry_fingerprint(
                 sequence,
             } => {
                 0_u8.hash(&mut hasher);
+                index.hash(&mut hasher);
+                z_index.hash(&mut hasher);
+                sequence.hash(&mut hasher);
+            }
+            UiSurfacePaintCommand::Stroke {
+                index,
+                z_index,
+                sequence,
+            } => {
+                3_u8.hash(&mut hasher);
                 index.hash(&mut hasher);
                 z_index.hash(&mut hasher);
                 sequence.hash(&mut hasher);
@@ -1181,6 +1311,133 @@ fn rounded_ndc_quad(
     positions
 }
 
+fn stroke_vertices(
+    draw_list: &UiSurfaceDrawList,
+    logical_width: u32,
+    logical_height: u32,
+    target_width: u32,
+    target_height: u32,
+    output_is_srgb: bool,
+) -> VertexBatch<SolidVertex> {
+    let scale_x = target_width.max(1) as f32 / logical_width.max(1) as f32;
+    let scale_y = target_height.max(1) as f32 / logical_height.max(1) as f32;
+    let scale = scale_x.min(scale_y);
+    let mut vertices = Vec::with_capacity(draw_list.strokes.len() * 66);
+    let mut ranges = Vec::with_capacity(draw_list.strokes.len());
+
+    for stroke in &draw_list.strokes {
+        let start = vertices.len() as u32;
+        let start_point = [stroke.start[0] * scale_x, stroke.start[1] * scale_y];
+        let end_point = [stroke.end[0] * scale_x, stroke.end[1] * scale_y];
+        append_stroke_vertices(
+            &mut vertices,
+            start_point,
+            end_point,
+            stroke.width * scale,
+            target_width,
+            target_height,
+            color_to_f32(stroke.color, output_is_srgb),
+        );
+        ranges.push(start..vertices.len() as u32);
+    }
+
+    VertexBatch { vertices, ranges }
+}
+
+fn append_stroke_vertices(
+    vertices: &mut Vec<SolidVertex>,
+    start: [f32; 2],
+    end: [f32; 2],
+    width: f32,
+    target_width: u32,
+    target_height: u32,
+    color: [f32; 4],
+) {
+    let half_width = width.max(1.0) * 0.5;
+    let dx = end[0] - start[0];
+    let dy = end[1] - start[1];
+    let length = (dx * dx + dy * dy).sqrt();
+    if length <= f32::EPSILON {
+        append_round_cap(
+            vertices,
+            start,
+            half_width,
+            target_width,
+            target_height,
+            color,
+        );
+        return;
+    }
+
+    let normal = [-dy / length * half_width, dx / length * half_width];
+    let a = [start[0] + normal[0], start[1] + normal[1]];
+    let b = [end[0] + normal[0], end[1] + normal[1]];
+    let c = [end[0] - normal[0], end[1] - normal[1]];
+    let d = [start[0] - normal[0], start[1] - normal[1]];
+    for point in [a, b, c, a, c, d] {
+        vertices.push(SolidVertex {
+            position: ndc_point(point[0], point[1], target_width, target_height),
+            color,
+        });
+    }
+    append_round_cap(
+        vertices,
+        start,
+        half_width,
+        target_width,
+        target_height,
+        color,
+    );
+    append_round_cap(
+        vertices,
+        end,
+        half_width,
+        target_width,
+        target_height,
+        color,
+    );
+}
+
+fn append_round_cap(
+    vertices: &mut Vec<SolidVertex>,
+    center: [f32; 2],
+    radius: f32,
+    target_width: u32,
+    target_height: u32,
+    color: [f32; 4],
+) {
+    const SEGMENTS: usize = 10;
+    let center_position = ndc_point(center[0], center[1], target_width, target_height);
+    for segment in 0..SEGMENTS {
+        let start_angle = std::f32::consts::TAU * segment as f32 / SEGMENTS as f32;
+        let end_angle = std::f32::consts::TAU * (segment + 1) as f32 / SEGMENTS as f32;
+        vertices.extend([
+            SolidVertex {
+                position: center_position,
+                color,
+            },
+            SolidVertex {
+                position: ndc_point(
+                    center[0] + start_angle.cos() * radius,
+                    center[1] + start_angle.sin() * radius,
+                    target_width,
+                    target_height,
+                ),
+                color,
+            },
+            SolidVertex {
+                position: ndc_point(
+                    center[0] + end_angle.cos() * radius,
+                    center[1] + end_angle.sin() * radius,
+                    target_width,
+                    target_height,
+                ),
+                color,
+            },
+        ]);
+    }
+}
+
 fn text_vertices(
     draw_list: &UiSurfaceDrawList,
     logical_width: u32,
@@ -1367,6 +1624,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn translucent_coverage_metrics_scale_to_the_physical_target() {
+        let list = UiSurfaceDrawList {
+            solids: vec![super::super::UiSurfaceQuad {
+                rect: super::super::UiRect::new(5.0, 5.0, 10.0, 8.0),
+                clip_rect: super::super::UiRect::new(0.0, 0.0, 20.0, 20.0),
+                color: [25, 31, 38, 220],
+                z_index: 0,
+                radius: 0.0,
+            }],
+            ..UiSurfaceDrawList::default()
+        };
+
+        assert_eq!(
+            estimate_translucent_solids(&list, [20, 20], [40, 40]),
+            (1, 320)
+        );
+    }
+
+    #[test]
     fn rounded_quad_uses_more_geometry_than_a_square_without_unbounded_segments() {
         let square = rounded_ndc_quad(0.0, 0.0, 120.0, 40.0, 0.0, 240, 120);
         let rounded = rounded_ndc_quad(0.0, 0.0, 120.0, 40.0, 12.0, 240, 120);
@@ -1374,6 +1650,27 @@ mod tests {
         assert_eq!(square.len(), 6);
         assert!(rounded.len() > square.len());
         assert!(rounded.len() <= 4 * (12 + 1) * 3);
+    }
+
+    #[test]
+    fn stroke_batch_uses_connected_caps_and_one_range_per_stroke() {
+        let list = UiSurfaceDrawList {
+            strokes: vec![super::super::UiSurfaceStroke {
+                start: [4.0, 5.0],
+                end: [20.0, 17.0],
+                clip_rect: super::super::UiRect::new(0.0, 0.0, 40.0, 30.0),
+                color: [237, 239, 242, 255],
+                width: 3.0,
+                z_index: 0,
+            }],
+            ..UiSurfaceDrawList::default()
+        };
+
+        let batch = stroke_vertices(&list, 40, 30, 80, 60, true);
+
+        assert_eq!(batch.ranges.len(), 1);
+        assert_eq!(batch.ranges[0].start, 0);
+        assert_eq!(batch.ranges[0].end - batch.ranges[0].start, 66);
     }
 
     #[test]
@@ -1470,6 +1767,7 @@ mod tests {
         let geometry = UiSurfaceGpuGeometryCache {
             fingerprint: 1,
             solid_batch: solid_vertices(&list, 160, 80, 160, 80, true),
+            stroke_batch: stroke_vertices(&list, 160, 80, 160, 80, true),
             text_batch: text_vertices(&list, 160, 80, 160, 80, true),
             image_batch: image_vertices(
                 &list,

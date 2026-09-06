@@ -149,6 +149,19 @@ pub struct SceneNode {
     /// Schema version of the source manifest, when this node came from one.
     #[serde(default)]
     pub source_schema_version: Option<u32>,
+    /// Optional semantic role assigned by an authoring tool (for example
+    /// `store.shelf`). It is metadata only and never changes rendering.
+    #[serde(default)]
+    pub semantic_role: Option<String>,
+    /// Stable authoring key used by reconciliation workflows.
+    #[serde(default)]
+    pub stable_key: Option<String>,
+    /// Searchable semantic tags for Agent perception and batch operations.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Task or tool that created the node, when known.
+    #[serde(default)]
+    pub agent_origin: Option<String>,
 }
 
 impl SceneNode {
@@ -175,6 +188,10 @@ impl SceneNode {
             is_folder: false,
             source_asset: None,
             source_schema_version: None,
+            semantic_role: None,
+            stable_key: None,
+            tags: Vec::new(),
+            agent_origin: None,
         }
     }
 
@@ -201,6 +218,10 @@ impl SceneNode {
             is_folder: false,
             source_asset: None,
             source_schema_version: None,
+            semantic_role: None,
+            stable_key: None,
+            tags: Vec::new(),
+            agent_origin: None,
         }
     }
 
@@ -359,8 +380,13 @@ impl SceneGraph {
         }
 
         let mut segments = Vec::new();
+        let mut seen = Vec::new();
         let mut current = Some(id);
         while let Some(node_id) = current {
+            if seen.contains(&node_id) {
+                return None;
+            }
+            seen.push(node_id);
             let node = self.nodes.get(node_id.0)?;
             if node.name.is_empty() {
                 return None;
@@ -391,14 +417,26 @@ impl SceneGraph {
     /// pre-compute a flat buffer.
     pub fn world_matrix(&self, id: SceneNodeId) -> Mat4 {
         let mut chain = Vec::with_capacity(8);
+        if id.0 >= self.nodes.len() {
+            return Mat4::IDENTITY;
+        }
         let mut current = Some(id);
         while let Some(cid) = current {
+            if chain.contains(&cid) {
+                return Mat4::IDENTITY;
+            }
             chain.push(cid);
-            current = self.nodes[cid.0].parent;
+            current = self
+                .nodes
+                .get(cid.0)
+                .and_then(|node| node.parent)
+                .filter(|parent| parent.0 < self.nodes.len());
         }
         let mut mat = Mat4::IDENTITY;
         for cid in chain.into_iter().rev() {
-            mat = mat * self.nodes[cid.0].local_matrix();
+            if let Some(node) = self.nodes.get(cid.0) {
+                mat = mat * node.local_matrix();
+            }
         }
         mat
     }
@@ -616,6 +654,58 @@ impl SceneGraph {
         true
     }
 
+    /// Reparent an existing node while keeping its world-space transform.
+    ///
+    /// The graph stores local transforms, so changing parents normally changes
+    /// the rendered position. This variant derives the new local transform
+    /// from the old world matrix before changing the hierarchy. It is the
+    /// safe primitive used by authoring tools that reorganize an existing
+    /// scene without visually moving its content.
+    pub fn reparent_node_preserve_world_transform(
+        &mut self,
+        id: SceneNodeId,
+        new_parent: Option<SceneNodeId>,
+    ) -> bool {
+        if !self.is_valid_node(id) {
+            return false;
+        }
+        if let Some(parent_id) = new_parent {
+            if !self.is_valid_node(parent_id)
+                || parent_id == id
+                || self.is_descendant(parent_id, id)
+            {
+                return false;
+            }
+        }
+
+        let world_before = self.world_matrix(id);
+        let parent_world = new_parent
+            .map(|parent_id| self.world_matrix(parent_id))
+            .unwrap_or(Mat4::IDENTITY);
+        let local = parent_world.inverse() * world_before;
+        if !local.is_finite() {
+            return false;
+        }
+
+        let (scale, rotation, position) = local.to_scale_rotation_translation();
+        if !scale.is_finite() || !rotation.is_finite() || !position.is_finite() {
+            return false;
+        }
+        let (yaw, pitch, roll) = rotation.to_euler(glam::EulerRot::YXZ);
+        let local_rotation = Vec3::new(pitch.to_degrees(), yaw.to_degrees(), roll.to_degrees());
+
+        if !self.reparent_node(id, new_parent) {
+            return false;
+        }
+        let Some(node) = self.get_mut(id) else {
+            return false;
+        };
+        node.position = position;
+        node.rotation = local_rotation;
+        node.scale = scale;
+        true
+    }
+
     /// Soft-remove a node: hides it, clears its primitive, and detaches from
     /// parent/root list. We keep the slot to avoid invalidating indices.
     pub fn remove_node(&mut self, id: SceneNodeId) -> bool {
@@ -734,6 +824,21 @@ impl SceneGraph {
             .collect()
     }
 
+    /// Collect all live node ids, including nodes hidden in the editor.
+    ///
+    /// A removed node keeps its slot for stable ids but clears its name. This
+    /// helper is the shared semantic count used by authoring, Agent context,
+    /// CLI and MCP; callers that specifically need renderable nodes should use
+    /// all_valid_ids instead.
+    pub fn all_live_ids(&self) -> Vec<SceneNodeId> {
+        self.nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| !node.name.is_empty())
+            .map(|(index, _)| SceneNodeId(index))
+            .collect()
+    }
+
     /// Save the scene graph to a RON file.
     pub fn save_ron(&self, path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
         let pretty = ron::ser::PrettyConfig::default();
@@ -752,11 +857,20 @@ impl SceneGraph {
 
     fn is_descendant(&self, candidate: SceneNodeId, ancestor: SceneNodeId) -> bool {
         let mut current = Some(candidate);
+        let mut seen = Vec::new();
         while let Some(node_id) = current {
             if node_id == ancestor {
                 return true;
             }
-            current = self.nodes[node_id.0].parent;
+            if seen.contains(&node_id) {
+                return false;
+            }
+            seen.push(node_id);
+            current = self
+                .nodes
+                .get(node_id.0)
+                .and_then(|node| node.parent)
+                .filter(|parent| parent.0 < self.nodes.len());
         }
         false
     }
@@ -773,6 +887,10 @@ impl SceneGraph {
         let mut copy = source.clone();
         copy.uuid = Uuid::new_v4();
         copy.name = format!("{} (copy)", source.name);
+        // Stable reconciliation keys must remain unique. The semantic role
+        // and tags describe what the copy is, but a duplicate receives a new
+        // key only when an authoring tool explicitly assigns one.
+        copy.stable_key = None;
         copy.parent = parent;
         copy.children.clear();
         if offset_root {
@@ -862,6 +980,26 @@ mod tests {
         let translation = world.col(3);
         assert!((translation.x - 10.0).abs() < 0.001);
         assert!((translation.y - 5.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn reparent_preserves_world_transform() {
+        let mut graph = SceneGraph::new();
+        let source = graph.add_root("Source");
+        graph.get_mut(source).unwrap().position = Vec3::new(10.0, 2.0, -4.0);
+        let target = graph.add_root_folder("Target");
+        graph.get_mut(target).unwrap().position = Vec3::new(-3.0, 5.0, 7.0);
+        let child = graph.add_child_with_primitive(source, "Child", Primitive::Cube);
+        graph.get_mut(child).unwrap().position = Vec3::new(2.0, 1.0, 3.0);
+
+        let before = graph.world_matrix(child).to_cols_array();
+        assert!(graph.reparent_node_preserve_world_transform(child, Some(target)));
+        let after = graph.world_matrix(child).to_cols_array();
+
+        assert_eq!(graph.get(child).unwrap().parent, Some(target));
+        for (before, after) in before.iter().zip(after) {
+            assert!((*before - after).abs() < 0.001);
+        }
     }
 
     #[test]
@@ -961,5 +1099,17 @@ mod tests {
 
         assert!(graph.reparent_node_before(second, Some(root), Some(first)));
         assert_ne!(graph.render_fingerprint(), before);
+    }
+
+    #[test]
+    fn all_live_ids_excludes_soft_removed_slots_but_keeps_hidden_nodes() {
+        let mut graph = SceneGraph::new();
+        let hidden = graph.add_root("Hidden");
+        graph.get_mut(hidden).unwrap().visible = false;
+        let removed = graph.add_root("Removed");
+        assert!(graph.remove_node(removed));
+
+        assert_eq!(graph.all_live_ids(), vec![hidden]);
+        assert_eq!(graph.all_valid_ids(), Vec::<SceneNodeId>::new());
     }
 }

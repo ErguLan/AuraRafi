@@ -1,24 +1,29 @@
 //! Controller for the Agent workbench.
 //!
-//! This module owns runtime/history/provider orchestration only. The retained
-//! surface in `agent_surface.rs` receives a read-only reference and emits
-//! typed actions, so the UI can evolve without moving the AI backend again.
+//! This module owns runtime/history/provider orchestration only. A future UI
+//! may consume its state and typed actions without moving the AI backend.
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
 use raf_ai::agent_history::{AgentHistory, AgentHistoryWriter};
 use raf_ai::agent_model_registry::AgentModelRegistry;
-use raf_ai::agent_runtime::{AgentRuntime, AgentStatus, ToolExecutor};
+use raf_ai::agent_runtime::{
+    AgentRuntime, AgentStatus, AgentToolResult, ToolExecutionMode, ToolExecutor,
+};
 use raf_ai::chat::ChatMessage;
 use raf_ai::openai_client::{OpenAiConfig, OpenAiTool};
 use raf_ai::provider::{AgentMode, AiProvider, AiProviderConfig};
 use raf_core::config::EngineSettings;
 use raf_core::i18n::t;
-use raf_core::project::Project;
+use raf_core::project::{Project, ProjectType};
 use raf_core::Language;
 
-use crate::agent_executor::{build_tool_name_map, AgentToolExecutor};
+use crate::agent_context::{build_agent_system_prompt, AgentProjectSnapshot};
+use crate::agent_executor::{AgentToolExecutor, AgentToolRoute};
 use crate::commands::catalog::CommandCatalog;
+
+const MIN_AGENT_STREAM_PRESENTATION: Duration = Duration::from_millis(33);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentReadiness {
@@ -44,7 +49,7 @@ pub struct AgentPanel {
     pub history: AgentHistory,
     pub model_registry: AgentModelRegistry,
     pub tools: Vec<OpenAiTool>,
-    pub tool_name_map: std::collections::HashMap<String, String>,
+    pub tool_routes: std::collections::HashMap<String, AgentToolRoute>,
     pub input_text: String,
     pub selected_model: String,
     pub sidebar_open: bool,
@@ -53,13 +58,18 @@ pub struct AgentPanel {
     pub new_model_error: Option<String>,
     pub open_settings_requested: bool,
     pub settings_changed: bool,
+    pub(crate) model_menu_open: bool,
+    pub(crate) mode_menu_open: bool,
+    pub(crate) add_model_open: bool,
     pub language: Language,
     pub last_status: AgentStatus,
     visual_revision: u64,
+    last_visual_message_revision: u64,
+    last_visual_present: Instant,
     loaded_project_path: Option<PathBuf>,
     runtime_key: Option<RuntimeKey>,
-    tools_language: Option<Language>,
     system_prompt: String,
+    pending_submission: Option<String>,
     last_saved_message_count: usize,
     history_writer: AgentHistoryWriter,
 }
@@ -71,7 +81,7 @@ impl Default for AgentPanel {
             history: AgentHistory::default(),
             model_registry: AgentModelRegistry::default(),
             tools: Vec::new(),
-            tool_name_map: std::collections::HashMap::new(),
+            tool_routes: std::collections::HashMap::new(),
             input_text: String::new(),
             selected_model: AgentModelRegistry::PROVIDER_DEFAULT.to_string(),
             sidebar_open: true,
@@ -80,19 +90,25 @@ impl Default for AgentPanel {
             new_model_error: None,
             open_settings_requested: false,
             settings_changed: false,
+            model_menu_open: false,
+            mode_menu_open: false,
+            add_model_open: false,
             language: Language::English,
             last_status: AgentStatus::Done,
             visual_revision: 0,
+            last_visual_message_revision: 0,
+            last_visual_present: Instant::now(),
             loaded_project_path: None,
             runtime_key: None,
-            tools_language: None,
             system_prompt: String::new(),
+            pending_submission: None,
             last_saved_message_count: 0,
             history_writer: AgentHistoryWriter::new(),
         }
     }
 }
 
+#[allow(dead_code)]
 impl AgentPanel {
     /// Synchronise project-local state and return the actionable readiness
     /// state for the current provider/model selection.
@@ -100,16 +116,9 @@ impl AgentPanel {
         &mut self,
         settings: &EngineSettings,
         project: Option<&Project>,
-        catalog: &CommandCatalog,
+        _catalog: &CommandCatalog,
     ) -> AgentReadiness {
         self.language = settings.language;
-        if self.tools_language != Some(settings.language) || self.tools.is_empty() {
-            self.tools = AgentToolExecutor::build_tools(catalog, settings.language);
-            self.tool_name_map = build_tool_name_map(catalog);
-            self.tools_language = Some(settings.language);
-            self.system_prompt = build_agent_prompt(&self.tools);
-            self.runtime.set_system_prompt(self.system_prompt.clone());
-        }
         if self.model_registry.shortcuts != settings.agent_model_shortcuts {
             self.model_registry = AgentModelRegistry::new(settings.agent_model_shortcuts.clone());
         }
@@ -132,24 +141,18 @@ impl AgentPanel {
     pub(crate) fn poll(&mut self, executor: &mut dyn ToolExecutor) {
         let previous_status = self.runtime.status.clone();
         let previous_message_count = self.runtime.messages.len();
-        let previous_last_message = self
-            .runtime
-            .messages
-            .last()
-            .map(|message| (message.id.clone(), message.content.clone()));
-        let previous_pending = format!("{:?}", self.runtime.pending_calls);
+        let previous_task = self.runtime.task_snapshot();
         let status = self.runtime.poll(Some(executor));
-        let current_last_message = self
-            .runtime
-            .messages
-            .last()
-            .map(|message| (message.id.clone(), message.content.clone()));
-        let runtime_changed = previous_status != self.runtime.status
+        let message_revision = self.runtime.message_revision();
+        let structural_change = previous_status != self.runtime.status
             || previous_message_count != self.runtime.messages.len()
-            || previous_last_message != current_last_message
-            || previous_pending != format!("{:?}", self.runtime.pending_calls);
-        if runtime_changed {
+            || previous_task != self.runtime.task_snapshot();
+        let stream_update_ready = message_revision != self.last_visual_message_revision
+            && self.last_visual_present.elapsed() >= MIN_AGENT_STREAM_PRESENTATION;
+        if structural_change || stream_update_ready {
             self.visual_revision = self.visual_revision.wrapping_add(1);
+            self.last_visual_message_revision = message_revision;
+            self.last_visual_present = Instant::now();
         }
         if status != self.last_status {
             self.last_status = status;
@@ -164,7 +167,7 @@ impl AgentPanel {
     }
 
     pub(crate) fn has_live_output(&self) -> bool {
-        self.runtime.status.blocks_input()
+        self.runtime.status.needs_continuous_frame()
     }
 
     pub(crate) fn readiness(&self, settings: &EngineSettings) -> AgentReadiness {
@@ -212,12 +215,52 @@ impl AgentPanel {
             AgentAction::NewChat => self.start_new_chat(),
             AgentAction::SelectSession(index) => self.select_session(index),
             AgentAction::DeleteSession(index) => self.delete_session(index),
-            AgentAction::SelectModel(label) => self.selected_model = label,
+            AgentAction::SelectModel(label) => {
+                // A shortcut is provider-owned. Selecting it must also move
+                // the active provider, otherwise `effective_model` correctly
+                // rejects the shortcut and the runtime silently falls back
+                // to the provider card's default model.
+                if let Some(shortcut) = self.model_registry.get(&label) {
+                    settings.default_ai_provider = shortcut.provider;
+                }
+                self.selected_model = label.clone();
+                settings.default_agent_model = (label != AgentModelRegistry::PROVIDER_DEFAULT)
+                    .then_some(label)
+                    .unwrap_or_default();
+                self.settings_changed = true;
+                self.model_menu_open = false;
+            }
+            AgentAction::ToggleModelMenu => {
+                self.model_menu_open = !self.model_menu_open;
+                self.mode_menu_open = false;
+                self.add_model_open = false;
+            }
+            AgentAction::ToggleModeMenu => {
+                self.mode_menu_open = !self.mode_menu_open;
+                self.model_menu_open = false;
+                self.add_model_open = false;
+            }
+            AgentAction::OpenAddModel => {
+                self.add_model_open = true;
+                self.model_menu_open = false;
+                self.mode_menu_open = false;
+                self.new_model_error = None;
+            }
+            AgentAction::CloseAddModel => {
+                self.add_model_open = false;
+                self.new_model_error = None;
+            }
+            AgentAction::CloseMenus => {
+                self.model_menu_open = false;
+                self.mode_menu_open = false;
+                self.add_model_open = false;
+            }
             AgentAction::SetMode(mode) => {
                 if settings.agent_mode != mode {
                     settings.agent_mode = mode;
                     self.settings_changed = true;
                 }
+                self.mode_menu_open = false;
             }
             AgentAction::SetNewModelLabel(value) => {
                 self.new_model_label = value;
@@ -243,14 +286,16 @@ impl AgentPanel {
                 {
                     settings.agent_model_shortcuts = self.model_registry.shortcuts.clone();
                     self.selected_model = label.to_string();
+                    settings.default_agent_model = label.to_string();
                     self.settings_changed = true;
                     self.new_model_label.clear();
                     self.new_model_id.clear();
                     self.new_model_error = None;
+                    self.add_model_open = false;
                 }
             }
             AgentAction::OpenSettings => self.open_settings_requested = true,
-            AgentAction::Submit => self.submit(settings.agent_mode == AgentMode::Active),
+            AgentAction::Submit => self.queue_submission(),
             AgentAction::Stop => {
                 self.runtime.cancel();
                 self.last_status = AgentStatus::Done;
@@ -286,14 +331,67 @@ impl AgentPanel {
         std::mem::take(&mut self.open_settings_requested)
     }
 
-    fn submit(&mut self, active_mode: bool) {
+    pub(crate) fn take_settings_changed(&mut self) -> bool {
+        std::mem::take(&mut self.settings_changed)
+    }
+
+    pub(crate) fn close_menus(&mut self) {
+        self.model_menu_open = false;
+        self.mode_menu_open = false;
+        self.add_model_open = false;
+        self.new_model_error = None;
+    }
+
+    pub(crate) fn has_open_menu(&self) -> bool {
+        self.model_menu_open || self.mode_menu_open || self.add_model_open
+    }
+
+    fn queue_submission(&mut self) {
         let content = self.input_text.trim().to_string();
         if content.is_empty() || self.runtime.status.blocks_input() {
             return;
         }
         self.input_text.clear();
+        self.pending_submission = Some(content);
+        self.visual_revision = self.visual_revision.wrapping_add(1);
+    }
+
+    pub(crate) fn start_pending_run(
+        &mut self,
+        snapshot: &AgentProjectSnapshot,
+        catalog: &CommandCatalog,
+        project_type: Option<ProjectType>,
+        mode: AgentMode,
+    ) {
+        let Some(content) = self.pending_submission.take() else {
+            return;
+        };
+        let pack = AgentToolExecutor::build_tool_pack(
+            catalog,
+            self.language,
+            project_type,
+            mode,
+            &content,
+        );
+        self.tools = pack.tools;
+        self.tool_routes = pack.routes;
+        self.system_prompt = build_agent_system_prompt(snapshot, mode.label(), self.language);
         self.runtime.set_system_prompt(self.system_prompt.clone());
-        self.runtime.start_run(&content, &self.tools, active_mode);
+        self.runtime.set_initial_tool_context(
+            "project_summary",
+            serde_json::json!({}),
+            AgentToolResult::success(
+                t("app.agent_context_loaded", self.language),
+                serde_json::to_value(snapshot).unwrap_or(serde_json::Value::Null),
+            ),
+        );
+        let execution_mode = match mode {
+            AgentMode::Inspect => ToolExecutionMode::Inspect,
+            AgentMode::Plan => ToolExecutionMode::Preview,
+            AgentMode::Active => ToolExecutionMode::Apply,
+        };
+        self.runtime
+            .start_run(&content, &self.tools, execution_mode);
         self.last_status = AgentStatus::Thinking;
         self.persist_history();
     }
@@ -302,9 +400,10 @@ impl AgentPanel {
         let next_path = project.map(|project| project.path.clone());
         if self.loaded_project_path == next_path {
             if self.history.active_index.is_none() && project.is_some() {
-                let index = self.history.ensure_active_session("New chat");
+                let default_title = t("app.agent_new_chat_default", self.language);
+                let index = self.history.ensure_active_session(&default_title);
                 self.load_session_into_runtime(index);
-                self.persist_history_with_force(true);
+                self.enqueue_history_snapshot();
             }
             return;
         }
@@ -314,11 +413,17 @@ impl AgentPanel {
             .as_deref()
             .map(AgentHistory::load)
             .unwrap_or_default();
-        self.history.ensure_active_session("New chat");
-        self.last_saved_message_count = 0;
+        let had_valid_active_session = self
+            .history
+            .active_index
+            .is_some_and(|index| index < self.history.sessions.len());
+        let default_title = t("app.agent_new_chat_default", self.language);
+        self.history.ensure_active_session(&default_title);
         if let Some(index) = self.history.active_index {
             self.load_session_into_runtime(index);
-            self.persist_history_with_force(true);
+            if !had_valid_active_session {
+                self.enqueue_history_snapshot();
+            }
         }
     }
 
@@ -355,10 +460,12 @@ impl AgentPanel {
 
     fn start_new_chat(&mut self) {
         self.runtime.clear();
-        self.history.start_session("New chat");
+        let default_title = t("app.agent_new_chat_default", self.language);
+        self.history.start_session(&default_title);
         self.runtime.set_system_prompt(self.system_prompt.clone());
         self.input_text.clear();
-        self.persist_history_with_force(true);
+        self.last_saved_message_count = 0;
+        self.enqueue_history_snapshot();
     }
 
     fn select_session(&mut self, index: usize) {
@@ -367,7 +474,7 @@ impl AgentPanel {
         }
         self.history.active_index = Some(index);
         self.load_session_into_runtime(index);
-        self.persist_history_with_force(true);
+        self.enqueue_history_snapshot();
     }
 
     fn load_session_into_runtime(&mut self, index: usize) {
@@ -382,6 +489,7 @@ impl AgentPanel {
         self.runtime.set_system_prompt(self.system_prompt.clone());
         self.input_text.clear();
         self.last_status = AgentStatus::Done;
+        self.last_saved_message_count = self.runtime.messages.len();
         self.visual_revision = self.visual_revision.wrapping_add(1);
     }
 
@@ -406,15 +514,12 @@ impl AgentPanel {
             self.load_session_into_runtime(index);
         } else {
             self.start_new_chat();
+            return;
         }
-        self.persist_history_with_force(true);
+        self.enqueue_history_snapshot();
     }
 
     fn persist_history(&mut self) {
-        self.persist_history_with_force(false);
-    }
-
-    fn persist_history_with_force(&mut self, force: bool) {
         let Some(index) = self.history.active_index else {
             return;
         };
@@ -436,7 +541,7 @@ impl AgentPanel {
             }
         }
         let messages_changed = !messages_equal(&session.messages, &self.runtime.messages);
-        if !force && !messages_changed && !title_changed {
+        if !messages_changed && !title_changed {
             return;
         }
         if messages_changed {
@@ -444,6 +549,12 @@ impl AgentPanel {
             session.touch();
         }
         self.last_saved_message_count = self.runtime.messages.len();
+        if let Some(project_path) = self.loaded_project_path.as_deref() {
+            self.history_writer.enqueue(project_path, &self.history);
+        }
+    }
+
+    fn enqueue_history_snapshot(&self) {
         if let Some(project_path) = self.loaded_project_path.as_deref() {
             self.history_writer.enqueue(project_path, &self.history);
         }
@@ -470,6 +581,7 @@ fn fallback_session_title(content: &str) -> String {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum AgentAction {
     SetInput(String),
     ToggleSidebar,
@@ -478,6 +590,11 @@ pub(crate) enum AgentAction {
     SelectSession(usize),
     DeleteSession(usize),
     SelectModel(String),
+    ToggleModelMenu,
+    ToggleModeMenu,
+    OpenAddModel,
+    CloseAddModel,
+    CloseMenus,
     SetMode(AgentMode),
     SetNewModelLabel(String),
     SetNewModelId(String),
@@ -500,17 +617,6 @@ fn messages_equal(left: &[ChatMessage], right: &[ChatMessage]) -> bool {
         })
 }
 
-fn build_agent_prompt(tools: &[OpenAiTool]) -> String {
-    let tool_names = tools
-        .iter()
-        .map(|tool| tool.function.name.as_str())
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "You are the AuraRafi Agent inside the current editor. Be concise and actionable. Use tools when they help the user. Never claim a mutation succeeded unless the tool result confirms it. Available tools: {tool_names}"
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,15 +637,65 @@ mod tests {
     }
 
     #[test]
+    fn restored_session_is_already_marked_as_persisted() {
+        let mut panel = AgentPanel::default();
+        let index = panel.history.start_session("Restored");
+        panel.history.sessions[index]
+            .messages
+            .push(ChatMessage::user("saved message"));
+
+        panel.load_session_into_runtime(index);
+
+        assert_eq!(panel.last_saved_message_count, panel.runtime.messages.len());
+    }
+
+    #[test]
     fn mode_action_updates_settings_for_the_next_agent_submission() {
         let mut panel = AgentPanel::default();
         let mut settings = EngineSettings::default();
-        settings.agent_mode = AgentMode::Passive;
+        settings.agent_mode = AgentMode::Plan;
 
         panel.apply_action(AgentAction::SetMode(AgentMode::Active), &mut settings);
 
         assert_eq!(settings.agent_mode, AgentMode::Active);
         assert!(panel.settings_changed);
+    }
+
+    #[test]
+    fn selecting_model_shortcut_switches_provider_and_effective_model() {
+        let mut panel = AgentPanel::default();
+        let mut settings = EngineSettings::default();
+        assert!(panel
+            .model_registry
+            .add("GPT test", AiProvider::OpenAI, "gpt-test"));
+
+        panel.apply_action(
+            AgentAction::SelectModel("GPT test".to_string()),
+            &mut settings,
+        );
+
+        assert_eq!(settings.default_ai_provider, AiProvider::OpenAI);
+        assert_eq!(settings.default_agent_model, "GPT test");
+        let provider = settings
+            .ai_providers
+            .iter()
+            .find(|provider| provider.provider == AiProvider::OpenAI)
+            .expect("OpenAI provider");
+        assert_eq!(panel.effective_model(provider), "gpt-test");
+    }
+
+    #[test]
+    fn adding_model_shortcut_persists_it_as_the_default_selection() {
+        let mut panel = AgentPanel::default();
+        let mut settings = EngineSettings::default();
+        panel.new_model_label = "Local test".to_string();
+        panel.new_model_id = "local-model".to_string();
+
+        panel.apply_action(AgentAction::AddModel, &mut settings);
+
+        assert_eq!(settings.default_agent_model, "Local test");
+        assert_eq!(panel.selected_model, "Local test");
+        assert!(panel.model_registry.get("Local test").is_some());
     }
 
     #[test]

@@ -13,6 +13,18 @@ pub struct UiControlState {
     scroll_max_offsets: BTreeMap<String, [f32; 2]>,
     #[serde(default)]
     text_edit: BTreeMap<String, UiTextEditState>,
+    #[serde(default)]
+    text_selection: BTreeMap<String, UiTextEditState>,
+    #[serde(default)]
+    ime_preedit: BTreeMap<String, String>,
+    #[serde(skip)]
+    text_history: BTreeMap<String, UiTextHistory>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct UiTextHistory {
+    undo: Vec<String>,
+    redo: Vec<String>,
 }
 
 /// Session-owned caret and selection state for a text control.
@@ -20,6 +32,10 @@ pub struct UiControlState {
 pub struct UiTextEditState {
     pub cursor: usize,
     pub anchor: usize,
+    /// Character column to preserve while moving vertically through visual
+    /// lines. This is transient editor state, not part of the authored UI.
+    #[serde(default)]
+    pub preferred_column: Option<usize>,
 }
 
 impl UiTextEditState {
@@ -47,6 +63,10 @@ impl UiControlState {
         snapshot
             .scroll_offsets
             .retain(|_, offset| offset.iter().any(|value| *value != 0.0));
+        // Caret, selection, and IME preedit affect the rendered text pass and
+        // therefore belong in the layout cache key. Dropping them here makes
+        // a focused field keep painting the previous caret after typing.
+        snapshot.text_history.clear();
         snapshot
     }
 
@@ -62,6 +82,79 @@ impl UiControlState {
         self.text_values.contains_key(key)
     }
 
+    pub fn set_ime_preedit(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        let key = key.into();
+        let value = value.into();
+        if value.is_empty() {
+            self.ime_preedit.remove(&key);
+        } else {
+            self.ime_preedit.insert(key, value);
+        }
+    }
+
+    pub fn ime_preedit(&self, key: &str) -> &str {
+        self.ime_preedit.get(key).map(String::as_str).unwrap_or("")
+    }
+
+    fn record_text_change(&mut self, key: &str, before: String) {
+        let after = self.text(key).to_string();
+        if before == after {
+            return;
+        }
+        let history = self.text_history.entry(key.to_string()).or_default();
+        history.undo.push(before);
+        if history.undo.len() > 100 {
+            history.undo.remove(0);
+        }
+        history.redo.clear();
+    }
+
+    pub fn undo(&mut self, key: &str) -> bool {
+        let Some(previous) = self
+            .text_history
+            .get_mut(key)
+            .and_then(|history| history.undo.pop())
+        else {
+            return false;
+        };
+        let current = self.text(key).to_string();
+        self.text_history
+            .entry(key.to_string())
+            .or_default()
+            .redo
+            .push(current);
+        let length = previous.chars().count();
+        self.text_values.insert(key.to_string(), previous);
+        let edit = self.text_edit.entry(key.to_string()).or_default();
+        edit.cursor = length;
+        edit.anchor = length;
+        edit.preferred_column = None;
+        true
+    }
+
+    pub fn redo(&mut self, key: &str) -> bool {
+        let Some(next) = self
+            .text_history
+            .get_mut(key)
+            .and_then(|history| history.redo.pop())
+        else {
+            return false;
+        };
+        let current = self.text(key).to_string();
+        self.text_history
+            .entry(key.to_string())
+            .or_default()
+            .undo
+            .push(current);
+        let length = next.chars().count();
+        self.text_values.insert(key.to_string(), next);
+        let edit = self.text_edit.entry(key.to_string()).or_default();
+        edit.cursor = length;
+        edit.anchor = length;
+        edit.preferred_column = None;
+        true
+    }
+
     pub fn set_text(
         &mut self,
         key: impl Into<String>,
@@ -73,17 +166,20 @@ impl UiControlState {
         let length = value.chars().count();
         let unchanged = self.text_values.get(&key).map(String::as_str) == Some(value.as_str());
         self.text_values.insert(key.clone(), value);
-        let edit = self.text_edit.entry(key).or_default();
+        let edit = self.text_edit.entry(key.clone()).or_default();
         if unchanged {
             edit.cursor = edit.cursor.min(length);
             edit.anchor = edit.anchor.min(length);
         } else {
             edit.cursor = length;
             edit.anchor = length;
+            edit.preferred_column = None;
+            self.ime_preedit.remove(&key);
         }
     }
 
     pub fn append_text(&mut self, key: &str, value: &str, max_length: usize) -> bool {
+        let before = self.text(key).to_string();
         let current = self.text_values.entry(key.to_string()).or_default();
         let edit = self
             .text_edit
@@ -91,6 +187,7 @@ impl UiControlState {
             .or_insert_with(|| UiTextEditState {
                 cursor: current.chars().count(),
                 anchor: current.chars().count(),
+                preferred_column: None,
             });
         let selection = edit.selection();
         let current_length = current.chars().count();
@@ -105,10 +202,16 @@ impl UiControlState {
         let cursor = selection.start + append.chars().count();
         edit.cursor = cursor;
         edit.anchor = cursor;
-        !append.is_empty()
+        edit.preferred_column = None;
+        let changed = !append.is_empty();
+        if changed {
+            self.record_text_change(key, before);
+        }
+        changed
     }
 
     pub fn backspace(&mut self, key: &str) -> bool {
+        let before = self.text(key).to_string();
         let Some(value) = self.text_values.get_mut(key) else {
             return false;
         };
@@ -117,6 +220,7 @@ impl UiControlState {
             UiTextEditState {
                 cursor: end,
                 anchor: end,
+                preferred_column: None,
             }
         });
         let range = if edit.has_selection() {
@@ -131,6 +235,8 @@ impl UiControlState {
         *value = chars.into_iter().collect();
         edit.cursor = range.start;
         edit.anchor = range.start;
+        edit.preferred_column = None;
+        self.record_text_change(key, before);
         true
     }
 
@@ -141,6 +247,7 @@ impl UiControlState {
         if self.text_edit(key).has_selection() {
             return self.backspace(key);
         }
+        let before = self.text(key).to_string();
         let Some(value) = self.text_values.get_mut(key) else {
             return false;
         };
@@ -149,6 +256,7 @@ impl UiControlState {
             UiTextEditState {
                 cursor: end,
                 anchor: end,
+                preferred_column: None,
             }
         });
         if edit.cursor == 0 {
@@ -168,10 +276,13 @@ impl UiControlState {
         *value = chars.into_iter().collect();
         edit.cursor = range.start;
         edit.anchor = range.start;
+        edit.preferred_column = None;
+        self.record_text_change(key, before);
         true
     }
 
     pub fn delete_forward(&mut self, key: &str) -> bool {
+        let before = self.text(key).to_string();
         let Some(value) = self.text_values.get_mut(key) else {
             return false;
         };
@@ -180,6 +291,7 @@ impl UiControlState {
             UiTextEditState {
                 cursor: end,
                 anchor: end,
+                preferred_column: None,
             }
         });
         let range = if edit.has_selection() {
@@ -194,6 +306,8 @@ impl UiControlState {
         *value = chars.into_iter().collect();
         edit.cursor = range.start;
         edit.anchor = range.start;
+        edit.preferred_column = None;
+        self.record_text_change(key, before);
         true
     }
 
@@ -201,6 +315,7 @@ impl UiControlState {
         if self.text_edit(key).has_selection() {
             return self.delete_forward(key);
         }
+        let before = self.text(key).to_string();
         let Some(value) = self.text_values.get_mut(key) else {
             return false;
         };
@@ -209,6 +324,7 @@ impl UiControlState {
             UiTextEditState {
                 cursor: end,
                 anchor: end,
+                preferred_column: None,
             }
         });
         let chars = value.chars().collect::<Vec<_>>();
@@ -228,6 +344,8 @@ impl UiControlState {
         *value = chars.into_iter().collect();
         edit.cursor = range.start;
         edit.anchor = range.start;
+        edit.preferred_column = None;
+        self.record_text_change(key, before);
         true
     }
 
@@ -253,6 +371,7 @@ impl UiControlState {
             UiTextEditState {
                 cursor: end,
                 anchor: end,
+                preferred_column: None,
             }
         });
         let length = value.chars().count();
@@ -262,8 +381,111 @@ impl UiControlState {
             (edit.cursor + 1).min(length)
         };
         edit.cursor = next;
+        edit.preferred_column = None;
         if !extend {
             edit.anchor = next;
+        }
+    }
+
+    /// Moves by semantic words for native-feeling Ctrl/Command navigation.
+    pub fn move_cursor_by_word(&mut self, key: &str, direction: i32, extend: bool) {
+        let chars = self.text(key).chars().collect::<Vec<_>>();
+        let mut cursor = self.text_edit(key).cursor.min(chars.len());
+        if direction < 0 {
+            while cursor > 0 && chars[cursor - 1].is_whitespace() {
+                cursor -= 1;
+            }
+            while cursor > 0 && !chars[cursor - 1].is_whitespace() {
+                cursor -= 1;
+            }
+        } else {
+            while cursor < chars.len() && chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+            while cursor < chars.len() && !chars[cursor].is_whitespace() {
+                cursor += 1;
+            }
+        }
+        self.set_cursor(key, cursor, extend);
+    }
+
+    /// Moves to the beginning/end of the current line. Newline characters are
+    /// treated as boundaries and remain outside the editable line content.
+    pub fn move_cursor_to_line_edge(&mut self, key: &str, end: bool, extend: bool) {
+        let chars = self.text(key).chars().collect::<Vec<_>>();
+        let cursor = self.text_edit(key).cursor.min(chars.len());
+        let mut line_start = cursor;
+        while line_start > 0 && chars[line_start - 1] != '\n' {
+            line_start -= 1;
+        }
+        let mut line_end = cursor;
+        while line_end < chars.len() && chars[line_end] != '\n' {
+            line_end += 1;
+        }
+        self.set_cursor(key, if end { line_end } else { line_start }, extend);
+    }
+
+    /// Moves vertically through explicit newline-delimited lines.
+    pub fn move_cursor_vertical(&mut self, key: &str, direction: i32, extend: bool) {
+        let chars = self.text(key).chars().collect::<Vec<_>>();
+        let mut lines = Vec::new();
+        let mut start = 0;
+        for (index, character) in chars.iter().enumerate() {
+            if *character == '\n' {
+                lines.push((start, index));
+                start = index + 1;
+            }
+        }
+        lines.push((start, chars.len()));
+        self.move_cursor_vertical_with_lines(key, direction, extend, &lines);
+    }
+
+    /// Moves vertically through the visual line ranges produced by the text
+    /// renderer. The ranges use character indices and may come from either
+    /// explicit newlines or soft wrapping.
+    pub fn move_cursor_vertical_with_lines(
+        &mut self,
+        key: &str,
+        direction: i32,
+        extend: bool,
+        lines: &[(usize, usize)],
+    ) {
+        if lines.is_empty() {
+            return;
+        }
+        let length = self.text(key).chars().count();
+        let edit = self.text_edit.entry(key.to_string()).or_default();
+        let cursor = edit.cursor.min(length);
+        let current_index = lines
+            .iter()
+            .enumerate()
+            .position(|(index, (start, end))| {
+                cursor >= *start
+                    && (cursor < *end
+                        || cursor == *end
+                            && lines
+                                .get(index + 1)
+                                .is_none_or(|(next_start, _)| *next_start != cursor))
+            })
+            .unwrap_or_else(|| lines.len().saturating_sub(1));
+        let target_index = if direction < 0 {
+            current_index.checked_sub(1)
+        } else {
+            (current_index + 1 < lines.len()).then_some(current_index + 1)
+        };
+        let Some(target_index) = target_index else {
+            return;
+        };
+        let (current_start, current_end) = lines[current_index];
+        let column = edit
+            .preferred_column
+            .unwrap_or_else(|| cursor.saturating_sub(current_start.min(current_end)));
+        let (target_start, target_end) = lines[target_index];
+        let target = (target_start + column).min(target_end);
+        edit.cursor = target.min(length);
+        edit.preferred_column = Some(column);
+        if !extend {
+            edit.anchor = edit.cursor;
         }
     }
 
@@ -278,6 +500,7 @@ impl UiControlState {
             .unwrap_or(0);
         let edit = self.text_edit.entry(key.to_string()).or_default();
         edit.cursor = cursor.min(length);
+        edit.preferred_column = None;
         if !extend {
             edit.anchor = edit.cursor;
         }
@@ -295,6 +518,92 @@ impl UiControlState {
         let edit = self.text_edit.entry(key.to_string()).or_default();
         edit.anchor = anchor.min(length);
         edit.cursor = cursor.min(length);
+        edit.preferred_column = None;
+    }
+
+    /// Returns the selection state for a read-only selectable text node. The
+    /// text itself stays in the retained node; only the transient character
+    /// boundaries live in this per-surface state.
+    pub fn selectable_text_edit(&self, key: &str, text: &str) -> UiTextEditState {
+        let length = text.chars().count();
+        self.text_selection
+            .get(key)
+            .copied()
+            .map(|mut edit| {
+                edit.cursor = edit.cursor.min(length);
+                edit.anchor = edit.anchor.min(length);
+                edit
+            })
+            .unwrap_or(UiTextEditState {
+                cursor: length,
+                anchor: length,
+                preferred_column: None,
+            })
+    }
+
+    pub fn set_selectable_cursor(&mut self, key: &str, text: &str, cursor: usize, extend: bool) {
+        let length = text.chars().count();
+        let edit = self
+            .text_selection
+            .entry(key.to_string())
+            .or_insert(UiTextEditState {
+                cursor: length,
+                anchor: length,
+                preferred_column: None,
+            });
+        edit.cursor = cursor.min(length);
+        edit.preferred_column = None;
+        if !extend {
+            edit.anchor = edit.cursor;
+        }
+    }
+
+    pub fn move_selectable_cursor(&mut self, key: &str, text: &str, direction: i32, extend: bool) {
+        let edit = self.selectable_text_edit(key, text);
+        let next = if direction < 0 {
+            edit.cursor.saturating_sub(1)
+        } else {
+            (edit.cursor + 1).min(text.chars().count())
+        };
+        self.set_selectable_cursor(key, text, next, extend);
+    }
+
+    pub fn move_selectable_cursor_to_edge(
+        &mut self,
+        key: &str,
+        text: &str,
+        end: bool,
+        extend: bool,
+    ) {
+        self.set_selectable_cursor(
+            key,
+            text,
+            if end { text.chars().count() } else { 0 },
+            extend,
+        );
+    }
+
+    pub fn select_all_selectable(&mut self, key: &str, text: &str) {
+        let length = text.chars().count();
+        self.text_selection.insert(
+            key.to_string(),
+            UiTextEditState {
+                cursor: length,
+                anchor: 0,
+                preferred_column: None,
+            },
+        );
+    }
+
+    pub fn selected_selectable_text(&self, key: &str, text: &str) -> String {
+        let edit = self.selectable_text_edit(key, text);
+        if !edit.has_selection() {
+            return String::new();
+        }
+        text.chars()
+            .skip(edit.selection().start)
+            .take(edit.selection().len())
+            .collect()
     }
 
     pub fn move_cursor_to_edge(&mut self, key: &str, end: bool, extend: bool) {
@@ -305,6 +614,7 @@ impl UiControlState {
             .unwrap_or(0);
         let edit = self.text_edit.entry(key.to_string()).or_default();
         edit.cursor = if end { length } else { 0 };
+        edit.preferred_column = None;
         if !extend {
             edit.anchor = edit.cursor;
         }
@@ -319,6 +629,7 @@ impl UiControlState {
         let edit = self.text_edit.entry(key.to_string()).or_default();
         edit.anchor = 0;
         edit.cursor = length;
+        edit.preferred_column = None;
     }
 
     pub fn text_edit(&self, key: &str) -> UiTextEditState {
@@ -327,6 +638,7 @@ impl UiControlState {
             UiTextEditState {
                 cursor: end,
                 anchor: end,
+                preferred_column: None,
             }
         })
     }
@@ -542,6 +854,51 @@ mod tests {
         state.set_cursor("query", 0, false);
         assert!(state.delete_forward_word("query"));
         assert_eq!(state.text("query"), " ");
+    }
+
+    #[test]
+    fn text_edit_preserves_spaces_at_the_caret() {
+        let mut state = UiControlState::default();
+        state.set_text("query", "dsad1adssd", 32);
+        state.set_cursor("query", 4, false);
+        assert!(state.append_text("query", " ", 32));
+
+        assert_eq!(state.text("query"), "dsad 1adssd");
+        assert_eq!(state.text_edit("query").cursor, 5);
+
+        assert!(state.append_text("query", "  ", 32));
+        assert_eq!(state.text("query"), "dsad   1adssd");
+    }
+
+    #[test]
+    fn vertical_navigation_keeps_the_preferred_visual_column() {
+        let mut state = UiControlState::default();
+        state.set_text("query", "abcd1234", 32);
+        state.set_cursor("query", 3, false);
+        state.move_cursor_vertical_with_lines("query", 1, false, &[(0, 4), (4, 8)]);
+
+        assert_eq!(state.text_edit("query").cursor, 7);
+        assert_eq!(state.text_edit("query").preferred_column, Some(3));
+    }
+
+    #[test]
+    fn selectable_text_keeps_read_only_selection_and_returns_selected_content() {
+        let mut state = UiControlState::default();
+        let text = "hello agent";
+        state.set_selectable_cursor("message", text, 0, false);
+        state.set_selectable_cursor("message", text, 5, true);
+
+        assert_eq!(state.selected_selectable_text("message", text), "hello");
+        assert_eq!(
+            state.selectable_text_edit("message", text).selection(),
+            0..5
+        );
+
+        state.select_all_selectable("message", text);
+        assert_eq!(
+            state.selected_selectable_text("message", text),
+            "hello agent"
+        );
     }
 
     #[test]

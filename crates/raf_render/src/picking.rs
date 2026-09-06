@@ -190,6 +190,10 @@ pub const GIZMO_ARROW_PICK_RADIUS: f32 = 14.0;
 /// Segments used for projected rotation ring hit-testing.
 pub const GIZMO_ROTATION_SEGMENTS: usize = 48;
 
+/// Denser sampling used only when a rotation plane is nearly parallel to the
+/// camera ray and the exact ray/plane parameter cannot be resolved reliably.
+const GIZMO_ROTATION_PARAMETER_SEGMENTS: usize = 192;
+
 /// Arrowhead size (fraction of arrow length).
 pub const GIZMO_HEAD_SIZE: f32 = 0.15;
 
@@ -212,23 +216,86 @@ pub fn project_gizmo_scale_handles(
     vp_w: f32,
     vp_h: f32,
 ) -> Vec<GizmoScaleHandle> {
+    project_gizmo_scale_handles_oriented(
+        entity_pos,
+        entity_scale,
+        [Vec3::X, Vec3::Y, Vec3::Z],
+        view_proj,
+        vp_w,
+        vp_h,
+    )
+}
+
+/// Resolve the world directions and full world-space axis lengths represented
+/// by a model matrix. The normalized columns are the actual transformed local
+/// X/Y/Z axes, including parent transforms and mirrored scales.
+pub fn gizmo_scale_basis(world: Mat4) -> ([Vec3; 3], Vec3) {
+    let columns = [
+        world.x_axis.truncate(),
+        world.y_axis.truncate(),
+        world.z_axis.truncate(),
+    ];
+    let mut axes = [Vec3::X, Vec3::Y, Vec3::Z];
+    let mut scale = Vec3::ZERO;
+    for (index, column) in columns.into_iter().enumerate() {
+        let length = column.length();
+        if length.is_finite() && length > 1e-5 {
+            axes[index] = column / length;
+            scale[index] = length;
+        }
+    }
+    (axes, scale.max(Vec3::splat(0.01)))
+}
+
+/// World position of one scale handle. This is shared by rendering, picking,
+/// and drag math so a rotated face cannot display one handle while interaction
+/// follows a different, world-aligned axis.
+pub fn gizmo_scale_handle_world_position(
+    entity_pos: Vec3,
+    entity_scale: Vec3,
+    entity_axes: [Vec3; 3],
+    axis_index: usize,
+    sign: f32,
+) -> Vec3 {
     let extents = entity_scale.abs().max(Vec3::splat(0.1)) * 0.5;
     let outset = (extents.max_element() * 0.12)
         .max(GIZMO_SCALE_HANDLE_OUTSET)
         .min(0.5);
+    let axis_index = axis_index.min(2);
+    let fallback = [Vec3::X, Vec3::Y, Vec3::Z][axis_index];
+    let axis = normalized_axis_or(entity_axes[axis_index], fallback);
+    entity_pos + axis * (extents[axis_index] + outset) * normalized_sign(sign)
+}
+
+/// Project scale handles along the selected object's transformed local axes.
+pub fn project_gizmo_scale_handles_oriented(
+    entity_pos: Vec3,
+    entity_scale: Vec3,
+    entity_axes: [Vec3; 3],
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Vec<GizmoScaleHandle> {
     let handles = [
-        (Vec3::new(extents.x + outset, 0.0, 0.0), 0usize, 1.0f32),
-        (Vec3::new(-extents.x - outset, 0.0, 0.0), 0usize, -1.0f32),
-        (Vec3::new(0.0, extents.y + outset, 0.0), 1usize, 1.0f32),
-        (Vec3::new(0.0, -extents.y - outset, 0.0), 1usize, -1.0f32),
-        (Vec3::new(0.0, 0.0, extents.z + outset), 2usize, 1.0f32),
-        (Vec3::new(0.0, 0.0, -extents.z - outset), 2usize, -1.0f32),
+        (0usize, 1.0f32),
+        (0usize, -1.0f32),
+        (1usize, 1.0f32),
+        (1usize, -1.0f32),
+        (2usize, 1.0f32),
+        (2usize, -1.0f32),
     ];
 
     handles
         .iter()
-        .filter_map(|(offset, axis_index, sign)| {
-            project_to_screen(entity_pos + *offset, view_proj, vp_w, vp_h).map(|center| {
+        .filter_map(|(axis_index, sign)| {
+            let world_position = gizmo_scale_handle_world_position(
+                entity_pos,
+                entity_scale,
+                entity_axes,
+                *axis_index,
+                *sign,
+            );
+            project_to_screen(world_position, view_proj, vp_w, vp_h).map(|center| {
                 GizmoScaleHandle {
                     center,
                     axis_index: *axis_index,
@@ -383,11 +450,42 @@ pub fn pick_gizmo_scale_handle_scaled(
     vp_w: f32,
     vp_h: f32,
 ) -> Option<(usize, f32, f32)> {
+    pick_gizmo_scale_handle_scaled_oriented(
+        click,
+        entity_pos,
+        entity_scale,
+        [Vec3::X, Vec3::Y, Vec3::Z],
+        presentation_scale,
+        view_proj,
+        vp_w,
+        vp_h,
+    )
+}
+
+/// Hit-test scale handles against the same transformed local axes used by the
+/// renderer.
+pub fn pick_gizmo_scale_handle_scaled_oriented(
+    click: [f32; 2],
+    entity_pos: Vec3,
+    entity_scale: Vec3,
+    entity_axes: [Vec3; 3],
+    presentation_scale: f32,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<(usize, f32, f32)> {
     let pick_radius =
         gizmo_scale_handle_radius(presentation_scale) + GIZMO_SCALE_HANDLE_PICK_PADDING;
     let mut best: Option<(usize, f32, f32)> = None;
 
-    for handle in project_gizmo_scale_handles(entity_pos, entity_scale, view_proj, vp_w, vp_h) {
+    for handle in project_gizmo_scale_handles_oriented(
+        entity_pos,
+        entity_scale,
+        entity_axes,
+        view_proj,
+        vp_w,
+        vp_h,
+    ) {
         let dx = click[0] - handle.center[0];
         let dy = click[1] - handle.center[1];
         let distance = (dx * dx + dy * dy).sqrt();
@@ -469,6 +567,50 @@ pub fn pick_gizmo_rotation_ring_scaled(
     best
 }
 
+/// Resolve the angular parameter of a pointer around one projected rotation
+/// ring. The exact path intersects the pointer ray with the ring plane; a
+/// continuity-aware projected fallback handles nearly edge-on rings.
+pub fn rotation_ring_parameter_scaled(
+    pointer: [f32; 2],
+    entity_pos: Vec3,
+    axis_index: usize,
+    presentation_scale: f32,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+    reference_angle: Option<f32>,
+) -> Option<f32> {
+    let (axis_a, axis_b) = rotation_axis_plane(axis_index)?;
+    let normal = axis_a.cross(axis_b).normalize_or_zero();
+
+    if let Some((ray_origin, ray_dir)) = screen_to_world_ray(pointer, view_proj, vp_w, vp_h) {
+        let denominator = ray_dir.dot(normal);
+        if denominator.abs() > 1e-4 {
+            let distance = (entity_pos - ray_origin).dot(normal) / denominator;
+            if distance.is_finite() && distance >= 0.0 {
+                let relative = ray_origin + ray_dir * distance - entity_pos;
+                let x = relative.dot(axis_a);
+                let y = relative.dot(axis_b);
+                if x.is_finite() && y.is_finite() && x * x + y * y > 1e-8 {
+                    return Some(y.atan2(x));
+                }
+            }
+        }
+    }
+
+    projected_rotation_ring_parameter(
+        pointer,
+        entity_pos,
+        axis_a,
+        axis_b,
+        presentation_scale,
+        view_proj,
+        vp_w,
+        vp_h,
+        reference_angle,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -481,6 +623,90 @@ fn project_to_screen(point: Vec3, view_proj: &Mat4, vp_w: f32, vp_h: f32) -> Opt
     let ndc_x = clip.x / clip.w;
     let ndc_y = clip.y / clip.w;
     Some([(ndc_x + 1.0) * 0.5 * vp_w, (1.0 - ndc_y) * 0.5 * vp_h])
+}
+
+fn rotation_axis_plane(axis_index: usize) -> Option<(Vec3, Vec3)> {
+    match axis_index {
+        0 => Some((Vec3::Y, Vec3::Z)),
+        // Positive Y rotation maps +X toward -Z in the engine's right-handed
+        // transform convention, so the parameter basis mirrors Z here.
+        1 => Some((Vec3::X, -Vec3::Z)),
+        2 => Some((Vec3::X, Vec3::Y)),
+        _ => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn projected_rotation_ring_parameter(
+    pointer: [f32; 2],
+    entity_pos: Vec3,
+    axis_a: Vec3,
+    axis_b: Vec3,
+    presentation_scale: f32,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+    reference_angle: Option<f32>,
+) -> Option<f32> {
+    let radius = GIZMO_ROTATION_RADIUS * presentation_scale.max(0.1);
+    let mut samples = Vec::with_capacity(GIZMO_ROTATION_PARAMETER_SEGMENTS);
+    let mut best_distance_sq = f32::INFINITY;
+    for step in 0..GIZMO_ROTATION_PARAMETER_SEGMENTS {
+        let angle =
+            (step as f32 / GIZMO_ROTATION_PARAMETER_SEGMENTS as f32) * std::f32::consts::TAU;
+        let world_point =
+            entity_pos + axis_a * (angle.cos() * radius) + axis_b * (angle.sin() * radius);
+        let Some(screen) = project_to_screen(world_point, view_proj, vp_w, vp_h) else {
+            continue;
+        };
+        let dx = pointer[0] - screen[0];
+        let dy = pointer[1] - screen[1];
+        let distance_sq = dx * dx + dy * dy;
+        best_distance_sq = best_distance_sq.min(distance_sq);
+        samples.push((angle, distance_sq));
+    }
+    if samples.is_empty() || !best_distance_sq.is_finite() {
+        return None;
+    }
+
+    // Opposite ring points can project to the same pixel when the plane is
+    // edge-on. Keep candidates inside a two-pixel band and choose the one
+    // nearest the previous angular parameter to prevent branch flipping.
+    let distance_band = best_distance_sq + 4.0;
+    samples
+        .into_iter()
+        .filter(|(_, distance_sq)| *distance_sq <= distance_band)
+        .min_by(|(angle_a, distance_a), (angle_b, distance_b)| {
+            let score_a = reference_angle
+                .map(|reference| wrapped_angle_delta(reference, *angle_a).abs())
+                .unwrap_or(*distance_a);
+            let score_b = reference_angle
+                .map(|reference| wrapped_angle_delta(reference, *angle_b).abs())
+                .unwrap_or(*distance_b);
+            score_a.total_cmp(&score_b)
+        })
+        .map(|(angle, _)| angle)
+}
+
+fn wrapped_angle_delta(from: f32, to: f32) -> f32 {
+    (to - from + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
+
+fn normalized_axis_or(axis: Vec3, fallback: Vec3) -> Vec3 {
+    let length = axis.length();
+    if length.is_finite() && length > 1e-5 {
+        axis / length
+    } else {
+        fallback
+    }
+}
+
+fn normalized_sign(sign: f32) -> f32 {
+    if sign < 0.0 {
+        -1.0
+    } else {
+        1.0
+    }
 }
 
 fn screen_to_world_ray(
@@ -558,6 +784,7 @@ fn intersect_ray_sphere(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use glam::Quat;
 
     #[test]
     fn pick_no_entities() {
@@ -618,5 +845,77 @@ mod tests {
         assert!(handles[1].center[0] < 300.0);
         assert!(handles[2].center[1] < 225.0);
         assert!(handles[3].center[1] > 375.0);
+    }
+
+    #[test]
+    fn scale_basis_tracks_rotated_world_axes_and_lengths() {
+        let world = Mat4::from_scale_rotation_translation(
+            Vec3::new(2.0, 3.0, 4.0),
+            Quat::from_rotation_z(std::f32::consts::FRAC_PI_2),
+            Vec3::ZERO,
+        );
+        let (axes, scale) = gizmo_scale_basis(world);
+
+        assert!((axes[0] - Vec3::Y).length() < 1e-5);
+        assert!((axes[1] + Vec3::X).length() < 1e-5);
+        assert!((axes[2] - Vec3::Z).length() < 1e-5);
+        assert!((scale - Vec3::new(2.0, 3.0, 4.0)).length() < 1e-5);
+    }
+
+    #[test]
+    fn scale_handles_follow_rotated_local_faces() {
+        let handles = project_gizmo_scale_handles_oriented(
+            Vec3::ZERO,
+            Vec3::splat(0.5),
+            [Vec3::Y, -Vec3::X, Vec3::Z],
+            &Mat4::IDENTITY,
+            800.0,
+            600.0,
+        );
+
+        assert_eq!(handles.len(), 6);
+        assert!(handles[0].center[1] < 225.0);
+        assert!(handles[1].center[1] > 375.0);
+        assert!(handles[2].center[0] < 300.0);
+        assert!(handles[3].center[0] > 500.0);
+    }
+
+    #[test]
+    fn rotation_parameter_crosses_pi_without_reversing_direction() {
+        let first_expected = 179.0f32.to_radians();
+        let second_expected = -179.0f32.to_radians();
+        let screen_point = |angle: f32| {
+            let world = Vec3::new(
+                angle.cos() * GIZMO_ROTATION_RADIUS,
+                angle.sin() * GIZMO_ROTATION_RADIUS,
+                0.0,
+            );
+            project_to_screen(world, &Mat4::IDENTITY, 800.0, 600.0).unwrap()
+        };
+        let first = rotation_ring_parameter_scaled(
+            screen_point(first_expected),
+            Vec3::ZERO,
+            2,
+            1.0,
+            &Mat4::IDENTITY,
+            800.0,
+            600.0,
+            None,
+        )
+        .unwrap();
+        let second = rotation_ring_parameter_scaled(
+            screen_point(second_expected),
+            Vec3::ZERO,
+            2,
+            1.0,
+            &Mat4::IDENTITY,
+            800.0,
+            600.0,
+            Some(first),
+        )
+        .unwrap();
+
+        let delta = wrapped_angle_delta(first, second);
+        assert!((delta - 2.0f32.to_radians()).abs() < 1e-4);
     }
 }

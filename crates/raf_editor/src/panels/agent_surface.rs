@@ -1,2154 +1,2575 @@
-//! Native RafUI Agent workbench.
+//! Retained RafUI surface for the native Agent dock.
 //!
-//! The Agent controller lives in `ai_chat.rs`; this module owns only the
-//! retained document, transient menu state and native AGB presentation.
+//! This module is deliberately a projection only. Runtime polling, history
+//! persistence, provider configuration and tool execution stay in
+//! `ai_chat.rs` and the native workbench. The surface keeps a bounded visible
+//! message window so long conversations do not turn into a per-frame layout
+//! workload.
 
-use raf_ai::agent_runtime::AgentStatus;
+use raf_ai::agent_model_registry::AgentModelRegistry;
+use raf_ai::agent_runtime::{AgentStatus, AgentToolResult};
 use raf_ai::chat::{ChatMessage, MessageRole};
-use raf_ai::provider::AgentMode;
+use raf_core::ai::AgentMode;
 use raf_core::config::{EngineSettings, Language};
-use raf_core::project::Project;
-use raf_core::{InputOwner, InputRegionId, InputRouter};
+use raf_core::i18n::t;
+use raf_core::project::ProjectType;
 use raf_render::api_graphic_basic::ui_surface::{
-    DirectUiSurfaceHost, NativeGraphicsContext, NativeUiInputBridge, StudioUiPalette, UiAction,
-    UiIcon, UiIconId, UiIconSize, UiSurface,
-};
-use raf_render::api_graphic_basic::EditorUiLayer;
-use raf_ui::{
-    UiAlign, UiDispatchedAction, UiEventBinding, UiEventKind, UiFlow, UiJustify, UiLayout,
-    UiMotionSpec, UiNode, UiNodeKind, UiOverflow, UiRect, UiScrollAxis, UiSizeMode, UiSpacing,
-    UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet,
-    UiTextInput, UiTextStyle, UiTween,
+    StudioUiPalette, UiAccessibilityRole, UiAction, UiAlign, UiEventBinding, UiEventKind, UiFlow,
+    UiIcon, UiIconId, UiIconSize, UiJustify, UiLayout, UiNode, UiNodeKind, UiOverflow, UiRect,
+    UiScrollAxis, UiSelect, UiSelectOption, UiSizeMode, UiSpacing, UiStyle, UiStylePatch,
+    UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurface, UiSurfaceMaterial,
+    UiTextOverflow, UiTextStyle, UiVirtualRange,
 };
 
-use super::ai_chat::{AgentAction, AgentPanel, AgentReadiness};
-use crate::editor_layout::EditorRect;
+use super::ai_chat::{AgentPanel, AgentReadiness};
 
-const MAX_INPUT_LENGTH: usize = 4_096;
-const MAX_MESSAGE_DISPLAY_CHARS: usize = 16_384;
-const APPROX_CHARS_PER_TOKEN: usize = 4;
-const MODE_MENU_WIDTH: f32 = 156.0;
-const MODE_MENU_HEIGHT: f32 = 42.0;
-const AGENT_CLEAR: [u8; 4] = [14, 16, 22, 255];
+const MAX_VISIBLE_MESSAGE_CHARS: usize = 16_384;
+const MESSAGE_TEXT_CHUNK_CHARS: usize = 768;
+const MESSAGE_TEXT_CHUNK_LINES: usize = 32;
+const MESSAGE_TEXT_TILE_GAP: f32 = 2.0;
+const MESSAGE_TEXT_TILE_OVERSCAN: f32 = 180.0;
+const MESSAGE_CARD_CHROME_HEIGHT: f32 = 76.0;
+const HISTORY_OVERSCAN: usize = 3;
+const HISTORY_VIEWPORT_ESTIMATE: f32 = 460.0;
+const MESSAGE_WIDTH_RATIO: f32 = 0.78;
 
-pub(crate) struct AgentSurfaceHost {
-    region: InputRegionId,
-    rect: EditorRect,
-    host: DirectUiSurfaceHost,
-    surface_key: Option<AgentSurfaceKey>,
-    model_menu_open: bool,
-    mode_menu_open: bool,
-    add_model_open: bool,
-    sidebar_motion: UiTween,
-    last_sync_time_seconds: f64,
-    last_message_context: Option<(Option<usize>, usize)>,
+#[derive(Debug, Clone, Copy)]
+struct MessageViewport {
+    top: f32,
+    bottom: f32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct AgentSurfaceKey {
-    language: Language,
-    agent_mode: AgentMode,
-    readiness: AgentReadiness,
-    status: AgentStatus,
-    sidebar_open: bool,
-    model_menu_open: bool,
-    mode_menu_open: bool,
-    add_model_open: bool,
-    sidebar_progress_bits: u32,
-    selected_model: String,
-    active_provider: String,
-    effective_model_id: String,
-    runtime_visual_revision: u64,
-    streaming_enabled: bool,
-    surface_width_bits: u32,
-    surface_height_bits: u32,
-    session_count: usize,
-    active_session: Option<usize>,
-    message_count: usize,
-    last_message_id: Option<String>,
-    new_model_label: String,
-    new_model_id: String,
-    new_model_error: Option<String>,
-}
-
-impl AgentSurfaceHost {
-    pub(crate) fn new(
-        graphics: &NativeGraphicsContext<'_>,
-        region: InputRegionId,
-        rect: EditorRect,
-        palette: StudioUiPalette,
-    ) -> Self {
-        let surface = build_agent_surface(
-            palette,
-            &AgentPanel::default(),
-            &EngineSettings::default(),
-            None,
-            AgentReadiness::ProviderDisabled,
-            false,
-            false,
-            false,
-            1.0,
-            rect.width.max(1.0),
-            rect.height.max(1.0),
-        );
+impl MessageViewport {
+    fn for_message(scroll_offset: f32, viewport_height: f32, message_top: f32) -> Self {
         Self {
-            region,
-            rect,
-            host: graphics.create_ui_host(surface, AGENT_CLEAR),
-            surface_key: None,
-            model_menu_open: false,
-            mode_menu_open: false,
-            add_model_open: false,
-            sidebar_motion: UiTween::new(1.0, UiMotionSpec::dock()),
-            last_sync_time_seconds: 0.0,
-            last_message_context: None,
-        }
-    }
-
-    pub(crate) fn owner(&self) -> InputOwner {
-        InputOwner::RetainedUi(self.region)
-    }
-
-    pub(crate) fn rect(&self) -> EditorRect {
-        self.rect
-    }
-
-    pub(crate) fn needs_surface_sync(&self) -> bool {
-        self.surface_key.is_none()
-    }
-
-    pub(crate) fn has_active_motion(&self, agent: &AgentPanel) -> bool {
-        !self.sidebar_motion.is_settled()
-            || self.host.has_active_motion()
-            || agent.has_live_output()
-    }
-
-    pub(crate) fn sync(
-        &mut self,
-        rect: EditorRect,
-        palette: StudioUiPalette,
-        agent: &AgentPanel,
-        settings: &EngineSettings,
-        project: Option<&Project>,
-        readiness: AgentReadiness,
-        now_seconds: f64,
-    ) {
-        self.rect = rect;
-        self.sidebar_motion
-            .set_target(if agent.sidebar_open { 1.0 } else { 0.0 });
-        let delta = (now_seconds - self.last_sync_time_seconds).clamp(0.0, 0.25) as f32;
-        self.last_sync_time_seconds = now_seconds;
-        let sidebar_progress = self.sidebar_motion.advance(delta, false);
-        let key = AgentSurfaceKey::new(
-            agent,
-            settings,
-            readiness,
-            self.model_menu_open,
-            self.mode_menu_open,
-            self.add_model_open,
-            sidebar_progress,
-            rect.width,
-            rect.height,
-        );
-        let message_context = (key.active_session, key.message_count);
-        if self
-            .last_message_context
-            .is_some_and(|previous| previous != message_context)
-        {
-            self.host
-                .session_mut()
-                .reset_interaction_for_surface_change(Some("agent.messages"));
-        }
-        self.last_message_context = Some(message_context);
-        if self.surface_key.as_ref() == Some(&key) {
-            return;
-        }
-        let was_add_model_open = self
-            .surface_key
-            .as_ref()
-            .is_some_and(|previous| previous.add_model_open);
-        self.host.set_surface(build_agent_surface(
-            palette,
-            agent,
-            settings,
-            project,
-            readiness,
-            self.model_menu_open,
-            self.mode_menu_open,
-            self.add_model_open,
-            sidebar_progress,
-            rect.width.max(1.0),
-            rect.height.max(1.0),
-        ));
-        self.host.session_mut().interaction.controls.set_text(
-            "agent.input",
-            &agent.input_text,
-            MAX_INPUT_LENGTH,
-        );
-        self.host.session_mut().interaction.controls.set_text(
-            "agent.model-label",
-            &agent.new_model_label,
-            120,
-        );
-        self.host.session_mut().interaction.controls.set_text(
-            "agent.model-id",
-            &agent.new_model_id,
-            160,
-        );
-        if self.add_model_open && !was_add_model_open {
-            self.host
-                .session_mut()
-                .interaction
-                .focus
-                .request_focus("agent.model-label");
-        }
-        self.surface_key = Some(key);
-    }
-
-    pub(crate) fn process_input(
-        &mut self,
-        input: &NativeUiInputBridge,
-        router: &mut InputRouter,
-        agent: &AgentPanel,
-        settings: &EngineSettings,
-        project: Option<&Project>,
-    ) -> Vec<AgentAction> {
-        let actions = self.host.process_routed_input(
-            self.rect.logical_size(),
-            input.scale_factor() as f32,
-            |key| raf_core::i18n::t(key, settings.language),
-            input,
-            router,
-            self.owner(),
-            raf_ui::UiRect::new(self.rect.x, self.rect.y, self.rect.width, self.rect.height),
-        );
-        if !actions.is_empty() {
-            // Commands such as opening a model menu intentionally do not
-            // become AgentAction values. Mark the retained document dirty so
-            // the next frame still presents their state change.
-            self.surface_key = None;
-        }
-        // RafUI emits Click on pointer release. Closing a popup on press
-        // destroys the retained surface before that release arrives, so the
-        // active button can never dispatch `Active` or `+ Add model`. Only
-        // close on release when the click did not belong to the popup's own
-        // command family.
-        if input
-            .snapshot()
-            .button_released(raf_core::PointerButton::Primary)
-            && (self.model_menu_open || self.mode_menu_open || self.add_model_open)
-            && !has_agent_popup_command(&actions)
-        {
-            self.model_menu_open = false;
-            self.mode_menu_open = false;
-            self.add_model_open = false;
-            self.surface_key = None;
-        }
-        let mut translated = Vec::new();
-        for dispatched in actions {
-            match dispatched.action {
-                UiAction::SetText { key, value } => match key.as_str() {
-                    "agent.input" => translated.push(AgentAction::SetInput(value)),
-                    "agent.model-label" => translated.push(AgentAction::SetNewModelLabel(value)),
-                    "agent.model-id" => translated.push(AgentAction::SetNewModelId(value)),
-                    _ => {}
-                },
-                UiAction::Command { name } => {
-                    if let Some(action) =
-                        self.parse_command(&name, project, settings.language, agent)
-                    {
-                        translated.push(action);
-                    }
-                }
-                _ => {}
-            }
-        }
-        translated
-    }
-
-    pub(crate) fn compositor_layer(
-        &mut self,
-        scale_factor: f32,
-        target_size: [u32; 2],
-    ) -> EditorUiLayer<'_> {
-        EditorUiLayer {
-            host: &mut self.host,
-            target_rect: self.rect.to_physical(scale_factor, target_size),
-            logical_size: self.rect.logical_size(),
-            raster_scale: scale_factor.max(1.0),
-        }
-    }
-
-    pub(crate) fn host(&self) -> &DirectUiSurfaceHost {
-        &self.host
-    }
-
-    fn parse_command(
-        &mut self,
-        name: &str,
-        project: Option<&Project>,
-        language: Language,
-        agent: &AgentPanel,
-    ) -> Option<AgentAction> {
-        match name {
-            "agent.sidebar.toggle" => Some(AgentAction::ToggleSidebar),
-            "agent.sidebar.close" => Some(AgentAction::CloseSidebar),
-            "agent.new-chat" => Some(AgentAction::NewChat),
-            "agent.model.menu" => {
-                self.model_menu_open = !self.model_menu_open;
-                self.mode_menu_open = false;
-                self.add_model_open = false;
-                None
-            }
-            "agent.mode.menu" => {
-                self.mode_menu_open = !self.mode_menu_open;
-                self.model_menu_open = false;
-                self.add_model_open = false;
-                None
-            }
-            "agent.add-model.toggle" => {
-                self.add_model_open = !self.add_model_open;
-                self.model_menu_open = false;
-                self.mode_menu_open = false;
-                None
-            }
-            "agent.add-model.cancel" => {
-                self.add_model_open = false;
-                None
-            }
-            "agent.add-model.confirm" => {
-                let valid = !agent.new_model_label.trim().is_empty()
-                    && !agent.new_model_id.trim().is_empty()
-                    && agent
-                        .model_registry
-                        .get(agent.new_model_label.trim())
-                        .is_none();
-                self.add_model_open = !valid;
-                Some(AgentAction::AddModel)
-            }
-            "agent.add-model.settings" => {
-                self.add_model_open = false;
-                Some(AgentAction::OpenSettings)
-            }
-            "agent.settings" => Some(AgentAction::OpenSettings),
-            "agent.submit" => Some(AgentAction::Submit),
-            "agent.stop" => Some(AgentAction::Stop),
-            "agent.approve" => Some(AgentAction::Approve),
-            "agent.deny" => Some(AgentAction::Deny),
-            _ => {
-                if let Some(index) = name
-                    .strip_prefix("agent.session:")
-                    .and_then(|value| value.parse().ok())
-                {
-                    return Some(AgentAction::SelectSession(index));
-                }
-                if let Some(index) = name
-                    .strip_prefix("agent.session.delete:")
-                    .and_then(|value| value.parse().ok())
-                {
-                    return Some(AgentAction::DeleteSession(index));
-                }
-                if let Some(label) = name.strip_prefix("agent.model.select:") {
-                    self.model_menu_open = false;
-                    return Some(AgentAction::SelectModel(label.to_string()));
-                }
-                if let Some(mode) = name.strip_prefix("agent.mode.select:") {
-                    self.mode_menu_open = false;
-                    return match mode {
-                        "passive" => Some(AgentAction::SetMode(AgentMode::Passive)),
-                        "active" => Some(AgentAction::SetMode(AgentMode::Active)),
-                        _ => None,
-                    };
-                }
-                if let Some(index) = name
-                    .strip_prefix("agent.suggestion:")
-                    .and_then(|value| value.parse().ok())
-                {
-                    return suggestion(project, language, index).map(AgentAction::UseSuggestion);
-                }
-                None
-            }
+            top: scroll_offset - message_top,
+            bottom: scroll_offset + viewport_height - message_top,
         }
     }
 }
 
-fn has_agent_popup_command(actions: &[UiDispatchedAction]) -> bool {
-    actions.iter().any(|action| {
-        matches!(
-            &action.action,
-            UiAction::Command { name }
-                if name.starts_with("agent.model.")
-                    || name.starts_with("agent.mode.")
-                    || name.starts_with("agent.add-model.")
-        )
-    })
-}
-
-impl AgentSurfaceKey {
-    fn new(
-        agent: &AgentPanel,
-        settings: &EngineSettings,
-        readiness: AgentReadiness,
-        model_menu_open: bool,
-        mode_menu_open: bool,
-        add_model_open: bool,
-        sidebar_progress: f32,
-        surface_width: f32,
-        surface_height: f32,
-    ) -> Self {
-        Self {
-            language: settings.language,
-            agent_mode: settings.agent_mode,
-            readiness,
-            status: agent.runtime.status.clone(),
-            sidebar_open: agent.sidebar_open,
-            model_menu_open,
-            mode_menu_open,
-            add_model_open,
-            sidebar_progress_bits: sidebar_progress.to_bits(),
-            selected_model: agent.selected_model.clone(),
-            active_provider: agent
-                .effective_provider(settings)
-                .map(|provider| provider.provider.display_name().to_string())
-                .unwrap_or_default(),
-            effective_model_id: agent
-                .effective_provider(settings)
-                .map(|provider| agent.effective_model(provider))
-                .unwrap_or_default(),
-            runtime_visual_revision: agent.visual_revision(),
-            streaming_enabled: settings.agent_streaming_enabled,
-            surface_width_bits: surface_width.to_bits(),
-            surface_height_bits: surface_height.to_bits(),
-            session_count: agent.history.sessions.len(),
-            active_session: agent.history.active_index,
-            message_count: agent.runtime.messages.len(),
-            last_message_id: agent
-                .runtime
-                .messages
-                .last()
-                .map(|message| message.id.to_string()),
-            new_model_label: agent.new_model_label.clone(),
-            new_model_id: agent.new_model_id.clone(),
-            new_model_error: agent.new_model_error.clone(),
-        }
-    }
-}
-
-fn localized(language: Language, english: &str, spanish: &str) -> String {
-    match language {
-        Language::Spanish => spanish.to_string(),
-        Language::English => english.to_string(),
-    }
-}
-
-fn popup_rect(
-    anchor_x: f32,
-    anchor_y: f32,
-    width: f32,
-    height: f32,
-    surface_width: f32,
-    surface_height: f32,
-) -> UiRect {
-    let horizontal_margin = 8.0;
-    let available_width = (surface_width - horizontal_margin * 2.0).max(1.0);
-    let width = width.min(available_width).max(1.0);
-    let height = height.min((surface_height - horizontal_margin * 2.0).max(1.0));
-    let max_x = (surface_width - width - horizontal_margin).max(horizontal_margin);
-    let x = anchor_x.clamp(horizontal_margin, max_x);
-    let below = anchor_y + height <= surface_height - horizontal_margin;
-    let y = if below {
-        anchor_y
-    } else {
-        (anchor_y - height - 8.0).max(horizontal_margin)
-    };
-    UiRect::new(x, y, width, height)
-}
-
-fn active_provider_model(agent: &AgentPanel, settings: &EngineSettings) -> (String, String) {
-    let provider = settings.default_ai_provider.display_name().to_string();
-    let model = agent
-        .effective_provider(settings)
-        .map(|config| config.model.clone())
-        .unwrap_or_default();
-    (provider, model)
-}
-
-fn model_option_details(
-    label: &str,
-    agent: &AgentPanel,
-    settings: &EngineSettings,
-) -> (String, String, bool) {
-    if label == raf_ai::agent_model_registry::AgentModelRegistry::PROVIDER_DEFAULT {
-        let (provider, model) = active_provider_model(agent, settings);
-        return (provider, model, true);
-    }
-    let Some(shortcut) = agent.model_registry.get(label) else {
-        let (provider, _) = active_provider_model(agent, settings);
-        return (provider, String::new(), false);
-    };
-    (
-        shortcut.provider.display_name().to_string(),
-        shortcut.model_id.clone(),
-        shortcut.provider == settings.default_ai_provider,
-    )
-}
-
-fn effective_selection_label(agent: &AgentPanel, settings: &EngineSettings) -> String {
-    if agent.selected_model != raf_ai::agent_model_registry::AgentModelRegistry::PROVIDER_DEFAULT
-        && agent
-            .model_registry
-            .resolve_model_id(&agent.selected_model, settings.default_ai_provider)
-            .is_some()
-    {
-        agent.selected_model.clone()
-    } else {
-        raf_ai::agent_model_registry::AgentModelRegistry::PROVIDER_DEFAULT.to_string()
-    }
-}
-
-fn selected_model_label(agent: &AgentPanel, settings: &EngineSettings) -> String {
-    let selected = effective_selection_label(agent, settings);
-    if selected == raf_ai::agent_model_registry::AgentModelRegistry::PROVIDER_DEFAULT {
-        localized(
-            settings.language,
-            "Provider default",
-            "Predeterminado del proveedor",
-        )
-    } else {
-        selected
-    }
-}
-
-fn selected_model_details(agent: &AgentPanel, settings: &EngineSettings) -> String {
-    let selected = effective_selection_label(agent, settings);
-    let (provider, model_id, _) = model_option_details(&selected, agent, settings);
-    if model_id.trim().is_empty() {
-        format!(
-            "{}  |  {}",
-            provider,
-            localized(
-                settings.language,
-                "Model not configured",
-                "Modelo no configurado"
-            )
-        )
-    } else {
-        format!("{}  |  {}", provider, model_id)
-    }
-}
-
-fn build_agent_surface(
+pub(crate) fn build_agent_surface(
     palette: StudioUiPalette,
-    agent: &AgentPanel,
+    panel: &AgentPanel,
     settings: &EngineSettings,
-    project: Option<&Project>,
     readiness: AgentReadiness,
-    model_menu_open: bool,
-    mode_menu_open: bool,
-    add_model_open: bool,
+    project_type: ProjectType,
+    size: [f32; 2],
+    scroll_offset: f32,
     sidebar_progress: f32,
-    surface_width: f32,
-    surface_height: f32,
 ) -> UiSurface {
-    let menu_width = (surface_width - 16.0).min(360.0).max(220.0);
-    let model_height = (74.0 + agent.model_registry.selector_labels().len() as f32 * 44.0)
-        .min((surface_height - 16.0).max(132.0));
-    let mut main = UiNode::new("agent.main", UiNodeKind::Panel)
-        .with_class("agent-main")
-        .with_layout(UiLayout {
-            flow: UiFlow::Column,
-            grow: 1.0,
-            gap: 8.0,
-            padding: UiSpacing::xy(12.0, 10.0),
-            overflow: UiOverflow::Clip,
-            ..UiLayout::default()
+    let width = size[0].max(1.0);
+    let height = size[1].max(1.0);
+    let requested_sidebar_width = (width * 0.30).clamp(184.0, 236.0).min(width * 0.52);
+    let sidebar_width = requested_sidebar_width * sidebar_progress.clamp(0.0, 1.0);
+    let main_width = (width - sidebar_width).max(1.0);
+    let tokens = palette.tokens();
+
+    let root = UiNode::new("agent.surface.root", UiNodeKind::Root)
+        .with_class("agent-root")
+        .with_layout(UiLayout::fill(UiFlow::None))
+        .with_style(UiStyle {
+            fill: tokens.background,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 0.0,
+            radius: 0.0,
+            opacity: 1.0,
         })
-        .with_style(UiStyle::transparent())
-        .with_child(build_header(
+        .with_child(build_sidebar(palette, panel, sidebar_width, height))
+        .with_child(build_main(
             palette,
-            agent,
+            panel,
             settings,
-            model_menu_open,
-            mode_menu_open,
-        ));
-
-    if readiness != AgentReadiness::Ready {
-        let text = match readiness {
-            AgentReadiness::ProviderDisabled => {
-                raf_core::i18n::t("app.agent_provider_disabled", settings.language)
-            }
-            AgentReadiness::ModelMissing => {
-                raf_core::i18n::t("app.agent_model_missing", settings.language)
-            }
-            AgentReadiness::AdapterRequired => {
-                raf_core::i18n::t("app.agent_provider_adapter_required", settings.language)
-            }
-            AgentReadiness::Ready => String::new(),
-        };
-        main = main.with_child(status_card(palette, &text, true));
-    } else if settings.agent_mode == AgentMode::Active {
-        main = main.with_child(status_card(
-            palette,
-            &raf_core::i18n::t("app.agent_active_mode_warning", settings.language),
-            true,
-        ));
-    }
-    if agent.runtime.status.blocks_input() {
-        main = main.with_child(activity_card(palette, agent, settings.language));
-    }
-    if agent.runtime.status == AgentStatus::AwaitingApproval
-        && !agent.runtime.pending_calls.is_empty()
-    {
-        main = main.with_child(approval_card(palette));
-    }
-    main = main
-        .with_child(build_message_summary(
-            palette,
-            agent,
-            settings.language,
-            settings.agent_max_response_tokens,
-        ))
-        .with_child(build_messages(palette, agent, settings.language))
-        .with_child(build_suggestions(
-            palette,
-            agent,
-            project,
             readiness,
-            settings.language,
+            project_type,
+            main_width,
+            height,
+            sidebar_width,
+            scroll_offset,
         ));
-    main = main.with_child(build_composer(palette, agent, readiness, settings.language));
 
-    let root = UiNode::new("agent.root", UiNodeKind::Root)
-        .with_layout(UiLayout {
-            flow: UiFlow::Row,
-            gap: 1.0,
-            overflow: UiOverflow::Visible,
-            ..UiLayout::fill(UiFlow::Row)
-        })
-        .with_style(palette.root_style())
-        .with_child(build_sidebar(palette, agent, sidebar_progress))
-        .with_child(main);
-    let mut root = root;
-    // Menus are siblings of the workbench content instead of children of the
-    // trigger buttons. This gives them a stable z-order, keeps keyboard focus
-    // inside the popup and prevents the main panel's clipping from swallowing
-    // the form on narrow windows.
-    if add_model_open {
-        root = root.with_child(
-            build_add_model(palette, agent, settings, menu_width).with_layout(
-                UiLayout::absolute(popup_rect(
-                    (surface_width - menu_width) * 0.5,
-                    58.0,
-                    menu_width,
-                    306.0,
-                    surface_width,
-                    surface_height,
-                ))
-                .with_z_index(400),
-            ),
-        );
-    } else if model_menu_open {
-        root = root.with_child(
-            build_model_menu(palette, agent, settings, menu_width, model_height).with_layout(
-                UiLayout::absolute(popup_rect(
-                    (surface_width - menu_width) * 0.5,
-                    58.0,
-                    menu_width,
-                    model_height,
-                    surface_width,
-                    surface_height,
-                ))
-                .with_z_index(390),
-            ),
-        );
-    } else if mode_menu_open {
-        root = root.with_child(
-            build_mode_menu(palette, settings.agent_mode, settings.language).with_layout(
-                UiLayout::absolute(popup_rect(
-                    surface_width - MODE_MENU_WIDTH - 8.0,
-                    58.0,
-                    MODE_MENU_WIDTH,
-                    MODE_MENU_HEIGHT,
-                    surface_width,
-                    surface_height,
-                ))
-                .with_z_index(390),
-            ),
-        );
-    }
-    let mut surface = UiSurface::new("agent.workbench", palette, root);
+    let mut surface = UiSurface::new("editor.bottom.agent", palette, root);
     surface.style_sheet = agent_style_sheet(palette);
-    surface.with_retained_tooltips(false)
+    surface
 }
 
-fn build_sidebar(palette: StudioUiPalette, agent: &AgentPanel, progress: f32) -> UiNode {
+fn build_sidebar(palette: StudioUiPalette, panel: &AgentPanel, width: f32, height: f32) -> UiNode {
     let tokens = palette.tokens();
-    let mut sessions = UiNode::scroll_view("agent.sessions", UiScrollAxis::Vertical)
-        .with_class("agent-session-list")
+    let active = panel.history.active_index;
+    let mut sessions = UiNode::scroll_view("agent.sessions.scroll", UiScrollAxis::Vertical)
+        .with_class("agent-sessions-scroll")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 3.0,
             grow: 1.0,
+            gap: 3.0,
+            padding: UiSpacing::xy(8.0, 8.0),
             overflow: UiOverflow::ScrollY,
             ..UiLayout::default()
         });
-    for (index, session) in agent.history.sessions.iter().enumerate().rev() {
-        let active = agent.history.active_index == Some(index);
-        let mut row = UiNode::new(format!("agent.session.row.{index}"), UiNodeKind::Panel)
-            .with_class(if active {
-                "agent-session-active"
-            } else {
-                "agent-session"
-            })
-            .with_layout(UiLayout {
-                flow: UiFlow::Row,
-                align_items: UiAlign::Center,
-                gap: 4.0,
-                padding: UiSpacing::xy(4.0, 3.0),
-                ..UiLayout::fixed(0.0, 36.0).with_width_mode(UiSizeMode::Fill)
-            });
-        row = row.with_child(
-            UiNode::new(format!("agent.session.select.{index}"), UiNodeKind::Button)
-                .with_text_value(truncate(&session.title, 36))
+
+    if panel.history.sessions.is_empty() {
+        sessions = sessions.with_child(
+            UiNode::new("agent.sessions.empty", UiNodeKind::Label)
+                .with_text_key("app.agent_no_messages")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        );
+    } else {
+        for (index, session) in panel.history.sessions.iter().enumerate() {
+            let is_active = active == Some(index);
+            let select = UiNode::new(format!("agent.session.{index}"), UiNodeKind::Button)
+                .with_class(if is_active {
+                    "agent-session-active"
+                } else {
+                    "agent-session"
+                })
                 .with_layout(UiLayout {
                     grow: 1.0,
-                    padding: UiSpacing::xy(4.0, 2.0),
-                    ..UiLayout::fixed(0.0, 28.0)
+                    width_mode: UiSizeMode::Fill,
+                    height_mode: UiSizeMode::Fixed,
+                    basis: [0.0, 40.0],
+                    padding: UiSpacing::xy(10.0, 8.0),
+                    ..UiLayout::default()
                 })
-                .with_text_style(UiTextStyle::body(if active {
-                    tokens.accent_hot
-                } else {
+                .with_text_value(short_text(&session.title, 72))
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_text_style(UiTextStyle::button(if is_active {
                     tokens.text
+                } else {
+                    tokens.text_muted
                 }))
+                .with_accessibility_role(UiAccessibilityRole::Button)
+                .with_accessibility_selected(is_active)
                 .focusable()
                 .with_event(UiEventBinding::command(
                     UiEventKind::Click,
-                    format!("agent.session:{index}"),
-                )),
-        );
-        row = row.with_child(
-            UiNode::new(format!("agent.session.delete.{index}"), UiNodeKind::Button)
+                    format!("agent.session.select:{index}"),
+                ));
+            let delete = UiNode::new(format!("agent.session.delete.{index}"), UiNodeKind::Button)
+                .with_class("agent-icon-button")
+                .with_layout(UiLayout::fixed(30.0, 30.0))
                 .with_icon(UiIcon::new(UiIconId::Close).with_size(UiIconSize::Small))
                 .with_tooltip_key("app.agent_delete")
-                .with_layout(UiLayout::fixed(24.0, 24.0))
+                .with_accessibility_label_key("app.agent_delete")
+                .with_accessibility_role(UiAccessibilityRole::Button)
                 .focusable()
                 .with_event(UiEventBinding::command(
                     UiEventKind::Click,
                     format!("agent.session.delete:{index}"),
-                )),
-        );
-        sessions = sessions.with_child(row);
+                ));
+            sessions = sessions.with_child(
+                UiNode::new(format!("agent.session.row.{index}"), UiNodeKind::Toolbar)
+                    .with_class("agent-session-row")
+                    .with_layout({
+                        let mut layout =
+                            UiLayout::fixed(0.0, 40.0).with_width_mode(UiSizeMode::Fill);
+                        layout.flow = UiFlow::Row;
+                        layout.gap = 4.0;
+                        layout.align_items = UiAlign::Center;
+                        layout
+                    })
+                    .with_child(select)
+                    .with_child(delete),
+            );
+        }
     }
-    if agent.history.sessions.is_empty() {
-        sessions = sessions.with_child(
-            UiNode::new("agent.sessions.empty", UiNodeKind::Label)
-                .with_text_value(localized(
-                    agent.language,
-                    "No conversations yet",
-                    "Aun no hay conversaciones",
-                ))
-                .with_layout(UiLayout::fit_content())
-                .with_text_style(UiTextStyle::body(tokens.text_muted)),
-        );
-    }
+
+    let mut sidebar_layout = UiLayout::absolute(UiRect::new(0.0, 0.0, width, height));
+    sidebar_layout.flow = UiFlow::Column;
+    sidebar_layout.overflow = UiOverflow::Clip;
     UiNode::new("agent.sidebar", UiNodeKind::Panel)
         .with_class("agent-sidebar")
-        .with_layout(UiLayout {
-            flow: UiFlow::Column,
-            gap: 8.0,
-            padding: UiSpacing::xy(9.0, 10.0),
-            overflow: UiOverflow::Clip,
-            ..UiLayout::fixed((224.0 * progress).max(1.0), 0.0).with_height_mode(UiSizeMode::Fill)
-        })
-        .with_style(UiStyle {
-            fill: tokens.surface_alt,
-            border: tokens.border,
-            text: tokens.text,
-            border_width: 1.0,
-            radius: 0.0,
-            opacity: 1.0,
-        })
+        .with_layout(sidebar_layout)
         .with_child(
             UiNode::new("agent.sidebar.header", UiNodeKind::Toolbar)
+                .with_class("agent-sidebar-header")
                 .with_layout(UiLayout {
                     flow: UiFlow::Row,
                     align_items: UiAlign::Center,
                     justify_content: UiJustify::SpaceBetween,
-                    ..UiLayout::fixed(0.0, 30.0)
+                    padding: UiSpacing::xy(12.0, 8.0),
+                    ..UiLayout::fixed(0.0, 48.0).with_width_mode(UiSizeMode::Fill)
                 })
                 .with_child(
-                    UiNode::new("agent.sidebar.title", UiNodeKind::Label)
+                    UiNode::new("agent.sessions.title", UiNodeKind::Label)
                         .with_text_key("app.agent_sessions")
-                        .with_layout(UiLayout {
-                            grow: 1.0,
-                            ..UiLayout::fit_content()
-                        })
-                        .with_text_style(UiTextStyle::panel_title(tokens.text)),
+                        .with_text_style(UiTextStyle::panel_title(tokens.text))
+                        .with_layout(UiLayout::fit_content()),
                 )
-                .with_child(
-                    UiNode::new("agent.sidebar.close", UiNodeKind::Button)
-                        .with_icon(UiIcon::new(UiIconId::Close).with_size(UiIconSize::Small))
-                        .with_tooltip_key("app.agent_toggle_sidebar")
-                        .with_layout(UiLayout::fixed(28.0, 28.0))
-                        .focusable()
-                        .with_event(UiEventBinding::command(
-                            UiEventKind::Click,
-                            "agent.sidebar.close",
-                        )),
-                ),
-        )
-        .with_child(
-            UiNode::new("agent.new", UiNodeKind::Button)
-                .with_class("agent-new-chat")
-                .with_text_key("app.agent_new_chat")
-                .with_layout(UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill))
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
+                .with_child(icon_button(
+                    "agent.sidebar.new",
+                    UiIconId::Add,
+                    "app.agent_new_chat",
                     "agent.new-chat",
                 )),
         )
         .with_child(sessions)
 }
 
+fn build_main(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    settings: &EngineSettings,
+    readiness: AgentReadiness,
+    project_type: ProjectType,
+    width: f32,
+    height: f32,
+    x: f32,
+    scroll_offset: f32,
+) -> UiNode {
+    let provider_label = panel
+        .effective_provider(settings)
+        .map(|provider| provider.provider.display_name().to_string())
+        .unwrap_or_else(|| t("app.agent_provider_default", settings.language));
+    let model_label = if panel.selected_model == AgentModelRegistry::PROVIDER_DEFAULT {
+        t("app.agent_provider_default_short", settings.language)
+    } else {
+        short_text(&panel.selected_model, 32)
+    };
+    let mode_key = match settings.agent_mode {
+        AgentMode::Inspect => "app.agent_mode_inspect",
+        AgentMode::Plan => "app.agent_mode_plan",
+        AgentMode::Active => "app.agent_mode_active",
+    };
+
+    let mut main_layout = UiLayout::absolute(UiRect::new(x, 0.0, width, height));
+    main_layout.flow = UiFlow::Column;
+    main_layout.overflow = UiOverflow::Clip;
+    let mut main = UiNode::new("agent.main", UiNodeKind::Panel)
+        .with_class("agent-main")
+        .with_layout(main_layout)
+        .with_child(build_header(
+            palette,
+            panel,
+            settings,
+            provider_label,
+            model_label,
+            mode_key,
+            width,
+        ));
+
+    let mut content_layout = UiLayout::default();
+    content_layout.flow = UiFlow::Column;
+    content_layout.grow = 1.0;
+    content_layout.width_mode = UiSizeMode::Fill;
+    content_layout.height_mode = UiSizeMode::Fill;
+    content_layout.overflow = UiOverflow::Clip;
+    let mut content = UiNode::new("agent.content", UiNodeKind::Panel)
+        .with_class("agent-content")
+        .with_layout(content_layout)
+        .with_child(build_status_strip(palette, panel, settings, readiness));
+
+    let visible_messages = panel
+        .runtime
+        .messages
+        .iter()
+        .filter(|message| {
+            message.role != MessageRole::System
+                && !(message.role == MessageRole::Assistant
+                    && message.content.trim().is_empty()
+                    && message.tool_calls.is_some())
+        })
+        .collect::<Vec<_>>();
+    let history_width = (width - 22.0).max(180.0);
+    content = content.with_child(build_history(
+        palette,
+        panel,
+        project_type,
+        &visible_messages,
+        history_width,
+        scroll_offset,
+    ));
+    if visible_messages.is_empty() && matches!(readiness, AgentReadiness::Ready) {
+        content = content.with_child(build_suggestions(palette, project_type));
+    }
+    content = content.with_child(build_composer(
+        palette,
+        panel,
+        settings,
+        readiness,
+        width,
+        visible_messages.len(),
+    ));
+    main = main.with_child(content);
+
+    if panel.model_menu_open {
+        main = main.with_child(build_model_menu(palette, panel, settings, width));
+    }
+    if panel.mode_menu_open {
+        main = main.with_child(build_mode_menu(palette, settings, width));
+    }
+    if panel.add_model_open {
+        main = main.with_child(build_add_model_menu(
+            palette, panel, settings, width, height,
+        ));
+    }
+    main
+}
+
 fn build_header(
     palette: StudioUiPalette,
-    agent: &AgentPanel,
+    panel: &AgentPanel,
     settings: &EngineSettings,
-    model_menu_open: bool,
-    mode_menu_open: bool,
+    provider_label: String,
+    model_label: String,
+    mode_key: &str,
+    width: f32,
 ) -> UiNode {
     let tokens = palette.tokens();
-    let model_label = truncate(&selected_model_label(agent, settings), 24);
-    let model_details = selected_model_details(agent, settings);
-    let mode_label = if settings.agent_mode == AgentMode::Active {
-        localized(settings.language, "Active", "Activo")
-    } else {
-        localized(settings.language, "Passive", "Pasivo")
-    };
-    let model_button = command_button(
-        "agent.model",
-        &model_label,
-        "agent.model.menu",
-        model_menu_open,
-        tokens,
-    )
-    .with_layout(UiLayout::fixed(148.0, 30.0).with_text_safe_area(true))
-    .with_tooltip_value(model_details.clone());
-
-    let mode_button = command_button(
-        "agent.mode",
-        &mode_label,
-        "agent.mode.menu",
-        mode_menu_open,
-        tokens,
-    )
-    .with_layout(UiLayout::fixed(88.0, 30.0).with_text_safe_area(true));
-
-    UiNode::new("agent.header", UiNodeKind::Toolbar)
+    let title = panel
+        .history
+        .active_index
+        .and_then(|index| panel.history.sessions.get(index))
+        .map(|session| short_text(&session.title, 54))
+        .unwrap_or_else(|| t("app.agent_title", settings.language));
+    let (model_width, mode_width) = selector_widths(width);
+    let mut header = UiNode::new("agent.header", UiNodeKind::Toolbar)
         .with_class("agent-header")
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
-            gap: 6.0,
-            ..UiLayout::fixed(0.0, 34.0)
-                .with_width_mode(UiSizeMode::Fill)
-                .with_z_index(200)
+            gap: 8.0,
+            padding: UiSpacing::xy(12.0, 7.0),
+            ..UiLayout::fixed(0.0, 52.0).with_width_mode(UiSizeMode::Fill)
         })
-        .with_child(
+        .with_child(icon_button(
+            "agent.sidebar.toggle",
+            if panel.sidebar_open {
+                UiIconId::ChevronLeft
+            } else {
+                UiIconId::Menu
+            },
+            "app.agent_sessions",
+            "agent.sidebar.toggle",
+        ));
+    if width >= 420.0 {
+        header = header.with_child(
+            UiNode::new("agent.header.icon", UiNodeKind::Image)
+                .with_icon(UiIcon::new(UiIconId::Agent).with_size(UiIconSize::Small))
+                .with_layout(UiLayout::fixed(20.0, 20.0)),
+        );
+    }
+    if width >= 360.0 {
+        header = header.with_child(
             UiNode::new("agent.header.title", UiNodeKind::Label)
-                .with_text_value(
-                    agent
-                        .history
-                        .active_session()
-                        .map(|session| session.title.clone())
-                        .unwrap_or_else(|| {
-                            raf_core::i18n::t("app.agent_new_chat_default", settings.language)
-                        }),
-                )
+                .with_text_value(title)
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
                 .with_layout(UiLayout {
                     grow: 1.0,
+                    width_mode: UiSizeMode::Fill,
                     ..UiLayout::fit_content()
-                })
-                .with_text_style(UiTextStyle::panel_title(tokens.text)),
-        )
-        .with_child(model_button)
-        .with_child(
-            UiNode::new("agent.model.details", UiNodeKind::Label)
-                .with_text_value(truncate(&model_details, 42))
-                .with_layout(UiLayout {
-                    max_size: [230.0, 30.0],
-                    ..UiLayout::fit_content()
-                })
-                .with_text_style(UiTextStyle::body(tokens.text_muted)),
-        )
-        .with_child(mode_button)
-        .with_child(
-            UiNode::new("agent.sidebar.toggle", UiNodeKind::Button)
-                .with_icon(UiIcon::new(UiIconId::Menu).with_size(UiIconSize::Small))
-                .with_tooltip_key("app.agent_toggle_sidebar")
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
-                    "agent.sidebar.toggle",
-                )),
-        )
-        .with_child(
-            UiNode::new("agent.settings", UiNodeKind::Button)
-                .with_icon(UiIcon::new(UiIconId::Settings).with_size(UiIconSize::Small))
-                .with_text_key("app.agent_settings")
-                .with_layout(UiLayout::fixed(94.0, 30.0).with_text_safe_area(true))
-                .with_tooltip_key("app.settings_menu")
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
-                    "agent.settings",
-                )),
-        )
+                }),
+        );
+    }
+    header = header
+        .with_child(model_selector_button(
+            "agent.model.trigger",
+            &panel.model_registry,
+            &panel.selected_model,
+            &model_label,
+            &provider_label,
+            panel.model_menu_open,
+            model_width,
+        ))
+        .with_child(mode_selector_button(
+            "agent.mode.trigger",
+            settings,
+            mode_key,
+            panel.mode_menu_open,
+            mode_width,
+        ))
+        .with_child(icon_button(
+            "agent.settings",
+            UiIconId::Settings,
+            "app.agent_settings",
+            "agent.open-settings",
+        ));
+
+    if width < 620.0 {
+        header = header.with_class("agent-header-compact");
+    }
+    header
 }
 
-fn command_button(
-    id: &str,
-    label: &str,
-    command: &str,
-    selected: bool,
-    tokens: raf_ui::UiTokens,
-) -> UiNode {
-    UiNode::new(id, UiNodeKind::Button)
-        .with_class(if selected {
-            "agent-command-selected"
-        } else {
-            "agent-command"
-        })
-        .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::FitContent))
-        .with_text_value(label.to_string())
-        .with_text_style(UiTextStyle::button(tokens.text))
-        .focusable()
-        .with_event(UiEventBinding::command(UiEventKind::Click, command))
-}
-
-fn build_model_menu(
+fn build_status_strip(
     palette: StudioUiPalette,
-    agent: &AgentPanel,
+    panel: &AgentPanel,
     settings: &EngineSettings,
-    width: f32,
-    height: f32,
+    readiness: AgentReadiness,
 ) -> UiNode {
     let tokens = palette.tokens();
-    let active_label = effective_selection_label(agent, settings);
-    let mut options = UiNode::scroll_view("agent.model.options", UiScrollAxis::Vertical)
-        .with_class("agent-model-options")
+    let mut strip = UiNode::new("agent.status.strip", UiNodeKind::Panel)
+        .with_class("agent-status-strip")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 3.0,
-            grow: 1.0,
-            overflow: UiOverflow::ScrollY,
-            ..UiLayout::default()
+            gap: 4.0,
+            padding: UiSpacing::xy(12.0, 6.0),
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         });
-    for label in agent.model_registry.selector_labels() {
-        let (provider, model_id, compatible) = model_option_details(&label, agent, settings);
-        let current = label == active_label;
-        let class = if !compatible {
-            "agent-model-option-disabled"
-        } else if current {
-            "agent-model-option-current"
-        } else {
-            "agent-model-option"
-        };
-        let mut row = UiNode::new(format!("agent.model.{label}"), UiNodeKind::Button)
-            .with_class(class)
-            .with_layout(UiLayout {
-                flow: UiFlow::Column,
-                align_items: UiAlign::Start,
-                gap: 1.0,
-                padding: UiSpacing::xy(8.0, 5.0),
-                ..UiLayout::fixed(0.0, 40.0).with_width_mode(UiSizeMode::Fill)
-            })
-            .focusable()
-            .disabled(!compatible)
-            .with_child(
-                UiNode::new(format!("agent.model.{label}.label"), UiNodeKind::Label)
-                    .with_text_value(if current {
-                        format!(
-                            "{}  {}",
-                            localized(settings.language, "Selected", "Seleccionado"),
-                            label
-                        )
-                    } else {
-                        label.clone()
-                    })
-                    .with_text_style(UiTextStyle::button(tokens.text)),
-            )
-            .with_child(
-                UiNode::new(format!("agent.model.{label}.details"), UiNodeKind::Label)
-                    .with_text_value(if compatible {
-                        format!("{}  |  {}", provider, truncate(&model_id, 92))
-                    } else {
-                        format!(
-                            "{}  |  {}",
-                            provider,
-                            localized(
-                                settings.language,
-                                "Provider mismatch",
-                                "Proveedor incompatible",
-                            )
-                        )
-                    })
-                    .with_text_style(UiTextStyle::body(tokens.text_muted)),
-            );
-        if compatible {
-            row = row.with_event(UiEventBinding::command(
-                UiEventKind::Click,
-                format!("agent.model.select:{label}"),
-            ));
+
+    match readiness {
+        AgentReadiness::Ready => {}
+        AgentReadiness::ProviderDisabled => {
+            strip = strip.with_child(status_label(
+                palette,
+                "agent.status.provider-disabled",
+                "app.agent_provider_disabled",
+                UiIconId::Warning,
+            ))
         }
-        options = options.with_child(row);
+        AgentReadiness::ModelMissing => {
+            strip = strip.with_child(status_label(
+                palette,
+                "agent.status.model-missing",
+                "app.agent_model_missing",
+                UiIconId::Warning,
+            ))
+        }
+        AgentReadiness::AdapterRequired => {
+            strip = strip.with_child(status_label(
+                palette,
+                "agent.status.adapter-required",
+                "app.agent_provider_adapter_required",
+                UiIconId::Warning,
+            ))
+        }
     }
-    return UiNode::new("agent.model.menu.panel", UiNodeKind::Menu)
-        .with_class("agent-menu")
-        .with_layout(UiLayout {
-            flow: UiFlow::Column,
-            gap: 4.0,
-            padding: UiSpacing::same(6.0),
-            ..UiLayout::fixed(width, height)
-        })
-        .with_child(
-            UiNode::new("agent.model.heading", UiNodeKind::Label)
-                .with_text_value(localized(
-                    settings.language,
-                    "Configured models",
-                    "Modelos configurados",
-                ))
-                .with_text_style(UiTextStyle::panel_title(tokens.text_muted)),
-        )
-        .with_child(options)
-        .with_child(
-            UiNode::new("agent.model.separator", UiNodeKind::Separator)
-                .with_class("agent-menu-separator")
-                .with_layout(UiLayout::fixed(0.0, 1.0).with_width_mode(UiSizeMode::Fill)),
-        )
-        .with_child(
-            UiNode::new("agent.model.add", UiNodeKind::Button)
-                .with_class("agent-add-model-button")
-                .with_text_key("app.agent_add_model")
-                // Give the modal action a concrete hitbox. A zero-basis Fill
-                // child was visually painted by some layouts but could lose
-                // its release target after the popup rebuilt.
-                .with_layout(UiLayout::fixed((width - 12.0).max(1.0), 32.0))
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
-                    "agent.add-model.toggle",
-                )),
-        );
-}
 
-fn build_mode_menu(palette: StudioUiPalette, mode: AgentMode, language: Language) -> UiNode {
-    let tokens = palette.tokens();
-    let mut menu = UiNode::new("agent.mode.menu.panel", UiNodeKind::Toolbar)
-        .with_class("agent-menu")
-        .with_layout(UiLayout {
-            flow: UiFlow::Row,
-            gap: 4.0,
-            padding: UiSpacing::xy(5.0, 5.0),
-            ..UiLayout::fixed(MODE_MENU_WIDTH, MODE_MENU_HEIGHT)
-        });
-    let option_width = ((MODE_MENU_WIDTH - 10.0 - 4.0) * 0.5).max(1.0);
-    for value in ["passive", "active"] {
-        let is_active = value == "active";
-        let label = if is_active {
-            localized(language, "Active", "Activo")
-        } else {
-            localized(language, "Passive", "Pasivo")
+    if settings.agent_mode == AgentMode::Active {
+        strip = strip.with_child(
+            UiNode::new("agent.active-warning", UiNodeKind::Label)
+                .with_class("agent-active-warning")
+                .with_text_key("app.agent_active_mode_warning")
+                .with_text_style(UiTextStyle::body(tokens.warning))
+                .with_text_overflow(UiTextOverflow::Wrap)
+                .with_icon(UiIcon::new(UiIconId::Warning).with_size(UiIconSize::Small))
+                .with_layout(UiLayout {
+                    padding: UiSpacing::xy(8.0, 6.0),
+                    ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                }),
+        );
+    }
+
+    match panel.runtime.status {
+        AgentStatus::Done => {}
+        AgentStatus::Thinking => {
+            strip = strip.with_child(status_label(
+                palette,
+                "agent.status.thinking",
+                "app.agent_thinking",
+                UiIconId::Agent,
+            ))
+        }
+        AgentStatus::ExecutingTools => {
+            let status_key = match settings.agent_mode {
+                AgentMode::Inspect => "app.agent_inspecting",
+                AgentMode::Plan => "app.agent_planning",
+                AgentMode::Active => "app.agent_executing_tools",
+            };
+            strip = strip.with_child(status_label(
+                palette,
+                "agent.status.executing",
+                status_key,
+                UiIconId::Node,
+            ))
+        }
+        AgentStatus::AwaitingApproval => {
+            let count = panel.runtime.pending_calls.len();
+            strip = strip.with_child(
+                UiNode::new("agent.approval", UiNodeKind::Panel)
+                    .with_class("agent-approval")
+                    .with_layout(UiLayout {
+                        flow: UiFlow::Row,
+                        align_items: UiAlign::Center,
+                        gap: 8.0,
+                        padding: UiSpacing::xy(8.0, 6.0),
+                        min_size: [0.0, 34.0],
+                        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                    })
+                    .with_child(
+                        UiNode::new("agent.approval.label", UiNodeKind::Label)
+                            .with_text_value(format!(
+                                "{} ({count})",
+                                t("app.agent_pending_tools", settings.language)
+                            ))
+                            .with_text_style(UiTextStyle::body(tokens.warning))
+                            .with_layout(UiLayout {
+                                grow: 1.0,
+                                width_mode: UiSizeMode::Fill,
+                                ..UiLayout::fit_content()
+                            }),
+                    )
+                    .with_child(action_button(
+                        "agent.approval.deny",
+                        "app.agent_deny",
+                        "agent.deny",
+                        false,
+                    ))
+                    .with_child(action_button(
+                        "agent.approval.approve",
+                        "app.agent_approve",
+                        "agent.approve",
+                        true,
+                    )),
+            );
+        }
+        AgentStatus::Error => {
+            let error = panel
+                .runtime
+                .last_error
+                .as_deref()
+                .map(|value| short_text(value, 600))
+                .unwrap_or_else(|| t("app.agent_error_label", settings.language));
+            strip = strip.with_child(
+                UiNode::new("agent.error", UiNodeKind::Panel)
+                    .with_class("agent-error")
+                    .with_layout(UiLayout {
+                        min_size: [0.0, 30.0],
+                        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                    })
+                    .with_child(
+                        UiNode::new("agent.error.label", UiNodeKind::Label)
+                            .with_text_value(format!(
+                                "{}: {error}",
+                                t("app.agent_error_label", settings.language)
+                            ))
+                            .with_text_style(UiTextStyle::body(tokens.danger))
+                            .with_text_overflow(UiTextOverflow::Wrap)
+                            .with_icon(UiIcon::new(UiIconId::Warning).with_size(UiIconSize::Small))
+                            .with_layout(UiLayout {
+                                padding: UiSpacing::xy(8.0, 6.0),
+                                ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                            }),
+                    ),
+            );
+        }
+    }
+
+    if let Some(task) = panel
+        .runtime
+        .task_snapshot()
+        .filter(|task| !task.status.is_terminal())
+    {
+        let progress = task
+            .progress
+            .total
+            .map(|total| format!("{}/{}", task.progress.completed, total));
+        let stage_key = match task.progress.stage.as_str() {
+            "queued" => "app.agent_task_stage_queued",
+            "running" => "app.agent_task_stage_running",
+            "thinking" => "app.agent_task_stage_thinking",
+            "executing_tools" => "app.agent_task_stage_executing_tools",
+            "waiting_approval" => "app.agent_task_stage_waiting_approval",
+            _ => "app.agent_task_stage_running",
         };
-        let current = is_active == (mode == AgentMode::Active);
-        menu = menu.with_child(
-            UiNode::new(format!("agent.mode.{value}"), UiNodeKind::Button)
-                .with_class(if current {
-                    "agent-mode-option-current"
-                } else {
-                    "agent-mode-option"
+        strip = strip.with_child(
+            UiNode::new("agent.task-progress", UiNodeKind::Label)
+                .with_class("agent-task-progress")
+                .with_text_value(match progress {
+                    Some(progress) => format!(
+                        "{}: {} · {}",
+                        t("app.agent_task_progress", settings.language),
+                        progress,
+                        t(stage_key, settings.language)
+                    ),
+                    None => format!(
+                        "{} · {}",
+                        t("app.agent_task_progress", settings.language),
+                        t(stage_key, settings.language)
+                    ),
                 })
-                .with_layout(UiLayout::fixed(option_width, 30.0))
-                .with_text_value(label)
-                .with_text_style(UiTextStyle::button(tokens.text))
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
-                    format!("agent.mode.select:{value}"),
-                )),
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_layout(UiLayout {
+                    padding: UiSpacing::xy(8.0, 3.0),
+                    ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                }),
         );
     }
-    menu
+    strip
 }
 
-fn build_add_model(
+fn build_history(
     palette: StudioUiPalette,
-    agent: &AgentPanel,
-    settings: &EngineSettings,
+    panel: &AgentPanel,
+    project_type: ProjectType,
+    messages: &[&ChatMessage],
     width: f32,
+    scroll_offset: f32,
 ) -> UiNode {
     let tokens = palette.tokens();
-    let input_width = (width - 16.0).clamp(180.0, 320.0);
-    let mut panel = UiNode::new("agent.add-model", UiNodeKind::Panel)
-        .with_class("agent-popup")
+    let message_heights = messages
+        .iter()
+        .map(|message| estimated_message_height(message, width))
+        .collect::<Vec<_>>();
+    let range = visible_message_range(&message_heights, scroll_offset, HISTORY_VIEWPORT_ESTIMATE);
+    let mut scroll = UiNode::scroll_view("agent.history", UiScrollAxis::Vertical)
+        .with_class("agent-history")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 5.0,
-            padding: UiSpacing::xy(8.0, 8.0),
-            ..UiLayout::fixed(width, 306.0)
-        })
-        .with_child(
-            UiNode::new("agent.add-model.title", UiNodeKind::Label)
-                .with_text_key("app.agent_add_model_title")
-                .with_text_style(UiTextStyle::panel_title(tokens.text)),
-        )
-        .with_child(
-            UiNode::new("agent.add-model.provider", UiNodeKind::Label)
-                .with_text_value(format!(
-                    "{}: {}",
-                    raf_core::i18n::t("app.agent_add_model_provider", settings.language),
-                    settings.default_ai_provider.display_name()
-                ))
-                .with_text_style(UiTextStyle::body(tokens.text_muted)),
-        )
-        .with_child(
-            UiNode::new("agent.add-model.label-caption", UiNodeKind::Label)
-                .with_text_key("app.agent_model_label")
-                .with_text_style(UiTextStyle::body(tokens.text_muted)),
-        )
-        .with_child(
-            UiNode::text_input(
-                "agent.model-label",
-                UiTextInput {
-                    value_key: "agent.model-label".to_string(),
-                    placeholder_key: Some("app.agent_model_label".to_string()),
-                    max_length: 120,
-                    multiline: false,
-                    password: false,
-                    submit_command: Some("agent.add-model.confirm".to_string()),
-                },
-            )
-            .with_layout(UiLayout::fixed(input_width, 28.0)),
-        )
-        .with_child(
-            UiNode::new("agent.add-model.id-caption", UiNodeKind::Label)
-                .with_text_key("app.agent_model_id")
-                .with_text_style(UiTextStyle::body(tokens.text_muted)),
-        )
-        .with_child(
-            UiNode::text_input(
-                "agent.model-id",
-                UiTextInput {
-                    value_key: "agent.model-id".to_string(),
-                    placeholder_key: Some("app.agent_model_id".to_string()),
-                    max_length: 160,
-                    multiline: false,
-                    password: false,
-                    submit_command: Some("agent.add-model.confirm".to_string()),
-                },
-            )
-            .with_layout(UiLayout::fixed(input_width, 28.0)),
-        )
-        .with_child(
-            UiNode::new("agent.add-model.settings", UiNodeKind::Button)
-                .with_class("agent-secondary-button")
-                .with_text_key("app.agent_open_ai_settings")
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
-                    "agent.add-model.settings",
-                )),
-        );
-    if let Some(error) = agent.new_model_error.as_deref() {
-        panel = panel.with_child(
-            UiNode::new("agent.add-model.error", UiNodeKind::Label)
-                .with_text_value(error)
-                .with_text_style(UiTextStyle::body(tokens.danger)),
-        );
-    }
-    panel
-        .with_child(
-            UiNode::new("agent.add-model.confirm", UiNodeKind::Button)
-                .with_class("agent-primary-button")
-                .with_text_key("app.agent_add_model_confirm")
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
-                    "agent.add-model.confirm",
-                )),
-        )
-        .with_child(
-            UiNode::new("agent.add-model.cancel", UiNodeKind::Button)
-                .with_class("agent-secondary-button")
-                .with_text_key("app.agent_cancel")
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
-                    "agent.add-model.cancel",
-                )),
-        )
-}
-
-fn build_messages(palette: StudioUiPalette, agent: &AgentPanel, language: Language) -> UiNode {
-    let mut list = UiNode::scroll_view("agent.messages", UiScrollAxis::Vertical)
-        .with_class("agent-messages")
-        .with_layout(UiLayout {
-            flow: UiFlow::Column,
-            gap: 7.0,
             grow: 1.0,
-            min_size: [0.0, 96.0],
+            gap: 8.0,
+            padding: UiSpacing::xy(12.0, 10.0),
             overflow: UiOverflow::ScrollY,
-            // Reserve space for RafUI's generated scrollbar so the thumb
-            // never covers the last glyph of a wrapped response.
-            padding: UiSpacing {
-                left: 4.0,
-                right: 16.0,
-                top: 2.0,
-                bottom: 2.0,
-            },
             ..UiLayout::default()
         });
-    let visible = agent
-        .runtime
-        .messages
-        .iter()
-        .filter(|message| message.role != MessageRole::System)
-        .collect::<Vec<_>>();
-    // The transcript is one continuous scroll surface. The old page buttons
-    // made the chat feel clipped and competed with the scrollbar, so older
-    // messages stay in the same list instead of requiring a second pager.
-    for (index, message) in visible.iter().enumerate() {
-        list = list.with_child(message_card(palette, index, message, language));
+    let top_height = estimated_prefix_height(&message_heights, range.start);
+    let bottom_height = estimated_suffix_height(&message_heights, range.end);
+    if top_height > 0.0 {
+        scroll = scroll.with_child(spacer("agent.history.top", top_height));
     }
-    if visible.is_empty() {
-        list = list.with_child(
+    if messages.is_empty() {
+        scroll = scroll.with_child(
             UiNode::new("agent.empty", UiNodeKind::Panel)
                 .with_class("agent-empty")
                 .with_layout(UiLayout {
                     flow: UiFlow::Column,
-                    gap: 4.0,
-                    padding: UiSpacing::xy(14.0, 12.0),
+                    gap: 5.0,
+                    padding: UiSpacing::same(18.0),
+                    align_items: UiAlign::Center,
                     ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
                 })
                 .with_child(
                     UiNode::new("agent.empty.title", UiNodeKind::Label)
                         .with_text_key("app.agent_empty_title")
-                        .with_text_style(UiTextStyle::panel_title(palette.tokens().text)),
+                        .with_text_style(UiTextStyle::panel_title(tokens.text))
+                        .with_layout(UiLayout::fit_content()),
                 )
                 .with_child(
                     UiNode::new("agent.empty.subtitle", UiNodeKind::Label)
-                        .with_text_key("app.agent_empty_subtitle")
-                        .with_text_style(UiTextStyle::body(palette.tokens().text_muted)),
+                        .with_text_key(match project_type {
+                            ProjectType::Game => "app.agent_empty_subtitle_game",
+                            ProjectType::Electronics => "app.agent_empty_subtitle_electronics",
+                        })
+                        .with_text_style(UiTextStyle::body(tokens.text_muted))
+                        .with_layout(UiLayout {
+                            max_size: [520.0, 0.0],
+                            ..UiLayout::fit_content()
+                        }),
                 ),
         );
-    }
-    list
-}
-
-fn build_message_summary(
-    palette: StudioUiPalette,
-    agent: &AgentPanel,
-    language: Language,
-    max_response_tokens: u32,
-) -> UiNode {
-    let tokens = palette.tokens();
-    let visible = agent
-        .runtime
-        .messages
-        .iter()
-        .filter(|message| message.role != MessageRole::System)
-        .collect::<Vec<_>>();
-    let count = visible.len();
-    let end = count;
-    let total_chars = visible
-        .iter()
-        .map(|message| message.content.chars().count())
-        .sum::<usize>();
-    let approx_tokens = total_chars.div_ceil(APPROX_CHARS_PER_TOKEN);
-    let text = if count == 0 {
-        format!(
-            "{} | {} {}",
-            raf_core::i18n::t("app.agent_no_messages", language),
-            raf_core::i18n::t("app.agent_response_max", language),
-            max_response_tokens
-        )
     } else {
-        format!(
-            "{} 1-{} {} {} | {} ~{} {} | {} {}",
-            raf_core::i18n::t("app.agent_messages_label", language),
-            end,
-            raf_core::i18n::t("app.agent_messages_of", language),
-            count,
-            raf_core::i18n::t("app.agent_context_approx", language),
-            approx_tokens,
-            raf_core::i18n::t("app.agent_tokens", language),
-            raf_core::i18n::t("app.agent_response_max", language),
-            max_response_tokens
-        )
-    };
-    UiNode::new("agent.messages.summary", UiNodeKind::Toolbar)
-        .with_class("agent-message-summary")
-        .with_layout(UiLayout::fixed(0.0, 24.0).with_width_mode(UiSizeMode::Fill))
-        .with_text_value(text)
-        .with_text_style(UiTextStyle::body(tokens.text_muted))
+        let mut message_top = top_height + if top_height > 0.0 { 8.0 } else { 0.0 };
+        for (index, message) in messages
+            .iter()
+            .enumerate()
+            .skip(range.start)
+            .take(range.end.saturating_sub(range.start))
+        {
+            let viewport =
+                MessageViewport::for_message(scroll_offset, HISTORY_VIEWPORT_ESTIMATE, message_top);
+            scroll = scroll.with_child(message_card(palette, message, width, index, viewport));
+            message_top += message_heights[index] + 8.0;
+        }
+    }
+    if bottom_height > 0.0 {
+        scroll = scroll.with_child(spacer("agent.history.bottom", bottom_height));
+    }
+    if panel.runtime.status == AgentStatus::Done && panel.runtime.messages.is_empty() {
+        return scroll;
+    }
+    scroll
 }
 
-fn message_card(
-    palette: StudioUiPalette,
-    index: usize,
-    message: &ChatMessage,
-    language: Language,
-) -> UiNode {
+fn build_suggestions(palette: StudioUiPalette, project_type: ProjectType) -> UiNode {
     let tokens = palette.tokens();
-    let (class, role) = match message.role {
-        MessageRole::User => ("agent-message-user", localized(language, "You", "Tu")),
-        MessageRole::Assistant => (
-            "agent-message-assistant",
-            localized(language, "Agent", "Agent"),
-        ),
-        MessageRole::Tool => (
-            "agent-message-tool",
-            localized(language, "Tool result", "Resultado de herramienta"),
-        ),
-        MessageRole::System => (
-            "agent-message-system",
-            localized(language, "System", "Sistema"),
-        ),
+    let keys: &[&str] = match project_type {
+        ProjectType::Electronics => &[
+            "app.agent_hint_resistor",
+            "app.agent_hint_electrical_test",
+            "app.agent_hint_nets",
+        ],
+        ProjectType::Game => &[
+            "app.agent_hint_cube",
+            "app.agent_hint_light",
+            "app.agent_hint_camera",
+        ],
     };
-    UiNode::new(format!("agent.message.{index}"), UiNodeKind::Panel)
-        .with_class(class)
+    let mut row = UiNode::new("agent.suggestions", UiNodeKind::Toolbar)
+        .with_class("agent-suggestions")
         .with_layout(UiLayout {
-            flow: UiFlow::Column,
-            gap: 4.0,
-            padding: UiSpacing::xy(9.0, 8.0),
+            flow: UiFlow::RowWrap,
+            gap: 6.0,
+            padding: UiSpacing::xy(12.0, 6.0),
+            compact: raf_render::api_graphic_basic::ui_surface::UiCompactMode::Wrap,
             ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
-            UiNode::new(format!("agent.message.{index}.role"), UiNodeKind::Label)
-                .with_text_value(role)
-                .with_text_style(UiTextStyle::button(tokens.accent_hot)),
-        )
-        .with_child(
-            UiNode::new(format!("agent.message.{index}.content"), UiNodeKind::Label)
-                .with_text_value(truncate(&message.content, MAX_MESSAGE_DISPLAY_CHARS))
-                .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill))
-                .with_text_style(UiTextStyle::body(tokens.text)),
-        )
-}
-
-fn build_suggestions(
-    _palette: StudioUiPalette,
-    agent: &AgentPanel,
-    project: Option<&Project>,
-    readiness: AgentReadiness,
-    language: Language,
-) -> UiNode {
-    let mut row = UiNode::new("agent.suggestions", UiNodeKind::Toolbar).with_layout(UiLayout {
-        flow: UiFlow::RowWrap,
-        gap: 5.0,
-        ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
-    });
-    if readiness != AgentReadiness::Ready {
-        return row;
+            UiNode::new("agent.suggestions.title", UiNodeKind::Label)
+                .with_text_key("app.agent_suggestions_title")
+                .with_text_style(UiTextStyle::button(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        );
+    for key in keys {
+        row = row.with_child(
+            UiNode::new(format!("agent.suggestion.{key}"), UiNodeKind::Button)
+                .with_class("agent-suggestion")
+                .with_layout(UiLayout {
+                    padding: UiSpacing::xy(10.0, 6.0),
+                    ..UiLayout::fit_content()
+                })
+                .with_text_key(*key)
+                .with_text_style(UiTextStyle::button(tokens.text_muted))
+                .with_accessibility_role(UiAccessibilityRole::Button)
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    format!("agent.suggestion:{key}"),
+                )),
+        );
     }
-    for index in 0..3 {
-        if let Some(value) = suggestion(project, language, index) {
-            row = row.with_child(
-                UiNode::new(format!("agent.suggestion.{index}"), UiNodeKind::Button)
-                    .with_class("agent-suggestion")
-                    .with_text_value(value)
-                    .with_layout(UiLayout::fit_content())
-                    .focusable()
-                    .with_event(UiEventBinding::command(
-                        UiEventKind::Click,
-                        format!("agent.suggestion:{index}"),
-                    )),
-            );
-        }
-    }
-    if agent.runtime.messages.is_empty() {
-        row
-    } else {
-        row.with_layout(UiLayout::fixed(0.0, 0.0))
-    }
+    row
 }
 
 fn build_composer(
     palette: StudioUiPalette,
-    agent: &AgentPanel,
+    panel: &AgentPanel,
+    settings: &EngineSettings,
     readiness: AgentReadiness,
-    language: Language,
+    width: f32,
+    message_count: usize,
 ) -> UiNode {
     let tokens = palette.tokens();
-    let running = agent.runtime.status.blocks_input();
-    let command = if running {
-        "agent.stop"
-    } else {
-        "agent.submit"
-    };
-    let enabled =
-        running || (readiness == AgentReadiness::Ready && !agent.input_text.trim().is_empty());
-    let button_class = if running {
-        "agent-stop-button"
-    } else if enabled {
-        "agent-primary-button"
-    } else {
-        "agent-disabled-button"
-    };
-    let button_label = if running {
-        localized(language, "Stop", "Detener")
-    } else {
-        localized(language, "Send", "Enviar")
-    };
-    UiNode::new("agent.composer", UiNodeKind::Toolbar)
+    let running = matches!(
+        panel.runtime.status,
+        AgentStatus::Thinking | AgentStatus::ExecutingTools | AgentStatus::AwaitingApproval
+    );
+    let composer = UiNode::new("agent.composer", UiNodeKind::Toolbar)
         .with_class("agent-composer")
         .with_layout(UiLayout {
-            flow: UiFlow::Row,
-            align_items: UiAlign::End,
-            gap: 6.0,
-            padding: UiSpacing::xy(0.0, 4.0),
-            ..UiLayout::fixed(0.0, 52.0).with_width_mode(UiSizeMode::Fill)
+            flow: UiFlow::Column,
+            gap: 5.0,
+            padding: UiSpacing::xy(12.0, 8.0),
+            ..UiLayout::fixed(0.0, if width < 500.0 { 112.0 } else { 96.0 })
+                .with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
-            UiNode::text_input(
-                "agent.input",
-                UiTextInput {
-                    value_key: "agent.input".to_string(),
-                    placeholder_key: Some("app.agent_input_placeholder".to_string()),
-                    max_length: MAX_INPUT_LENGTH,
-                    multiline: true,
-                    password: false,
-                    submit_command: Some("agent.submit".to_string()),
-                },
-            )
-            .with_class("agent-input")
-            .with_layout(UiLayout {
-                grow: 1.0,
-                min_size: [120.0, 44.0],
-                ..UiLayout::fixed(0.0, 44.0)
-            })
-            .with_text_style(UiTextStyle::body(tokens.text)),
+            UiNode::new("agent.composer.row", UiNodeKind::Toolbar)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Row,
+                    gap: 8.0,
+                    align_items: UiAlign::End,
+                    ..UiLayout::fixed(0.0, 62.0).with_width_mode(UiSizeMode::Fill)
+                })
+                .with_child(
+                    UiNode::text_input(
+                        "agent.input",
+                        raf_render::api_graphic_basic::ui_surface::UiTextInput {
+                            value_key: "agent.input".to_string(),
+                            placeholder_key: Some("app.agent_input_placeholder".to_string()),
+                            max_length: MAX_VISIBLE_MESSAGE_CHARS,
+                            multiline: true,
+                            password: false,
+                            submit_command: None,
+                        },
+                    )
+                    .with_class("agent-input")
+                    .with_layout(UiLayout {
+                        grow: 1.0,
+                        width_mode: UiSizeMode::Fill,
+                        height_mode: UiSizeMode::Fixed,
+                        basis: [0.0, 62.0],
+                        padding: UiSpacing::xy(10.0, 8.0),
+                        ..UiLayout::default()
+                    })
+                    .with_text_style(UiTextStyle::body(tokens.text))
+                    .with_text_overflow(UiTextOverflow::Wrap)
+                    .with_accessibility_role(UiAccessibilityRole::Textbox),
+                )
+                .with_child(if running {
+                    action_button("agent.stop", "app.agent_stop", "agent.stop", false)
+                        .with_icon(UiIcon::new(UiIconId::Stop).with_size(UiIconSize::Small))
+                } else {
+                    action_button("agent.send", "app.agent_send", "agent.submit", true)
+                        .disabled(!matches!(readiness, AgentReadiness::Ready))
+                }),
         )
         .with_child(
-            UiNode::new("agent.submit", UiNodeKind::Button)
-                .with_class(button_class)
-                .disabled(!enabled)
-                .with_icon(
-                    UiIcon::new(if running {
-                        UiIconId::Close
-                    } else {
-                        UiIconId::ChevronRight
-                    })
-                    .with_size(UiIconSize::Small),
-                )
+            UiNode::new("agent.composer.footer", UiNodeKind::Toolbar)
                 .with_layout(UiLayout {
                     flow: UiFlow::Row,
                     align_items: UiAlign::Center,
-                    justify_content: UiJustify::Center,
-                    gap: 5.0,
-                    ..UiLayout::fixed(82.0, 36.0)
+                    justify_content: UiJustify::SpaceBetween,
+                    ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
                 })
-                .with_text_value(button_label)
+                .with_child(
+                    UiNode::new("agent.composer.hint", UiNodeKind::Label)
+                        .with_text_key("app.agent_enter_to_send")
+                        .with_text_style(UiTextStyle::body(tokens.text_muted))
+                        .with_layout(UiLayout::fit_content()),
+                )
+                .with_child(
+                    UiNode::new("agent.composer.metrics", UiNodeKind::Label)
+                        .with_class("agent-metrics")
+                        .with_text_value(metrics_text(
+                            panel,
+                            settings.language,
+                            settings.agent_max_response_tokens,
+                            message_count,
+                        ))
+                        .with_text_style(UiTextStyle::body(tokens.text_muted))
+                        .with_layout(UiLayout::fit_content()),
+                ),
+        );
+    composer
+}
+
+fn build_model_menu(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    settings: &EngineSettings,
+    width: f32,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let labels = panel.model_registry.selector_labels();
+    let options = labels
+        .iter()
+        .cloned()
+        .map(|label| UiSelectOption::new(label.clone(), label))
+        .collect::<Vec<_>>();
+    let (model_width, mode_width) = selector_widths(width);
+    let menu_height = (labels.len().saturating_add(1) as f32 * 34.0).clamp(68.0, 300.0);
+    let mut menu_layout = UiLayout::absolute(UiRect::new(
+        (width - 50.0 - mode_width - 8.0 - model_width).max(8.0),
+        48.0,
+        model_width,
+        menu_height,
+    ));
+    menu_layout.flow = UiFlow::Column;
+    menu_layout.overflow = UiOverflow::ScrollY;
+    let mut menu = UiNode::new("agent.model.menu", UiNodeKind::Menu)
+        .with_class("agent-menu")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
+        .with_layout(menu_layout.with_z_index(30))
+        .with_accessibility_role(UiAccessibilityRole::Menu);
+    for label in labels {
+        let value = if label == AgentModelRegistry::PROVIDER_DEFAULT {
+            t("app.agent_provider_default_short", settings.language)
+        } else {
+            panel
+                .model_registry
+                .get(&label)
+                .map(|shortcut| {
+                    format!(
+                        "{}  |  {}  ·  {}",
+                        shortcut.label,
+                        shortcut.model_id,
+                        shortcut.provider.display_name()
+                    )
+                })
+                .unwrap_or_else(|| label.clone())
+        };
+        menu = menu.with_child(
+            UiNode::new(format!("agent.model.option.{label}"), UiNodeKind::Button)
+                .with_class("agent-menu-item")
+                .with_layout(UiLayout {
+                    padding: UiSpacing::xy(10.0, 8.0),
+                    ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
+                })
+                .with_text_value(value.clone())
+                .with_text_overflow(UiTextOverflow::Ellipsis)
                 .with_text_style(UiTextStyle::button(tokens.text))
+                .with_tooltip_value(value)
+                .with_accessibility_role(UiAccessibilityRole::Option)
+                .with_accessibility_selected(panel.selected_model == label)
                 .focusable()
-                .with_event(UiEventBinding::command(UiEventKind::Click, command)),
+                .with_event(UiEventBinding {
+                    event: UiEventKind::Click,
+                    action: UiAction::SetSelect {
+                        key: "agent.model".to_string(),
+                        value: label.clone(),
+                        index: options
+                            .iter()
+                            .position(|option| option.value == label)
+                            .unwrap_or(0),
+                    },
+                })
+                .with_event(UiEventBinding {
+                    event: UiEventKind::Click,
+                    action: UiAction::SetSelectOpen {
+                        id: "agent.model.trigger".to_string(),
+                        open: false,
+                    },
+                }),
+        );
+    }
+    menu.with_child(
+        UiNode::new("agent.model.add", UiNodeKind::Button)
+            .with_class("agent-menu-item-accent")
+            .with_layout(UiLayout {
+                padding: UiSpacing::xy(10.0, 8.0),
+                ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
+            })
+            .with_text_key("app.agent_add_model")
+            .with_text_style(UiTextStyle::button(tokens.accent_hot))
+            .with_accessibility_role(UiAccessibilityRole::MenuItem)
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                "agent.model.add",
+            )),
+    )
+}
+
+fn build_mode_menu(palette: StudioUiPalette, settings: &EngineSettings, width: f32) -> UiNode {
+    let tokens = palette.tokens();
+    let (_, mode_width) = selector_widths(width);
+    let mut menu_layout = UiLayout::absolute(UiRect::new(
+        (width - 50.0 - mode_width).max(8.0),
+        48.0,
+        mode_width,
+        102.0,
+    ));
+    menu_layout.flow = UiFlow::Column;
+    menu_layout.overflow = UiOverflow::Clip;
+    UiNode::new("agent.mode.menu", UiNodeKind::Menu)
+        .with_class("agent-menu")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
+        .with_layout(menu_layout.with_z_index(30))
+        .with_accessibility_role(UiAccessibilityRole::Menu)
+        .with_child(mode_option(
+            tokens,
+            "app.agent_mode_inspect",
+            "inspect",
+            0,
+            settings.agent_mode == AgentMode::Inspect,
+        ))
+        .with_child(mode_option(
+            tokens,
+            "app.agent_mode_plan",
+            "plan",
+            1,
+            settings.agent_mode == AgentMode::Plan,
+        ))
+        .with_child(mode_option(
+            tokens,
+            "app.agent_mode_active",
+            "active",
+            2,
+            settings.agent_mode == AgentMode::Active,
+        ))
+}
+
+fn build_add_model_menu(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    settings: &EngineSettings,
+    width: f32,
+    height: f32,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let provider_name = panel
+        .effective_provider(settings)
+        .map(|provider| provider.provider.display_name().to_string())
+        .unwrap_or_else(|| t("app.agent_provider_default", settings.language));
+    let menu_height = if panel.new_model_error.is_some() {
+        292.0
+    } else {
+        264.0
+    };
+    let mut menu_layout = UiLayout::absolute(UiRect::new(
+        (width - 360.0).max(8.0),
+        ((height - menu_height) * 0.5).max(58.0),
+        352.0_f32.min((width - 16.0).max(1.0)),
+        menu_height,
+    ));
+    menu_layout.flow = UiFlow::Column;
+    menu_layout.gap = 8.0;
+    menu_layout.padding = UiSpacing::same(12.0);
+    menu_layout.overflow = UiOverflow::Clip;
+    let mut menu = UiNode::new("agent.add-model.menu", UiNodeKind::Menu)
+        .with_class("agent-menu agent-add-model")
+        .with_material(UiSurfaceMaterial::ModalSurface)
+        .with_layout(menu_layout.with_z_index(40))
+        .with_accessibility_role(UiAccessibilityRole::Dialog)
+        .with_child(
+            UiNode::new("agent.add-model.title", UiNodeKind::Label)
+                .with_text_key("app.agent_add_model_title")
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(
+            UiNode::new("agent.add-model.provider", UiNodeKind::Label)
+                .with_text_value(format!(
+                    "{}: {}",
+                    t("app.agent_add_model_provider", settings.language),
+                    provider_name
+                ))
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(model_text_input(
+            "agent.new-model.label",
+            "app.agent_model_label",
+            panel.new_model_label.clone(),
+        ))
+        .with_child(model_text_input(
+            "agent.new-model.id",
+            "app.agent_model_id",
+            panel.new_model_id.clone(),
+        ));
+    if let Some(error) = panel.new_model_error.as_deref() {
+        menu = menu.with_child(
+            UiNode::new("agent.add-model.error", UiNodeKind::Label)
+                .with_text_value(error.to_string())
+                .with_text_style(UiTextStyle::body(tokens.danger))
+                .with_layout(UiLayout::fit_content()),
+        );
+    }
+    menu.with_child(
+        UiNode::new("agent.add-model.actions", UiNodeKind::Toolbar)
+            .with_layout(UiLayout {
+                flow: UiFlow::Row,
+                gap: 6.0,
+                justify_content: UiJustify::End,
+                ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+            })
+            .with_child(action_button(
+                "agent.add-model.cancel",
+                "app.agent_cancel",
+                "agent.model.cancel",
+                false,
+            ))
+            .with_child(action_button(
+                "agent.add-model.settings",
+                "app.agent_open_ai_settings",
+                "agent.open-settings",
+                false,
+            ))
+            .with_child(action_button(
+                "agent.add-model.confirm",
+                "app.agent_add_model_confirm",
+                "agent.model.confirm",
+                true,
+            )),
+    )
+}
+
+fn message_card(
+    palette: StudioUiPalette,
+    message: &ChatMessage,
+    width: f32,
+    index: usize,
+    viewport: MessageViewport,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let content = bounded_text(&display_message_content(message), MAX_VISIBLE_MESSAGE_CHARS);
+    let (class, label_key, label_color, card_alignment) = match message.role {
+        MessageRole::User => (
+            "agent-message-user",
+            "app.agent_you",
+            tokens.accent_hot,
+            UiAlign::End,
+        ),
+        MessageRole::Assistant => (
+            "agent-message-assistant",
+            "app.agent_label",
+            tokens.text_muted,
+            UiAlign::Start,
+        ),
+        MessageRole::Tool => (
+            "agent-message-tool",
+            "app.agent_tool_result",
+            tokens.positive,
+            UiAlign::Start,
+        ),
+        MessageRole::System => (
+            "agent-message-system",
+            "app.agent_system_label",
+            tokens.text_muted,
+            UiAlign::Start,
+        ),
+    };
+    let card_width = (width * MESSAGE_WIDTH_RATIO).clamp(220.0, 760.0);
+    let body_style = UiTextStyle::body(tokens.text);
+    let display_text = if matches!(message.role, MessageRole::Assistant | MessageRole::Tool) {
+        lightweight_markdown_text(&content)
+    } else {
+        content.clone()
+    };
+    let display_chunks = message_text_chunks(&display_text);
+    let body_height = display_chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            estimated_text_tile_height(chunk, card_width - 24.0, body_style.line_height_px)
+                + if index + 1 < display_chunks.len() {
+                    MESSAGE_TEXT_TILE_GAP
+                } else {
+                    0.0
+                }
+        })
+        .sum::<f32>()
+        .max(1.0);
+    let card_height = MESSAGE_CARD_CHROME_HEIGHT + body_height;
+    let mut card = UiNode::new(format!("agent.message.{index}.card"), UiNodeKind::Panel)
+        .with_class(class)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 4.0,
+            padding: UiSpacing::xy(12.0, 9.0),
+            width_mode: UiSizeMode::Fixed,
+            height_mode: UiSizeMode::Fixed,
+            basis: [card_width, card_height],
+            ..UiLayout::default()
+        })
+        .with_child(
+            UiNode::new(format!("agent.message.{index}.label"), UiNodeKind::Label)
+                .with_text_key(label_key)
+                .with_text_style(UiTextStyle::button(label_color))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(message_body(
+            format!("agent.message.{index}.body"),
+            &content,
+            body_style,
+            message.role,
+            card_width - 24.0,
+            viewport,
+        ));
+    if matches!(message.role, MessageRole::Assistant | MessageRole::Tool) {
+        card = card.with_child(copy_message_button(
+            format!("agent.message.{index}.copy"),
+            &message.content,
+        ));
+    }
+    UiNode::new(format!("agent.message.{index}.row"), UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            align_items: card_alignment,
+            height_mode: UiSizeMode::Fixed,
+            basis: [0.0, card_height],
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(card)
+}
+
+fn message_body(
+    id: String,
+    content: &str,
+    body_style: UiTextStyle,
+    role: MessageRole,
+    width: f32,
+    viewport: MessageViewport,
+) -> UiNode {
+    let body_id = id;
+    let display_text = if matches!(role, MessageRole::Assistant | MessageRole::Tool) {
+        lightweight_markdown_text(content)
+    } else {
+        content.to_string()
+    };
+    let chunks = message_text_chunks(&display_text);
+    let chunk_heights = chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            estimated_text_tile_height(chunk, width, body_style.line_height_px)
+                + if index + 1 < chunks.len() {
+                    MESSAGE_TEXT_TILE_GAP
+                } else {
+                    0.0
+                }
+        })
+        .collect::<Vec<_>>();
+    let body_height = chunk_heights.iter().sum::<f32>().max(1.0);
+    let visible_top = viewport.top - MESSAGE_CARD_CHROME_HEIGHT - MESSAGE_TEXT_TILE_OVERSCAN;
+    let visible_bottom = viewport.bottom - MESSAGE_CARD_CHROME_HEIGHT + MESSAGE_TEXT_TILE_OVERSCAN;
+    let visible_range = visible_text_tile_range(&chunk_heights, visible_top, visible_bottom);
+    let top_spacer = chunk_heights.iter().take(visible_range.start).sum::<f32>();
+    let bottom_spacer = chunk_heights.iter().skip(visible_range.end).sum::<f32>();
+    let mut body = UiNode::new(body_id.clone(), UiNodeKind::Panel).with_layout(UiLayout {
+        flow: UiFlow::Column,
+        width_mode: UiSizeMode::Fill,
+        height_mode: UiSizeMode::Fixed,
+        basis: [0.0, body_height],
+        max_size: [width.max(1.0), 0.0],
+        overflow: UiOverflow::Clip,
+        ..UiLayout::default()
+    });
+    if top_spacer > 0.0 {
+        body = body.with_child(spacer(&format!("{body_id}.top"), top_spacer));
+    }
+    for (index, chunk) in chunks
+        .into_iter()
+        .enumerate()
+        .skip(visible_range.start)
+        .take(visible_range.end.saturating_sub(visible_range.start))
+    {
+        let text_id = if index == 0 {
+            format!("{body_id}.text")
+        } else {
+            format!("{body_id}.text.{index}")
+        };
+        body = body.with_child(
+            UiNode::new(text_id, UiNodeKind::Label)
+                .with_text_value(chunk)
+                .selectable_text()
+                .with_text_overflow(UiTextOverflow::Wrap)
+                .with_text_style(body_style)
+                .with_layout(UiLayout {
+                    width_mode: UiSizeMode::Fill,
+                    height_mode: UiSizeMode::Fixed,
+                    basis: [0.0, chunk_heights[index]],
+                    max_size: [width.max(1.0), 0.0],
+                    overflow: UiOverflow::Clip,
+                    ..UiLayout::default()
+                }),
+        );
+    }
+    if bottom_spacer > 0.0 {
+        body = body.with_child(spacer(&format!("{body_id}.bottom"), bottom_spacer));
+    }
+    body
+}
+
+fn visible_text_tile_range(
+    chunk_heights: &[f32],
+    visible_top: f32,
+    visible_bottom: f32,
+) -> std::ops::Range<usize> {
+    let mut cursor = 0.0;
+    let mut first = None;
+    let mut end = 0;
+    for (index, height) in chunk_heights.iter().copied().enumerate() {
+        let tile_bottom = cursor + height;
+        if tile_bottom > visible_top && cursor < visible_bottom {
+            first.get_or_insert(index);
+            end = index + 1;
+        }
+        cursor = tile_bottom;
+    }
+    first.map_or(0..0, |first| first..end)
+}
+
+fn estimated_text_tile_height(content: &str, width: f32, line_height: f32) -> f32 {
+    // Deliberately conservative: a slightly taller fixed tile is cheaper than
+    // clipping a wide glyph and keeps virtual spacers stable across DPI.
+    let chars_per_line = (width.max(1.0) / 8.0).max(16.0) as usize;
+    let lines = content
+        .split('\n')
+        .map(|line| {
+            (line.chars().count().saturating_add(chars_per_line - 1) / chars_per_line).max(1)
+        })
+        .sum::<usize>()
+        .max(1);
+    lines as f32 * line_height.max(14.0)
+}
+
+/// Keeps a single retained text request below the atlas tile limit. Normal
+/// messages remain one node; only long responses are split into bounded tiles.
+fn message_text_chunks(content: &str) -> Vec<String> {
+    if content.is_empty() {
+        return vec![String::new()];
+    }
+    let mut chunks = Vec::new();
+    let mut current = String::with_capacity(MESSAGE_TEXT_CHUNK_CHARS);
+    let mut chars = 0usize;
+    let mut lines = 1usize;
+    for character in content.chars() {
+        current.push(character);
+        chars += 1;
+        if character == '\n' {
+            lines += 1;
+        }
+        if chars >= MESSAGE_TEXT_CHUNK_CHARS || lines >= MESSAGE_TEXT_CHUNK_LINES {
+            chunks.push(std::mem::take(&mut current));
+            chars = 0;
+            lines = 1;
+        }
+    }
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+    chunks
+}
+
+fn lightweight_markdown_text(content: &str) -> String {
+    content
+        .lines()
+        .map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return String::new();
+            }
+            let without_heading = trimmed.trim_start_matches('#').trim();
+            let (bullet, text) = if let Some(value) = without_heading.strip_prefix("- ") {
+                (true, value)
+            } else if let Some(value) = without_heading.strip_prefix("* ") {
+                (true, value)
+            } else {
+                (false, without_heading)
+            };
+            let prefix = bullet.then_some("\u{2022} ").unwrap_or_default();
+            format!("{prefix}{}", strip_inline_markdown(text))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn strip_inline_markdown(value: &str) -> String {
+    value.replace("**", "").replace("__", "").replace('`', "")
+}
+
+fn status_label(palette: StudioUiPalette, id: &str, key: &str, icon: UiIconId) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new(id, UiNodeKind::Label)
+        .with_class("agent-status")
+        .with_text_key(key)
+        .with_text_style(UiTextStyle::body(tokens.text_muted))
+        .with_text_overflow(UiTextOverflow::Wrap)
+        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
+        .with_layout(UiLayout {
+            padding: UiSpacing::xy(8.0, 5.0),
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+}
+
+fn mode_option(
+    tokens: raf_render::api_graphic_basic::ui_surface::UiTokens,
+    label_key: &str,
+    value: &str,
+    index: usize,
+    selected: bool,
+) -> UiNode {
+    UiNode::new(format!("agent.mode.option.{value}"), UiNodeKind::Button)
+        .with_class("agent-menu-item")
+        .with_layout(UiLayout {
+            padding: UiSpacing::xy(10.0, 8.0),
+            ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_text_key(label_key)
+        .with_text_style(UiTextStyle::button(tokens.text))
+        .with_accessibility_role(UiAccessibilityRole::Option)
+        .with_accessibility_selected(selected)
+        .focusable()
+        .with_event(UiEventBinding {
+            event: UiEventKind::Click,
+            action: UiAction::SetSelect {
+                key: "agent.mode".to_string(),
+                value: value.to_string(),
+                index,
+            },
+        })
+        .with_event(UiEventBinding {
+            event: UiEventKind::Click,
+            action: UiAction::SetSelectOpen {
+                id: "agent.mode.trigger".to_string(),
+                open: false,
+            },
+        })
+}
+
+fn model_text_input(id: &str, label_key: &str, value: String) -> UiNode {
+    UiNode::new(format!("{id}.field"), UiNodeKind::Panel)
+        .with_class("agent-form-field")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 4.0,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new(format!("{id}.label"), UiNodeKind::Label)
+                .with_text_key(label_key)
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(
+            UiNode::text_input(
+                id,
+                raf_render::api_graphic_basic::ui_surface::UiTextInput {
+                    value_key: id.to_string(),
+                    placeholder_key: None,
+                    max_length: 256,
+                    multiline: false,
+                    password: false,
+                    submit_command: None,
+                },
+            )
+            .with_class("agent-form-input")
+            .focusable()
+            .with_layout(UiLayout {
+                padding: UiSpacing::xy(9.0, 7.0),
+                ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill)
+            })
+            .with_text_value(value),
         )
 }
 
-fn status_card(palette: StudioUiPalette, text: &str, warning: bool) -> UiNode {
-    UiNode::new("agent.status", UiNodeKind::Panel)
-        .with_class(if warning {
-            "agent-status-warning"
-        } else {
-            "agent-status"
-        })
-        .with_layout(UiLayout {
-            padding: UiSpacing::xy(8.0, 6.0),
-            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-        })
-        .with_text_value(text.to_string())
-        .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
+fn selector_widths(width: f32) -> (f32, f32) {
+    if width < 360.0 {
+        (108.0, 112.0)
+    } else if width < 560.0 {
+        (132.0, 116.0)
+    } else {
+        (168.0, 124.0)
+    }
 }
 
-fn activity_card(palette: StudioUiPalette, agent: &AgentPanel, language: Language) -> UiNode {
-    let text = match &agent.runtime.status {
-        AgentStatus::Thinking => localized(
-            language,
-            "Thinking while waiting for the provider...",
-            "Pensando mientras espera al proveedor...",
-        ),
-        AgentStatus::ExecutingTools => localized(
-            language,
-            "Applying tool changes...",
-            "Aplicando cambios de herramienta...",
-        ),
-        AgentStatus::AwaitingApproval => localized(
-            language,
-            "Approval required before continuing.",
-            "Se requiere aprobación para continuar.",
-        ),
-        AgentStatus::Done | AgentStatus::Error => String::new(),
+fn model_selector_button(
+    id: &str,
+    registry: &AgentModelRegistry,
+    selected_model: &str,
+    value: &str,
+    tooltip: &str,
+    open: bool,
+    width: f32,
+) -> UiNode {
+    let labels = registry.selector_labels();
+    let selected_index = labels
+        .iter()
+        .position(|label| label == selected_model)
+        .unwrap_or(0);
+    let options = labels
+        .into_iter()
+        .map(|label| UiSelectOption::new(label.clone(), label))
+        .collect();
+    agent_select_trigger(
+        id,
+        "agent.model",
+        options,
+        selected_index,
+        value,
+        tooltip,
+        open,
+        width,
+        "agent.model.menu",
+    )
+}
+
+fn mode_selector_button(
+    id: &str,
+    settings: &EngineSettings,
+    mode_key: &str,
+    open: bool,
+    width: f32,
+) -> UiNode {
+    let options = vec![
+        UiSelectOption::new("inspect", "app.agent_mode_inspect"),
+        UiSelectOption::new("plan", "app.agent_mode_plan"),
+        UiSelectOption::new("active", "app.agent_mode_active"),
+    ];
+    let selected_index = match settings.agent_mode {
+        AgentMode::Inspect => 0,
+        AgentMode::Plan => 1,
+        AgentMode::Active => 2,
     };
-    status_card(palette, &text, false)
+    let value = t(mode_key, settings.language);
+    let tooltip = t("app.agent_mode", settings.language);
+    agent_select_trigger(
+        id,
+        "agent.mode",
+        options,
+        selected_index,
+        &value,
+        &tooltip,
+        open,
+        width,
+        "agent.mode.menu",
+    )
 }
 
-fn approval_card(palette: StudioUiPalette) -> UiNode {
-    let tokens = palette.tokens();
-    UiNode::new("agent.approval", UiNodeKind::Toolbar)
-        .with_class("agent-approval")
+fn agent_select_trigger(
+    id: &str,
+    value_key: &str,
+    options: Vec<UiSelectOption>,
+    selected_index: usize,
+    value: &str,
+    tooltip: &str,
+    open: bool,
+    width: f32,
+    popup_id: &str,
+) -> UiNode {
+    let mut select = UiSelect::new(value_key, options, selected_index).with_popup_id(popup_id);
+    select.open = open;
+    UiNode::select(id, select)
+        .with_class("agent-selector")
         .with_layout(UiLayout {
             flow: UiFlow::Row,
-            align_items: UiAlign::Center,
-            gap: 6.0,
-            padding: UiSpacing::xy(8.0, 6.0),
-            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+            gap: 4.0,
+            padding: UiSpacing::xy(8.0, 5.0),
+            width_mode: UiSizeMode::Fixed,
+            height_mode: UiSizeMode::Fixed,
+            basis: [width, 32.0],
+            ..UiLayout::default()
         })
-        .with_child(
-            UiNode::new("agent.approval.label", UiNodeKind::Label)
-                .with_text_key("app.agent_pending_tools")
-                .with_layout(UiLayout {
-                    grow: 1.0,
-                    ..UiLayout::fit_content()
-                })
-                .with_text_style(UiTextStyle::body(tokens.warning)),
-        )
-        .with_child(
-            UiNode::new("agent.approve", UiNodeKind::Button)
-                .with_text_key("app.agent_approve")
-                .focusable()
-                .with_event(UiEventBinding::command(UiEventKind::Click, "agent.approve")),
-        )
-        .with_child(
-            UiNode::new("agent.deny", UiNodeKind::Button)
-                .with_text_key("app.agent_deny")
-                .focusable()
-                .with_event(UiEventBinding::command(UiEventKind::Click, "agent.deny")),
-        )
+        .with_text_value(value.to_string())
+        .with_text_overflow(UiTextOverflow::Ellipsis)
+        .with_icon(UiIcon::new(UiIconId::ChevronDown).with_size(UiIconSize::Small))
+        .with_tooltip_value(tooltip.to_string())
+        .with_accessibility_role(UiAccessibilityRole::Combobox)
+        .with_accessibility_expanded(open)
+        .focusable()
 }
 
-fn suggestion(project: Option<&Project>, language: Language, index: usize) -> Option<String> {
-    let name =
-        project
-            .map(|project| project.name.as_str())
-            .unwrap_or(if language == Language::Spanish {
-                "este proyecto"
-            } else {
-                "this project"
-            });
-    [
-        localized(
-            language,
-            &format!("Inspect {name}"),
-            &format!("Inspecciona {name}"),
-        ),
-        localized(
-            language,
-            "Create a starter blockout",
-            "Crea un blockout inicial",
-        ),
-        localized(
-            language,
-            "Explain the current scene",
-            "Explica la escena actual",
-        ),
-    ]
-    .get(index)
-    .cloned()
+fn icon_button(id: &str, icon: UiIconId, tooltip_key: &str, command: &str) -> UiNode {
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class("agent-icon-button")
+        .with_layout(UiLayout::fixed(30.0, 30.0))
+        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
+        .with_tooltip_key(tooltip_key)
+        .with_accessibility_label_key(tooltip_key)
+        .with_accessibility_role(UiAccessibilityRole::Button)
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
-fn truncate(value: &str, max_chars: usize) -> String {
-    let mut output = value.chars().take(max_chars).collect::<String>();
-    if value.chars().count() > max_chars {
-        output.push_str("...");
+fn action_button(id: &str, text_key: &str, command: &str, primary: bool) -> UiNode {
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class(if primary {
+            "agent-button-primary"
+        } else {
+            "agent-button"
+        })
+        .with_layout(UiLayout {
+            padding: UiSpacing::xy(12.0, 7.0),
+            ..UiLayout::fit_content()
+        })
+        .with_text_key(text_key)
+        .with_accessibility_role(UiAccessibilityRole::Button)
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
+}
+
+fn copy_message_button(id: String, text: &str) -> UiNode {
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class("agent-copy-button")
+        .with_layout(UiLayout {
+            padding: UiSpacing::xy(8.0, 4.0),
+            ..UiLayout::fit_content()
+        })
+        .with_text_key("app.agent_copy")
+        .with_tooltip_key("app.agent_copy")
+        .with_accessibility_label_key("app.agent_copy")
+        .with_accessibility_role(UiAccessibilityRole::Button)
+        .focusable()
+        .with_event(UiEventBinding {
+            event: UiEventKind::Click,
+            action: UiAction::SetClipboard {
+                text: text.to_string(),
+            },
+        })
+}
+
+fn spacer(id: &str, height: f32) -> UiNode {
+    UiNode::new(id, UiNodeKind::Panel)
+        .with_layout(UiLayout::fixed(0.0, height.max(0.0)).with_width_mode(UiSizeMode::Fill))
+        .with_style(UiStyle::transparent())
+}
+
+fn metrics_text(
+    panel: &AgentPanel,
+    language: Language,
+    max_response_tokens: u32,
+    message_count: usize,
+) -> String {
+    let approx_tokens: usize = panel
+        .runtime
+        .messages
+        .iter()
+        .map(|message| message.content.chars().count().saturating_add(3) / 4)
+        .sum();
+    format!(
+        "{}: {message_count}  |  {}: ~{approx_tokens} {}  |  {}: {}",
+        t("app.agent_messages_label", language),
+        t("app.agent_context_approx", language),
+        t("app.agent_tokens", language),
+        t("app.agent_response_max", language),
+        max_response_tokens
+    )
+}
+
+fn visible_message_range(
+    message_heights: &[f32],
+    scroll_offset: f32,
+    viewport_height: f32,
+) -> UiVirtualRange {
+    if message_heights.is_empty() {
+        return UiVirtualRange { start: 0, end: 0 };
     }
-    output
+    let mut cursor = 0.0;
+    let target = scroll_offset.max(0.0);
+    let mut first = 0;
+    for (index, height) in message_heights.iter().copied().enumerate() {
+        if cursor + height > target {
+            first = index;
+            break;
+        }
+        cursor += height + 8.0;
+        first = index.saturating_add(1).min(message_heights.len());
+    }
+    let mut end = first;
+    let mut visible_height = 0.0;
+    while end < message_heights.len() && visible_height < viewport_height.max(0.0) {
+        visible_height += message_heights[end] + 8.0;
+        end += 1;
+    }
+    UiVirtualRange {
+        start: first.saturating_sub(HISTORY_OVERSCAN),
+        end: end
+            .saturating_add(HISTORY_OVERSCAN)
+            .min(message_heights.len()),
+    }
+}
+
+fn estimated_prefix_height(message_heights: &[f32], end: usize) -> f32 {
+    let count = end.min(message_heights.len());
+    let total = message_heights
+        .iter()
+        .take(count)
+        .map(|height| height + 8.0)
+        .sum::<f32>();
+    if count > 0 {
+        total - 8.0
+    } else {
+        0.0
+    }
+}
+
+fn estimated_suffix_height(message_heights: &[f32], start: usize) -> f32 {
+    let count = message_heights.len().saturating_sub(start);
+    let total = message_heights
+        .iter()
+        .skip(start)
+        .map(|height| height + 8.0)
+        .sum::<f32>();
+    if count > 0 {
+        total - 8.0
+    } else {
+        0.0
+    }
+}
+
+fn estimated_message_height(message: &ChatMessage, width: f32) -> f32 {
+    let content = bounded_text(&display_message_content(message), MAX_VISIBLE_MESSAGE_CHARS);
+    let display_text = if matches!(message.role, MessageRole::Assistant | MessageRole::Tool) {
+        lightweight_markdown_text(&content)
+    } else {
+        content
+    };
+    let card_width = (width * MESSAGE_WIDTH_RATIO).clamp(220.0, 760.0);
+    let line_height = 18.0;
+    let chunks = message_text_chunks(&display_text);
+    let body_height = chunks
+        .iter()
+        .enumerate()
+        .map(|(index, chunk)| {
+            estimated_text_tile_height(chunk, card_width - 24.0, line_height)
+                + if index + 1 < chunks.len() {
+                    MESSAGE_TEXT_TILE_GAP
+                } else {
+                    0.0
+                }
+        })
+        .sum::<f32>();
+    (MESSAGE_CARD_CHROME_HEIGHT + body_height).max(70.0)
+}
+
+fn display_message_content(message: &ChatMessage) -> String {
+    if message.role != MessageRole::Tool {
+        return message.content.clone();
+    }
+    let Ok(result) = serde_json::from_str::<AgentToolResult>(&message.content) else {
+        return message.content.clone();
+    };
+    let mut lines = vec![result.summary];
+    if let Some(revision) = result.revision {
+        lines.push(format!("Revision {revision}"));
+    }
+    if let Some(status) = result
+        .verification
+        .as_ref()
+        .and_then(|verification| verification.get("status"))
+        .and_then(serde_json::Value::as_str)
+    {
+        lines.push(format!("Verification: {status}"));
+    }
+    lines.extend(
+        result
+            .warnings
+            .into_iter()
+            .map(|warning| format!("Warning: {warning}")),
+    );
+    lines.join("\n")
+}
+
+fn bounded_text(value: &str, max_chars: usize) -> String {
+    let mut result = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        result.push('\u{2026}');
+    }
+    result
+}
+
+fn short_text(value: &str, max_chars: usize) -> String {
+    bounded_text(value.trim(), max_chars)
 }
 
 fn agent_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
     let tokens = palette.tokens();
     UiStyleSheet {
         rules: vec![
+            style(
+                "agent-sidebar",
+                tokens.surface,
+                tokens.border,
+                tokens.text,
+                1.0,
+                0.0,
+            ),
+            style(
+                "agent-main",
+                tokens.background,
+                tokens.border,
+                tokens.text,
+                0.0,
+                0.0,
+            ),
+            style(
+                "agent-header",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text,
+                1.0,
+                0.0,
+            ),
+            style(
+                "agent-sidebar-header",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text,
+                1.0,
+                0.0,
+            ),
+            style(
+                "agent-composer",
+                tokens.surface,
+                tokens.border,
+                tokens.text,
+                1.0,
+                0.0,
+            ),
+            style(
+                "agent-input",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-status",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text_muted,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-active-warning",
+                tokens.surface_alt,
+                tokens.warning,
+                tokens.warning,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-approval",
+                tokens.surface_alt,
+                tokens.warning,
+                tokens.text,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-error",
+                tokens.surface_alt,
+                tokens.danger,
+                tokens.danger,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-empty",
+                tokens.surface,
+                tokens.border,
+                tokens.text,
+                1.0,
+                6.0,
+            ),
+            style(
+                "agent-message-assistant",
+                tokens.surface,
+                tokens.border,
+                tokens.text,
+                1.0,
+                6.0,
+            ),
+            style(
+                "agent-message-user",
+                tokens.surface_raised,
+                tokens.accent,
+                tokens.text,
+                1.0,
+                6.0,
+            ),
+            style(
+                "agent-message-tool",
+                tokens.surface_alt,
+                tokens.positive,
+                tokens.text,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-message-system",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text_muted,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-menu",
+                tokens.surface_raised,
+                tokens.border,
+                tokens.text,
+                1.0,
+                6.0,
+            ),
+            style(
+                "agent-form-field",
+                tokens.surface_raised,
+                tokens.border,
+                tokens.text,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-form-input",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-button",
+                tokens.surface_raised,
+                tokens.border,
+                tokens.text,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-button-primary",
+                tokens.accent,
+                tokens.accent_hot,
+                tokens.background,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-icon-button",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text_muted,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-copy-button",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text_muted,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-selector",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-session",
+                tokens.surface,
+                tokens.border,
+                tokens.text_muted,
+                0.0,
+                4.0,
+            ),
+            style(
+                "agent-session-active",
+                tokens.selection,
+                tokens.accent,
+                tokens.text,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-menu-item",
+                tokens.surface_raised,
+                tokens.border,
+                tokens.text,
+                0.0,
+                4.0,
+            ),
+            style(
+                "agent-menu-item-accent",
+                tokens.surface_raised,
+                tokens.accent,
+                tokens.accent_hot,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-suggestion",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text_muted,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-metrics",
+                tokens.surface,
+                tokens.border,
+                tokens.text_muted,
+                0.0,
+                0.0,
+            ),
+            state_patch(
+                "agent-button",
+                UiStyleRuleState::Hovered,
+                tokens.surface_raised,
+                tokens.accent_hot,
+            ),
+            state_patch(
+                "agent-button-primary",
+                UiStyleRuleState::Hovered,
+                tokens.accent_hot,
+                tokens.accent_hot,
+            ),
+            state_patch(
+                "agent-icon-button",
+                UiStyleRuleState::Hovered,
+                tokens.surface_raised,
+                tokens.accent_hot,
+            ),
+            state_patch(
+                "agent-copy-button",
+                UiStyleRuleState::Hovered,
+                tokens.surface_raised,
+                tokens.accent_hot,
+            ),
+            state_patch(
+                "agent-selector",
+                UiStyleRuleState::Hovered,
+                tokens.surface_raised,
+                tokens.accent_hot,
+            ),
+            state_patch(
+                "agent-menu-item",
+                UiStyleRuleState::Hovered,
+                tokens.surface,
+                tokens.accent_hot,
+            ),
+            state_patch(
+                "agent-suggestion",
+                UiStyleRuleState::Hovered,
+                tokens.surface_raised,
+                tokens.accent_hot,
+            ),
+            state_patch(
+                "agent-button",
+                UiStyleRuleState::Focused,
+                tokens.surface_raised,
+                tokens.focus,
+            ),
+            state_patch(
+                "agent-button-primary",
+                UiStyleRuleState::Focused,
+                tokens.accent_hot,
+                tokens.focus,
+            ),
+            state_patch(
+                "agent-icon-button",
+                UiStyleRuleState::Focused,
+                tokens.surface_raised,
+                tokens.focus,
+            ),
+            state_patch(
+                "agent-copy-button",
+                UiStyleRuleState::Focused,
+                tokens.surface_raised,
+                tokens.focus,
+            ),
+            state_patch(
+                "agent-selector",
+                UiStyleRuleState::Focused,
+                tokens.surface_raised,
+                tokens.focus,
+            ),
+            state_patch(
+                "agent-input",
+                UiStyleRuleState::Focused,
+                tokens.surface_alt,
+                tokens.focus,
+            ),
+            state_patch(
+                "agent-form-input",
+                UiStyleRuleState::Focused,
+                tokens.surface_alt,
+                tokens.focus,
+            ),
+            state_patch(
+                "agent-menu-item",
+                UiStyleRuleState::Selected,
+                tokens.surface_alt,
+                tokens.accent_hot,
+            ),
             UiStyleRule::new(
-                UiStyleSelector::Class("agent-command".to_string()),
+                UiStyleSelector::Class("agent-button-primary".to_string()),
                 UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-command".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-command".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent),
-                    border: Some(tokens.accent_hot),
-                    text: Some([255, 255, 255, 255]),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Active),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-command-selected".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent),
-                    border: Some(tokens.accent_hot),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    text: Some([255, 255, 255, 255]),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-session".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-session".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-session-active".to_string()),
-                UiStylePatch {
-                    fill: Some([55, 43, 26, 255]),
-                    border: Some(tokens.accent),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-suggestion".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-suggestion".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-suggestion".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent),
-                    border: Some(tokens.accent_hot),
-                    text: Some([255, 255, 255, 255]),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Active),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-new-chat".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent),
-                    border: Some(tokens.accent_hot),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    text: Some([255, 255, 255, 255]),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-new-chat".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent_hot),
-                    border: Some(tokens.accent_hot),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-empty".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(5.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-model-option".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-model-option".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-model-option-current".to_string()),
-                UiStylePatch {
-                    fill: Some([55, 43, 26, 255]),
-                    border: Some(tokens.accent),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    text: Some(tokens.text),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-model-option-current".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent),
-                    border: Some(tokens.accent_hot),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-model-option-disabled".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface),
-                    border: Some(tokens.border),
-                    text: Some(tokens.text_muted),
-                    opacity: Some(0.48),
+                    text: Some(tokens.background),
                     ..UiStylePatch::default()
                 },
             )
             .when(UiStyleRuleState::Disabled),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-add-model-button".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-add-model-button".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-primary-button".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent),
-                    border: Some(tokens.accent_hot),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    text: Some([255, 255, 255, 255]),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-primary-button".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent_hot),
-                    border: Some(tokens.accent_hot),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-stop-button".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.warning),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    text: Some(tokens.warning),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-disabled-button".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface),
-                    border: Some(tokens.border),
-                    text: Some(tokens.text_muted),
-                    opacity: Some(0.55),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Disabled),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-input".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-input".to_string()),
-                UiStylePatch {
-                    border: Some(tokens.accent),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Focused),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-composer".to_string()),
-                UiStylePatch {
-                    fill: Some([0, 0, 0, 0]),
-                    border: Some([0, 0, 0, 0]),
-                    border_width: Some(0.0),
-                    radius: Some(0.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-secondary-button".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    text: Some(tokens.text),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-secondary-button".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-menu".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-mode-option".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-mode-option".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-mode-option-current".to_string()),
-                UiStylePatch {
-                    fill: Some([55, 43, 26, 255]),
-                    border: Some(tokens.accent),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    text: Some(tokens.text),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-mode-option-current".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent),
-                    border: Some(tokens.accent_hot),
-                    text: Some([255, 255, 255, 255]),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-popup".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-message-summary".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-sidebar".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    ..UiStylePatch::default()
-                },
-            ),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-message-user".to_string()),
-                UiStylePatch {
-                    fill: Some([45, 36, 24, 255]),
-                    border: Some(tokens.accent),
-                    border_width: Some(1.0),
-                    radius: Some(5.0),
-                    ..UiStylePatch::default()
-                },
-            ),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-message-assistant".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(5.0),
-                    ..UiStylePatch::default()
-                },
-            ),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-message-tool".to_string()),
-                UiStylePatch {
-                    fill: Some([22, 28, 35, 255]),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(5.0),
-                    ..UiStylePatch::default()
-                },
-            ),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-status-warning".to_string()),
-                UiStylePatch {
-                    fill: Some([66, 44, 20, 255]),
-                    border: Some(tokens.warning),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    ..UiStylePatch::default()
-                },
-            ),
-            UiStyleRule::new(
-                UiStyleSelector::Class("agent-approval".to_string()),
-                UiStylePatch {
-                    fill: Some([63, 43, 24, 255]),
-                    border: Some(tokens.warning),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    ..UiStylePatch::default()
-                },
-            ),
         ],
     }
+}
+
+fn style(
+    class: &str,
+    fill: [u8; 4],
+    border: [u8; 4],
+    text: [u8; 4],
+    border_width: f32,
+    radius: f32,
+) -> UiStyleRule {
+    UiStyleRule::new(
+        UiStyleSelector::Class(class.to_string()),
+        UiStylePatch {
+            fill: Some(fill),
+            border: Some(border),
+            text: Some(text),
+            border_width: Some(border_width),
+            radius: Some(radius),
+            ..UiStylePatch::default()
+        },
+    )
+}
+
+fn state_patch(
+    class: &str,
+    state: UiStyleRuleState,
+    fill: [u8; 4],
+    border: [u8; 4],
+) -> UiStyleRule {
+    UiStyleRule::new(
+        UiStyleSelector::Class(class.to_string()),
+        UiStylePatch {
+            fill: Some(fill),
+            border: Some(border),
+            border_width: Some(1.0),
+            ..UiStylePatch::default()
+        },
+    )
+    .when(state)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raf_ai::chat::ChatMessage;
-    use raf_core::config::EngineSettings;
-    use raf_render::api_graphic_basic::ui_surface::{UiHitTestMode, UiSurface};
+    use chrono::Utc;
+    use raf_render::api_graphic_basic::ui_surface::{UiInputState, UiSurfaceSession};
+    use uuid::Uuid;
 
-    fn test_surface(
-        agent: &AgentPanel,
-        settings: &EngineSettings,
-        model_menu_open: bool,
-        mode_menu_open: bool,
-        add_model_open: bool,
-    ) -> UiSurface {
-        build_agent_surface(
-            StudioUiPalette::IndustrialDark,
-            agent,
-            settings,
-            None,
-            AgentReadiness::ProviderDisabled,
-            model_menu_open,
-            mode_menu_open,
-            add_model_open,
-            1.0,
-            640.0,
-            480.0,
-        )
+    fn message(content: &str) -> ChatMessage {
+        ChatMessage {
+            id: Uuid::new_v4(),
+            role: MessageRole::Assistant,
+            content: content.to_string(),
+            timestamp: Utc::now(),
+            tool_calls: None,
+        }
+    }
+
+    fn node<'a>(root: &'a UiNode, id: &str) -> Option<&'a UiNode> {
+        if root.id == id {
+            return Some(root);
+        }
+        root.children.iter().find_map(|child| node(child, id))
     }
 
     #[test]
-    fn mode_popup_is_compact_and_active_has_a_real_hitbox() {
-        let agent = AgentPanel::default();
-        let settings = EngineSettings::default();
-        let surface = test_surface(&agent, &settings, false, true, false);
-        let frame = surface.build_frame(640, 480, [0, 0, 0, 255]);
-        let active = frame
+    fn assistant_messages_expose_selectable_text_and_a_copy_action() {
+        let message = message("response from the agent");
+        let card = message_card(
+            StudioUiPalette::IndustrialDark,
+            &message,
+            700.0,
+            0,
+            MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+        );
+        let text = node(&card, "agent.message.0.body.text").expect("message text");
+        let copy = node(&card, "agent.message.0.copy").expect("copy button");
+
+        assert!(text.text_selectable);
+        assert!(text.focusable);
+        assert!(copy.focusable);
+        assert!(copy.event_handlers.iter().any(|binding| matches!(
+            &binding.action,
+            UiAction::SetClipboard { text } if text == "response from the agent"
+        )));
+    }
+
+    #[test]
+    fn virtual_range_keeps_small_overscan_for_long_history() {
+        let messages = (0..200)
+            .map(|index| message(&format!("message {index}")))
+            .collect::<Vec<_>>();
+        let heights = messages
+            .iter()
+            .map(|message| estimated_message_height(message, 700.0))
+            .collect::<Vec<_>>();
+        let range = visible_message_range(&heights, 5_000.0, 360.0);
+        assert!(range.end - range.start < 30);
+        assert!(range.start > 0);
+    }
+
+    #[test]
+    fn virtual_history_spacers_do_not_add_a_trailing_gap() {
+        let heights = [100.0, 200.0, 300.0];
+
+        assert_eq!(estimated_prefix_height(&heights, 2), 308.0);
+        assert_eq!(estimated_suffix_height(&heights, 1), 508.0);
+    }
+
+    #[test]
+    fn long_message_height_estimate_preserves_its_full_scroll_extent() {
+        let message = message(&"Long Agent line ".repeat(1_000));
+        let height = estimated_message_height(&message, 700.0);
+
+        assert!(height > 1_000.0);
+    }
+
+    #[test]
+    fn message_text_is_bounded_without_splitting_unicode() {
+        let source = "é".repeat(MAX_VISIBLE_MESSAGE_CHARS + 10);
+        let bounded = bounded_text(&source, MAX_VISIBLE_MESSAGE_CHARS);
+        assert_eq!(bounded.chars().count(), MAX_VISIBLE_MESSAGE_CHARS + 1);
+        assert!(bounded.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn lightweight_markdown_keeps_readable_text_without_parser_cost() {
+        let text = lightweight_markdown_text("### **Scene**\n- `Create` a cube\n\nReady");
+
+        assert_eq!(text, "Scene\n\u{2022} Create a cube\n\nReady");
+    }
+
+    #[test]
+    fn long_message_text_is_split_into_bounded_atlas_tiles() {
+        let source = "Long Agent response ".repeat(180);
+        let chunks = message_text_chunks(&source);
+
+        assert!(chunks.len() > 1);
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.chars().count() <= MESSAGE_TEXT_CHUNK_CHARS));
+        assert_eq!(chunks.concat(), source);
+    }
+
+    #[test]
+    fn maximum_agent_message_fits_the_bounded_text_atlas_as_tiles() {
+        let source = "Agent output ".repeat(1_500);
+        let mut message = message(&source);
+        message.role = MessageRole::Tool;
+        let surface = UiSurface::new(
+            "agent-long-message-atlas",
+            StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root)
+                .with_layout(UiLayout::fill(UiFlow::Column))
+                .with_child(message_card(
+                    StudioUiPalette::IndustrialDark,
+                    &message,
+                    700.0,
+                    0,
+                    MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+                ))
+                .with_child(
+                    UiNode::new("status.fps", UiNodeKind::Label)
+                        .with_text_value("FPS: 60")
+                        .with_layout(UiLayout::fixed(76.0, 18.0)),
+                ),
+        );
+        let mut session = UiSurfaceSession::default();
+        let frame = session.build_frame_with_resolved_text_at_scale(
+            &surface,
+            760,
+            7_000,
+            [0, 0, 0, 255],
+            1.5,
+            |key| key.to_string(),
+        );
+        let body_requests = frame
+            .text_requests
+            .iter()
+            .filter(|request| request.node_id.starts_with("agent.message.0.body.text"))
+            .collect::<Vec<_>>();
+        let fps_request = frame
+            .text_requests
+            .iter()
+            .find(|request| request.node_id == "status.fps")
+            .expect("status text remains in the frame after a long message");
+
+        assert!((2..=8).contains(&body_requests.len()));
+        assert!(body_requests.iter().all(|request| session
+            .text_atlas
+            .slot_for(request, &request.text_key)
+            .is_some()));
+        assert!(session
+            .text_atlas
+            .slot_for(fps_request, &fps_request.text_key)
+            .is_some());
+    }
+
+    #[test]
+    fn deep_scroll_keeps_only_a_bounded_window_of_one_large_message() {
+        let source = "Tool output row with several values and paths\n".repeat(500);
+        let mut message = message(&source);
+        message.role = MessageRole::Tool;
+        let surface = UiSurface::new(
+            "agent-deep-message-window",
+            StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root)
+                .with_layout(UiLayout::fill(UiFlow::Column))
+                .with_child(message_card(
+                    StudioUiPalette::IndustrialDark,
+                    &message,
+                    700.0,
+                    0,
+                    MessageViewport {
+                        top: 2_500.0,
+                        bottom: 2_960.0,
+                    },
+                )),
+        );
+        let mut session = UiSurfaceSession::default();
+        let frame = session.build_frame_with_resolved_text_at_scale(
+            &surface,
+            760,
+            7_000,
+            [0, 0, 0, 255],
+            1.5,
+            |key| key.to_string(),
+        );
+        let body_requests = frame
+            .text_requests
+            .iter()
+            .filter(|request| request.node_id.starts_with("agent.message.0.body.text"))
+            .collect::<Vec<_>>();
+        let body = frame
             .layout_boxes
             .iter()
-            .find(|layout| layout.id == "agent.mode.active")
-            .expect("active mode option");
+            .find(|layout| layout.id == "agent.message.0.body")
+            .expect("virtualized message body");
 
-        assert!(active.rect.width < 90.0);
-        let hit = raf_ui::hit_test(
-            &frame.hit_regions,
-            [
-                active.rect.x + active.rect.width * 0.5,
-                active.rect.y + 15.0,
-            ],
-            UiHitTestMode::InteractiveOnly,
-        )
-        .expect("active mode hit");
-        assert_eq!(hit.id, "agent.mode.active");
+        assert!(!body_requests.is_empty());
+        assert!(body_requests.len() <= 8);
+        assert!(body_requests
+            .iter()
+            .all(|request| request.node_id != "agent.message.0.body.text"));
+        assert!(body.rect.height > 3_000.0);
     }
 
     #[test]
-    fn model_menu_add_action_and_form_are_present_in_independent_layers() {
-        let agent = AgentPanel::default();
+    fn session_rows_keep_distinct_vertical_tracks() {
+        let mut panel = AgentPanel::default();
+        panel.history.start_session("First chat");
+        panel.history.start_session("Second chat");
+        let surface = UiSurface::new(
+            "agent-sessions-layout",
+            StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root)
+                .with_layout(UiLayout::fill(UiFlow::None))
+                .with_child(build_sidebar(
+                    StudioUiPalette::IndustrialDark,
+                    &panel,
+                    280.0,
+                    180.0,
+                )),
+        );
+        let mut session = UiSurfaceSession::default();
+        let frame =
+            session.build_frame_with_resolved_text(&surface, 280, 180, [0, 0, 0, 255], |key| {
+                key.to_string()
+            });
+        let first = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.session.row.0")
+            .expect("first session row");
+        let second = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.session.row.1")
+            .expect("second session row");
+
+        assert_eq!(first.rect.height, 40.0);
+        assert_eq!(second.rect.height, 40.0);
+        assert!(second.rect.y >= first.rect.bottom());
+    }
+
+    #[test]
+    fn message_rows_reserve_height_instead_of_overlapping() {
+        let first = message("first");
+        let second = message("second");
+        let surface = UiSurface::new(
+            "agent-history-layout",
+            StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root)
+                .with_layout(UiLayout::fill(UiFlow::Column))
+                .with_child(message_card(
+                    StudioUiPalette::IndustrialDark,
+                    &first,
+                    360.0,
+                    0,
+                    MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+                ))
+                .with_child(message_card(
+                    StudioUiPalette::IndustrialDark,
+                    &second,
+                    360.0,
+                    1,
+                    MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+                )),
+        );
+        let mut session = UiSurfaceSession::default();
+        let frame =
+            session.build_frame_with_resolved_text(&surface, 400, 240, [0, 0, 0, 255], |key| {
+                key.to_string()
+            });
+        let first_row = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.message.0.row")
+            .expect("first message row");
+        let second_row = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.message.1.row")
+            .expect("second message row");
+
+        assert!(second_row.rect.y >= first_row.rect.bottom());
+    }
+
+    #[test]
+    fn wrapped_message_rows_advance_by_their_measured_height() {
+        let first = message(
+            "A long assistant response that must wrap across several lines inside the message card. \
+             It must keep the following message below it instead of painting over it.",
+        );
+        let second = message("second");
+        let surface = UiSurface::new(
+            "agent-wrapped-history-layout",
+            StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root)
+                .with_layout(UiLayout::fill(UiFlow::Column))
+                .with_child(message_card(
+                    StudioUiPalette::IndustrialDark,
+                    &first,
+                    260.0,
+                    0,
+                    MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+                ))
+                .with_child(message_card(
+                    StudioUiPalette::IndustrialDark,
+                    &second,
+                    260.0,
+                    1,
+                    MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+                )),
+        );
+        let mut session = UiSurfaceSession::default();
+        let frame =
+            session.build_frame_with_resolved_text(&surface, 300, 240, [0, 0, 0, 255], |key| {
+                match key {
+                    "app.agent_label" => "Agent".to_string(),
+                    _ => key.to_string(),
+                }
+            });
+        let first_row = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.message.0.row")
+            .expect("first wrapped message row");
+        let second_row = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.message.1.row")
+            .expect("second message row");
+        let first_body = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.message.0.body.text")
+            .expect("first body text");
+        assert!(first_body.rect.height > 18.0);
+        assert!(second_row.rect.y >= first_row.rect.bottom());
+    }
+
+    #[test]
+    fn dropdown_menus_have_vertical_flow_and_visible_bounds() {
+        let panel = AgentPanel::default();
         let settings = EngineSettings::default();
-        let menu = test_surface(&agent, &settings, true, false, false);
-        let menu_frame = menu.build_frame(640, 480, [0, 0, 0, 255]);
-        let add = menu_frame
+        let model_menu =
+            build_model_menu(StudioUiPalette::IndustrialDark, &panel, &settings, 720.0);
+        let mode_menu = build_mode_menu(StudioUiPalette::IndustrialDark, &settings, 720.0);
+
+        assert_eq!(model_menu.layout.flow, UiFlow::Column);
+        assert_eq!(mode_menu.layout.flow, UiFlow::Column);
+        assert!(model_menu.layout.rect.is_some_and(|rect| rect.height > 0.0));
+        assert!(mode_menu.layout.rect.is_some_and(|rect| rect.height > 0.0));
+    }
+
+    #[test]
+    fn selector_click_dispatches_the_shared_select_contract() {
+        let panel = AgentPanel::default();
+        let settings = EngineSettings::default();
+        let surface = build_agent_surface(
+            StudioUiPalette::IndustrialDark,
+            &panel,
+            &settings,
+            AgentReadiness::ProviderDisabled,
+            ProjectType::Game,
+            [720.0, 400.0],
+            0.0,
+            1.0,
+        );
+        let mut session = UiSurfaceSession::default();
+        let frame =
+            session.build_frame_with_resolved_text(&surface, 720, 400, [0, 0, 0, 255], |key| {
+                key.to_string()
+            });
+        let trigger = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.model.trigger")
+            .expect("model selector");
+        let point = [trigger.rect.x + 12.0, trigger.rect.y + 12.0];
+        let _ = session.process_input(
+            &surface,
+            &frame,
+            &UiInputState {
+                pointer_position: Some(point),
+                pointer_down: true,
+                time_seconds: 0.1,
+                ..UiInputState::default()
+            },
+        );
+        let actions = session.process_input(
+            &surface,
+            &frame,
+            &UiInputState {
+                pointer_position: Some(point),
+                time_seconds: 0.2,
+                ..UiInputState::default()
+            },
+        );
+
+        assert!(actions.iter().any(|action| {
+            matches!(
+                action.action,
+                raf_ui::UiAction::SetSelectOpen { ref id, open: true }
+                    if id == "agent.model.trigger"
+            )
+        }));
+    }
+
+    #[test]
+    fn model_menu_add_action_is_reachable_and_compact_selectors_keep_their_width() {
+        let mut panel = AgentPanel::default();
+        panel.model_menu_open = true;
+        let settings = EngineSettings::default();
+        let surface = build_agent_surface(
+            StudioUiPalette::IndustrialDark,
+            &panel,
+            &settings,
+            AgentReadiness::ProviderDisabled,
+            ProjectType::Game,
+            [720.0, 400.0],
+            0.0,
+            1.0,
+        );
+        let mut session = UiSurfaceSession::default();
+        let frame =
+            session.build_frame_with_resolved_text(&surface, 720, 400, [0, 0, 0, 255], |key| {
+                key.to_string()
+            });
+        let add = frame
             .layout_boxes
             .iter()
             .find(|layout| layout.id == "agent.model.add")
-            .expect("add model action");
-        let hit = raf_ui::hit_test(
-            &menu_frame.hit_regions,
-            [
-                add.rect.x + add.rect.width * 0.5,
-                add.rect.y + add.rect.height * 0.5,
-            ],
-            UiHitTestMode::InteractiveOnly,
-        )
-        .expect("add model hit");
-        assert_eq!(hit.id, "agent.model.add");
+            .expect("add model menu item");
+        assert!(add.interactive);
 
-        let form = test_surface(&agent, &settings, false, false, true);
-        assert!(form
-            .root
-            .children
-            .iter()
-            .any(|node| node.id == "agent.add-model"));
-    }
-
-    #[test]
-    fn popup_release_keeps_internal_mode_and_add_model_commands_alive() {
-        let internal = UiDispatchedAction {
-            target_id: "agent.mode.active".to_string(),
-            event: UiEventKind::Click,
-            action: UiAction::Command {
-                name: "agent.mode.select:active".to_string(),
+        let point = [add.rect.x + 12.0, add.rect.y + 12.0];
+        let _ = session.process_input(
+            &surface,
+            &frame,
+            &UiInputState {
+                pointer_position: Some(point),
+                pointer_down: true,
+                time_seconds: 0.1,
+                ..UiInputState::default()
             },
-        };
-        assert!(has_agent_popup_command(&[internal]));
-
-        let outside = UiDispatchedAction {
-            target_id: "agent.settings".to_string(),
-            event: UiEventKind::Click,
-            action: UiAction::Command {
-                name: "agent.settings".to_string(),
+        );
+        let actions = session.process_input(
+            &surface,
+            &frame,
+            &UiInputState {
+                pointer_position: Some(point),
+                time_seconds: 0.2,
+                ..UiInputState::default()
             },
-        };
-        assert!(!has_agent_popup_command(&[outside]));
-    }
+        );
+        assert!(actions.iter().any(|action| matches!(
+            action.action,
+            raf_ui::UiAction::Command { ref name } if name == "agent.model.add"
+        )));
 
-    #[test]
-    fn message_summary_exposes_continuous_range_and_response_limit() {
-        let mut agent = AgentPanel::default();
-        for index in 0..24 {
-            agent
-                .runtime
-                .messages
-                .push(ChatMessage::user(&format!("Prompt {index}")));
-        }
-        let settings = EngineSettings::default();
-        let surface = test_surface(&agent, &settings, false, false, false);
-        let frame = surface.build_frame(640, 480, [0, 0, 0, 255]);
-        let summary = frame
+        let narrow_header = build_header(
+            StudioUiPalette::IndustrialDark,
+            &panel,
+            &settings,
+            "OpenRouter".to_string(),
+            "Default".to_string(),
+            "app.agent_mode_plan",
+            340.0,
+        );
+        let narrow_surface = UiSurface::new(
+            "agent-narrow-header",
+            StudioUiPalette::IndustrialDark,
+            UiNode::new("root", UiNodeKind::Root).with_child(narrow_header),
+        );
+        let narrow_frame = narrow_surface.build_frame(340, 400, [0, 0, 0, 255]);
+        let model = narrow_frame
             .layout_boxes
             .iter()
-            .find(|layout| layout.id == "agent.messages.summary")
-            .expect("message summary");
-        let text = summary.text_value.as_deref().expect("summary text");
-        assert!(text.contains("24"));
-        assert!(text.contains(&settings.agent_max_response_tokens.to_string()));
-        assert!(text.contains("response"));
-        assert_eq!(
-            frame
-                .layout_boxes
-                .iter()
-                .filter(|layout| layout.id.starts_with("agent.message.")
-                    && layout.kind == UiNodeKind::Panel)
-                .count(),
-            24
-        );
+            .find(|layout| layout.id == "agent.model.trigger")
+            .expect("narrow model selector");
+        let mode = narrow_frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.mode.trigger")
+            .expect("narrow mode selector");
+        assert!(model.rect.width >= 100.0);
+        assert!(mode.rect.width >= 80.0);
+        assert!(mode.rect.x >= model.rect.right());
     }
 }

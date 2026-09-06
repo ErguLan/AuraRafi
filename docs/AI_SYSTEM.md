@@ -17,14 +17,15 @@ attached, reversible, budgeted, and outside Play/Runtime.
 
 ```
 User types message
-  -> AgentPanel (ai_chat.rs)                         UI layer
-    -> AgentRuntime (agent_runtime.rs)                State machine
+  -> AgentSurfaceHost (agent_surface.rs)              Native UI layer
+    -> AgentPanel + AgentRuntime                      Session/state machine
       -> OpenAiClient (openai_client.rs)              HTTP to LLM API
         <- Response with tool calls or text
-      -> AgentToolExecutor (agent_executor.rs)        Routes tools to handlers
-        -> Command handlers (game, electronics, etc.)  Engine mutations
-        <- CommandOutput
-      -> Result formatted back to LLM or user
+      -> ProjectSnapshot + contextual Agent tool pack
+      -> AgentToolExecutor (agent_executor.rs)        Native typed tool layer
+        -> EngineCommandRequest -> CommandGateway -> domain kernel
+        <- EngineCommandResponse + verification + diff
+      -> Compact AgentToolResult formatted for LLM and UI
 ```
 
 ## Key Files
@@ -33,9 +34,11 @@ User types message
 
 | File | Role |
 |------|------|
-| `src/panels/ai_chat.rs` | AgentPanel UI: left sidebar with sessions, message bubbles, model/mode selectors, input area |
-| `src/agent_executor.rs` | AgentToolExecutor: converts tool calls to engine commands, builds tool definitions from catalog, sanitizes tool names |
-| `src/editor_viewport_app.rs` | Owns the active editor document, session, history and attached command queue |
+| `src/panels/agent_surface.rs` | Retained native Agent surface: sidebar, transcript, model/mode controls, approvals and input |
+| `src/panels/ai_chat.rs` | AgentPanel session/readiness model consumed by the native surface |
+| `src/agent_context.rs` | ProjectSnapshot, scene hierarchy/query/inspect, asset/script catalog, health and verification reads |
+| `src/agent_executor.rs` | Contextual semantic tool packs and typed Agent tool-call-to-CommandGateway adapter |
+| `src/native_workbench.rs` | Owns the active native editor composition and connects the Agent surface to the editor runtime |
 | `src/attached.rs` | Token-scoped loopback endpoint; queues external CLI/MCP requests onto the editor thread |
 
 ### AI Crate (`crates/raf_ai/`)
@@ -54,7 +57,7 @@ User types message
 
 | File | Role |
 |------|------|
-| `src/ai.rs` | AgentMode, AiProvider, AiProviderConfig, AiModelShortcut types |
+| `src/ai.rs` | Inspect/Plan/Active AgentMode, provider and model shortcut types |
 | `locales/en.json` | English UI strings (agent_* keys) |
 | `locales/es.json` | Spanish UI strings |
 
@@ -75,19 +78,18 @@ The Agent panel is split into two areas:
 - **Right content**: header with model selector and mode toggle, scrollable
   message area, quick suggestion chips, and text input.
 
-### Agent history rendering and pagination
+### Agent history rendering
 
 The Agent runtime keeps the conversation available for the next model request,
-but the retained UI does not build every message card at once. It renders one
-page of non-system messages, controlled by `settings.agent_message_page_size`
-(default `8`, configurable from **Settings > AI**, bounded to `4..32`). This
-limits layout, text-atlas, and paint work when a chat opens.
+but the retained UI renders the transcript through one continuous scroll
+surface. `settings.agent_message_page_size` is a legacy persisted compatibility
+field (default `24`, bounded to `20..64`); it is not a network page size and
+must not be treated as a second history store.
 
-`Load older messages` moves the retained view toward earlier pages; `Back to
-latest` returns to the newest page. These controls are UI pagination, not
-network loading and not a second history store. A smaller page is safer for
-long tool-result chats. A larger page is more convenient but increases the
-one-time render cost when opening or changing pages.
+The native Agent keeps history I/O in the runtime and outside the render loop.
+The surface fingerprints only the visible message content needed for
+invalidation, so a long tool-result history does not make every idle frame
+proportional to stored output.
 
 #### 2026-08-06 Agent FPS incident
 
@@ -99,11 +101,11 @@ stable because they did not execute that Agent bridge. The fix records both
 sizes after a successful GPU render; resize, surface replacement, and actual
 input still invalidate normally.
 
-The page/session transition also resets retained scroll, focus, hover, and
-pointer capture state. This prevents a previous chat's transient interaction
-from being applied to the next document. Do not replace this with a full
-history rebuild on every frame, clear the text atlas during idle presentation,
-or move history persistence into the render loop.
+The session transition resets retained scroll, focus, hover, and pointer capture
+state. This prevents a previous chat's transient interaction from being applied
+to the next document. Do not replace this with a full history rebuild on every
+frame, clear the text atlas during idle presentation, or move history
+persistence into the render loop.
 
 Retained surfaces also have explicit pointer ownership. A press that started
 in the 3D viewport must not become an Agent drag merely because the cursor
@@ -125,11 +127,9 @@ never freezes:
 1. `AgentRuntime::start_run()` pushes the user message and spawns a thread
    that calls the LLM API.
 2. Each frame, `AgentRuntime::poll()` checks if the thread completed.
-3. If the response contains tool calls:
-   - **Active mode**: approved tools execute one per editor `poll()` frame,
-     then the next API request starts automatically.
-   - **Passive mode**: the UI shows the pending calls and waits for user
-     approval before continuing.
+3. If the response contains tool calls, the runtime executes at most one per
+   editor poll interval, preserving mutation order. Inspect runs reads only;
+   Plan routes mutations to disposable preview state; Active applies them.
 4. If the response is plain text, it is added to the message list and the runtime
    returns to `Done` state.
 
@@ -145,7 +145,31 @@ review but are never passed to the command executor. These guardrails keep an
 ambitious generation request cooperative with the editor; they do not enable a
 game runtime or autonomous in-game agent.
 
-### 3. Tool Name Sanitization
+### 3. Native Agent perception and contextual tool packs
+
+Before the first provider request for a submitted prompt, the workbench builds
+a compact `ProjectSnapshot` from the mounted `SceneGraph`, selection, active
+session, worker-backed `ProjectCatalog`, and shared revision ledger. The
+snapshot is seeded as an ephemeral `project_summary` tool exchange in the
+provider context. It is not duplicated inside the system prompt, persisted as
+a fake chat message, or rendered as user text. The Agent therefore starts with
+real project evidence while the conversation history remains truthful and
+compact.
+
+The pack is selected by project domain and prompt intent. A Game project never
+receives Electronics tools. Normal questions receive read tools only;
+authoring prompts receive semantic mutation tools. Observation tools are
+bounded and paginated: `project_summary`, `scene_outline`, `scene_query`,
+`scene_spatial_map`, `scene_design_audit`, `scene_inspect`, `assets_catalog`,
+`scripts_catalog`, `project_health`, `scene_verify`, and
+`game_validate_layout`.
+
+Game mutations use `scene_create`, `scene_update`, `scene_delete`,
+`scene_duplicate`, `scene_arrange`, `scene_instantiate_prefab`, and atomic
+`scene_batch`. The provider sees nested transforms and stable target fields;
+only the final adapter flattens them for the legacy domain handler.
+
+### 4. Tool Name Sanitization
 
 Some LLM providers (Cohere, etc.) reject tool names containing dots or special
 characters. The system automatically sanitizes command names:
@@ -154,16 +178,16 @@ characters. The system automatically sanitizes command names:
 - `workspace.read` becomes `workspace_read`
 - Leading digits get an underscore prefix
 
-A reverse map (`tool_name_map`) translates sanitized names back to original
-command names before execution.
+A contextual route table maps the provider-safe name to either a native read or
+a typed command route. It no longer reconstructs a slash command string.
 
-### 4. Settings Linkage
+### 5. Settings Linkage
 
 The Agent panel reads from the same `EngineSettings` as the Settings panel:
 
 - `settings.default_ai_provider` -- which provider is active
 - `settings.ai_providers` -- per-provider base URL, model, API key
-- `settings.agent_mode` -- Passive (ask before commands) or Active (auto-execute)
+- `settings.agent_mode` -- Inspect, Plan (preview), or Active (apply)
 - `settings.agent_model_shortcuts` -- user-defined model shortcuts
 - `settings.language` -- UI language
 

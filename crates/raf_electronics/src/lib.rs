@@ -9,6 +9,7 @@ pub mod component;
 pub mod drc;
 pub mod export;
 pub mod extensions;
+pub mod fingerprint;
 pub mod library;
 pub mod netlist;
 pub mod pcb;
@@ -30,7 +31,8 @@ pub use extensions::{
     register_component_template, register_drc_rule, registered_extension_summary,
     ElectricalExtensionRegistry, ElectricalExtensionSummary, ElectricalRule,
 };
-pub use library::{ComponentLibrary, ComponentTemplate};
+pub use fingerprint::{pcb_fingerprint, schematic_fingerprint};
+pub use library::{ComponentLibrary, ComponentTemplate, ELECTRICAL_ASSETS_DIR};
 pub use netlist::Netlist;
 pub use pcb::{
     footprint_definition, BoardOutline, FootprintDefinition, FootprintPadDefinition, PcbAirwire,

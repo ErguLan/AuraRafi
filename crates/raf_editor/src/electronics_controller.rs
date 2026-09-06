@@ -9,11 +9,10 @@
 
 use glam::Vec2;
 use raf_core::config::EngineSettings;
-use raf_core::project::Project;
+use raf_core::project::{Project, ProjectSettings};
 use raf_core::session::ProjectSessionRegistry;
 use raf_core::{CaptureMode, InputKey, InputOwner, InputRouter, InputSnapshot, PointerButton};
 use raf_electronics::cad_interaction::{pick, CadInteractionState};
-use raf_electronics::component::ElectronicComponent;
 use raf_electronics::library::ComponentLibrary;
 use raf_electronics::schematic::{component_pin_world_position, WireAnchor};
 use raf_electronics::{
@@ -158,7 +157,12 @@ pub struct NativeElectronicsEditor {
     library: ComponentLibrary,
     placement_template: Option<usize>,
     grid_visible: bool,
+    snap_enabled: bool,
     grid_step: f32,
+    schematic_grid_step: f32,
+    pcb_grid_step: f32,
+    placement_drag_active: bool,
+    placement_preview: Option<Vec2>,
     grid_opacity: f32,
     labels_visible: bool,
     drc_lines: Vec<String>,
@@ -171,6 +175,9 @@ pub struct NativeElectronicsEditor {
     context_menu_position: Option<[f32; 2]>,
     secondary_pointer: Option<SecondaryPointerState>,
     component_drag: Option<ComponentDrag>,
+    pan_pointer: Option<PointerButton>,
+    minimap_drag: bool,
+    inactive_camera: Option<CadCamera>,
     camera_initialized: bool,
     revision: u64,
     ui_revision: u64,
@@ -195,7 +202,12 @@ impl NativeElectronicsEditor {
             library: ComponentLibrary::default_library(),
             placement_template: None,
             grid_visible: true,
+            snap_enabled: true,
             grid_step: 20.0,
+            schematic_grid_step: 20.0,
+            pcb_grid_step: 20.0,
+            placement_drag_active: false,
+            placement_preview: None,
             grid_opacity: 0.55,
             labels_visible: true,
             drc_lines: Vec::new(),
@@ -208,6 +220,9 @@ impl NativeElectronicsEditor {
             context_menu_position: None,
             secondary_pointer: None,
             component_drag: None,
+            pan_pointer: None,
+            minimap_drag: false,
+            inactive_camera: None,
             camera_initialized: false,
             revision: 1,
             ui_revision: 1,
@@ -232,6 +247,7 @@ impl NativeElectronicsEditor {
                 editor.pcb = pcb;
             }
         }
+        editor.library.load_external_assets_from(&project.path);
         editor.rebuild_scene();
         editor.dirty = false;
         editor
@@ -265,19 +281,60 @@ impl NativeElectronicsEditor {
         &self.library
     }
 
+    /// Re-read external component templates from `<project_path>/ElectricalAssets/`
+    /// and merge them into the live library. Safe to call after the editor is
+    /// already open; touch the UI revision so the navigator refreshes.
+    pub fn refresh_library(&mut self, project_path: &std::path::Path) {
+        self.library.load_external_assets_from(project_path);
+        self.touch_ui();
+    }
+
     pub fn grid_visible(&self) -> bool {
         self.grid_visible
+    }
+
+    pub fn grid_step(&self) -> f32 {
+        self.grid_step
     }
 
     pub fn apply_engine_settings(&mut self, settings: &EngineSettings) {
         let grid_step = settings.electronics_grid_step_mm.clamp(5.0, 100.0);
         let grid_opacity = settings.electronics_grid_opacity.clamp(0.2, 1.0);
         let changed = self.grid_visible != settings.grid_visible
+            || self.snap_enabled != settings.snap_to_grid
             || (self.grid_step - grid_step).abs() > f32::EPSILON
             || (self.grid_opacity - grid_opacity).abs() > f32::EPSILON;
+        let labels_changed = self.labels_visible != settings.show_viewport_labels;
         self.grid_visible = settings.grid_visible;
+        self.snap_enabled = settings.snap_to_grid;
         self.grid_step = grid_step;
+        self.schematic_grid_step = grid_step;
+        self.pcb_grid_step = grid_step;
         self.grid_opacity = grid_opacity;
+        self.labels_visible = settings.show_viewport_labels;
+        if changed || labels_changed {
+            self.touch_ui();
+            self.touch();
+        }
+    }
+
+    pub fn apply_project_settings(&mut self, settings: &ProjectSettings) {
+        let schematic_step = settings
+            .electronics_schematic_grid_step_mm
+            .clamp(1.0, 100.0);
+        let pcb_step = settings.electronics_pcb_grid_step_mm.clamp(1.0, 100.0);
+        let active_step = match self.active_surface {
+            CadSurfaceKind::Schematic => schematic_step,
+            CadSurfaceKind::Pcb => pcb_step,
+        };
+        let changed = (self.schematic_grid_step - schematic_step).abs() > f32::EPSILON
+            || (self.pcb_grid_step - pcb_step).abs() > f32::EPSILON
+            || self.snap_enabled != settings.electronics_snap_to_grid
+            || (self.grid_step - active_step).abs() > f32::EPSILON;
+        self.schematic_grid_step = schematic_step;
+        self.pcb_grid_step = pcb_step;
+        self.grid_step = active_step;
+        self.snap_enabled = settings.electronics_snap_to_grid;
         if changed {
             self.touch_ui();
             self.touch();
@@ -293,16 +350,20 @@ impl NativeElectronicsEditor {
             .components
             .iter()
             .find(|component| component.id == source_id)
-            .map(|component| match component.kind_label() {
-                "Resistor" => "electronics://library/resistor.png",
-                "Capacitor" => "electronics://library/capacitor.png",
-                "LED" => "electronics://library/led.png",
-                "Magnet" => "electronics://library/magnet.png",
-                "Battery" => "electronics://library/battery.png",
-                "Ground" => "electronics://library/ground.png",
-                _ => "electronics://library/generic.png",
-            })
+            .map(|component| component_asset_key(component.kind_label()))
             .unwrap_or("electronics://library/generic.png")
+    }
+
+    /// Asset used by the pointer-driven library placement ghost. Keeping this
+    /// lookup in the controller means the canvas overlay does not need to know
+    /// how component templates are classified.
+    pub fn placement_preview_asset_key(&self) -> Option<&'static str> {
+        self.placement_drag_active.then(|| {
+            self.placement_template
+                .and_then(|index| self.library.components.get(index))
+                .map(|template| component_asset_key(template.template.kind_label()))
+                .unwrap_or("electronics://library/generic.png")
+        })
     }
 
     pub fn drc_lines(&self) -> &[String] {
@@ -598,6 +659,20 @@ impl NativeElectronicsEditor {
                         }
                     }
                 }
+                if let Some(index) = command.strip_prefix("electronics.library.drag.start.") {
+                    if let Ok(index) = index.parse::<usize>() {
+                        return self.begin_library_drag(index);
+                    }
+                }
+                if command.starts_with("electronics.library.drag.move.")
+                    || command.starts_with("electronics.library.drag.end.")
+                {
+                    // Pointer coordinates are consumed by the native frame
+                    // so the controller can convert them against the actual
+                    // Electronics canvas. The command itself is retained as
+                    // a semantic no-op for direct/headless callers.
+                    return self.placement_drag_active;
+                }
                 return false;
             }
         }
@@ -617,20 +692,32 @@ impl NativeElectronicsEditor {
                 )
             })
             .map(|selection| selection.source_id);
+        let previous_camera = self.camera_initialized.then_some(self.camera);
+        let next_camera = self.inactive_camera.take();
+        self.inactive_camera = previous_camera;
+        self.camera = next_camera.unwrap_or_default();
+        self.camera_initialized = next_camera.is_some();
         self.active_surface = surface;
+        // A PCB view is a derived document. Keep the established workflow in
+        // which entering it materializes missing footprints/links from the
+        // schematic, while still preserving an independent camera per view.
+        if surface == CadSurfaceKind::Pcb {
+            self.sync_pcb_from_schematic();
+        }
+        self.grid_step = match surface {
+            CadSurfaceKind::Schematic => self.schematic_grid_step,
+            CadSurfaceKind::Pcb => self.pcb_grid_step,
+        };
         self.selection = None;
         self.interaction.clear_selection();
         self.wire_start = None;
         self.board_outline_start = None;
-        self.camera_initialized = false;
-        if surface == CadSurfaceKind::Pcb
-            && self.pcb.components.is_empty()
-            && !self.schematic.components.is_empty()
-        {
-            self.sync_pcb_from_schematic();
-        } else {
-            self.rebuild_scene();
-        }
+        self.tool = ElectronicsTool::Select;
+        self.placement_template = None;
+        self.placement_drag_active = false;
+        self.placement_preview = None;
+        self.pointer_world = None;
+        self.rebuild_scene_internal();
         if let Some(component_id) = cross_probe_component {
             let index = match surface {
                 CadSurfaceKind::Schematic => self
@@ -679,11 +766,35 @@ impl NativeElectronicsEditor {
         self.history.can_redo()
     }
 
+    pub fn can_rotate_selection(&self) -> bool {
+        let Some(selection) = self.selection else {
+            return false;
+        };
+        if !matches!(
+            selection.kind,
+            ElectronicsSelectionKind::Component | ElectronicsSelectionKind::Pin
+        ) {
+            return false;
+        }
+        match self.active_surface {
+            CadSurfaceKind::Schematic => self
+                .schematic
+                .components
+                .iter()
+                .any(|component| component.id == selection.source_id && !component.locked),
+            CadSurfaceKind::Pcb => self.pcb.components.iter().any(|component| {
+                component.component_id == selection.source_id && !component.locked
+            }),
+        }
+    }
+
     pub fn set_tool(&mut self, tool: ElectronicsTool) {
         if self.tool != tool {
             self.tool = tool;
             if tool != ElectronicsTool::Place {
                 self.placement_template = None;
+                self.placement_drag_active = false;
+                self.placement_preview = None;
             }
             if tool != ElectronicsTool::BoardOutline {
                 self.board_outline_start = None;
@@ -910,10 +1021,38 @@ impl NativeElectronicsEditor {
                 .unwrap_or_else(|| CadScene::from_schematic(&self.schematic)),
             CadSurfaceKind::Pcb => CadScene::from_pcb(&self.pcb),
         };
+        if let (Some(template_index), Some(position)) =
+            (self.placement_template, self.placement_preview)
+        {
+            if let Some(template) = self.library.components.get(template_index) {
+                let size = raf_electronics::cad_scene::schematic_component_size(&template.template);
+                let min = position - size * 0.5;
+                let max = position + size * 0.5;
+                self.scene.objects.push(CadObject {
+                    id: "component-placement-preview".to_string(),
+                    source_id: None,
+                    kind: CadObjectKind::Component,
+                    layer: CadLayerKind::Overlay,
+                    pick_priority: CadPickPriority::Overlay,
+                    rect: Some(raf_electronics::CadRect::new(position, size)),
+                    points: Vec::new(),
+                    line_paths: vec![vec![
+                        min,
+                        Vec2::new(max.x, min.y),
+                        max,
+                        Vec2::new(min.x, max.y),
+                        min,
+                    ]],
+                    label: None,
+                    net: None,
+                    color_rgba: [255, 172, 64, 74],
+                });
+            }
+        }
         if self.active_surface == CadSurfaceKind::Pcb {
             if let (Some(start), Some(end)) = (self.board_outline_start, self.pointer_world) {
                 let min = start.min(end);
-                let max = snap_to_grid(start.max(end));
+                let max = self.snap_world(start.max(end));
                 self.scene.objects.push(CadObject {
                     id: "board-outline-preview".to_string(),
                     source_id: None,
@@ -939,7 +1078,7 @@ impl NativeElectronicsEditor {
             let end = self
                 .pin_endpoint_at(end)
                 .map(|(_, position, _)| position)
-                .unwrap_or_else(|| snap_to_grid(end));
+                .unwrap_or_else(|| self.snap_world(end));
             let points = orthogonal_wire_points(start.world, end);
             self.scene.objects.push(CadObject {
                 id: "wire-preview".to_string(),
@@ -957,6 +1096,14 @@ impl NativeElectronicsEditor {
         }
     }
 
+    fn snap_world(&self, value: Vec2) -> Vec2 {
+        if self.snap_enabled {
+            snap_to_grid(value, self.grid_step)
+        } else {
+            value
+        }
+    }
+
     fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1).max(1);
     }
@@ -964,6 +1111,18 @@ impl NativeElectronicsEditor {
     fn touch_ui(&mut self) {
         self.ui_revision = self.ui_revision.wrapping_add(1).max(1);
         self.touch();
+    }
+}
+
+fn component_asset_key(kind_label: &str) -> &'static str {
+    match kind_label {
+        "Resistor" => "electronics://library/resistor.png",
+        "Capacitor" => "electronics://library/capacitor.png",
+        "LED" => "electronics://library/led.png",
+        "Magnet" => "electronics://library/magnet.png",
+        "Battery" => "electronics://library/battery.png",
+        "Ground" => "electronics://library/ground.png",
+        _ => "electronics://library/generic.png",
     }
 }
 
@@ -1001,16 +1160,18 @@ fn scene_bounds(scene: &CadScene) -> Option<(Vec2, Vec2)> {
     found.then_some((min, max))
 }
 
-fn snap_to_grid(value: Vec2) -> Vec2 {
+fn snap_to_grid(value: Vec2, step: f32) -> Vec2 {
+    let step = step.max(f32::EPSILON);
     Vec2::new(
-        (value.x / 20.0).round() * 20.0,
-        (value.y / 20.0).round() * 20.0,
+        (value.x / step).round() * step,
+        (value.y / step).round() * step,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raf_electronics::component::ElectronicComponent;
 
     #[test]
     fn camera_zoom_keeps_cursor_world_point_stable() {
@@ -1142,6 +1303,26 @@ mod tests {
         assert!(editor.apply_ui_command("electronics.place.template.0"));
         assert_eq!(editor.tool(), ElectronicsTool::Place);
         assert!(editor.ui_revision() > ui_revision);
+    }
+
+    #[test]
+    fn library_drag_only_commits_inside_the_canvas() {
+        let mut editor = NativeElectronicsEditor::empty("Test");
+        let canvas = EditorRect::new(10.0, 20.0, 240.0, 180.0);
+
+        assert!(editor.begin_library_drag(0));
+        assert_eq!(
+            editor.placement_preview_asset_key(),
+            Some("electronics://library/resistor.png")
+        );
+        assert!(!editor.finish_library_drag_at(Some([400.0, 400.0]), canvas));
+        assert!(editor.schematic.components.is_empty());
+        assert_eq!(editor.placement_preview_asset_key(), None);
+
+        assert!(editor.begin_library_drag(0));
+        assert!(editor.finish_library_drag_at(Some([40.0, 50.0]), canvas));
+        assert_eq!(editor.schematic.components.len(), 1);
+        assert!(!editor.placement_drag_active);
     }
 
     #[test]

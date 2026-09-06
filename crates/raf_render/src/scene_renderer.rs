@@ -26,10 +26,14 @@ use crate::api_graphic_basic::pipeline::BasicPipelineKind;
 use crate::camera::{Camera, CameraMode};
 use crate::geometry::mesh_data::MeshData;
 use crate::geometry::primitives;
+use crate::math::clip::{clip_triangle_to_near, ClipVertex};
 use crate::math::frustum::Frustum;
 use crate::math::transform;
 use crate::render_pipeline::framebuffer::Framebuffer;
 use crate::render_pipeline::rasterizer::{self, ScreenVertex};
+use crate::scene_visibility::{
+    SceneObjectBounds, SceneVisibility, SceneVisibilityPolicy, WorldStreamVisibility,
+};
 
 use raf_core::scene::graph::{Primitive, SceneGraph, SceneNodeId};
 use raf_core::scene::WorldTransformCache;
@@ -45,23 +49,10 @@ pub struct FrameStats {
     pub triangles_rendered: u32,
     /// Triangles culled by backface test.
     pub triangles_culled: u32,
-    /// Visible entities skipped because the frame triangle budget was reached.
-    pub budget_culled_entities: u32,
-    /// Triangles withheld by the frame triangle budget.
-    pub budget_culled_triangles: u32,
+    /// Entities fully outside the camera frustum.
+    pub frustum_culled_entities: u32,
     /// Entities outside the active streamed camera region.
     pub streaming_culled_entities: u32,
-}
-
-/// Render mode for the viewport.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RenderMode {
-    /// Fill triangles with flat shading.
-    Solid,
-    /// Draw only triangle edges.
-    Wireframe,
-    /// Solid + wireframe edges on all objects.
-    Preview,
 }
 
 /// Per-frame renderer options supplied by the editor viewport.
@@ -71,7 +62,6 @@ pub enum RenderMode {
 /// xray opacity, and selection highlighting.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOptions {
-    pub mode: RenderMode,
     pub show_grid_3d: bool,
     pub grid_spacing: f32,
     pub grid_load_distance: f32,
@@ -89,8 +79,6 @@ pub struct RenderOptions {
     pub primary_selected: Option<u64>,
     pub grid_y: f32,
     pub grid_no_depth_test: bool,
-    /// Maximum scene triangles recorded for this frame. `u32::MAX` is unlimited.
-    pub triangle_budget: u32,
     /// Enable region-based visibility before frustum culling and draw sorting.
     pub world_streaming_enabled: bool,
     /// Edge length in meters for a streamed world region.
@@ -102,7 +90,6 @@ pub struct RenderOptions {
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
-            mode: RenderMode::Solid,
             show_grid_3d: true,
             grid_spacing: 1.0,
             grid_load_distance: 15.0,
@@ -115,7 +102,6 @@ impl Default for RenderOptions {
             primary_selected: None,
             grid_y: -0.02,
             grid_no_depth_test: false,
-            triangle_budget: u32::MAX,
             world_streaming_enabled: false,
             world_stream_region_size: 128.0,
             world_stream_load_radius: 3,
@@ -134,19 +120,19 @@ pub struct SceneRenderer {
     cube_mesh: MeshData,
     cube_basic_mesh: Arc<BasicMesh>,
     cube_edges: Vec<[Vec3; 2]>,
-    cube_radius: f32,
+    cube_local_bounds: (Vec3, Vec3),
     cylinder_mesh: MeshData,
     cylinder_basic_mesh: Arc<BasicMesh>,
     cylinder_edges: Vec<[Vec3; 2]>,
-    cylinder_radius: f32,
+    cylinder_local_bounds: (Vec3, Vec3),
     sphere_mesh: MeshData,
     sphere_basic_mesh: Arc<BasicMesh>,
     sphere_edges: Vec<[Vec3; 2]>,
-    sphere_radius: f32,
+    sphere_local_bounds: (Vec3, Vec3),
     plane_mesh: MeshData,
     plane_basic_mesh: Arc<BasicMesh>,
     plane_edges: Vec<[Vec3; 2]>,
-    plane_radius: f32,
+    plane_local_bounds: (Vec3, Vec3),
     /// Stats from the last frame.
     pub stats: FrameStats,
 }
@@ -174,27 +160,129 @@ impl SceneRenderer {
         let cylinder_mesh = primitives::cylinder(32);
         let sphere_mesh = primitives::sphere(16, 24);
         let plane_mesh = primitives::plane(1);
+        let cube_local_bounds = cube_mesh.aabb();
+        let cylinder_local_bounds = cylinder_mesh.aabb();
+        let sphere_local_bounds = sphere_mesh.aabb();
+        let plane_local_bounds = plane_mesh.aabb();
 
         Self {
             framebuffer: Framebuffer::new(width.max(1), height.max(1)),
             cube_basic_mesh: Arc::new(mesh_to_basic(&cube_mesh)),
             cube_edges: primitives::extract_edges(&cube_mesh),
-            cube_radius: cube_mesh.bounding_radius(),
+            cube_local_bounds,
             cube_mesh,
             cylinder_basic_mesh: Arc::new(mesh_to_basic(&cylinder_mesh)),
             cylinder_edges: primitives::extract_edges(&cylinder_mesh),
-            cylinder_radius: cylinder_mesh.bounding_radius(),
+            cylinder_local_bounds,
             cylinder_mesh,
             sphere_basic_mesh: Arc::new(mesh_to_basic(&sphere_mesh)),
             sphere_edges: primitives::extract_edges(&sphere_mesh),
-            sphere_radius: sphere_mesh.bounding_radius(),
+            sphere_local_bounds,
             sphere_mesh,
             plane_basic_mesh: Arc::new(mesh_to_basic(&plane_mesh)),
             plane_edges: primitives::extract_edges(&plane_mesh),
-            plane_radius: plane_mesh.bounding_radius(),
+            plane_local_bounds,
             plane_mesh,
             stats: FrameStats::default(),
         }
+    }
+
+    fn local_bounds_for_primitive(&self, primitive: Primitive) -> (Vec3, Vec3) {
+        match primitive {
+            Primitive::Cube => self.cube_local_bounds,
+            Primitive::Cylinder => self.cylinder_local_bounds,
+            Primitive::Sphere => self.sphere_local_bounds,
+            Primitive::Plane => self.plane_local_bounds,
+            Primitive::Empty => self.cube_local_bounds,
+        }
+    }
+
+    fn collect_render_jobs(
+        &self,
+        scene: &SceneGraph,
+        frustum: &Frustum,
+        camera_position: Vec3,
+        selected: &[SceneNodeId],
+        options: RenderOptions,
+        mesh_override: Option<(SceneNodeId, &MeshData)>,
+    ) -> (Vec<RenderJob>, FrameStats) {
+        let selected_ids: HashSet<_> = selected.iter().copied().collect();
+        let transforms = WorldTransformCache::build(scene);
+        let visibility = SceneVisibilityPolicy {
+            world_stream: WorldStreamVisibility {
+                enabled: options.world_streaming_enabled,
+                region_size: options.world_stream_region_size,
+                load_radius: options.world_stream_load_radius,
+            },
+        };
+        let mut jobs = Vec::new();
+        let mut stats = FrameStats::default();
+        let override_bounds = mesh_override.map(|(override_id, mesh)| (override_id, mesh.aabb()));
+
+        for (id, node) in scene.iter() {
+            if !node.visible || matches!(node.primitive, Primitive::Empty) {
+                continue;
+            }
+            stats.total_entities += 1;
+
+            let model = transforms
+                .world_matrix(id)
+                .unwrap_or_else(|| node.local_matrix());
+            let (local_min, local_max) = override_bounds
+                .and_then(|(override_id, bounds)| (override_id == id).then_some(bounds))
+                .unwrap_or_else(|| self.local_bounds_for_primitive(node.primitive));
+            let bounds = SceneObjectBounds::from_local_aabb(local_min, local_max, model);
+
+            match visibility.classify(frustum, camera_position, bounds) {
+                SceneVisibility::Visible => {}
+                SceneVisibility::OutsideFrustum => {
+                    stats.frustum_culled_entities += 1;
+                    continue;
+                }
+                SceneVisibility::OutsideStream => {
+                    stats.streaming_culled_entities += 1;
+                    continue;
+                }
+            }
+
+            stats.visible_entities += 1;
+            let mut base_color = [node.color.r, node.color.g, node.color.b, node.color.a];
+            if options.solid_xray_mode {
+                base_color[3] = base_color[3].min(120);
+            }
+            let center = bounds.center();
+
+            jobs.push(RenderJob {
+                id,
+                primitive: node.primitive,
+                model,
+                base_color,
+                is_selected: selected_ids.contains(&id),
+                dist_to_camera: (center - camera_position).length(),
+                is_transparent: base_color[3] < u8::MAX,
+            });
+        }
+
+        // Opaque geometry is front-to-back for early depth rejection;
+        // transparent geometry stays back-to-front. Entity ID breaks equal
+        // distances deterministically so camera motion cannot shuffle ties.
+        jobs.sort_by(|a, b| {
+            let order = match (a.is_transparent, b.is_transparent) {
+                (false, true) => std::cmp::Ordering::Less,
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, false) => a
+                    .dist_to_camera
+                    .partial_cmp(&b.dist_to_camera)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+                (true, true) => b
+                    .dist_to_camera
+                    .partial_cmp(&a.dist_to_camera)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            };
+            order.then_with(|| a.id.0.cmp(&b.id.0))
+        });
+
+        (jobs, stats)
     }
 
     /// Render the scene and return the pixel buffer.
@@ -225,106 +313,17 @@ impl SceneRenderer {
         let frustum = Frustum::from_matrix(&vp);
         let light_dir = light_dir.normalize();
         let cam_eye = camera.eye();
-        let selected_ids: HashSet<_> = selected.iter().copied().collect();
-        let transforms = WorldTransformCache::build(scene);
 
         let cube_mesh = &self.cube_mesh;
         let cube_edges = self.cube_edges.as_slice();
-        let cube_radius = self.cube_radius;
         let cylinder_mesh = &self.cylinder_mesh;
         let cylinder_edges = self.cylinder_edges.as_slice();
-        let cylinder_radius = self.cylinder_radius;
         let sphere_mesh = &self.sphere_mesh;
         let sphere_edges = self.sphere_edges.as_slice();
-        let sphere_radius = self.sphere_radius;
         let plane_mesh = &self.plane_mesh;
         let plane_edges = self.plane_edges.as_slice();
-        let plane_radius = self.plane_radius;
-
-        let mut stats = FrameStats::default();
-        // Collect render jobs first (avoids borrow conflict on self)
-        let mut jobs: Vec<RenderJob> = Vec::new();
-
-        for (id, node) in scene.iter() {
-            if !node.visible {
-                continue;
-            }
-            if matches!(node.primitive, Primitive::Empty) {
-                continue;
-            }
-
-            stats.total_entities += 1;
-
-            // World matrix (includes parent chain)
-            let model = transforms
-                .world_matrix(id)
-                .unwrap_or_else(|| node.local_matrix());
-            let world_pos = model.col(3).truncate();
-
-            if !within_world_stream_radius(world_pos, cam_eye, options) {
-                stats.streaming_culled_entities += 1;
-                continue;
-            }
-
-            let mesh_radius = match node.primitive {
-                Primitive::Cube => cube_radius,
-                Primitive::Cylinder => cylinder_radius,
-                Primitive::Sphere => sphere_radius,
-                Primitive::Plane => plane_radius,
-                _ => cube_radius,
-            };
-
-            let bounding_r = mesh_radius * world_max_scale(model);
-
-            if !frustum.intersects_sphere(world_pos, bounding_r) {
-                continue;
-            }
-
-            stats.visible_entities += 1;
-
-            let mut base_color = [node.color.r, node.color.g, node.color.b, node.color.a];
-            if matches!(options.mode, RenderMode::Solid) && options.solid_xray_mode {
-                // Clamp opaque objects so the depth-tested scene becomes easier to inspect.
-                base_color[3] = base_color[3].min(120);
-            }
-            let is_selected = selected_ids.contains(&id);
-
-            let dist = (world_pos - cam_eye).length();
-            let is_transparent = node.color.a < 255;
-
-            jobs.push(RenderJob {
-                id,
-                primitive: node.primitive,
-                model,
-                base_color,
-                is_selected,
-                dist_to_camera: dist,
-                is_transparent,
-                triangle_count: primitive_triangle_count(
-                    node.primitive,
-                    &self.cube_mesh,
-                    &self.cylinder_mesh,
-                    &self.sphere_mesh,
-                    &self.plane_mesh,
-                ),
-            });
-        }
-
-        // Sort: opaque first (front-to-back for early Z rejection),
-        // then transparent (back-to-front for correct blending).
-        jobs.sort_by(|a, b| match (a.is_transparent, b.is_transparent) {
-            (false, true) => std::cmp::Ordering::Less,
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, false) => a
-                .dist_to_camera
-                .partial_cmp(&b.dist_to_camera)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            (true, true) => b
-                .dist_to_camera
-                .partial_cmp(&a.dist_to_camera)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        });
-        apply_triangle_budget(&mut jobs, options.triangle_budget, &mut stats);
+        let (jobs, mut stats) =
+            self.collect_render_jobs(scene, &frustum, cam_eye, selected, options, mesh_override);
 
         if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
             draw_world_grid(
@@ -339,8 +338,7 @@ impl SceneRenderer {
         }
 
         // Execute render jobs (now we can borrow framebuffer mutably)
-        let use_tonality =
-            !(matches!(options.mode, RenderMode::Solid) && !options.solid_face_tonality);
+        let use_tonality = options.solid_face_tonality;
         for job in &jobs {
             let override_mesh = mesh_override.and_then(|(override_id, override_mesh)| {
                 (override_id == job.id).then_some(override_mesh)
@@ -388,14 +386,6 @@ impl SceneRenderer {
                 let c0 = mvp * Vec4::new(p0.x, p0.y, p0.z, 1.0);
                 let c1 = mvp * Vec4::new(p1.x, p1.y, p1.z, 1.0);
                 let c2 = mvp * Vec4::new(p2.x, p2.y, p2.z, 1.0);
-
-                // Near plane clip: skip if any vertex behind camera
-                if c0.w <= 0.001 || c1.w <= 0.001 || c2.w <= 0.001 {
-                    stats.triangles_culled += 1;
-                    continue;
-                }
-
-                // Perspective divide -> NDC -> screen
                 let shade0 = if use_tonality {
                     0.3 + 0.7
                         * transform::transform_normal(mesh.normals[i0], &normal_mat)
@@ -420,64 +410,34 @@ impl SceneRenderer {
                 } else {
                     1.0
                 };
-
-                let to_screen = |c: Vec4, shade: f32| -> ScreenVertex {
-                    let inv_w = 1.0 / c.w;
-                    let ndc_x = c.x * inv_w;
-                    let ndc_y = c.y * inv_w;
-                    let ndc_z = c.z * inv_w;
-                    ScreenVertex {
-                        x: (ndc_x + 1.0) * 0.5 * vp_w,
-                        y: (1.0 - ndc_y) * 0.5 * vp_h,
-                        z: (ndc_z + 1.0) * 0.5,
-                        shade,
-                    }
-                };
-
-                let sv0 = to_screen(c0, shade0);
-                let sv1 = to_screen(c1, shade1);
-                let sv2 = to_screen(c2, shade2);
-
-                // Rasterize based on render mode.
-                match options.mode {
-                    RenderMode::Wireframe => {
-                        // Skip filled triangles in wireframe mode.
-                    }
-                    RenderMode::Solid | RenderMode::Preview => {
-                        if job.is_transparent {
-                            rasterizer::rasterize_triangle_blended(
-                                &mut self.framebuffer,
-                                sv0,
-                                sv1,
-                                sv2,
-                                color[0],
-                                color[1],
-                                color[2],
-                                color[3],
-                            );
-                        } else {
-                            rasterizer::rasterize_triangle(
-                                &mut self.framebuffer,
-                                sv0,
-                                sv1,
-                                sv2,
-                                color[0],
-                                color[1],
-                                color[2],
-                                color[3],
-                            );
-                        }
-                    }
+                let rendered = rasterize_clipped_triangle(
+                    &mut self.framebuffer,
+                    [
+                        ClipVertex {
+                            position: c0,
+                            shade: shade0,
+                        },
+                        ClipVertex {
+                            position: c1,
+                            shade: shade1,
+                        },
+                        ClipVertex {
+                            position: c2,
+                            shade: shade2,
+                        },
+                    ],
+                    color,
+                    vp_w,
+                    vp_h,
+                );
+                if rendered == 0 {
+                    stats.triangles_culled += 1;
+                } else {
+                    stats.triangles_rendered += rendered;
                 }
-
-                stats.triangles_rendered += 1;
             }
 
-            let draw_surface_edges = match options.mode {
-                RenderMode::Wireframe => true,
-                RenderMode::Preview => true,
-                RenderMode::Solid => options.solid_show_surface_edges,
-            };
+            let draw_surface_edges = options.solid_show_surface_edges;
 
             if draw_surface_edges || (options.selection_outline && job.is_selected) {
                 let edge_color = if job.is_selected && options.selection_outline {
@@ -521,111 +481,25 @@ impl SceneRenderer {
         let frustum = Frustum::from_matrix(&vp);
         let light_dir = light_dir.normalize();
         let cam_eye = camera.eye();
-        let selected_ids: HashSet<_> = selected.iter().copied().collect();
-        let transforms = WorldTransformCache::build(scene);
 
         let cube_mesh = &self.cube_mesh;
         let cube_basic_mesh = Arc::clone(&self.cube_basic_mesh);
         let cube_edges = self.cube_edges.as_slice();
-        let cube_radius = self.cube_radius;
         let cylinder_mesh = &self.cylinder_mesh;
         let cylinder_basic_mesh = Arc::clone(&self.cylinder_basic_mesh);
         let cylinder_edges = self.cylinder_edges.as_slice();
-        let cylinder_radius = self.cylinder_radius;
         let sphere_mesh = &self.sphere_mesh;
         let sphere_basic_mesh = Arc::clone(&self.sphere_basic_mesh);
         let sphere_edges = self.sphere_edges.as_slice();
-        let sphere_radius = self.sphere_radius;
         let plane_mesh = &self.plane_mesh;
         let plane_basic_mesh = Arc::clone(&self.plane_basic_mesh);
         let plane_edges = self.plane_edges.as_slice();
-        let plane_radius = self.plane_radius;
-
-        let mut stats = FrameStats::default();
         let mut commands = BasicCommandList::new();
         commands.clear(bg_color);
+        let (jobs, mut stats) =
+            self.collect_render_jobs(scene, &frustum, cam_eye, selected, options, mesh_override);
 
-        let mut jobs: Vec<RenderJob> = Vec::new();
-
-        for (id, node) in scene.iter() {
-            if !node.visible {
-                continue;
-            }
-            if matches!(node.primitive, Primitive::Empty) {
-                continue;
-            }
-
-            stats.total_entities += 1;
-
-            let model = transforms
-                .world_matrix(id)
-                .unwrap_or_else(|| node.local_matrix());
-            let world_pos = model.col(3).truncate();
-
-            if !within_world_stream_radius(world_pos, cam_eye, options) {
-                stats.streaming_culled_entities += 1;
-                continue;
-            }
-
-            let mesh_radius = match node.primitive {
-                Primitive::Cube => cube_radius,
-                Primitive::Cylinder => cylinder_radius,
-                Primitive::Sphere => sphere_radius,
-                Primitive::Plane => plane_radius,
-                _ => cube_radius,
-            };
-
-            let bounding_r = mesh_radius * world_max_scale(model);
-
-            if !frustum.intersects_sphere(world_pos, bounding_r) {
-                continue;
-            }
-
-            stats.visible_entities += 1;
-
-            let mut base_color = [node.color.r, node.color.g, node.color.b, node.color.a];
-            if matches!(options.mode, RenderMode::Solid) && options.solid_xray_mode {
-                base_color[3] = base_color[3].min(120);
-            }
-            let is_selected = selected_ids.contains(&id);
-
-            let dist = (world_pos - cam_eye).length();
-            let is_transparent = node.color.a < 255;
-
-            jobs.push(RenderJob {
-                id,
-                primitive: node.primitive,
-                model,
-                base_color,
-                is_selected,
-                dist_to_camera: dist,
-                is_transparent,
-                triangle_count: primitive_triangle_count(
-                    node.primitive,
-                    &self.cube_mesh,
-                    &self.cylinder_mesh,
-                    &self.sphere_mesh,
-                    &self.plane_mesh,
-                ),
-            });
-        }
-
-        jobs.sort_by(|a, b| match (a.is_transparent, b.is_transparent) {
-            (false, true) => std::cmp::Ordering::Less,
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, false) => a
-                .dist_to_camera
-                .partial_cmp(&b.dist_to_camera)
-                .unwrap_or(std::cmp::Ordering::Equal),
-            (true, true) => b
-                .dist_to_camera
-                .partial_cmp(&a.dist_to_camera)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        });
-        apply_triangle_budget(&mut jobs, options.triangle_budget, &mut stats);
-
-        let use_tonality =
-            !(matches!(options.mode, RenderMode::Solid) && !options.solid_face_tonality);
+        let use_tonality = options.solid_face_tonality;
         let mut grid_drawn = false;
         for job in &jobs {
             if job.is_transparent && !grid_drawn {
@@ -684,26 +558,20 @@ impl SceneRenderer {
                 job.base_color
             };
 
-            if !matches!(options.mode, RenderMode::Wireframe) {
-                commands.set_pipeline(if use_tonality {
-                    BasicPipelineKind::PbrLit
-                } else {
-                    BasicPipelineKind::FlatColor
-                });
-                let mesh_id = if override_mesh.is_some() {
-                    commands.register_transient_mesh(basic_mesh)
-                } else {
-                    commands.register_mesh(basic_mesh)
-                };
-                commands.draw_mesh(mesh_id, job.model, color);
-                stats.triangles_rendered += mesh.triangle_count() as u32;
-            }
-
-            let draw_surface_edges = match options.mode {
-                RenderMode::Wireframe => true,
-                RenderMode::Preview => true,
-                RenderMode::Solid => options.solid_show_surface_edges,
+            commands.set_pipeline(if use_tonality {
+                BasicPipelineKind::PbrLit
+            } else {
+                BasicPipelineKind::FlatColor
+            });
+            let mesh_id = if override_mesh.is_some() {
+                commands.register_transient_mesh(basic_mesh)
+            } else {
+                commands.register_mesh(basic_mesh)
             };
+            commands.draw_mesh(mesh_id, job.model, color);
+            stats.triangles_rendered += mesh.triangle_count() as u32;
+
+            let draw_surface_edges = options.solid_show_surface_edges;
 
             if draw_surface_edges || (options.selection_outline && job.is_selected) {
                 let edge_color = if job.is_selected && options.selection_outline {
@@ -863,132 +731,6 @@ struct RenderJob {
     is_selected: bool,
     dist_to_camera: f32,
     is_transparent: bool,
-    triangle_count: u32,
-}
-
-fn primitive_triangle_count(
-    primitive: Primitive,
-    cube: &MeshData,
-    cylinder: &MeshData,
-    sphere: &MeshData,
-    plane: &MeshData,
-) -> u32 {
-    match primitive {
-        Primitive::Cube => cube.triangle_count() as u32,
-        Primitive::Cylinder => cylinder.triangle_count() as u32,
-        Primitive::Sphere => sphere.triangle_count() as u32,
-        Primitive::Plane => plane.triangle_count() as u32,
-        Primitive::Empty => 0,
-    }
-}
-
-/// Conservative world-space radius multiplier. Using the model basis here
-/// keeps culling correct when a parent applies scale to a child.
-fn world_max_scale(model: Mat4) -> f32 {
-    model
-        .x_axis
-        .truncate()
-        .length()
-        .max(model.y_axis.truncate().length())
-        .max(model.z_axis.truncate().length())
-        .max(1.0e-4)
-}
-
-fn within_world_stream_radius(world_pos: Vec3, camera_pos: Vec3, options: RenderOptions) -> bool {
-    if !options.world_streaming_enabled {
-        return true;
-    }
-
-    let region_size = options.world_stream_region_size.clamp(16.0, 1024.0);
-    let radius = options.world_stream_load_radius.max(1) as i32;
-    let camera_region = (
-        (camera_pos.x / region_size).floor() as i32,
-        (camera_pos.z / region_size).floor() as i32,
-    );
-    let entity_region = (
-        (world_pos.x / region_size).floor() as i32,
-        (world_pos.z / region_size).floor() as i32,
-    );
-
-    (entity_region.0 - camera_region.0).abs() <= radius
-        && (entity_region.1 - camera_region.1).abs() <= radius
-}
-
-fn apply_triangle_budget(jobs: &mut Vec<RenderJob>, triangle_budget: u32, stats: &mut FrameStats) {
-    if triangle_budget == u32::MAX {
-        return;
-    }
-
-    let mut used_triangles = 0u32;
-    jobs.retain(|job| {
-        let within_budget = used_triangles.saturating_add(job.triangle_count) <= triangle_budget;
-        if job.is_selected || within_budget {
-            used_triangles = used_triangles.saturating_add(job.triangle_count);
-            true
-        } else {
-            stats.budget_culled_entities += 1;
-            stats.budget_culled_triangles += job.triangle_count;
-            false
-        }
-    });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn job(id: usize, selected: bool) -> RenderJob {
-        RenderJob {
-            id: SceneNodeId(id),
-            primitive: Primitive::Cube,
-            model: Mat4::IDENTITY,
-            base_color: [255, 255, 255, 255],
-            is_selected: selected,
-            dist_to_camera: id as f32,
-            is_transparent: false,
-            triangle_count: 12,
-        }
-    }
-
-    #[test]
-    fn triangle_budget_keeps_selection_and_reports_culled_work() {
-        let mut jobs = vec![job(0, false), job(1, false), job(2, true)];
-        let mut stats = FrameStats::default();
-
-        apply_triangle_budget(&mut jobs, 12, &mut stats);
-
-        assert_eq!(jobs.len(), 2);
-        assert_eq!(jobs[0].id, SceneNodeId(0));
-        assert_eq!(jobs[1].id, SceneNodeId(2));
-        assert_eq!(stats.budget_culled_entities, 1);
-        assert_eq!(stats.budget_culled_triangles, 12);
-    }
-
-    #[test]
-    fn world_stream_radius_filters_distant_xz_regions() {
-        let options = RenderOptions {
-            world_streaming_enabled: true,
-            world_stream_region_size: 100.0,
-            world_stream_load_radius: 1,
-            ..RenderOptions::default()
-        };
-
-        assert!(within_world_stream_radius(
-            Vec3::new(150.0, 500.0, 0.0),
-            Vec3::ZERO,
-            options
-        ));
-        assert!(!within_world_stream_radius(
-            Vec3::new(250.0, 0.0, 0.0),
-            Vec3::ZERO,
-            options
-        ));
-        assert!(!within_world_stream_radius(
-            Vec3::new(0.0, 0.0, -150.0),
-            Vec3::ZERO,
-            options
-        ));
-    }
 }
 
 fn mesh_to_basic(mesh: &MeshData) -> BasicMesh {
@@ -1052,6 +794,73 @@ fn record_world_grid(
     }
 }
 
+fn rasterize_clipped_triangle(
+    framebuffer: &mut Framebuffer,
+    triangle: [ClipVertex; 3],
+    color: [u8; 4],
+    vp_w: f32,
+    vp_h: f32,
+) -> u32 {
+    let clipped = clip_triangle_to_near(triangle);
+    let vertices = clipped.vertices();
+    if vertices.len() < 3 {
+        return 0;
+    }
+
+    let to_screen = |vertex: ClipVertex| -> Option<ScreenVertex> {
+        if vertex.position.w <= 1.0e-6 {
+            return None;
+        }
+        let inv_w = 1.0 / vertex.position.w;
+        let ndc_x = vertex.position.x * inv_w;
+        let ndc_y = vertex.position.y * inv_w;
+        let ndc_z = vertex.position.z * inv_w;
+        Some(ScreenVertex {
+            x: (ndc_x + 1.0) * 0.5 * vp_w,
+            y: (1.0 - ndc_y) * 0.5 * vp_h,
+            z: (ndc_z + 1.0) * 0.5,
+            shade: vertex.shade,
+        })
+    };
+
+    let Some(first) = to_screen(vertices[0]) else {
+        return 0;
+    };
+    let mut rendered = 0u32;
+    for index in 1..vertices.len() - 1 {
+        let (Some(second), Some(third)) =
+            (to_screen(vertices[index]), to_screen(vertices[index + 1]))
+        else {
+            continue;
+        };
+        if color[3] < u8::MAX {
+            rasterizer::rasterize_triangle_blended(
+                framebuffer,
+                first,
+                second,
+                third,
+                color[0],
+                color[1],
+                color[2],
+                color[3],
+            );
+        } else {
+            rasterizer::rasterize_triangle(
+                framebuffer,
+                first,
+                second,
+                third,
+                color[0],
+                color[1],
+                color[2],
+                color[3],
+            );
+        }
+        rendered += 1;
+    }
+    rendered
+}
+
 fn rasterize_mesh_command(
     fb: &mut Framebuffer,
     mesh: &BasicMesh,
@@ -1080,10 +889,6 @@ fn rasterize_mesh_command(
         let c1 = mvp * Vec4::new(p1.x, p1.y, p1.z, 1.0);
         let c2 = mvp * Vec4::new(p2.x, p2.y, p2.z, 1.0);
 
-        if c0.w <= 0.001 || c1.w <= 0.001 || c2.w <= 0.001 {
-            continue;
-        }
-
         let shade0 = if shaded {
             0.3 + 0.7
                 * transform::transform_normal(mesh.vertices[i0].normal, &normal_mat)
@@ -1109,32 +914,26 @@ fn rasterize_mesh_command(
             1.0
         };
 
-        let to_screen = |c: Vec4, shade: f32| -> ScreenVertex {
-            let inv_w = 1.0 / c.w;
-            let ndc_x = c.x * inv_w;
-            let ndc_y = c.y * inv_w;
-            let ndc_z = c.z * inv_w;
-            ScreenVertex {
-                x: (ndc_x + 1.0) * 0.5 * vp_w,
-                y: (1.0 - ndc_y) * 0.5 * vp_h,
-                z: (ndc_z + 1.0) * 0.5,
-                shade,
-            }
-        };
-
-        let sv0 = to_screen(c0, shade0);
-        let sv1 = to_screen(c1, shade1);
-        let sv2 = to_screen(c2, shade2);
-
-        if color[3] < 255 {
-            rasterizer::rasterize_triangle_blended(
-                fb, sv0, sv1, sv2, color[0], color[1], color[2], color[3],
-            );
-        } else {
-            rasterizer::rasterize_triangle(
-                fb, sv0, sv1, sv2, color[0], color[1], color[2], color[3],
-            );
-        }
+        rasterize_clipped_triangle(
+            fb,
+            [
+                ClipVertex {
+                    position: c0,
+                    shade: shade0,
+                },
+                ClipVertex {
+                    position: c1,
+                    shade: shade1,
+                },
+                ClipVertex {
+                    position: c2,
+                    shade: shade2,
+                },
+            ],
+            color,
+            vp_w,
+            vp_h,
+        );
     }
 }
 
@@ -1390,4 +1189,37 @@ fn line_outside_clip(c0: Vec4, c1: Vec4) -> bool {
         || (c0.y > c0.w && c1.y > c1.w)
         || (c0.z < -c0.w && c1.z < -c1.w)
         || (c0.z > c0.w && c1.z > c1.w)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render_config::RenderConfig;
+
+    #[test]
+    fn lightweight_scene_submission_keeps_all_visible_geometry() {
+        let mut scene = SceneGraph::new();
+        for index in 0..4 {
+            scene.add_root_with_primitive(&format!("Sphere {index}"), Primitive::Sphere);
+        }
+        let camera = Camera::default();
+        let mut renderer = SceneRenderer::new(320, 240);
+        let expected_triangles = renderer.sphere_mesh.triangle_count() as u32 * 4;
+
+        let frame = renderer.build_frame(
+            &scene,
+            &camera,
+            320.0,
+            240.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::new(0.4, 1.0, 0.2),
+            RenderOptions::default(),
+            None,
+        );
+
+        assert!(expected_triangles > RenderConfig::editor_lightweight().max_triangles);
+        assert_eq!(frame.stats.visible_entities, 4);
+        assert_eq!(frame.stats.triangles_rendered, expected_triangles);
+    }
 }

@@ -35,7 +35,8 @@ Aquí vive la UX del schematic editor.
 - `native_workbench.rs`, `native_workbench_input.rs`,
   `native_workbench_surface.rs` y `panels/electronics_*_surface.rs`: shell,
   input semántico y RafUI retenido.
-- `panels/schematic_panels.rs`: inspector lateral e “hierarchy” del circuito.
+- `native_workbench_electronics.rs` y `panels/electronics_*_surface.rs`:
+  inspector, navigator, toolbar y superficies retenidas del circuito.
 - `schematic_document.rs`: helper pequeño para cargar y guardar `schematic.ron`.
 
 El editor ya no trata al schematic como si fuera una escena 3D disfrazada. Ahora cambia paneles, acciones globales y persistencia según el tipo de proyecto.

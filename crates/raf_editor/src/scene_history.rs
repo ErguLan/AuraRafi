@@ -103,11 +103,14 @@ impl SceneHistory {
 
 pub(crate) fn scene_fingerprint(scene: &SceneGraph) -> u64 {
     // SceneGraph deliberately does not derive Hash because glam values are
-    // not hashable. Debug is stable for the in-memory Rust model and this
-    // function is used after mutations and at save/exit boundaries, never in
-    // the normal render loop.
+    // not hashable. Hash the serialized document instead of Debug: Debug also
+    // includes the renderer-local Cell cache, which must not advance the
+    // Agent revision when a frame is rendered.
     let mut hasher = DefaultHasher::new();
-    format!("{scene:?}").hash(&mut hasher);
+    match ron::ser::to_string(scene) {
+        Ok(serialized) => serialized.hash(&mut hasher),
+        Err(_) => format!("{scene:?}").hash(&mut hasher),
+    }
     hasher.finish()
 }
 

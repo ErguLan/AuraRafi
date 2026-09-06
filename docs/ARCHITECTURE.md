@@ -320,9 +320,9 @@ Lightweight pub/sub system with type-erased events:
 Shared graphics runtime for editor surfaces, with GPU hardware execution first when available and built-in CPU software fallback via ApiGraphicBasic.
 
 The renderer direction is canvas-first: scene, schematic, PCB, and the studio
-UI surface use `RenderRuntime -> BasicDevice`. RafUI is the retained editor
-surface and ApiGraphicBasic composes it with the active canvas; there is no
-Native Winit editor host with retained RafUI in the runtime path.
+UI surface use `RenderRuntime -> BasicDevice`. The active editor is a native
+Winit application whose retained RafUI surfaces are composed by
+ApiGraphicBasic; the retired widget host is not an ownership boundary.
 
 ### Canonical Active Graphics Path
 
@@ -520,7 +520,7 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 
 ### Panels
 
-- **Viewport**: Modular orthographic-2D/perspective-3D native editor shell delegating to `raf_render::bridge`. Z-buffered CPU rendering with Solid/Wireframe/Preview modes, shared CPU/GPU line batching, bounded mesh reuse, projected grid, entity labels, transform gizmos (G/R/T), vertex edit mode, and RafUI-compatible overlays. Composition lives in `native_application.rs`, `native_workbench.rs`, `native_editor_runtime.rs`, and `panels/viewport_controller.rs`.
+- **Viewport**: Modular orthographic-2D/perspective-3D native editor shell delegating to `raf_render::bridge`. GPU-first rendering through ApiGraphicBasic with CPU recovery, shared CPU/GPU line batching, bounded mesh reuse, projected grid, entity labels, transform gizmos (G/R/T), vertex edit mode, and RafUI-compatible overlays. Composition lives in `native_application.rs`, `native_workbench.rs`, `native_editor_runtime.rs`, and `panels/viewport_controller.rs`.
 - **Hierarchy**: Scene tree with selection and collapsible groups
 - **Properties**: Transform editing, RGB color picker with 7 presets, primitive type dropdown, visibility toggle
 - **Console**: Log output with severity filters and auto-scroll
@@ -529,9 +529,9 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 - **Schematic View**: Electronics component placement and wiring
 - **Settings**: Theme, language, quality, editor prefs, Simple Mode toggle, target platform selector
 - **AI Chat**: Native RafUI Agent surface with sessions, model/mode controls,
-  approvals, pagination, and the existing provider/runtime boundary. It remains
-  unavailable until its configured provider is ready; the surface itself is not
-  a deleted or placeholder panel.
+  approvals, continuous transcript scrolling, and the existing
+  provider/runtime boundary. The surface is active; requests require a
+  configured verified transport.
 
 ## Assets (raf_assets)
 
@@ -546,13 +546,15 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 - `SimModel`: Resistor (ohms), Capacitor (farads), LED (forward voltage), Magnet (tesla + polarity), Wire
 - `Pin`: Named connection point with direction (Input/Output/Bidirectional/Power/Ground)
 - `Schematic`: Components + wires with net names, remove/duplicate helpers
-- `ComponentLibrary`: Built-in parts (Resistor, Capacitor, LED, Magnet)
+- `ComponentLibrary`: Built-in parts plus external `.ron` assets and registered
+  Rust extension templates
 - `Netlist`: Union-find algorithm builds nets from wire endpoints and pin positions (rotation-aware)
 - Auto-designator assignment (R1, R2, C1, MAG1, etc.)
 - `DrcReport`: 8 built-in checks - floating pins, missing values, isolated components, unnamed nets, short circuits, LED current limiting, dangling wire endpoints, and component-pin bypass shorts
 - DC simulation engine: Modified Nodal Analysis, Gaussian elimination with partial pivoting, node voltages, branch currents, power dissipation
 - Export: SVG vector image (styled, rotation-aware), BOM CSV (grouped with quantities), text netlist
-- Gerber export structure for JLCPCB/PCBWay (manufacturer-specific layers defined, placeholder until PCB 3D layout)
+- Gerber export structure for JLCPCB/PCBWay (manufacturer-specific layers
+  defined; the final writer remains incomplete and targets the 2D PCB layout)
 - Circuit sharing: RON serialization for shareable compact strings
 - **Schematic document split**: Electronics projects now persist their editor document as `schematic.ron`; `scene.ron` remains only for game projects.
 - **Schematic editor modularization**: The active workflow is split between
@@ -578,7 +580,11 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 - `NodeGraph`: Collection of nodes and connections. Multiple flows supported via `Vec<NodeGraph>`.
 - `NodeCategory`: Event, Logic, Action, Math, Electronics, Variable
 - Built-in nodes: On Start, On Update, Print, If Branch, Loops (For, While), Compare (>, <, ==), Entity manipulation
-- **UI Architecture**: `NodeEditorPanel` utilizes explicit grid allocation (`ui.allocate_space`) before rendering nodes to completely bypass "Input Swallowing". Bezier connections use `Rect::contains()` upon pointer release for accurate hit detection.
+- **UI Architecture**: The active node surface is
+  `panels/nodes_surface.rs`, composed through the native workbench and RafUI.
+  Node interaction must remain in the retained surface and its typed action
+  boundary; the retired `NodeEditorPanel`/widget allocation recipe is not an
+  active implementation target.
 - **Undo/Redo**: Fully memory-backed history stack capable of holding up to 50 iterations (`history: Vec<(Vec<NodeGraph>, usize)>`), supporting global shortcuts (Ctrl+Z / Ctrl+Y).
 - **Executor**: Walks flow chains in topological order, evaluates data pins, handles conditional branching (If node), 10k step safety limit
 - `NodeValue`: Runtime value type with coercion (Bool, Int, Float, String, Vec3)
@@ -588,9 +594,13 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 
 - `ToolRegistry`: Engine operations exposed as callable tools with JSON schema
 - `ToolDefinition`: Name, category, parameters, return type
-- `ChatPanel`: Message history, input, provider selection
-- `AiProvider`: OpenRouter, OpenAI, GenAI, Claude
-- Status: Tooling and UI scaffolding exist, but provider-backed AI functionality is not wired end-to-end yet
+- `AgentSurfaceHost` + `AgentPanel`: retained message history, input,
+  approvals and provider selection
+- `AiProvider`: the model registry can deserialize OpenRouter, OpenAI, GenAI,
+  Claude and legacy gateway values; the native editor currently exposes and
+  verifies OpenRouter and OpenAI-compatible transports.
+- Status: the native Agent surface, runtime and shared command path are wired;
+  a configured verified provider is still required for live requests.
 
 ## Networking (raf_net)
 
@@ -655,20 +665,20 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 - PCB routing is intentionally 2D-first. The current base supports board outline validation, physical footprint geometry, trace storage, and airwire regeneration without depending on any 3D board view.
 - The Gerber layer export path is still incomplete, but the placeholder now targets the PCB layout document instead of a hypothetical future 3D-only dependency.
 
-## AI Co-Developer Integration & Context Routing (v0.8.0+)
+## AI Co-Developer Integration & Context Routing (v0.9.5+)
 
 To minimize token consumption, eradicate agent regressions, and avoid the generation of conflicting or outdated implementation structures, AuraRafi's development context is modularly partitioned under the `.ai/` directory.
 
 ### Core Context Redirection
 * **Agent Master Context**: [Agent.md](../Agent.md) in the root now acts as a dedicated synapse router, redirecting all incoming LLM agents to the structured `.ai/` workspace.
 * **Master System Truth**: [.ai/SYSTEM_TRUTH.md](../.ai/SYSTEM_TRUTH.md) — The single compiler-grade registry housing the up-to-date architecture mapping of all engine crates, files, and modules.
-* **Strict Quality Directives**: [.ai/instructions.md](../.ai/instructions.md) — Universal non-negotiable rules enforcing English-only codebases, no emojis, strict i18n JSON translations, complete-before-test flows, and `app.rs` file modularity.
+* **Strict Quality Directives**: [.ai/instructions.md](../.ai/instructions.md) — Universal non-negotiable rules enforcing English-only codebases, no emojis, strict i18n JSON translations, complete-before-test flows, and modular native hosts.
 
 ### Specialized AI Roles
 Agents are categorized into four specialized roles to prevent token swelling and ensure maximum engineering focus:
 1. **CTO Lead (Systems & Core)**: [.ai/roles/cto_lead.md](../.ai/roles/cto_lead.md) — Focuses on ECS (`hecs`), commands bus, memory safety, and thread-pool allocations.
 2. **Render Math (Graphics Programmer)**: [.ai/roles/render_math.md](../.ai/roles/render_math.md) — Focuses on perspective/orthographic coordinate matrices, grids, ray picking, and PBR/CPU rasterization shaders.
-3. **CAD Electronics (Hardware Engineer)**: [.ai/roles/electronics.md](../.ai/roles/electronics.md) — Focuses on routing, Union-Find netlists, DRC tests, DC Modified Nodal Analysis (MNA), and mapping RON components to 3D.
+3. **CAD Electronics (Hardware Engineer)**: [.ai/roles/electronics.md](../.ai/roles/electronics.md) — Focuses on routing, Union-Find netlists, DRC tests, DC Modified Nodal Analysis (MNA), and 2D-first PCB authoring.
 4. **Editor RafUI contract**: [`EDITOR_RAFUI.md`](EDITOR_RAFUI.md) — Focuses on visual alignment, responsive tab groups, interaction, and styling boundaries.
 
 ### Vision Triage Protocol

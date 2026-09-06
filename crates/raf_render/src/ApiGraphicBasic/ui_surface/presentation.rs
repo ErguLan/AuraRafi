@@ -6,9 +6,10 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use super::text_atlas::visual_line_ranges;
 use super::{
     images::builtin_icon_key, UiControl, UiImageFit, UiRect, UiSkeletonShape, UiStyle,
-    UiSurfaceFrame, UiTextAtlas, UiTextRole,
+    UiSurfaceFrame, UiTextAtlas, UiTextAtlasRequest, UiTextRole, UiTogglePresentation,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +19,22 @@ pub struct UiSurfaceQuad {
     pub color: [u8; 4],
     pub z_index: i16,
     pub radius: f32,
+}
+
+/// A native, resolution-independent solid stroke in the retained draw list.
+///
+/// Small marks such as checkbox ticks should not be assembled from a handful
+/// of axis-aligned pixels. Keeping the stroke in the ApiGraphicBasic draw list
+/// lets both the WGPU presenter and the CPU recovery path rasterize the same
+/// geometry at the output density.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UiSurfaceStroke {
+    pub start: [f32; 2],
+    pub end: [f32; 2],
+    pub clip_rect: UiRect,
+    pub color: [u8; 4],
+    pub width: f32,
+    pub z_index: i16,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -46,6 +63,11 @@ pub enum UiSurfacePaintCommand {
         z_index: i16,
         sequence: u32,
     },
+    Stroke {
+        index: usize,
+        z_index: i16,
+        sequence: u32,
+    },
     Text {
         index: usize,
         z_index: i16,
@@ -62,6 +84,7 @@ impl UiSurfacePaintCommand {
     pub fn z_index(self) -> i16 {
         match self {
             Self::Solid { z_index, .. }
+            | Self::Stroke { z_index, .. }
             | Self::Text { z_index, .. }
             | Self::Image { z_index, .. } => z_index,
         }
@@ -70,6 +93,7 @@ impl UiSurfacePaintCommand {
     fn sequence(self) -> u32 {
         match self {
             Self::Solid { sequence, .. }
+            | Self::Stroke { sequence, .. }
             | Self::Text { sequence, .. }
             | Self::Image { sequence, .. } => sequence,
         }
@@ -79,6 +103,7 @@ impl UiSurfacePaintCommand {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UiSurfaceDrawList {
     pub solids: Vec<UiSurfaceQuad>,
+    pub strokes: Vec<UiSurfaceStroke>,
     pub text: Vec<UiSurfaceTextQuad>,
     pub images: Vec<UiSurfaceImageQuad>,
     pub paint_order: Vec<UiSurfacePaintCommand>,
@@ -151,6 +176,7 @@ impl UiSurfaceDrawList {
     ) -> Self {
         let raster_scale = raster_scale.clamp(1.0, 4.0);
         let mut solids = Vec::with_capacity(frame.layout_boxes.len() * 3);
+        let mut strokes = Vec::new();
         let mut text = Vec::new();
         let mut images = Vec::new();
         let mut paint_order = Vec::with_capacity(frame.layout_boxes.len() * 3);
@@ -182,8 +208,10 @@ impl UiSurfaceDrawList {
             }
 
             let first_control_solid = solids.len();
+            let first_control_stroke = strokes.len();
             append_control_quads(
                 &mut solids,
+                &mut strokes,
                 layout.content_rect,
                 layout.clip_rect,
                 &layout.control,
@@ -194,6 +222,14 @@ impl UiSurfaceDrawList {
                 paint_order.push(UiSurfacePaintCommand::Solid {
                     index,
                     z_index: solids[index].z_index,
+                    sequence,
+                });
+                sequence = sequence.wrapping_add(1);
+            }
+            for index in first_control_stroke..strokes.len() {
+                paint_order.push(UiSurfacePaintCommand::Stroke {
+                    index,
+                    z_index: strokes[index].z_index,
                     sequence,
                 });
                 sequence = sequence.wrapping_add(1);
@@ -217,10 +253,7 @@ impl UiSurfaceDrawList {
                 sequence = sequence.wrapping_add(1);
             }
 
-            let has_text = frame
-                .text_requests
-                .iter()
-                .any(|request| request.node_id == layout.id);
+            let has_text = text_request_index.contains_key(layout.id.as_str());
             let content_rect = layout.content_rect;
             let content_clip = layout.clip_rect.intersection(content_rect);
             if let Some(icon) = layout.icon {
@@ -276,14 +309,7 @@ impl UiSurfaceDrawList {
                 let text_origin_x = if symbol_button {
                     content_rect.x + ((content_rect.width - text_width) * 0.5).max(0.0)
                 } else {
-                    content_rect.x
-                        + if has_text && layout.icon.is_some() {
-                            6.0 + f32::from(
-                                layout.icon.expect("icon checked").size.logical_pixels(),
-                            ) + 6.0
-                        } else {
-                            0.0
-                        }
+                    text_origin_x_for_layout(layout, request, resolved, atlas, raster_scale)
                 };
                 let text_rect = UiRect::new(
                     text_origin_x,
@@ -294,22 +320,43 @@ impl UiSurfaceDrawList {
                 if let Some(edit) = layout.text_edit {
                     let selection = edit.selection();
                     if selection.start < selection.end {
-                        let start_x = text_origin_x
-                            + atlas.measure_prefix_width(request, resolved, selection.start)
-                                / raster_scale;
-                        let end_x = text_origin_x
-                            + atlas.measure_prefix_width(request, resolved, selection.end)
-                                / raster_scale;
-                        let selection_rect = UiRect::new(
-                            start_x.min(end_x),
-                            text_rect.y,
-                            (end_x - start_x).abs(),
-                            text_rect.height,
-                        )
-                        .intersection(content_clip);
-                        if !selection_rect.is_empty() {
-                            let selection_color =
-                                apply_opacity([58, 121, 226, 150], layout.style.opacity);
+                        let characters = resolved.chars().collect::<Vec<_>>();
+                        let lines = visual_line_ranges(request, resolved);
+                        let line_height = (request.style.line_height_px / raster_scale).max(1.0);
+                        let text_y = text_rect.y;
+                        let selection_color =
+                            apply_opacity([58, 121, 226, 150], layout.style.opacity);
+                        for (line_index, line) in lines.iter().enumerate() {
+                            let start = selection.start.max(line.start);
+                            let end = selection.end.min(line.end);
+                            if start >= end || start >= characters.len() {
+                                continue;
+                            }
+                            let line_text = characters[line.start..line.end.min(characters.len())]
+                                .iter()
+                                .collect::<String>();
+                            let start_x = text_origin_x
+                                + atlas.measure_prefix_width(
+                                    request,
+                                    &line_text,
+                                    start.saturating_sub(line.start),
+                                ) / raster_scale;
+                            let end_x = text_origin_x
+                                + atlas.measure_prefix_width(
+                                    request,
+                                    &line_text,
+                                    end.saturating_sub(line.start),
+                                ) / raster_scale;
+                            let selection_rect = UiRect::new(
+                                start_x.min(end_x),
+                                text_y + line_index as f32 * line_height,
+                                (end_x - start_x).abs().max(1.0),
+                                line_height,
+                            )
+                            .intersection(content_clip);
+                            if selection_rect.is_empty() {
+                                continue;
+                            }
                             let index = solids.len();
                             solids.push(UiSurfaceQuad {
                                 rect: selection_rect,
@@ -352,27 +399,34 @@ impl UiSurfaceDrawList {
             }
 
             if let Some(edit) = layout.text_edit {
-                let prefix_width =
-                    atlas.measure_prefix_width(request, resolved, edit.cursor) / raster_scale;
-                let text_origin_x = content_rect.x
-                    + if has_text && layout.icon.is_some() {
-                        6.0 + f32::from(layout.icon.expect("icon checked").size.logical_pixels())
-                            + 6.0
-                    } else {
-                        0.0
-                    };
+                let (caret_line, prefix_width) =
+                    text_cursor_metrics(request, resolved, edit.cursor, atlas, raster_scale);
+                let text_origin_x =
+                    text_origin_x_for_layout(layout, request, resolved, atlas, raster_scale);
                 let caret_width = 1.0;
                 let caret_x = (text_origin_x + prefix_width).clamp(
                     content_rect.x,
                     (content_rect.right() - caret_width).max(content_rect.x),
                 );
+                let line_height = (request.style.line_height_px / raster_scale).max(1.0);
+                let text_height = atlas
+                    .slot_for(request, resolved)
+                    .map(|slot| f32::from(slot.rect.height) / raster_scale)
+                    .unwrap_or(line_height);
+                let text_y = content_rect.y + ((content_rect.height - text_height) * 0.5).max(0.0);
+                let caret_y =
+                    (text_y + caret_line as f32 * line_height + 2.0).min(content_rect.bottom());
                 let caret_rect = UiRect::new(
                     caret_x,
-                    (content_rect.y + 2.0).min(content_rect.bottom()),
+                    caret_y,
                     caret_width.min(content_rect.width),
-                    (content_rect.height - 4.0)
-                        .max(1.0)
-                        .min(content_rect.height),
+                    (if request.single_line {
+                        content_rect.height - 4.0
+                    } else {
+                        line_height - 3.0
+                    })
+                    .max(1.0)
+                    .min((content_rect.bottom() - caret_y).max(1.0)),
                 );
                 if !content_clip.is_empty() && !caret_rect.is_empty() {
                     let mut caret_color = layout.style.border;
@@ -395,12 +449,52 @@ impl UiSurfaceDrawList {
                     });
                     sequence = sequence.wrapping_add(1);
                 }
+                if layout
+                    .ime_preedit
+                    .as_deref()
+                    .is_some_and(|value| !value.is_empty())
+                {
+                    let preedit_width = atlas.measure_prefix_width(
+                        request,
+                        layout.ime_preedit.as_deref().unwrap_or_default(),
+                        layout
+                            .ime_preedit
+                            .as_deref()
+                            .unwrap_or_default()
+                            .chars()
+                            .count(),
+                    ) / raster_scale;
+                    let underline = UiRect::new(
+                        (text_origin_x + prefix_width).max(content_rect.x),
+                        (caret_y + line_height - 3.0).min(content_rect.bottom() - 1.0),
+                        preedit_width.max(2.0),
+                        1.0,
+                    )
+                    .intersection(content_clip);
+                    if !underline.is_empty() {
+                        let index = solids.len();
+                        solids.push(UiSurfaceQuad {
+                            rect: underline,
+                            clip_rect: content_clip,
+                            color: apply_opacity([232, 133, 28, 255], layout.style.opacity),
+                            z_index: layout.z_index.saturating_add(2),
+                            radius: 0.0,
+                        });
+                        paint_order.push(UiSurfacePaintCommand::Solid {
+                            index,
+                            z_index: layout.z_index.saturating_add(2),
+                            sequence,
+                        });
+                        sequence = sequence.wrapping_add(1);
+                    }
+                }
             }
         }
         paint_order.sort_by_key(|command| (command.z_index(), command.sequence()));
 
         Self {
             solids,
+            strokes,
             text,
             images,
             paint_order,
@@ -416,12 +510,21 @@ impl UiSurfaceDrawList {
         }
 
         let mut sequence = 0_u32;
-        let mut commands =
-            Vec::with_capacity(self.solids.len() + self.text.len() + self.images.len());
+        let mut commands = Vec::with_capacity(
+            self.solids.len() + self.strokes.len() + self.text.len() + self.images.len(),
+        );
         for (index, quad) in self.solids.iter().enumerate() {
             commands.push(UiSurfacePaintCommand::Solid {
                 index,
                 z_index: quad.z_index,
+                sequence,
+            });
+            sequence = sequence.wrapping_add(1);
+        }
+        for (index, stroke) in self.strokes.iter().enumerate() {
+            commands.push(UiSurfacePaintCommand::Stroke {
+                index,
+                z_index: stroke.z_index,
                 sequence,
             });
             sequence = sequence.wrapping_add(1);
@@ -470,6 +573,18 @@ impl UiSurfaceDrawList {
                     color: quad.color,
                     z_index: quad.z_index,
                     radius: quad.radius * scale_x.min(scale_y),
+                })
+                .collect(),
+            strokes: self
+                .strokes
+                .iter()
+                .map(|stroke| UiSurfaceStroke {
+                    start: [stroke.start[0] * scale_x, stroke.start[1] * scale_y],
+                    end: [stroke.end[0] * scale_x, stroke.end[1] * scale_y],
+                    clip_rect: scale_rect(stroke.clip_rect),
+                    color: stroke.color,
+                    width: stroke.width * scale_x.min(scale_y),
+                    z_index: stroke.z_index,
                 })
                 .collect(),
             text: self
@@ -533,6 +648,7 @@ fn skeleton_style(control: &UiControl, style: &UiStyle, rect: UiRect) -> UiStyle
 /// GPU and CPU without asking each settings surface to fake it with offsets.
 fn append_control_quads(
     solids: &mut Vec<UiSurfaceQuad>,
+    strokes: &mut Vec<UiSurfaceStroke>,
     rect: UiRect,
     clip_rect: UiRect,
     control: &UiControl,
@@ -561,89 +677,236 @@ fn append_control_quads(
 
     match control {
         UiControl::Toggle(toggle) => {
-            let width = rect.width.min(44.0).max(28.0);
-            let height = rect.height.min(20.0).max(16.0);
-            let track_rect = UiRect::new(
-                rect.x + (rect.width - width).max(0.0),
-                rect.y + (rect.height - height) * 0.5,
-                width,
-                height,
-            );
-            let track_color = if toggle.value { ACCENT } else { border };
-            solids.push(UiSurfaceQuad {
-                rect: track_rect,
-                clip_rect,
-                color: color(track_color),
-                z_index,
-                radius: height * 0.5,
-            });
-            let thumb_size = (height - 4.0).max(8.0);
-            let thumb_x = if toggle.value {
-                track_rect.right() - thumb_size - 2.0
-            } else {
-                track_rect.x + 2.0
-            };
-            solids.push(UiSurfaceQuad {
-                rect: UiRect::new(
-                    thumb_x,
-                    track_rect.y + (height - thumb_size) * 0.5,
-                    thumb_size,
-                    thumb_size,
-                ),
-                clip_rect,
-                color: color(text),
-                z_index: z_index.saturating_add(1),
-                radius: thumb_size * 0.5,
-            });
-        }
-        UiControl::Range(range) => {
-            let track_height = 4.0_f32.min(rect.height).max(2.0);
-            let track_rect = UiRect::new(
-                rect.x,
-                rect.y + (rect.height - track_height) * 0.5,
-                rect.width,
-                track_height,
-            );
-            solids.push(UiSurfaceQuad {
-                rect: track_rect,
-                clip_rect,
-                color: color(border),
-                z_index,
-                radius: track_height * 0.5,
-            });
-            let progress = UiRect::new(
-                track_rect.x,
-                track_rect.y,
-                track_rect.width * range.fraction(),
-                track_rect.height,
-            );
-            if progress.width > 0.0 {
+            if toggle.presentation == UiTogglePresentation::Checkbox {
+                let size = rect.width.min(rect.height).clamp(16.0, 20.0);
+                let box_rect = UiRect::new(
+                    rect.x + (rect.width - size).max(0.0),
+                    rect.y + (rect.height - size) * 0.5,
+                    size,
+                    size,
+                );
                 solids.push(UiSurfaceQuad {
-                    rect: progress,
+                    rect: box_rect,
                     clip_rect,
-                    color: color(ACCENT),
+                    // Checkbox outlines are an explicit foreground affordance:
+                    // near-white in dark themes and near-black in light themes.
+                    // `style.text` comes from the active RafUI theme token.
+                    color: color(if style.text[3] == 0 {
+                        THUMB
+                    } else {
+                        style.text
+                    }),
+                    z_index,
+                    radius: 2.0,
+                });
+                let inner_color = if toggle.value {
+                    ACCENT
+                } else if style.fill[3] == 0 {
+                    TRACK
+                } else {
+                    style.fill
+                };
+                solids.push(UiSurfaceQuad {
+                    rect: UiRect::new(
+                        box_rect.x + 2.0,
+                        box_rect.y + 2.0,
+                        (box_rect.width - 4.0).max(1.0),
+                        (box_rect.height - 4.0).max(1.0),
+                    ),
+                    clip_rect,
+                    color: color(inner_color),
                     z_index: z_index.saturating_add(1),
-                    radius: track_height * 0.5,
+                    radius: 1.0,
+                });
+                if toggle.value {
+                    append_checkbox_checkmark(
+                        strokes,
+                        box_rect,
+                        clip_rect,
+                        color(text),
+                        z_index.saturating_add(2),
+                    );
+                }
+            } else {
+                let width = rect.width.min(44.0).max(28.0);
+                let height = rect.height.min(20.0).max(16.0);
+                let track_rect = UiRect::new(
+                    rect.x + (rect.width - width).max(0.0),
+                    rect.y + (rect.height - height) * 0.5,
+                    width,
+                    height,
+                );
+                let track_color = if toggle.value { ACCENT } else { border };
+                solids.push(UiSurfaceQuad {
+                    rect: track_rect,
+                    clip_rect,
+                    color: color(track_color),
+                    z_index,
+                    radius: height * 0.5,
+                });
+                let thumb_size = (height - 4.0).max(8.0);
+                let thumb_x = if toggle.value {
+                    track_rect.right() - thumb_size - 2.0
+                } else {
+                    track_rect.x + 2.0
+                };
+                solids.push(UiSurfaceQuad {
+                    rect: UiRect::new(
+                        thumb_x,
+                        track_rect.y + (height - thumb_size) * 0.5,
+                        thumb_size,
+                        thumb_size,
+                    ),
+                    clip_rect,
+                    color: color(text),
+                    z_index: z_index.saturating_add(1),
+                    radius: thumb_size * 0.5,
                 });
             }
-            let thumb_size = rect.height.min(14.0).max(8.0);
-            let thumb_x = (track_rect.x + track_rect.width * range.fraction() - thumb_size * 0.5)
-                .clamp(track_rect.x, track_rect.right() - thumb_size);
-            solids.push(UiSurfaceQuad {
-                rect: UiRect::new(
-                    thumb_x,
-                    rect.y + (rect.height - thumb_size) * 0.5,
-                    thumb_size,
-                    thumb_size,
-                ),
-                clip_rect,
-                color: color(text),
-                z_index: z_index.saturating_add(2),
-                radius: thumb_size * 0.5,
-            });
+        }
+        UiControl::Range(range) => {
+            // Transparent ranges are useful as interaction-only hit areas,
+            // for example over a color-picker image. They still dispatch the
+            // typed value action but do not paint a second track on top.
+            if style.fill[3] == 0 && style.border[3] == 0 && style.text[3] == 0 {
+                return;
+            }
+            let fraction = range.fraction();
+            match range.orientation {
+                super::UiRangeOrientation::Horizontal => {
+                    let track_height = 4.0_f32.min(rect.height).max(2.0);
+                    let track_rect = UiRect::new(
+                        rect.x,
+                        rect.y + (rect.height - track_height) * 0.5,
+                        rect.width,
+                        track_height,
+                    );
+                    solids.push(UiSurfaceQuad {
+                        rect: track_rect,
+                        clip_rect,
+                        color: color(border),
+                        z_index,
+                        radius: track_height * 0.5,
+                    });
+                    let progress = UiRect::new(
+                        track_rect.x,
+                        track_rect.y,
+                        track_rect.width * fraction,
+                        track_rect.height,
+                    );
+                    if progress.width > 0.0 {
+                        solids.push(UiSurfaceQuad {
+                            rect: progress,
+                            clip_rect,
+                            color: color(ACCENT),
+                            z_index: z_index.saturating_add(1),
+                            radius: track_height * 0.5,
+                        });
+                    }
+                    let thumb_size = rect.height.min(14.0).max(8.0);
+                    let thumb_x = (track_rect.x + track_rect.width * fraction - thumb_size * 0.5)
+                        .clamp(track_rect.x, track_rect.right() - thumb_size);
+                    solids.push(UiSurfaceQuad {
+                        rect: UiRect::new(
+                            thumb_x,
+                            rect.y + (rect.height - thumb_size) * 0.5,
+                            thumb_size,
+                            thumb_size,
+                        ),
+                        clip_rect,
+                        color: color(text),
+                        z_index: z_index.saturating_add(2),
+                        radius: thumb_size * 0.5,
+                    });
+                }
+                super::UiRangeOrientation::Vertical => {
+                    let track_width = 4.0_f32.min(rect.width).max(2.0);
+                    let track_rect = UiRect::new(
+                        rect.x + (rect.width - track_width) * 0.5,
+                        rect.y,
+                        track_width,
+                        rect.height,
+                    );
+                    solids.push(UiSurfaceQuad {
+                        rect: track_rect,
+                        clip_rect,
+                        color: color(border),
+                        z_index,
+                        radius: track_width * 0.5,
+                    });
+                    let progress = UiRect::new(
+                        track_rect.x,
+                        track_rect.bottom() - track_rect.height * fraction,
+                        track_rect.width,
+                        track_rect.height * fraction,
+                    );
+                    if progress.height > 0.0 {
+                        solids.push(UiSurfaceQuad {
+                            rect: progress,
+                            clip_rect,
+                            color: color(ACCENT),
+                            z_index: z_index.saturating_add(1),
+                            radius: track_width * 0.5,
+                        });
+                    }
+                    let thumb_size = rect.width.min(14.0).max(8.0);
+                    let thumb_y =
+                        (track_rect.bottom() - track_rect.height * fraction - thumb_size * 0.5)
+                            .clamp(track_rect.y, track_rect.bottom() - thumb_size);
+                    solids.push(UiSurfaceQuad {
+                        rect: UiRect::new(
+                            rect.x + (rect.width - thumb_size) * 0.5,
+                            thumb_y,
+                            thumb_size,
+                            thumb_size,
+                        ),
+                        clip_rect,
+                        color: color(text),
+                        z_index: z_index.saturating_add(2),
+                        radius: thumb_size * 0.5,
+                    });
+                }
+            }
         }
         _ => {}
     }
+}
+
+fn append_checkbox_checkmark(
+    strokes: &mut Vec<UiSurfaceStroke>,
+    box_rect: UiRect,
+    clip_rect: UiRect,
+    color: [u8; 4],
+    z_index: i16,
+) {
+    let size = box_rect.width.min(box_rect.height);
+    if size <= 0.0 {
+        return;
+    }
+
+    // Two connected vector strokes produce a stable tick at 100% through
+    // 200% DPI. The old implementation emitted five tiny rounded quads; at
+    // distance those read as a dotted staircase instead of one mark.
+    let width = (size * 0.17).clamp(2.4, 3.4);
+    let joint = [box_rect.x + size * 0.42, box_rect.y + size * 0.70];
+    strokes.extend([
+        UiSurfaceStroke {
+            start: [box_rect.x + size * 0.22, box_rect.y + size * 0.51],
+            end: joint,
+            clip_rect,
+            color,
+            width,
+            z_index,
+        },
+        UiSurfaceStroke {
+            start: joint,
+            end: [box_rect.x + size * 0.78, box_rect.y + size * 0.29],
+            clip_rect,
+            color,
+            width,
+            z_index,
+        },
+    ]);
 }
 
 fn append_style_quads(
@@ -749,6 +1012,97 @@ fn append_style_quads(
 fn apply_opacity(mut color: [u8; 4], opacity: f32) -> [u8; 4] {
     color[3] = ((f32::from(color[3]) * opacity.clamp(0.0, 1.0)).round()) as u8;
     color
+}
+
+pub(super) fn text_origin_x_for_layout(
+    layout: &super::UiLayoutBox,
+    request: &UiTextAtlasRequest,
+    resolved: &str,
+    atlas: &UiTextAtlas,
+    raster_scale: f32,
+) -> f32 {
+    let icon_inset = layout
+        .icon
+        .map(|icon| 6.0 + f32::from(icon.size.logical_pixels()) + 6.0)
+        .unwrap_or(0.0);
+    let base = layout.content_rect.x + icon_inset;
+    let Some(edit) = layout.text_edit else {
+        return base;
+    };
+    if layout.control.text_input().is_none() {
+        return base;
+    }
+    if !request.single_line
+        && layout
+            .control
+            .text_input()
+            .is_some_and(|input| input.multiline)
+    {
+        return base;
+    }
+    let caret_width =
+        text_prefix_width_for_cursor(request, resolved, edit.cursor, atlas) / raster_scale;
+    let right = layout.content_rect.right() - 2.0;
+    let available = (right - base).max(1.0);
+    let offset = if caret_width > available {
+        (available - caret_width).min(0.0)
+    } else {
+        0.0
+    };
+    (base + offset).max(base.min(layout.content_rect.right()))
+}
+
+/// Measures the current visual line instead of the widest line in a
+/// multiline value. `UiTextAtlas::measure_prefix_width` intentionally returns
+/// the widest prefix width for general layout; a caret needs the width of the
+/// line it is actually sitting on.
+pub(super) fn text_prefix_width_for_cursor(
+    request: &UiTextAtlasRequest,
+    resolved: &str,
+    cursor: usize,
+    atlas: &UiTextAtlas,
+) -> f32 {
+    text_cursor_metrics(request, resolved, cursor, atlas, 1.0).1
+}
+
+fn text_cursor_metrics(
+    request: &UiTextAtlasRequest,
+    resolved: &str,
+    cursor: usize,
+    atlas: &UiTextAtlas,
+    raster_scale: f32,
+) -> (usize, f32) {
+    let characters = resolved.chars().collect::<Vec<_>>();
+    let cursor = cursor.min(characters.len());
+    let lines = visual_line_ranges(request, resolved);
+    let line_index = lines
+        .iter()
+        .enumerate()
+        .position(|(index, line)| {
+            cursor >= line.start
+                && (cursor < line.end
+                    || cursor == line.end
+                        && lines.get(index + 1).is_none_or(|next| next.start != cursor))
+        })
+        .unwrap_or_else(|| lines.len().saturating_sub(1));
+    let line = lines
+        .get(line_index)
+        .copied()
+        .unwrap_or(super::text_atlas::UiTextVisualLine {
+            start: cursor,
+            end: cursor,
+            width: 0.0,
+        });
+    let line_text = characters[line.start.min(characters.len())..line.end.min(characters.len())]
+        .iter()
+        .collect::<String>();
+    let prefix = cursor
+        .saturating_sub(line.start)
+        .min(line.end.saturating_sub(line.start));
+    (
+        line_index,
+        atlas.measure_prefix_width(request, &line_text, prefix) / raster_scale.max(1.0),
+    )
 }
 
 #[cfg(test)]
@@ -907,6 +1261,32 @@ mod tests {
 
         assert!(list.solids.iter().any(|quad| quad.radius >= 8.0));
         assert!(list.solids.iter().any(|quad| quad.rect.width > 80.0));
+    }
+
+    #[test]
+    fn checked_checkbox_uses_theme_foreground_and_native_strokes() {
+        for palette in [StudioUiPalette::IndustrialDark, StudioUiPalette::PaperLight] {
+            let control = UiControl::Toggle(
+                UiToggle::new("setting.value", true)
+                    .with_presentation(UiTogglePresentation::Checkbox),
+            );
+            let mut solids = Vec::new();
+            let mut strokes = Vec::new();
+            append_control_quads(
+                &mut solids,
+                &mut strokes,
+                UiRect::new(0.0, 0.0, 22.0, 22.0),
+                UiRect::new(0.0, 0.0, 22.0, 22.0),
+                &control,
+                &palette.root_style(),
+                1,
+            );
+
+            assert_eq!(solids[0].color, palette.tokens().text);
+            assert_eq!(strokes.len(), 2);
+            assert!(strokes.iter().all(|stroke| stroke.width >= 2.4));
+            assert!(strokes[0].end == strokes[1].start);
+        }
     }
 
     #[test]

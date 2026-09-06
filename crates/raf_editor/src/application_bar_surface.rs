@@ -8,7 +8,7 @@ use raf_core::project::ProjectType;
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiEventBinding, UiEventKind, UiFlow, UiIcon, UiIconId, UiIconSize, UiImage,
     UiImageFit, UiImageSource, UiLayout, UiNode, UiNodeKind, UiSizeMode, UiSpacing, UiStyle,
-    UiSurface, UiTextInput, UiTextStyle,
+    UiSurface, UiSurfaceMaterial, UiTextInput, UiTextStyle,
 };
 use raf_ui::{UiMenu, UiMenuCommand, UiMenuItem};
 
@@ -38,27 +38,18 @@ pub fn application_menu_popup_height(menu: &UiMenu) -> f32 {
             .sum::<f32>()
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentBarStatus {
-    Ready,
-    Thinking,
-    Approval,
-    Error,
-}
-
 pub fn build_application_bar_surface(
     palette: StudioUiPalette,
     project_name: &str,
     project_type: ProjectType,
     open_menu: Option<&str>,
-    agent_status: AgentBarStatus,
 ) -> UiSurface {
     let tokens = palette.tokens();
     let context_key = match project_type {
         ProjectType::Game => "app.scene_view",
         ProjectType::Electronics => "app.schematic_view",
     };
-    let root = UiNode::new("application-bar.root", UiNodeKind::Toolbar)
+    let mut root = UiNode::new("application-bar.root", UiNodeKind::Toolbar)
         .with_class("application-bar")
         .with_layout(UiLayout {
             flow: UiFlow::Row,
@@ -98,13 +89,13 @@ pub fn build_application_bar_surface(
                 "application-bar.product-project-separator",
                 UiNodeKind::Label,
             )
-            .with_text_key("|")
+            .with_text_value("|")
             .with_text_style(UiTextStyle::body(tokens.text_muted))
             .with_layout(UiLayout::fixed(8.0, 20.0)),
         )
         .with_child(
             UiNode::new("application-bar.project", UiNodeKind::Label)
-                .with_text_key(project_name.to_string())
+                .with_text_value(project_name.to_string())
                 .with_text_style(UiTextStyle::body(tokens.text))
                 .with_layout(UiLayout::fixed(148.0, 20.0)),
         )
@@ -152,7 +143,6 @@ pub fn build_application_bar_surface(
             60.0,
             open_menu == Some("help"),
         ))
-        .with_child(agent_toolbar_button(palette, agent_status))
         .with_child(
             UiNode::new("application-bar.drag-region", UiNodeKind::Panel)
                 .with_class("application-bar-drag-region")
@@ -171,7 +161,27 @@ pub fn build_application_bar_surface(
                 .with_text_key(context_key)
                 .with_text_style(UiTextStyle::button(tokens.text_muted))
                 .with_layout(UiLayout::fit_content()),
-        )
+        );
+
+    if project_type == ProjectType::Electronics {
+        root = root
+            .with_child(icon_action_button(
+                palette,
+                "application-bar.electronics-drc",
+                "electronics.topbar.drc",
+                "electronics.analysis.drc",
+                UiIconId::Warning,
+            ))
+            .with_child(icon_action_button(
+                palette,
+                "application-bar.electronics-simulate",
+                "electronics.topbar.simulate",
+                "electronics.analysis.simulation",
+                UiIconId::Play,
+            ));
+    }
+
+    root = root
         .with_child(saved_status(palette))
         .with_child(action_button(
             palette,
@@ -209,6 +219,7 @@ pub fn build_application_menu_popup_surface(palette: StudioUiPalette, menu: &UiM
     let height = application_menu_popup_height(menu);
     let mut root = UiNode::new("application-menu.popup", UiNodeKind::Panel)
         .with_class("application-menu-popup")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 0.0,
@@ -304,7 +315,7 @@ fn menu_command_row(palette: StudioUiPalette, index: usize, command: &UiMenuComm
                 format!("application-menu.accelerator.{index}.{}", command.id),
                 UiNodeKind::Label,
             )
-            .with_text_key(accelerator)
+            .with_text_value(accelerator)
             .with_text_style(UiTextStyle::button(tokens.text_muted))
             .with_layout(UiLayout::fit_content()),
         );
@@ -389,40 +400,6 @@ fn application_menu_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleShee
     }
 }
 
-fn agent_bar_rule(
-    class: &str,
-    fill: [u8; 4],
-    border: [u8; 4],
-    text: [u8; 4],
-) -> raf_ui::UiStyleRule {
-    raf_ui::UiStyleRule::new(
-        raf_ui::UiStyleSelector::Class(class.to_string()),
-        raf_ui::UiStylePatch {
-            fill: Some(fill),
-            border: Some(border),
-            text: Some(text),
-            border_width: Some(1.0),
-            radius: Some(2.0),
-            ..raf_ui::UiStylePatch::default()
-        },
-    )
-    .when(raf_ui::UiStyleRuleState::Always)
-}
-
-fn agent_bar_hover_rule(class: &str, fill: [u8; 4], border: [u8; 4]) -> raf_ui::UiStyleRule {
-    raf_ui::UiStyleRule::new(
-        raf_ui::UiStyleSelector::Class(class.to_string()),
-        raf_ui::UiStylePatch {
-            fill: Some(fill),
-            border: Some(border),
-            text: Some([255, 255, 255, 255]),
-            border_width: Some(1.0),
-            ..raf_ui::UiStylePatch::default()
-        },
-    )
-    .when(raf_ui::UiStyleRuleState::Hovered)
-}
-
 fn hover_tint(base: [u8; 4], accent: [u8; 4]) -> [u8; 4] {
     [
         ((base[0] as u16 * 3 + accent[0] as u16) / 4) as u8,
@@ -492,42 +469,24 @@ fn action_button(
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
-fn agent_toolbar_button(palette: StudioUiPalette, status: AgentBarStatus) -> UiNode {
+fn icon_action_button(
+    palette: StudioUiPalette,
+    id: &str,
+    label_key: &str,
+    command: &str,
+    icon: UiIconId,
+) -> UiNode {
     let tokens = palette.tokens();
-    let class = match status {
-        AgentBarStatus::Ready => "application-bar-agent",
-        AgentBarStatus::Thinking => "application-bar-agent-busy",
-        AgentBarStatus::Approval => "application-bar-agent-warning",
-        AgentBarStatus::Error => "application-bar-agent-error",
-    };
-    UiNode::new("application-bar.agent", UiNodeKind::Button)
-        .with_class(class)
-        .with_layout(UiLayout::fixed(76.0, 28.0))
-        .with_child(
-            UiNode::new("application-bar.agent.content", UiNodeKind::Panel)
-                .with_layout(UiLayout {
-                    flow: UiFlow::Row,
-                    align_items: raf_ui::UiAlign::Center,
-                    justify_content: raf_ui::UiJustify::Center,
-                    gap: 5.0,
-                    ..UiLayout::fill(UiFlow::Row)
-                })
-                .with_child(
-                    UiNode::new("application-bar.agent.icon", UiNodeKind::Panel)
-                        .with_icon(UiIcon::new(UiIconId::Agent).with_size(UiIconSize::Small))
-                        .with_layout(UiLayout::fixed(16.0, 18.0)),
-                )
-                .with_child(
-                    UiNode::new("application-bar.agent.label", UiNodeKind::Label)
-                        .with_text_key("app.agent_tab")
-                        .with_text_style(UiTextStyle::button(tokens.text))
-                        .with_layout(UiLayout::fit_content()),
-                ),
-        )
-        .with_tooltip_key("app.agent_title")
-        .with_accessibility_label_key("app.agent_title")
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class("application-bar-electronics-action")
+        .with_layout(UiLayout::fixed(86.0, 28.0))
+        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
+        .with_text_key(label_key)
+        .with_text_style(UiTextStyle::button(tokens.text))
+        .with_tooltip_key(label_key)
+        .with_accessibility_label_key(label_key)
         .focusable()
-        .with_event(UiEventBinding::command(UiEventKind::Click, "agent.open"))
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
 fn command_search(palette: StudioUiPalette) -> UiNode {
@@ -559,7 +518,7 @@ fn command_search(palette: StudioUiPalette) -> UiNode {
         )
         .with_child(
             UiNode::new("application-bar.command-search.shortcut", UiNodeKind::Label)
-                .with_text_key(crate::editor_shortcuts::accelerator_for(
+                .with_text_value(crate::editor_shortcuts::accelerator_for(
                     crate::application_menu::command::SEARCH_OPEN,
                 ))
                 .with_text_style(UiTextStyle::button(tokens.text_muted))
@@ -696,50 +655,6 @@ fn application_bar_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleSheet
                 },
             )
             .when(raf_ui::UiStyleRuleState::Active),
-            agent_bar_rule(
-                "application-bar-agent",
-                tokens.surface_alt,
-                tokens.border,
-                tokens.text,
-            ),
-            agent_bar_rule(
-                "application-bar-agent-busy",
-                tokens.surface_raised,
-                tokens.accent,
-                tokens.text,
-            ),
-            agent_bar_rule(
-                "application-bar-agent-warning",
-                tokens.surface_raised,
-                tokens.warning,
-                tokens.text,
-            ),
-            agent_bar_rule(
-                "application-bar-agent-error",
-                tokens.surface_raised,
-                tokens.danger,
-                tokens.text,
-            ),
-            agent_bar_hover_rule(
-                "application-bar-agent",
-                hover_tint(tokens.surface_raised, tokens.accent),
-                tokens.accent,
-            ),
-            agent_bar_hover_rule(
-                "application-bar-agent-busy",
-                hover_tint(tokens.surface_raised, tokens.accent),
-                tokens.accent_hot,
-            ),
-            agent_bar_hover_rule(
-                "application-bar-agent-warning",
-                hover_tint(tokens.surface_raised, tokens.warning),
-                tokens.warning,
-            ),
-            agent_bar_hover_rule(
-                "application-bar-agent-error",
-                hover_tint(tokens.surface_raised, tokens.danger),
-                tokens.danger,
-            ),
             raf_ui::UiStyleRule::new(
                 raf_ui::UiStyleSelector::Class("application-bar-secondary-action".to_string()),
                 raf_ui::UiStylePatch {
@@ -758,6 +673,29 @@ fn application_bar_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleSheet
                     border: Some(tokens.accent),
                     border_width: Some(1.0),
                     text: Some([255, 255, 255, 255]),
+                    ..raf_ui::UiStylePatch::default()
+                },
+            )
+            .when(raf_ui::UiStyleRuleState::Hovered),
+            raf_ui::UiStyleRule::new(
+                raf_ui::UiStyleSelector::Class("application-bar-electronics-action".to_string()),
+                raf_ui::UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    text: Some(tokens.text_muted),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    ..raf_ui::UiStylePatch::default()
+                },
+            )
+            .when(raf_ui::UiStyleRuleState::Always),
+            raf_ui::UiStyleRule::new(
+                raf_ui::UiStyleSelector::Class("application-bar-electronics-action".to_string()),
+                raf_ui::UiStylePatch {
+                    fill: Some(hover_tint(tokens.surface_raised, tokens.accent)),
+                    border: Some(tokens.accent),
+                    text: Some([255, 255, 255, 255]),
+                    border_width: Some(1.0),
                     ..raf_ui::UiStylePatch::default()
                 },
             )
@@ -833,7 +771,6 @@ mod tests {
             "Demo",
             ProjectType::Game,
             None,
-            AgentBarStatus::Ready,
         );
         let serialized = format!("{surface:?}");
         assert!(!serialized.contains("Build"));
@@ -848,5 +785,21 @@ mod tests {
         assert!(serialized.contains("application-bar.menu.file.label"));
         assert!(serialized.contains("application-bar.saved.content"));
         assert!(serialized.contains("application-bar.drag-region"));
+    }
+
+    #[test]
+    fn electronics_bar_exposes_analysis_actions_in_the_application_bar() {
+        let surface = build_application_bar_surface(
+            StudioUiPalette::IndustrialDark,
+            "Demo",
+            ProjectType::Electronics,
+            None,
+        );
+        let serialized = format!("{surface:?}");
+        assert!(serialized.contains("electronics.topbar.drc"));
+        assert!(serialized.contains("electronics.topbar.simulate"));
+        assert!(serialized.contains("application-bar-electronics-action"));
+        assert!(serialized.contains("electronics.analysis.drc"));
+        assert!(serialized.contains("electronics.analysis.simulation"));
     }
 }

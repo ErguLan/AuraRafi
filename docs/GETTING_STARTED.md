@@ -155,7 +155,9 @@ In electronics workspaces, the same area becomes a domain-specific inspector:
 - **Console**: Log messages with severity filters (Info, Warning, Error)
 - **Assets**: Browse and filter project assets
 - **Node Editor**: Visual scripting with connected nodes
-- **AI Chat**: AI assistant interface structure (UI exists, provider/runtime integration is still pending)
+- **AI Chat**: Native RafUI Agent surface with sessions, approvals and the
+  shared command boundary. Configure a verified OpenAI or OpenRouter transport
+  before sending requests.
 
 ## Node Editor
 

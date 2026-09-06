@@ -1,6 +1,13 @@
 //! Component library - built-in electronic parts.
 
+use std::path::{Path, PathBuf};
+
 use crate::component::ElectronicComponent;
+
+/// Conventional directory name that modders drop inside a project root to add
+/// custom component templates and DRC rules. Resolved against a caller-provided
+/// base path so the engine never depends on the current working directory.
+pub const ELECTRICAL_ASSETS_DIR: &str = "ElectricalAssets";
 
 /// Library of electronic components available for placement.
 pub struct ComponentLibrary {
@@ -121,46 +128,71 @@ impl ComponentLibrary {
         library
     }
 
-    /// Load external components from ElectricalAssets directory.
-    pub fn load_external_assets(&mut self) {
-        let assets_dir = std::path::Path::new("ElectricalAssets");
-        if !assets_dir.exists() {
-            let _ = std::fs::create_dir_all(assets_dir);
-            // Export current defaults for modders to see
-            for tmpl in &self.components {
-                if let Ok(ron_str) =
-                    ron::ser::to_string_pretty(&tmpl.template, ron::ser::PrettyConfig::default())
-                {
-                    let file_name = format!("{}.ron", tmpl.name.replace(" ", "_"));
-                    let _ = std::fs::write(assets_dir.join(file_name), ron_str);
-                }
-            }
+    /// Load external components from a project-relative `ElectricalAssets/`
+    /// directory. The base path is provided by the caller so the engine never
+    /// falls back to the current working directory.
+    ///
+    /// Missing directories are ignored silently; use `export_default_templates_to`
+    /// when you want to scaffold a new project.
+    pub fn load_external_assets_from(&mut self, base: &Path) {
+        let assets_dir = base.join(ELECTRICAL_ASSETS_DIR);
+        if !assets_dir.is_dir() {
             return;
         }
 
-        // Load all .ron files
-        if let Ok(entries) = std::fs::read_dir(assets_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("ron") {
-                    if let Ok(contents) = std::fs::read_to_string(&path) {
-                        if let Ok(template) = ron::from_str::<ElectronicComponent>(&contents) {
-                            let name = path.file_stem().unwrap().to_str().unwrap().to_string();
-                            self.components.push(ComponentTemplate {
-                                name,
-                                category: template.category.clone(),
-                                description: format!("Loaded from {}", path.display()),
-                                icon_asset: None,
-                                keywords: Vec::new(),
-                                favorite: false,
-                                datasheet: template.datasheet.clone(),
-                                template,
-                            });
-                        }
-                    }
-                }
+        let Ok(entries) = std::fs::read_dir(&assets_dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("ron") {
+                continue;
             }
+            let Ok(contents) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let Ok(template) = ron::from_str::<ElectronicComponent>(&contents) else {
+                continue;
+            };
+            let name = path
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| template.designator.clone());
+            self.components.push(ComponentTemplate {
+                name,
+                category: template.category.clone(),
+                description: format!("Loaded from {}", path.display()),
+                icon_asset: None,
+                keywords: Vec::new(),
+                favorite: false,
+                datasheet: template.datasheet.clone(),
+                template,
+            });
         }
+    }
+
+    /// Backwards-compatible wrapper that resolves `ElectricalAssets/` from the
+    /// current working directory. New callers should prefer
+    /// `load_external_assets_from(&project_root)`.
+    pub fn load_external_assets(&mut self) {
+        self.load_external_assets_from(Path::new("."));
+    }
+
+    /// Write every built-in template as a `.ron` file inside
+    /// `<base>/ElectricalAssets/`. Used once to scaffold a project so modders
+    /// have a starting point. Missing directories are created.
+    pub fn export_default_templates_to(&self, base: &Path) -> std::io::Result<()> {
+        let assets_dir: PathBuf = base.join(ELECTRICAL_ASSETS_DIR);
+        std::fs::create_dir_all(&assets_dir)?;
+        for tmpl in &self.components {
+            let ron_str =
+                ron::ser::to_string_pretty(&tmpl.template, ron::ser::PrettyConfig::default())
+                    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let file_name = format!("{}.ron", tmpl.name.replace(' ', "_"));
+            std::fs::write(assets_dir.join(file_name), ron_str)?;
+        }
+        Ok(())
     }
 
     /// Merge code-registered extensions into the library.
@@ -195,6 +227,21 @@ impl ComponentLibrary {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+
+    fn unique_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = env::temp_dir().join(format!(
+            "rafi_library_test_{label}_{}_{}",
+            std::process::id(),
+            nanos
+        ));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        dir
+    }
 
     #[test]
     fn default_library_keeps_existing_component_set_only() {
@@ -216,5 +263,40 @@ mod tests {
                 "Ground"
             ]
         );
+    }
+
+    #[test]
+    fn load_external_assets_from_uses_caller_provided_path() {
+        let base = unique_dir("external");
+        let assets_dir = base.join(ELECTRICAL_ASSETS_DIR);
+        std::fs::create_dir_all(&assets_dir).expect("assets dir");
+
+        let mut custom = ElectronicComponent::resistor("47k");
+        custom.designator = "R?".to_string();
+        custom.category = "Passive".to_string();
+        let ron_str = ron::ser::to_string_pretty(&custom, ron::ser::PrettyConfig::default())
+            .expect("serialize template");
+        std::fs::write(assets_dir.join("Custom_Resistor.ron"), ron_str).expect("write template");
+
+        let mut library = ComponentLibrary::default_library();
+        let before = library.components.len();
+        library.load_external_assets_from(&base);
+        assert!(library.components.len() > before);
+        assert!(library
+            .components
+            .iter()
+            .any(|template| template.name == "Custom_Resistor"));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn load_external_assets_from_silently_skips_missing_dir() {
+        let base = unique_dir("missing");
+        std::fs::remove_dir_all(&base).ok();
+        let mut library = ComponentLibrary::default_library();
+        let before = library.components.len();
+        library.load_external_assets_from(&base);
+        assert_eq!(library.components.len(), before);
     }
 }

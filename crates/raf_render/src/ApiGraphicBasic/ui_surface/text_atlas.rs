@@ -4,11 +4,11 @@
 //! font registry, shaping fallback, rasterization, shelf atlas, dirty state,
 //! and cache keys that presentation backends consume.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use ab_glyph::{point, Font, FontArc, ScaleFont};
-use raf_ui::{UiFontWeight, UiTextAtlasRequest, UiTextRole};
+use raf_ui::{UiFontWeight, UiTextAtlasRequest, UiTextOverflow, UiTextRole};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiTextAtlasRect {
@@ -55,6 +55,8 @@ struct UiTextAtlasKey {
     size_px: u16,
     line_height_px: u16,
     max_width_px: u16,
+    overflow: UiTextOverflow,
+    single_line: bool,
 }
 
 impl UiTextAtlas {
@@ -143,7 +145,9 @@ impl UiTextAtlas {
         let requests = requests.into_iter().collect::<Vec<_>>();
         self.frame = self.frame.wrapping_add(1);
         let frame = self.frame;
+        let compacted = self.compact_stale_slots(&requests);
         let mut stats = self.sync_resolved_pass(&requests, frame);
+        stats.evicted = stats.evicted.saturating_add(compacted);
 
         // Recovery is deliberately frame-atomic. Clearing while iterating the
         // requests invalidates slots that presentation still needs for this
@@ -151,12 +155,54 @@ impl UiTextAtlas {
         // retained tree. Repack only after the first pass has finished, then
         // resolve the complete request set against the fresh atlas.
         if stats.overflowed > 0 {
-            let evicted = self.slots.len();
+            let evicted = stats.evicted.saturating_add(self.slots.len());
             self.clear();
             stats = self.sync_resolved_pass(&requests, frame);
             stats.evicted = stats.evicted.saturating_add(evicted);
         }
         stats
+    }
+
+    /// Reclaims atlas space left by text that no longer belongs to the current
+    /// retained frame. Agent history virtualization changes a few large text
+    /// blocks at a time; keeping every previously visited block made the atlas
+    /// grow until scrolling itself became progressively more expensive.
+    ///
+    /// A small stale tail is intentionally preserved so a one-row scroll back
+    /// can reuse its glyphs. Repacking only begins once stale content is both
+    /// meaningful and large enough to justify one bounded rebuild.
+    fn compact_stale_slots(&mut self, requests: &[(&UiTextAtlasRequest, &str)]) -> usize {
+        const MIN_STALE_SLOTS: usize = 8;
+
+        if self.slots.len() < MIN_STALE_SLOTS {
+            return 0;
+        }
+        let active = requests
+            .iter()
+            .map(|(request, text)| UiTextAtlasKey::from_request(request, text))
+            .collect::<HashSet<_>>();
+        let stale = self
+            .slots
+            .iter()
+            .filter(|(key, _)| !active.contains(*key))
+            .collect::<Vec<_>>();
+        if stale.len() < MIN_STALE_SLOTS {
+            return 0;
+        }
+        let stale_area = stale
+            .iter()
+            .map(|(_, slot)| usize::from(slot.rect.width) * usize::from(slot.rect.height))
+            .sum::<usize>();
+        let atlas_area = usize::from(self.size[0]) * usize::from(self.size[1]);
+        let stale_dominates_slots = stale.len().saturating_mul(2) >= self.slots.len();
+        let stale_dominates_pixels = stale_area.saturating_mul(4) >= atlas_area;
+        if !stale_dominates_slots && !stale_dominates_pixels {
+            return 0;
+        }
+
+        let evicted = self.slots.len();
+        self.clear();
+        evicted
     }
 
     fn sync_resolved_pass<'a>(
@@ -240,7 +286,12 @@ impl UiTextAtlas {
         let lines = layout_lines(
             &scale,
             &prefix,
-            text_layout_width(request.style.role, request.max_width),
+            text_layout_width(
+                request.style.role,
+                request.max_width,
+                request.single_line,
+                request.overflow,
+            ),
             brand_tracking(request.style.role),
         );
         lines.iter().map(|line| line.width).fold(0.0_f32, f32::max)
@@ -337,6 +388,8 @@ impl UiTextAtlasKey {
             size_px: pixels_to_u16(request.style.size_px),
             line_height_px: pixels_to_u16(request.style.line_height_px),
             max_width_px: pixels_to_u16(request.max_width),
+            overflow: request.overflow,
+            single_line: request.single_line,
         }
     }
 }
@@ -389,10 +442,20 @@ fn rasterize_text(request: &UiTextAtlasRequest, text: &str) -> RasterizedText {
         .line_height_px
         .max(scale.height().ceil() + 2.0)
         .ceil();
+    let display_text = if request.overflow == UiTextOverflow::Ellipsis {
+        ellipsize_text(&scale, text, request.max_width.max(1.0), tracking)
+    } else {
+        text.to_string()
+    };
     let lines = layout_lines(
         &scale,
-        text,
-        text_layout_width(request.style.role, request.max_width),
+        &display_text,
+        text_layout_width(
+            request.style.role,
+            request.max_width,
+            request.single_line,
+            request.overflow,
+        ),
         tracking,
     );
     let width = lines
@@ -441,16 +504,52 @@ fn rasterize_text(request: &UiTextAtlasRequest, text: &str) -> RasterizedText {
     }
 }
 
-fn text_layout_width(role: UiTextRole, authored_width: f32) -> f32 {
+fn text_layout_width(
+    role: UiTextRole,
+    authored_width: f32,
+    single_line: bool,
+    overflow: UiTextOverflow,
+) -> f32 {
     // Controls are single-line by contract. Wrapping a tab, row label, or
     // toolbar button can reduce its visible text to one glyph when a narrow
     // responsive layout temporarily compresses the flow track. The parent
     // clip remains responsible for truncation; the atlas must not create
     // extra lines for these compact controls.
-    if matches!(role, UiTextRole::Button | UiTextRole::Toolbar) {
+    if single_line
+        || matches!(role, UiTextRole::Button | UiTextRole::Toolbar)
+        || matches!(overflow, UiTextOverflow::Clip)
+    {
         authored_width.max(1024.0)
+    } else if overflow == UiTextOverflow::Ellipsis {
+        authored_width.max(1.0)
     } else {
         authored_width.max(1.0)
+    }
+}
+
+fn ellipsize_text<F: Font>(
+    scale: &impl ScaleFont<F>,
+    text: &str,
+    max_width: f32,
+    tracking: f32,
+) -> String {
+    let ellipsis = "…";
+    let width_of = |value: &str| appended_text_width(scale, 0.0, None, value, tracking);
+    if width_of(text) <= max_width {
+        return text.to_string();
+    }
+    let mut result = String::new();
+    for character in text.chars() {
+        let candidate = format!("{result}{character}{ellipsis}");
+        if width_of(&candidate) > max_width {
+            break;
+        }
+        result.push(character);
+    }
+    if result.is_empty() {
+        ellipsis.to_string()
+    } else {
+        format!("{result}{ellipsis}")
     }
 }
 
@@ -462,8 +561,17 @@ fn weighted_coverage(coverage: f32, _weight: UiFontWeight) -> f32 {
 }
 
 struct RasterLine {
+    start: usize,
+    end: usize,
     width: f32,
     glyphs: Vec<RasterGlyph>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct UiTextVisualLine {
+    pub start: usize,
+    pub end: usize,
+    pub width: f32,
 }
 
 struct RasterGlyph {
@@ -478,63 +586,71 @@ fn layout_lines<F: Font>(
     tracking: f32,
 ) -> Vec<RasterLine> {
     let mut lines = vec![RasterLine {
+        start: 0,
+        end: 0,
         width: 0.0,
         glyphs: Vec::new(),
     }];
     let mut previous = None;
-    for (paragraph_index, paragraph) in text.split('\n').enumerate() {
-        if paragraph_index > 0 {
+    for (character_index, character) in text.chars().enumerate() {
+        if character == '\n' {
+            lines.last_mut().expect("text layout line exists").end = character_index;
             lines.push(RasterLine {
+                start: character_index + 1,
+                end: character_index + 1,
+                width: 0.0,
+                glyphs: Vec::new(),
+            });
+            previous = None;
+            continue;
+        }
+
+        let line = lines.last().expect("text layout begins with a line");
+        let next_width = appended_character_width(scale, line.width, previous, character, tracking);
+        if !line.glyphs.is_empty() && next_width > max_width {
+            lines.push(RasterLine {
+                start: character_index,
+                end: character_index,
                 width: 0.0,
                 glyphs: Vec::new(),
             });
             previous = None;
         }
-        for word in paragraph.split_whitespace() {
-            let line = lines.last().expect("text layout begins with a line");
-            if !line.glyphs.is_empty() {
-                let width_with_space =
-                    appended_text_width(scale, line.width, previous, " ", tracking);
-                let width_with_word =
-                    appended_text_width(scale, width_with_space, None, word, tracking);
-                if width_with_word > max_width {
-                    lines.push(RasterLine {
-                        width: 0.0,
-                        glyphs: Vec::new(),
-                    });
-                    previous = None;
-                } else {
-                    append_text_to_line(
-                        scale,
-                        lines.last_mut().expect("text layout line exists"),
-                        &mut previous,
-                        " ",
-                        tracking,
-                    );
-                }
-            }
-            for character in word.chars() {
-                let line = lines.last().expect("text layout line exists");
-                let next_width =
-                    appended_character_width(scale, line.width, previous, character, tracking);
-                if !line.glyphs.is_empty() && next_width > max_width {
-                    lines.push(RasterLine {
-                        width: 0.0,
-                        glyphs: Vec::new(),
-                    });
-                    previous = None;
-                }
-                append_character_to_line(
-                    scale,
-                    lines.last_mut().expect("text layout line exists"),
-                    &mut previous,
-                    character,
-                    tracking,
-                );
-            }
-        }
+        let line = lines.last_mut().expect("text layout line exists");
+        append_character_to_line(scale, line, &mut previous, character, tracking);
+        line.end = character_index + 1;
     }
     lines
+}
+
+/// Returns the exact character ranges occupied by the same visual lines that
+/// the atlas rasterizes. Spaces are retained, and soft-wrap boundaries are
+/// represented alongside explicit newline boundaries.
+pub(crate) fn visual_line_ranges(
+    request: &UiTextAtlasRequest,
+    text: &str,
+) -> Vec<UiTextVisualLine> {
+    let font = atlas_font(request.style.role, request.style.weight);
+    let scale = font.as_scaled(request.style.size_px.max(6.0));
+    let lines = layout_lines(
+        &scale,
+        text,
+        text_layout_width(
+            request.style.role,
+            request.max_width,
+            request.single_line,
+            request.overflow,
+        ),
+        brand_tracking(request.style.role),
+    );
+    lines
+        .into_iter()
+        .map(|line| UiTextVisualLine {
+            start: line.start,
+            end: line.end,
+            width: line.width,
+        })
+        .collect()
 }
 
 fn appended_text_width<F: Font>(
@@ -569,18 +685,6 @@ fn appended_character_width<F: Font>(
         + previous.map(|glyph| scale.kern(glyph, id)).unwrap_or(0.0))
     .max(0.0)
         + scale.h_advance(id)
-}
-
-fn append_text_to_line<F: Font>(
-    scale: &impl ScaleFont<F>,
-    line: &mut RasterLine,
-    previous: &mut Option<ab_glyph::GlyphId>,
-    text: &str,
-    tracking: f32,
-) {
-    for character in text.chars() {
-        append_character_to_line(scale, line, previous, character, tracking);
-    }
 }
 
 fn append_character_to_line<F: Font>(
@@ -760,6 +864,41 @@ mod tests {
     }
 
     #[test]
+    fn virtualized_text_reclaims_a_stale_atlas_window() {
+        let mut atlas = UiTextAtlas::new([512, 512]);
+        let mut previous = Vec::new();
+        for index in 0..12 {
+            let mut request = request();
+            request.node_id = format!("previous.{index}");
+            previous.push((request, format!("Previous Agent message {index}")));
+        }
+        atlas.sync_resolved(
+            previous
+                .iter()
+                .map(|(request, text)| (request, text.as_str())),
+        );
+        assert_eq!(atlas.slot_count(), previous.len());
+
+        let mut current = Vec::new();
+        for index in 0..4 {
+            let mut request = request();
+            request.node_id = format!("current.{index}");
+            current.push((request, format!("Current Agent message {index}")));
+        }
+        let stats = atlas.sync_resolved(
+            current
+                .iter()
+                .map(|(request, text)| (request, text.as_str())),
+        );
+
+        assert!(stats.evicted >= previous.len());
+        assert_eq!(atlas.slot_count(), current.len());
+        assert!(current
+            .iter()
+            .all(|(request, text)| atlas.slot_for(request, text).is_some()));
+    }
+
+    #[test]
     fn compact_button_text_stays_on_one_line() {
         let request = UiTextAtlasRequest::new(
             "hierarchy.row.label",
@@ -777,6 +916,23 @@ mod tests {
             .ceil() as usize;
         assert!(raster.height <= expected_line_height + 4);
         assert!(raster.width > 24);
+    }
+
+    #[test]
+    fn visual_lines_preserve_consecutive_spaces_and_character_ranges() {
+        let mut request = request();
+        request.max_width = 512.0;
+        let lines = visual_line_ranges(&request, "a  b");
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!((lines[0].start, lines[0].end), (0, 4));
+
+        let mut atlas = UiTextAtlas::new([512, 128]);
+        atlas.sync_resolved([(&request, "a  b"), (&request, "ab")]);
+        assert!(
+            atlas.measure_prefix_width(&request, "a  b", 4)
+                > atlas.measure_prefix_width(&request, "ab", 2)
+        );
     }
 
     #[test]

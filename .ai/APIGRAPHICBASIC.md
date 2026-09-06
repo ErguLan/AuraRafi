@@ -165,6 +165,11 @@ an alternative UI ownership path, and it must not be removed blindly.
 - Cache layout, resolved text, paint data, buffers, and image uploads by their
   real invalidation inputs. Preserve paint order while batching only compatible
   adjacent work; do not optimize by reordering overlays or text behind panels.
+- Semantic RafUI translucency is resolved by ApiGraphicBasic before the shared
+  draw list. Alpha-only materials reuse existing blending; high contrast,
+  Reduce transparency, and constrained budgets use an opaque fallback.
+- Blur requires separate authorization, bounded transient resources, and
+  measured GPU/CPU behavior. It is not part of the alpha-only material beta.
 
 ### 6B. Frontier RafUI Overlay And Density Contract
 

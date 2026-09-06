@@ -16,4 +16,3 @@ tracing = { workspace = true }
 fluent = { workspace = true }
 fluent-bundle = { workspace = true }
 chrono = { workspace = true }
-libloading = { workspace = true }

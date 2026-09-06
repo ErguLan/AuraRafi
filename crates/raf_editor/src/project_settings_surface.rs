@@ -4,15 +4,16 @@
 //! serialized with the active project and never modify global preferences.
 
 use raf_core::config::{RenderPreset, ScriptExecutionMode, ScriptLanguage};
-use raf_core::project::{BuildingStyle, Project};
+use raf_core::project::{BuildingStyle, Project, ProjectType};
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAction, UiAlign, UiCompactMode, UiEventBinding, UiEventKind, UiFlow,
     UiLayout, UiNode, UiNodeKind, UiOverflow, UiRange, UiScrollAxis, UiSizeMode, UiSpacing,
     UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurface,
-    UiTextInput, UiTextStyle, UiToggle,
+    UiTextInput, UiTextStyle, UiToggle, UiTogglePresentation,
 };
 
 const CONTROL_WIDTH: f32 = 232.0;
+const CONTENT_WIDTH: f32 = 760.0;
 const ACCENT: [u8; 4] = [232, 133, 28, 255];
 
 pub fn build_project_settings_surface(
@@ -21,6 +22,37 @@ pub fn build_project_settings_surface(
     global_console_commands_enabled: bool,
 ) -> UiSurface {
     let tokens = palette.tokens();
+    let mut settings_scroll =
+        UiNode::scroll_view("project-settings.scroll", UiScrollAxis::Vertical)
+            .with_layout(UiLayout {
+                flow: UiFlow::Column,
+                grow: 1.0,
+                gap: 14.0,
+                padding: UiSpacing::xy(22.0, 18.0),
+                overflow: UiOverflow::ScrollY,
+                responsive: vec![raf_ui::UiResponsiveRule {
+                    max_width: 520.0,
+                    flow: Some(UiFlow::Column),
+                    basis: Some([0.0, 0.0]),
+                    padding: Some(UiSpacing::xy(12.0, 12.0)),
+                    gap: Some(10.0),
+                    compact: Some(UiCompactMode::Stack),
+                    grid_columns: None,
+                }],
+                ..UiLayout::fill(UiFlow::Column)
+            })
+            .with_child(overview(palette, project))
+            .with_child(layout(palette, project))
+            .with_child(saving(palette, project));
+    if project.project_type == ProjectType::Electronics {
+        settings_scroll = settings_scroll.with_child(electronics(palette, project));
+    } else {
+        settings_scroll = settings_scroll
+            .with_child(runtime(palette, project, global_console_commands_enabled))
+            .with_child(scripting(palette, project))
+            .with_child(graphics(palette, project));
+    }
+
     let root = UiNode::new("project-settings.root", UiNodeKind::Root)
         .with_layout(UiLayout::fill(UiFlow::Column))
         .with_style(palette.root_style())
@@ -69,32 +101,7 @@ pub fn build_project_settings_surface(
                     ),
                 ),
         )
-        .with_child(
-            UiNode::scroll_view("project-settings.scroll", UiScrollAxis::Vertical)
-                .with_layout(UiLayout {
-                    flow: UiFlow::Column,
-                    grow: 1.0,
-                    gap: 14.0,
-                    padding: UiSpacing::xy(22.0, 18.0),
-                    overflow: UiOverflow::ScrollY,
-                    responsive: vec![raf_ui::UiResponsiveRule {
-                        max_width: 520.0,
-                        flow: Some(UiFlow::Column),
-                        basis: Some([0.0, 0.0]),
-                        padding: Some(UiSpacing::xy(12.0, 12.0)),
-                        gap: Some(10.0),
-                        compact: Some(UiCompactMode::Stack),
-                        grid_columns: None,
-                    }],
-                    ..UiLayout::fill(UiFlow::Column)
-                })
-                .with_child(overview(palette, project))
-                .with_child(layout(palette, project))
-                .with_child(runtime(palette, project, global_console_commands_enabled))
-                .with_child(saving(palette, project))
-                .with_child(scripting(palette, project))
-                .with_child(graphics(palette, project)),
-        );
+        .with_child(settings_scroll);
 
     let mut surface = UiSurface::new("editor.project-settings", palette, root);
     surface.style_sheet = project_settings_style_sheet(palette);
@@ -163,6 +170,48 @@ fn layout(palette: StudioUiPalette, project: &Project) -> UiNode {
         )
 }
 
+fn electronics(palette: StudioUiPalette, project: &Project) -> UiNode {
+    section(
+        palette,
+        "project-settings.electronics",
+        "app.project_electronics",
+    )
+    .with_child(range_row_disabled(
+        palette,
+        "project-settings.electronics-schematic-grid-step",
+        "app.electronics_schematic_grid_step",
+        "project-settings.electronics-schematic-grid-step",
+        project.settings.electronics_schematic_grid_step_mm,
+        1.0,
+        100.0,
+        1.0,
+        format!(
+            "{:.0} mm",
+            project.settings.electronics_schematic_grid_step_mm
+        ),
+        false,
+    ))
+    .with_child(range_row_disabled(
+        palette,
+        "project-settings.electronics-pcb-grid-step",
+        "app.electronics_pcb_grid_step",
+        "project-settings.electronics-pcb-grid-step",
+        project.settings.electronics_pcb_grid_step_mm,
+        1.0,
+        100.0,
+        1.0,
+        format!("{:.0} mm", project.settings.electronics_pcb_grid_step_mm),
+        false,
+    ))
+    .with_child(toggle_row(
+        palette,
+        "project-settings.electronics-snap-to-grid",
+        "app.electronics_snap_to_grid",
+        "project-settings.electronics-snap-to-grid",
+        project.settings.electronics_snap_to_grid,
+    ))
+}
+
 fn runtime(
     palette: StudioUiPalette,
     project: &Project,
@@ -189,13 +238,6 @@ fn runtime(
             "app.pause_when_unfocused",
             "project-settings.pause-unfocused",
             project.settings.pause_when_unfocused,
-        ))
-        .with_child(toggle_row(
-            palette,
-            "project-settings.enable-complements",
-            "app.enable_complements",
-            "project-settings.enable-complements",
-            project.settings.enable_complements,
         ))
         .with_child(toggle_row_disabled(
             palette,
@@ -408,7 +450,17 @@ fn section(palette: StudioUiPalette, id: &str, title_key: &str) -> UiNode {
             flow: UiFlow::Column,
             gap: 6.0,
             padding: UiSpacing::same(14.0),
-            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+            basis: [CONTENT_WIDTH, 0.0],
+            responsive: vec![raf_ui::UiResponsiveRule {
+                max_width: CONTENT_WIDTH + 100.0,
+                flow: Some(UiFlow::Column),
+                basis: Some([0.0, 0.0]),
+                padding: Some(UiSpacing::same(12.0)),
+                gap: Some(5.0),
+                compact: Some(UiCompactMode::Stack),
+                grid_columns: None,
+            }],
+            ..UiLayout::fixed(CONTENT_WIDTH, 0.0).with_height_mode(UiSizeMode::FitContent)
         })
         .with_style(UiStyle {
             fill: tokens.surface,
@@ -486,13 +538,15 @@ fn toggle_row_disabled(
     let row = row(
         palette,
         id.clone(),
-        label_key,
+        label_key.clone(),
         UiNode::toggle(
             format!("{id}.control"),
-            UiToggle::new(value_key.clone(), value),
+            UiToggle::new(value_key.clone(), value)
+                .with_presentation(UiTogglePresentation::Checkbox),
         )
         .with_class("project-settings-toggle")
-        .with_layout(UiLayout::fixed(48.0, 28.0))
+        .with_accessibility_label_key(label_key.clone())
+        .with_layout(UiLayout::fixed(22.0, 22.0))
         .disabled(disabled),
     );
     if disabled {
@@ -604,7 +658,7 @@ fn text_row(
                 max_length: 128,
                 multiline: false,
                 password: false,
-                submit_command: None,
+                submit_command: Some("project-settings.commit_text:default_scene_name".to_string()),
             },
         )
         .with_layout(UiLayout {
@@ -834,5 +888,42 @@ mod tests {
         );
         let scroll = &surface.root.children[1];
         assert_eq!(scroll.children.len(), 6);
+    }
+
+    #[test]
+    fn project_settings_cards_are_bounded_and_toggles_use_checkboxes() {
+        let project = Project {
+            id: uuid::Uuid::new_v4(),
+            name: "Demo".to_string(),
+            project_type: raf_core::project::ProjectType::Game,
+            path: std::path::PathBuf::from("."),
+            created_at: chrono::Utc::now(),
+            modified_at: chrono::Utc::now(),
+            engine_version: "0.9.0".to_string(),
+            settings: Default::default(),
+        };
+        let surface =
+            build_project_settings_surface(StudioUiPalette::IndustrialDark, &project, true);
+
+        let overview = surface
+            .root
+            .find("project-settings.overview")
+            .expect("overview section");
+        assert_eq!(overview.layout.basis[0], CONTENT_WIDTH);
+        assert_eq!(overview.layout.width_mode, UiSizeMode::Fixed);
+
+        let toggle = surface
+            .root
+            .find("project-settings.show-hierarchy.control")
+            .and_then(|node| node.control.toggle())
+            .expect("project checkbox");
+        assert_eq!(toggle.presentation, UiTogglePresentation::Checkbox);
+        assert_eq!(
+            surface
+                .root
+                .find("project-settings.show-hierarchy.control")
+                .and_then(|node| node.accessibility_label_key.as_deref()),
+            Some("app.show_hierarchy_panel")
+        );
     }
 }

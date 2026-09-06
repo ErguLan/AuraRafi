@@ -5,6 +5,7 @@
 
 use glam::{Mat4, Vec3};
 
+use raf_core::agent_context::world_bounds;
 use raf_core::scene::graph::{SceneGraph, SceneNodeId};
 
 use crate::api_graphic_basic::device::SceneFrameOutput;
@@ -16,6 +17,25 @@ use crate::bridge::transform_controller::{AxisDragOutcome, ViewportTransformCont
 use crate::camera::{Camera, CameraMode};
 use crate::gizmo::{GizmoAxis, GizmoMode, GizmoState};
 use crate::scene_renderer::{FrameStats, RenderOptions, SceneRenderFrame, SceneRenderer};
+
+const CAMERA_SNAP_DURATION_S: f32 = 0.22;
+
+fn shortest_angle_delta(from: f32, to: f32) -> f32 {
+    (to - from + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
+
+fn normalize_angle(angle: f32) -> f32 {
+    (angle + std::f32::consts::PI).rem_euclid(std::f32::consts::TAU) - std::f32::consts::PI
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CameraSnapTransition {
+    from_yaw: f32,
+    to_yaw: f32,
+    from_pitch: f32,
+    to_pitch: f32,
+    elapsed_s: f32,
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ViewportPointerInput {
@@ -68,6 +88,9 @@ pub struct ViewportBridge {
     /// When set, the camera lerps towards this each frame and clears it
     /// once it is close enough. Replaces the old instant `focus_selected`.
     pending_focus: Option<(Vec3, f32)>,
+    /// Short, interruptible orientation transition started by the viewport
+    /// compass or an equivalent view-snap command.
+    pending_camera_snap: Option<CameraSnapTransition>,
 }
 
 impl Default for ViewportBridge {
@@ -90,6 +113,7 @@ impl ViewportBridge {
             orbit_pitch: 0.5,
             orbit_distance: 8.0,
             pending_focus: None,
+            pending_camera_snap: None,
         }
     }
 
@@ -129,6 +153,7 @@ impl ViewportBridge {
         self.offset_2d = block.offset_2d;
         self.zoom_2d = block.zoom_2d;
         self.pending_focus = None;
+        self.pending_camera_snap = None;
         self.update_camera(block.mode == EditorCameraMode::Orthographic2D);
     }
 
@@ -167,15 +192,18 @@ impl ViewportBridge {
     pub fn set_camera_target(&mut self, target: Vec3) {
         self.camera.target = target;
         self.pending_focus = None;
+        self.pending_camera_snap = None;
     }
 
     pub fn set_orbit_angles(&mut self, yaw: f32, pitch: f32) {
         self.orbit_yaw = yaw;
         self.orbit_pitch = pitch.clamp(-1.4, 1.4);
+        self.pending_camera_snap = None;
     }
 
     pub fn set_orbit_distance(&mut self, distance: f32) {
         self.orbit_distance = distance.clamp(0.5, 200.0);
+        self.pending_camera_snap = None;
     }
 
     pub fn offset_2d(&self) -> [f32; 2] {
@@ -216,19 +244,78 @@ impl ViewportBridge {
             return;
         }
 
-        if axis.y.abs() > 0.99 {
-            self.orbit_yaw = 0.0;
-            self.orbit_pitch = 1.35 * axis.y.signum();
-            return;
-        }
-
-        self.orbit_yaw = axis.x.atan2(axis.z);
-        self.orbit_pitch = axis.y.clamp(-0.97, 0.97).asin();
+        let (yaw, pitch) = if axis.y.abs() > 0.99 {
+            (0.0, 1.35 * axis.y.signum())
+        } else {
+            (axis.x.atan2(axis.z), axis.y.clamp(-0.97, 0.97).asin())
+        };
+        self.begin_camera_snap(yaw, pitch);
     }
 
     pub fn reset_isometric_view(&mut self) {
-        self.orbit_yaw = std::f32::consts::FRAC_PI_4;
-        self.orbit_pitch = 0.5;
+        self.begin_camera_snap(std::f32::consts::FRAC_PI_4, 0.5);
+    }
+
+    fn begin_camera_snap(&mut self, yaw: f32, pitch: f32) {
+        self.pending_focus = None;
+
+        let pitch = pitch.clamp(-1.4, 1.4);
+        let to_yaw = self.orbit_yaw + shortest_angle_delta(self.orbit_yaw, yaw);
+        let yaw_delta = to_yaw - self.orbit_yaw;
+        if yaw_delta.abs() <= f32::EPSILON && (pitch - self.orbit_pitch).abs() <= f32::EPSILON {
+            self.orbit_yaw = normalize_angle(yaw);
+            self.orbit_pitch = pitch;
+            self.pending_camera_snap = None;
+            return;
+        }
+
+        self.pending_camera_snap = Some(CameraSnapTransition {
+            from_yaw: self.orbit_yaw,
+            to_yaw,
+            from_pitch: self.orbit_pitch,
+            to_pitch: pitch,
+            elapsed_s: 0.0,
+        });
+    }
+
+    /// Returns whether a focus or orientation transition still owns a camera
+    /// update. The controller uses this before advancing a frame so the final
+    /// transition frame is rendered even when the animation completes there.
+    pub fn has_camera_transition(&self) -> bool {
+        self.pending_focus.is_some() || self.pending_camera_snap.is_some()
+    }
+
+    /// Advances the camera transitions that are driven by the editor frame
+    /// loop. Compass snaps use a short smoothstep curve and can be interrupted
+    /// by any direct camera input without forcing the user through the rest of
+    /// the animation.
+    pub fn update_camera_transitions(&mut self, delta_seconds: f32) -> bool {
+        let focus_active = self.update_smooth_focus();
+        let snap_active = self.update_camera_snap(delta_seconds);
+        focus_active || snap_active
+    }
+
+    fn update_camera_snap(&mut self, delta_seconds: f32) -> bool {
+        let Some(mut transition) = self.pending_camera_snap.take() else {
+            return false;
+        };
+
+        transition.elapsed_s =
+            (transition.elapsed_s + delta_seconds.max(0.0).min(0.25)).min(CAMERA_SNAP_DURATION_S);
+        let t = (transition.elapsed_s / CAMERA_SNAP_DURATION_S).clamp(0.0, 1.0);
+        let eased = t * t * (3.0 - 2.0 * t);
+        self.orbit_yaw = transition.from_yaw + (transition.to_yaw - transition.from_yaw) * eased;
+        self.orbit_pitch =
+            transition.from_pitch + (transition.to_pitch - transition.from_pitch) * eased;
+
+        if t >= 1.0 {
+            self.orbit_yaw = normalize_angle(transition.to_yaw);
+            self.orbit_pitch = transition.to_pitch;
+            false
+        } else {
+            self.pending_camera_snap = Some(transition);
+            true
+        }
     }
 
     pub fn edit_session(&self) -> &ViewportEditSession {
@@ -504,6 +591,17 @@ impl ViewportBridge {
         config: ViewportNavigationConfig,
     ) {
         let pointer_delta = Vec3::new(input.pointer_delta[0], input.pointer_delta[1], 0.0);
+        let direct_camera_input = input.drag_secondary
+            || input.drag_middle
+            || (input.hovered
+                && (input.move_forward.abs() > f32::EPSILON
+                    || input.move_right.abs() > f32::EPSILON
+                    || input.move_up.abs() > f32::EPSILON
+                    || input.scroll_delta_y.abs() > 0.01));
+        if direct_camera_input {
+            self.pending_camera_snap = None;
+            self.pending_focus = None;
+        }
 
         if is_2d {
             if input.drag_secondary || input.drag_middle {
@@ -561,11 +659,13 @@ impl ViewportBridge {
             let up = Vec3::Y;
             // `forward` is the target-to-camera vector in orbit space. Moving
             // the camera forward therefore moves the orbit target in the
-            // opposite direction. The square-root distance scale keeps fly
-            // navigation usable when the camera is far from the scene instead
-            // of making a low setting feel unnaturally fast.
-            let move_speed = self.orbit_distance.clamp(2.0, 200.0).sqrt()
-                * 0.05
+            // opposite direction. Scale fly speed with orbit distance so 1x
+            // covers a useful fraction of the current view each second. The
+            // previous sqrt(distance) * 0.05 scale reduced the initial 8-unit
+            // view to roughly 0.14 units/second and made normal 0.5x settings
+            // look completely frozen in the real editor.
+            let move_speed = self.orbit_distance.clamp(2.0, 200.0)
+                * 0.85
                 * config.wasd_speed.clamp(0.05, 5.0)
                 * dt;
             self.camera.target -= forward * input.move_forward * move_speed;
@@ -612,21 +712,34 @@ impl ViewportBridge {
         };
 
         let world = scene.world_matrix(id);
-        let center = world.col(3).truncate();
-        let max_extent = world
-            .x_axis
-            .truncate()
-            .length()
-            .max(world.y_axis.truncate().length())
-            .max(world.z_axis.truncate().length())
-            .max(0.0001);
+        let fallback_center = world.col(3).truncate();
+        let (center, max_extent) = world_bounds(scene, id)
+            .map(|(min, max)| {
+                let size = max - min;
+                (
+                    (min + max) * 0.5,
+                    size.x.max(size.y).max(size.z).max(0.0001),
+                )
+            })
+            .unwrap_or_else(|| {
+                let extent = world
+                    .x_axis
+                    .truncate()
+                    .length()
+                    .max(world.y_axis.truncate().length())
+                    .max(world.z_axis.truncate().length())
+                    .max(0.0001);
+                (fallback_center, extent)
+            });
 
         if is_2d {
+            self.pending_camera_snap = None;
             self.offset_2d = [center.x, center.y];
             self.zoom_2d = (4.0 / max_extent.max(0.25)).clamp(0.2, 25.0);
         } else {
             let target_distance = (max_extent * 3.0).clamp(1.5, 40.0);
             // Queue a smooth focus instead of snapping instantly.
+            self.pending_camera_snap = None;
             self.pending_focus = Some((center, target_distance));
         }
     }
@@ -717,5 +830,73 @@ impl ViewportBridge {
             options,
             mesh_override.as_ref().map(|(id, mesh)| (*id, mesh)),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn angle_error(actual: f32, expected: f32) -> f32 {
+        shortest_angle_delta(expected, actual).abs()
+    }
+
+    #[test]
+    fn compass_snap_interpolates_before_settling_on_axis() {
+        let mut bridge = ViewportBridge::new();
+        bridge.set_orbit_angles(0.0, 0.0);
+
+        bridge.snap_view_to_axis(Vec3::X);
+
+        assert!(bridge.has_camera_transition());
+        assert_eq!(bridge.orbit_yaw(), 0.0);
+        assert_eq!(bridge.orbit_pitch(), 0.0);
+
+        assert!(bridge.update_camera_transitions(CAMERA_SNAP_DURATION_S * 0.5));
+        assert!(bridge.orbit_yaw() > 0.0);
+        assert!(bridge.orbit_yaw() < std::f32::consts::FRAC_PI_2);
+
+        assert!(!bridge.update_camera_transitions(CAMERA_SNAP_DURATION_S));
+        assert!(!bridge.has_camera_transition());
+        assert!(angle_error(bridge.orbit_yaw(), std::f32::consts::FRAC_PI_2) < 0.0001);
+        assert!(angle_error(bridge.orbit_pitch(), 0.0) < 0.0001);
+    }
+
+    #[test]
+    fn compass_snap_uses_the_shortest_yaw_path() {
+        let mut bridge = ViewportBridge::new();
+        bridge.set_orbit_angles(std::f32::consts::PI - 0.1, 0.0);
+
+        bridge.snap_view_to_axis(Vec3::new(-1.0, 0.0, -0.1));
+        assert!(bridge.has_camera_transition());
+
+        let starting_yaw = bridge.orbit_yaw();
+        bridge.update_camera_transitions(CAMERA_SNAP_DURATION_S * 0.5);
+        assert!(bridge.orbit_yaw() > starting_yaw);
+
+        while bridge.has_camera_transition() {
+            bridge.update_camera_transitions(CAMERA_SNAP_DURATION_S);
+        }
+        assert!(angle_error(bridge.orbit_yaw(), (-1.0f32).atan2(-0.1)) < 0.0001);
+    }
+
+    #[test]
+    fn direct_camera_input_interrupts_compass_snap() {
+        let mut bridge = ViewportBridge::new();
+        bridge.snap_view_to_axis(Vec3::X);
+        assert!(bridge.has_camera_transition());
+
+        bridge.handle_camera_input(
+            ViewportPointerInput {
+                hovered: true,
+                move_forward: 1.0,
+                frame_time_s: 1.0 / 60.0,
+                ..ViewportPointerInput::default()
+            },
+            false,
+            ViewportNavigationConfig::default(),
+        );
+
+        assert!(!bridge.has_camera_transition());
     }
 }

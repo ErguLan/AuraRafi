@@ -2,7 +2,7 @@
 
 This file contains the definitive technical registry of AuraRafi. AI agents must rely on this file as the primary architectural mapping of the codebase.
 
-## Current native migration truth (2026-08-20)
+## Current native migration truth (2026-08-24)
 
 The active editor path is Winit + RafUI + ApiGraphicBasic. The retired widget
 toolkit is not a runtime dependency or an ownership boundary. Any old panel
@@ -11,6 +11,42 @@ current presentation boundary is
 `native_application.rs`, `native_workbench.rs`, `native_editor_runtime.rs`,
 `native_surface.rs`, and `ApiGraphicBasic::editor_compositor`.
 
+## Current decisions absorbed here
+
+This section is the active decision register. Historical ADR files are not a
+second authority. When an older note conflicts with this section or with the
+active code map below, this document and the live code win.
+
+* **Native editor ownership**: Winit, RafUI, ApiGraphicBasic and the native
+  workbench own the active editor path. The old monolithic `app.rs`/retired
+  widget descriptions are historical and must not be used as implementation
+  targets.
+* **Command boundary**: `raf_core::CommandBus` remains the transactional
+  primitive for history and undo/redo. Native UI, Agent, CLI and MCP converge
+  through the shared command protocol and `raf_editor::commands::CommandGateway`;
+  no adapter may create a parallel mutation path.
+* **Electronics presentation**: schematic and PCB authoring are 2D-first
+  documents. The native CAD surface uses shared ApiGraphicBasic contracts;
+  3D inspection is future/prepared capability, not the current PCB ownership
+  model.
+* **Component extensibility**: the electrical library intentionally combines
+  built-in templates from `default_library()`, external `.ron` assets, and
+  registered Rust extension hooks. “Data-driven” does not mean “no built-ins”.
+* **Persistence and scene data**: project documents use RON; the core scene
+  stores nodes in contiguous vectors with index relationships. Do not replace
+  those boundaries with ad-hoc JSON/TOML or pointer-owned trees.
+* **Translations**: visible UI text uses the embedded JSON i18n catalogs and
+  `raf_core::i18n::t()` with entries in both `en.json` and `es.json`; inline
+  language branches are deprecated.
+* **Windows toolchain**: the repository's documented build target remains
+  `stable-x86_64-pc-windows-gnu` with outputs under `target_gnu/`.
+
+* **Visual design governance**: `.ai/STUDIO_GRADE_UI.md` is the active
+  product-wide visual guide. It supplies defaults rather than immutable
+  architecture. A current user brief or screenshot may override a visual
+  default while preserving the technical, accessibility, localization, and
+  performance contracts below.
+
 ## 1. Core Architectural Pillars
 AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Graphs and CAD PCB Design Topologies inside a lightweight structural core.
 
@@ -18,7 +54,9 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 * **GPU Hardware Driver Priority**: Uses available GPU hardware as the normal execution path, including integrated GPUs for potato profiles. CPU software rasterization is recovery, headless, testing, or incompatibility; it is not the automatic definition of low-spec mode.
 * **Native Graphics Ownership**: Responsibilities move into Rafi-owned ApiGraphicBasic contracts capability by capability. Upper layers never fork into separate WGPU/native versions; WGPU remains private until a validated executor replacement exists.
 * **Viewport Integrity Baseline (2026-07-19)**: View2D is an orthographic view of the shared 3D scene. The active scene path batches adjacent lines, bounds persistent mesh reuse, renders physical pixels for high-DPI targets, and uses world-transform scale for culling/focus. `Sprite2D` is a legacy alias to `Plane`, not an active primitive.
-* **Unified Event & Mutator Layers**: High-level commands flow through the `CommandBus` to support transaction replays, Undo/Redo historical stacks, and AI Tool Calling.
+* **Unified Event & Mutator Layers**: `CommandBus` supplies transactional
+  history; the editor `CommandGateway` and shared command protocol are the
+  boundary used by native UI, Agent, CLI and MCP for project mutations.
 * **No MSVC Tooling Assumptions**: Always compiled via `stable-x86_64-pc-windows-gnu` using MinGW/MSYS2 toolchains on Windows. All compiled outputs are routed to `target_gnu/`.
 * **Canonical Unit System**: 1 world unit = 1 meter (games viewport 3D). 1 schematic unit = 1 millimeter (schematic/PCB canvas). All internal calculations in SI. `DisplayUnit` enum only changes UI display, never computation. Constants in `raf_core::units`.
 * **Scripts Never Touch Engine Internals**: All scripting (Rhai, WASM, Visual Nodes) calls the shared Host API in `raf_script::host_api::ScriptContext`. No tier accesses `SceneGraph`, `InputState`, or audio directly. Scripts hold `NodeHandle` (opaque IDs), not references. See `docs/SCRIPTING_SYSTEM.md`.
@@ -61,6 +99,14 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
   frame pacing, dynamic resolution, and canvas orchestration.
 * `src/native_editor_commands.rs`: RafUI/menu intent translation into runtime
   scene operations.
+* `src/commands/gateway.rs`: Shared editor command boundary used by native UI,
+  Agent and attached adapters.
+* `src/agent_artifacts.rs`: Project-scoped evidence artifacts produced from
+  the last ApiGraphicBasic Game frame; no renderer or scene ownership.
+* `src/agent_executor.rs`: Native Agent tool layer and direct typed gateway
+  routing, including the visual observation tool.
+* `src/native_workbench.rs`: Native Agent lifecycle projection, including the
+  bounded task snapshots/events exposed to attached CLI and MCP clients.
 * `src/native_attached_executor.rs`: CLI/MCP attached command boundary.
 * `src/native_surface.rs`: Native retained RafUI placement/input wrapper.
 * `src/native_workbench.rs`: Game editor chrome state, lifecycle and retained
@@ -123,6 +169,8 @@ recoverable through version history and the stabilization archive.
 
 #### 4. `raf_render` (Graphics Runtime)
 * `src/bridge/render_runtime.rs`: Canonical shared runtime and surface/backend state for Scene, CAD, and renderer-owned surfaces.
+  It also exposes a backend-neutral readback of the last rendered scene frame
+  for Agent evidence; it does not initiate a second render.
 * `src/render_config.rs`: Houses quality configuration structures and GPU capabilities tags.
 * `src/ApiGraphicBasic/`: Rafi-owned graphics contract, devices, command lists, resources, Scene/CAD/RafUI surface presentation, WGPU adapter implementation, and CPU recovery. It must not expose WGPU types to upper layers long-term.
   * `handles.rs`: Generational backend-neutral resource and surface handles.
@@ -172,8 +220,9 @@ recoverable through version history and the stabilization archive.
 ## 3. Crucial Workflows & Systems
 
 ### A. UI Modification Protocol
-* **No retained tree in `app.rs`**: Keep `app.rs` as route coordinator,
-  application-state owner, command/persistence boundary, and autosave owner.
+* **No monolithic editor coordinator**: Keep composition and lifecycle in
+  `native_application.rs`, `native_workbench.rs` and their focused hosts. Do
+  not reintroduce a retired `app.rs` ownership boundary.
 * **Creating a RafUI surface**:
   1. Add a focused `*_surface.rs` document builder under the owning editor
      module or `panels/`.
@@ -183,34 +232,44 @@ recoverable through version history and the stabilization archive.
      keys, and typed event bindings.
   4. Map `UiAction` values to existing command, validation, undo, and
      persistence boundaries. Do not mutate models inside the document builder.
-  5. Register the route/host in `app.rs` without embedding raw visual trees.
+  5. Register the route/host through the native workbench/composition owner
+     without embedding raw visual trees in a monolithic coordinator.
 * **Native RafUI**: Retained surfaces own new menus, rails, fixed dock chrome,
   and editor overlays; ApiGraphicBasic owns their GPU/CPU composition.
 * **Authoring source of truth**: Read `docs/RAF_UI.md`,
   `docs/EDITOR_RAFUI.md`, `docs/APIGRAPHICBASIC.md`, and
-  `.ulpi/design/DESIGN.md` before UI or surface changes. They define exact
-  menu, theme, canvas, resource, editor, and ownership behavior.
+  `.ai/STUDIO_GRADE_UI.md` before UI or surface changes. The technical
+  documents define menu, canvas, resource, editor, and ownership behavior;
+  Studio Grade UI defines visual defaults and quality criteria. A brief under
+  `.ulpi/design/` is task-specific context, not a second global authority.
 
 ### B. Command Console Loop
-* Manual commands typed with `/` in the Console flow to `parse_console_input` in `app.rs`.
-* Parsed fields are mapped in `execute_console_command`. Every mutating command pushes an undo state copy first, mutates the state, and records the change in `record_immediate_document_change` (zero-latency auto-save when linear saving is enabled).
+* Manual commands typed with `/` in the Console flow through
+  `commands::parser::parse_console_input` and
+  `native_editor_commands.rs`/the domain gateway.
+* Parsed fields are mapped in the command executors. Every mutating command
+  must preserve the command/history/persistence boundary rather than mutate a
+  document silently.
 
 ### C. Agent Retained Rendering Guardrails
-* Agent history pagination is a view optimization, not backend loading. `Load
-  older messages` and `Back to latest` change the visible page; they must not
-  create a second persistence path or move history I/O into the render loop.
-* The page size is persisted as `EngineSettings::agent_message_page_size`,
-  defaults to 8, and is clamped to 4..32. Keep the current-page bound when
-  changing the Agent surface; rendering the full runtime history defeats the
-  retained text-atlas budget.
-* When changing session or page, reset transient scroll/focus/hover/pointer
-  capture state. Do not reuse a previous surface's interaction state against
-  a new message document.
+* The native Agent transcript is a continuous scroll surface. History I/O stays
+  in the runtime and outside the render loop; the retained surface must not
+  create a second persistence path.
+* `EngineSettings::agent_message_page_size` is legacy persisted compatibility
+  data. Its current bounds are 20..64 with a default of 24; it is not a live
+  pagination contract.
+* When changing session, reset transient scroll/focus/hover/pointer capture
+  state. Do not reuse a previous surface's interaction state against a new
+  message document.
 * Performance validation must inspect `render_needed`, target-size markers,
   layout/paint cache hits, atlas uploads, and GPU present time. Switching tabs
   is not proof that Agent is fixed; it only stops executing the Agent bridge.
 
-### D. Game Engine Viewport / PCB Layout Unification
-* A PCB is mapped into the `SceneGraph` container directly using its footprint's physical parameters. Primitives (fr4 boards as flat Cubes, IC chips as black Cubes, pads as Cylinders) represent the layout instantly in the 3D viewport, sharing the same render pipeline of standard game assets.
+### D. Electronics / PCB Boundary
+* Schematic and PCB documents are authored and persisted as 2D CAD data. The
+  active PCB model lives under `raf_electronics::pcb::layout`; the native
+  electronics controller and ApiGraphicBasic CAD surface own presentation and
+  interaction. Do not map the current PCB editor into game `SceneGraph`
+  primitives as an implementation shortcut.
 
 > Developed by Yoll. More info: [yoll.site](https://yoll.site).

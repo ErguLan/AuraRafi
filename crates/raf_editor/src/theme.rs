@@ -22,10 +22,14 @@ impl ThemePalette {
         Self::from_tokens(StudioUiPalette::IndustrialDark.tokens())
     }
 
-    pub fn for_theme(_theme: Theme) -> Self {
-        // RafUI currently ships one deliberate industrial palette. Keeping the
-        // theme argument preserves the public boundary for future light mode.
-        Self::industrial_dark()
+    pub fn for_theme(theme: Theme) -> Self {
+        let palette = match theme {
+            Theme::Light => StudioUiPalette::PaperLight,
+            // System follows the existing dark-first native shell until the
+            // platform color-mode bridge is available.
+            Theme::Dark | Theme::System => StudioUiPalette::IndustrialDark,
+        };
+        Self::from_tokens(palette.tokens())
     }
 
     pub fn from_tokens(tokens: UiTokens) -> Self {

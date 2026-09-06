@@ -85,6 +85,8 @@ Current implementation profile:
 - [Roadmap](docs/ROADMAP.md) - Planned features and milestones
 - [Setup](SETUP.md) - Windows GNU toolchain setup and editor run notes
 - [Changelog](CHANGELOG.md) - Actual feature progression by version
+- [Studio Grade UI](.ai/STUDIO_GRADE_UI.md) - Visual defaults, reference handling,
+  and interface quality criteria
 
 Documentation note:
 

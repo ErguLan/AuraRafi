@@ -33,19 +33,84 @@ impl NativeElectronicsEditor {
         canvas: EditorRect,
     ) -> ElectronicsInputResult {
         let owner = InputOwner::ElectronicsCanvas;
+        if self.placement_drag_active {
+            return self.process_library_drag_input(input, canvas);
+        }
         if router.has_exclusive_pointer_capture() && router.exclusive_pointer_owner() != Some(owner)
         {
             return ElectronicsInputResult::default();
         }
 
-        let Some(pointer) = input
+        let inside_canvas = input
             .pointer_position
-            .and_then(|point| canvas.local_point(point))
-        else {
+            .and_then(|point| canvas.local_point(point));
+        let owns_gesture =
+            router.exclusive_pointer_owner() == Some(owner) || self.secondary_pointer.is_some();
+        if input.key_pressed(InputKey::Escape) && (inside_canvas.is_some() || owns_gesture) {
+            self.cancel_gesture(router, owner);
+            return ElectronicsInputResult {
+                changed: true,
+                request_redraw: true,
+            };
+        }
+        let Some(pointer) = inside_canvas.or_else(|| {
+            owns_gesture
+                .then(|| {
+                    input
+                        .pointer_position
+                        .map(|point| [point[0] - canvas.x, point[1] - canvas.y])
+                })
+                .flatten()
+        }) else {
+            if owns_gesture {
+                self.cancel_gesture(router, owner);
+                return ElectronicsInputResult {
+                    changed: true,
+                    request_redraw: true,
+                };
+            }
             return ElectronicsInputResult::default();
         };
         let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
         self.ensure_camera(canvas);
+        let minimap = crate::electronics_minimap::overlay_rect(size);
+        let over_minimap = pointer[0] >= minimap.x
+            && pointer[0] <= minimap.x + minimap.width
+            && pointer[1] >= minimap.y
+            && pointer[1] <= minimap.y + minimap.height;
+        if over_minimap
+            && input.button_pressed(PointerButton::Primary)
+            && !router.has_pointer_capture()
+        {
+            self.minimap_drag = router.try_capture_pointer(
+                PointerButton::Primary,
+                owner,
+                CaptureMode::Exclusive,
+                input.pointer_position.unwrap_or_default(),
+                input.time_seconds,
+            );
+        }
+        if self.minimap_drag {
+            if let Some(center) =
+                crate::electronics_minimap::world_at(&self.scene, Vec2::from(pointer), size)
+            {
+                self.camera.center = center;
+                self.touch();
+            }
+            if input.button_released(PointerButton::Primary)
+                || !input.button_down(PointerButton::Primary)
+            {
+                self.minimap_drag = false;
+                router.release_pointer(PointerButton::Primary, owner);
+            }
+            return ElectronicsInputResult {
+                changed: true,
+                request_redraw: true,
+            };
+        }
+        if over_minimap && !owns_gesture {
+            return ElectronicsInputResult::default();
+        }
         let world = self.camera.world_from_screen(Vec2::from(pointer), size);
         let pointer_changed = self.pointer_world != Some(world);
         self.pointer_world = Some(world);
@@ -59,7 +124,7 @@ impl NativeElectronicsEditor {
         // opens the context menu on release; a drag captures the secondary
         // button and pans the camera. Opening the menu on press used to leave
         // a stale interaction line behind and made right-drag impossible.
-        if input.button_pressed(PointerButton::Secondary) {
+        if inside_canvas.is_some() && input.button_pressed(PointerButton::Secondary) {
             // A secondary gesture always takes navigation priority. If a
             // wire/outline preview was active, discard it before panning so
             // the preview cannot look like a stray black line during a
@@ -111,7 +176,7 @@ impl NativeElectronicsEditor {
             } else if input.button_released(PointerButton::Secondary)
                 || !input.button_down(PointerButton::Secondary)
             {
-                if !secondary.dragging && !moved {
+                if inside_canvas.is_some() && !secondary.dragging && !moved {
                     self.select_secondary_target(world);
                     self.context_menu_position = input.pointer_position;
                     self.touch_ui();
@@ -176,17 +241,14 @@ impl NativeElectronicsEditor {
                 input.pointer_position.unwrap_or([canvas.x, canvas.y]),
                 input.time_seconds,
             ) {
+                self.pan_pointer = Some(pan_button);
                 result.request_redraw = true;
             }
         }
 
-        let pan_button = if router.is_pointer_owned_by(PointerButton::Primary, owner) {
-            Some(PointerButton::Primary)
-        } else if router.is_pointer_owned_by(PointerButton::Middle, owner) {
-            Some(PointerButton::Middle)
-        } else {
-            None
-        };
+        let pan_button = self
+            .pan_pointer
+            .filter(|button| router.is_pointer_owned_by(*button, owner));
         if let Some(pan_button) = pan_button {
             if input.pointer_delta != [0.0, 0.0] {
                 self.camera.center -= Vec2::from(input.pointer_delta) / self.camera.zoom;
@@ -196,10 +258,12 @@ impl NativeElectronicsEditor {
             }
             if input.button_released(pan_button) || !input.button_down(pan_button) {
                 router.release_pointer(pan_button, owner);
+                self.pan_pointer = None;
             }
         }
 
-        if input.button_pressed(PointerButton::Primary)
+        if inside_canvas.is_some()
+            && input.button_pressed(PointerButton::Primary)
             && self.tool != ElectronicsTool::Pan
             && !router.has_pointer_capture()
             && router.try_capture_pointer(
@@ -224,10 +288,10 @@ impl NativeElectronicsEditor {
                     self.handle_route_click(world, router, owner, &mut result);
                 }
                 ElectronicsTool::Place => {
-                    self.place_component(world);
+                    let changed = self.place_component(world);
                     router.release_pointer(PointerButton::Primary, owner);
-                    result.changed = true;
-                    result.request_redraw = true;
+                    result.changed |= changed;
+                    result.request_redraw |= changed;
                 }
                 ElectronicsTool::BoardOutline => {
                     self.handle_board_outline_click(world, router, owner, &mut result);
@@ -241,14 +305,16 @@ impl NativeElectronicsEditor {
         {
             if input.button_down(PointerButton::Primary) && input.pointer_delta != [0.0, 0.0] {
                 if let Some(drag) = self.component_drag.as_ref() {
+                    let component_id = drag.component_id;
+                    let target = self.snap_world(world + drag.pointer_offset);
                     let changed = if self.active_surface == CadSurfaceKind::Schematic {
                         if let Some(component) = self
                             .schematic
                             .components
                             .iter_mut()
-                            .find(|component| component.id == drag.component_id)
+                            .find(|component| component.id == component_id)
                         {
-                            component.position = snap_to_grid(world + drag.pointer_offset);
+                            component.position = target;
                             self.schematic.sync_wire_anchors();
                             true
                         } else {
@@ -258,9 +324,9 @@ impl NativeElectronicsEditor {
                         .pcb
                         .components
                         .iter_mut()
-                        .find(|component| component.component_id == drag.component_id)
+                        .find(|component| component.component_id == component_id)
                     {
-                        component.position = snap_to_grid(world + drag.pointer_offset);
+                        component.position = target;
                         self.pcb.rebuild_airwires();
                         true
                     } else {
@@ -462,8 +528,10 @@ impl NativeElectronicsEditor {
         let endpoint = self.pin_endpoint_at(world);
         if let Some(start) = self.wire_start.take() {
             let end = endpoint.map(|(_, position, anchor)| (position, anchor));
-            let (end_world, end_anchor) =
-                end.unwrap_or((snap_to_grid(world), WireAnchor::Point(snap_to_grid(world))));
+            let (end_world, end_anchor) = end.unwrap_or((
+                self.snap_world(world),
+                WireAnchor::Point(self.snap_world(world)),
+            ));
             if start.world.distance(end_world) > 0.5 {
                 let before = self.snapshot();
                 let points = orthogonal_wire_points(start.world, end_world);
@@ -486,8 +554,8 @@ impl NativeElectronicsEditor {
             let (point, anchor) = endpoint
                 .map(|(_, point, anchor)| (point, Some(anchor)))
                 .unwrap_or((
-                    snap_to_grid(world),
-                    Some(WireAnchor::Point(snap_to_grid(world))),
+                    self.snap_world(world),
+                    Some(WireAnchor::Point(self.snap_world(world))),
                 ));
             self.wire_start = Some(WireStart {
                 world: point,
@@ -535,7 +603,7 @@ impl NativeElectronicsEditor {
             router.release_pointer(PointerButton::Primary, owner);
             return;
         }
-        let point = snap_to_grid(world);
+        let point = self.snap_world(world);
         if let Some(start) = self.board_outline_start.take() {
             let min = start.min(point);
             let max = start.max(point);
@@ -594,14 +662,120 @@ impl NativeElectronicsEditor {
             })
     }
 
-    pub(super) fn place_component(&mut self, world: Vec2) {
+    /// Starts a pointer-driven placement originating in the component
+    /// library. The retained library card owns the pointer capture; the CAD
+    /// controller only tracks the semantic drag and renders its preview.
+    pub(crate) fn begin_library_drag(&mut self, index: usize) -> bool {
+        if index >= self.library.components.len() {
+            return false;
+        }
+        self.placement_template = Some(index);
+        self.placement_drag_active = true;
+        self.placement_preview = None;
+        self.set_tool(ElectronicsTool::Place);
+        self.touch_ui();
+        true
+    }
+
+    /// Completes a library drag using window-space coordinates. Placement is
+    /// accepted only inside the Electronics canvas and never on the minimap.
+    /// Returning `true` means a real component was committed.
+    pub(crate) fn finish_library_drag_at(
+        &mut self,
+        pointer: Option<[f32; 2]>,
+        canvas: EditorRect,
+    ) -> bool {
+        if !self.placement_drag_active {
+            return false;
+        }
+        let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
+        self.ensure_camera(canvas);
+        let local = pointer.and_then(|point| canvas.local_point(point));
+        let minimap = crate::electronics_minimap::overlay_rect(size);
+        let world = local
+            .filter(|point| {
+                !(point[0] >= minimap.x
+                    && point[0] <= minimap.x + minimap.width
+                    && point[1] >= minimap.y
+                    && point[1] <= minimap.y + minimap.height)
+            })
+            .map(|point| self.camera.world_from_screen(Vec2::from(point), size));
+        let changed = world.is_some_and(|world| self.place_component(world));
+        self.placement_drag_active = false;
+        self.placement_preview = None;
+        self.pointer_world = None;
+        self.rebuild_scene_internal();
+        if !changed {
+            self.touch_ui();
+        }
+        changed
+    }
+
+    fn process_library_drag_input(
+        &mut self,
+        input: &InputSnapshot,
+        canvas: EditorRect,
+    ) -> ElectronicsInputResult {
+        let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
+        let pointer = input.pointer_position;
+        let local = pointer.and_then(|point| canvas.local_point(point));
+        let minimap = crate::electronics_minimap::overlay_rect(size);
+        let world = local
+            .filter(|point| {
+                !(point[0] >= minimap.x
+                    && point[0] <= minimap.x + minimap.width
+                    && point[1] >= minimap.y
+                    && point[1] <= minimap.y + minimap.height)
+            })
+            .map(|point| {
+                self.ensure_camera(canvas);
+                self.snap_world(self.camera.world_from_screen(Vec2::from(point), size))
+            });
+
+        if input.key_pressed(InputKey::Escape)
+            || input.button_released(PointerButton::Primary)
+            || (!input.button_down(PointerButton::Primary) && self.placement_preview.is_some())
+        {
+            let changed = if input.key_pressed(InputKey::Escape) {
+                false
+            } else {
+                self.finish_library_drag_at(pointer, canvas)
+            };
+            if self.placement_drag_active {
+                self.placement_drag_active = false;
+                self.placement_preview = None;
+                self.rebuild_scene_internal();
+                self.touch_ui();
+            }
+            return ElectronicsInputResult {
+                changed,
+                request_redraw: true,
+            };
+        }
+
+        if self.placement_preview != world {
+            self.placement_preview = world;
+            self.rebuild_scene_internal();
+            self.touch_ui();
+            return ElectronicsInputResult {
+                changed: true,
+                request_redraw: true,
+            };
+        }
+        ElectronicsInputResult::default()
+    }
+
+    pub(super) fn place_component(&mut self, world: Vec2) -> bool {
         let before = self.snapshot();
-        let mut component = self
+        let position = self.snap_world(world);
+        let Some(mut component) = self
             .placement_template
             .and_then(|index| self.library.components.get(index))
             .map(|template| template.instantiate())
-            .unwrap_or_else(|| ElectronicComponent::resistor("10k"));
-        component.position = snap_to_grid(world);
+        else {
+            return false;
+        };
+        component.position = position;
         let id = self.schematic.add_component(component);
         if self.active_surface == CadSurfaceKind::Pcb {
             self.pcb.sync_from_schematic(&self.schematic);
@@ -611,7 +785,7 @@ impl NativeElectronicsEditor {
                 .iter_mut()
                 .find(|placement| placement.component_id == id)
             {
-                placement.position = snap_to_grid(world);
+                placement.position = position;
             }
             self.pcb.rebuild_airwires();
         }
@@ -625,6 +799,7 @@ impl NativeElectronicsEditor {
         }
         self.rebuild_scene();
         self.touch_ui();
+        true
     }
 
     pub(super) fn delete_selected(&mut self) -> bool {
@@ -809,6 +984,11 @@ impl NativeElectronicsEditor {
         self.wire_start = None;
         self.board_outline_start = None;
         self.secondary_pointer = None;
+        self.pan_pointer = None;
+        self.minimap_drag = false;
+        self.placement_drag_active = false;
+        self.placement_preview = None;
+        self.rebuild_scene_internal();
         router.cancel_owner(owner);
         self.touch_ui();
     }
