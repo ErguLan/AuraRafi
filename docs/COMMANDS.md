@@ -115,8 +115,9 @@ Shared:
 - `/transaction.undo token=<undo-token>` (attached CLI/MCP only; requires
   `confirm=true` and the exact issuing revision)
 - `/project.info`, `/project.save`
-- `/scene.outline`, `/scene.query`, `/scene.spatial_map`, `/scene.design_audit`,
-  `/scene.inspect`, `/scene.verify`
+- `/scene.outline`, `/scene.query`, `/scene.spatial_map`, `/scene.check_overlaps`,
+  `/scene.diff`, `/scene.design_audit`, `/scene.inspect`, `/scene.verify`
+- `/assets.catalog`, `/assets.inspect`, `/assets.recommend`
 - `/workspace.read`, `/workspace.search`
 
 Games:
@@ -125,21 +126,25 @@ Games:
 - `/game.delete`, `/game.duplicate`
 - `/game.set_transform`, `/game.move`, `/game.rotate`, `/game.scale`
 - `/game.color`, `/game.arrange_grid`
-- `/game.generate_prefab`, `/game.update`, `/game.batch`
+- `/game.generate_prefab`, `/game.snap`, `/game.update`, `/game.batch`
 - `/game.create_group`, `/game.reparent`, `/game.build`, `/game.reconcile`, `/game.repair`
 - `/game.describe_scene`, `/game.focus`
 
 The native Agent uses a semantic tool layer over these commands. Its compact
 tools are `project_summary`, `scene_outline`, `scene_query`,
-`scene_spatial_map`, `scene_design_audit`, `scene_inspect`, `selection_get`, `assets_catalog`,
+`scene_spatial_map`, `scene_check_overlaps`, `scene_diff`, `scene_design_audit`,
+`scene_inspect`, `selection_get`, `assets_catalog`, `assets_recommend`,
 `asset_inspect`, `scripts_catalog`, `project_health`, and `scene_verify`.
 Authoring tools such as `scene_build`, `scene_reconcile`, `scene_repair`, `scene_create_group`, `scene_create`,
 `scene_update`, `scene_reparent`, `scene_delete`, `scene_duplicate`,
-`scene_arrange`, `scene_instantiate_prefab`, and `scene_batch` are only
+`scene_snap`, `scene_arrange`, `scene_instantiate_template`, and `scene_batch` are only
 advertised when the project domain and prompt require them. `scene_build`
 creates groups before entities, accepts child groups in any order, and accepts
 group references by name or path;
-`scene_batch` accepts 1-512 ordered operations and commits atomically.
+`scene_batch` accepts 1-512 ordered operations and commits atomically. Repeated
+duplicates and template instances accept `count`, `axis`, `spacing`, `offset`,
+and `parent`, so a repeated layout does not require a hand-written list of
+nearly identical calls.
 `scene_reconcile` requires a unique `stable_key` for every desired group/entity;
 rerunning the same payload updates those nodes in place and preserves
 unmentioned nodes. `game.build` and `game.reconcile` accept an optional
@@ -164,6 +169,19 @@ aggregate extents of the inspected scope, and optional overlap pairs. Use
 `root=<uuid|ref|name|path>` to avoid unrelated legacy scene roots and follow
 `next_cursor` when the result is paginated. It reports overlap evidence; it
 does not mutate or automatically move the scene.
+
+`scene.check_overlaps` is the focused repair companion. It reports intersecting
+world-space bounds, penetration, the smallest separating axis, and a deterministic
+`suggested_snap` for the next mutation. `scene.snap` can then place an entity on
+the grid, floor, or another entity's surface. `scene.diff` reports retained
+created/updated/deleted references since a revision, which lets the Agent explain
+what a long build actually changed without rereading the whole scene.
+
+`assets.recommend` ranks imported assets for an authoring intent such as
+`shelf`, `wall`, or `store`. It is deliberately transparent and heuristic: the
+result includes the matched tokens and scene references, so the Agent can choose
+between an existing asset and a procedural primitive instead of scanning the
+workspace's internal metadata.
 
 `scene.design_audit` is a read-only semantic check for real-world authoring.
 It infers candidates for `floor`, `enclosure`, `entrance`, `circulation`,
@@ -237,6 +255,10 @@ entities second in one atomic operation, while scene_reconcile applies a keyed
 desired state without duplicating existing nodes. scene_batch accepts 1-512
 ordered operations.
 Nested transform and color objects remain structured through the gateway.
+Every vector uses the same flat shape, for example `position: [x, y, z]`;
+`[[x, y, z]]` is rejected with an actionable shape diagnostic. Reparenting,
+duplication, snapping, and template instantiation are first-class kernel
+operations, so the native Agent, CLI, and MCP share the same behavior.
 
 Prefer this payload for generated structures:
 
@@ -280,6 +302,11 @@ The CLI human output and the Agent/MCP model-facing text use the same compact
 line filter: renderer dumps such as `Command executed:`, mesh vertices, and
 duplicated raw JSON are omitted from the summary while the structured response
 remains available to callers that explicitly request details.
+
+While a run is waiting on a provider or executing tools, the Agent surface shows
+the current semantic activity, completed/total tools, turn and elapsed time. The
+activity is a projection of runtime state, not a fake message, and stops with
+the run so a stalled-looking panel remains diagnosable.
 
 Editor-owned mutating commands push an undo snapshot before the document change
 is recorded. Attached/headless adapters record the revision and semantic diff,

@@ -5,7 +5,7 @@
 
 use raf_core::project::{Project, ProjectType};
 use raf_core::scene::SceneGraph;
-use raf_core::session::ProjectSessionRegistry;
+use raf_core::session::{ProjectSession, ProjectSessionRegistry, SessionId};
 use raf_nodes::NodeGraph;
 
 pub(crate) fn initial_project() -> Option<Project> {
@@ -127,12 +127,43 @@ pub(crate) fn initial_scene(project: Option<&Project>) -> SceneGraph {
     SceneGraph::load_ron(&session.path(&project.path, &session.scene_file))
 }
 
+pub(crate) fn initial_scene_for_session(project: &Project, session_id: SessionId) -> SceneGraph {
+    let registry = ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
+    let Some(session) = registry
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+    else {
+        return SceneGraph::new();
+    };
+    SceneGraph::load_ron(&session.path(&project.path, &session.scene_file))
+}
+
 pub(crate) fn initial_node_graph(project: Option<&Project>) -> NodeGraph {
     let Some(project) = project else {
         return NodeGraph::new("Main");
     };
     let registry = ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
     let Some(session) = registry.active() else {
+        return NodeGraph::new("Main");
+    };
+    let path = session.path(&project.path, &session.nodes_file);
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| ron::from_str::<NodeGraph>(&raw).ok())
+        .unwrap_or_else(|| NodeGraph::new("Main"))
+}
+
+pub(crate) fn initial_node_graph_for_session(
+    project: &Project,
+    session_id: SessionId,
+) -> NodeGraph {
+    let registry = ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
+    let Some(session) = registry
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+    else {
         return NodeGraph::new("Main");
     };
     let path = session.path(&project.path, &session.nodes_file);
@@ -149,9 +180,22 @@ pub(crate) fn save_project_document(
 ) -> Result<(), String> {
     project.save().map_err(|error| error.to_string())?;
     let registry = ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
-    let session = registry
-        .active()
-        .ok_or_else(|| "project has no active session".to_string())?;
+    save_project_document_for_session(project, registry.active_session, scene, node_graph)
+}
+
+pub(crate) fn save_project_document_for_session(
+    project: &Project,
+    session_id: SessionId,
+    scene: &SceneGraph,
+    node_graph: &NodeGraph,
+) -> Result<(), String> {
+    let registry = ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
+    let session: ProjectSession = registry
+        .sessions
+        .iter()
+        .find(|session| session.id == session_id)
+        .cloned()
+        .ok_or_else(|| "project session was not found".to_string())?;
     session
         .ensure_storage(&project.path)
         .map_err(|error| format!("session storage: {error}"))?;

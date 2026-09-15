@@ -20,6 +20,14 @@ pub const AGENT_MAX_RESPONSE_TOKENS_MIN: u32 = 1_024;
 pub const AGENT_MAX_RESPONSE_TOKENS_MAX: u32 = 32_768;
 pub const AGENT_MAX_RESPONSE_TOKENS_DEFAULT: u32 = 4_096;
 
+/// Optional per-run tool-call budget for the native Agent. It is disabled by
+/// default so large scene builds are not stopped by an arbitrary small cap.
+pub const AGENT_MAX_TOOL_CALLS_MIN: u32 = 1;
+pub const AGENT_MAX_TOOL_CALLS_MAX: u32 = 4_096;
+pub const AGENT_MAX_TOOL_CALLS_DEFAULT: u32 = 256;
+/// Informational UI warning threshold; it does not stop the Agent.
+pub const AGENT_TOOL_CALL_WARNING_THRESHOLD: u32 = 45;
+
 // ---------------------------------------------------------------------------
 // Theme
 // ---------------------------------------------------------------------------
@@ -128,6 +136,14 @@ fn default_ai_persist_credentials() -> bool {
 
 fn default_agent_max_response_tokens() -> u32 {
     AGENT_MAX_RESPONSE_TOKENS_DEFAULT
+}
+
+fn default_agent_tool_call_limit_enabled() -> bool {
+    false
+}
+
+fn default_agent_max_tool_calls() -> u32 {
+    AGENT_MAX_TOOL_CALLS_DEFAULT
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +505,15 @@ pub struct EngineSettings {
     #[serde(default = "default_agent_max_response_tokens")]
     pub agent_max_response_tokens: u32,
 
+    /// Whether the native Agent should enforce `agent_max_tool_calls` for a
+    /// single run. Disabled by default for large, iterative workflows.
+    #[serde(default = "default_agent_tool_call_limit_enabled")]
+    pub agent_tool_call_limit_enabled: bool,
+
+    /// Maximum native tool calls per Agent run when the optional limit is on.
+    #[serde(default = "default_agent_max_tool_calls")]
+    pub agent_max_tool_calls: u32,
+
     /// Label of the model shortcut selected by default. "provider_default"
     /// means the raw model configured in the active provider card.
     #[serde(default)]
@@ -724,6 +749,8 @@ impl Default for EngineSettings {
             agent_message_page_size: AGENT_MESSAGE_PAGE_SIZE_DEFAULT,
             agent_streaming_enabled: true,
             agent_max_response_tokens: AGENT_MAX_RESPONSE_TOKENS_DEFAULT,
+            agent_tool_call_limit_enabled: false,
+            agent_max_tool_calls: AGENT_MAX_TOOL_CALLS_DEFAULT,
             default_agent_model: String::new(),
             window_width: 1280,
             window_height: 720,
@@ -790,6 +817,7 @@ impl EngineSettings {
                 settings.normalize_ai_providers();
                 settings.normalize_agent_message_page_size();
                 settings.normalize_agent_max_response_tokens();
+                settings.normalize_agent_max_tool_calls();
                 settings.viewport_render_mode = settings.viewport_render_mode.normalized();
                 settings
             }
@@ -828,6 +856,12 @@ impl EngineSettings {
             .agent_max_response_tokens
             .clamp(AGENT_MAX_RESPONSE_TOKENS_MIN, AGENT_MAX_RESPONSE_TOKENS_MAX);
     }
+
+    fn normalize_agent_max_tool_calls(&mut self) {
+        self.agent_max_tool_calls = self
+            .agent_max_tool_calls
+            .clamp(AGENT_MAX_TOOL_CALLS_MIN, AGENT_MAX_TOOL_CALLS_MAX);
+    }
 }
 
 #[cfg(test)]
@@ -848,6 +882,8 @@ mod tests {
             s.agent_max_response_tokens,
             AGENT_MAX_RESPONSE_TOKENS_DEFAULT
         );
+        assert!(!s.agent_tool_call_limit_enabled);
+        assert_eq!(s.agent_max_tool_calls, AGENT_MAX_TOOL_CALLS_DEFAULT);
     }
 
     #[test]

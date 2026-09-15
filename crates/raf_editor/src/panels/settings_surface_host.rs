@@ -267,7 +267,7 @@ impl SettingsSurfaceHost {
     }
 
     pub fn commit_numeric_drafts(&mut self) -> bool {
-        const NUMERIC_KEYS: [&str; 18] = [
+        const NUMERIC_KEYS: [&str; 19] = [
             "settings.theme_experimental",
             "settings.font_size",
             "settings.ui_scale",
@@ -286,6 +286,7 @@ impl SettingsSurfaceHost {
             "settings.scale_sensitivity",
             "settings.script_timeout_ms",
             "settings.agent_max_response_tokens",
+            "settings.agent_max_tool_calls",
         ];
         let mut changed = false;
         for key in NUMERIC_KEYS {
@@ -314,6 +315,9 @@ impl SettingsSurfaceHost {
             return false;
         }
         if key == "settings.ui_scale" && self.draft.auto_ui_scale {
+            return false;
+        }
+        if key == "settings.agent_max_tool_calls" && !self.draft.agent_tool_call_limit_enabled {
             return false;
         }
         if self.draft.simple_mode
@@ -477,6 +481,10 @@ impl SettingsSurfaceHost {
             (
                 "settings.agent_max_response_tokens.text",
                 self.draft.agent_max_response_tokens.to_string(),
+            ),
+            (
+                "settings.agent_max_tool_calls.text",
+                self.draft.agent_max_tool_calls.to_string(),
             ),
             (
                 "settings.script_external_editor.text",

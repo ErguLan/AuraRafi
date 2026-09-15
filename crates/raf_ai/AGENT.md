@@ -122,13 +122,17 @@ converted to CLI strings.
 ## Native Agent perception and result contract
 
 Use `project_summary`, `scene_outline`, `scene_query`, `scene_spatial_map`,
-`scene_design_audit`, `scene_inspect`, `assets_catalog`, `scripts_catalog`,
-`project_health`, and `scene_verify` for native project understanding. These
+`scene_check_overlaps`, `scene_diff`, `scene_design_audit`, `scene_inspect`,
+`assets_catalog`, `assets_recommend`, `scripts_catalog`, `project_health`, and
+`scene_verify` for native project understanding. These
 are bounded and paginated; do not use
 workspace text search to infer scene hierarchy or asset usage.
 
 Use semantic `scene_create`, `scene_update`, `scene_delete`, `scene_duplicate`,
-`scene_arrange`, `scene_instantiate_prefab`, and `scene_batch` for Game builds.
+`scene_reparent`, `scene_snap`, `scene_arrange`, `scene_instantiate_template`,
+and `scene_batch` for Game builds. Repeated structures should use `count`,
+`axis`, `spacing`, `offset`, and `parent` rather than manually duplicating
+nearly identical operations.
 `scene_batch` accepts ordered operations and commits only if every operation
 succeeds.
 Use `scene_repair` after `scene_design_audit` or `scene_spatial_map` when a
@@ -145,6 +149,8 @@ state, not durable jobs.
 Tool results are compact structured values with `summary`, `data`, stable
 `references`, `changed`, `revision`, and optional `verification`. Summarize
 them naturally; never dump raw JSON or the legacy `Command executed` wrapper.
+Malformed vectors and target failures include an error code, path, and repair
+suggestion so the next turn can correct the call without guessing.
 
 ## Tone
 

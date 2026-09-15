@@ -97,6 +97,18 @@ pub enum GraphicCommand {
     },
 }
 
+/// Backend-neutral work totals recorded for one scene frame.
+///
+/// These counters are derived from the retained command list before a backend
+/// executes it, so CPU and GPU diagnostics describe the same submitted work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BasicCommandStats {
+    pub command_count: u32,
+    pub mesh_instances: u32,
+    pub line_instances: u32,
+    pub overlay_triangles: u32,
+}
+
 /// Accumulator of drawing commands that represents a single frame's rendering pipeline instructions.
 #[derive(Debug, Clone, Default)]
 pub struct BasicCommandList {
@@ -110,11 +122,17 @@ pub struct BasicCommandList {
 impl BasicCommandList {
     /// Create an empty command list.
     pub fn new() -> Self {
+        Self::with_capacity(0, 0)
+    }
+
+    /// Create a frame command list with bounded capacity hints from the
+    /// renderer's visible-set projection.
+    pub fn with_capacity(command_capacity: usize, mesh_capacity: usize) -> Self {
         Self {
-            commands: Vec::new(),
-            meshes: Vec::new(),
-            mesh_ids: std::collections::HashMap::new(),
-            mesh_cacheable: Vec::new(),
+            commands: Vec::with_capacity(command_capacity),
+            meshes: Vec::with_capacity(mesh_capacity),
+            mesh_ids: std::collections::HashMap::with_capacity(mesh_capacity),
+            mesh_cacheable: Vec::with_capacity(mesh_capacity),
             current_pipeline: BasicPipelineKind::FlatColor,
         }
     }
@@ -277,6 +295,33 @@ impl BasicCommandList {
         });
     }
 
+    /// Record an already grouped line stream and merge it with the previous
+    /// compatible batch. Exact-size producers allocate only once.
+    pub fn draw_line_batch<I>(&mut self, lines: I, no_depth_test: bool)
+    where
+        I: IntoIterator<Item = BasicLine>,
+    {
+        let mut lines = lines.into_iter();
+        if let Some(GraphicCommand::DrawLineBatch {
+            lines: batch_lines,
+            no_depth_test: batch_no_depth_test,
+        }) = self.commands.last_mut()
+        {
+            if *batch_no_depth_test == no_depth_test {
+                batch_lines.extend(lines);
+                return;
+            }
+        }
+
+        let collected = lines.by_ref().collect::<Vec<_>>();
+        if !collected.is_empty() {
+            self.commands.push(GraphicCommand::DrawLineBatch {
+                lines: collected,
+                no_depth_test,
+            });
+        }
+    }
+
     /// Add a screen-space overlay triangle. Adjacent triangles are grouped so
     /// a gizmo can submit its outline and fill with one backend draw call.
     pub fn draw_screen_triangle(&mut self, triangle: BasicScreenTriangle) {
@@ -304,6 +349,43 @@ impl BasicCommandList {
     /// Get a reference to the recorded commands.
     pub fn commands(&self) -> &[GraphicCommand] {
         &self.commands
+    }
+
+    /// Summarize submitted work without exposing backend-specific counters.
+    pub fn stats(&self) -> BasicCommandStats {
+        let mut stats = BasicCommandStats {
+            command_count: self.commands.len().min(u32::MAX as usize) as u32,
+            ..BasicCommandStats::default()
+        };
+        for command in &self.commands {
+            match command {
+                GraphicCommand::DrawMesh { .. } => {
+                    stats.mesh_instances = stats.mesh_instances.saturating_add(1);
+                }
+                GraphicCommand::DrawMeshBatch { instances, .. } => {
+                    stats.mesh_instances = stats
+                        .mesh_instances
+                        .saturating_add(instances.len().min(u32::MAX as usize) as u32);
+                }
+                GraphicCommand::DrawLine { .. } => {
+                    stats.line_instances = stats.line_instances.saturating_add(1);
+                }
+                GraphicCommand::DrawLineBatch { lines, .. } => {
+                    stats.line_instances = stats
+                        .line_instances
+                        .saturating_add(lines.len().min(u32::MAX as usize) as u32);
+                }
+                GraphicCommand::DrawScreenTriangleBatch { triangles } => {
+                    stats.overlay_triangles = stats
+                        .overlay_triangles
+                        .saturating_add(triangles.len().min(u32::MAX as usize) as u32);
+                }
+                GraphicCommand::Clear { .. }
+                | GraphicCommand::SetPipeline(_)
+                | GraphicCommand::DrawGrid { .. } => {}
+            }
+        }
+        stats
     }
 
     /// Resolve a mesh by its frame-local ID.
@@ -390,5 +472,28 @@ mod tests {
             GraphicCommand::DrawMeshBatch { mesh_id: id, instances }
                 if *id == mesh_id && instances.len() == 2
         ));
+    }
+
+    #[test]
+    fn stats_count_instances_instead_of_only_draw_commands() {
+        let mut commands = BasicCommandList::new();
+        let mesh = Arc::new(BasicMesh::new(
+            vec![BasicVertex {
+                position: Vec3::ZERO,
+                normal: Vec3::Y,
+                uv: [0.0, 0.0],
+            }],
+            vec![0],
+        ));
+        let mesh_id = commands.register_mesh(mesh);
+        commands.draw_mesh(mesh_id, Mat4::IDENTITY, [255; 4]);
+        commands.draw_mesh(mesh_id, Mat4::from_translation(Vec3::X), [255; 4]);
+        commands.draw_line(Vec3::ZERO, Vec3::X, [255; 4], 1.0, false, 0.0);
+        commands.draw_line(Vec3::Y, Vec3::ONE, [255; 4], 1.0, false, 0.0);
+
+        let stats = commands.stats();
+        assert_eq!(stats.mesh_instances, 2);
+        assert_eq!(stats.line_instances, 2);
+        assert_eq!(stats.command_count, 2);
     }
 }

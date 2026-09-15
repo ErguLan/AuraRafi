@@ -194,24 +194,19 @@ fn validate_execution_budget(
                         .and_then(Value::as_array)
                         .map_or(0, Vec::len),
                 ),
-            "game.add"
-            | "scene.add"
-            | "game.create"
-            | "scene.create"
-            | "game.create_group"
-            | "scene.create_group"
-            | "game.update"
-            | "scene.update"
-            | "game.reparent"
-            | "scene.reparent"
-            | "game.delete"
-            | "scene.delete"
-            | "game.duplicate"
+            "game.add" | "scene.add" | "game.create" | "scene.create" | "game.create_group"
+            | "scene.create_group" | "game.update" | "scene.update" | "game.reparent"
+            | "scene.reparent" | "game.delete" | "scene.delete" | "game.arrange_grid"
+            | "scene.arrange" | "game.snap" | "scene.snap" => 1,
+            "game.duplicate"
             | "scene.duplicate"
-            | "game.arrange_grid"
-            | "scene.arrange"
             | "game.generate_prefab"
-            | "scene.instantiate_prefab" => 1,
+            | "scene.instantiate_prefab"
+            | "scene.instantiate_template" => request
+                .params
+                .get("count")
+                .and_then(Value::as_u64)
+                .unwrap_or(1) as usize,
             _ => 0,
         };
         if operations > max_operations as usize {
@@ -235,14 +230,15 @@ fn validate_execution_budget(
 
 fn requested_scene_entities(name: &str, params: &Value) -> usize {
     match name {
-        "game.add"
-        | "scene.add"
-        | "game.create"
-        | "scene.create"
-        | "game.create_group"
-        | "scene.create_group"
+        "game.add" | "scene.add" | "game.create" | "scene.create" | "game.create_group"
+        | "scene.create_group" => 1,
+        "game.duplicate"
+        | "scene.duplicate"
         | "game.generate_prefab"
-        | "scene.instantiate_prefab" => 1,
+        | "scene.instantiate_prefab"
+        | "scene.instantiate_template" => {
+            params.get("count").and_then(Value::as_u64).unwrap_or(1) as usize
+        }
         "game.build" | "scene.build" | "game.reconcile" | "scene.reconcile" => params
             .get("groups")
             .and_then(Value::as_array)
@@ -259,19 +255,30 @@ fn requested_scene_entities(name: &str, params: &Value) -> usize {
             .map(|operations| {
                 operations
                     .iter()
-                    .filter(|operation| {
-                        matches!(
-                            operation
-                                .get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or_default(),
-                            "scene_create"
-                                | "scene_create_group"
-                                | "scene_duplicate"
-                                | "scene_instantiate_prefab"
-                        )
+                    .map(|operation| {
+                        let operation_name = operation
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .trim_start_matches('/')
+                            .to_ascii_lowercase();
+                        match operation_name.as_str() {
+                            "scene_create" | "game.add" | "scene_create_group"
+                            | "game.create_group" => 1,
+                            "scene_duplicate"
+                            | "game.duplicate"
+                            | "scene_instantiate_prefab"
+                            | "scene_instantiate_template"
+                            | "game.generate_prefab" => operation
+                                .get("params")
+                                .and_then(|params| params.get("count"))
+                                .and_then(Value::as_u64)
+                                .unwrap_or(1)
+                                as usize,
+                            _ => 0,
+                        }
                     })
-                    .count()
+                    .sum()
             })
             .unwrap_or(0),
         _ => 0,

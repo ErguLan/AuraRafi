@@ -40,6 +40,7 @@ const MIN_ZOOM: f32 = 0.15;
 const MAX_ZOOM: f32 = 12.0;
 const DEFAULT_ZOOM: f32 = 1.0;
 const PICK_TOLERANCE_SCREEN: f32 = 10.0;
+const PIN_SNAP_TOLERANCE_SCREEN: f32 = 16.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElectronicsTool {
@@ -811,12 +812,16 @@ impl NativeElectronicsEditor {
         self.ensure_camera(canvas);
         let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
         let mut options = CadSurfaceOptions::default();
+        options.clear_color = [16, 20, 28, 255];
         options.world_bounds = Some(self.camera.world_bounds(size));
         options.selected_source_ids = self
             .selection
             .map(|selection| vec![*selection.source_id.as_bytes()])
             .unwrap_or_default();
         options.grid_step = self.grid_step;
+        options.grid_color = [140, 175, 220, 18];
+        options.major_grid_color = [170, 205, 250, 36];
+        options.axis_color = [185, 215, 255, 48];
         options.grid_color[3] = (f32::from(options.grid_color[3]) * self.grid_opacity)
             .round()
             .clamp(0.0, 255.0) as u8;
@@ -1075,11 +1080,17 @@ impl NativeElectronicsEditor {
             }
         }
         if let (Some(start), Some(end)) = (self.wire_start, self.pointer_world) {
-            let end = self
-                .pin_endpoint_at(end)
+            let pin_hit = self.pin_endpoint_at(end);
+            let is_snapped = pin_hit.is_some();
+            let end_point = pin_hit
                 .map(|(_, position, _)| position)
                 .unwrap_or_else(|| self.snap_world(end));
-            let points = orthogonal_wire_points(start.world, end);
+            let points = orthogonal_wire_points(start.world, end_point);
+            let wire_color = if is_snapped {
+                [0, 220, 255, 230]
+            } else {
+                [255, 172, 64, 190]
+            };
             self.scene.objects.push(CadObject {
                 id: "wire-preview".to_string(),
                 source_id: None,
@@ -1091,8 +1102,23 @@ impl NativeElectronicsEditor {
                 line_paths: Vec::new(),
                 label: None,
                 net: None,
-                color_rgba: [255, 172, 64, 190],
+                color_rgba: wire_color,
             });
+            if is_snapped {
+                self.scene.objects.push(CadObject {
+                    id: "pin-snap-target".to_string(),
+                    source_id: None,
+                    kind: CadObjectKind::Pin,
+                    layer: CadLayerKind::Overlay,
+                    pick_priority: CadPickPriority::Overlay,
+                    rect: None,
+                    points: vec![end_point],
+                    line_paths: Vec::new(),
+                    label: None,
+                    net: None,
+                    color_rgba: [0, 220, 255, 255],
+                });
+            }
         }
     }
 

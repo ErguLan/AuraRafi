@@ -10,20 +10,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use raf_core::config::{
-    EngineSettings, RenderPreset, RenderQuality, ScriptExecutionMode, ScriptLanguage, Theme,
+    EngineSettings, RenderExecutionPolicy, RenderPreset, RenderQuality, ScriptExecutionMode,
+    ScriptLanguage, Theme,
 };
 use raf_core::project::{BuildingStyle, Project, ProjectSettings, ProjectType};
 use raf_core::scene::SceneGraph;
+use raf_core::session::{ProjectSessionRegistry, SessionId};
 use raf_core::TransactionLedger;
 use raf_render::api_graphic_basic::ui_surface::{
     NativeUiInputBridge, NativeUiWindowConfig, StudioUiPalette, UiAction, UiDispatchedAction,
 };
-use raf_render::api_graphic_basic::NativeEditorCompositor;
+use raf_render::api_graphic_basic::{GraphicsAdapterPreference, NativeEditorCompositor};
 use raf_ui::{UiColorMode, UiEnvironment, UiResizeEdge, UiWindowCommand};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
 use winit::event::{ElementState, MouseButton, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy};
 use winit::window::{Window, WindowId};
 
 use crate::attached::AttachedCommandHost;
@@ -34,7 +36,9 @@ use crate::native_editor_commands::apply_workbench_intents;
 use crate::native_editor_runtime::NativeEditorRuntime;
 use crate::native_electronics::NativeElectronicsCanvas;
 use crate::native_project_controller::{
-    initial_node_graph, initial_project, initial_scene, project_capabilities, save_project_document,
+    initial_node_graph, initial_node_graph_for_session, initial_project, initial_scene,
+    initial_scene_for_session, project_capabilities, save_project_document,
+    save_project_document_for_session,
 };
 use crate::native_studio::{
     forget_project, remember_project, NativeStudioIntent, NativeStudioSurface,
@@ -49,10 +53,77 @@ use crate::panels::viewport_compass::ViewportCompassState;
 use crate::panels::viewport_controller::NativeViewportMode;
 use crate::settings_surface::SettingsSection;
 
-const NATIVE_LOADING_SECONDS: f64 = 1.15;
 const NATIVE_EDITOR_SIZE: [f64; 2] = [1440.0, 900.0];
 const NATIVE_EDITOR_MIN_SIZE: [f64; 2] = [900.0, 600.0];
 const NATIVE_SPLASH_SIZE: [f64; 2] = [620.0, 500.0];
+
+fn switch_session_documents(
+    project: &Project,
+    previous_session: SessionId,
+    next_session: SessionId,
+    scene: &mut SceneGraph,
+    runtime: &mut NativeEditorRuntime,
+    electronics_editor: &mut Option<NativeElectronicsEditor>,
+    attached_ledger: &mut TransactionLedger,
+    observed_scene_revision: &mut u64,
+    observed_scene_render_fingerprint: &mut u64,
+) -> Result<(), String> {
+    if previous_session == next_session {
+        return Ok(());
+    }
+
+    // The registry has already been persisted by the session command. Save
+    // the live document explicitly to the old session before loading the new
+    // one; using the registry's active session here would write the old scene
+    // into the newly selected directory.
+    save_project_document_for_session(project, previous_session, scene, runtime.node_graph())?;
+    if project.project_type == ProjectType::Electronics {
+        if let Some(editor) = electronics_editor.as_mut() {
+            editor.save_to_session(project, previous_session)?;
+        }
+    }
+
+    *scene = initial_scene_for_session(project, next_session);
+    runtime.reset_document();
+    runtime.set_node_graph(initial_node_graph_for_session(project, next_session));
+    if project.project_type == ProjectType::Electronics {
+        *electronics_editor = Some(NativeElectronicsEditor::from_project(project));
+    }
+
+    *attached_ledger = TransactionLedger::load_for_project(
+        &project.path,
+        crate::scene_history::scene_fingerprint(scene),
+    );
+    *observed_scene_revision = scene.document_revision();
+    *observed_scene_render_fingerprint = scene.render_fingerprint();
+    if let Err(error) = attached_ledger.persist_for_project(&project.path) {
+        tracing::warn!(%error, "session switch ledger persistence failed");
+    }
+    Ok(())
+}
+
+fn open_project_folder(path: &Path) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        let target = if path.is_dir() {
+            path.to_path_buf()
+        } else {
+            path.parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| path.to_path_buf())
+        };
+        std::process::Command::new("explorer.exe")
+            .arg(target)
+            .spawn()
+            .map(|_| ())
+            .map_err(|error| format!("could not open project folder: {error}"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = path;
+        Err("opening the project folder is only implemented for Windows".to_string())
+    }
+}
 
 fn native_palette(theme: Theme) -> StudioUiPalette {
     match theme {
@@ -379,15 +450,16 @@ pub fn run_native() -> Result<(), String> {
         .build()
         .map_err(|error| format!("native event loop: {error}"))?;
     let mut application = NativeEditorApplication::default();
-    application
-        .attached_host
-        .set_wakeup(event_loop.create_proxy());
+    let wakeup = event_loop.create_proxy();
+    application.event_loop_proxy = Some(wakeup.clone());
+    application.attached_host.set_wakeup(wakeup);
     event_loop
         .run_app(&mut application)
         .map_err(|error| format!("native editor event loop: {error}"))
 }
 
 pub struct NativeEditorApplication {
+    event_loop_proxy: Option<EventLoopProxy<()>>,
     window: Option<Arc<Window>>,
     window_host: Option<raf_render::api_graphic_basic::ui_surface::NativeUiWindowHost>,
     compositor: Option<NativeEditorCompositor>,
@@ -404,6 +476,8 @@ pub struct NativeEditorApplication {
     exit_confirmation_open: bool,
     loading: Option<LoadingSurfaceHost>,
     show_loading: bool,
+    startup_loading_presented: bool,
+    startup_graphics_ready_ms: f32,
     electronics_canvas: Option<NativeElectronicsCanvas>,
     electronics_editor: Option<NativeElectronicsEditor>,
     electronics_frame_key: Option<(u64, [u32; 2])>,
@@ -411,6 +485,7 @@ pub struct NativeEditorApplication {
     project: Option<Project>,
     attached_host: AttachedCommandHost,
     attached_ledger: TransactionLedger,
+    boot_started_at: Instant,
     started_at: Instant,
     close_requested: bool,
     pending_window_commands: Vec<UiWindowCommand>,
@@ -421,32 +496,24 @@ pub struct NativeEditorApplication {
     pending_project_text: Option<(String, String)>,
     pending_project_command: Option<String>,
     saved_document_fingerprint: Option<u64>,
+    observed_scene_revision: u64,
+    observed_scene_render_fingerprint: u64,
     pending_document_saved: bool,
     last_auto_save_at: Instant,
 }
 
 impl Default for NativeEditorApplication {
     fn default() -> Self {
-        let project = initial_project();
-        let scene = initial_scene(project.as_ref());
-        let attached_ledger = project
-            .as_ref()
-            .map(|project| {
-                let ledger = TransactionLedger::load_for_project(
-                    &project.path,
-                    crate::scene_history::scene_fingerprint(&scene),
-                );
-                if let Err(error) = ledger.persist_for_project(&project.path) {
-                    tracing::warn!(
-                        %error,
-                        path = %project.path.display(),
-                        "initial attached agent state persistence failed"
-                    );
-                }
-                ledger
-            })
-            .unwrap_or_default();
+        let boot_started_at = Instant::now();
+        // Project/session I/O is deliberately deferred until the loading
+        // surface has presented. `Default` runs before Winit owns a window;
+        // doing the reads here made `cargo run` pay the whole project cost
+        // before the user could see any progress.
+        let scene = SceneGraph::new();
+        let observed_scene_revision = scene.document_revision();
+        let observed_scene_render_fingerprint = scene.render_fingerprint();
         Self {
+            event_loop_proxy: None,
             window: None,
             window_host: None,
             compositor: None,
@@ -463,13 +530,16 @@ impl Default for NativeEditorApplication {
             exit_confirmation_open: false,
             loading: None,
             show_loading: false,
+            startup_loading_presented: false,
+            startup_graphics_ready_ms: 0.0,
             electronics_canvas: None,
             electronics_editor: None,
             electronics_frame_key: None,
             scene,
-            project,
+            project: None,
             attached_host: AttachedCommandHost::start(),
-            attached_ledger,
+            attached_ledger: TransactionLedger::default(),
+            boot_started_at,
             started_at: Instant::now(),
             close_requested: false,
             pending_window_commands: Vec::new(),
@@ -480,6 +550,8 @@ impl Default for NativeEditorApplication {
             pending_project_text: None,
             pending_project_command: None,
             saved_document_fingerprint: None,
+            observed_scene_revision,
+            observed_scene_render_fingerprint,
             pending_document_saved: false,
             last_auto_save_at: Instant::now(),
         }
@@ -492,7 +564,10 @@ impl NativeEditorApplication {
             return;
         }
 
-        let startup_loading = self.project.is_none();
+        // The lightweight surface is presented before the workbench, Hub,
+        // Electronics editor, and their retained documents are constructed.
+        // This is a real initialization boundary, not a minimum-duration wait.
+        let startup_loading = true;
         let mut attributes = Window::default_attributes()
             .with_title("Proyecto Rafi")
             .with_decorations(false)
@@ -524,10 +599,20 @@ impl NativeEditorApplication {
             center_native_window(&window, size);
         }
         let scale_factor = window.scale_factor() as f32;
+        let native_graphics_config = NativeUiWindowConfig {
+            adapter_preference: if self.settings_state.render_execution_policy
+                == RenderExecutionPolicy::GpuPreferred
+            {
+                GraphicsAdapterPreference::HighPerformance
+            } else {
+                GraphicsAdapterPreference::LowPower
+            },
+            ..NativeUiWindowConfig::default()
+        };
         let mut host = match pollster::block_on(
             raf_render::api_graphic_basic::ui_surface::NativeUiWindowHost::create_with_config(
                 window.clone(),
-                NativeUiWindowConfig::default(),
+                native_graphics_config,
             ),
         ) {
             Ok(host) => host,
@@ -538,6 +623,7 @@ impl NativeEditorApplication {
             }
         };
         host.set_vsync(self.settings_state.vsync);
+        let graphics_ready_ms = self.boot_started_at.elapsed().as_secs_f32() * 1000.0;
 
         let project_type = self
             .project
@@ -561,72 +647,221 @@ impl NativeEditorApplication {
         runtime
             .graphics_mut()
             .set_shared_graphics_context(Some(host.shared_graphics_context()));
+        runtime.set_present_refresh_hz(host.effective_present_refresh_hz());
         runtime.set_node_graph(initial_node_graph(self.project.as_ref()));
 
         let graphics = host.graphics_context();
         let compositor = NativeEditorCompositor::new(&graphics, [8, 11, 15, 255]);
         let palette = native_palette(self.settings_state.theme);
-        let workbench = NativeGameWorkbench::new(&graphics, palette, runtime.layout().window);
-        let studio = NativeStudioSurface::new(&graphics, runtime.layout().window, palette);
-        let settings_surface =
-            SettingsSurfaceHost::new(&graphics, runtime.layout().window, palette);
-        let exit_confirmation_surface =
-            ExitConfirmationSurfaceHost::new(&graphics, runtime.layout().window, palette);
-        let loading = LoadingSurfaceHost::new(&graphics, runtime.layout().window, palette);
-        let electronics_canvas = NativeElectronicsCanvas::new(
-            &graphics,
-            [10, 10, 11, 255],
-            raf_render::bridge::GraphicsSurfaceKind::SchematicCanvas,
-        );
-        let mut workbench = workbench;
-        workbench.set_engine_settings(self.settings_state.clone());
-        if let Some(project) = self.project.as_ref() {
-            workbench.set_project_info(project.name.clone(), project.project_type);
-        }
+        let mut loading = LoadingSurfaceHost::new(&graphics, runtime.layout().window, palette);
+        loading.set_environment(native_environment(
+            &self.settings_state,
+            [logical_size[0].max(1.0), logical_size[1].max(1.0)],
+        ));
 
         self.input.set_scale_factor(window.scale_factor());
         self.window = Some(window.clone());
         self.window_host = Some(host);
         self.compositor = Some(compositor);
         self.runtime = Some(runtime);
-        self.workbench = Some(workbench);
-        self.studio = Some(studio);
-        if let Some(studio) = self.studio.as_mut() {
-            studio.set_language(self.settings_state.language);
-            let window = self
-                .runtime
-                .as_ref()
-                .map(|runtime| runtime.layout().window)
-                .unwrap_or_default();
-            studio.set_environment(native_environment(
-                &self.settings_state,
-                [window.width.max(1.0), window.height.max(1.0)],
-            ));
-        }
-        let initial_environment = native_environment(
-            &self.settings_state,
-            self.runtime
-                .as_ref()
-                .map(|runtime| {
-                    let window = runtime.layout().window;
-                    [window.width, window.height]
-                })
-                .unwrap_or([1.0; 2]),
-        );
-        self.settings_surface = Some(settings_surface);
-        self.exit_confirmation_surface = Some(exit_confirmation_surface);
+        self.workbench = None;
+        self.studio = None;
+        self.settings_surface = None;
+        self.exit_confirmation_surface = None;
         self.loading = Some(loading);
-        if let Some(settings_surface) = self.settings_surface.as_mut() {
-            settings_surface.set_environment(initial_environment);
+        self.show_loading = true;
+        self.startup_loading_presented = false;
+        self.startup_graphics_ready_ms = graphics_ready_ms;
+        self.electronics_canvas = None;
+        self.electronics_editor = None;
+        self.electronics_frame_key = None;
+        tracing::info!(
+            graphics_ready_ms,
+            project_open = self.project.is_some(),
+            "native ApiGraphicBasic loading surface ready"
+        );
+        self.started_at = Instant::now();
+        window.request_redraw();
+    }
+
+    fn current_window_rect(&self) -> crate::editor_layout::EditorRect {
+        self.runtime
+            .as_ref()
+            .map(|runtime| runtime.layout().window)
+            .unwrap_or_default()
+    }
+
+    fn ensure_workbench(&mut self) {
+        if self.workbench.is_some() {
+            return;
         }
-        if let Some(exit_confirmation_surface) = self.exit_confirmation_surface.as_mut() {
-            exit_confirmation_surface.set_environment(initial_environment);
+        let rect = self.current_window_rect();
+        let palette = native_palette(self.settings_state.theme);
+        let Some(host) = self.window_host.as_ref() else {
+            return;
+        };
+        let mut workbench = NativeGameWorkbench::new(&host.graphics_context(), palette, rect);
+        workbench.set_engine_settings(self.settings_state.clone());
+        if let Some(project) = self.project.as_ref() {
+            workbench.set_project_info(project.name.clone(), project.project_type);
         }
-        if let Some(loading) = self.loading.as_mut() {
-            loading.set_environment(initial_environment);
+        self.workbench = Some(workbench);
+    }
+
+    fn ensure_studio(&mut self) {
+        if self.studio.is_some() {
+            return;
         }
-        self.show_loading = self.project.is_none();
-        self.electronics_canvas = Some(electronics_canvas);
+        let rect = self.current_window_rect();
+        let palette = native_palette(self.settings_state.theme);
+        let Some(host) = self.window_host.as_ref() else {
+            return;
+        };
+        let mut studio = NativeStudioSurface::new(
+            &host.graphics_context(),
+            rect,
+            palette,
+            self.event_loop_proxy.clone(),
+        );
+        studio.set_language(self.settings_state.language);
+        studio.set_environment(native_environment(
+            &self.settings_state,
+            [rect.width.max(1.0), rect.height.max(1.0)],
+        ));
+        self.studio = Some(studio);
+    }
+
+    fn ensure_settings_surface(&mut self) {
+        if self.settings_surface.is_some() {
+            return;
+        }
+        let rect = self.current_window_rect();
+        let palette = native_palette(self.settings_state.theme);
+        let Some(host) = self.window_host.as_ref() else {
+            return;
+        };
+        let mut surface = SettingsSurfaceHost::new(&host.graphics_context(), rect, palette);
+        surface.set_environment(native_environment(
+            &self.settings_state,
+            [rect.width.max(1.0), rect.height.max(1.0)],
+        ));
+        self.settings_surface = Some(surface);
+    }
+
+    fn ensure_exit_confirmation_surface(&mut self) {
+        if self.exit_confirmation_surface.is_some() {
+            return;
+        }
+        let rect = self.current_window_rect();
+        let palette = native_palette(self.settings_state.theme);
+        let Some(host) = self.window_host.as_ref() else {
+            return;
+        };
+        let mut surface = ExitConfirmationSurfaceHost::new(&host.graphics_context(), rect, palette);
+        surface.set_environment(native_environment(
+            &self.settings_state,
+            [rect.width.max(1.0), rect.height.max(1.0)],
+        ));
+        self.exit_confirmation_surface = Some(surface);
+    }
+
+    fn ensure_electronics_canvas(&mut self) {
+        if self.electronics_canvas.is_some() {
+            return;
+        }
+        let Some(host) = self.window_host.as_ref() else {
+            return;
+        };
+        self.electronics_canvas = Some(NativeElectronicsCanvas::new(
+            &host.graphics_context(),
+            [10, 10, 11, 255],
+            raf_render::bridge::GraphicsSurfaceKind::SchematicCanvas,
+        ));
+    }
+
+    fn initialize_startup_project(&mut self) {
+        if self.project.is_some() {
+            return;
+        }
+        let started_at = Instant::now();
+        let project = initial_project();
+        let scene = initial_scene(project.as_ref());
+        let attached_ledger = project
+            .as_ref()
+            .map(|project| {
+                let ledger = TransactionLedger::load_for_project(
+                    &project.path,
+                    crate::scene_history::scene_fingerprint(&scene),
+                );
+                if let Err(error) = ledger.persist_for_project(&project.path) {
+                    tracing::warn!(
+                        %error,
+                        path = %project.path.display(),
+                        "initial attached agent state persistence failed"
+                    );
+                }
+                ledger
+            })
+            .unwrap_or_default();
+        let project_open = project.is_some();
+        self.scene = scene;
+        self.project = project;
+        self.attached_ledger = attached_ledger;
+        self.observed_scene_revision = self.scene.document_revision();
+        self.observed_scene_render_fingerprint = self.scene.render_fingerprint();
+        tracing::info!(
+            startup_project_load_ms = started_at.elapsed().as_secs_f32() * 1000.0,
+            project_open,
+            "native startup project state ready"
+        );
+    }
+
+    fn finish_startup_loading(&mut self) {
+        if !self.show_loading {
+            return;
+        }
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        self.initialize_startup_project();
+        let project_type = self
+            .project
+            .as_ref()
+            .map(|project| project.project_type)
+            .unwrap_or(ProjectType::Game);
+        let logical_size = self
+            .runtime
+            .as_ref()
+            .map(|runtime| {
+                let [width, height] = runtime.layout().window.logical_size();
+                [width as f32, height as f32]
+            })
+            .unwrap_or([NATIVE_SPLASH_SIZE[0] as f32, NATIVE_SPLASH_SIZE[1] as f32]);
+        let startup_layout = project_layout_request(
+            project_type,
+            [logical_size[0], logical_size[1]],
+            self.project.as_ref(),
+        );
+        let allow_gpu_features = self
+            .project
+            .as_ref()
+            .is_some_and(|project| project.settings.allow_gpu_features);
+        let startup_node_graph = initial_node_graph(self.project.as_ref());
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.set_project_type(project_type);
+            runtime.set_layout_request(startup_layout);
+            runtime.apply_engine_settings(&self.settings_state, allow_gpu_features);
+            runtime.set_node_graph(startup_node_graph);
+        }
+
+        if self.project.is_some() {
+            self.ensure_workbench();
+        } else {
+            self.ensure_studio();
+        }
+        if self.project.is_some() && project_type == ProjectType::Electronics {
+            self.ensure_electronics_canvas();
+        }
         self.electronics_editor = self
             .project
             .as_ref()
@@ -638,27 +873,15 @@ impl NativeEditorApplication {
             }
         }
         self.electronics_frame_key = None;
-        let capabilities = project_capabilities(project_type);
         self.attached_host.update_project(
             self.project.as_ref(),
             self.attached_ledger.revision(),
             None,
             None,
-            capabilities,
+            project_capabilities(project_type),
         );
         self.mark_document_saved();
-        self.started_at = Instant::now();
-        window.request_redraw();
-    }
 
-    fn finish_startup_loading(&mut self) {
-        if !self.show_loading {
-            return;
-        }
-        self.show_loading = false;
-        let Some(window) = self.window.as_ref() else {
-            return;
-        };
         let scale_factor = window.scale_factor().max(0.25);
         let target_size = PhysicalSize::new(
             (NATIVE_EDITOR_SIZE[0] * scale_factor).round().max(1.0) as u32,
@@ -675,10 +898,20 @@ impl NativeEditorApplication {
                 NATIVE_EDITOR_SIZE[1],
             ))
             .unwrap_or(target_size);
-        center_native_window(window, applied_size);
+        center_native_window(&window, applied_size);
+        self.show_loading = false;
+        self.startup_loading_presented = false;
+        self.loading = None;
         if let Some(runtime) = self.runtime.as_mut() {
-            runtime.request_animation_frame();
+            runtime.request_ui_frame();
         }
+        tracing::info!(
+            graphics_ready_ms = self.startup_graphics_ready_ms,
+            startup_total_ms = self.boot_started_at.elapsed().as_secs_f32() * 1000.0,
+            project_open = self.project.is_some(),
+            "native ApiGraphicBasic startup ready"
+        );
+        self.started_at = Instant::now();
         window.request_redraw();
     }
 
@@ -824,6 +1057,7 @@ impl NativeEditorApplication {
     }
 
     fn open_settings(&mut self, section: SettingsSection) {
+        self.ensure_settings_surface();
         self.settings_restore_focus = self
             .workbench
             .as_ref()
@@ -1020,8 +1254,14 @@ impl NativeEditorApplication {
 
     fn apply_committed_settings(&mut self) {
         self.apply_live_project_settings();
-        if let Some(window_host) = self.window_host.as_mut() {
+        let present_refresh_hz = if let Some(window_host) = self.window_host.as_mut() {
             window_host.set_vsync(self.settings_state.vsync);
+            window_host.effective_present_refresh_hz()
+        } else {
+            None
+        };
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.set_present_refresh_hz(present_refresh_hz);
         }
         if let Some(workbench) = self.workbench.as_mut() {
             workbench.set_engine_settings(self.settings_state.clone());
@@ -1270,45 +1510,14 @@ impl NativeEditorApplication {
     }
 
     fn redraw(&mut self) {
-        self.sync_attached_document_revision();
-        let project_assets = self
-            .workbench
-            .as_ref()
-            .map(|workbench| workbench.agent_assets().to_vec())
-            .unwrap_or_default();
-        let catalog_pending = self
-            .workbench
-            .as_ref()
-            .is_some_and(|workbench| workbench.agent_catalog_pending());
-        let catalog_error = self
-            .workbench
-            .as_ref()
-            .and_then(|workbench| workbench.agent_catalog_error().map(str::to_string));
-        let attached_result = poll_attached_commands(
-            &mut self.attached_host,
-            &mut self.attached_ledger,
-            self.runtime.as_mut(),
-            self.workbench.as_mut(),
-            &mut self.scene,
-            self.electronics_editor.as_mut(),
-            self.project.as_ref(),
-            &project_assets,
-            catalog_pending,
-            catalog_error.as_deref(),
-            self.settings_state.language,
-        );
-        if attached_result.changed {
-            self.attached_ledger
-                .mark_document(crate::scene_history::scene_fingerprint(&self.scene));
-            self.persist_attached_ledger();
-            if let Some(window) = self.window.as_ref() {
-                window.request_redraw();
-            }
-        }
-        if attached_result.document_saved {
-            self.pending_document_saved = true;
-        }
         let now = self.elapsed_seconds();
+        let present_refresh_hz = self
+            .window_host
+            .as_ref()
+            .and_then(|host| host.effective_present_refresh_hz());
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.set_present_refresh_hz(present_refresh_hz);
+        }
         let Some(runtime) = self.runtime.as_ref() else {
             return;
         };
@@ -1318,16 +1527,14 @@ impl NativeEditorApplication {
         if seconds_until_frame > f64::EPSILON {
             return;
         }
+        let redraw_started_at = Instant::now();
         self.input.set_time_seconds(now);
         if let Some(runtime) = self.runtime.as_mut() {
             runtime
                 .input_router_mut()
                 .reconcile_input(self.input.snapshot());
         }
-        let loading_active = self.show_loading && now < NATIVE_LOADING_SECONDS;
-        if self.show_loading && !loading_active {
-            self.finish_startup_loading();
-        }
+        let loading_active = self.show_loading;
         let exit_confirmation_was_open = self.exit_confirmation_open;
         let mut persist_agent_settings = false;
         let mut linear_save_requested = false;
@@ -1337,7 +1544,11 @@ impl NativeEditorApplication {
             self.apply_exit_confirmation_action(action);
         }
 
-        if self.project.is_none() && !loading_active {
+        if loading_active {
+            if let Some(runtime) = self.runtime.as_mut() {
+                runtime.set_continuous_ui_motion(false);
+            }
+        } else if self.project.is_none() {
             if self.settings_open && !self.exit_confirmation_open && !exit_confirmation_was_open {
                 let settings_actions = self.process_settings_input();
                 self.apply_settings_actions(settings_actions);
@@ -1354,7 +1565,7 @@ impl NativeEditorApplication {
                 || exit_confirmation_was_open
             {
                 if let Some(runtime) = self.runtime.as_mut() {
-                    runtime.request_animation_frame();
+                    runtime.set_continuous_ui_motion(false);
                 }
                 Vec::new()
             } else {
@@ -1391,6 +1602,11 @@ impl NativeEditorApplication {
                 let settings_actions = self.process_settings_input();
                 self.apply_settings_actions(settings_actions);
             }
+            let presentation_label = self
+                .window_host
+                .as_ref()
+                .map(|host| host.presentation_mode().label())
+                .unwrap_or("Present");
             let Some(runtime) = self.runtime.as_mut() else {
                 return;
             };
@@ -1421,7 +1637,23 @@ impl NativeEditorApplication {
                 if let Some(project) = self.project.as_ref() {
                     workbench.set_project_info(project.name.clone(), project.project_type);
                 }
-                workbench.set_presented_fps(runtime.presented_fps());
+                let graphics_snapshot = runtime.graphics().snapshot();
+                let performance = graphics_snapshot.scheduler_metrics;
+                workbench.set_performance_metrics(
+                    performance.presented_fps,
+                    runtime.viewport_fps(now),
+                    performance.last_frame_total_cpu_ms,
+                    performance.last_frame_cpu_ms,
+                    performance.target_fps,
+                    performance.requested_target_fps,
+                    performance.p95_frame_time_ms,
+                    performance.hitch_count,
+                    graphics_snapshot.last_frame_metrics,
+                    presentation_label,
+                    runtime.active_frame_activity().label(),
+                    runtime.active_frame_reason_label(),
+                    runtime.canvas_status_label(),
+                );
                 let selected = runtime.game_viewport().selected.clone();
                 let compass_state = if runtime.project_type() == ProjectType::Game
                     && runtime.game_viewport().mode == NativeViewportMode::View3d
@@ -1442,6 +1674,7 @@ impl NativeEditorApplication {
                     runtime.has_clipboard(),
                     runtime.node_graph(),
                     runtime.selected_graph_node(),
+                    runtime.node_graph_revision(),
                     self.project.as_ref(),
                     now,
                     compass_state,
@@ -1452,10 +1685,10 @@ impl NativeEditorApplication {
                     cursor_hint = Some(workbench.cursor_hint());
                 }
                 if self.settings_open || self.exit_confirmation_open || exit_confirmation_was_open {
-                    runtime.request_animation_frame();
                     runtime.set_continuous_ui_motion(false);
                 } else {
                     let ui_language = self.settings_state.language;
+                    let previous_session_id = workbench.active_session_id();
                     let (intents, actions) = workbench.process_input(
                         &self.input,
                         runtime.input_router_mut(),
@@ -1540,36 +1773,74 @@ impl NativeEditorApplication {
                                 self.settings_state = settings;
                                 persist_agent_settings = true;
                             }
-                            crate::native_workbench::NativeWorkbenchIntent::Command(command) => {
-                                if let Some(raw_value) = command.strip_prefix("layout.resize.bottom:")
-                                {
-                                    if let Ok(value) = raw_value.parse::<f32>() {
-                                        workbench.set_bottom_dock_height(value);
+                            crate::native_workbench::NativeWorkbenchIntent::OpenProjectFolder => {
+                                if let Some(project) = self.project.as_ref() {
+                                    if let Err(error) = open_project_folder(&project.path) {
+                                        tracing::warn!(
+                                            %error,
+                                            "native project folder could not be opened"
+                                        );
                                     }
                                 }
-                                domain_intents.push(
-                                    crate::native_workbench::NativeWorkbenchIntent::Command(
-                                        command,
-                                    ),
-                                );
+                            }
+                            crate::native_workbench::NativeWorkbenchIntent::Command(command) => {
+                                if command == "sessions.reload" {
+                                    let next_session_id = workbench.active_session_id();
+                                    if next_session_id != previous_session_id {
+                                        if let Some(project) = self.project.as_ref() {
+                                            match switch_session_documents(
+                                                project,
+                                                previous_session_id,
+                                                next_session_id,
+                                                &mut self.scene,
+                                                runtime,
+                                                &mut self.electronics_editor,
+                                                &mut self.attached_ledger,
+                                                &mut self.observed_scene_revision,
+                                                &mut self.observed_scene_render_fingerprint,
+                                            ) {
+                                                Ok(()) => {
+                                                    let registry =
+                                                        ProjectSessionRegistry::load_or_legacy(
+                                                            &project.path,
+                                                            project.project_type,
+                                                        );
+                                                    let session_name = registry
+                                                        .active()
+                                                        .map(|session| session.name.clone());
+                                                    self.attached_host.update_session(
+                                                        Some(next_session_id.0),
+                                                        session_name,
+                                                    );
+                                                    self.electronics_frame_key = None;
+                                                    self.pending_document_saved = true;
+                                                }
+                                                Err(error) => tracing::warn!(
+                                                    %error,
+                                                    "native session switch could not reload documents"
+                                                ),
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    if let Some(raw_value) =
+                                        command.strip_prefix("layout.resize.bottom:")
+                                    {
+                                        if let Ok(value) = raw_value.parse::<f32>() {
+                                            workbench.set_bottom_dock_height(value);
+                                        }
+                                    }
+                                    domain_intents.push(
+                                        crate::native_workbench::NativeWorkbenchIntent::Command(
+                                            command,
+                                        ),
+                                    );
+                                }
                             }
                             other => domain_intents.push(other),
                         }
                     }
                     if runtime.project_type() == ProjectType::Electronics {
-                        if domain_intents.iter().any(|intent| {
-                            matches!(
-                                intent,
-                                crate::native_workbench::NativeWorkbenchIntent::Command(command)
-                                    if command == "sessions.reload"
-                            )
-                        }) {
-                            self.electronics_editor = self
-                                .project
-                                .as_ref()
-                                .map(NativeElectronicsEditor::from_project);
-                            self.electronics_frame_key = None;
-                        }
                         if let Some(editor) = self.electronics_editor.as_mut() {
                             let electronics_canvas = runtime.layout().electronics_canvas();
                             for intent in &domain_intents {
@@ -1899,7 +2170,9 @@ impl NativeEditorApplication {
         } else {
             self.settings_state.language
         };
-        let canvas_layer = if project_open && runtime.project_type() == ProjectType::Game {
+        let canvas_layer = if loading_active {
+            None
+        } else if project_open && runtime.project_type() == ProjectType::Game {
             let Some(canvas_layer) = runtime.render_game_canvas(&self.scene) else {
                 runtime.cancel_frame();
                 self.input.begin_frame();
@@ -1923,7 +2196,30 @@ impl NativeEditorApplication {
         } else {
             None
         };
-        if project_open {
+        if loading_active {
+            let Some(loading) = self.loading.as_mut() else {
+                runtime.cancel_frame();
+                self.input.begin_frame();
+                return;
+            };
+            loading.sync(
+                runtime.layout().window,
+                native_palette(self.settings_state.theme),
+                if self.startup_loading_presented {
+                    0.72
+                } else {
+                    0.28
+                },
+                self.settings_state.language,
+            );
+            let mut layer = loading.compositor_layer(self.input.scale_factor() as f32, target_size);
+            let _ = host.render_editor_layers(
+                compositor,
+                None,
+                std::slice::from_mut(&mut layer),
+                |key| raf_core::i18n::t(key, self.settings_state.language),
+            );
+        } else if project_open {
             let Some(workbench) = self.workbench.as_mut() else {
                 runtime.cancel_frame();
                 self.input.begin_frame();
@@ -1958,25 +2254,6 @@ impl NativeEditorApplication {
                     .map(|model| crate::native_studio::resolve_hub_text(key, model, ui_language))
                     .unwrap_or_else(|| raf_core::i18n::t(key, ui_language))
             });
-        } else if loading_active {
-            let Some(loading) = self.loading.as_mut() else {
-                runtime.cancel_frame();
-                self.input.begin_frame();
-                return;
-            };
-            loading.sync(
-                runtime.layout().window,
-                native_palette(self.settings_state.theme),
-                (now / NATIVE_LOADING_SECONDS).clamp(0.0, 1.0) as f32,
-                self.settings_state.language,
-            );
-            let mut layer = loading.compositor_layer(self.input.scale_factor() as f32, target_size);
-            let _ = host.render_editor_layers(
-                compositor,
-                None,
-                std::slice::from_mut(&mut layer),
-                |key| raf_core::i18n::t(key, self.settings_state.language),
-            );
         } else {
             let Some(studio) = self.studio.as_mut() else {
                 runtime.cancel_frame();
@@ -2007,19 +2284,30 @@ impl NativeEditorApplication {
                     .unwrap_or_else(|| raf_core::i18n::t(key, ui_language))
             });
         }
-        let frame_cpu_ms = runtime
-            .graphics()
-            .snapshot()
-            .last_frame_metrics
-            .frame_cpu_ms;
-        runtime.finish_frame(now, frame_cpu_ms, 0.0);
-        if loading_active {
-            runtime.request_animation_frame();
+        let scene_rendered_this_frame = runtime.scene_rendered_this_frame();
+        let scene_metrics = runtime.graphics().snapshot().last_frame_metrics;
+        let frame_cpu_ms = scene_metrics.frame_cpu_ms;
+        let frame_gpu_ms = if scene_rendered_this_frame && scene_metrics.gpu_timing_sampled {
+            scene_metrics.gpu_frame_ms
+        } else {
+            0.0
+        };
+        let presented_at = self.started_at.elapsed().as_secs_f64();
+        let total_cpu_ms = redraw_started_at.elapsed().as_secs_f32() * 1000.0;
+        runtime.finish_frame(presented_at, frame_cpu_ms, frame_gpu_ms, total_cpu_ms);
+        let initialize_workspace_after_present = loading_active && self.startup_loading_presented;
+        if loading_active && !initialize_workspace_after_present {
+            runtime.request_ui_frame();
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
         }
         self.input.begin_frame();
+        if initialize_workspace_after_present {
+            self.finish_startup_loading();
+        } else if loading_active {
+            self.startup_loading_presented = true;
+        }
     }
 
     fn apply_studio_intents(&mut self, intents: Vec<NativeStudioIntent>) {
@@ -2090,17 +2378,25 @@ impl NativeEditorApplication {
             &project.path,
             crate::scene_history::scene_fingerprint(&self.scene),
         );
+        self.observed_scene_revision = self.scene.document_revision();
+        self.observed_scene_render_fingerprint = self.scene.render_fingerprint();
         self.persist_attached_ledger_for(&project);
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.reset_document();
             runtime.set_project_type(project_type);
             runtime.set_node_graph(initial_node_graph(Some(&project)));
         }
+        self.ensure_workbench();
         if let Some(workbench) = self.workbench.as_mut() {
             workbench.set_engine_settings(self.settings_state.clone());
             workbench.set_project_info(project.name.clone(), project.project_type);
         }
         self.project = Some(project);
+        if project_type == ProjectType::Electronics {
+            self.ensure_electronics_canvas();
+        } else {
+            self.electronics_canvas = None;
+        }
         let allow_gpu_features = self
             .project
             .as_ref()
@@ -2196,6 +2492,13 @@ impl NativeEditorApplication {
                 if let Some(runtime) = self.runtime.as_mut() {
                     runtime.resize([size.width, size.height], window.scale_factor() as f32);
                 }
+                let present_refresh_hz = self
+                    .window_host
+                    .as_ref()
+                    .and_then(|host| host.effective_present_refresh_hz());
+                if let Some(runtime) = self.runtime.as_mut() {
+                    runtime.set_present_refresh_hz(present_refresh_hz);
+                }
                 let scale = self.input.scale_factor() as f32;
                 let logical_size = [
                     size.width as f32 / scale.max(0.25),
@@ -2276,33 +2579,41 @@ impl NativeEditorApplication {
     fn about_to_wait_native(&mut self, event_loop: &ActiveEventLoop) {
         // Attached CLI/MCP clients wake this loop through the user-event
         // proxy; draining here answers them without waiting for a rendered
-        // frame. Zero cost while no client sends anything.
-        let project_assets = self
-            .workbench
-            .as_ref()
-            .map(|workbench| workbench.agent_assets().to_vec())
-            .unwrap_or_default();
-        let catalog_pending = self
-            .workbench
-            .as_ref()
-            .is_some_and(|workbench| workbench.agent_catalog_pending());
-        let catalog_error = self
-            .workbench
-            .as_ref()
-            .and_then(|workbench| workbench.agent_catalog_error().map(str::to_string));
-        let attached_result = poll_attached_commands(
-            &mut self.attached_host,
-            &mut self.attached_ledger,
-            self.runtime.as_mut(),
-            self.workbench.as_mut(),
-            &mut self.scene,
-            self.electronics_editor.as_mut(),
-            self.project.as_ref(),
-            &project_assets,
-            catalog_pending,
-            catalog_error.as_deref(),
-            self.settings_state.language,
-        );
+        // frame. Document serialization is revision-gated and never belongs
+        // to the redraw hot path.
+        self.sync_attached_document_revision();
+        let pending_attached = self.attached_host.drain();
+        let attached_result = if pending_attached.is_empty() {
+            Default::default()
+        } else {
+            let project_assets = self
+                .workbench
+                .as_ref()
+                .map(|workbench| workbench.agent_assets().to_vec())
+                .unwrap_or_default();
+            let catalog_pending = self
+                .workbench
+                .as_ref()
+                .is_some_and(|workbench| workbench.agent_catalog_pending());
+            let catalog_error = self
+                .workbench
+                .as_ref()
+                .and_then(|workbench| workbench.agent_catalog_error().map(str::to_string));
+            poll_attached_commands(
+                &mut self.attached_host,
+                pending_attached,
+                &mut self.attached_ledger,
+                self.runtime.as_mut(),
+                self.workbench.as_mut(),
+                &mut self.scene,
+                self.electronics_editor.as_mut(),
+                self.project.as_ref(),
+                &project_assets,
+                catalog_pending,
+                catalog_error.as_deref(),
+                self.settings_state.language,
+            )
+        };
         if attached_result.changed {
             self.attached_ledger
                 .mark_document(crate::scene_history::scene_fingerprint(&self.scene));
@@ -2337,6 +2648,7 @@ impl NativeEditorApplication {
         if !self.exit_confirmation_open {
             if let Some(open_create) = self.pending_return_to_hub {
                 if self.has_unsaved_changes() {
+                    self.ensure_exit_confirmation_surface();
                     self.exit_confirmation_open = true;
                     if let Some(runtime) = self.runtime.as_mut() {
                         runtime.request_animation_frame();
@@ -2406,7 +2718,9 @@ impl NativeEditorApplication {
         self.project = None;
         self.attached_ledger = TransactionLedger::new();
         self.electronics_editor = None;
+        self.electronics_canvas = None;
         self.electronics_frame_key = None;
+        self.ensure_studio();
         if let Some(studio) = self.studio.as_mut() {
             studio.reset_for_hub(open_create);
         }
@@ -2430,6 +2744,15 @@ impl NativeEditorApplication {
         let Some(project_path) = self.project.as_ref().map(|project| project.path.clone()) else {
             return;
         };
+        let scene_revision = self.scene.document_revision();
+        let render_fingerprint = self.scene.render_fingerprint();
+        if self.observed_scene_revision == scene_revision
+            && self.observed_scene_render_fingerprint == render_fingerprint
+        {
+            return;
+        }
+        self.observed_scene_revision = scene_revision;
+        self.observed_scene_render_fingerprint = render_fingerprint;
         let fingerprint = crate::scene_history::scene_fingerprint(&self.scene);
         if self.attached_ledger.observe_document(fingerprint) {
             if let Err(error) = self.attached_ledger.persist_for_project(&project_path) {
@@ -2646,6 +2969,15 @@ impl ApplicationHandler for NativeEditorApplication {
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.about_to_wait_native(event_loop);
+    }
+
+    fn user_event(&mut self, _event_loop: &ActiveEventLoop, _event: ()) {
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.request_ui_frame();
+        }
+        if let Some(window) = self.window.as_ref() {
+            window.request_redraw();
+        }
     }
 }
 

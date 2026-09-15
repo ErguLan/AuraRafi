@@ -37,6 +37,22 @@ hilo de UI mediante `electronics_analysis.rs`; el dock hace polling del
 resultado, permite cancelar y los cambios del documento invalidan los
 resultados anteriores y sus marcadores DRC.
 
+## Actualizacion 2026-09-09 — pacing, arranque y renderer Game
+
+- El limite FPS configurado es autoritativo dentro del perfil activo; Hub y
+  modales estaticos vuelven a reposo event-driven en lugar de presentar frames
+  continuos.
+- El HUD separa FPS presentado, CPU, GPU timestamp opcional, P95, draws,
+  uploads, hitches y modo de presentacion efectivo. Los timestamps GPU usan
+  readback asincrono y nunca introducen un `wait` en el frame.
+- Game conserva transforms por revision de escena, agrupa geometria opaca por
+  buckets de profundidad/primitiva, difiere edges para no romper instancing,
+  crece slots dinamicos geometricamente y expulsa un solo mesh LRU al alcanzar
+  el limite.
+- El loading interno se presenta antes de construir superficies pesadas y no
+  contiene la antigua espera fija de 1.15 segundos. La compilacion previa a
+  que exista el proceso del editor sigue fuera de esa superficie.
+
 ## Actualizacion 2026-08-20 — Fronteras nativas y alcance vigente
 
 - El editor inicia por la ruta nativa `Winit -> RafUI -> ApiGraphicBasic`.

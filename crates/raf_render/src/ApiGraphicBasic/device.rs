@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
@@ -89,6 +89,13 @@ impl GpuTextureView {
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SceneFrameMetrics {
     pub frame_cpu_ms: f32,
+    pub gpu_frame_ms: f32,
+    pub gpu_timing_supported: bool,
+    pub gpu_timing_sampled: bool,
+    pub command_count: u32,
+    pub mesh_instances: u32,
+    pub line_instances: u32,
+    pub overlay_triangles: u32,
     pub target_rebuilds: u32,
     pub mesh_draw_calls: u32,
     pub line_draw_calls: u32,
@@ -101,6 +108,7 @@ pub struct SceneFrameMetrics {
     pub line_slot_creations: u32,
     pub mesh_upload_bytes: u64,
     pub uniform_upload_bytes: u64,
+    pub uniform_uploads_skipped: u64,
     pub mesh_instance_upload_bytes: u64,
     pub line_upload_bytes: u64,
     pub overlay_upload_bytes: u64,
@@ -108,6 +116,24 @@ pub struct SceneFrameMetrics {
     pub mesh_resident_bytes: u64,
     pub mesh_resident_entries: u32,
     pub mesh_cache_evictions: u64,
+    pub frame_upload_bytes: u64,
+    pub upload_budget_exceeded: bool,
+}
+
+impl SceneFrameMetrics {
+    pub const fn total_draw_calls(self) -> u32 {
+        self.mesh_draw_calls
+            .saturating_add(self.line_draw_calls)
+            .saturating_add(self.overlay_draw_calls)
+    }
+
+    pub const fn total_upload_bytes(self) -> u64 {
+        self.mesh_upload_bytes
+            .saturating_add(self.uniform_upload_bytes)
+            .saturating_add(self.mesh_instance_upload_bytes)
+            .saturating_add(self.line_upload_bytes)
+            .saturating_add(self.overlay_upload_bytes)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -218,27 +244,24 @@ impl BasicDevice {
                 tracing::info!(
                     "ApiGraphicBasic initialized GPU Hardware backend using the shared native WGPU device."
                 );
+                let device = shared_graphics_context.device();
+                let queue = shared_graphics_context.queue();
                 return Self {
                     backend: BasicBackendType::GpuHardware,
                     framebuffer: Framebuffer::new(1, 1),
-                    capabilities: GraphicsCapabilities::wgpu(
-                        shared_graphics_context
-                            .device()
-                            .limits()
-                            .max_texture_dimension_2d,
-                        shared_graphics_context.device().limits().max_buffer_size,
+                    capabilities: GraphicsCapabilities::wgpu_with_timestamp_queries(
+                        device.limits().max_texture_dimension_2d,
+                        device.limits().max_buffer_size,
+                        device.features().contains(wgpu_timestamp_features()),
                     ),
                     memory_budget: config.memory_budget,
-                    gpu_scene: Some(GpuSceneState::new(
-                        shared_graphics_context.device().as_ref(),
-                        config.memory_budget,
-                    )),
+                    gpu_scene: Some(GpuSceneState::new(&device, &queue, config.memory_budget)),
                     last_scene_frame_ready: false,
                     last_frame_metrics: SceneFrameMetrics::default(),
                     wgpu_instance: None,
                     wgpu_adapter: None,
-                    wgpu_device: Some(shared_graphics_context.device()),
-                    wgpu_queue: Some(shared_graphics_context.queue()),
+                    wgpu_device: Some(device),
+                    wgpu_queue: Some(queue),
                 };
             }
         }
@@ -251,12 +274,14 @@ impl BasicDevice {
                 tracing::info!(
                     "ApiGraphicBasic successfully initialized GPU Hardware backend (wgpu)."
                 );
+                let gpu_scene =
+                    GpuSceneState::new(&gpu_state.device, &gpu_state.queue, config.memory_budget);
                 return Self {
                     backend: BasicBackendType::GpuHardware,
                     capabilities: gpu_state.capabilities,
                     memory_budget: config.memory_budget,
                     framebuffer: Framebuffer::new(1, 1),
-                    gpu_scene: Some(GpuSceneState::new(&gpu_state.device, config.memory_budget)),
+                    gpu_scene: Some(gpu_scene),
                     last_scene_frame_ready: false,
                     last_frame_metrics: SceneFrameMetrics::default(),
                     wgpu_instance: Some(gpu_state.instance),
@@ -524,8 +549,13 @@ impl BasicDevice {
     fn execute_cpu_scene_frame(&mut self, frame: &SceneRenderFrame) -> SceneFrameOutput {
         let frame_start = Instant::now();
         rasterize_basic_scene_frame(frame, &mut self.framebuffer);
+        let command_stats = frame.commands.stats();
         self.last_frame_metrics = SceneFrameMetrics {
             frame_cpu_ms: frame_start.elapsed().as_secs_f32() * 1000.0,
+            command_count: command_stats.command_count,
+            mesh_instances: command_stats.mesh_instances,
+            line_instances: command_stats.line_instances,
+            overlay_triangles: command_stats.overlay_triangles,
             ..SceneFrameMetrics::default()
         };
         SceneFrameOutput::CpuPixels(self.framebuffer.pixels().to_vec())
@@ -551,11 +581,18 @@ impl BasicDevice {
             force_fallback_adapter: false, // Fallback is requested if direct hardware creation fails
         }))?;
 
+        let timestamp_features = wgpu_timestamp_features();
+        let optional_features = if adapter.features().contains(timestamp_features) {
+            timestamp_features
+        } else {
+            wgpu::Features::empty()
+        };
+
         // Request device with minimal limit requirements (potato-friendly limit margin)
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("AuraRafi_Device"),
-                required_features: wgpu::Features::empty(),
+                required_features: optional_features,
                 required_limits: wgpu::Limits::downlevel_defaults(),
                 memory_hints: wgpu::MemoryHints::Performance,
             },
@@ -569,12 +606,20 @@ impl BasicDevice {
             adapter,
             device,
             queue,
-            capabilities: GraphicsCapabilities::wgpu(
+            capabilities: GraphicsCapabilities::wgpu_with_timestamp_queries(
                 limits.max_texture_dimension_2d,
                 limits.max_buffer_size,
+                optional_features.contains(wgpu_timestamp_features()),
             ),
         })
     }
+}
+
+pub(crate) fn wgpu_timestamp_features() -> wgpu::Features {
+    // `CommandEncoder::write_timestamp` needs the encoder-specific feature in
+    // addition to timestamp queries. Some adapters expose TIMESTAMP_QUERY but
+    // not TIMESTAMP_QUERY_INSIDE_ENCODERS, so timing must stay disabled there.
+    wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::TIMESTAMP_QUERY_INSIDE_ENCODERS
 }
 
 struct GpuState {
@@ -806,7 +851,7 @@ impl GpuLineVertex {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable)]
 struct MeshUniforms {
     mvp: [[f32; 4]; 4],
     model: [[f32; 4]; 4],
@@ -816,8 +861,62 @@ struct MeshUniforms {
     params: [f32; 4],
 }
 
+#[derive(Debug)]
+struct UniformReuse<T> {
+    values: Vec<Option<T>>,
+}
+
+impl<T> Default for UniformReuse<T> {
+    fn default() -> Self {
+        Self { values: Vec::new() }
+    }
+}
+
+impl<T> UniformReuse<T>
+where
+    T: Copy + PartialEq,
+{
+    fn should_upload(&mut self, draw_index: usize, value: T) -> bool {
+        if self
+            .values
+            .get(draw_index)
+            .and_then(|value| *value)
+            .is_some_and(|previous| previous == value)
+        {
+            return false;
+        }
+
+        if self.values.len() <= draw_index {
+            self.values.resize(draw_index + 1, None);
+        }
+        self.values[draw_index] = Some(value);
+        true
+    }
+}
+
+fn write_uniform_if_changed<T>(
+    queue: &wgpu::Queue,
+    slot: &GpuUniformSlot,
+    reuse: &mut UniformReuse<T>,
+    draw_index: usize,
+    value: T,
+    metrics: &mut SceneFrameMetrics,
+) where
+    T: bytemuck::Pod + PartialEq,
+{
+    if !reuse.should_upload(draw_index, value) {
+        metrics.uniform_uploads_skipped = metrics.uniform_uploads_skipped.saturating_add(1);
+        return;
+    }
+
+    queue.write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&value));
+    metrics.uniform_upload_bytes = metrics
+        .uniform_upload_bytes
+        .saturating_add(std::mem::size_of::<T>() as u64);
+}
+
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct LineUniforms {
     mvp: [[f32; 4]; 4],
     viewport: [f32; 2],
@@ -825,10 +924,144 @@ struct LineUniforms {
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
+#[derive(Clone, Copy, PartialEq, Pod, Zeroable)]
 struct OverlayUniforms {
     viewport: [f32; 2],
     _padding: [f32; 2],
+}
+
+const GPU_TIMESTAMP_QUERY_BYTES: u64 = 2 * std::mem::size_of::<u64>() as u64;
+const GPU_TIMESTAMP_READBACK_SLOTS: usize = 3;
+
+struct GpuTimestampReadback {
+    buffer: Arc<wgpu::Buffer>,
+    pending: bool,
+}
+
+struct GpuTimestampCompletion {
+    slot: usize,
+    succeeded: bool,
+}
+
+/// Non-blocking GPU frame timing. Results are read several frames later so
+/// diagnostics never stall rendering just to obtain a number for the HUD.
+struct GpuTimestampState {
+    query_set: Arc<wgpu::QuerySet>,
+    resolve_buffer: Arc<wgpu::Buffer>,
+    readbacks: Vec<GpuTimestampReadback>,
+    completion_tx: mpsc::Sender<GpuTimestampCompletion>,
+    completion_rx: mpsc::Receiver<GpuTimestampCompletion>,
+    timestamp_period_ns: f32,
+    next_slot: usize,
+    last_gpu_ms: f32,
+    has_sample: bool,
+}
+
+impl GpuTimestampState {
+    fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Option<Self> {
+        if !device.features().contains(wgpu_timestamp_features()) {
+            return None;
+        }
+
+        let query_set = Arc::new(device.create_query_set(&wgpu::QuerySetDescriptor {
+            label: Some("ApiGraphicBasic.SceneTimestampQueries"),
+            ty: wgpu::QueryType::Timestamp,
+            count: 2,
+        }));
+        let resolve_buffer = Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ApiGraphicBasic.SceneTimestampResolve"),
+            size: GPU_TIMESTAMP_QUERY_BYTES,
+            usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        }));
+        let readbacks = (0..GPU_TIMESTAMP_READBACK_SLOTS)
+            .map(|_| GpuTimestampReadback {
+                buffer: Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("ApiGraphicBasic.SceneTimestampReadback"),
+                    size: GPU_TIMESTAMP_QUERY_BYTES,
+                    usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                    mapped_at_creation: false,
+                })),
+                pending: false,
+            })
+            .collect();
+        let (completion_tx, completion_rx) = mpsc::channel();
+
+        Some(Self {
+            query_set,
+            resolve_buffer,
+            readbacks,
+            completion_tx,
+            completion_rx,
+            timestamp_period_ns: queue.get_timestamp_period(),
+            next_slot: 0,
+            last_gpu_ms: 0.0,
+            has_sample: false,
+        })
+    }
+
+    fn collect_ready(&mut self, device: &wgpu::Device) {
+        if self.readbacks.iter().any(|readback| readback.pending) {
+            let _ = device.poll(wgpu::Maintain::Poll);
+        }
+
+        while let Ok(completion) = self.completion_rx.try_recv() {
+            let Some(readback) = self.readbacks.get_mut(completion.slot) else {
+                continue;
+            };
+            if completion.succeeded {
+                let mapped = readback.buffer.slice(..).get_mapped_range();
+                if mapped.len() >= GPU_TIMESTAMP_QUERY_BYTES as usize {
+                    let start = u64::from_le_bytes(
+                        mapped[0..8]
+                            .try_into()
+                            .expect("timestamp start has a fixed byte width"),
+                    );
+                    let end = u64::from_le_bytes(
+                        mapped[8..16]
+                            .try_into()
+                            .expect("timestamp end has a fixed byte width"),
+                    );
+                    if end >= start {
+                        self.last_gpu_ms =
+                            (end - start) as f32 * self.timestamp_period_ns / 1_000_000.0;
+                        self.has_sample = true;
+                    }
+                }
+                drop(mapped);
+                readback.buffer.unmap();
+            }
+            readback.pending = false;
+        }
+    }
+
+    fn reserve_readback(&mut self) -> Option<(usize, Arc<wgpu::Buffer>)> {
+        for offset in 0..self.readbacks.len() {
+            let slot = (self.next_slot + offset) % self.readbacks.len();
+            if !self.readbacks[slot].pending {
+                self.readbacks[slot].pending = true;
+                self.next_slot = (slot + 1) % self.readbacks.len();
+                return Some((slot, Arc::clone(&self.readbacks[slot].buffer)));
+            }
+        }
+        None
+    }
+
+    fn map_readback(&self, slot: usize) {
+        let Some(readback) = self.readbacks.get(slot) else {
+            return;
+        };
+        let completion_tx = self.completion_tx.clone();
+        readback
+            .buffer
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |result| {
+                let _ = completion_tx.send(GpuTimestampCompletion {
+                    slot,
+                    succeeded: result.is_ok(),
+                });
+            });
+    }
 }
 
 struct GpuSceneState {
@@ -844,6 +1077,9 @@ struct GpuSceneState {
     mesh_cache: HashMap<usize, MeshHandle>,
     mesh_registry: MeshRegistry<GpuMeshBuffers>,
     mesh_cache_limit: usize,
+    mesh_uniform_reuse: UniformReuse<MeshUniforms>,
+    line_uniform_reuse: UniformReuse<LineUniforms>,
+    overlay_uniform_reuse: UniformReuse<OverlayUniforms>,
     mesh_uniform_slots: Vec<GpuUniformSlot>,
     mesh_instance_slots: Vec<GpuMeshInstanceSlot>,
     transient_mesh_slots: Vec<GpuTransientMeshSlot>,
@@ -856,10 +1092,16 @@ struct GpuSceneState {
     target: Option<GpuSceneTarget>,
     target_generation: u32,
     frame_index: u64,
+    frame_upload_budget: u64,
+    gpu_timing: Option<GpuTimestampState>,
 }
 
 impl GpuSceneState {
-    fn new(device: &wgpu::Device, memory_budget: GraphicsMemoryBudget) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        memory_budget: GraphicsMemoryBudget,
+    ) -> Self {
         let color_format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ApiGraphicBasic.SceneShader"),
@@ -1136,6 +1378,9 @@ impl GpuSceneState {
             mesh_cache: HashMap::new(),
             mesh_registry: MeshRegistry::new(memory_budget.gpu_bytes / 2),
             mesh_cache_limit: memory_budget.mesh_cache_entries as usize,
+            mesh_uniform_reuse: UniformReuse::default(),
+            line_uniform_reuse: UniformReuse::default(),
+            overlay_uniform_reuse: UniformReuse::default(),
             mesh_uniform_slots: Vec::new(),
             mesh_instance_slots: Vec::new(),
             transient_mesh_slots: Vec::new(),
@@ -1148,6 +1393,8 @@ impl GpuSceneState {
             target: None,
             target_generation: 0,
             frame_index: 0,
+            frame_upload_budget: memory_budget.frame_upload_bytes,
+            gpu_timing: GpuTimestampState::new(device, queue),
         }
     }
 
@@ -1160,6 +1407,17 @@ impl GpuSceneState {
         let frame_start = Instant::now();
         self.frame_index = self.frame_index.wrapping_add(1).max(1);
         let target_rebuilt = self.ensure_target(device, frame.width, frame.height);
+        let timestamp_plan = self.gpu_timing.as_mut().and_then(|timing| {
+            timing.collect_ready(device);
+            timing.reserve_readback().map(|(slot, readback)| {
+                (
+                    slot,
+                    Arc::clone(&timing.query_set),
+                    Arc::clone(&timing.resolve_buffer),
+                    readback,
+                )
+            })
+        });
         let target = self.target.as_ref()?;
         let color_view = Arc::clone(&target.color_view);
         let depth_view = Arc::clone(&target.depth_view);
@@ -1167,7 +1425,23 @@ impl GpuSceneState {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ApiGraphicBasic.SceneEncoder"),
         });
+        let command_stats = frame.commands.stats();
         let mut metrics = SceneFrameMetrics {
+            gpu_timing_supported: self.gpu_timing.is_some(),
+            gpu_frame_ms: self
+                .gpu_timing
+                .as_ref()
+                .map(|timing| timing.last_gpu_ms)
+                .unwrap_or(0.0),
+            gpu_timing_sampled: self
+                .gpu_timing
+                .as_ref()
+                .map(|timing| timing.has_sample)
+                .unwrap_or(false),
+            command_count: command_stats.command_count,
+            mesh_instances: command_stats.mesh_instances,
+            line_instances: command_stats.line_instances,
+            overlay_triangles: command_stats.overlay_triangles,
             target_rebuilds: u32::from(target_rebuilt),
             ..SceneFrameMetrics::default()
         };
@@ -1175,6 +1449,9 @@ impl GpuSceneState {
         let mut line_draw_index = 0usize;
         let mut overlay_draw_index = 0usize;
 
+        if let Some((_, query_set, _, _)) = timestamp_plan.as_ref() {
+            encoder.write_timestamp(query_set.as_ref(), 0);
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("ApiGraphicBasic.ScenePass"),
@@ -1307,12 +1584,29 @@ impl GpuSceneState {
             }
         }
 
+        if let Some((_, query_set, resolve_buffer, readback)) = timestamp_plan.as_ref() {
+            encoder.write_timestamp(query_set.as_ref(), 1);
+            encoder.resolve_query_set(query_set.as_ref(), 0..2, resolve_buffer.as_ref(), 0);
+            encoder.copy_buffer_to_buffer(
+                resolve_buffer.as_ref(),
+                0,
+                readback.as_ref(),
+                0,
+                GPU_TIMESTAMP_QUERY_BYTES,
+            );
+        }
         queue.submit(std::iter::once(encoder.finish()));
-        let _ = device.poll(wgpu::Maintain::Poll);
+        if let Some((slot, _, _, _)) = timestamp_plan {
+            if let Some(timing) = self.gpu_timing.as_ref() {
+                timing.map_readback(slot);
+            }
+        }
         let residency = self.mesh_registry.metrics();
         metrics.mesh_resident_bytes = residency.resident_bytes;
         metrics.mesh_resident_entries = residency.resident_entries;
         metrics.mesh_cache_evictions = residency.evictions;
+        metrics.frame_upload_bytes = metrics.total_upload_bytes();
+        metrics.upload_budget_exceeded = metrics.frame_upload_bytes > self.frame_upload_budget;
         metrics.frame_cpu_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         Some((
             SceneFrameOutput::GpuTexture {
@@ -1417,12 +1711,7 @@ impl GpuSceneState {
                 buffers
             } else {
                 self.mesh_cache.remove(&mesh_key);
-                self.mesh_cache
-                    .retain(|_, handle| self.mesh_registry.contains(*handle));
-                if self.mesh_cache.len() >= self.mesh_cache_limit {
-                    self.mesh_registry.clear_unpinned();
-                    self.mesh_cache.clear();
-                }
+                self.make_room_for_cached_mesh();
 
                 metrics.mesh_cache_misses += 1;
                 let buffers = create_gpu_mesh_buffers(device, mesh.as_ref());
@@ -1477,8 +1766,14 @@ impl GpuSceneState {
             light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
             params: [if lit { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         };
-        queue.write_buffer(&uniform_slot.buffer, 0, bytemuck::bytes_of(&uniforms));
-        metrics.uniform_upload_bytes += std::mem::size_of::<MeshUniforms>() as u64;
+        write_uniform_if_changed(
+            queue,
+            &uniform_slot,
+            &mut self.mesh_uniform_reuse,
+            draw_index,
+            uniforms,
+            metrics,
+        );
         metrics.mesh_draw_calls += 1;
 
         pass.set_pipeline(&self.mesh_pipeline);
@@ -1548,6 +1843,7 @@ impl GpuSceneState {
                 buffers
             } else {
                 self.mesh_cache.remove(&mesh_key);
+                self.make_room_for_cached_mesh();
                 metrics.mesh_cache_misses += 1;
                 let buffers = create_gpu_mesh_buffers(device, mesh.as_ref());
                 let bytes = buffers.vertex_bytes.saturating_add(buffers.index_bytes);
@@ -1577,6 +1873,7 @@ impl GpuSceneState {
                 buffers
             }
         } else {
+            self.make_room_for_cached_mesh();
             metrics.mesh_cache_misses += 1;
             let buffers = create_gpu_mesh_buffers(device, mesh.as_ref());
             let bytes = buffers.vertex_bytes.saturating_add(buffers.index_bytes);
@@ -1630,10 +1927,16 @@ impl GpuSceneState {
             light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
             params: [if lit { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         };
-        queue.write_buffer(&uniform_slot.buffer, 0, bytemuck::bytes_of(&uniforms));
+        write_uniform_if_changed(
+            queue,
+            &uniform_slot,
+            &mut self.mesh_uniform_reuse,
+            batch_index,
+            uniforms,
+            metrics,
+        );
         metrics.mesh_instance_upload_bytes +=
             std::mem::size_of_val(self.mesh_instance_scratch.as_slice()) as u64;
-        metrics.uniform_upload_bytes += std::mem::size_of::<MeshUniforms>() as u64;
         metrics.mesh_draw_calls += 1;
 
         pass.set_pipeline(&self.mesh_instanced_pipeline);
@@ -1694,10 +1997,16 @@ impl GpuSceneState {
             0,
             bytemuck::cast_slice(self.line_vertex_scratch.as_slice()),
         );
-        queue.write_buffer(&line_slot.uniform.buffer, 0, bytemuck::bytes_of(&uniforms));
+        write_uniform_if_changed(
+            queue,
+            &line_slot.uniform,
+            &mut self.line_uniform_reuse,
+            batch_index,
+            uniforms,
+            metrics,
+        );
         metrics.line_upload_bytes +=
             std::mem::size_of_val(self.line_vertex_scratch.as_slice()) as u64;
-        metrics.uniform_upload_bytes += std::mem::size_of::<LineUniforms>() as u64;
         metrics.line_draw_calls += 1;
 
         pass.set_pipeline(if no_depth_test {
@@ -1744,10 +2053,16 @@ impl GpuSceneState {
             0,
             bytemuck::cast_slice(self.overlay_vertex_scratch.as_slice()),
         );
-        queue.write_buffer(&slot.uniform.buffer, 0, bytemuck::bytes_of(&uniforms));
+        write_uniform_if_changed(
+            queue,
+            &slot.uniform,
+            &mut self.overlay_uniform_reuse,
+            batch_index,
+            uniforms,
+            metrics,
+        );
         metrics.overlay_upload_bytes +=
             std::mem::size_of_val(self.overlay_vertex_scratch.as_slice()) as u64;
-        metrics.uniform_upload_bytes += std::mem::size_of::<OverlayUniforms>() as u64;
         metrics.overlay_draw_calls += 1;
 
         pass.set_pipeline(&self.overlay_pipeline);
@@ -1798,9 +2113,15 @@ impl GpuSceneState {
             light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
             params: [if lit { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
         };
-        queue.write_buffer(&uniform_slot.buffer, 0, bytemuck::bytes_of(&uniforms));
+        write_uniform_if_changed(
+            queue,
+            &uniform_slot,
+            &mut self.mesh_uniform_reuse,
+            draw_index,
+            uniforms,
+            metrics,
+        );
         metrics.mesh_upload_bytes += vertex_bytes + index_bytes;
-        metrics.uniform_upload_bytes += std::mem::size_of::<MeshUniforms>() as u64;
         metrics.mesh_draw_calls += 1;
 
         pass.set_pipeline(&self.mesh_pipeline);
@@ -1889,6 +2210,7 @@ impl GpuSceneState {
         required_capacity: usize,
         metrics: &mut SceneFrameMetrics,
     ) -> GpuLineSlot {
+        let required_capacity = slot_capacity(required_capacity);
         while self.line_slots.len() <= draw_index {
             self.line_slots.push(GpuLineSlot {
                 vertex_buffer: Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -1918,6 +2240,7 @@ impl GpuSceneState {
                     mapped_at_creation: false,
                 }));
             self.line_slots[draw_index].capacity = required_capacity;
+            metrics.line_slot_creations += 1;
         }
 
         self.line_slots[draw_index].clone()
@@ -1930,7 +2253,7 @@ impl GpuSceneState {
         required_capacity: usize,
         metrics: &mut SceneFrameMetrics,
     ) -> GpuOverlaySlot {
-        let required_capacity = required_capacity.max(1);
+        let required_capacity = slot_capacity(required_capacity);
         while self.overlay_slots.len() <= batch_index {
             self.overlay_slots.push(GpuOverlaySlot {
                 vertex_buffer: Arc::new(device.create_buffer(&wgpu::BufferDescriptor {
@@ -1965,6 +2288,22 @@ impl GpuSceneState {
 
         self.overlay_slots[batch_index].clone()
     }
+
+    fn make_room_for_cached_mesh(&mut self) {
+        self.mesh_cache
+            .retain(|_, handle| self.mesh_registry.contains(*handle));
+        if self.mesh_cache.len() < self.mesh_cache_limit {
+            return;
+        }
+        if let Some(evicted) = self.mesh_registry.evict_least_recently_used_unpinned() {
+            self.mesh_cache.retain(|_, handle| *handle != evicted);
+        }
+    }
+}
+
+#[inline]
+fn slot_capacity(required_capacity: usize) -> usize {
+    required_capacity.max(1).next_power_of_two()
 }
 
 fn create_gpu_mesh_buffers(device: &wgpu::Device, mesh: &BasicMesh) -> GpuMeshBuffers {
@@ -1999,6 +2338,44 @@ fn create_gpu_mesh_buffers(device: &wgpu::Device, mesh: &BasicMesh) -> GpuMeshBu
         index_count: mesh.indices.len() as u32,
         vertex_bytes,
         index_bytes,
+    }
+}
+
+#[cfg(test)]
+mod uniform_reuse_tests {
+    use super::*;
+
+    fn uniforms(value: f32) -> MeshUniforms {
+        MeshUniforms {
+            mvp: [[value; 4]; 4],
+            model: [[value + 1.0; 4]; 4],
+            normal_matrix: [[value + 2.0; 4]; 4],
+            color: [value + 3.0; 4],
+            light_dir: [value + 4.0; 4],
+            params: [value + 5.0; 4],
+        }
+    }
+
+    #[test]
+    fn reuses_identical_slot_values_without_upload() {
+        let mut reuse = UniformReuse::<MeshUniforms>::default();
+        let first = uniforms(1.0);
+
+        assert!(reuse.should_upload(0, first));
+        assert!(!reuse.should_upload(0, first));
+        assert!(reuse.should_upload(0, uniforms(2.0)));
+        assert!(!reuse.should_upload(0, uniforms(2.0)));
+    }
+
+    #[test]
+    fn keeps_reuse_state_independent_per_draw_slot() {
+        let mut reuse = UniformReuse::<MeshUniforms>::default();
+        let first = uniforms(1.0);
+
+        assert!(reuse.should_upload(0, first));
+        assert!(reuse.should_upload(1, first));
+        assert!(!reuse.should_upload(0, first));
+        assert!(!reuse.should_upload(1, first));
     }
 }
 
@@ -2172,6 +2549,13 @@ mod tests {
         );
         assert_eq!(offsets, vec![0, 16, 32, 48, 52]);
         assert_eq!(layout.attributes[4].shader_location, 4);
+    }
+
+    #[test]
+    fn dynamic_slots_grow_geometrically() {
+        assert_eq!(slot_capacity(0), 1);
+        assert_eq!(slot_capacity(1), 1);
+        assert_eq!(slot_capacity(129), 256);
     }
 
     #[test]

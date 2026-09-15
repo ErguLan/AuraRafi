@@ -427,9 +427,20 @@ impl NativeElectronicsEditor {
 
     pub fn save(&mut self, project: &Project) -> Result<(), String> {
         let registry = ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
+        self.save_to_session(project, registry.active_session)
+    }
+
+    pub fn save_to_session(
+        &mut self,
+        project: &Project,
+        session_id: raf_core::session::SessionId,
+    ) -> Result<(), String> {
+        let registry = ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
         let session = registry
-            .active()
-            .ok_or_else(|| "project has no active session".to_string())?;
+            .sessions
+            .iter()
+            .find(|session| session.id == session_id)
+            .ok_or_else(|| "project session was not found".to_string())?;
         session
             .ensure_storage(&project.path)
             .map_err(|error| format!("session storage: {error}"))?;
@@ -638,7 +649,7 @@ impl NativeElectronicsEditor {
     }
 
     pub(super) fn pin_endpoint_at(&self, point: Vec2) -> Option<(Uuid, Vec2, WireAnchor)> {
-        let tolerance = PICK_TOLERANCE_SCREEN / self.camera.zoom.max(MIN_ZOOM);
+        let tolerance = PIN_SNAP_TOLERANCE_SCREEN / self.camera.zoom.max(MIN_ZOOM);
         self.schematic
             .components
             .iter()

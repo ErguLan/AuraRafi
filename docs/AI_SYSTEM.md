@@ -160,14 +160,22 @@ The pack is selected by project domain and prompt intent. A Game project never
 receives Electronics tools. Normal questions receive read tools only;
 authoring prompts receive semantic mutation tools. Observation tools are
 bounded and paginated: `project_summary`, `scene_outline`, `scene_query`,
-`scene_spatial_map`, `scene_design_audit`, `scene_inspect`, `assets_catalog`,
-`scripts_catalog`, `project_health`, `scene_verify`, and
+`scene_spatial_map`, `scene_check_overlaps`, `scene_diff`, `scene_design_audit`,
+`scene_inspect`, `assets_catalog`, `assets_recommend`, `scripts_catalog`,
+`project_health`, `scene_verify`, and
 `game_validate_layout`.
 
 Game mutations use `scene_create`, `scene_update`, `scene_delete`,
-`scene_duplicate`, `scene_arrange`, `scene_instantiate_prefab`, and atomic
-`scene_batch`. The provider sees nested transforms and stable target fields;
-only the final adapter flattens them for the legacy domain handler.
+`scene_duplicate`, `scene_reparent`, `scene_snap`, `scene_arrange`,
+`scene_instantiate_template`, and atomic `scene_batch`. The provider sees nested
+transforms and stable target fields; only the final adapter flattens them for the
+legacy domain handler. Repeated operations use explicit `count`, `axis`,
+`spacing`, and `offset` fields instead of prompt-generated command text.
+
+The scene authoring contract is shared by the native Agent, CLI, and MCP:
+vectors are always flat `[x, y, z]`, invalid nested shapes return an actionable
+structured diagnostic, and post-build verification can use `scene_diff` and
+`scene_check_overlaps` before claiming completion.
 
 ### 4. Tool Name Sanitization
 

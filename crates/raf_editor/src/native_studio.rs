@@ -5,6 +5,7 @@
 //! application boundary executes project creation/opening.
 
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver, TryRecvError};
 
 use raf_core::config::Language;
 use raf_core::i18n::t;
@@ -16,6 +17,7 @@ use raf_render::api_graphic_basic::ui_surface::{
 };
 use raf_render::api_graphic_basic::EditorUiLayer;
 use raf_ui::UiRect;
+use winit::event_loop::EventLoopProxy;
 
 use crate::editor_layout::{EditorFrameLayout, EditorRect};
 use crate::folder_picker;
@@ -54,6 +56,7 @@ pub struct NativeStudioSurface {
     pointer_position: Option<[f32; 2]>,
     palette: raf_render::api_graphic_basic::ui_surface::StudioUiPalette,
     language: Language,
+    discovery: Option<Receiver<HubSurfaceModel>>,
 }
 
 impl NativeStudioSurface {
@@ -61,10 +64,21 @@ impl NativeStudioSurface {
         graphics: &NativeGraphicsContext<'_>,
         rect: EditorRect,
         palette: raf_render::api_graphic_basic::ui_surface::StudioUiPalette,
+        wakeup: Option<EventLoopProxy<()>>,
     ) -> Self {
-        let mut model = discover_hub_model();
+        let mut model = HubSurfaceModel::default();
         model.create_path = default_project_location().to_string_lossy().to_string();
         model.create_active = true;
+        let (sender, discovery) = mpsc::channel();
+        std::thread::Builder::new()
+            .name("raf-hub-discovery".to_string())
+            .spawn(move || {
+                let _ = sender.send(discover_hub_model());
+                if let Some(wakeup) = wakeup {
+                    let _ = wakeup.send_event(());
+                }
+            })
+            .ok();
         let surface = build_hub_surface_with_model(palette, &model);
         let mut host = graphics.create_ui_host(surface, HUB_CLEAR);
         load_hub_images(host.images_mut());
@@ -77,6 +91,7 @@ impl NativeStudioSurface {
             pointer_position: None,
             palette,
             language: Language::English,
+            discovery: Some(discovery),
         }
     }
 
@@ -89,6 +104,7 @@ impl NativeStudioSurface {
         layout: EditorFrameLayout,
         palette: raf_render::api_graphic_basic::ui_surface::StudioUiPalette,
     ) {
+        self.poll_discovery();
         self.rect = layout.window;
         let palette_changed = self.palette != palette;
         self.palette = palette;
@@ -168,6 +184,26 @@ impl NativeStudioSurface {
         self.host.has_active_motion()
     }
 
+    fn poll_discovery(&mut self) {
+        let Some(receiver) = self.discovery.as_ref() else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(discovered) => {
+                self.model.total_projects = discovered.total_projects;
+                self.model.game_projects = discovered.game_projects;
+                self.model.electronics_projects = discovered.electronics_projects;
+                self.model.featured_project = discovered.featured_project;
+                self.model.recent_activity = discovered.recent_activity;
+                self.model.projects = discovered.projects;
+                self.last_model = None;
+                self.discovery = None;
+            }
+            Err(TryRecvError::Disconnected) => self.discovery = None,
+            Err(TryRecvError::Empty) => {}
+        }
+    }
+
     pub fn has_active_text_repeat(&self) -> bool {
         self.host.has_active_text_repeat()
     }
@@ -178,7 +214,7 @@ impl NativeStudioSurface {
         router: &mut InputRouter,
     ) -> Vec<NativeStudioIntent> {
         self.pointer_position = input.snapshot().pointer_position;
-        let model = self.model.clone();
+        let model = &self.model;
         let language = self.language;
         let actions = self.host.process_routed_input(
             self.rect.logical_size(),

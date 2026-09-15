@@ -1,8 +1,8 @@
 //! Native state host for the retained bottom dock.
 //!
-//! The dock builders remain in `editor_bottom_dock_surface.rs`; this module
-//! owns only tab state and project-local layout persistence so the surface
-//! stays declarative.
+//! The dock chrome builders live in `editor_bottom_dock_surface.rs`; content
+//! panels have their own focused surface modules. This module owns only tab
+//! state and project-local layout persistence so surfaces stay declarative.
 
 use std::collections::HashSet;
 use std::path::PathBuf;

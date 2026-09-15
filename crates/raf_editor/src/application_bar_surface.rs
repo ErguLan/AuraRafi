@@ -10,7 +10,7 @@ use raf_render::api_graphic_basic::ui_surface::{
     UiImageFit, UiImageSource, UiLayout, UiNode, UiNodeKind, UiSizeMode, UiSpacing, UiStyle,
     UiSurface, UiSurfaceMaterial, UiTextInput, UiTextStyle,
 };
-use raf_ui::{UiMenu, UiMenuCommand, UiMenuItem};
+use raf_ui::{UiAccessibilityRole, UiMenu, UiMenuCommand, UiMenuItem};
 
 const ACCENT: [u8; 4] = [232, 133, 28, 255];
 pub const APPLICATION_BAR_HEIGHT: f32 = 34.0;
@@ -215,6 +215,14 @@ pub fn build_application_bar_surface(
 /// shared with native adapters; this surface only turns that model into RafUI
 /// nodes and emits the stable command ids on activation.
 pub fn build_application_menu_popup_surface(palette: StudioUiPalette, menu: &UiMenu) -> UiSurface {
+    build_application_menu_popup_surface_with_submenu(palette, menu, None)
+}
+
+pub fn build_application_menu_popup_surface_with_submenu(
+    palette: StudioUiPalette,
+    menu: &UiMenu,
+    expanded_submenu: Option<&str>,
+) -> UiSurface {
     let tokens = palette.tokens();
     let height = application_menu_popup_height(menu);
     let mut root = UiNode::new("application-menu.popup", UiNodeKind::Panel)
@@ -245,7 +253,12 @@ pub fn build_application_menu_popup_surface(palette: StudioUiPalette, menu: &UiM
             .with_class("application-menu-separator")
             .with_layout(UiLayout::fixed(0.0, APPLICATION_MENU_SEPARATOR_HEIGHT)),
             UiMenuItem::Command(command) => menu_command_row(palette, index, command),
-            UiMenuItem::Submenu(submenu) => menu_submenu_row(palette, index, submenu),
+            UiMenuItem::Submenu(submenu) => menu_submenu_row(
+                palette,
+                index,
+                submenu,
+                expanded_submenu == Some(submenu.id.as_str()),
+            ),
         });
     }
 
@@ -274,6 +287,9 @@ fn menu_command_row(palette: StudioUiPalette, index: usize, command: &UiMenuComm
     })
     .disabled(!command.enabled)
     .with_accessibility_label_key(command.label_key.clone());
+    if command.id.starts_with("help.shortcut.") {
+        row = row.with_class("application-menu-shortcut");
+    }
 
     if command.enabled {
         row = row.focusable().with_event(UiEventBinding::command(
@@ -323,21 +339,58 @@ fn menu_command_row(palette: StudioUiPalette, index: usize, command: &UiMenuComm
     row
 }
 
-fn menu_submenu_row(palette: StudioUiPalette, index: usize, submenu: &UiMenu) -> UiNode {
+fn menu_submenu_row(
+    palette: StudioUiPalette,
+    index: usize,
+    submenu: &UiMenu,
+    expanded: bool,
+) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new(
         format!("application-menu.submenu.{index}.{}", submenu.id),
-        UiNodeKind::Label,
+        UiNodeKind::Button,
     )
     .with_class("application-menu-row")
     .with_layout(UiLayout {
         flow: UiFlow::Row,
         align_items: raf_ui::UiAlign::Center,
+        gap: 7.0,
         padding: UiSpacing::xy(7.0, 0.0),
         ..UiLayout::fixed(0.0, APPLICATION_MENU_ROW_HEIGHT).with_width_mode(UiSizeMode::Fill)
     })
-    .with_text_key(submenu.label_key.clone())
-    .with_text_style(UiTextStyle::button(tokens.text_muted))
+    .with_accessibility_role(UiAccessibilityRole::MenuItem)
+    .with_accessibility_label_key(submenu.label_key.clone())
+    .with_accessibility_expanded(expanded)
+    .focusable()
+    .with_event(UiEventBinding::command(
+        UiEventKind::HoverEnter,
+        format!("application.menu.submenu.open:{}", submenu.id),
+    ))
+    .with_event(UiEventBinding::command(
+        UiEventKind::Click,
+        format!("application.menu.submenu.open:{}", submenu.id),
+    ))
+    .with_child(
+        UiNode::new(
+            format!("application-menu.submenu.label.{index}.{}", submenu.id),
+            UiNodeKind::Label,
+        )
+        .with_text_key(submenu.label_key.clone())
+        .with_text_style(UiTextStyle::button(tokens.text))
+        .with_layout(UiLayout {
+            grow: 1.0,
+            ..UiLayout::fit_content()
+        }),
+    )
+    .with_child(
+        UiNode::new(
+            format!("application-menu.submenu.arrow.{index}.{}", submenu.id),
+            UiNodeKind::Label,
+        )
+        .with_text_value(">")
+        .with_text_style(UiTextStyle::button(tokens.text_muted))
+        .with_layout(UiLayout::fit_content()),
+    )
 }
 
 fn application_menu_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleSheet {
@@ -382,6 +435,17 @@ fn application_menu_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleShee
                     border: Some(tokens.surface_raised),
                     text: Some(tokens.text_muted),
                     opacity: Some(0.48),
+                    ..raf_ui::UiStylePatch::default()
+                },
+            )
+            .when(raf_ui::UiStyleRuleState::Disabled),
+            raf_ui::UiStyleRule::new(
+                raf_ui::UiStyleSelector::Class("application-menu-shortcut".to_string()),
+                raf_ui::UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.surface_raised),
+                    text: Some(tokens.text_muted),
+                    opacity: Some(1.0),
                     ..raf_ui::UiStylePatch::default()
                 },
             )

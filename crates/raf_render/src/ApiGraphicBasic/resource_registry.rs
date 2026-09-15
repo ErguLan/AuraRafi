@@ -222,6 +222,24 @@ where
         }
     }
 
+    /// Evict exactly one least-recently-used unpinned resource.
+    ///
+    /// Callers with a secondary key map use the returned handle to remove only
+    /// the stale entry they displaced. This avoids turning a small cache-limit
+    /// overflow into a full-cache flush and the upload burst that follows it.
+    pub fn evict_least_recently_used_unpinned(&mut self) -> Option<H> {
+        let index = self
+            .slots
+            .iter()
+            .enumerate()
+            .filter(|(_, slot)| slot.value.is_some() && !slot.pinned)
+            .min_by_key(|(_, slot)| slot.last_used_frame)
+            .map(|(index, _)| index)?;
+        let generation = self.slots[index].generation;
+        self.evict_index(index);
+        Some(H::from_parts(index as u32, generation))
+    }
+
     fn slot(&self, handle: H) -> Option<&ResourceSlot<T>> {
         let slot = self.slots.get(handle.index() as usize)?;
         (slot.generation == handle.generation() && slot.value.is_some()).then_some(slot)
@@ -234,17 +252,9 @@ where
 
     fn evict_to_budget(&mut self, incoming_bytes: u64) {
         while self.metrics.resident_bytes.saturating_add(incoming_bytes) > self.budget_bytes {
-            let candidate = self
-                .slots
-                .iter()
-                .enumerate()
-                .filter(|(_, slot)| slot.value.is_some() && !slot.pinned)
-                .min_by_key(|(_, slot)| slot.last_used_frame)
-                .map(|(index, _)| index);
-            let Some(index) = candidate else {
+            if self.evict_least_recently_used_unpinned().is_none() {
                 break;
-            };
-            self.evict_index(index);
+            }
         }
     }
 
@@ -278,3 +288,24 @@ pub type SamplerRegistry<T> = ResourceArena<SamplerHandle, T>;
 pub type PipelineRegistry<T> = ResourceArena<PipelineHandle, T>;
 pub type MeshRegistry<T> = ResourceArena<MeshHandle, T>;
 pub type MaterialRegistry<T> = ResourceArena<MaterialHandle, T>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evicts_only_the_oldest_unpinned_resource() {
+        let mut arena = MeshRegistry::new(64);
+        let oldest = arena
+            .insert(1_u8, ResourceAdmission::cached(8, 1))
+            .expect("first resource fits");
+        let newest = arena
+            .insert(2_u8, ResourceAdmission::cached(8, 9))
+            .expect("second resource fits");
+
+        assert_eq!(arena.evict_least_recently_used_unpinned(), Some(oldest));
+        assert!(!arena.contains(oldest));
+        assert!(arena.contains(newest));
+        assert_eq!(arena.metrics().evictions, 1);
+    }
+}

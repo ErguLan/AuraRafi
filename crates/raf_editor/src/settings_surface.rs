@@ -860,9 +860,12 @@ fn performance(
             "settings.render_execution_policy",
             "settings.render_execution_policy",
             vec![
-                UiSelectOption::new("auto", "settings.policy.auto"),
-                UiSelectOption::new("cpu_only", "settings.policy.cpu_only"),
-                UiSelectOption::new("gpu_preferred", "settings.policy.gpu_preferred"),
+                UiSelectOption::new("auto", "settings.render_execution_policy.auto"),
+                UiSelectOption::new("cpu_only", "settings.render_execution_policy.cpu_only"),
+                UiSelectOption::new(
+                    "gpu_preferred",
+                    "settings.render_execution_policy.gpu_preferred",
+                ),
             ],
             match settings.render_execution_policy {
                 RenderExecutionPolicy::Auto => 0,
@@ -1471,6 +1474,25 @@ fn ai(
             "settings.agent_streaming_enabled",
             settings.agent_streaming_enabled,
         ))
+        .with_child(toggle_row_with_description(
+            palette,
+            "settings.agent-tool-call-limit",
+            "settings.agent_tool_call_limit_enabled",
+            settings.agent_tool_call_limit_enabled,
+            "settings.agent_tool_call_limit_enabled_desc",
+        ))
+        .with_child(range_row_disabled_with_description(
+            palette,
+            "settings.agent-max-tool-calls",
+            "settings.agent_max_tool_calls",
+            settings.agent_max_tool_calls as f32,
+            raf_core::config::AGENT_MAX_TOOL_CALLS_MIN as f32,
+            raf_core::config::AGENT_MAX_TOOL_CALLS_MAX as f32,
+            1.0,
+            settings.agent_max_tool_calls.to_string(),
+            !settings.agent_tool_call_limit_enabled,
+            "settings.agent_max_tool_calls_desc",
+        ))
         .with_child(range_row(
             palette,
             "settings.agent-max-response-tokens",
@@ -1659,6 +1681,7 @@ fn select_row_with_description(
     let value_key = value_key.into();
     let description_key = description_key.into();
     let has_description = !description_key.is_empty();
+    let selected_index = selected_index.min(options.len().saturating_sub(1));
     let action_value_key = value_key.clone();
     let trigger_id = format!("{id}.control");
     let is_open = open_select == Some(trigger_id.as_str());
@@ -1690,10 +1713,11 @@ fn select_row_with_description(
         let mut menu = UiNode::new(format!("{id}.menu"), UiNodeKind::Menu)
             .with_class("settings-select-menu")
             .with_material(UiSurfaceMaterial::TranslucentRaised)
-            .with_layout(
-                UiLayout::absolute(UiRect::new(0.0, 34.0, CONTROL_WIDTH, menu_height.max(30.0)))
-                    .with_z_index(30),
-            )
+            .with_layout(UiLayout {
+                flow: UiFlow::Column,
+                ..UiLayout::absolute(UiRect::new(0.0, 34.0, CONTROL_WIDTH, menu_height.max(30.0)))
+                    .with_z_index(30)
+            })
             .with_style(UiStyle {
                 fill: tokens.surface_raised,
                 border: tokens.border,
@@ -2624,7 +2648,7 @@ fn settings_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raf_render::api_graphic_basic::ui_surface::UiSurfaceSession;
+    use raf_render::api_graphic_basic::ui_surface::{UiInputState, UiSurfaceSession};
 
     fn find_node<'a>(node: &'a UiNode, id: &str) -> Option<&'a UiNode> {
         if node.id == id {
@@ -2905,6 +2929,91 @@ mod tests {
         assert!(reset.event_handlers.iter().any(|binding| matches!(
             &binding.action,
             UiAction::Command { name } if name == "settings.reset_defaults"
+        )));
+    }
+
+    #[test]
+    fn settings_select_popup_keeps_ordered_hitboxes_and_selection_indices() {
+        let surface = build_settings_surface_with_state(
+            StudioUiPalette::IndustrialDark,
+            &EngineSettings::default(),
+            SettingsSection::Performance,
+            UiRect::new(32.0, 40.0, 920.0, 640.0),
+            "",
+            Some("settings.render_execution_policy.control"),
+        );
+        let menu = find_node(&surface.root, "settings.render_execution_policy.menu")
+            .expect("render policy menu");
+        assert_eq!(menu.layout.flow, UiFlow::Column);
+        assert_eq!(
+            menu.children
+                .iter()
+                .filter_map(|option| option.text_key.as_deref())
+                .collect::<Vec<_>>(),
+            vec![
+                "settings.render_execution_policy.auto",
+                "settings.render_execution_policy.cpu_only",
+                "settings.render_execution_policy.gpu_preferred",
+            ]
+        );
+
+        let mut session = UiSurfaceSession::default();
+        let frame =
+            session.build_frame_with_resolved_text(&surface, 1280, 800, [0, 0, 0, 255], |key| {
+                key.to_string()
+            });
+        let mut option_rects = menu
+            .children
+            .iter()
+            .filter_map(|option| {
+                frame
+                    .layout_boxes
+                    .iter()
+                    .find(|layout| layout.id == option.id)
+                    .map(|layout| layout.rect)
+            })
+            .collect::<Vec<_>>();
+        option_rects.sort_by(|left, right| left.y.total_cmp(&right.y));
+        assert_eq!(option_rects.len(), 3);
+        assert!(option_rects
+            .iter()
+            .all(|rect| (rect.height - 30.0).abs() < f32::EPSILON));
+        assert!(option_rects
+            .windows(2)
+            .all(|pair| pair[1].y >= pair[0].bottom()));
+
+        let option = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "settings.render_execution_policy.option.cpu_only")
+            .expect("CPU-only option");
+        let point = [option.rect.x + 12.0, option.rect.y + 12.0];
+        let _ = session.process_input(
+            &surface,
+            &frame,
+            &UiInputState {
+                pointer_position: Some(point),
+                pointer_down: true,
+                time_seconds: 0.1,
+                ..UiInputState::default()
+            },
+        );
+        let actions = session.process_input(
+            &surface,
+            &frame,
+            &UiInputState {
+                pointer_position: Some(point),
+                time_seconds: 0.2,
+                ..UiInputState::default()
+            },
+        );
+        assert!(actions.iter().any(|action| matches!(
+            &action.action,
+            UiAction::SetSelect {
+                key,
+                value,
+                index: 1,
+            } if key == "settings.render_execution_policy" && value == "cpu_only"
         )));
     }
 

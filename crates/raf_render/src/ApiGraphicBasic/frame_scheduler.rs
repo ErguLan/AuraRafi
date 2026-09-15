@@ -126,6 +126,35 @@ impl FrameInvalidation {
     pub fn remove(&mut self, other: Self) {
         self.0 &= !other.0;
     }
+
+    /// Compact diagnostic label for the last frame request. The scheduler
+    /// keeps the full bitset for policy decisions; the editor only needs a
+    /// stable human-readable primary cause in its lightweight status line.
+    pub const fn primary_label(self) -> &'static str {
+        if self.intersects(Self::DOCUMENT) {
+            "Scene"
+        } else if self.intersects(Self::CAMERA) {
+            "Camera"
+        } else if self.intersects(Self::SIMULATION) {
+            "Sim"
+        } else if self.intersects(Self::ASSET_UPLOAD) {
+            "Asset"
+        } else if self.intersects(Self::WINDOW) {
+            "Window"
+        } else if self.intersects(Self::POINTER_CAPTURE) {
+            "Input"
+        } else if self.intersects(Self::OVERLAY) {
+            "Overlay"
+        } else if self.intersects(Self::ANIMATION) {
+            "Anim"
+        } else if self.intersects(Self::UI) {
+            "UI"
+        } else if self.intersects(Self::EXPLICIT) {
+            "Explicit"
+        } else {
+            "Idle"
+        }
+    }
 }
 
 impl std::ops::BitOr for FrameInvalidation {
@@ -150,6 +179,17 @@ pub enum FrameActivity {
     Benchmark,
 }
 
+impl FrameActivity {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Idle => "Idle",
+            Self::Passive => "Passive",
+            Self::Interactive => "Interactive",
+            Self::Benchmark => "Benchmark",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FramePermit {
     pub frame_index: u64,
@@ -163,7 +203,15 @@ pub struct FrameSchedulerMetrics {
     pub frames_permitted: u64,
     pub idle_frames_skipped: u64,
     pub paced_frames_deferred: u64,
+    /// CPU time measured from the scheduler permit until presentation.
+    ///
+    /// This is the renderer/compositor work window. The editor also records
+    /// the end-to-end redraw time separately so input, retained UI sync and
+    /// other pre-frame work cannot hide behind this value.
     pub last_frame_cpu_ms: f32,
+    /// End-to-end CPU time measured by the native event-loop redraw.
+    #[serde(default)]
+    pub last_frame_total_cpu_ms: f32,
     pub last_frame_gpu_ms: f32,
     pub last_present_seconds: f64,
     /// Smoothed presentation rate measured from completed frames.
@@ -172,6 +220,22 @@ pub struct FrameSchedulerMetrics {
     /// budget is a ceiling; this value describes what the editor actually
     /// presented while it was active.
     pub presented_fps: f32,
+    /// Effective scheduler ceiling for the most recently permitted frame.
+    #[serde(default)]
+    pub target_fps: u16,
+    /// Ceiling before a native presentation constraint (for example VSync)
+    /// is applied.
+    #[serde(default)]
+    pub requested_target_fps: u16,
+    /// Latest active frame interval. Idle gaps are deliberately excluded.
+    #[serde(default)]
+    pub frame_time_ms: f32,
+    /// Rolling 95th percentile of active frame intervals.
+    #[serde(default)]
+    pub p95_frame_time_ms: f32,
+    /// Frames that exceeded 150% of their active pacing budget.
+    #[serde(default)]
+    pub hitch_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -269,6 +333,10 @@ pub struct FrameScheduler {
     /// while the window is focused; `None` keeps the profile default.
     #[serde(default)]
     frame_limit: Option<u16>,
+    /// Refresh rate of the active native presentation target. When VSync is
+    /// active, the scheduler must not submit work faster than this cadence.
+    #[serde(default)]
+    present_refresh_hz: Option<u16>,
     pending: FrameInvalidation,
     continuous: FrameInvalidation,
     window_focused: bool,
@@ -276,6 +344,16 @@ pub struct FrameScheduler {
     next_frame_index: u64,
     next_present_seconds: f64,
     metrics: FrameSchedulerMetrics,
+    #[serde(skip, default = "empty_frame_intervals")]
+    frame_intervals_ms: [f32; 120],
+    #[serde(skip)]
+    frame_interval_cursor: usize,
+    #[serde(skip)]
+    frame_interval_len: usize,
+}
+
+fn empty_frame_intervals() -> [f32; 120] {
+    [0.0; 120]
 }
 
 impl Default for FrameScheduler {
@@ -290,6 +368,7 @@ impl FrameScheduler {
             profile,
             budget: FramePacingBudget::for_profile(profile),
             frame_limit: None,
+            present_refresh_hz: None,
             pending: FrameInvalidation::WINDOW | FrameInvalidation::EXPLICIT,
             continuous: FrameInvalidation::NONE,
             window_focused: true,
@@ -297,6 +376,9 @@ impl FrameScheduler {
             next_frame_index: 1,
             next_present_seconds: 0.0,
             metrics: FrameSchedulerMetrics::default(),
+            frame_intervals_ms: [0.0; 120],
+            frame_interval_cursor: 0,
+            frame_interval_len: 0,
         }
     }
 
@@ -312,6 +394,22 @@ impl FrameScheduler {
         self.frame_limit
     }
 
+    pub fn present_refresh_hz(&self) -> Option<u16> {
+        self.present_refresh_hz
+    }
+
+    /// Synchronizes pacing with the native swapchain. A missing or zero rate
+    /// means that no presentation-side ceiling is known.
+    pub fn set_present_refresh_hz(&mut self, refresh_hz: Option<u16>) {
+        let refresh_hz = refresh_hz.filter(|value| *value > 0);
+        if self.present_refresh_hz == refresh_hz {
+            return;
+        }
+        self.present_refresh_hz = refresh_hz;
+        self.next_present_seconds = 0.0;
+        self.request(FrameInvalidation::WINDOW);
+    }
+
     pub fn set_frame_limit(&mut self, fps_limit: u32) {
         let next = if fps_limit == 0 {
             Some(0)
@@ -322,6 +420,7 @@ impl FrameScheduler {
             return;
         }
         self.frame_limit = next;
+        self.rebuild_effective_budget();
         self.next_present_seconds = 0.0;
         self.request(FrameInvalidation::EXPLICIT);
     }
@@ -339,7 +438,7 @@ impl FrameScheduler {
             return;
         }
         self.profile = profile;
-        self.budget = FramePacingBudget::for_profile(profile);
+        self.rebuild_effective_budget();
         self.next_present_seconds = 0.0;
         self.request(FrameInvalidation::EXPLICIT);
     }
@@ -397,7 +496,10 @@ impl FrameScheduler {
         } else {
             FrameActivity::Idle
         };
-        let fps = self.target_fps(activity);
+        let requested_fps = self.target_fps(activity);
+        let fps = self.effective_target_fps(activity);
+        self.metrics.requested_target_fps = requested_fps;
+        self.metrics.target_fps = fps;
         if fps > 0 && now_seconds + f64::EPSILON < self.next_present_seconds {
             self.metrics.paced_frames_deferred =
                 self.metrics.paced_frames_deferred.saturating_add(1);
@@ -427,28 +529,63 @@ impl FrameScheduler {
         presented_at_seconds: f64,
         cpu_ms: f32,
         gpu_ms: f32,
+        total_cpu_ms: f32,
     ) {
         let presented_at_seconds = presented_at_seconds.max(permit.requested_at_seconds);
         let previous_present_seconds = self.metrics.last_present_seconds;
         let interval = presented_at_seconds - previous_present_seconds;
 
-        // Event-driven idle time is not a rendered frame interval. Ignore
-        // long gaps so opening a panel after being idle does not report a
-        // bogus one-frame FPS collapse.
+        // Event-driven idle time is not a rendered frame interval. Reset the
+        // rolling presentation samples so opening a panel after being idle
+        // does not keep showing stale FPS/P95 values from before the pause.
+        if previous_present_seconds > 0.0 && interval.is_finite() && interval > 0.5 {
+            self.metrics.presented_fps = 0.0;
+            self.metrics.frame_time_ms = 0.0;
+            self.metrics.p95_frame_time_ms = 0.0;
+            self.frame_intervals_ms.fill(0.0);
+            self.frame_interval_cursor = 0;
+            self.frame_interval_len = 0;
+        }
+
+        // Active intervals are the only samples used for FPS/P95/hitch
+        // diagnostics. Long gaps are intentionally excluded above.
         if previous_present_seconds > 0.0
             && interval.is_finite()
             && interval > 0.0001
             && interval <= 0.5
         {
-            let sample_fps = (1.0 / interval).clamp(0.0, 1000.0) as f32;
+            let sample_fps = (1.0 / interval).clamp(0.0, 10_000.0) as f32;
+            let frame_time_ms = (interval * 1000.0) as f32;
             self.metrics.presented_fps = if self.metrics.presented_fps <= f32::EPSILON {
                 sample_fps
             } else {
                 self.metrics.presented_fps * 0.85 + sample_fps * 0.15
             };
+            self.metrics.frame_time_ms = frame_time_ms;
+            self.frame_intervals_ms[self.frame_interval_cursor] = frame_time_ms;
+            self.frame_interval_cursor =
+                (self.frame_interval_cursor + 1) % self.frame_intervals_ms.len();
+            self.frame_interval_len =
+                (self.frame_interval_len + 1).min(self.frame_intervals_ms.len());
+            if self.frame_interval_len >= 8 && permit.frame_index % 15 == 0 {
+                let mut samples = self.frame_intervals_ms;
+                let active = &mut samples[..self.frame_interval_len];
+                active.sort_by(f32::total_cmp);
+                let p95_index = ((active.len() - 1) * 95) / 100;
+                self.metrics.p95_frame_time_ms = active[p95_index];
+            }
+            let target_fps = self.effective_target_fps(permit.activity);
+            if target_fps > 0 && frame_time_ms > (1000.0 / f32::from(target_fps)) * 1.5 {
+                self.metrics.hitch_count = self.metrics.hitch_count.saturating_add(1);
+            }
         }
         self.metrics.last_present_seconds = presented_at_seconds;
         self.metrics.last_frame_cpu_ms = cpu_ms.max(0.0);
+        self.metrics.last_frame_total_cpu_ms = if total_cpu_ms.is_finite() && total_cpu_ms > 0.0 {
+            total_cpu_ms
+        } else {
+            cpu_ms.max(0.0)
+        };
         self.metrics.last_frame_gpu_ms = gpu_ms.max(0.0);
     }
 
@@ -483,10 +620,51 @@ impl FrameScheduler {
             FrameActivity::Benchmark => 0,
         };
         match self.frame_limit {
+            Some(0) if activity == FrameActivity::Passive => self.budget.passive_fps,
             Some(0) => 0,
             Some(limit) if profile_fps == 0 => limit,
             Some(limit) => profile_fps.min(limit),
             None => profile_fps,
+        }
+    }
+
+    fn effective_target_fps(&self, activity: FrameActivity) -> u16 {
+        let target_fps = self.target_fps(activity);
+        if target_fps == 0 {
+            // `0` is the user's uncapped request, but an uncapped scheduler
+            // still has nothing useful to gain by submitting faster than a
+            // VSync swapchain. Benchmark mode is the explicit exception:
+            // keep it truly uncapped for profiling.
+            return (activity != FrameActivity::Benchmark)
+                .then_some(self.present_refresh_hz)
+                .flatten()
+                .unwrap_or(0);
+        }
+        self.present_refresh_hz
+            .map(|refresh_hz| target_fps.min(refresh_hz))
+            .unwrap_or(target_fps)
+    }
+
+    fn rebuild_effective_budget(&mut self) {
+        self.budget = FramePacingBudget::for_profile(self.profile);
+        if self.profile == FramePacingProfile::Benchmark {
+            return;
+        }
+        let Some(limit) = self.frame_limit else {
+            return;
+        };
+        if limit == 0 {
+            // Unlimited applies to the interactive viewport. RafUI motion is
+            // intentionally bounded: static UI remains event-driven and a
+            // menu transition gains nothing from consuming thousands of FPS.
+            self.budget.foreground_fps = 0;
+            self.budget.passive_fps = FramePacingBudget::performance().passive_fps;
+        } else {
+            // An explicit user limit is authoritative. Profiles still own
+            // resolution and background policy, but may not silently clamp a
+            // requested 120/240 Hz viewport back to Eco's 60 Hz.
+            self.budget.foreground_fps = limit;
+            self.budget.passive_fps = limit.min(FramePacingBudget::performance().passive_fps);
         }
     }
 }
@@ -507,18 +685,93 @@ mod tests {
     #[test]
     fn measures_completed_presentation_rate() {
         let mut scheduler = FrameScheduler::default();
-        scheduler.finish_frame(permit(0.016), 0.016, 0.0, 0.0);
-        scheduler.finish_frame(permit(0.032), 0.032, 0.0, 0.0);
+        scheduler.finish_frame(permit(0.016), 0.016, 0.0, 0.0, 0.0);
+        scheduler.finish_frame(permit(0.032), 0.032, 0.0, 0.0, 0.0);
 
         assert!((scheduler.metrics().presented_fps - 62.5).abs() < 0.01);
     }
 
     #[test]
+    fn keeps_render_and_end_to_end_cpu_samples_distinct() {
+        let mut scheduler = FrameScheduler::default();
+        scheduler.finish_frame(permit(0.016), 0.016, 1.5, 0.0, 4.0);
+
+        assert_eq!(scheduler.metrics().last_frame_cpu_ms, 1.5);
+        assert_eq!(scheduler.metrics().last_frame_total_cpu_ms, 4.0);
+    }
+
+    #[test]
     fn ignores_event_driven_idle_gap() {
         let mut scheduler = FrameScheduler::default();
-        scheduler.finish_frame(permit(0.016), 0.016, 0.0, 0.0);
-        scheduler.finish_frame(permit(2.016), 2.016, 0.0, 0.0);
+        scheduler.finish_frame(permit(0.016), 0.016, 0.0, 0.0, 0.0);
+        scheduler.finish_frame(permit(2.016), 2.016, 0.0, 0.0, 0.0);
 
         assert_eq!(scheduler.metrics().presented_fps, 0.0);
+    }
+
+    #[test]
+    fn resets_active_rate_after_event_driven_idle_gap() {
+        let mut scheduler = FrameScheduler::default();
+        scheduler.finish_frame(permit(0.016), 0.016, 0.0, 0.0, 0.0);
+        scheduler.finish_frame(permit(0.032), 0.032, 0.0, 0.0, 0.0);
+        assert!(scheduler.metrics().presented_fps > 0.0);
+
+        scheduler.finish_frame(permit(2.032), 2.032, 0.0, 0.0, 0.0);
+        assert_eq!(scheduler.metrics().presented_fps, 0.0);
+        assert_eq!(scheduler.metrics().frame_time_ms, 0.0);
+        assert_eq!(scheduler.metrics().p95_frame_time_ms, 0.0);
+    }
+
+    #[test]
+    fn explicit_limit_is_not_clamped_by_hidden_profile() {
+        let mut scheduler = FrameScheduler::default();
+        scheduler.set_frame_limit(240);
+
+        assert_eq!(scheduler.budget().foreground_fps, 240);
+        assert_eq!(scheduler.target_fps(FrameActivity::Interactive), 240);
+        assert_eq!(scheduler.target_fps(FrameActivity::Passive), 120);
+    }
+
+    #[test]
+    fn presentation_refresh_caps_scheduler_without_losing_requested_limit() {
+        let mut scheduler = FrameScheduler::default();
+        scheduler.set_frame_limit(240);
+        scheduler.set_present_refresh_hz(Some(60));
+
+        assert!(scheduler.request_frame(0.0).is_some());
+        assert_eq!(scheduler.metrics().requested_target_fps, 240);
+        assert_eq!(scheduler.metrics().target_fps, 60);
+        assert_eq!(scheduler.present_refresh_hz(), Some(60));
+    }
+
+    #[test]
+    fn refresh_cap_prevents_normal_vsync_frames_from_being_hitches() {
+        let mut scheduler = FrameScheduler::default();
+        scheduler.set_frame_limit(240);
+        scheduler.set_present_refresh_hz(Some(60));
+        scheduler.finish_frame(permit(0.016), 0.016, 0.0, 0.0, 0.0);
+        scheduler.finish_frame(permit(0.032), 0.032, 0.0, 0.0, 0.0);
+
+        assert_eq!(scheduler.metrics().hitch_count, 0);
+    }
+
+    #[test]
+    fn unlimited_request_is_still_bound_by_vsync() {
+        let mut scheduler = FrameScheduler::default();
+        scheduler.set_frame_limit(0);
+        scheduler.set_present_refresh_hz(Some(60));
+
+        assert!(scheduler.request_frame(0.0).is_some());
+        assert_eq!(scheduler.metrics().requested_target_fps, 0);
+        assert_eq!(scheduler.metrics().target_fps, 60);
+    }
+
+    #[test]
+    fn static_ui_returns_to_event_driven_idle() {
+        let mut scheduler = FrameScheduler::default();
+        scheduler.set_frame_limit(240);
+        assert!(scheduler.request_frame(0.0).is_some());
+
+        assert_eq!(scheduler.seconds_until_next_frame(1.0), None);
     }
 }

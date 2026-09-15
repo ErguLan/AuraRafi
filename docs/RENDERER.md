@@ -69,6 +69,36 @@ without enabling advanced effects:
   rebuilt explicitly instead of assigning WGSL swizzles, preventing a pre-project
   validation panic.
 
+## Precision performance pass — 2026-09-09
+
+The active Game path now treats frame truth and bounded reuse as runtime
+contracts rather than relying on the visible FPS number alone:
+
+- `SceneRenderer` reuses its render-job allocation and its world-transform
+  snapshot while `SceneGraph::document_revision()` is unchanged. Camera-only
+  frames no longer rebuild every hierarchy transform.
+- Opaque work is sorted into coarse front-to-back depth buckets and then by
+  primitive mesh. This preserves useful early depth rejection while exposing
+  repeated meshes to `DrawMeshBatch`.
+- Surface and selection edges are emitted after mesh submission. They merge
+  into line batches instead of interrupting every compatible mesh run.
+- Dynamic line and overlay slots grow geometrically. A slightly larger frame
+  therefore does not recreate the same GPU buffer on several consecutive
+  frames.
+- Reaching the mesh-entry limit evicts one least-recently-used unpinned mesh;
+  it does not flush the whole cache and cause a re-upload storm.
+- `SceneFrameMetrics` reports submitted commands/instances, draw calls, upload
+  bytes, residency, evictions, CPU encode time, and upload-budget overruns.
+- When the adapter supports timestamp queries, GPU pass time is sampled through
+  a triple asynchronous readback ring. Rendering never blocks waiting for a
+  diagnostic sample, and UI-only frames do not reuse an old GPU sample as if it
+  belonged to the current frame.
+
+The native status strip displays presented FPS, configured target, total CPU
+frame time, sampled GPU time, P95 frame time, draw calls, frame uploads, hitch
+count, and the effective presentation mode. GPU `--` means the adapter has not
+provided a valid asynchronous timestamp sample; it does not mean zero GPU cost.
+
 Game 2D is an orthographic 3D scene. `Sprite2D` is no longer an active
 primitive; old serialized/command spellings are accepted as `Plane`. Shadows,
 post-processing, PBR, particles, and skeletal animation remain future,

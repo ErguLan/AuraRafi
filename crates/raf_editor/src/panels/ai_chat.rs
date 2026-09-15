@@ -41,6 +41,8 @@ struct RuntimeKey {
     api_key: String,
     streaming: bool,
     max_tokens: u32,
+    tool_call_limit_enabled: bool,
+    max_tool_calls: u32,
 }
 
 /// The editor-facing Agent state.
@@ -61,11 +63,13 @@ pub struct AgentPanel {
     pub(crate) model_menu_open: bool,
     pub(crate) mode_menu_open: bool,
     pub(crate) add_model_open: bool,
+    tool_call_warning_dismissed: bool,
     pub language: Language,
     pub last_status: AgentStatus,
     visual_revision: u64,
     last_visual_message_revision: u64,
     last_visual_present: Instant,
+    last_visual_elapsed_second: Option<u64>,
     loaded_project_path: Option<PathBuf>,
     runtime_key: Option<RuntimeKey>,
     system_prompt: String,
@@ -93,11 +97,13 @@ impl Default for AgentPanel {
             model_menu_open: false,
             mode_menu_open: false,
             add_model_open: false,
+            tool_call_warning_dismissed: false,
             language: Language::English,
             last_status: AgentStatus::Done,
             visual_revision: 0,
             last_visual_message_revision: 0,
             last_visual_present: Instant::now(),
+            last_visual_elapsed_second: None,
             loaded_project_path: None,
             runtime_key: None,
             system_prompt: String::new(),
@@ -144,16 +150,22 @@ impl AgentPanel {
         let previous_task = self.runtime.task_snapshot();
         let status = self.runtime.poll(Some(executor));
         let message_revision = self.runtime.message_revision();
+        let elapsed_second = self
+            .runtime
+            .activity_snapshot()
+            .map(|activity| activity.elapsed_seconds);
+        let elapsed_tick = elapsed_second != self.last_visual_elapsed_second;
         let structural_change = previous_status != self.runtime.status
             || previous_message_count != self.runtime.messages.len()
             || previous_task != self.runtime.task_snapshot();
         let stream_update_ready = message_revision != self.last_visual_message_revision
             && self.last_visual_present.elapsed() >= MIN_AGENT_STREAM_PRESENTATION;
-        if structural_change || stream_update_ready {
+        if structural_change || stream_update_ready || elapsed_tick {
             self.visual_revision = self.visual_revision.wrapping_add(1);
             self.last_visual_message_revision = message_revision;
             self.last_visual_present = Instant::now();
         }
+        self.last_visual_elapsed_second = elapsed_second;
         if status != self.last_status {
             self.last_status = status;
             self.persist_history();
@@ -168,6 +180,25 @@ impl AgentPanel {
 
     pub(crate) fn has_live_output(&self) -> bool {
         self.runtime.status.needs_continuous_frame()
+    }
+
+    pub(crate) fn should_show_tool_call_warning(&self) -> bool {
+        if self.tool_call_warning_dismissed
+            || !matches!(
+                self.runtime.status,
+                AgentStatus::Thinking | AgentStatus::ExecutingTools
+            )
+        {
+            return false;
+        }
+        self.runtime.activity_snapshot().is_some_and(|activity| {
+            activity.completed_tools >= raf_core::config::AGENT_TOOL_CALL_WARNING_THRESHOLD as usize
+        })
+    }
+
+    pub(crate) fn dismiss_tool_call_warning(&mut self) {
+        self.tool_call_warning_dismissed = true;
+        self.visual_revision = self.visual_revision.wrapping_add(1);
     }
 
     pub(crate) fn readiness(&self, settings: &EngineSettings) -> AgentReadiness {
@@ -295,6 +326,7 @@ impl AgentPanel {
                 }
             }
             AgentAction::OpenSettings => self.open_settings_requested = true,
+            AgentAction::DismissToolCallWarning => self.dismiss_tool_call_warning(),
             AgentAction::Submit => self.queue_submission(),
             AgentAction::Stop => {
                 self.runtime.cancel();
@@ -392,6 +424,7 @@ impl AgentPanel {
         };
         self.runtime
             .start_run(&content, &self.tools, execution_mode);
+        self.tool_call_warning_dismissed = false;
         self.last_status = AgentStatus::Thinking;
         self.persist_history();
     }
@@ -438,6 +471,8 @@ impl AgentPanel {
             api_key: provider.api_key.clone(),
             streaming: settings.agent_streaming_enabled,
             max_tokens: settings.agent_max_response_tokens,
+            tool_call_limit_enabled: settings.agent_tool_call_limit_enabled,
+            max_tool_calls: settings.agent_max_tool_calls,
         };
         if self.runtime_key.as_ref() == Some(&key) {
             return;
@@ -453,6 +488,12 @@ impl AgentPanel {
             streaming: key.streaming,
         });
         self.runtime.messages = messages;
+        self.runtime.set_run_limits(
+            128,
+            key.tool_call_limit_enabled
+                .then_some(key.max_tool_calls as usize),
+            16 * 1024,
+        );
         self.runtime.set_system_prompt(self.system_prompt.clone());
         self.runtime_key = Some(key);
         self.visual_revision = self.visual_revision.wrapping_add(1);
@@ -460,6 +501,7 @@ impl AgentPanel {
 
     fn start_new_chat(&mut self) {
         self.runtime.clear();
+        self.tool_call_warning_dismissed = false;
         let default_title = t("app.agent_new_chat_default", self.language);
         self.history.start_session(&default_title);
         self.runtime.set_system_prompt(self.system_prompt.clone());
@@ -485,6 +527,7 @@ impl AgentPanel {
             .map(|session| session.messages.clone())
             .unwrap_or_default();
         self.runtime.cancel();
+        self.tool_call_warning_dismissed = false;
         self.runtime.messages = messages;
         self.runtime.set_system_prompt(self.system_prompt.clone());
         self.input_text.clear();
@@ -600,6 +643,7 @@ pub(crate) enum AgentAction {
     SetNewModelId(String),
     AddModel,
     OpenSettings,
+    DismissToolCallWarning,
     Submit,
     Stop,
     Approve,

@@ -1,10 +1,7 @@
 //! Pure helper functions for the native workbench.
 //!
-//! Keeping fingerprints, validation and small parsing policies here prevents
+//! Keeping validation and small parsing policies here prevents
 //! the lifecycle coordinator from becoming a second domain monolith.
-
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 use crate::panels::inspector_surface::{InspectorSection, InspectorViewState};
 use crate::panels::viewport_toolbar_surface::{
@@ -13,7 +10,6 @@ use crate::panels::viewport_toolbar_surface::{
 use raf_core::project::BuildingStyle;
 use raf_core::scene::{SceneGraph, SceneNodeId};
 use raf_core::session::ProjectSessionRegistry;
-use raf_nodes::{NodeGraph, NodeId};
 
 pub(crate) fn unique_session_name(registry: &ProjectSessionRegistry, base: &str) -> String {
     let base = base.trim();
@@ -128,36 +124,4 @@ pub(crate) fn set_inspector_section(
         InspectorSection::Metadata => view.metadata = value,
         InspectorSection::Debug => view.debug = value,
     }
-}
-
-pub(crate) fn hierarchy_fingerprint(scene: &SceneGraph) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    scene.roots().hash(&mut hasher);
-    for (id, node) in scene.iter() {
-        id.0.hash(&mut hasher);
-        node.uuid.hash(&mut hasher);
-        node.name.hash(&mut hasher);
-        node.parent.map(|parent| parent.0).hash(&mut hasher);
-        node.children.hash(&mut hasher);
-        node.visible.hash(&mut hasher);
-        node.locked.hash(&mut hasher);
-        node.is_folder.hash(&mut hasher);
-    }
-    hasher.finish()
-}
-
-pub(crate) fn node_graph_fingerprint(graph: &NodeGraph, selected: Option<NodeId>) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    graph.name.hash(&mut hasher);
-    graph.nodes.len().hash(&mut hasher);
-    graph.connections.len().hash(&mut hasher);
-    for node in &graph.nodes {
-        node.id.hash(&mut hasher);
-        node.name.hash(&mut hasher);
-        node.position[0].to_bits().hash(&mut hasher);
-        node.position[1].to_bits().hash(&mut hasher);
-    }
-    selected.hash(&mut hasher);
-    hasher.finish()
 }

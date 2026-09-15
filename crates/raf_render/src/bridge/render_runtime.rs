@@ -211,6 +211,10 @@ impl RenderRuntime {
         self.scheduler.set_frame_limit(fps_limit);
     }
 
+    pub fn set_present_refresh_hz(&mut self, refresh_hz: Option<u16>) {
+        self.scheduler.set_present_refresh_hz(refresh_hz);
+    }
+
     pub fn request_frame(&mut self, reason: FrameInvalidation) {
         self.scheduler.request(reason);
     }
@@ -229,9 +233,15 @@ impl RenderRuntime {
         presented_at_seconds: f64,
         frame_cpu_ms: f32,
         frame_gpu_ms: f32,
+        total_cpu_ms: f32,
     ) {
-        self.scheduler
-            .finish_frame(permit, presented_at_seconds, frame_cpu_ms, frame_gpu_ms);
+        self.scheduler.finish_frame(
+            permit,
+            presented_at_seconds,
+            frame_cpu_ms,
+            frame_gpu_ms,
+            total_cpu_ms,
+        );
     }
 
     pub fn render_scene_frame(&mut self, frame: &SceneRenderFrame) -> SceneFrameOutput {

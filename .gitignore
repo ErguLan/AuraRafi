@@ -1,6 +1,7 @@
 # Build output
 /target/
 /target_gnu/
+/target_*/
 
 # IDE
 .vscode/

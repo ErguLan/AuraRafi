@@ -5,13 +5,14 @@
 //! an off-screen editor surface without coupling it to a window framework.
 
 use std::borrow::Cow;
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
 
 use bytemuck::{Pod, Zeroable};
 
 use crate::api_graphic_basic::canvas_presenter::CanvasTargetRect;
+use crate::api_graphic_basic::capabilities::GraphicsMemoryBudget;
 
 use super::{
     UiRect, UiSurfaceDrawList, UiSurfaceImageStore, UiSurfacePaintCommand, UiTextAtlas,
@@ -26,6 +27,10 @@ pub struct UiSurfaceGpuMetrics {
     pub image_vertices: u32,
     pub atlas_uploads: u32,
     pub image_uploads: u32,
+    pub image_upload_bytes: u64,
+    pub image_evictions: u32,
+    pub image_resident_bytes: u64,
+    pub image_budget_exceeded: bool,
     pub geometry_cache_hit: bool,
     pub buffer_upload_bytes: u64,
     pub paint_runs: u32,
@@ -70,11 +75,20 @@ struct VertexBatch<T> {
 }
 
 struct UiSurfaceGpuGeometryCache {
-    fingerprint: u64,
+    key: UiSurfaceGpuGeometryKey,
     solid_batch: VertexBatch<SolidVertex>,
     stroke_batch: VertexBatch<SolidVertex>,
     text_batch: VertexBatch<TextVertex>,
     image_batch: VertexBatch<TextVertex>,
+    paint_runs: Vec<UiSurfacePaintRun>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct UiSurfaceGpuGeometryKey {
+    draw_list_identity: usize,
+    draw_list_revision: u64,
+    logical_size: [u32; 2],
+    target_size: [u32; 2],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +110,8 @@ struct UiImageGpuTexture {
     _texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     revision: u64,
+    bytes: u64,
+    last_used_frame: u64,
 }
 
 impl TextVertex {
@@ -110,7 +126,7 @@ impl TextVertex {
     }
 }
 
-pub struct UiSurfaceGpuRenderer {
+pub(crate) struct UiSurfaceGpuSharedResources {
     solid_pipeline: wgpu::RenderPipeline,
     text_pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
@@ -118,6 +134,10 @@ pub struct UiSurfaceGpuRenderer {
     sampler: wgpu::Sampler,
     image_sampler: wgpu::Sampler,
     icon_sampler: wgpu::Sampler,
+}
+
+pub struct UiSurfaceGpuRenderer {
+    shared: Arc<UiSurfaceGpuSharedResources>,
     atlas_texture: Option<wgpu::Texture>,
     atlas_bind_group: Option<wgpu::BindGroup>,
     atlas_size: [u16; 2],
@@ -130,11 +150,15 @@ pub struct UiSurfaceGpuRenderer {
     image_buffer: Option<wgpu::Buffer>,
     image_capacity: u64,
     image_textures: HashMap<String, UiImageGpuTexture>,
+    image_resident_bytes: u64,
+    image_budget_bytes: u64,
+    image_entry_budget: usize,
+    image_frame_index: u64,
     geometry_cache: Option<UiSurfaceGpuGeometryCache>,
 }
 
-impl UiSurfaceGpuRenderer {
-    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+impl UiSurfaceGpuSharedResources {
+    pub(crate) fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ApiGraphicBasic.UiSurfaceShader"),
             source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(UI_SURFACE_WGSL)),
@@ -237,6 +261,24 @@ impl UiSurfaceGpuRenderer {
             sampler,
             image_sampler,
             icon_sampler,
+        }
+    }
+}
+
+impl UiSurfaceGpuRenderer {
+    pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
+        Self::with_shared_and_budget(
+            Arc::new(UiSurfaceGpuSharedResources::new(device, color_format)),
+            GraphicsMemoryBudget::default(),
+        )
+    }
+
+    pub(crate) fn with_shared_and_budget(
+        shared: Arc<UiSurfaceGpuSharedResources>,
+        memory_budget: GraphicsMemoryBudget,
+    ) -> Self {
+        Self {
+            shared,
             atlas_texture: None,
             atlas_bind_group: None,
             atlas_size: [0, 0],
@@ -249,6 +291,13 @@ impl UiSurfaceGpuRenderer {
             image_buffer: None,
             image_capacity: 0,
             image_textures: HashMap::new(),
+            image_resident_bytes: 0,
+            image_budget_bytes: memory_budget
+                .gpu_bytes
+                .saturating_div(16)
+                .max(4 * 1024 * 1024),
+            image_entry_budget: memory_budget.texture_cache_entries.max(1) as usize,
+            image_frame_index: 0,
             geometry_cache: None,
         }
     }
@@ -292,16 +341,44 @@ impl UiSurfaceGpuRenderer {
         images: &UiSurfaceImageStore,
         clear_color: [u8; 4],
     ) -> UiSurfaceGpuMetrics {
+        self.render_at_scale_with_revision(
+            device,
+            queue,
+            target,
+            target_size,
+            logical_size,
+            0,
+            draw_list,
+            atlas,
+            images,
+            clear_color,
+        )
+    }
+
+    pub(crate) fn render_at_scale_with_revision(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        target: &wgpu::TextureView,
+        target_size: [u32; 2],
+        logical_size: [u32; 2],
+        draw_list_revision: u64,
+        draw_list: &UiSurfaceDrawList,
+        atlas: &mut UiTextAtlas,
+        images: &UiSurfaceImageStore,
+        clear_color: [u8; 4],
+    ) -> UiSurfaceGpuMetrics {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ApiGraphicBasic.UiSurfaceEncoder"),
         });
-        let metrics = self.encode_at_scale(
+        let metrics = self.encode_at_scale_with_revision(
             device,
             queue,
             &mut encoder,
             target,
             target_size,
             logical_size,
+            draw_list_revision,
             draw_list,
             atlas,
             images,
@@ -311,7 +388,7 @@ impl UiSurfaceGpuRenderer {
         metrics
     }
 
-    pub(crate) fn encode_at_scale(
+    pub(crate) fn encode_at_scale_with_revision(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -319,12 +396,13 @@ impl UiSurfaceGpuRenderer {
         target: &wgpu::TextureView,
         target_size: [u32; 2],
         logical_size: [u32; 2],
+        draw_list_revision: u64,
         draw_list: &UiSurfaceDrawList,
         atlas: &mut UiTextAtlas,
         images: &UiSurfaceImageStore,
         load: wgpu::LoadOp<wgpu::Color>,
     ) -> UiSurfaceGpuMetrics {
-        self.encode_in_rect(
+        self.encode_in_rect_with_revision(
             device,
             queue,
             encoder,
@@ -332,6 +410,7 @@ impl UiSurfaceGpuRenderer {
             target_size,
             CanvasTargetRect::full(target_size),
             logical_size,
+            draw_list_revision,
             draw_list,
             atlas,
             images,
@@ -339,7 +418,7 @@ impl UiSurfaceGpuRenderer {
         )
     }
 
-    pub(crate) fn encode_in_rect(
+    pub(crate) fn encode_in_rect_with_revision(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -348,6 +427,7 @@ impl UiSurfaceGpuRenderer {
         target_size: [u32; 2],
         target_rect: CanvasTargetRect,
         logical_size: [u32; 2],
+        draw_list_revision: u64,
         draw_list: &UiSurfaceDrawList,
         atlas: &mut UiTextAtlas,
         images: &UiSurfaceImageStore,
@@ -361,6 +441,7 @@ impl UiSurfaceGpuRenderer {
         let height = target_rect.height;
         let logical_width = logical_size[0].max(1);
         let logical_height = logical_size[1].max(1);
+        self.image_frame_index = self.image_frame_index.wrapping_add(1).max(1);
         let mut metrics = UiSurfaceGpuMetrics::default();
         (
             metrics.translucent_solid_quads,
@@ -374,37 +455,39 @@ impl UiSurfaceGpuRenderer {
         let mut uploaded_image_keys = HashSet::new();
         for quad in &draw_list.images {
             if uploaded_image_keys.insert(quad.source_key.as_str()) {
-                metrics.image_uploads +=
-                    u32::from(self.sync_image(device, queue, images, &quad.source_key));
+                metrics.image_uploads += u32::from(self.sync_image(
+                    device,
+                    queue,
+                    images,
+                    &quad.source_key,
+                    &mut metrics,
+                ));
             }
         }
-        // Keep GPU image memory proportional to the current surface. Images are
-        // content-addressed by source key, so an image that leaves the draw list
-        // is safe to release; it will be uploaded again only if it becomes
-        // visible later. This prevents editor previews and asset browsers from
-        // accumulating every thumbnail ever visited.
-        self.image_textures
-            .retain(|key, _| uploaded_image_keys.contains(key.as_str()));
+        metrics.image_resident_bytes = self.image_resident_bytes;
+        metrics.image_budget_exceeded = self.image_resident_bytes > self.image_budget_bytes;
 
-        let geometry_fingerprint = retained_geometry_fingerprint(
-            draw_list,
-            images,
-            logical_width,
-            logical_height,
-            width,
-            height,
-        );
+        let geometry_key = UiSurfaceGpuGeometryKey {
+            draw_list_identity: if draw_list_revision == 0 {
+                std::ptr::from_ref(draw_list) as usize
+            } else {
+                0
+            },
+            draw_list_revision,
+            logical_size: [logical_width, logical_height],
+            target_size: [width, height],
+        };
         let geometry_rebuilt = self
             .geometry_cache
             .as_ref()
-            .map_or(true, |cached| cached.fingerprint != geometry_fingerprint);
+            .map_or(true, |cached| cached.key != geometry_key);
         metrics.geometry_cache_hit = !geometry_rebuilt;
         if geometry_rebuilt {
             // UiStyle colors and registered PNGs are stored as sRGB values.
             // The compositor operates in linear light even when its target is
             // Unorm because the native compositor presents it into an sRGB target.
-            let geometry = UiSurfaceGpuGeometryCache {
-                fingerprint: geometry_fingerprint,
+            let mut geometry = UiSurfaceGpuGeometryCache {
+                key: geometry_key,
                 solid_batch: solid_vertices(
                     draw_list,
                     logical_width,
@@ -438,7 +521,14 @@ impl UiSurfaceGpuRenderer {
                     images,
                     true,
                 ),
+                paint_runs: Vec::new(),
             };
+            geometry.paint_runs = build_paint_runs(
+                draw_list,
+                &geometry,
+                [width, height],
+                [logical_width, logical_height],
+            );
             metrics.solid_vertices = geometry.solid_batch.vertices.len() as u32;
             metrics.stroke_vertices = geometry.stroke_batch.vertices.len() as u32;
             metrics.text_vertices = geometry.text_batch.vertices.len() as u32;
@@ -486,12 +576,7 @@ impl UiSurfaceGpuRenderer {
             .geometry_cache
             .as_ref()
             .expect("GPU UI geometry cache is initialized before rendering");
-        let paint_runs = build_paint_runs(
-            draw_list,
-            geometry,
-            [width, height],
-            [logical_width, logical_height],
-        );
+        let paint_runs = &geometry.paint_runs;
         metrics.paint_runs = paint_runs.len() as u32;
         metrics.draw_calls = metrics.paint_runs;
 
@@ -536,14 +621,14 @@ impl UiSurfaceGpuRenderer {
                 .filter(|_| !geometry.image_batch.vertices.is_empty());
             let mut active_pipeline: Option<&UiSurfacePaintKind> = None;
             let mut active_scissor = None;
-            for run in &paint_runs {
+            for run in paint_runs {
                 match &run.kind {
                     UiSurfacePaintKind::Solid => {
                         let Some(buffer) = solid_buffer else {
                             continue;
                         };
                         if active_pipeline != Some(&run.kind) {
-                            pass.set_pipeline(&self.solid_pipeline);
+                            pass.set_pipeline(&self.shared.solid_pipeline);
                             pass.set_vertex_buffer(0, buffer.slice(..));
                             active_pipeline = Some(&run.kind);
                         }
@@ -553,7 +638,7 @@ impl UiSurfaceGpuRenderer {
                             continue;
                         };
                         if active_pipeline != Some(&run.kind) {
-                            pass.set_pipeline(&self.solid_pipeline);
+                            pass.set_pipeline(&self.shared.solid_pipeline);
                             pass.set_vertex_buffer(0, buffer.slice(..));
                             active_pipeline = Some(&run.kind);
                         }
@@ -565,7 +650,7 @@ impl UiSurfaceGpuRenderer {
                             continue;
                         };
                         if active_pipeline != Some(&run.kind) {
-                            pass.set_pipeline(&self.text_pipeline);
+                            pass.set_pipeline(&self.shared.text_pipeline);
                             pass.set_vertex_buffer(0, buffer.slice(..));
                             pass.set_bind_group(0, bind_group, &[]);
                             active_pipeline = Some(&run.kind);
@@ -578,7 +663,7 @@ impl UiSurfaceGpuRenderer {
                             continue;
                         };
                         if active_pipeline != Some(&run.kind) {
-                            pass.set_pipeline(&self.image_pipeline);
+                            pass.set_pipeline(&self.shared.image_pipeline);
                             pass.set_vertex_buffer(0, buffer.slice(..));
                             pass.set_bind_group(0, &texture.bind_group, &[]);
                             active_pipeline = Some(&run.kind);
@@ -626,7 +711,7 @@ impl UiSurfaceGpuRenderer {
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
             self.atlas_bind_group = Some(device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("ApiGraphicBasic.UiSurfaceAtlasBindGroup"),
-                layout: &self.atlas_layout,
+                layout: &self.shared.atlas_layout,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
@@ -634,7 +719,7 @@ impl UiSurfaceGpuRenderer {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.sampler),
+                        resource: wgpu::BindingResource::Sampler(&self.shared.sampler),
                     },
                 ],
             }));
@@ -703,18 +788,28 @@ impl UiSurfaceGpuRenderer {
         queue: &wgpu::Queue,
         images: &UiSurfaceImageStore,
         key: &str,
+        metrics: &mut UiSurfaceGpuMetrics,
     ) -> bool {
         let Some(image) = images.get(key) else {
-            self.image_textures.remove(key);
+            if let Some(previous) = self.image_textures.remove(key) {
+                self.image_resident_bytes =
+                    self.image_resident_bytes.saturating_sub(previous.bytes);
+            }
             return false;
         };
-        if self
-            .image_textures
-            .get(key)
-            .is_some_and(|cached| cached.revision == image.revision)
-        {
-            return false;
+        if let Some(cached) = self.image_textures.get_mut(key) {
+            cached.last_used_frame = self.image_frame_index;
+            if cached.revision == image.revision {
+                return false;
+            }
+            let previous = self
+                .image_textures
+                .remove(key)
+                .expect("image cache entry existed before replacement");
+            self.image_resident_bytes = self.image_resident_bytes.saturating_sub(previous.bytes);
         }
+        let bytes = image_mip_chain_bytes(image.size);
+        self.reserve_image_budget(bytes, key, metrics);
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("ApiGraphicBasic.UiSurfaceImage"),
             size: wgpu::Extent3d {
@@ -762,13 +857,13 @@ impl UiSurfaceGpuRenderer {
         }
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = if key.starts_with("builtin://icon/") {
-            &self.icon_sampler
+            &self.shared.icon_sampler
         } else {
-            &self.image_sampler
+            &self.shared.image_sampler
         };
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("ApiGraphicBasic.UiSurfaceImageBindGroup"),
-            layout: &self.atlas_layout,
+            layout: &self.shared.atlas_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -786,9 +881,45 @@ impl UiSurfaceGpuRenderer {
                 _texture: texture,
                 bind_group,
                 revision: image.revision,
+                bytes,
+                last_used_frame: self.image_frame_index,
             },
         );
+        self.image_resident_bytes = self.image_resident_bytes.saturating_add(bytes);
+        metrics.image_upload_bytes = metrics.image_upload_bytes.saturating_add(bytes);
         true
+    }
+
+    fn reserve_image_budget(
+        &mut self,
+        incoming_bytes: u64,
+        protected_key: &str,
+        metrics: &mut UiSurfaceGpuMetrics,
+    ) {
+        while self.image_textures.len() >= self.image_entry_budget
+            || self.image_resident_bytes.saturating_add(incoming_bytes) > self.image_budget_bytes
+        {
+            let candidate = self
+                .image_textures
+                .iter()
+                .filter(|(key, texture)| {
+                    key.as_str() != protected_key
+                        && texture.last_used_frame < self.image_frame_index
+                })
+                .min_by_key(|(_, texture)| texture.last_used_frame)
+                .map(|(key, _)| key.clone());
+            let Some(candidate) = candidate else {
+                // Keep all images used by the current draw list resident. If
+                // that set is larger than the budget, allow the frame to
+                // exceed it instead of evicting a texture and immediately
+                // uploading it again later in the same frame.
+                break;
+            };
+            if let Some(evicted) = self.image_textures.remove(&candidate) {
+                self.image_resident_bytes = self.image_resident_bytes.saturating_sub(evicted.bytes);
+                metrics.image_evictions = metrics.image_evictions.saturating_add(1);
+            }
+        }
     }
 
     fn ensure_solid_buffer(&mut self, device: &wgpu::Device, vertex_count: usize) {
@@ -965,116 +1096,6 @@ fn build_paint_runs(
     runs
 }
 
-fn retained_geometry_fingerprint(
-    draw_list: &UiSurfaceDrawList,
-    images: &UiSurfaceImageStore,
-    logical_width: u32,
-    logical_height: u32,
-    target_width: u32,
-    target_height: u32,
-) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    logical_width.hash(&mut hasher);
-    logical_height.hash(&mut hasher);
-    target_width.hash(&mut hasher);
-    target_height.hash(&mut hasher);
-    draw_list.atlas_size.hash(&mut hasher);
-    for quad in &draw_list.solids {
-        hash_rect(quad.rect, &mut hasher);
-        hash_rect(quad.clip_rect, &mut hasher);
-        quad.color.hash(&mut hasher);
-        quad.z_index.hash(&mut hasher);
-        quad.radius.to_bits().hash(&mut hasher);
-    }
-    for stroke in &draw_list.strokes {
-        stroke.start[0].to_bits().hash(&mut hasher);
-        stroke.start[1].to_bits().hash(&mut hasher);
-        stroke.end[0].to_bits().hash(&mut hasher);
-        stroke.end[1].to_bits().hash(&mut hasher);
-        hash_rect(stroke.clip_rect, &mut hasher);
-        stroke.color.hash(&mut hasher);
-        stroke.width.to_bits().hash(&mut hasher);
-        stroke.z_index.hash(&mut hasher);
-    }
-    for quad in &draw_list.text {
-        hash_rect(quad.rect, &mut hasher);
-        hash_rect(quad.clip_rect, &mut hasher);
-        hash_rect(quad.atlas_rect, &mut hasher);
-        quad.color.hash(&mut hasher);
-        quad.z_index.hash(&mut hasher);
-    }
-    for quad in &draw_list.images {
-        hash_rect(quad.rect, &mut hasher);
-        hash_rect(quad.clip_rect, &mut hasher);
-        quad.source_key.hash(&mut hasher);
-        match quad.fit {
-            super::UiImageFit::Contain => 0_u8,
-            super::UiImageFit::Cover => 1_u8,
-            super::UiImageFit::Stretch => 2_u8,
-        }
-        .hash(&mut hasher);
-        quad.tint.hash(&mut hasher);
-        quad.z_index.hash(&mut hasher);
-        images
-            .get(&quad.source_key)
-            .map(|image| image.size)
-            .unwrap_or([0, 0])
-            .hash(&mut hasher);
-    }
-    for command in draw_list.paint_commands().iter().copied() {
-        match command {
-            UiSurfacePaintCommand::Solid {
-                index,
-                z_index,
-                sequence,
-            } => {
-                0_u8.hash(&mut hasher);
-                index.hash(&mut hasher);
-                z_index.hash(&mut hasher);
-                sequence.hash(&mut hasher);
-            }
-            UiSurfacePaintCommand::Stroke {
-                index,
-                z_index,
-                sequence,
-            } => {
-                3_u8.hash(&mut hasher);
-                index.hash(&mut hasher);
-                z_index.hash(&mut hasher);
-                sequence.hash(&mut hasher);
-            }
-            UiSurfacePaintCommand::Text {
-                index,
-                z_index,
-                sequence,
-            } => {
-                1_u8.hash(&mut hasher);
-                index.hash(&mut hasher);
-                z_index.hash(&mut hasher);
-                sequence.hash(&mut hasher);
-            }
-            UiSurfacePaintCommand::Image {
-                index,
-                z_index,
-                sequence,
-            } => {
-                2_u8.hash(&mut hasher);
-                index.hash(&mut hasher);
-                z_index.hash(&mut hasher);
-                sequence.hash(&mut hasher);
-            }
-        }
-    }
-    hasher.finish()
-}
-
-fn hash_rect(rect: super::UiRect, hasher: &mut DefaultHasher) {
-    rect.x.to_bits().hash(hasher);
-    rect.y.to_bits().hash(hasher);
-    rect.width.to_bits().hash(hasher);
-    rect.height.to_bits().hash(hasher);
-}
-
 fn image_mip_level_count(size: [u32; 2]) -> u32 {
     let mut largest = size[0].max(size[1]).max(1);
     let mut levels = 1;
@@ -1083,6 +1104,25 @@ fn image_mip_level_count(size: [u32; 2]) -> u32 {
         levels += 1;
     }
     levels
+}
+
+fn image_mip_chain_bytes(size: [u32; 2]) -> u64 {
+    let mut width = size[0].max(1);
+    let mut height = size[1].max(1);
+    let mut bytes = 0_u64;
+    loop {
+        bytes = bytes.saturating_add(
+            u64::from(width)
+                .saturating_mul(u64::from(height))
+                .saturating_mul(4),
+        );
+        if width == 1 && height == 1 {
+            break;
+        }
+        width = (width / 2).max(1);
+        height = (height / 2).max(1);
+    }
+    bytes
 }
 
 fn padded_rgba_rows(pixels: &[u8], size: [u32; 2]) -> (Vec<u8>, u32) {
@@ -1765,7 +1805,12 @@ mod tests {
             ..UiSurfaceDrawList::default()
         };
         let geometry = UiSurfaceGpuGeometryCache {
-            fingerprint: 1,
+            key: UiSurfaceGpuGeometryKey {
+                draw_list_identity: std::ptr::from_ref(&list) as usize,
+                draw_list_revision: 0,
+                logical_size: [160, 80],
+                target_size: [160, 80],
+            },
             solid_batch: solid_vertices(&list, 160, 80, 160, 80, true),
             stroke_batch: stroke_vertices(&list, 160, 80, 160, 80, true),
             text_batch: text_vertices(&list, 160, 80, 160, 80, true),
@@ -1778,6 +1823,7 @@ mod tests {
                 &UiSurfaceImageStore::default(),
                 true,
             ),
+            paint_runs: Vec::new(),
         };
 
         let runs = build_paint_runs(&list, &geometry, [160, 80], [160, 80]);
@@ -1819,6 +1865,13 @@ mod tests {
 
         let mip = downsample_rgba_premultiplied(&[255, 0, 0, 255, 0, 0, 0, 0], [2, 1], [1, 1]);
         assert_eq!(mip, vec![255, 0, 0, 128]);
+    }
+
+    #[test]
+    fn image_budget_counts_the_complete_mip_chain() {
+        assert_eq!(image_mip_chain_bytes([1, 1]), 4);
+        assert_eq!(image_mip_chain_bytes([2, 2]), 20);
+        assert_eq!(image_mip_chain_bytes([4, 2]), 44);
     }
 }
 

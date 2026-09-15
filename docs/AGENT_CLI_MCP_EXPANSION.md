@@ -90,11 +90,16 @@ the native Agent, attached CLI, and MCP adapter:
   hierarchy and exact entity inspection with pagination;
 - `scene.spatial_map`: world-space extents, renderable bounds, and conservative
   overlaps for a bounded scope;
+- `scene.check_overlaps`: focused overlap evidence with deterministic
+  `scene.snap` repair suggestions;
+- `scene.diff`: retained created/updated/deleted references since a revision;
 - `scene.design_audit`: feature and envelope checks for real-world profiles such
   as `supermarket`, `parking`, `building`, and `outdoor`;
 - `assets.catalog`/`assets.inspect` and `scripts.catalog`: imported resources,
   usage, references, and attached script relationships without crawling Agent
   history or internal metadata;
+- `assets.recommend`: transparent intent-based ranking of imported assets before
+  the Agent falls back to procedural primitives;
 - `project.health` and `scene.verify`: focused identity, hierarchy, target,
   transform, expected-name, count, and optional collision verification.
 
@@ -188,8 +193,10 @@ not every engine subsystem.
 ### Modify
 
 - create, select, rename, duplicate, delete, and group entities;
+- reparent, snap to a grid/floor/surface, and duplicate repeated layouts with
+  `count`, `axis`, `spacing`, `offset`, and `parent`;
 - batch transforms, colors, material references, and parent relationships;
-- create reusable prefabs from primitives or existing entity groups;
+- instantiate reusable templates from primitives or existing entity groups;
 - import or generate project-scoped assets through existing asset workers;
 - create, attach, edit, and validate Rhai or C++ scripts through the scripting
   host boundary;
@@ -225,6 +232,8 @@ Required behavior:
   when rollback is actually available. In the current attached slice,
   `transaction.undo` consumes that token only at the exact issuing revision;
 - structured diffs list created, modified, deleted, and relinked objects;
+- malformed vector shapes and missing targets return actionable error codes,
+  paths, and repair suggestions instead of opaque parser failures;
 - verification returns checks, warnings, failures, and artifact references;
 - budgets bound tool calls, elapsed time, generated entities, filesystem reads,
   and result size for potato hardware.
@@ -241,7 +250,9 @@ Long tasks must be cooperative and cancellable. They should yield progress
 events and avoid holding the UI thread. The current attached Agent run is
 observable through `task.list`, `task.get`, `task.events`, and `task.cancel`,
 but these records are bounded in-memory state: durable MCP tasks, persistence,
-and resume support remain part of the full v0.12 harness.
+and resume support remain part of the full v0.12 harness. The native Agent
+surface also projects the current tool, completed/total tools, turn, and elapsed
+time so provider waits and long mutation batches never look like a dead panel.
 
 The attached Game viewport also exposes `viewport.capture`. It reads the last
 frame already rendered by ApiGraphicBasic and stores a bounded PNG artifact in

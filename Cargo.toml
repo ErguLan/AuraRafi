@@ -22,7 +22,7 @@ members = [
 default-members = ["editor"]
 
 [workspace.package]
-version = "0.9.5"
+version = "0.9.8"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/AuraRafi/AuraRafi"
@@ -66,7 +66,28 @@ tracing-subscriber = "0.3"
 notify = "7"
 
 # Asset loading
-image = "0.25"
+# Keep the formats already accepted by the editor, but do not pull the AVIF
+# encoder into every native binary. `image` enables AVIF/ravif by default;
+# that brings the SIMD-heavy `rav1e`/`av-scenechange` stack and currently
+# breaks the MinGW final link with unresolved symbols. The editor only needs
+# the decoder/PNG export path here, so keep the default formats except AVIF.
+image = { version = "0.25", default-features = false, features = [
+    "rayon",
+    "bmp",
+    "dds",
+    "exr",
+    "ff",
+    "gif",
+    "hdr",
+    "ico",
+    "jpeg",
+    "png",
+    "pnm",
+    "qoi",
+    "tga",
+    "tiff",
+    "webp",
+] }
 gltf = "1"
 
 # Utilities

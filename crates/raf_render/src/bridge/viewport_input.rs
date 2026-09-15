@@ -229,9 +229,13 @@ impl ViewportInputFrame {
     }
 
     pub fn requires_continuous_redraw(self) -> bool {
-        self.has_camera_motion()
-            || self.button_down(PointerButton::Primary)
-            || self.pointer_delta != [0.0; 2]
+        // Cursor movement by itself is hover sampling, not camera motion. The
+        // native host already wakes RafUI for CursorMoved; escalating every
+        // passive hover event into a continuous viewport redraw defeats the
+        // retained canvas cache and can turn a long scene into one render per
+        // mouse event. Held buttons, wheel input, and keyboard navigation are
+        // the actual interaction paths that need continuous frames.
+        self.has_camera_motion() || self.button_down(PointerButton::Primary)
     }
 }
 
@@ -318,5 +322,36 @@ mod tests {
         frame.keys_down.clear();
         frame.keys_down.insert(InputKey::S);
         assert_eq!(frame.fly_axis()[2], -1.0);
+    }
+
+    #[test]
+    fn passive_pointer_motion_does_not_request_continuous_redraw() {
+        let frame = ViewportInputFrame {
+            pointer_enabled: true,
+            pointer_local: Some([120.0, 80.0]),
+            pointer_delta: [1.0, -1.0],
+            ..ViewportInputFrame::default()
+        };
+
+        assert!(!frame.has_camera_motion());
+        assert!(!frame.requires_continuous_redraw());
+    }
+
+    #[test]
+    fn held_viewport_gestures_still_request_continuous_redraw() {
+        let mut frame = ViewportInputFrame {
+            pointer_enabled: true,
+            pointer_local: Some([120.0, 80.0]),
+            pointer_delta: [1.0, -1.0],
+            ..ViewportInputFrame::default()
+        };
+
+        frame.buttons_down.insert(PointerButton::Secondary);
+        assert!(frame.has_camera_motion());
+        assert!(frame.requires_continuous_redraw());
+
+        frame.buttons_down.clear();
+        frame.buttons_down.insert(PointerButton::Primary);
+        assert!(frame.requires_continuous_redraw());
     }
 }

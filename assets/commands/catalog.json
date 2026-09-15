@@ -189,6 +189,31 @@
       "examples": ["/scene.design_audit root=Store required_features=[floor,enclosure,entrance,circulation]"]
     },
     {
+      "name": "scene.check_overlaps",
+      "aliases": ["scene.overlaps"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scene_check_overlaps.desc",
+      "parameters": [
+        {"name": "root", "kind": "string", "required": false, "description_key": "commands.param.root"},
+        {"name": "include_hidden", "kind": "bool", "required": false, "default": "false"},
+        {"name": "margin", "kind": "f32", "required": false, "default": "0.02"},
+        {"name": "max_pairs", "kind": "usize", "required": false, "default": "64"}
+      ],
+      "examples": ["/scene.check_overlaps root=Store max_pairs=32"]
+    },
+    {
+      "name": "scene.diff",
+      "aliases": [],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scene_diff.desc",
+      "parameters": [
+        {"name": "from_revision", "kind": "usize", "required": false, "description_key": "commands.param.from_revision"}
+      ],
+      "examples": ["/scene.diff from_revision=12"]
+    },
+    {
       "name": "selection.get",
       "aliases": ["selection"],
       "domain": "shared",
@@ -275,6 +300,19 @@
         {"name": "target", "kind": "path", "required": true, "description_key": "commands.param.target"}
       ],
       "examples": ["/assets.inspect target=assets/shelf.glb"]
+    },
+    {
+      "name": "assets.recommend",
+      "aliases": ["asset.recommend"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.assets_recommend.desc",
+      "parameters": [
+        {"name": "intent", "kind": "string", "required": true, "description_key": "commands.param.intent"},
+        {"name": "kind", "kind": "enum", "required": false, "description_key": "commands.param.kind"},
+        {"name": "limit", "kind": "usize", "required": false, "default": "8", "description_key": "commands.param.limit"}
+      ],
+      "examples": ["/assets.recommend intent=supermarket shelf kind=model"]
     },
     {
       "name": "scripts.catalog",
@@ -378,6 +416,23 @@
       "examples": ["/game.reparent target=Shelf parent=Store", "/game.reparent target=Shelf parent=root"]
     },
     {
+      "name": "game.snap",
+      "aliases": ["scene.snap"],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_snap.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true, "description_key": "commands.param.target"},
+        {"name": "mode", "kind": "enum", "required": true, "description_key": "commands.param.snap_mode"},
+        {"name": "snap_to", "kind": "string", "required": false, "description_key": "commands.param.snap_to"},
+        {"name": "axis", "kind": "enum", "required": false, "default": "y", "description_key": "commands.param.axis"},
+        {"name": "placement", "kind": "enum", "required": false, "default": "after", "description_key": "commands.param.placement"},
+        {"name": "gap", "kind": "f32", "required": false, "default": "0", "description_key": "commands.param.gap"},
+        {"name": "grid", "kind": "f32", "required": false, "default": "1", "description_key": "commands.param.grid"}
+      ],
+      "examples": ["/game.snap target=Product mode=surface snap_to=Shelf axis=y placement=after gap=0.02", "/game.snap target=Shelf mode=grid grid=0.25"]
+    },
+    {
       "name": "game.build",
       "aliases": ["scene.build"],
       "domain": "game",
@@ -460,9 +515,16 @@
       "category": "scene",
       "description_key": "commands.game_duplicate.desc",
       "parameters": [
-        {"name": "target", "kind": "string", "required": false}
+        {"name": "target", "kind": "string", "required": false},
+        {"name": "parent", "kind": "string", "required": false, "description_key": "commands.param.parent"},
+        {"name": "name", "kind": "string", "required": false, "description_key": "commands.param.name"},
+        {"name": "offset", "kind": "array", "required": false, "description_key": "commands.param.offset"},
+        {"name": "count", "kind": "usize", "required": false, "default": "1", "description_key": "commands.param.count"},
+        {"name": "axis", "kind": "enum", "required": false, "default": "x", "description_key": "commands.param.axis"},
+        {"name": "spacing", "kind": "f32", "required": false, "default": "1", "description_key": "commands.param.spacing"},
+        {"name": "preserve_world", "kind": "bool", "required": false, "default": "true", "description_key": "commands.param.preserve_world"}
       ],
-      "examples": ["/game.duplicate target=Player"]
+      "examples": ["/game.duplicate target=Player", "/game.duplicate target=Can parent=Products count=6 axis=x spacing=0.35 offset=[0,0,0]"]
     },
     {
       "name": "game.set_transform",
@@ -549,11 +611,17 @@
       "description_key": "commands.game_generate_prefab.desc",
       "parameters": [
         {"name": "kind", "kind": "string", "required": false, "default": "platform", "description_key": "commands.param.prefab_kind"},
-        {"name": "name", "kind": "string", "required": false}
+        {"name": "name", "kind": "string", "required": false},
+        {"name": "parent", "kind": "string", "required": false, "description_key": "commands.param.parent"},
+        {"name": "transform", "kind": "object", "required": false, "description_key": "commands.param.transform"},
+        {"name": "count", "kind": "usize", "required": false, "default": "1", "description_key": "commands.param.count"},
+        {"name": "axis", "kind": "enum", "required": false, "default": "x", "description_key": "commands.param.axis"},
+        {"name": "spacing", "kind": "f32", "required": false, "default": "2", "description_key": "commands.param.spacing"}
       ],
       "examples": [
         "/game.generate_prefab kind=tower name=WatchTower",
-        "/game.generate_prefab kind=boat name=Basic_Boat"
+        "/game.generate_prefab kind=boat name=Basic_Boat",
+        "/game.generate_prefab kind=platform name=Aisle parent=Store count=4 axis=z spacing=3"
       ]
     },
     {

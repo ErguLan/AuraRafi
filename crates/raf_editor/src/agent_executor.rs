@@ -118,11 +118,14 @@ fn order_contextual_tools(tools: &mut Vec<OpenAiTool>) {
         "scene_outline",
         "scene_query",
         "scene_spatial_map",
+        "scene_check_overlaps",
+        "scene_diff",
         "scene_design_audit",
         "scene_inspect",
         "selection_get",
         "viewport_capture",
         "assets_catalog",
+        "assets_recommend",
         "asset_inspect",
         "scripts_catalog",
         "project_health",
@@ -132,14 +135,15 @@ fn order_contextual_tools(tools: &mut Vec<OpenAiTool>) {
         "scene_reconcile",
         "scene_repair",
         "scene_batch",
+        "scene_reparent",
+        "scene_duplicate",
+        "scene_snap",
+        "scene_instantiate_template",
         "scene_create_group",
         "scene_create",
         "scene_update",
-        "scene_reparent",
-        "scene_arrange",
         "scene_delete",
-        "scene_duplicate",
-        "scene_instantiate_prefab",
+        "scene_arrange",
     ];
     tools.sort_by_key(|tool| {
         PRIORITY
@@ -263,7 +267,7 @@ impl AgentToolExecutor<'_> {
         // Provider quality degrades sharply when every command is advertised.
         // Keep the contextual pack bounded and deterministic.
         order_contextual_tools(&mut pack.tools);
-        const MAX_CONTEXTUAL_TOOLS: usize = 22;
+        const MAX_CONTEXTUAL_TOOLS: usize = 26;
         if pack.tools.len() > MAX_CONTEXTUAL_TOOLS {
             pack.tools.truncate(MAX_CONTEXTUAL_TOOLS);
             let visible = pack
@@ -504,6 +508,42 @@ impl ToolExecutor for AgentToolExecutor<'_> {
             return Ok(result);
         }
 
+        if name == "scene_diff" {
+            let from_revision = arguments
+                .get("from_revision")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| self.ledger.revision().saturating_sub(1));
+            return match self.ledger.diff_since(from_revision) {
+                Ok(data) => {
+                    let mut result = AgentToolResult::success(
+                        format!(
+                            "Scene changes from revision {from_revision} to {}.",
+                            self.ledger.revision()
+                        ),
+                        data,
+                    );
+                    result.revision = Some(self.ledger.revision());
+                    Ok(result)
+                }
+                Err(error) => Ok(AgentToolResult {
+                    ok: false,
+                    summary: error.clone(),
+                    data: serde_json::json!({
+                        "error": {"code": "revision_not_available", "message": error},
+                        "current_revision": self.ledger.revision()
+                    }),
+                    references: Vec::new(),
+                    changed: false,
+                    revision: Some(self.ledger.revision()),
+                    diff: None,
+                    verification: None,
+                    warnings: Vec::new(),
+                    details: Vec::new(),
+                    preview: false,
+                }),
+            };
+        }
+
         if let Some(mut result) = self.observation_context().execute(name, &arguments) {
             result.revision = Some(self.ledger.revision());
             return Ok(result);
@@ -548,7 +588,34 @@ impl ToolExecutor for AgentToolExecutor<'_> {
             .command_name
             .as_deref()
             .ok_or_else(|| format!("Agent tool '{name}' has no command route."))?;
-        let params = translate_arguments(name, command_name, arguments)?;
+        let params = match translate_arguments(name, command_name, arguments) {
+            Ok(params) => params,
+            Err(error) => {
+                return Ok(AgentToolResult {
+                    ok: false,
+                    summary: format!("Invalid arguments for {name}."),
+                    data: serde_json::json!({
+                        "error": {
+                            "code": "invalid_tool_arguments",
+                            "message": error,
+                            "suggestion": "Compare the failing path with the tool schema, remove extra array nesting, and retry only the failed operation."
+                        },
+                        "tool": name,
+                    }),
+                    references: Vec::new(),
+                    changed: false,
+                    revision: Some(self.ledger.revision()),
+                    diff: None,
+                    verification: Some(serde_json::json!({
+                        "status": "failed",
+                        "reason": "invalid_tool_arguments"
+                    })),
+                    warnings: Vec::new(),
+                    details: Vec::new(),
+                    preview: mode == ToolExecutionMode::Preview,
+                });
+            }
+        };
         self.execute_gateway(call_id, command_name, params, route.kind, mode)
     }
 
@@ -689,10 +756,13 @@ fn add_project_read_tools(
         );
         pack.push_native(
             "scene_query",
-            "Find scene entities by name, path, kind, source asset, or current selection without scanning files.",
+            "Find scene entities by name, path, kind, semantic role, exact tags, source asset, or current selection without scanning files.",
             paginated_schema(&[
                 ("query", string_schema("Name, path, or asset query.")),
                 ("kind", string_schema("Optional primitive or folder kind.")),
+                ("semantic_role", string_schema("Exact semantic role or parent role prefix.")),
+                ("tags", semantic_tags_schema()),
+                ("match_all_tags", boolean_schema("Require every tag; defaults to true.")),
                 ("selected", boolean_schema("Only search the current selection.")),
             ]),
             AgentToolKind::Read,
@@ -715,6 +785,34 @@ fn add_project_read_tools(
                     boolean_schema("Check conservative world-space AABB overlaps; defaults to true."),
                 ),
             ]),
+            AgentToolKind::Read,
+            None,
+        );
+        pack.push_native(
+            "scene_check_overlaps",
+            "Check a bounded scene scope for conservative world-space overlaps. Returns penetration depth and a suggested scene_snap repair for every pair.",
+            object_schema(
+                Map::from_iter([
+                    ("root".to_string(), string_schema("Optional root ID, UUID, name, or path.")),
+                    ("include_hidden".to_string(), boolean_schema("Include hidden renderable entities.")),
+                    ("margin".to_string(), number_schema("Extra separation after repair.", 0.0, 100.0)),
+                    ("max_pairs".to_string(), integer_schema("Maximum overlap pairs returned.", 1, 256)),
+                ]),
+                &[],
+            ),
+            AgentToolKind::Read,
+            None,
+        );
+        pack.push_native(
+            "scene_diff",
+            "Read retained semantic scene changes since an Agent revision, including created, updated and deleted UUIDs.",
+            object_schema(
+                Map::from_iter([(
+                    "from_revision".to_string(),
+                    integer_schema("Known revision to compare from.", 0, i32::MAX as i64),
+                )]),
+                &[],
+            ),
             AgentToolKind::Read,
             None,
         );
@@ -810,6 +908,22 @@ fn add_project_read_tools(
         AgentToolKind::Read,
         None,
     );
+    if project_type == Some(ProjectType::Game) && (intent.authoring || intent.assets) {
+        pack.push_native(
+            "assets_recommend",
+            "Rank imported assets for an authoring intent using transparent name, semantic-token, type, and usage evidence.",
+            object_schema(
+                Map::from_iter([
+                    ("intent".to_string(), string_schema("What is needed, such as supermarket shelf or checkout counter.")),
+                    ("kind".to_string(), enum_schema("Optional preferred asset kind.", &["image", "model", "audio", "script", "data", "file"])),
+                    ("limit".to_string(), integer_schema("Maximum recommendations.", 1, 24)),
+                ]),
+                &["intent"],
+            ),
+            AgentToolKind::Read,
+            None,
+        );
+    }
     if !intent.authoring || intent.prefab || intent.assets {
         pack.push_native(
             "asset_inspect",
@@ -938,7 +1052,7 @@ fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIntent) {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "name": {"type":"string","enum":["scene_create","scene_create_group","scene_update","scene_reparent","scene_delete","scene_duplicate","scene_arrange","scene_instantiate_prefab"]},
+                                "name": {"type":"string","enum":["scene_create","scene_create_group","scene_update","scene_reparent","scene_snap","scene_delete","scene_duplicate","scene_arrange","scene_instantiate_template"]},
                                 "params": batch_operation_params_schema()
                             },
                             "required": ["name", "params"],
@@ -954,7 +1068,7 @@ fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIntent) {
     );
     pack.push_native(
         "scene_batch",
-        "Apply an ordered, atomic batch of scene_create, scene_create_group, scene_update, scene_reparent, scene_delete, scene_duplicate, scene_arrange, or scene_instantiate_prefab operations. The live scene is committed only when every operation succeeds. Use explicit nested transform and color values; never flatten them into text.",
+        "Apply an ordered, atomic batch of scene_create, scene_create_group, scene_update, scene_reparent, scene_snap, scene_delete, scene_duplicate, scene_arrange, or scene_instantiate_template operations. The live scene is committed only when every operation succeeds. Use explicit nested transform and color values; never flatten them into text.",
         object_schema(
             Map::from_iter([(
                 "operations".to_string(),
@@ -967,8 +1081,8 @@ fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIntent) {
                         "properties": {
                             "name": {"type": "string", "enum": [
                                 "scene_create", "scene_create_group", "scene_update",
-                                "scene_reparent", "scene_delete", "scene_duplicate",
-                                "scene_arrange", "scene_instantiate_prefab"
+                                "scene_reparent", "scene_snap", "scene_delete", "scene_duplicate",
+                                "scene_arrange", "scene_instantiate_template"
                             ]},
                             "params": batch_operation_params_schema()
                         },
@@ -1099,6 +1213,24 @@ fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIntent) {
         AgentToolKind::Mutation,
         Some("game.reparent"),
     );
+    pack.push_native(
+        "scene_snap",
+        "Snap one entity to the local grid, world floor, or another entity's world bounds. Use snap_to plus axis and placement for an explicit surface relation.",
+        object_schema(
+            Map::from_iter([
+                ("target".to_string(), string_schema("Entity target.")),
+                ("mode".to_string(), enum_schema("Snap mode.", &["grid", "floor", "surface"])),
+                ("snap_to".to_string(), string_schema("Optional surface entity target.")),
+                ("axis".to_string(), enum_schema("Alignment axis.", &["x", "y", "z"])),
+                ("placement".to_string(), enum_schema("Place before, after, or centered on the surface.", &["before", "after", "center"])),
+                ("gap".to_string(), number_schema("Separation from the surface.", 0.0, 1000.0)),
+                ("grid".to_string(), number_schema("Grid interval for grid mode.", 0.001, 1000.0)),
+            ]),
+            &["target", "mode"],
+        ),
+        AgentToolKind::Mutation,
+        Some("game.snap"),
+    );
     for (tool, command, description) in [
         (
             "scene_delete",
@@ -1108,16 +1240,27 @@ fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIntent) {
         (
             "scene_duplicate",
             "game.duplicate",
-            "Duplicate one scene entity and its descendants.",
+            "Duplicate one scene entity and its descendants, optionally into a new parent or as a repeated offset array.",
         ),
     ] {
+        let properties = if tool == "scene_duplicate" {
+            Map::from_iter([
+                ("target".to_string(), string_schema("Entity target.")),
+                ("parent".to_string(), string_schema("Optional new parent or root.")),
+                ("name".to_string(), string_schema("Optional base name for copies.")),
+                ("offset".to_string(), vec3_schema("Base local offset from the source.")),
+                ("count".to_string(), integer_schema("Number of copies.", 1, 128)),
+                ("axis".to_string(), enum_schema("Array axis.", &["x", "y", "z"])),
+                ("spacing".to_string(), number_schema("Additional spacing between copies.", -10000.0, 10000.0)),
+                ("preserve_world".to_string(), boolean_schema("Preserve world transform when changing parent.")),
+            ])
+        } else {
+            Map::from_iter([("target".to_string(), string_schema("Entity target."))])
+        };
         pack.push_native(
             tool,
             description,
-            object_schema(
-                Map::from_iter([("target".to_string(), string_schema("Entity target."))]),
-                &["target"],
-            ),
+            object_schema(properties, &["target"]),
             AgentToolKind::Mutation,
             Some(command),
         );
@@ -1139,12 +1282,17 @@ fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIntent) {
     }
     if intent.prefab {
         pack.push_native(
-            "scene_instantiate_prefab",
-            "Instantiate one registered native prefab/manifest into the scene.",
+            "scene_instantiate_template",
+            "Instantiate a registered native template into an optional parent, with an explicit transform or repeated count, axis and spacing.",
             object_schema(
                 Map::from_iter([
                     ("kind".to_string(), string_schema("Registered prefab kind.")),
                     ("name".to_string(), string_schema("Optional root name.")),
+                    ("parent".to_string(), string_schema("Optional parent ID, UUID, name, path, or root.")),
+                    ("transform".to_string(), transform_schema()),
+                    ("count".to_string(), integer_schema("Number of instances.", 1, 64)),
+                    ("axis".to_string(), enum_schema("Array axis.", &["x", "y", "z"])),
+                    ("spacing".to_string(), number_schema("Spacing between instances.", -10000.0, 10000.0)),
                 ]),
                 &["kind"],
             ),
@@ -1284,7 +1432,10 @@ fn translate_batch(arguments: &mut Value) -> Result<(), String> {
             "scene_delete" | "game.delete" => "game.delete",
             "scene_duplicate" | "game.duplicate" => "game.duplicate",
             "scene_arrange" | "game.arrange_grid" => "game.arrange_grid",
-            "scene_instantiate_prefab" | "game.generate_prefab" => "game.generate_prefab",
+            "scene_snap" | "game.snap" => "game.snap",
+            "scene_instantiate_prefab" | "scene_instantiate_template" | "game.generate_prefab" => {
+                "game.generate_prefab"
+            }
             "scene_create_group" | "game.create_group" => "game.create_group",
             "scene_reparent" | "game.reparent" => "game.reparent",
             "scene_build" | "game.build" => {
@@ -1532,10 +1683,22 @@ fn verify_postconditions(
     scene: &SceneGraph,
 ) -> Vec<String> {
     match command_name {
-        "game.add" | "game.create_group" | "game.update" | "game.reparent" => data
+        "game.add" | "game.create_group" | "game.update" | "game.reparent" | "game.snap" => data
             .get("entity")
             .map(|entity| verify_entity_postcondition(params, entity, scene))
             .unwrap_or_else(|| vec!["The mutation result did not include an entity.".to_string()]),
+        "game.duplicate" | "game.generate_prefab" => {
+            let expected = params.get("count").and_then(Value::as_u64).unwrap_or(1);
+            let actual = data
+                .get("count")
+                .or_else(|| data.get("instances"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            (actual != expected)
+                .then(|| format!("Created {actual} instance(s), expected {expected}."))
+                .into_iter()
+                .collect()
+        }
         "game.batch" | "game.repair" => {
             let operations = params
                 .get("operations")
@@ -1712,6 +1875,9 @@ fn verify_batch_postconditions(
                 | "scene_update"
                 | "game.reparent"
                 | "scene_reparent"
+                | "game.snap"
+                | "scene_snap"
+                | "scene.snap"
         ) {
             continue;
         }
@@ -1770,10 +1936,13 @@ fn canonical_operation_name(name: &str) -> String {
         "scene_create_group" | "game.create_group" => "game.create_group".to_string(),
         "scene_update" | "game.update" => "game.update".to_string(),
         "scene_reparent" | "game.reparent" => "game.reparent".to_string(),
+        "scene_snap" | "scene.snap" | "game.snap" => "game.snap".to_string(),
         "scene_delete" | "game.delete" => "game.delete".to_string(),
         "scene_duplicate" | "game.duplicate" => "game.duplicate".to_string(),
         "scene_arrange" | "game.arrange_grid" => "game.arrange_grid".to_string(),
-        "scene_instantiate_prefab" | "game.generate_prefab" => "game.generate_prefab".to_string(),
+        "scene_instantiate_prefab" | "scene_instantiate_template" | "game.generate_prefab" => {
+            "game.generate_prefab".to_string()
+        }
         _ => name.to_string(),
     }
 }
@@ -2137,6 +2306,10 @@ fn expects_observable_scene_change(command_name: &str) -> bool {
             | "game.create_group"
             | "game.delete"
             | "game.duplicate"
+            | "game.update"
+            | "game.reparent"
+            | "game.snap"
+            | "game.arrange_grid"
             | "game.generate_prefab"
             | "game.build"
             | "game.reconcile"
@@ -2175,6 +2348,19 @@ fn classify_prompt(prompt: &str) -> PromptIntent {
             "organiza",
             "modifica",
             "cambia",
+            // Continuation prompts are authoring intent too. They commonly
+            // arrive after a previous Agent turn and omit an explicit
+            // "create" verb (for example: "continua y termina la tienda").
+            "continua",
+            "continúa",
+            "sigue",
+            "seguir",
+            "termina",
+            "terminar",
+            "completa",
+            "completar",
+            "finaliza",
+            "finalizar",
             "diseña",
             "disena",
             "diseña",
@@ -2196,6 +2382,9 @@ fn classify_prompt(prompt: &str) -> PromptIntent {
             "update",
             "change",
             "design",
+            "continue",
+            "finish",
+            "complete",
         ]),
         scripting: contains_any(&[
             "script",
@@ -2218,9 +2407,29 @@ fn classify_prompt(prompt: &str) -> PromptIntent {
             "capabilities",
         ]),
         layout: contains_any(&[
-            "arrange", "organiza", "organize", "grid", "layout", "distribu", "acomoda",
+            "arrange",
+            "organiza",
+            "organize",
+            "grid",
+            "layout",
+            "distribu",
+            "acomoda",
+            "snap",
+            "alinea",
+            "align",
+            "overlap",
+            "solape",
+            "superpuesto",
         ]),
-        prefab: contains_any(&["prefab", "manifest", "prefabricado", "instancia"]),
+        prefab: contains_any(&[
+            "prefab",
+            "manifest",
+            "prefabricado",
+            "instancia",
+            "template",
+            "plantilla",
+            "preset",
+        ]),
         assets: contains_any(&[
             "asset",
             "assets",
@@ -2383,11 +2592,14 @@ fn localized_native_tool_description(name: &str, fallback: &str, language: Langu
         "scene_outline" => Some("commands.scene_outline.desc"),
         "scene_query" => Some("commands.scene_query.desc"),
         "scene_spatial_map" => Some("commands.scene_spatial_map.desc"),
+        "scene_check_overlaps" => Some("commands.scene_check_overlaps.desc"),
+        "scene_diff" => Some("commands.scene_diff.desc"),
         "scene_design_audit" => Some("commands.scene_design_audit.desc"),
         "scene_inspect" => Some("commands.scene_inspect.desc"),
         "selection_get" => Some("commands.selection_get.desc"),
         "viewport_capture" => Some("commands.viewport_capture.desc"),
         "assets_catalog" => Some("commands.assets_catalog.desc"),
+        "assets_recommend" => Some("commands.assets_recommend.desc"),
         "asset_inspect" => Some("commands.asset_inspect.desc"),
         "scripts_catalog" => Some("commands.scripts_catalog.desc"),
         "project_health" => Some("commands.project_health.desc"),
@@ -2397,10 +2609,13 @@ fn localized_native_tool_description(name: &str, fallback: &str, language: Langu
         "scene_create" => Some("commands.game_add.desc"),
         "scene_update" => Some("commands.game_update.desc"),
         "scene_reparent" => Some("commands.game_reparent.desc"),
+        "scene_snap" => Some("commands.game_snap.desc"),
         "scene_delete" => Some("commands.game_delete.desc"),
         "scene_duplicate" => Some("commands.game_duplicate.desc"),
         "scene_arrange" => Some("commands.game_arrange_grid.desc"),
-        "scene_instantiate_prefab" => Some("commands.game_generate_prefab.desc"),
+        "scene_instantiate_prefab" | "scene_instantiate_template" => {
+            Some("commands.game_generate_prefab.desc")
+        }
         "scene_batch" => Some("commands.game_batch.desc"),
         "scene_reconcile" => Some("commands.game_reconcile.desc"),
         "scene_repair" => Some("commands.game_repair.desc"),
@@ -2475,26 +2690,27 @@ fn paginated_schema(extra: &[(&str, Value)]) -> Value {
 }
 
 fn transform_schema() -> Value {
-    let vector = |description: &str| {
-        serde_json::json!({
-            "type": "array",
-            "description": description,
-            "items": {"type": "number"},
-            "minItems": 3,
-            "maxItems": 3
-        })
-    };
     object_schema(
         Map::from_iter([
-            ("position".to_string(), vector("Local XYZ position.")),
+            ("position".to_string(), vec3_schema("Local XYZ position.")),
             (
                 "rotation_deg".to_string(),
-                vector("Local XYZ Euler rotation in degrees."),
+                vec3_schema("Local XYZ Euler rotation in degrees."),
             ),
-            ("scale".to_string(), vector("Local XYZ scale.")),
+            ("scale".to_string(), vec3_schema("Local XYZ scale.")),
         ]),
         &[],
     )
+}
+
+fn vec3_schema(description: &str) -> Value {
+    serde_json::json!({
+        "type": "array",
+        "description": description,
+        "items": {"type": "number"},
+        "minItems": 3,
+        "maxItems": 3
+    })
 }
 
 fn scene_entity_schema() -> Value {
@@ -2639,6 +2855,38 @@ fn batch_operation_params_schema() -> Value {
                 "preserve_world".to_string(),
                 boolean_schema("Keep world transform during reparenting."),
             ),
+            (
+                "offset".to_string(),
+                vec3_schema("Local duplication offset."),
+            ),
+            (
+                "count".to_string(),
+                integer_schema("Number of duplicates or template instances.", 1, 128),
+            ),
+            (
+                "axis".to_string(),
+                enum_schema("Array or snap axis.", &["x", "y", "z"]),
+            ),
+            (
+                "mode".to_string(),
+                enum_schema("Snap mode.", &["grid", "floor", "surface"]),
+            ),
+            (
+                "snap_to".to_string(),
+                string_schema("Surface entity target."),
+            ),
+            (
+                "placement".to_string(),
+                enum_schema("Surface placement.", &["before", "after", "center"]),
+            ),
+            (
+                "gap".to_string(),
+                number_schema("Surface separation.", 0.0, 1000.0),
+            ),
+            (
+                "grid".to_string(),
+                number_schema("Grid interval.", 0.001, 1000.0),
+            ),
             ("transform".to_string(), transform_schema()),
             (
                 "color_rgba".to_string(),
@@ -2662,7 +2910,7 @@ fn batch_operation_params_schema() -> Value {
             ),
             (
                 "spacing".to_string(),
-                number_schema("Grid spacing.", 0.1, 10000.0),
+                number_schema("Grid or array spacing.", -10000.0, 10000.0),
             ),
             (
                 "factor".to_string(),
@@ -2798,7 +3046,7 @@ mod tests {
             "Create a detailed store shelf",
         );
 
-        assert!(pack.tools.len() <= 22);
+        assert!(pack.tools.len() <= 26);
         assert!(pack
             .tools
             .iter()
@@ -2835,6 +3083,29 @@ mod tests {
             .tools
             .iter()
             .any(|tool| tool.function.name.starts_with("electronics_")));
+    }
+
+    #[test]
+    fn continuation_prompt_keeps_game_mutation_tools_available() {
+        let catalog = CommandCatalog::builtin();
+        let pack = AgentToolExecutor::build_tool_pack(
+            &catalog,
+            Language::English,
+            Some(ProjectType::Game),
+            AgentMode::Active,
+            "Continúa y termina la tienda con la estructura modular pendiente",
+        );
+
+        assert!(pack
+            .tools
+            .iter()
+            .any(|tool| tool.function.name == "scene_build"));
+        assert!(pack
+            .tools
+            .iter()
+            .any(|tool| tool.function.name == "scene_create"));
+        assert!(pack.routes.contains_key("scene_build"));
+        assert!(pack.routes.contains_key("scene_create"));
     }
 
     #[test]

@@ -252,7 +252,7 @@ fn library_list(
         .with_class("electronics-list")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 5.0,
+            gap: 3.0,
             padding: UiSpacing::xy(1.0, 2.0),
             grow: 1.0,
             overflow: UiOverflow::ScrollY,
@@ -275,9 +275,19 @@ fn library_list(
                     UiNodeKind::Label,
                 )
                 .with_class("electronics-category")
-                .with_text_value(category.clone())
-                .with_text_style(body_style(palette.tokens().text_muted))
-                .with_layout(UiLayout::fixed(0.0, 22.0).with_width_mode(UiSizeMode::Fill)),
+                .with_text_value(category.clone().to_uppercase())
+                .with_text_style(UiTextStyle {
+                    role: UiTextRole::Label,
+                    size_px: 10.0,
+                    line_height_px: 14.0,
+                    weight: UiFontWeight::Bold,
+                    color: palette.tokens().accent,
+                    inherit_color: false,
+                })
+                .with_layout(UiLayout {
+                    padding: UiSpacing::xy(3.0, 2.0),
+                    ..UiLayout::fixed(0.0, 16.0).with_width_mode(UiSizeMode::Fill)
+                }),
             );
         }
         list = list.with_child(library_card(palette, entry));
@@ -318,29 +328,26 @@ fn library_card(palette: StudioUiPalette, entry: &ElectronicsLibraryEntry) -> Ui
                 tint: None,
             },
         )
-        .with_layout(UiLayout::fixed(34.0, 34.0))
+        .with_layout(UiLayout::fixed(24.0, 24.0))
     } else {
         UiNode::new(
             format!("electronics.library.card.{}.icon", entry.index),
             UiNodeKind::Label,
         )
-        .with_icon(UiIcon::new(entry.icon).with_size(UiIconSize::Panel))
-        .with_layout(UiLayout::fixed(34.0, 34.0))
+        .with_icon(UiIcon::new(entry.icon).with_size(UiIconSize::Small))
+        .with_layout(UiLayout::fixed(24.0, 24.0))
     };
     UiNode::new(
         format!("electronics.library.card.{}", entry.index),
         UiNodeKind::Button,
     )
     .with_class("electronics-library-card")
-    // Keep a readable payload on the interactive card itself. This is a
-    // fallback for narrow retained layouts where a nested fit-content text
-    // column can collapse; the card remains fully native RafUI.
     .with_layout(UiLayout {
         flow: UiFlow::Row,
         align_items: UiAlign::Center,
-        gap: 8.0,
-        padding: UiSpacing::xy(9.0, 7.0),
-        ..UiLayout::fixed(0.0, 58.0).with_width_mode(UiSizeMode::Fill)
+        gap: 7.0,
+        padding: UiSpacing::xy(7.0, 3.0),
+        ..UiLayout::fixed(0.0, 36.0).with_width_mode(UiSizeMode::Fill)
     })
     .with_child(icon)
     .with_child(
@@ -350,9 +357,9 @@ fn library_card(palette: StudioUiPalette, entry: &ElectronicsLibraryEntry) -> Ui
         )
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 1.0,
+            gap: 0.0,
             grow: 1.0,
-            ..UiLayout::fixed(0.0, 40.0).with_width_mode(UiSizeMode::Fill)
+            ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
             UiNode::new(
@@ -363,12 +370,12 @@ fn library_card(palette: StudioUiPalette, entry: &ElectronicsLibraryEntry) -> Ui
             .with_text_style(UiTextStyle {
                 role: UiTextRole::Button,
                 size_px: 11.0,
-                line_height_px: 16.0,
+                line_height_px: 15.0,
                 weight: UiFontWeight::Bold,
                 color: tokens.text,
                 inherit_color: false,
             })
-            .with_layout(UiLayout::fixed(0.0, 18.0).with_width_mode(UiSizeMode::Fill)),
+            .with_layout(UiLayout::fixed(0.0, 15.0).with_width_mode(UiSizeMode::Fill)),
         )
         .with_child(
             UiNode::new(
@@ -377,7 +384,7 @@ fn library_card(palette: StudioUiPalette, entry: &ElectronicsLibraryEntry) -> Ui
             )
             .with_text_value(entry.description.clone())
             .with_text_style(body_style(tokens.text_muted))
-            .with_layout(UiLayout::fixed(0.0, 18.0).with_width_mode(UiSizeMode::Fill)),
+            .with_layout(UiLayout::fixed(0.0, 13.0).with_width_mode(UiSizeMode::Fill)),
         ),
     )
     .focusable()
@@ -578,22 +585,27 @@ fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
         ),
         class_rule(
             "electronics-nav-tabs",
-            tokens.surface,
+            tokens.surface_alt,
             tokens.border,
             tokens.text,
         ),
-        class_rule(
+        flat_class_rule(
             "electronics-nav-tab",
-            tokens.surface,
-            tokens.border,
+            [0, 0, 0, 0],
             tokens.text_muted,
         ),
-        class_rule(
-            "electronics-nav-tab-active",
-            tokens.surface_raised,
-            tokens.accent,
-            tokens.text,
-        ),
+        UiStyleRule::new(
+            UiStyleSelector::Class("electronics-nav-tab-active".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface_raised),
+                border: Some(tokens.border),
+                text: Some(tokens.text),
+                border_width: Some(1.0),
+                radius: Some(3.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Always),
         class_rule(
             "electronics-summary",
             [0, 0, 0, 0],
@@ -602,7 +614,7 @@ fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
         ),
         class_rule(
             "electronics-summary-card",
-            tokens.surface,
+            tokens.surface_alt,
             tokens.border,
             tokens.text,
         ),
@@ -619,16 +631,14 @@ fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             [0, 0, 0, 0],
             tokens.text_muted,
         ),
-        class_rule(
+        flat_class_rule(
             "electronics-library-card",
-            tokens.surface,
-            tokens.border,
+            tokens.surface_alt,
             tokens.text,
         ),
-        class_rule(
+        flat_class_rule(
             "electronics-document-row",
-            tokens.surface,
-            tokens.border,
+            [0, 0, 0, 0],
             tokens.text,
         ),
         class_rule(
@@ -648,29 +658,49 @@ fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
         hover_rule(
             "electronics-nav-tab",
             tokens.surface_raised,
-            tokens.focus,
+            [0, 0, 0, 0],
             tokens.text,
         ),
-        hover_rule(
-            "electronics-library-card",
-            tokens.surface_raised,
-            tokens.focus,
-            tokens.text,
-        ),
+        UiStyleRule::new(
+            UiStyleSelector::Class("electronics-library-card".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface_raised),
+                border: Some(tokens.border),
+                border_width: Some(1.0),
+                text: Some(tokens.text),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Hovered),
         hover_rule(
             "electronics-document-row",
             tokens.surface_raised,
-            tokens.focus,
+            [0, 0, 0, 0],
             tokens.text,
         ),
         hover_rule(
             "electronics-icon-button",
             tokens.surface_raised,
-            tokens.focus,
+            tokens.border,
             tokens.text,
         ),
     ]);
     UiStyleSheet { rules }
+}
+
+fn flat_class_rule(class: &str, fill: [u8; 4], text: [u8; 4]) -> UiStyleRule {
+    UiStyleRule::new(
+        UiStyleSelector::Class(class.to_string()),
+        UiStylePatch {
+            fill: Some(fill),
+            border: Some([0, 0, 0, 0]),
+            text: Some(text),
+            border_width: Some(0.0),
+            radius: Some(4.0),
+            ..UiStylePatch::default()
+        },
+    )
+    .when(UiStyleRuleState::Always)
 }
 
 fn class_rule(class: &str, fill: [u8; 4], border: [u8; 4], text: [u8; 4]) -> UiStyleRule {

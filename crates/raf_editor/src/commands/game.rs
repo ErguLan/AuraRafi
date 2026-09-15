@@ -1,6 +1,8 @@
 use glam::Vec3;
 use raf_assets::{builtin_primitive_model_kinds, PrimitiveModelManifest};
-use raf_core::agent_context::{display_name, display_path, resolve_target as resolve_agent_target};
+use raf_core::agent_context::{
+    display_name, display_path, resolve_target as resolve_agent_target, world_bounds,
+};
 use raf_core::scene::graph::{NodeColor, Primitive, SceneGraph, SceneNodeId};
 use serde_json::Value;
 use std::collections::HashSet;
@@ -67,6 +69,7 @@ const KNOWN_GAME_COMMANDS: &[&str] = &[
     "game.batch",
     "game.create_group",
     "game.reparent",
+    "game.snap",
     "game.build",
     "game.reconcile",
     "game.repair",
@@ -128,6 +131,7 @@ pub fn execute(
         "game.batch" => batch(command, ctx),
         "game.create_group" | "scene.group" | "scene.folder" => create_group(command, ctx),
         "game.reparent" | "scene.reparent" => reparent_entity(command, ctx),
+        "game.snap" | "scene.snap" => snap_entity(command, ctx),
         "game.build" | "scene.build" => build_scene(command, ctx),
         "game.reconcile" | "scene.reconcile" => reconcile_scene(command, ctx),
         "game.repair" | "scene.repair" => repair_scene(command, ctx),
@@ -176,11 +180,14 @@ fn batch(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOu
             "scene_delete" | "game.delete" => "game.delete".to_string(),
             "scene_duplicate" | "game.duplicate" => "game.duplicate".to_string(),
             "scene_arrange" | "game.arrange_grid" => "game.arrange_grid".to_string(),
-            "scene_instantiate_prefab" | "game.generate_prefab" => {
+            "scene_instantiate_prefab"
+            | "scene_instantiate_template"
+            | "game.generate_prefab" => {
                 "game.generate_prefab".to_string()
             }
             "scene_create_group" | "game.create_group" => "game.create_group".to_string(),
             "scene_reparent" | "game.reparent" => "game.reparent".to_string(),
+            "scene_snap" | "game.snap" => "game.snap".to_string(),
             "scene_build" | "game.build" => {
                 return CommandOutput::error(
                     "Game batch",
@@ -974,7 +981,7 @@ fn validate_repair_operations(
                     }
                 }
             }
-            "game.update" | "game.delete" | "game.duplicate" | "game.reparent" => {
+            "game.update" | "game.delete" | "game.duplicate" | "game.reparent" | "game.snap" => {
                 let target = params
                     .get("target")
                     .and_then(Value::as_str)
@@ -1017,6 +1024,26 @@ fn validate_repair_operations(
                             &staged_groups,
                         )?;
                     }
+                    if name == "game.snap" {
+                        if let Some(surface) = params
+                            .get("snap_to")
+                            .and_then(Value::as_str)
+                            .filter(|value| !value.trim().is_empty())
+                        {
+                            let surface_id = resolve_repair_target(scene, surface).ok_or_else(|| {
+                                format!(
+                                    "Repair operation {} (game.snap) surface '{surface}' was not found.",
+                                    index + 1
+                                )
+                            })?;
+                            if !is_in_repair_scope(scene, surface_id, root_id) {
+                                return Err(format!(
+                                    "Repair operation {} (game.snap) surface '{surface}' is outside the audited root.",
+                                    index + 1
+                                ));
+                            }
+                        }
+                    }
                 }
             }
             "game.arrange_grid" | "game.generate_prefab" if root.is_some() => {
@@ -1050,6 +1077,7 @@ fn canonical_repair_operation_name(raw_name: &str) -> String {
         "scene_delete" | "game.delete" => "game.delete".to_string(),
         "scene_duplicate" | "game.duplicate" => "game.duplicate".to_string(),
         "scene_reparent" | "game.reparent" => "game.reparent".to_string(),
+        "scene_snap" | "scene.snap" | "game.snap" => "game.snap".to_string(),
         "scene_arrange" | "game.arrange_grid" => "game.arrange_grid".to_string(),
         "scene_instantiate_prefab" | "game.generate_prefab" => "game.generate_prefab".to_string(),
         other => other.to_string(),
@@ -1766,15 +1794,226 @@ fn duplicate_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -
     let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
         return CommandOutput::error("Duplicate entity", "Target not found.");
     };
-    let Some(new_id) = ctx.scene.duplicate_node(id) else {
-        return CommandOutput::error("Duplicate entity", "Could not duplicate target.");
+    let source = ctx.scene.get(id).expect("resolved source exists").clone();
+    let parent_specified = text_argument(command, "parent").is_some();
+    let destination_parent = if parent_specified {
+        match parent_target(command, ctx.scene) {
+            Ok(parent) => parent,
+            Err(error) => return CommandOutput::error("Duplicate entity", error),
+        }
+    } else {
+        source.parent
     };
-    select_ids(ctx, vec![new_id]);
-    let node = ctx.scene.get(new_id).expect("duplicate exists");
+    if let Some(parent) = destination_parent {
+        if !ctx.scene.get(parent).is_some_and(|node| node.is_folder) {
+            return CommandOutput::error(
+                "Duplicate entity",
+                "parent must reference a live folder or group.",
+            );
+        }
+    }
+    let count = match usize_argument(command, "count", 1, 1, 128) {
+        Ok(count) => count,
+        Err(error) => return CommandOutput::error("Duplicate entity", error),
+    };
+    let offset = match structured_or_json_value(command, "offset", "offset") {
+        Ok(Some(value)) => match parse_vec3_value(&value, "offset") {
+            Ok([x, y, z]) => Vec3::new(x, y, z),
+            Err(error) => return CommandOutput::error("Duplicate entity", error),
+        },
+        Ok(None) => Vec3::new(1.0, 0.0, 0.0),
+        Err(error) => return CommandOutput::error("Duplicate entity", error),
+    };
+    let axis = match axis_vector(command.arg("axis").unwrap_or("x")) {
+        Ok(axis) => axis,
+        Err(error) => return CommandOutput::error("Duplicate entity", error),
+    };
+    let spacing = match finite_f32_argument(command, "spacing", 1.0) {
+        Ok(value) => value,
+        Err(error) => return CommandOutput::error("Duplicate entity", error),
+    };
+    let preserve_world = match bool_argument(command, "preserve_world", true) {
+        Ok(value) => value,
+        Err(error) => return CommandOutput::error("Duplicate entity", error),
+    };
+    let requested_name = text_argument(command, "name").map(|name| display_name(&name));
+    let mut created = Vec::with_capacity(count);
+    let mut entities = Vec::with_capacity(count);
+    for index in 0..count {
+        let Some(new_id) = ctx.scene.duplicate_node(id) else {
+            return CommandOutput::error("Duplicate entity", "Could not duplicate target.");
+        };
+        if let Some(node) = ctx.scene.get_mut(new_id) {
+            node.position = source.position;
+        }
+        if destination_parent != source.parent {
+            let moved = if preserve_world {
+                ctx.scene
+                    .reparent_node_preserve_world_transform(new_id, destination_parent)
+            } else {
+                ctx.scene.reparent_node(new_id, destination_parent)
+            };
+            if !moved {
+                return CommandOutput::error(
+                    "Duplicate entity",
+                    "The requested parent is invalid or would create a hierarchy cycle.",
+                );
+            }
+        }
+        if let Some(node) = ctx.scene.get_mut(new_id) {
+            node.position += offset + axis * spacing * index as f32;
+            if let Some(base) = requested_name.as_deref() {
+                node.name = if count == 1 {
+                    base.to_string()
+                } else {
+                    format!("{base} {}", index + 1)
+                };
+            }
+        }
+        let node = ctx.scene.get(new_id).expect("duplicate exists");
+        entities.push(node_json(new_id, node, ctx.scene)["entity"].clone());
+        created.push(new_id);
+    }
+    select_ids(ctx, created.clone());
     CommandOutput::changed(
-        format!("Duplicated {}", node.name),
-        node_detail_lines(new_id, node, ctx.scene),
-        node_json(new_id, node, ctx.scene),
+        format!("Duplicated {} time(s)", created.len()),
+        vec![
+            format!("source: {}", presentation_name(id, &source)),
+            format!("copies: {}", created.len()),
+            format!(
+                "parent: {}",
+                destination_parent
+                    .map(|id| id.0.to_string())
+                    .unwrap_or_else(|| "root".to_string())
+            ),
+            format!(
+                "offset: [{:.3}, {:.3}, {:.3}]",
+                offset.x, offset.y, offset.z
+            ),
+            format!("spacing: {spacing:.3}"),
+        ],
+        serde_json::json!({
+            "ok": true,
+            "source": format!("entity:{}", source.uuid),
+            "count": created.len(),
+            "created_ids": created.iter().map(|id| id.0).collect::<Vec<_>>(),
+            "entities": entities
+        }),
+    )
+}
+
+fn snap_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> CommandOutput {
+    let Some(id) = resolve_target(command, ctx.scene, ctx.selection) else {
+        return CommandOutput::error("Snap entity", "Target not found.");
+    };
+    let mode = command
+        .arg("mode")
+        .unwrap_or("grid")
+        .trim()
+        .to_ascii_lowercase();
+    let gap = match finite_f32_argument(command, "gap", 0.0) {
+        Ok(value) if value >= 0.0 => value,
+        Ok(_) => return CommandOutput::error("Snap entity", "gap must be zero or positive."),
+        Err(error) => return CommandOutput::error("Snap entity", error),
+    };
+    if mode == "grid" {
+        let grid = match finite_f32_argument(command, "grid", 1.0) {
+            Ok(value) if value > 0.0 => value,
+            Ok(_) => return CommandOutput::error("Snap entity", "grid must be greater than zero."),
+            Err(error) => return CommandOutput::error("Snap entity", error),
+        };
+        if let Some(node) = ctx.scene.get_mut(id) {
+            node.position = (node.position / grid).round() * grid;
+        }
+    } else if matches!(mode.as_str(), "floor" | "surface") {
+        let axis_name = command.arg("axis").unwrap_or("y");
+        let axis = match axis_index(axis_name) {
+            Ok(axis) => axis,
+            Err(error) => return CommandOutput::error("Snap entity", error),
+        };
+        let placement = command
+            .arg("placement")
+            .unwrap_or(if mode == "floor" { "after" } else { "after" })
+            .trim()
+            .to_ascii_lowercase();
+        if !matches!(placement.as_str(), "before" | "after" | "center") {
+            return CommandOutput::error(
+                "Snap entity",
+                "placement must be before, after, or center.",
+            );
+        }
+        let Some(source_bounds) = world_bounds(ctx.scene, id) else {
+            return CommandOutput::error(
+                "Snap entity",
+                "The target has no renderable world bounds to snap.",
+            );
+        };
+        let snap_target =
+            text_argument(command, "snap_to").or_else(|| text_argument(command, "surface"));
+        let surface_bounds = match snap_target.as_deref() {
+            Some(target) => {
+                let Some(surface_id) = resolve_text_target(target, ctx.scene) else {
+                    return CommandOutput::error(
+                        "Snap entity",
+                        format!("Snap surface target '{target}' was not found."),
+                    );
+                };
+                if surface_id == id {
+                    return CommandOutput::error(
+                        "Snap entity",
+                        "target and snap_to must reference different entities.",
+                    );
+                }
+                let Some(bounds) = world_bounds(ctx.scene, surface_id) else {
+                    return CommandOutput::error(
+                        "Snap entity",
+                        "The snap surface has no renderable world bounds.",
+                    );
+                };
+                bounds
+            }
+            None if mode == "floor" => (Vec3::ZERO, Vec3::ZERO),
+            None => {
+                return CommandOutput::error(
+                    "Snap entity",
+                    "snap_to is required when mode=surface.",
+                )
+            }
+        };
+        let source_min = component(source_bounds.0, axis);
+        let source_max = component(source_bounds.1, axis);
+        let source_center = (source_min + source_max) * 0.5;
+        let surface_min = component(surface_bounds.0, axis);
+        let surface_max = component(surface_bounds.1, axis);
+        let surface_center = (surface_min + surface_max) * 0.5;
+        let delta = match placement.as_str() {
+            "before" => surface_min - gap - source_max,
+            "center" => surface_center - source_center,
+            _ => surface_max + gap - source_min,
+        };
+        let mut world_delta = Vec3::ZERO;
+        set_component(&mut world_delta, axis, delta);
+        let parent = ctx.scene.get(id).and_then(|node| node.parent);
+        let local_delta = parent
+            .map(|parent| {
+                ctx.scene
+                    .world_matrix(parent)
+                    .inverse()
+                    .transform_vector3(world_delta)
+            })
+            .unwrap_or(world_delta);
+        if let Some(node) = ctx.scene.get_mut(id) {
+            node.position += local_delta;
+        }
+    } else {
+        return CommandOutput::error("Snap entity", "mode must be grid, floor, or surface.");
+    }
+    select_ids(ctx, vec![id]);
+    let node = ctx.scene.get(id).expect("snapped node exists");
+    CommandOutput::changed(
+        format!("Snapped {}", node.name),
+        vec![format!("mode: {mode}"), format!("gap: {gap:.3}")],
+        node_json(id, node, ctx.scene),
     )
 }
 
@@ -2036,24 +2275,74 @@ fn generate_prefab(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) ->
         .arg("name")
         .map(str::to_string)
         .unwrap_or_else(|| manifest.name.clone());
-    let created = manifest.instantiate_into_scene_with_name(ctx.scene, Some(&group_name));
-    let Some(root) = created.first().copied() else {
-        return CommandOutput::error(
-            "Generate prefab",
-            "Primitive manifest produced no root node.",
-        );
+    let parent = match parent_target(command, ctx.scene) {
+        Ok(parent) => parent,
+        Err(error) => return CommandOutput::error("Generate prefab", error),
     };
-    let part_count = created.len().saturating_sub(1);
-
-    select_ids(ctx, vec![root]);
+    if let Some(parent) = parent {
+        if !ctx.scene.get(parent).is_some_and(|node| node.is_folder) {
+            return CommandOutput::error(
+                "Generate prefab",
+                "parent must reference a live folder or group.",
+            );
+        }
+    }
+    let transform = match parse_transform_patch(command) {
+        Ok(transform) => transform,
+        Err(error) => return CommandOutput::error("Generate prefab", error),
+    };
+    let count = match usize_argument(command, "count", 1, 1, 64) {
+        Ok(count) => count,
+        Err(error) => return CommandOutput::error("Generate prefab", error),
+    };
+    let axis = match axis_vector(command.arg("axis").unwrap_or("x")) {
+        Ok(axis) => axis,
+        Err(error) => return CommandOutput::error("Generate prefab", error),
+    };
+    let spacing = match finite_f32_argument(command, "spacing", 2.0) {
+        Ok(value) => value,
+        Err(error) => return CommandOutput::error("Generate prefab", error),
+    };
+    let base_position = transform.position_or(Vec3::ZERO);
+    let mut roots = Vec::with_capacity(count);
+    let mut created_ids = Vec::new();
+    for index in 0..count {
+        let instance_name = if count == 1 {
+            group_name.clone()
+        } else {
+            format!("{group_name} {}", index + 1)
+        };
+        let created = manifest.instantiate_into_scene_with_name(ctx.scene, Some(&instance_name));
+        let Some(root) = created.first().copied() else {
+            return CommandOutput::error(
+                "Generate prefab",
+                "Primitive manifest produced no root node.",
+            );
+        };
+        if !ctx.scene.reparent_node(root, parent) && parent.is_some() {
+            return CommandOutput::error(
+                "Generate prefab",
+                "Could not attach the template to the requested parent.",
+            );
+        }
+        if let Some(node) = ctx.scene.get_mut(root) {
+            node.position = base_position + axis * spacing * index as f32;
+            node.rotation = transform.rotation_or(node.rotation);
+            node.scale = transform.scale_or(node.scale);
+        }
+        roots.push(root);
+        created_ids.extend(created);
+    }
+    let part_count = created_ids.len().saturating_sub(roots.len());
+    select_ids(ctx, roots.clone());
     CommandOutput::changed(
-        format!("Imported {group_name}"),
+        format!("Instantiated {group_name}"),
         vec![
             format!("kind: {kind}"),
             format!("manifest: {}", manifest.name),
             format!("schema_version: {}", manifest.schema_version),
-            format!("root_id: {}", root.0),
-            format!("created_nodes: {}", created.len()),
+            format!("instances: {}", roots.len()),
+            format!("created_nodes: {}", created_ids.len()),
             format!("parts: {part_count}"),
             "source: embedded_json_manifest".to_string(),
         ],
@@ -2063,9 +2352,10 @@ fn generate_prefab(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) ->
             "manifest": manifest.name,
             "schema_version": manifest.schema_version,
             "source": "embedded_json_manifest",
-            "root_id": root.0,
+            "root_ids": roots.iter().map(|id| id.0).collect::<Vec<_>>(),
+            "instances": roots.len(),
             "part_count": part_count,
-            "created_ids": created.iter().map(|id| id.0).collect::<Vec<_>>()
+            "created_ids": created_ids.iter().map(|id| id.0).collect::<Vec<_>>()
         }),
     )
 }
@@ -2380,6 +2670,78 @@ fn f32_arg(command: &ParsedCommand, name: &str, default: f32) -> f32 {
     command.arg(name).and_then(parse_f32).unwrap_or(default)
 }
 
+fn finite_f32_argument(command: &ParsedCommand, name: &str, default: f32) -> Result<f32, String> {
+    if let Some(value) = command.structured_arg(name) {
+        return parse_json_f32(value, name);
+    }
+    command
+        .arg(name)
+        .map(|value| parse_finite_f32(value, name))
+        .transpose()
+        .map(|value| value.unwrap_or(default))
+}
+
+fn usize_argument(
+    command: &ParsedCommand,
+    name: &str,
+    default: usize,
+    minimum: usize,
+    maximum: usize,
+) -> Result<usize, String> {
+    let value = if let Some(value) = command.structured_arg(name) {
+        value
+            .as_u64()
+            .and_then(|value| usize::try_from(value).ok())
+            .ok_or_else(|| format!("{name} must be a positive integer."))?
+    } else if let Some(value) = command.arg(name) {
+        value
+            .parse::<usize>()
+            .map_err(|_| format!("{name} must be a positive integer."))?
+    } else {
+        default
+    };
+    if !(minimum..=maximum).contains(&value) {
+        return Err(format!(
+            "{name} must be between {minimum} and {maximum}; received {value}."
+        ));
+    }
+    Ok(value)
+}
+
+fn axis_vector(axis: &str) -> Result<Vec3, String> {
+    match axis.trim().to_ascii_lowercase().as_str() {
+        "x" => Ok(Vec3::X),
+        "y" => Ok(Vec3::Y),
+        "z" => Ok(Vec3::Z),
+        _ => Err("axis must be x, y, or z.".to_string()),
+    }
+}
+
+fn axis_index(axis: &str) -> Result<usize, String> {
+    match axis.trim().to_ascii_lowercase().as_str() {
+        "x" => Ok(0),
+        "y" => Ok(1),
+        "z" => Ok(2),
+        _ => Err("axis must be x, y, or z.".to_string()),
+    }
+}
+
+fn component(value: Vec3, axis: usize) -> f32 {
+    match axis {
+        0 => value.x,
+        1 => value.y,
+        _ => value.z,
+    }
+}
+
+fn set_component(value: &mut Vec3, axis: usize, component: f32) {
+    match axis {
+        0 => value.x = component,
+        1 => value.y = component,
+        _ => value.z = component,
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct TransformPatch {
     position: [Option<f32>; 3],
@@ -2527,8 +2889,11 @@ fn parse_vec3_value(value: &Value, label: &str) -> Result<[f32; 3], String> {
             parse_json_f32(&values[1], &format!("{label}[1]"))?,
             parse_json_f32(&values[2], &format!("{label}[2]"))?,
         ]),
+        Value::Array(values) if values.len() == 1 && values[0].is_array() => Err(format!(
+            "{label} expected [x, y, z], received a nested array [[x, y, z]]. Remove the extra array layer and retry."
+        )),
         Value::Array(values) => Err(format!(
-            "{label} must be [x, y, z] with exactly 3 numbers; received {} values.",
+            "{label} expected [x, y, z] with exactly 3 finite numbers; received an array with {} values.",
             values.len()
         )),
         Value::Object(object) => {
@@ -2555,7 +2920,21 @@ fn parse_vec3_value(value: &Value, label: &str) -> Result<[f32; 3], String> {
             ])
         }
         Value::String(raw) => parse_json_vec3_argument(raw, label),
-        _ => Err(format!("{label} must be an array or object of 3 numbers.")),
+        _ => Err(format!(
+            "{label} expected [x, y, z] or {{x, y, z}} with finite numbers; received {}.",
+            json_shape(value)
+        )),
+    }
+}
+
+fn json_shape(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "a boolean",
+        Value::Number(_) => "a number",
+        Value::String(_) => "a string",
+        Value::Array(_) => "an array",
+        Value::Object(_) => "an object",
     }
 }
 
@@ -3272,6 +3651,79 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_supports_parent_count_and_spacing() {
+        let mut scene = SceneGraph::new();
+        let source_parent = scene.add_root_folder("Source");
+        let target_parent = scene.add_root_folder("Products");
+        scene.add_child_with_primitive(source_parent, "Can", Primitive::Cylinder);
+        let command = parsed_command(
+            "game.duplicate",
+            serde_json::json!({
+                "target": "Can",
+                "parent": "Products",
+                "name": "Can Copy",
+                "offset": [0.0, 0.0, 0.0],
+                "count": 3,
+                "axis": "x",
+                "spacing": 0.5,
+                "preserve_world": false
+            }),
+        );
+        let mut selection = SceneSelectionState::default();
+        let mut viewport = HeadlessGameViewportPort::default();
+        let mut ctx = GameCommandContext {
+            scene: &mut scene,
+            selection: &mut selection,
+            viewport: &mut viewport,
+        };
+
+        let output = execute("game.duplicate", &command, &mut ctx);
+
+        assert_eq!(output.level, CommandLevel::Info);
+        assert_eq!(output.json["count"], 3);
+        assert_eq!(ctx.selection.selected_nodes.len(), 3);
+        for (index, id) in ctx.selection.selected_nodes.iter().enumerate() {
+            let node = ctx.scene.get(*id).unwrap();
+            assert_eq!(node.parent, Some(target_parent));
+            assert_eq!(node.position.x, index as f32 * 0.5);
+        }
+    }
+
+    #[test]
+    fn snap_places_entity_on_top_of_surface_bounds() {
+        let mut scene = SceneGraph::new();
+        let shelf = scene.add_root_with_primitive("Shelf", Primitive::Cube);
+        let product = scene.add_root_with_primitive("Product", Primitive::Cube);
+        scene.get_mut(shelf).unwrap().scale = Vec3::new(4.0, 0.2, 2.0);
+        scene.get_mut(product).unwrap().scale = Vec3::new(0.5, 1.0, 0.5);
+        let command = parsed_command(
+            "game.snap",
+            serde_json::json!({
+                "target": "Product",
+                "mode": "surface",
+                "snap_to": "Shelf",
+                "axis": "y",
+                "placement": "after",
+                "gap": 0.05
+            }),
+        );
+        let mut selection = SceneSelectionState::default();
+        let mut viewport = HeadlessGameViewportPort::default();
+        let mut ctx = GameCommandContext {
+            scene: &mut scene,
+            selection: &mut selection,
+            viewport: &mut viewport,
+        };
+
+        let output = execute("game.snap", &command, &mut ctx);
+
+        assert_eq!(output.level, CommandLevel::Info);
+        let shelf_max = world_bounds(ctx.scene, shelf).unwrap().1.y;
+        let product_min = world_bounds(ctx.scene, product).unwrap().0.y;
+        assert!((product_min - shelf_max - 0.05).abs() < 0.001);
+    }
+
+    #[test]
     fn malformed_structured_transform_does_not_create_default_entity() {
         let mut scene = SceneGraph::new();
         let mut selection = SceneSelectionState::default();
@@ -3294,6 +3746,7 @@ mod tests {
 
         assert_eq!(output.level, CommandLevel::Error);
         assert_eq!(ctx.scene.len(), 0);
+        assert_eq!(output.json["error"]["code"], "invalid_vector_shape");
     }
 
     #[test]

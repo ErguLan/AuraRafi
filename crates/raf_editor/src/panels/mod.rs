@@ -5,9 +5,14 @@
 
 pub mod agent_surface;
 pub mod ai_chat;
+pub mod assets_surface;
+pub mod assets_surface_host;
+pub mod console_surface;
 pub mod editor_bottom_dock_host;
+pub mod editor_bottom_dock_styles;
 pub mod editor_bottom_dock_surface;
 pub mod editor_panel_splitter_surface;
+pub mod editor_status_surface;
 pub mod electronics_canvas_overlay_surface;
 pub mod electronics_context_menu_surface;
 pub mod electronics_inspector_surface;
@@ -27,6 +32,7 @@ pub mod new_project_surface;
 pub mod nodes_surface;
 pub mod primitive_create;
 pub mod project_settings_surface_host;
+pub mod project_surface;
 pub mod raf_ui_surface_bridge;
 pub mod raf_ui_tooltip;
 pub mod search_surface;

@@ -181,12 +181,75 @@ pub fn build_application_menu(state: ApplicationMenuState) -> UiApplicationMenu 
                     "app.project_settings_tab",
                 ))
                 .with_item(command(command::PROJECT_CLOSE, "app.close_project")),
-            UiMenu::new("help", "app.help_menu").with_item(command(
-                command::HELP_KEYBOARD_SHORTCUTS,
-                "app.keyboard_shortcuts",
-            )),
+            UiMenu::new("help", "app.help_menu")
+                .with_item(UiMenuItem::Submenu(keyboard_shortcuts_menu())),
         ],
     }
+}
+
+/// Reference-only shortcuts shown from Help. These are intentionally disabled
+/// menu rows: the editor shortcut registry remains the executable source of
+/// truth, while this submenu only exposes the same metadata to users.
+fn keyboard_shortcuts_menu() -> UiMenu {
+    let mut menu = UiMenu::new(command::HELP_KEYBOARD_SHORTCUTS, "app.keyboard_shortcuts");
+    for (index, command_id) in [
+        command::PROJECT_SAVE,
+        command::SEARCH_OPEN,
+        command::EDIT_UNDO,
+        command::EDIT_REDO,
+        command::EDIT_DUPLICATE,
+        command::EDIT_COPY,
+        command::EDIT_PASTE,
+        command::EDIT_DELETE,
+        command::EDIT_SELECT_ALL,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some(shortcut) = crate::editor_shortcuts::EDITOR_SHORTCUTS
+            .iter()
+            .find(|shortcut| shortcut.command == command_id)
+        {
+            menu = menu.with_item(shortcut_reference_item(index, shortcut));
+        }
+    }
+
+    menu = menu.with_item(UiMenuItem::Separator);
+    for (index, command_id) in [
+        "viewport.move",
+        "viewport.rotate",
+        "viewport.scale",
+        "viewport.select",
+        "viewport.focus",
+        "viewport.edit_mode",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if let Some(shortcut) = crate::editor_shortcuts::VIEWPORT_SHORTCUTS
+            .iter()
+            .find(|shortcut| shortcut.command == command_id)
+        {
+            menu = menu.with_item(shortcut_reference_item(index + 100, shortcut));
+        }
+    }
+    menu
+}
+
+fn shortcut_reference_item(
+    index: usize,
+    shortcut: &crate::editor_shortcuts::ShortcutSpec,
+) -> UiMenuItem {
+    let label_key = match shortcut.command {
+        command::SEARCH_OPEN => "app.search_menu",
+        "viewport.edit_mode" => "app.edit_mode",
+        _ => shortcut.label_key,
+    };
+    UiMenuItem::Command(
+        UiMenuCommand::new(format!("help.shortcut.{index}"), label_key)
+            .with_accelerator(shortcut.accelerator)
+            .with_enabled(false),
+    )
 }
 
 fn command(id: &str, label_key: &str) -> UiMenuItem {
@@ -293,5 +356,54 @@ mod tests {
             UiMenuItem::Separator => true,
             UiMenuItem::Submenu(_) => false,
         }));
+    }
+
+    #[test]
+    fn keyboard_shortcuts_live_under_help_as_an_expanded_submenu() {
+        let menu = build_application_menu(ApplicationMenuState {
+            project_type: ProjectType::Game,
+            active_view: ApplicationView::Scene,
+            grid_visible: true,
+            hierarchy_visible: true,
+            inspector_visible: true,
+            undo_available: true,
+            redo_available: true,
+            selection_available: true,
+            select_all_available: true,
+            copy_available: true,
+            paste_available: true,
+        });
+
+        let help = menu
+            .menus
+            .iter()
+            .find(|menu| menu.id == "help")
+            .expect("help menu");
+        let shortcuts = help
+            .items
+            .iter()
+            .find_map(|item| match item {
+                UiMenuItem::Submenu(menu) if menu.id == command::HELP_KEYBOARD_SHORTCUTS => {
+                    Some(menu)
+                }
+                _ => None,
+            })
+            .expect("keyboard shortcuts submenu");
+
+        assert!(shortcuts.items.iter().any(
+            |item| matches!(item, UiMenuItem::Command(command) if command.id == "help.shortcut.0")
+        ));
+        assert!(shortcuts.items.iter().any(
+            |item| matches!(item, UiMenuItem::Command(command) if command.id == "help.shortcut.100")
+        ));
+
+        let edit = menu
+            .menus
+            .iter()
+            .find(|menu| menu.id == "edit")
+            .expect("edit menu");
+        assert!(!edit.items.iter().any(
+            |item| matches!(item, UiMenuItem::Command(command) if command.id.starts_with("help.shortcut."))
+        ));
     }
 }

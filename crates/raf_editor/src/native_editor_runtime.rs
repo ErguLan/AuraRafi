@@ -11,8 +11,8 @@ use raf_core::project::ProjectType;
 use raf_core::scene::SceneGraph;
 use raf_core::{InputRouter, InputSnapshot, Revision, UndoToken};
 use raf_render::api_graphic_basic::{
-    DynamicResolutionController, EditorCanvasLayer, FrameInvalidation, FramePacingProfile,
-    FramePermit, SceneFrameCapture,
+    DynamicResolutionController, EditorCanvasLayer, FrameActivity, FrameInvalidation,
+    FramePacingProfile, FramePermit, FrameSchedulerMetrics, SceneFrameCapture,
 };
 use raf_render::bridge::{GraphicsSurfaceKind, RenderRuntime, ViewportInputRect};
 
@@ -48,6 +48,9 @@ pub struct NativeEditorRuntime {
     cached_game_canvas: Option<CachedGameCanvas>,
     canvas_renders: u64,
     canvas_cache_hits: u64,
+    scene_rendered_this_frame: bool,
+    viewport_fps: f32,
+    last_viewport_present_seconds: f64,
     frame_started_at: Option<Instant>,
     last_frame_cpu_ms: f32,
     command_registry: EditorCommandRegistry,
@@ -55,6 +58,7 @@ pub struct NativeEditorRuntime {
     attached_undo: Option<AttachedSceneUndo>,
     clipboard: Vec<raf_core::scene::SceneNodeId>,
     node_graph: raf_nodes::NodeGraph,
+    node_graph_revision: u64,
     selected_graph_node: Option<raf_nodes::NodeId>,
     node_drag: Option<(raf_nodes::NodeId, [f32; 2], [f32; 2])>,
 }
@@ -92,6 +96,9 @@ impl NativeEditorRuntime {
             cached_game_canvas: None,
             canvas_renders: 0,
             canvas_cache_hits: 0,
+            scene_rendered_this_frame: false,
+            viewport_fps: 0.0,
+            last_viewport_present_seconds: 0.0,
             frame_started_at: None,
             last_frame_cpu_ms: 0.0,
             command_registry: EditorCommandRegistry::default(),
@@ -99,6 +106,7 @@ impl NativeEditorRuntime {
             attached_undo: None,
             clipboard: Vec::new(),
             node_graph: raf_nodes::NodeGraph::new("Main"),
+            node_graph_revision: 1,
             selected_graph_node: None,
             node_drag: None,
         }
@@ -112,23 +120,36 @@ impl NativeEditorRuntime {
         self.selected_graph_node
     }
 
+    pub fn node_graph_revision(&self) -> u64 {
+        self.node_graph_revision
+    }
+
+    fn advance_node_graph_revision(&mut self) {
+        self.node_graph_revision = self.node_graph_revision.wrapping_add(1).max(1);
+    }
+
     pub fn set_node_graph(&mut self, graph: raf_nodes::NodeGraph) {
         self.node_graph = graph;
         self.selected_graph_node = None;
         self.node_drag = None;
+        self.advance_node_graph_revision();
         self.request_document_frame();
     }
 
     pub fn select_graph_node(&mut self, id: raf_nodes::NodeId) {
         if self.node_graph.nodes.iter().any(|node| node.id == id) {
-            self.selected_graph_node = Some(id);
-            self.request_ui_frame();
+            if self.selected_graph_node != Some(id) {
+                self.selected_graph_node = Some(id);
+                self.advance_node_graph_revision();
+                self.request_ui_frame();
+            }
         }
     }
 
     pub fn add_graph_node(&mut self, node: raf_nodes::Node) {
         let id = self.node_graph.add_node(node);
         self.selected_graph_node = Some(id);
+        self.advance_node_graph_revision();
         self.request_document_frame();
     }
 
@@ -138,6 +159,7 @@ impl NativeEditorRuntime {
         if self.selected_graph_node == Some(id) {
             self.selected_graph_node = None;
         }
+        self.advance_node_graph_revision();
         self.request_document_frame();
     }
 
@@ -145,15 +167,25 @@ impl NativeEditorRuntime {
         self.node_graph = raf_nodes::NodeGraph::new("Main");
         self.selected_graph_node = None;
         self.node_drag = None;
+        self.advance_node_graph_revision();
         self.request_document_frame();
     }
 
     pub fn begin_graph_node_drag(&mut self, id: raf_nodes::NodeId, pointer: [f32; 2]) {
-        let Some(node) = self.node_graph.nodes.iter().find(|node| node.id == id) else {
+        let Some(origin_position) = self
+            .node_graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map(|node| node.position)
+        else {
             return;
         };
-        self.selected_graph_node = Some(id);
-        self.node_drag = Some((id, pointer, node.position));
+        if self.selected_graph_node != Some(id) {
+            self.selected_graph_node = Some(id);
+            self.advance_node_graph_revision();
+        }
+        self.node_drag = Some((id, pointer, origin_position));
         self.request_ui_frame();
     }
 
@@ -169,6 +201,7 @@ impl NativeEditorRuntime {
                 origin_position[0] + pointer[0] - origin_pointer[0],
                 origin_position[1] + pointer[1] - origin_pointer[1],
             ];
+            self.advance_node_graph_revision();
             self.request_document_frame();
         }
     }
@@ -783,6 +816,10 @@ impl NativeEditorRuntime {
         self.graphics.set_frame_limit(fps_limit);
     }
 
+    pub fn set_present_refresh_hz(&mut self, refresh_hz: Option<u16>) {
+        self.graphics.set_present_refresh_hz(refresh_hz);
+    }
+
     pub fn update_game_input(
         &mut self,
         input: &InputSnapshot,
@@ -935,6 +972,53 @@ impl NativeEditorRuntime {
         self.graphics.snapshot().scheduler_metrics.presented_fps
     }
 
+    /// Returns the refresh rate of the 3D viewport layer, not the final
+    /// window presentation rate. UI-only frames and cached canvas reuse are
+    /// deliberately excluded so the editor can reveal whether the viewport
+    /// itself is refreshing or merely being composited again.
+    pub fn viewport_fps(&self, now_seconds: f64) -> f32 {
+        if self.last_viewport_present_seconds <= 0.0
+            || !now_seconds.is_finite()
+            || now_seconds - self.last_viewport_present_seconds > 0.75
+        {
+            0.0
+        } else {
+            self.viewport_fps
+        }
+    }
+
+    pub fn performance_metrics(&self) -> FrameSchedulerMetrics {
+        self.graphics.snapshot().scheduler_metrics
+    }
+
+    pub fn active_frame_activity(&self) -> FrameActivity {
+        self.active_frame
+            .map(|permit| permit.activity)
+            .unwrap_or(FrameActivity::Idle)
+    }
+
+    pub fn active_frame_reason_label(&self) -> &'static str {
+        self.active_frame
+            .map(|permit| permit.reasons.primary_label())
+            .unwrap_or("Idle")
+    }
+
+    /// Describes whether the next composition will refresh the 3D canvas or
+    /// reuse its retained layer. This is a diagnostic state, not a second
+    /// renderer: the viewport and RafUI still share one final presentation.
+    pub fn canvas_status_label(&self) -> &'static str {
+        let Some(permit) = self.active_frame else {
+            return "Idle";
+        };
+        if !canvas_requires_render(permit.reasons) && self.cached_game_canvas.is_some() {
+            "Cached"
+        } else if self.project_type == ProjectType::Game {
+            "Render"
+        } else {
+            "CAD"
+        }
+    }
+
     pub fn begin_frame(&mut self, now_seconds: f64) -> bool {
         if self.active_frame.is_some() {
             return true;
@@ -942,6 +1026,7 @@ impl NativeEditorRuntime {
         self.active_frame = self.graphics.next_frame(now_seconds);
         if self.active_frame.is_some() {
             self.frame_started_at = Some(Instant::now());
+            self.scene_rendered_this_frame = false;
         }
         self.active_frame.is_some()
     }
@@ -980,6 +1065,7 @@ impl NativeEditorRuntime {
             }
         }
         self.canvas_renders = self.canvas_renders.saturating_add(1);
+        self.scene_rendered_this_frame = true;
         let output = self
             .game_viewport
             .render(&mut self.graphics, scene, source_size);
@@ -995,11 +1081,16 @@ impl NativeEditorRuntime {
         Some(layer)
     }
 
+    pub fn scene_rendered_this_frame(&self) -> bool {
+        self.scene_rendered_this_frame
+    }
+
     pub fn finish_frame(
         &mut self,
         presented_at_seconds: f64,
         frame_cpu_ms: f32,
         frame_gpu_ms: f32,
+        total_cpu_ms: f32,
     ) {
         let Some(permit) = self.active_frame.take() else {
             return;
@@ -1011,10 +1102,40 @@ impl NativeEditorRuntime {
             .filter(|value| value.is_finite())
             .unwrap_or(frame_cpu_ms.max(0.0));
         self.last_frame_cpu_ms = measured_frame_cpu_ms;
+        if self.scene_rendered_this_frame {
+            let presented_at_seconds = presented_at_seconds
+                .max(self.last_viewport_present_seconds)
+                .max(0.0);
+            let interval = presented_at_seconds - self.last_viewport_present_seconds;
+            if self.last_viewport_present_seconds > 0.0
+                && interval.is_finite()
+                && interval > 0.0001
+                && interval <= 0.5
+            {
+                let sample_fps = (1.0 / interval).clamp(0.0, 10_000.0) as f32;
+                self.viewport_fps = if self.viewport_fps <= f32::EPSILON {
+                    sample_fps
+                } else {
+                    self.viewport_fps * 0.85 + sample_fps * 0.15
+                };
+            } else if interval > 0.5 {
+                self.viewport_fps = 0.0;
+            }
+            self.last_viewport_present_seconds = presented_at_seconds;
+        }
+        let resolution_cpu_ms =
+            if self.graphics.snapshot().is_gpu_active() && frame_gpu_ms <= f32::EPSILON {
+                // CPU frame time cannot tell whether lowering GPU resolution will
+                // help. Hold quality until ApiGraphicBasic has a real GPU sample
+                // instead of degrading the viewport in response to UI/CPU work.
+                0.0
+            } else {
+                measured_frame_cpu_ms
+            };
         self.dynamic_resolution.update(
             self.graphics.scheduler().budget(),
             permit.activity,
-            measured_frame_cpu_ms,
+            resolution_cpu_ms,
             frame_gpu_ms,
         );
         self.graphics.finish_frame(
@@ -1022,6 +1143,7 @@ impl NativeEditorRuntime {
             presented_at_seconds,
             measured_frame_cpu_ms,
             frame_gpu_ms,
+            total_cpu_ms,
         );
     }
 
@@ -1081,7 +1203,7 @@ mod tests {
 
         assert!(runtime.begin_frame(0.0));
         runtime.finish_input_frame(&input);
-        runtime.finish_frame(0.0, 0.0, 0.0);
+        runtime.finish_frame(0.0, 0.0, 0.0, 0.0);
         assert!(runtime
             .graphics()
             .scheduler()

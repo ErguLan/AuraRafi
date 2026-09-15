@@ -16,10 +16,10 @@ use raf_render::api_graphic_basic::ui_surface::{
 };
 use raf_ui::components::select_trigger;
 use raf_ui::{
-    UiAlign, UiColorPicker, UiEventBinding, UiEventKind, UiFlow, UiLayout, UiNode, UiNodeKind,
-    UiOverflow, UiRange, UiRect, UiScrollAxis, UiSelect, UiSelectOption, UiSizeMode, UiSpacing,
-    UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet,
-    UiSurfaceMaterial, UiTextInput, UiTextOverflow, UiTextStyle, UiToggle,
+    UiAlign, UiColorPicker, UiEventBinding, UiEventKind, UiFlow, UiIconSize, UiJustify, UiLayout,
+    UiNode, UiNodeKind, UiOverflow, UiRange, UiRect, UiScrollAxis, UiSelect, UiSelectOption,
+    UiSizeMode, UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector,
+    UiStyleSheet, UiSurfaceMaterial, UiTextInput, UiTextOverflow, UiTextStyle, UiToggle,
 };
 
 use crate::color_math::rgb_to_hsv;
@@ -151,8 +151,8 @@ pub fn build_inspector_surface_with_unit(
         .with_class("inspector-root")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 6.0,
-            padding: UiSpacing::same(8.0),
+            gap: 4.0,
+            padding: UiSpacing::same(6.0),
             overflow: UiOverflow::Clip,
             ..UiLayout::fill(UiFlow::Column)
         })
@@ -181,7 +181,7 @@ fn header(palette: StudioUiPalette) -> UiNode {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
             gap: 6.0,
-            ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
+            ..UiLayout::fixed(0.0, 26.0).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
             UiNode::new("inspector.header.icon", UiNodeKind::Label)
@@ -211,13 +211,17 @@ fn tabs(palette: StudioUiPalette, active: InspectorTab) -> UiNode {
         .with_class("inspector-tabs")
         .with_layout(UiLayout {
             flow: UiFlow::Row,
-            gap: 4.0,
-            ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
+            align_items: UiAlign::Center,
+            gap: 2.0,
+            padding: UiSpacing::same(2.0),
+            ..UiLayout::fixed(0.0, 22.0).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(tab_button(
             palette,
             "inspector.properties-tab",
             "app.properties",
+            UiIconId::Settings,
+            "electronics.tooltip.inspector.properties",
             "inspector.tab:properties",
             active == InspectorTab::Properties,
         ))
@@ -225,6 +229,8 @@ fn tabs(palette: StudioUiPalette, active: InspectorTab) -> UiNode {
             palette,
             "inspector.sessions-tab",
             "app.sessions",
+            UiIconId::Scene,
+            "electronics.tooltip.inspector.sessions",
             "inspector.tab:sessions",
             active == InspectorTab::Sessions,
         ))
@@ -234,6 +240,8 @@ fn tab_button(
     palette: StudioUiPalette,
     id: &str,
     text_key: &str,
+    icon: UiIconId,
+    tooltip_key: &str,
     command: &str,
     active: bool,
 ) -> UiNode {
@@ -244,19 +252,82 @@ fn tab_button(
             "inspector-tab"
         })
         .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            justify_content: UiJustify::Center,
+            gap: 4.0,
             grow: 1.0,
-            min_size: [88.0, 28.0],
-            padding: UiSpacing::xy(8.0, 0.0),
-            ..UiLayout::fixed(0.0, 28.0)
+            min_size: [64.0, 20.0],
+            padding: UiSpacing::xy(6.0, 0.0),
+            ..UiLayout::fixed(0.0, 20.0)
         })
+        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
         .with_text_key(text_key)
         .with_text_style(UiTextStyle::button(if active {
             palette.tokens().text
         } else {
             palette.tokens().text_muted
         }))
+        .with_tooltip_key(tooltip_key)
         .focusable()
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
+}
+
+fn session_context_bar(palette: StudioUiPalette, sessions: &ProjectSessionRegistry) -> UiNode {
+    let tokens = palette.tokens();
+    let active_name = sessions
+        .sessions
+        .iter()
+        .find(|session| session.id == sessions.active_session)
+        .map(|session| session.name.clone())
+        .unwrap_or_default();
+    let count = sessions.sessions.len();
+    UiNode::new("inspector.session.context", UiNodeKind::Toolbar)
+        .with_class("inspector-session-context")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 6.0,
+            padding: UiSpacing::xy(6.0, 2.0),
+            ..UiLayout::fixed(0.0, 24.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new("inspector.session.context.icon", UiNodeKind::Label)
+                .with_icon(
+                    UiIcon::new(UiIconId::Scene)
+                        .with_size(UiIconSize::Small)
+                        .with_tint(tokens.accent),
+                )
+                .with_layout(UiLayout::fixed(16.0, 16.0)),
+        )
+        .with_child(
+            UiNode::new("inspector.session.context.name", UiNodeKind::Label)
+                .with_text_value(active_name)
+                .with_text_style(UiTextStyle::button(tokens.text))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fit_content()
+                }),
+        )
+        .with_child(
+            UiNode::new("inspector.session.context.count", UiNodeKind::Label)
+                .with_text_value(format!("{count}"))
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(
+            UiNode::new("inspector.session.context.manage", UiNodeKind::Button)
+                .with_class("inspector-session-manage")
+                .with_layout(UiLayout::fixed(64.0, 20.0))
+                .with_text_key("app.sessions")
+                .with_text_style(UiTextStyle::button(tokens.text_muted))
+                .with_tooltip_key("electronics.tooltip.inspector.sessions")
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    "inspector.tab:sessions",
+                )),
+        )
 }
 
 fn content(
@@ -272,17 +343,26 @@ fn content(
     }
     let tokens = palette.tokens();
     let Some(id) = selected.filter(|id| scene.is_valid_node(*id)) else {
-        return UiNode::new("inspector.empty", UiNodeKind::Panel)
-            .with_class("inspector-empty")
+        return UiNode::new("inspector.empty.wrap", UiNodeKind::Panel)
             .with_layout(UiLayout {
                 flow: UiFlow::Column,
-                align_items: UiAlign::Center,
-                justify_content: raf_ui::UiJustify::Center,
-                gap: 8.0,
-                padding: UiSpacing::same(16.0),
+                gap: 6.0,
                 grow: 1.0,
                 ..UiLayout::fill(UiFlow::Column)
             })
+            .with_child(session_context_bar(palette, sessions))
+            .with_child(
+                UiNode::new("inspector.empty", UiNodeKind::Panel)
+                    .with_class("inspector-empty")
+                    .with_layout(UiLayout {
+                        flow: UiFlow::Column,
+                        align_items: UiAlign::Center,
+                        justify_content: raf_ui::UiJustify::Center,
+                        gap: 6.0,
+                        padding: UiSpacing::same(12.0),
+                        grow: 1.0,
+                        ..UiLayout::fill(UiFlow::Column)
+                    })
             .with_child(
                 UiNode::new("inspector.empty.icon", UiNodeKind::Label)
                     .with_icon(
@@ -303,23 +383,25 @@ fn content(
                     .with_text_key("app.inspector_empty_hint")
                     .with_text_style(UiTextStyle::body(tokens.text_muted))
                     .with_layout(UiLayout::fit_content()),
-            );
+            ));
     };
     let node = scene.get(id).expect("selected node was validated");
     let mut scroll =
         UiNode::scroll_view("inspector.scroll", UiScrollAxis::Vertical).with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 8.0,
+            gap: 6.0,
             grow: 1.0,
             padding: UiSpacing {
                 left: 2.0,
-                right: 5.0,
+                right: 4.0,
                 top: 2.0,
-                bottom: 18.0,
+                bottom: 12.0,
             },
             overflow: UiOverflow::ScrollY,
             ..UiLayout::fill(UiFlow::Column)
         });
+
+    scroll = scroll.with_child(session_context_bar(palette, sessions));
 
     scroll = scroll.with_child(section_title(
         palette,
@@ -342,8 +424,8 @@ fn content(
             )
             .with_class("inspector-input")
             .with_layout(UiLayout {
-                min_size: [120.0, 30.0],
-                ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
+                min_size: [100.0, 26.0],
+                ..UiLayout::fixed(0.0, 26.0).with_width_mode(UiSizeMode::Fill)
             }),
         );
         scroll = scroll
@@ -475,11 +557,11 @@ pub(crate) fn sessions_content(
         .with_class("inspector-session-list")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 6.0,
+            gap: 4.0,
             grow: 1.0,
             padding: UiSpacing {
                 left: 2.0,
-                right: 5.0,
+                right: 4.0,
                 top: 0.0,
                 bottom: 4.0,
             },
@@ -491,11 +573,12 @@ pub(crate) fn sessions_content(
         list = list.with_child(session_row(palette, registry, session));
     }
 
+    let count_text = format!(" ({})", registry.sessions.len());
     let controls = UiNode::new("inspector.sessions.controls", UiNodeKind::Panel)
         .with_class("inspector-sessions-controls")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 6.0,
+            gap: 4.0,
             ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
@@ -509,12 +592,18 @@ pub(crate) fn sessions_content(
                 })
                 .with_child(
                     UiNode::new("inspector.sessions.summary.icon", UiNodeKind::Label)
-                        .with_icon(UiIcon::new(UiIconId::Folder))
-                        .with_layout(UiLayout::fixed(18.0, 20.0)),
+                        .with_icon(UiIcon::new(UiIconId::Folder).with_size(UiIconSize::Small))
+                        .with_layout(UiLayout::fixed(16.0, 16.0)),
                 )
                 .with_child(
                     UiNode::new("inspector.sessions.summary.label", UiNodeKind::Label)
                         .with_text_key("app.session_registry")
+                        .with_text_style(UiTextStyle::panel_title(tokens.text))
+                        .with_layout(UiLayout::fit_content()),
+                )
+                .with_child(
+                    UiNode::new("inspector.sessions.summary.count", UiNodeKind::Label)
+                        .with_text_value(count_text)
                         .with_text_style(UiTextStyle::body(tokens.text_muted))
                         .with_layout(UiLayout {
                             grow: 1.0,
@@ -528,8 +617,8 @@ pub(crate) fn sessions_content(
                 .with_layout(UiLayout {
                     flow: UiFlow::Row,
                     align_items: UiAlign::Center,
-                    gap: 6.0,
-                    ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
+                    gap: 4.0,
+                    ..UiLayout::fixed(0.0, 24.0).with_width_mode(UiSizeMode::Fill)
                 })
                 .with_child(
                     UiNode::text_input(
@@ -546,8 +635,8 @@ pub(crate) fn sessions_content(
                     .with_class("inspector-input")
                     .with_layout(UiLayout {
                         grow: 1.0,
-                        min_size: [120.0, 30.0],
-                        ..UiLayout::fixed(0.0, 30.0)
+                        min_size: [80.0, 24.0],
+                        ..UiLayout::fixed(0.0, 24.0)
                     }),
                 )
                 .with_child(session_create_button(palette)),
@@ -568,7 +657,14 @@ pub(crate) fn sessions_content(
 fn session_create_button(palette: StudioUiPalette) -> UiNode {
     UiNode::new("inspector.session.create", UiNodeKind::Button)
         .with_class("inspector-session-create")
-        .with_layout(UiLayout::fixed(124.0, 30.0))
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 4.0,
+            padding: UiSpacing::xy(8.0, 0.0),
+            ..UiLayout::fixed(0.0, 24.0)
+        })
+        .with_icon(UiIcon::new(UiIconId::Add).with_size(UiIconSize::Small))
         .with_text_key("app.session_create")
         .with_text_style(UiTextStyle::button(palette.accent_style().text))
         .focusable()
@@ -578,6 +674,32 @@ fn session_create_button(palette: StudioUiPalette) -> UiNode {
         ))
 }
 
+fn session_icon_action(
+    id: &str,
+    icon: UiIconId,
+    tooltip: &str,
+    command: String,
+    is_delete: bool,
+) -> UiNode {
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class(if is_delete {
+            "inspector-session-delete-btn"
+        } else {
+            "inspector-session-action-btn"
+        })
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            justify_content: UiJustify::Center,
+            ..UiLayout::fixed(24.0, 24.0)
+        })
+        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
+        .with_tooltip_key(tooltip)
+        .with_accessibility_label_key(tooltip)
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
+}
+
 fn session_row(
     palette: StudioUiPalette,
     registry: &ProjectSessionRegistry,
@@ -585,129 +707,121 @@ fn session_row(
 ) -> UiNode {
     let active = registry.active_session == session.id;
     let tokens = palette.tokens();
-    let row = UiNode::new(
-        format!("inspector.session.row.{}", session.id.0),
-        UiNodeKind::Panel,
-    )
-    .with_class(if active {
-        "inspector-session-active"
-    } else {
-        "inspector-session-row"
-    })
-    .with_layout(UiLayout {
-        flow: UiFlow::Column,
-        gap: 4.0,
-        padding: UiSpacing::same(7.0),
-        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-    })
-    .with_child(session_identity(palette, session, active))
-    .with_child(
-        UiNode::new(
-            format!("inspector.session.kind.{}", session.id.0),
-            UiNodeKind::Label,
-        )
-        .with_class("inspector-session-kind")
-        .with_text_key(session_kind_label(session.kind))
-        .with_text_style(UiTextStyle::body(tokens.text_muted))
+    let id = session.id.0;
+
+    let mut row = UiNode::new(format!("inspector.session.row.{}", id), UiNodeKind::Panel)
+        .with_class(if active {
+            "inspector-session-active"
+        } else {
+            "inspector-session-row"
+        })
         .with_layout(UiLayout {
-            padding: UiSpacing {
-                left: 24.0,
-                right: 0.0,
-                top: 0.0,
-                bottom: 0.0,
-            },
-            ..UiLayout::fit_content()
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 4.0,
+            padding: UiSpacing::xy(6.0, 3.0),
+            ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
+        });
+
+    row = row.with_child(
+        UiNode::new(format!("inspector.session.icon.{}", id), UiNodeKind::Label)
+            .with_icon(
+                UiIcon::new(session_kind_icon(session.kind))
+                    .with_size(UiIconSize::Small)
+                    .with_tint(if active {
+                        tokens.accent
+                    } else {
+                        tokens.text_muted
+                    }),
+            )
+            .with_layout(UiLayout::fixed(16.0, 16.0)),
+    );
+
+    row = row.with_child(
+        UiNode::new(format!("inspector.session.name.{}", id), UiNodeKind::Label)
+            .with_text_value(session.name.clone())
+            .with_text_style(UiTextStyle::button(tokens.text))
+            .with_layout(UiLayout::fit_content()),
+    );
+
+    row = row.with_child(
+        UiNode::new(format!("inspector.session.kind.{}", id), UiNodeKind::Label)
+            .with_class("inspector-session-kind-chip")
+            .with_text_key(session_kind_label(session.kind))
+            .with_text_style(UiTextStyle::body(tokens.text_muted))
+            .with_layout(UiLayout {
+                padding: UiSpacing::xy(5.0, 1.0),
+                ..UiLayout::fit_content()
+            }),
+    );
+
+    row = row.with_child(
+        UiNode::new(
+            format!("inspector.session.spacer.{}", id),
+            UiNodeKind::Panel,
+        )
+        .with_layout(UiLayout {
+            grow: 1.0,
+            ..UiLayout::fixed(0.0, 0.0)
         }),
     );
 
-    let id = session.id.0;
+    if active {
+        row = row.with_child(
+            UiNode::new(
+                format!("inspector.session.active.{}", id),
+                UiNodeKind::Label,
+            )
+            .with_class("inspector-session-active-badge")
+            .with_text_key("app.session_active")
+            .with_text_style(UiTextStyle::body(tokens.accent))
+            .with_layout(UiLayout {
+                padding: UiSpacing::xy(6.0, 1.0),
+                ..UiLayout::fit_content()
+            }),
+        );
+    }
+
     let mut actions = UiNode::new(
         format!("inspector.session.actions.{}", id),
         UiNodeKind::Toolbar,
     )
     .with_layout(UiLayout {
         flow: UiFlow::Row,
-        gap: 4.0,
-        ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
-    });
-    actions = actions
-        .with_child(
-            session_action_button(
-                palette,
-                &format!("inspector.session.open.{id}"),
-                "app.session_open",
-                format!("inspector.session.open:{id}"),
-            )
-            .disabled(active),
-        )
-        .with_child(session_action_button(
-            palette,
-            &format!("inspector.session.duplicate.{id}"),
-            "app.session_duplicate",
-            format!("inspector.session.duplicate:{id}"),
-        ))
-        .with_child(
-            session_action_button(
-                palette,
-                &format!("inspector.session.remove.{id}"),
-                "app.session_remove",
-                format!("inspector.session.remove:{id}"),
-            )
-            .disabled(active),
-        );
-    row.with_child(actions)
-}
-
-fn session_identity(
-    palette: StudioUiPalette,
-    session: &raf_core::session::ProjectSession,
-    active: bool,
-) -> UiNode {
-    let tokens = palette.tokens();
-    let mut identity = UiNode::new(
-        format!("inspector.session.identity.{}", session.id.0),
-        UiNodeKind::Toolbar,
-    )
-    .with_class("inspector-session-identity")
-    .with_layout(UiLayout {
-        flow: UiFlow::Row,
         align_items: UiAlign::Center,
-        gap: 6.0,
-        ..UiLayout::fixed(0.0, 22.0).with_width_mode(UiSizeMode::Fill)
-    })
-    .with_child(
-        UiNode::new(
-            format!("inspector.session.icon.{}", session.id.0),
-            UiNodeKind::Label,
-        )
-        .with_icon(UiIcon::new(session_kind_icon(session.kind)))
-        .with_layout(UiLayout::fixed(18.0, 20.0)),
-    )
-    .with_child(
-        UiNode::new(
-            format!("inspector.session.name.{}", session.id.0),
-            UiNodeKind::Label,
-        )
-        .with_text_value(session.name.clone())
-        .with_text_style(UiTextStyle::button(tokens.text))
-        .with_layout(UiLayout {
-            grow: 1.0,
-            ..UiLayout::fit_content()
-        }),
-    );
-    if active {
-        identity = identity.with_child(
-            UiNode::new(
-                format!("inspector.session.active.{}", session.id.0),
-                UiNodeKind::Label,
-            )
-            .with_class("inspector-session-active-label")
-            .with_text_key("app.session_active")
-            .with_text_style(UiTextStyle::button(tokens.accent))
-            .with_layout(UiLayout::fit_content()),
-        );
+        gap: 2.0,
+        ..UiLayout::fit_content()
+    });
+
+    if !active {
+        actions = actions.with_child(session_icon_action(
+            &format!("inspector.session.open.{id}"),
+            UiIconId::Play,
+            "app.session_open",
+            format!("inspector.session.open:{id}"),
+            false,
+        ));
     }
-    identity
+
+    actions = actions.with_child(session_icon_action(
+        &format!("inspector.session.duplicate.{id}"),
+        UiIconId::Add,
+        "app.session_duplicate",
+        format!("inspector.session.duplicate:{id}"),
+        false,
+    ));
+
+    if !active {
+        actions = actions.with_child(session_icon_action(
+            &format!("inspector.session.remove.{id}"),
+            UiIconId::Trash,
+            "app.session_remove",
+            format!("inspector.session.remove:{id}"),
+            true,
+        ));
+    }
+
+    row.with_child(actions)
 }
 
 fn session_kind_icon(kind: ProjectSessionKind) -> UiIconId {
@@ -716,26 +830,6 @@ fn session_kind_icon(kind: ProjectSessionKind) -> UiIconId {
         ProjectSessionKind::Interface => UiIconId::Node,
         ProjectSessionKind::ElectronicsDesign => UiIconId::Schematic,
     }
-}
-
-fn session_action_button(
-    palette: StudioUiPalette,
-    id: &str,
-    text_key: &str,
-    command: String,
-) -> UiNode {
-    UiNode::new(id, UiNodeKind::Button)
-        .with_class("inspector-button")
-        .with_layout(UiLayout {
-            grow: 1.0,
-            min_size: [58.0, 26.0],
-            padding: UiSpacing::xy(6.0, 0.0),
-            ..UiLayout::fixed(0.0, 26.0)
-        })
-        .with_text_key(text_key)
-        .with_text_style(UiTextStyle::button(palette.tokens().text))
-        .focusable()
-        .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
 fn session_kind_label(kind: ProjectSessionKind) -> &'static str {
@@ -959,8 +1053,8 @@ fn status_row(palette: StudioUiPalette, id: SceneNodeId, visible: bool, locked: 
     UiNode::new("inspector.status", UiNodeKind::Toolbar)
         .with_layout(UiLayout {
             flow: UiFlow::Row,
-            gap: 6.0,
-            ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
+            gap: 4.0,
+            ..UiLayout::fixed(0.0, 26.0).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(status_button(
             palette,
@@ -1007,10 +1101,10 @@ fn status_button(
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
             justify_content: raf_ui::UiJustify::Center,
-            gap: 5.0,
+            gap: 4.0,
             grow: 1.0,
-            min_size: [80.0, 30.0],
-            ..UiLayout::fixed(0.0, 30.0)
+            min_size: [72.0, 26.0],
+            ..UiLayout::fixed(0.0, 26.0)
         })
         .with_icon(
             UiIcon::new(icon)
@@ -1966,19 +2060,42 @@ pub(crate) fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 with_alpha(tokens.border, 190),
                 tokens.text,
             ),
-            class_rule("inspector-tabs", [0, 0, 0, 0], [0, 0, 0, 0], tokens.text),
-            class_rule(
-                "inspector-tab",
-                with_alpha(tokens.surface_alt, 170),
-                with_alpha(tokens.border, 150),
-                tokens.text_muted,
-            ),
-            class_rule(
-                "inspector-tab-active",
-                with_alpha(tokens.surface_raised, 238),
-                tokens.accent,
-                tokens.text,
-            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-tabs".to_string()),
+                UiStylePatch {
+                    fill: Some(with_alpha(tokens.surface_alt, 220)),
+                    border: Some(with_alpha(tokens.border, 140)),
+                    border_width: Some(1.0),
+                    radius: Some(4.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-tab".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-tab-active".to_string()),
+                UiStylePatch {
+                    fill: Some(with_alpha(tokens.surface_raised, 245)),
+                    border: Some(with_alpha(tokens.border, 180)),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
             class_rule(
                 "inspector-content",
                 with_alpha(tokens.surface, 220),
@@ -2017,34 +2134,64 @@ pub(crate) fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             ),
             class_rule(
                 "inspector-session-row",
-                with_alpha(tokens.surface_alt, 195),
-                with_alpha(tokens.border, 165),
+                with_alpha(tokens.surface_alt, 175),
+                with_alpha(tokens.border, 130),
                 tokens.text,
             ),
             class_rule(
                 "inspector-session-active",
-                with_alpha(tokens.surface_raised, 238),
-                tokens.accent,
+                with_alpha(tokens.surface_raised, 240),
+                with_alpha(tokens.accent, 160),
                 tokens.text,
             ),
-            class_rule(
-                "inspector-session-identity",
-                [0, 0, 0, 0],
-                [0, 0, 0, 0],
-                tokens.text,
-            ),
-            class_rule(
-                "inspector-session-kind",
-                [0, 0, 0, 0],
-                [0, 0, 0, 0],
-                tokens.text_muted,
-            ),
-            class_rule(
-                "inspector-session-active-label",
-                [0, 0, 0, 0],
-                [0, 0, 0, 0],
-                tokens.accent,
-            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-kind-chip".to_string()),
+                UiStylePatch {
+                    fill: Some(with_alpha(tokens.surface_alt, 210)),
+                    border: Some(with_alpha(tokens.border, 110)),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-active-badge".to_string()),
+                UiStylePatch {
+                    fill: Some(with_alpha(tokens.accent, 25)),
+                    border: Some(with_alpha(tokens.accent, 120)),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-action-btn".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-delete-btn".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
             class_rule(
                 "inspector-session-create",
                 palette.accent_style().fill,
@@ -2055,6 +2202,12 @@ pub(crate) fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 "inspector-input",
                 with_alpha(tokens.surface_alt, 205),
                 with_alpha(tokens.border, 180),
+                tokens.text,
+            ),
+            class_rule(
+                "inspector-session-context",
+                with_alpha(tokens.surface_alt, 190),
+                with_alpha(tokens.border, 150),
                 tokens.text,
             ),
             class_rule(
@@ -2186,12 +2339,40 @@ pub(crate) fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             UiStyleRule::new(
                 UiStyleSelector::Class("inspector-tab".to_string()),
                 UiStylePatch {
-                    fill: Some(with_alpha(tokens.surface_raised, 205)),
-                    border: Some(tokens.border),
+                    fill: Some(with_alpha(tokens.surface_raised, 130)),
+                    text: Some(tokens.text),
                     ..UiStylePatch::default()
                 },
             )
             .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-tab-active".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(with_alpha(tokens.accent, 170)),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-tab".to_string()),
+                UiStylePatch {
+                    border: Some(with_alpha(tokens.accent, 140)),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-tab-active".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
             UiStyleRule::new(
                 UiStyleSelector::Class("inspector-session-create".to_string()),
                 UiStylePatch {
@@ -2201,6 +2382,46 @@ pub(crate) fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 },
             )
             .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-action-btn".to_string()),
+                UiStylePatch {
+                    fill: Some(with_alpha(tokens.surface_raised, 240)),
+                    border: Some(with_alpha(tokens.border, 180)),
+                    border_width: Some(1.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-action-btn".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-delete-btn".to_string()),
+                UiStylePatch {
+                    fill: Some([180, 45, 45, 120]),
+                    border: Some([220, 60, 60, 200]),
+                    border_width: Some(1.0),
+                    text: Some([255, 140, 140, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-delete-btn".to_string()),
+                UiStylePatch {
+                    border: Some([220, 60, 60, 255]),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
             UiStyleRule::new(
                 UiStyleSelector::Class("inspector-button".to_string()),
                 UiStylePatch {
@@ -2236,6 +2457,37 @@ pub(crate) fn inspector_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 },
             )
             .when(UiStyleRuleState::Disabled),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-manage".to_string()),
+                UiStylePatch {
+                    fill: Some(with_alpha(tokens.surface_raised, 200)),
+                    border: Some(with_alpha(tokens.border, 150)),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-manage".to_string()),
+                UiStylePatch {
+                    fill: Some(with_alpha(tokens.surface_raised, 240)),
+                    border: Some(tokens.accent),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("inspector-session-manage".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.focus),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
             UiStyleRule::new(
                 UiStyleSelector::Class("inspector-input".to_string()),
                 UiStylePatch {
@@ -2290,4 +2542,51 @@ fn class_rule(class: &str, fill: [u8; 4], border: [u8; 4], text: [u8; 4]) -> UiS
         },
     )
     .when(UiStyleRuleState::Always)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raf_core::project::ProjectType;
+    use raf_core::scene::SceneGraph;
+
+    fn find_node<'a>(node: &'a UiNode, id: &str) -> Option<&'a UiNode> {
+        if node.id == id {
+            return Some(node);
+        }
+        node.children
+            .iter()
+            .find_map(|candidate| find_node(candidate, id))
+    }
+
+    #[test]
+    fn inspector_properties_shows_compact_session_context() {
+        let scene = SceneGraph::default();
+        let sessions = ProjectSessionRegistry::new(ProjectType::Game);
+        let surface = build_inspector_surface(
+            StudioUiPalette::IndustrialDark,
+            &scene,
+            None,
+            &sessions,
+            1.0,
+            InspectorViewState::default(),
+        );
+
+        let context = find_node(&surface.root, "inspector.session.context")
+            .expect("session context bar should exist in properties");
+        assert!(find_node(context, "inspector.session.context.manage").is_some());
+    }
+
+    #[test]
+    fn inspector_sessions_list_uses_compact_rows() {
+        let sessions = ProjectSessionRegistry::new(ProjectType::Game);
+        let list = sessions_content(StudioUiPalette::IndustrialDark, &sessions);
+        let row = find_node(
+            &list,
+            &format!("inspector.session.row.{}", sessions.active_session.0),
+        )
+        .expect("active session row should exist");
+
+        assert_eq!(row.layout.basis, [0.0, 28.0]);
+    }
 }

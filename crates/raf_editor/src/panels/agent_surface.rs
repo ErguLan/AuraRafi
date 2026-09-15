@@ -454,26 +454,18 @@ fn build_status_strip(
 
     match panel.runtime.status {
         AgentStatus::Done => {}
-        AgentStatus::Thinking => {
-            strip = strip.with_child(status_label(
-                palette,
-                "agent.status.thinking",
-                "app.agent_thinking",
-                UiIconId::Agent,
-            ))
-        }
-        AgentStatus::ExecutingTools => {
-            let status_key = match settings.agent_mode {
-                AgentMode::Inspect => "app.agent_inspecting",
-                AgentMode::Plan => "app.agent_planning",
-                AgentMode::Active => "app.agent_executing_tools",
-            };
-            strip = strip.with_child(status_label(
-                palette,
-                "agent.status.executing",
-                status_key,
-                UiIconId::Node,
-            ))
+        AgentStatus::Thinking | AgentStatus::ExecutingTools => {
+            if let Some(activity) = panel.runtime.activity_snapshot() {
+                strip =
+                    strip.with_child(build_live_activity(palette, settings.language, &activity));
+                if panel.should_show_tool_call_warning() {
+                    strip = strip.with_child(build_tool_call_warning(
+                        palette,
+                        settings.language,
+                        activity.completed_tools,
+                    ));
+                }
+            }
         }
         AgentStatus::AwaitingApproval => {
             let count = panel.runtime.pending_calls.len();
@@ -547,48 +539,219 @@ fn build_status_strip(
         }
     }
 
-    if let Some(task) = panel
-        .runtime
-        .task_snapshot()
-        .filter(|task| !task.status.is_terminal())
-    {
-        let progress = task
-            .progress
-            .total
-            .map(|total| format!("{}/{}", task.progress.completed, total));
-        let stage_key = match task.progress.stage.as_str() {
-            "queued" => "app.agent_task_stage_queued",
-            "running" => "app.agent_task_stage_running",
-            "thinking" => "app.agent_task_stage_thinking",
-            "executing_tools" => "app.agent_task_stage_executing_tools",
-            "waiting_approval" => "app.agent_task_stage_waiting_approval",
-            _ => "app.agent_task_stage_running",
-        };
-        strip = strip.with_child(
-            UiNode::new("agent.task-progress", UiNodeKind::Label)
-                .with_class("agent-task-progress")
-                .with_text_value(match progress {
-                    Some(progress) => format!(
-                        "{}: {} · {}",
-                        t("app.agent_task_progress", settings.language),
-                        progress,
-                        t(stage_key, settings.language)
-                    ),
-                    None => format!(
-                        "{} · {}",
-                        t("app.agent_task_progress", settings.language),
-                        t(stage_key, settings.language)
-                    ),
-                })
-                .with_text_style(UiTextStyle::body(tokens.text_muted))
-                .with_text_overflow(UiTextOverflow::Ellipsis)
-                .with_layout(UiLayout {
-                    padding: UiSpacing::xy(8.0, 3.0),
-                    ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-                }),
-        );
-    }
     strip
+}
+
+fn build_live_activity(
+    palette: StudioUiPalette,
+    language: Language,
+    activity: &raf_ai::agent_runtime::AgentActivitySnapshot,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let tool = activity.current_tool.as_deref();
+    let activity_key = match tool {
+        Some(name) if name.starts_with("assets_") || name == "asset_inspect" => {
+            "app.agent_activity_assets"
+        }
+        Some("viewport_capture") => "app.agent_activity_viewport",
+        Some(name)
+            if name.contains("verify")
+                || name.contains("audit")
+                || name.contains("overlap")
+                || name.contains("spatial") =>
+        {
+            "app.agent_activity_verifying"
+        }
+        Some(name)
+            if name.starts_with("scene_")
+                && !matches!(name, "scene_outline" | "scene_query" | "scene_inspect") =>
+        {
+            "app.agent_activity_building"
+        }
+        Some(_) => "app.agent_activity_inspecting",
+        None if activity.completed_tools > 0 => "app.agent_activity_reviewing",
+        None => "app.agent_activity_thinking",
+    };
+    let icon = match tool {
+        Some(name) if name.starts_with("assets_") || name == "asset_inspect" => UiIconId::Assets,
+        Some("viewport_capture") => UiIconId::Eye,
+        Some(name) if name.contains("verify") || name.contains("audit") => UiIconId::Success,
+        Some(name) if name.starts_with("scene_") => UiIconId::Scene,
+        _ => UiIconId::Agent,
+    };
+    let mut details = Vec::new();
+    if let Some(tool) = tool {
+        details.push(tool.to_string());
+    }
+    if activity.total_tools > 0 {
+        details.push(format!(
+            "{}/{} {}",
+            activity.completed_tools,
+            activity.total_tools,
+            t("app.agent_activity_tools", language)
+        ));
+    } else {
+        details.push(format!(
+            "{} {}",
+            t("app.agent_activity_turn", language),
+            activity.turn.max(1)
+        ));
+    }
+    UiNode::new("agent.live-activity", UiNodeKind::Panel)
+        .with_class("agent-live-activity")
+        .with_accessibility_role(UiAccessibilityRole::Status)
+        .with_accessibility_label_key(activity_key)
+        .with_accessibility_description_key("app.agent_activity_live_hint")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 10.0,
+            padding: UiSpacing::xy(10.0, 7.0),
+            min_size: [0.0, 46.0],
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new("agent.live-activity.icon", UiNodeKind::Label)
+                .with_icon(UiIcon::new(icon).with_size(UiIconSize::Panel))
+                .with_text_value("")
+                .with_layout(UiLayout::fixed(24.0, 24.0)),
+        )
+        .with_child(
+            UiNode::new("agent.live-activity.copy", UiNodeKind::Panel)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Column,
+                    grow: 1.0,
+                    width_mode: UiSizeMode::Fill,
+                    gap: 2.0,
+                    ..UiLayout::fit_content()
+                })
+                .with_child(
+                    UiNode::new("agent.live-activity.title", UiNodeKind::Label)
+                        .with_text_key(activity_key)
+                        .with_text_style(UiTextStyle::body(tokens.text))
+                        .with_text_overflow(UiTextOverflow::Ellipsis)
+                        .with_layout(UiLayout {
+                            width_mode: UiSizeMode::Fill,
+                            ..UiLayout::fit_content()
+                        }),
+                )
+                .with_child(
+                    UiNode::new("agent.live-activity.detail", UiNodeKind::Label)
+                        .with_text_value(details.join("  |  "))
+                        .with_text_style(UiTextStyle::body(tokens.text_muted))
+                        .with_text_overflow(UiTextOverflow::Ellipsis)
+                        .with_layout(UiLayout {
+                            width_mode: UiSizeMode::Fill,
+                            ..UiLayout::fit_content()
+                        }),
+                ),
+        )
+        .with_child(
+            UiNode::new("agent.live-activity.elapsed", UiNodeKind::Label)
+                .with_text_value(format_elapsed(activity.elapsed_seconds))
+                .with_text_style(UiTextStyle::body(tokens.accent_hot))
+                .with_layout(UiLayout::fixed(54.0, 22.0)),
+        )
+}
+
+fn build_tool_call_warning(
+    palette: StudioUiPalette,
+    language: Language,
+    completed_tools: usize,
+) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new("agent.tool-call-warning", UiNodeKind::Panel)
+        .with_class("agent-tool-call-warning")
+        .with_accessibility_role(UiAccessibilityRole::Status)
+        .with_accessibility_label_key("app.agent_tool_call_warning")
+        .with_accessibility_description_key("app.agent_tool_warning_hint")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 6.0,
+            padding: UiSpacing::xy(10.0, 7.0),
+            min_size: [0.0, 62.0],
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(
+            UiNode::new("agent.tool-call-warning.top", UiNodeKind::Toolbar)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Row,
+                    align_items: UiAlign::Center,
+                    gap: 8.0,
+                    ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                })
+                .with_child(
+                    UiNode::new("agent.tool-call-warning.icon", UiNodeKind::Label)
+                        .with_icon(UiIcon::new(UiIconId::Warning).with_size(UiIconSize::Small))
+                        .with_text_value("")
+                        .with_layout(UiLayout::fixed(22.0, 22.0)),
+                )
+                .with_child(
+                    UiNode::new("agent.tool-call-warning.copy", UiNodeKind::Panel)
+                        .with_layout(UiLayout {
+                            flow: UiFlow::Column,
+                            grow: 1.0,
+                            width_mode: UiSizeMode::Fill,
+                            gap: 2.0,
+                            ..UiLayout::fit_content()
+                        })
+                        .with_child(
+                            UiNode::new("agent.tool-call-warning.title", UiNodeKind::Label)
+                                .with_text_value(format!(
+                                    "{} ({completed_tools})",
+                                    t("app.agent_tool_call_warning", language)
+                                ))
+                                .with_text_style(UiTextStyle::body(tokens.warning))
+                                .with_text_overflow(UiTextOverflow::Ellipsis)
+                                .with_layout(UiLayout {
+                                    width_mode: UiSizeMode::Fill,
+                                    ..UiLayout::fit_content()
+                                }),
+                        )
+                        .with_child(
+                            UiNode::new("agent.tool-call-warning.hint", UiNodeKind::Label)
+                                .with_text_key("app.agent_tool_warning_hint")
+                                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                                .with_text_overflow(UiTextOverflow::Wrap)
+                                .with_layout(UiLayout {
+                                    width_mode: UiSizeMode::Fill,
+                                    ..UiLayout::fit_content()
+                                }),
+                        ),
+                )
+                .with_child(icon_button(
+                    "agent.tool-call-warning.dismiss",
+                    UiIconId::Close,
+                    "app.agent_tool_warning_dismiss",
+                    "agent.tool-warning.dismiss",
+                )),
+        )
+        .with_child(
+            UiNode::new("agent.tool-call-warning.actions", UiNodeKind::Toolbar)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Row,
+                    gap: 6.0,
+                    ..UiLayout::fit_content()
+                })
+                .with_child(action_button(
+                    "agent.tool-call-warning.settings",
+                    "app.agent_tool_warning_settings",
+                    "agent.open-settings",
+                    false,
+                ))
+                .with_child(action_button(
+                    "agent.tool-call-warning.stop",
+                    "app.agent_tool_warning_stop",
+                    "agent.stop",
+                    false,
+                )),
+        )
+}
+
+fn format_elapsed(seconds: u64) -> String {
+    let minutes = seconds / 60;
+    let seconds = seconds % 60;
+    format!("{minutes:02}:{seconds:02}")
 }
 
 fn build_history(
@@ -1764,6 +1927,22 @@ fn agent_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 tokens.text_muted,
                 1.0,
                 4.0,
+            ),
+            style(
+                "agent-live-activity",
+                tokens.surface_alt,
+                tokens.accent,
+                tokens.text,
+                1.0,
+                5.0,
+            ),
+            style(
+                "agent-tool-call-warning",
+                tokens.surface_raised,
+                tokens.warning,
+                tokens.text,
+                1.0,
+                5.0,
             ),
             style(
                 "agent-active-warning",

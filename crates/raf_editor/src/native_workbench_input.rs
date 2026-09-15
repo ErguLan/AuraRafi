@@ -6,6 +6,7 @@
 
 use super::*;
 use crate::console::LogLevel;
+use crate::panels::assets_surface::AssetFilter;
 
 impl NativeGameWorkbench {
     pub fn process_input<F>(
@@ -125,7 +126,7 @@ impl NativeGameWorkbench {
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     "assets.search" => {
-                        self.assets_query = value.clone();
+                        self.assets_surface.query = value.clone();
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     "hierarchy.search" | "hierarchy.search.global" => {
@@ -147,11 +148,11 @@ impl NativeGameWorkbench {
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     "assets.file-name" => {
-                        self.assets_file_name = value.clone();
+                        self.assets_surface.file_name = value.clone();
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     "assets.script-name" => {
-                        self.assets_script_name = value.clone();
+                        self.assets_surface.script_name = value.clone();
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     "console.input" => {
@@ -424,9 +425,15 @@ impl NativeGameWorkbench {
                         self.apply_agent_action(action, &mut intents, reset_history);
                         continue;
                     }
+                    if let Some(submenu_id) = name.strip_prefix("application.menu.submenu.open:") {
+                        self.open_submenu = Some(submenu_id.to_string());
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
                     if let Some(menu_id) = name.strip_prefix("application.menu.") {
                         self.open_menu = (self.open_menu.as_deref() != Some(menu_id))
                             .then(|| menu_id.to_string());
+                        self.open_submenu = None;
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
@@ -913,12 +920,13 @@ impl NativeGameWorkbench {
                             continue;
                         }
                         "assets.create-primitive.toggle" => {
-                            self.assets_primitive_menu_open = !self.assets_primitive_menu_open;
+                            self.assets_surface.primitive_menu_open =
+                                !self.assets_surface.primitive_menu_open;
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                             continue;
                         }
                         "assets.create-primitive.cancel" => {
-                            self.assets_primitive_menu_open = false;
+                            self.assets_surface.primitive_menu_open = false;
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                             continue;
                         }
@@ -938,29 +946,35 @@ impl NativeGameWorkbench {
                             continue;
                         }
                         "assets.create-script" => {
-                            self.assets_script_menu_open = true;
-                            self.assets_file_menu_open = false;
+                            self.assets_surface.script_menu_open = true;
+                            self.assets_surface.file_menu_open = false;
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                             continue;
                         }
                         "assets.create-file" => {
-                            self.assets_file_menu_open = true;
-                            self.assets_script_menu_open = false;
+                            self.assets_surface.file_menu_open = true;
+                            self.assets_surface.script_menu_open = false;
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                             continue;
                         }
                         "assets.script.cancel" => {
-                            self.assets_script_menu_open = false;
+                            self.assets_surface.script_menu_open = false;
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                             continue;
                         }
                         "assets.file.cancel" => {
-                            self.assets_file_menu_open = false;
+                            self.assets_surface.file_menu_open = false;
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                             continue;
                         }
                         "assets.refresh" | "assets.open-folder" => {
                             self.project_catalog.refresh();
+                            continue;
+                        }
+                        "project.open_folder" => {
+                            self.bottom_dock.select("assets");
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                            intents.push(NativeWorkbenchIntent::OpenProjectFolder);
                             continue;
                         }
                         "editor.settings" => {
@@ -1020,7 +1034,7 @@ impl NativeGameWorkbench {
                         _ => {}
                     }
                     if name.starts_with("assets.create-primitive:") {
-                        self.assets_primitive_menu_open = false;
+                        self.assets_surface.primitive_menu_open = false;
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     if name.starts_with("inspector.primitive:")
@@ -1111,7 +1125,7 @@ impl NativeGameWorkbench {
                         continue;
                     }
                     if let Some(filter) = name.strip_prefix("assets.filter.") {
-                        self.assets_filter = match filter {
+                        self.assets_surface.filter = match filter {
                             "images" => AssetFilter::Images,
                             "models" => AssetFilter::Models,
                             "audio" => AssetFilter::Audio,
@@ -1130,21 +1144,21 @@ impl NativeGameWorkbench {
                         continue;
                     }
                     if let Some(language) = name.strip_prefix("assets.script.create:") {
-                        self.assets_script_menu_open = false;
-                        self.assets_refresh_requested = true;
+                        self.assets_surface.script_menu_open = false;
+                        self.assets_surface.refresh_requested = true;
                         intents.push(NativeWorkbenchIntent::Command(format!(
                             "assets.create-script:{language}:{}",
-                            self.assets_script_name.trim()
+                            self.assets_surface.script_name.trim()
                         )));
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
                     if name == "assets.file.create" {
-                        self.assets_file_menu_open = false;
-                        self.assets_refresh_requested = true;
+                        self.assets_surface.file_menu_open = false;
+                        self.assets_surface.refresh_requested = true;
                         intents.push(NativeWorkbenchIntent::Command(format!(
                             "assets.create-file:{}",
-                            self.assets_file_name.trim()
+                            self.assets_surface.file_name.trim()
                         )));
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
@@ -1590,6 +1604,7 @@ impl NativeGameWorkbench {
                 self.restore_search_focus();
             }
             self.open_menu = None;
+            self.open_submenu = None;
             self.hierarchy_renaming = None;
             self.hierarchy_drag = None;
             self.inspector_name_editing = None;
@@ -1597,7 +1612,7 @@ impl NativeGameWorkbench {
             self.hierarchy_primitive_menu_open = false;
             self.hierarchy_menu_target = None;
             self.hierarchy_menu_position = None;
-            self.assets_primitive_menu_open = false;
+            self.assets_surface.primitive_menu_open = false;
             self.toolbar_state.view_menu_open = false;
             self.toolbar_state.shading_menu_open = false;
             self.toolbar_state.primitive_menu_open = false;
@@ -1699,6 +1714,7 @@ impl NativeGameWorkbench {
                 })
         {
             self.open_menu = None;
+            self.open_submenu = None;
             self.hierarchy_menu_target = None;
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
@@ -1758,6 +1774,7 @@ fn parse_agent_action(name: &str, language: raf_core::Language) -> Option<AgentA
         "agent.model.cancel" => AgentAction::CloseAddModel,
         "agent.model.confirm" => AgentAction::AddModel,
         "agent.open-settings" => AgentAction::OpenSettings,
+        "agent.tool-warning.dismiss" => AgentAction::DismissToolCallWarning,
         "agent.submit" => AgentAction::Submit,
         "agent.stop" => AgentAction::Stop,
         "agent.approve" => AgentAction::Approve,

@@ -237,6 +237,10 @@ pub(crate) fn apply_workbench_intents(
                 // Agent settings are copied to the global settings store by
                 // the native application after the workbench input boundary.
             }
+            NativeWorkbenchIntent::OpenProjectFolder => {
+                // The native application opens the platform file manager after
+                // the retained workbench releases its input borrow.
+            }
             NativeWorkbenchIntent::Viewport(action) => {
                 use crate::panels::viewport_toolbar_surface::ViewportToolbarAction;
                 use raf_render::gizmo::GizmoMode;

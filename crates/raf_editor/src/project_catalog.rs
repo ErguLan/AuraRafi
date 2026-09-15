@@ -12,7 +12,7 @@ use std::thread;
 
 use raf_ui::UiIconId;
 
-use crate::panels::editor_bottom_dock_surface::ProjectTreeEntry;
+use crate::panels::project_surface::ProjectTreeEntry;
 
 const MAX_ASSET_ROWS: usize = 2_048;
 const MAX_PROJECT_ROWS: usize = 4_096;
@@ -134,16 +134,23 @@ impl ProjectCatalog {
                         self.error = result.error;
                         self.revision = self.revision.wrapping_add(1);
                         changed = true;
+                        // The sender normally disconnects immediately after
+                        // publishing this one-shot result. Stop polling now so
+                        // that expected disconnect cannot overwrite a valid
+                        // catalog with a false worker failure.
+                        break;
                     }
                 }
                 Err(TryRecvError::Empty) => break,
                 Err(TryRecvError::Disconnected) => {
-                    self.pending = false;
-                    self.error = Some(
-                        "Project catalog worker stopped before publishing results.".to_string(),
-                    );
-                    self.revision = self.revision.wrapping_add(1);
-                    changed = true;
+                    if self.pending {
+                        self.pending = false;
+                        self.error = Some(
+                            "Project catalog worker stopped before publishing results.".to_string(),
+                        );
+                        self.revision = self.revision.wrapping_add(1);
+                        changed = true;
+                    }
                     break;
                 }
             }
@@ -523,5 +530,34 @@ mod tests {
         assert_eq!(project_file_icon("main.ron"), UiIconId::Scene);
         assert_eq!(project_file_icon("icon.png"), UiIconId::Assets);
         assert_eq!(project_file_icon("script.rs"), UiIconId::Node);
+    }
+
+    #[test]
+    fn published_result_is_not_overwritten_by_expected_disconnect() {
+        let root = PathBuf::from("catalog-test");
+        let (sender, receiver) = mpsc::channel();
+        sender
+            .send(CatalogResult {
+                generation: 7,
+                root: root.clone(),
+                assets: vec!["models/shelf.glb".to_string()],
+                project_entries: Vec::new(),
+                import_report: None,
+                error: None,
+            })
+            .unwrap();
+        drop(sender);
+        let mut catalog = ProjectCatalog {
+            active_root: Some(root),
+            generation: 7,
+            receiver: Some(receiver),
+            pending: true,
+            ..ProjectCatalog::default()
+        };
+
+        assert!(catalog.poll());
+        assert_eq!(catalog.assets(), &["models/shelf.glb"]);
+        assert!(catalog.error().is_none());
+        assert!(!catalog.is_pending());
     }
 }

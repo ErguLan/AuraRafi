@@ -317,6 +317,16 @@ pub fn scene_query(
     let primitive = string_arg(args, "primitive")
         .or_else(|| string_arg(args, "kind"))
         .map(|value| value.trim().to_ascii_lowercase());
+    let semantic_role = string_arg(args, "semantic_role")
+        .or_else(|| string_arg(args, "role"))
+        .map(|value| value.trim().to_ascii_lowercase())
+        .filter(|value| !value.is_empty());
+    let requested_tags = string_array_arg(args, "tags")
+        .into_iter()
+        .map(|tag| tag.trim().to_ascii_lowercase())
+        .filter(|tag| !tag.is_empty())
+        .collect::<Vec<_>>();
+    let match_all_tags = bool_arg(args, "match_all_tags", true);
     let selected_only = bool_arg(args, "selected_only", false);
     let include_hidden = bool_arg(args, "include_hidden", true);
     let selected_ids: HashSet<SceneNodeId> = selected.iter().copied().collect();
@@ -345,6 +355,32 @@ pub fn scene_query(
                 primitive_name.as_str()
             };
             if kind != primitive.as_str() && primitive_name != primitive.as_str() {
+                return false;
+            }
+        }
+        if let Some(requested_role) = &semantic_role {
+            let role = node
+                .semantic_role
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase();
+            if role != *requested_role && !role.starts_with(&format!("{requested_role}.")) {
+                return false;
+            }
+        }
+        if !requested_tags.is_empty() {
+            let tags = node
+                .tags
+                .iter()
+                .map(|tag| tag.trim().to_ascii_lowercase())
+                .collect::<HashSet<_>>();
+            let tags_match = if match_all_tags {
+                requested_tags.iter().all(|tag| tags.contains(tag))
+            } else {
+                requested_tags.iter().any(|tag| tags.contains(tag))
+            };
+            if !tags_match {
                 return false;
             }
         }
@@ -402,7 +438,15 @@ pub fn scene_query(
             matching_ids.len(),
             offset,
             limit,
-            json!({"query": query, "primitive": primitive, "selected_only": selected_only, "scope": root.and_then(|id| scene_item_reference(scene, id))}),
+            json!({
+                "query": query,
+                "primitive": primitive,
+                "semantic_role": semantic_role,
+                "tags": requested_tags,
+                "match_all_tags": match_all_tags,
+                "selected_only": selected_only,
+                "scope": root.and_then(|id| scene_item_reference(scene, id))
+            }),
         ),
     );
     if root_target.is_some() && root.is_none() {
@@ -554,6 +598,159 @@ pub fn scene_spatial_map(
         result.warnings.push(format!(
             "Spatial overlap results were capped at {MAX_OVERLAPS} pairs."
         ));
+    }
+    result
+}
+
+/// Return only actionable overlap evidence for a bounded scope. Each pair
+/// includes penetration depth and a deterministic world-space correction for
+/// the second entity, allowing an agent to repair layout without guessing
+/// from a large spatial dump.
+pub fn scene_check_overlaps(
+    scene: &SceneGraph,
+    args: &Value,
+    _selected: &[SceneNodeId],
+) -> AgentObservationResult {
+    let root_target = string_arg(args, "root").or_else(|| string_arg(args, "scope"));
+    let root = root_target.and_then(|target| resolve_target(scene, target));
+    let include_hidden = bool_arg(args, "include_hidden", false);
+    let margin = args
+        .get("margin")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.02)
+        .clamp(0.0, 100.0) as f32;
+    let max_pairs = args
+        .get("max_pairs")
+        .and_then(Value::as_u64)
+        .unwrap_or(64)
+        .clamp(1, 256) as usize;
+    let scoped = if root_target.is_some() && root.is_none() {
+        Vec::new()
+    } else {
+        scoped_ids(scene, root)
+    };
+    let renderable = scoped
+        .into_iter()
+        .filter(|id| {
+            scene.get(*id).is_some_and(|node| {
+                !node.is_folder
+                    && node.primitive != Primitive::Empty
+                    && (include_hidden || node.visible)
+            })
+        })
+        .take(256)
+        .collect::<Vec<_>>();
+    let mut pairs = Vec::new();
+    let mut total_detected = 0usize;
+    for (index, left) in renderable.iter().enumerate() {
+        let Some(left_bounds) = world_bounds(scene, *left) else {
+            continue;
+        };
+        for right in renderable.iter().skip(index + 1) {
+            if is_ancestor(scene, *left, *right) || is_ancestor(scene, *right, *left) {
+                continue;
+            }
+            let Some(right_bounds) = world_bounds(scene, *right) else {
+                continue;
+            };
+            if !aabb_overlaps(left_bounds, right_bounds) {
+                continue;
+            }
+            total_detected = total_detected.saturating_add(1);
+            if pairs.len() >= max_pairs {
+                continue;
+            }
+            let penetration = Vec3::new(
+                left_bounds.1.x.min(right_bounds.1.x) - left_bounds.0.x.max(right_bounds.0.x),
+                left_bounds.1.y.min(right_bounds.1.y) - left_bounds.0.y.max(right_bounds.0.y),
+                left_bounds.1.z.min(right_bounds.1.z) - left_bounds.0.z.max(right_bounds.0.z),
+            );
+            let (axis, depth) = if penetration.x <= penetration.y && penetration.x <= penetration.z
+            {
+                ("x", penetration.x)
+            } else if penetration.y <= penetration.z {
+                ("y", penetration.y)
+            } else {
+                ("z", penetration.z)
+            };
+            let left_center = (left_bounds.0 + left_bounds.1) * 0.5;
+            let right_center = (right_bounds.0 + right_bounds.1) * 0.5;
+            let direction = match axis {
+                "x" if right_center.x < left_center.x => -1.0,
+                "y" if right_center.y < left_center.y => -1.0,
+                "z" if right_center.z < left_center.z => -1.0,
+                _ => 1.0,
+            };
+            let mut offset = Vec3::ZERO;
+            match axis {
+                "x" => offset.x = direction * (depth + margin),
+                "y" => offset.y = direction * (depth + margin),
+                _ => offset.z = direction * (depth + margin),
+            }
+            pairs.push(json!({
+                "a": scene_item_reference(scene, *left),
+                "b": scene_item_reference(scene, *right),
+                "a_bounds": bounds_value(left_bounds),
+                "b_bounds": bounds_value(right_bounds),
+                "penetration": [penetration.x, penetration.y, penetration.z],
+                "smallest_axis": axis,
+                "suggested_world_offset_for_b": [offset.x, offset.y, offset.z],
+                "suggested_snap": {
+                    "target": scene.get(*right).map(|node| format!("entity:{}", node.uuid)),
+                    "snap_to": scene.get(*left).map(|node| format!("entity:{}", node.uuid)),
+                    "axis": axis,
+                    "placement": if direction >= 0.0 { "after" } else { "before" },
+                    "gap": margin
+                }
+            }));
+        }
+    }
+    let truncated = total_detected > pairs.len();
+    let mut result = AgentObservationResult::new(
+        "Scene overlap check",
+        format!(
+            "Checked {} renderable node(s); found {} overlap pair(s).",
+            renderable.len(),
+            total_detected
+        ),
+        json!({
+            "scope": root.and_then(|id| scene_item_reference(scene, id)),
+            "checked": renderable.len(),
+            "overlap_count": total_detected,
+            "pairs": pairs,
+            "truncated": truncated,
+            "max_pairs": max_pairs,
+            "margin": margin,
+            "suggestion": if total_detected > 0 {
+                "Use each pair's suggested_snap with scene_snap, then run this check again."
+            } else {
+                "No overlap repair is needed in this scope."
+            }
+        }),
+    );
+    if root_target.is_some() && root.is_none() {
+        result
+            .warnings
+            .push("The requested overlap scope was not found.".to_string());
+        result.verification = Some(VerificationSummary {
+            status: "failed".to_string(),
+            checks: Vec::new(),
+            failures: vec!["The requested overlap scope was not found.".to_string()],
+        });
+    } else {
+        result.verification = Some(VerificationSummary {
+            status: if total_detected == 0 {
+                "passed"
+            } else {
+                "failed"
+            }
+            .to_string(),
+            checks: vec![format!("{} renderable node(s) checked.", renderable.len())],
+            failures: (total_detected > 0)
+                .then(|| format!("{total_detected} overlap pair(s) require review."))
+                .into_iter()
+                .collect(),
+        });
     }
     result
 }
@@ -1082,6 +1279,127 @@ pub fn assets_catalog(
             .push("The asset catalog is still indexing; results may be incomplete.".to_string());
     }
     result
+}
+
+/// Rank imported assets for an authoring intent without invoking a model or
+/// crawling workspace internals. This remains a transparent filename/type
+/// heuristic and reports its reasons so the Agent can decide whether to use a
+/// real asset or fall back to procedural primitives.
+pub fn assets_recommend(
+    scene: &SceneGraph,
+    assets: &[String],
+    args: &Value,
+    catalog_pending: bool,
+    catalog_error: Option<&str>,
+) -> AgentObservationResult {
+    let intent = string_arg(args, "intent").unwrap_or("").trim();
+    let preferred_kind = string_arg(args, "kind")
+        .map(str::trim)
+        .filter(|kind| !kind.is_empty())
+        .map(str::to_ascii_lowercase);
+    let limit = args
+        .get("limit")
+        .and_then(Value::as_u64)
+        .unwrap_or(8)
+        .clamp(1, 24) as usize;
+    let mut tokens = semantic_tokens(intent);
+    for (source, related) in [
+        ("shelf", &["rack", "cabinet", "display", "estante"][..]),
+        ("estante", &["shelf", "rack", "gondola"][..]),
+        ("store", &["shop", "market", "retail", "tienda"][..]),
+        ("tienda", &["store", "shop", "market", "retail"][..]),
+        ("wall", &["pared", "panel"][..]),
+        ("pared", &["wall", "panel"][..]),
+    ] {
+        if tokens.iter().any(|token| token == source) {
+            tokens.extend(related.iter().map(|value| (*value).to_string()));
+        }
+    }
+    tokens.sort();
+    tokens.dedup();
+    let used = used_assets(scene);
+    let mut ranked = assets
+        .iter()
+        .filter_map(|path| {
+            let normalized = normalize_asset_path(path);
+            let kind = asset_kind(path);
+            let is_used = used.contains(&normalized)
+                || used
+                    .iter()
+                    .any(|source| normalized.ends_with(source) || source.ends_with(&normalized));
+            let mut score = 0i32;
+            let mut reasons = Vec::new();
+            for token in &tokens {
+                if normalized.contains(token) {
+                    score += 10;
+                    reasons.push(format!("name/path matches '{token}'"));
+                }
+            }
+            if preferred_kind
+                .as_deref()
+                .is_some_and(|preferred| preferred == kind)
+            {
+                score += 8;
+                reasons.push(format!("preferred kind '{kind}'"));
+            }
+            if !is_used {
+                score += 1;
+                reasons.push("currently unused".to_string());
+            }
+            (score > 0 || tokens.is_empty()).then(|| {
+                json!({
+                    "path": path,
+                    "name": path.rsplit(['/', '\\']).next().unwrap_or(path),
+                    "kind": kind,
+                    "used": is_used,
+                    "score": score,
+                    "reasons": reasons,
+                    "references": scene_asset_references(scene, path)
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        right["score"]
+            .as_i64()
+            .cmp(&left["score"].as_i64())
+            .then_with(|| left["path"].as_str().cmp(&right["path"].as_str()))
+    });
+    ranked.truncate(limit);
+    let mut result = AgentObservationResult::new(
+        "Asset recommendations",
+        format!(
+            "Recommended {} imported asset(s) for '{}'.",
+            ranked.len(),
+            intent
+        ),
+        json!({
+            "intent": intent,
+            "kind": preferred_kind,
+            "items": ranked,
+            "catalog_pending": catalog_pending,
+            "strategy": "transparent filename, semantic-token and asset-kind ranking"
+        }),
+    );
+    if let Some(error) = catalog_error {
+        result
+            .warnings
+            .push(format!("Asset catalog warning: {error}"));
+    } else if catalog_pending {
+        result.warnings.push(
+            "The asset catalog is still indexing; recommendations may be incomplete.".to_string(),
+        );
+    }
+    result
+}
+
+fn semantic_tokens(value: &str) -> Vec<String> {
+    value
+        .split(|character: char| !character.is_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.chars().count() >= 3)
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 pub fn scripts_catalog(
@@ -2316,6 +2634,26 @@ mod tests {
     }
 
     #[test]
+    fn scene_query_filters_semantic_roles_and_exact_tags() {
+        let mut scene = SceneGraph::new();
+        let shelf = scene.add_root_with_primitive("Shelf", Primitive::Cube);
+        let product = scene.add_root_with_primitive("Product", Primitive::Cube);
+        scene.get_mut(shelf).unwrap().semantic_role = Some("store.shelf".to_string());
+        scene.get_mut(shelf).unwrap().tags = vec!["bodega".to_string(), "fixture".to_string()];
+        scene.get_mut(product).unwrap().semantic_role = Some("store.product".to_string());
+        scene.get_mut(product).unwrap().tags = vec!["bodega".to_string()];
+
+        let result = scene_query(
+            &scene,
+            &json!({"semantic_role":"store.shelf", "tags":["bodega", "fixture"]}),
+            &[],
+        );
+
+        assert_eq!(result.data["total"], 1);
+        assert_eq!(result.data["items"][0]["name"], "Shelf");
+    }
+
+    #[test]
     fn scene_outline_honors_requested_hierarchy_depth() {
         let mut scene = SceneGraph::new();
         let root = scene.add_root_folder("Store");
@@ -2363,6 +2701,20 @@ mod tests {
 
         assert!(result.is_success());
         assert_eq!(result.data["overlaps"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn overlap_check_returns_a_snap_repair_suggestion() {
+        let mut scene = SceneGraph::new();
+        scene.add_root_with_primitive("Shelf A", Primitive::Cube);
+        let second = scene.add_root_with_primitive("Shelf B", Primitive::Cube);
+        scene.get_mut(second).unwrap().position.x = 0.25;
+
+        let result = scene_check_overlaps(&scene, &json!({"margin":0.1}), &[]);
+
+        assert_eq!(result.data["overlap_count"], 1);
+        assert_eq!(result.data["pairs"][0]["smallest_axis"], "x");
+        assert_eq!(result.data["pairs"][0]["suggested_snap"]["axis"], "x");
     }
 
     #[test]
@@ -2457,6 +2809,29 @@ mod tests {
 
         let scripts = scripts_catalog(&scene, &["scripts/store.rhai".to_string()], &json!({}));
         assert_eq!(scripts.data["items"][0]["path"], "scripts/store.rhai");
+    }
+
+    #[test]
+    fn asset_recommendations_explain_semantic_filename_matches() {
+        let scene = SceneGraph::new();
+        let result = assets_recommend(
+            &scene,
+            &[
+                "models/supermarket_shelf.glb".to_string(),
+                "audio/checkout.wav".to_string(),
+            ],
+            &json!({"intent":"estante de supermercado", "kind":"model"}),
+            false,
+            None,
+        );
+
+        assert_eq!(
+            result.data["items"][0]["path"],
+            "models/supermarket_shelf.glb"
+        );
+        assert!(result.data["items"][0]["reasons"]
+            .as_array()
+            .is_some_and(|reasons| !reasons.is_empty()));
     }
 
     #[test]

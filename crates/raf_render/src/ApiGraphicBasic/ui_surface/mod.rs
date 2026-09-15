@@ -30,11 +30,13 @@ pub use cpu_host::{CpuUiSurfaceHost, DirectUiSurfaceCpuFrame};
 pub use cpu_renderer::{UiSurfaceCpuMetrics, UiSurfaceCpuRenderer};
 pub use diagnostics::UiSurfaceDiagnostics;
 pub use direct_host::{DirectUiSurfaceFrame, DirectUiSurfaceHost};
+pub(crate) use gpu_renderer::UiSurfaceGpuSharedResources;
 pub use gpu_renderer::{UiSurfaceGpuMetrics, UiSurfaceGpuRenderer};
 pub use images::{UiSurfaceImageData, UiSurfaceImageStore};
 pub use native_input::NativeUiInputBridge;
 pub use native_window::{
-    NativeGraphicsContext, NativeUiWindowConfig, NativeUiWindowHost, NativeWindowCommandResult,
+    NativeGraphicsContext, NativePresentMode, NativeUiWindowConfig, NativeUiWindowHost,
+    NativeWindowCommandResult,
 };
 pub use presentation::{
     UiSurfaceDrawList, UiSurfaceImageQuad, UiSurfacePaintCommand, UiSurfaceQuad, UiSurfaceStroke,

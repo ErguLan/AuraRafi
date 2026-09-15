@@ -29,8 +29,8 @@ pub fn build_electronics_toolbar_surface(
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
-            gap: 4.0,
-            padding: UiSpacing::xy(7.0, 5.0),
+            gap: 3.0,
+            padding: UiSpacing::xy(6.0, 3.0),
             overflow: UiOverflow::ScrollX,
             ..UiLayout::fixed(0.0, ELECTRONICS_TOOLBAR_HEIGHT).with_width_mode(UiSizeMode::Fill)
         })
@@ -240,6 +240,17 @@ fn button(
     active: bool,
     class: &str,
 ) -> UiNode {
+    let tokens = palette.tokens();
+    let is_mode = class.contains("mode");
+    let icon_tint = if active {
+        if is_mode {
+            [0, 180, 220, 255]
+        } else {
+            tokens.accent
+        }
+    } else {
+        tokens.text_muted
+    };
     UiNode::new(format!("electronics.toolbar.{command}"), UiNodeKind::Button)
         .with_class(class)
         .with_class(if active {
@@ -251,10 +262,10 @@ fn button(
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
             gap: 5.0,
-            padding: UiSpacing::xy(8.0, 4.0),
-            ..UiLayout::fit_content().with_text_safe_area(true)
+            padding: UiSpacing::xy(8.0, 2.0),
+            ..UiLayout::fixed(0.0, 26.0).with_text_safe_area(true)
         })
-        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Toolbar))
+        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small).with_tint(icon_tint))
         .with_text_key(label_key(command))
         .with_text_style(UiTextStyle {
             role: UiTextRole::Button,
@@ -274,11 +285,18 @@ fn button(
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
-fn icon_button(_palette: StudioUiPalette, command: &str, _label: &str, icon: UiIconId) -> UiNode {
+fn icon_button(palette: StudioUiPalette, command: &str, _label: &str, icon: UiIconId) -> UiNode {
+    let tokens = palette.tokens();
+    let is_delete = command.contains("delete");
+    let class = if is_delete {
+        "electronics-icon-button electronics-delete-button"
+    } else {
+        "electronics-icon-button"
+    };
     UiNode::new(format!("electronics.toolbar.{command}"), UiNodeKind::Button)
-        .with_class("electronics-icon-button")
-        .with_layout(UiLayout::fixed(30.0, 30.0))
-        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Toolbar))
+        .with_class(class)
+        .with_layout(UiLayout::fixed(26.0, 26.0))
+        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small).with_tint(tokens.text_muted))
         .with_tooltip_key(tooltip_key(command))
         .with_accessibility_label_key(tooltip_key(command))
         .focusable()
@@ -296,7 +314,9 @@ fn action_icon_button(
 }
 
 fn separator(id: &str) -> UiNode {
-    UiNode::new(id, UiNodeKind::Panel).with_layout(UiLayout::fixed(1.0, 26.0))
+    UiNode::new(id, UiNodeKind::Panel)
+        .with_class("electronics-toolbar-separator")
+        .with_layout(UiLayout::fixed(1.0, 18.0))
 }
 
 fn tooltip_key(command: &str) -> &'static str {
@@ -341,61 +361,34 @@ fn label_key(command: &str) -> &'static str {
 
 fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
     let tokens = palette.tokens();
-    let classes = [
-        (
-            "electronics-toolbar",
-            tokens.surface,
-            tokens.border,
-            tokens.text,
-        ),
-        (
-            "electronics-mode-button",
-            tokens.surface_alt,
-            tokens.border,
-            tokens.text_muted,
-        ),
-        (
-            "electronics-tool-button",
-            tokens.surface_alt,
-            tokens.border,
-            tokens.text_muted,
-        ),
-        (
-            "electronics-toggle-button",
-            tokens.surface_alt,
-            tokens.border,
-            tokens.text_muted,
-        ),
-        (
-            "electronics-icon-button",
-            tokens.surface_alt,
-            tokens.border,
-            tokens.text_muted,
-        ),
-        (
-            "electronics-toolbar-active",
-            tokens.surface_raised,
-            tokens.accent,
-            tokens.text,
-        ),
+    let mut rules = vec![
+        UiStyleRule::new(
+            UiStyleSelector::Class("electronics-toolbar".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface),
+                border: Some(tokens.border),
+                text: Some(tokens.text),
+                border_width: Some(1.0),
+                radius: Some(6.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Always),
+        UiStyleRule::new(
+            UiStyleSelector::Class("electronics-toolbar-separator".to_string()),
+            UiStylePatch {
+                fill: Some([tokens.border[0], tokens.border[1], tokens.border[2], 120]),
+                border: Some([0, 0, 0, 0]),
+                text: Some([0, 0, 0, 0]),
+                border_width: Some(0.0),
+                radius: Some(0.0),
+                opacity: Some(0.65),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Always),
     ];
-    let mut rules = classes
-        .into_iter()
-        .map(|(class, fill, border, text)| {
-            UiStyleRule::new(
-                UiStyleSelector::Class(class.to_string()),
-                UiStylePatch {
-                    fill: Some(fill),
-                    border: Some(border),
-                    text: Some(text),
-                    border_width: Some(1.0),
-                    radius: Some(5.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(UiStyleRuleState::Always)
-        })
-        .collect::<Vec<_>>();
+
     for class in [
         "electronics-mode-button",
         "electronics-tool-button",
@@ -406,15 +399,74 @@ fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             UiStyleRule::new(
                 UiStyleSelector::Class(class.to_string()),
                 UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    text: Some(tokens.text_muted),
+                    border_width: Some(0.0),
+                    radius: Some(4.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+        );
+        rules.push(
+            UiStyleRule::new(
+                UiStyleSelector::Class(class.to_string()),
+                UiStylePatch {
                     fill: Some(tokens.surface_raised),
-                    border: Some(tokens.focus),
+                    border: Some([0, 0, 0, 0]),
                     text: Some(tokens.text),
+                    radius: Some(4.0),
                     ..UiStylePatch::default()
                 },
             )
             .when(UiStyleRuleState::Hovered),
         );
     }
+
+    rules.push(
+        UiStyleRule::new(
+            UiStyleSelector::Class("electronics-toolbar-active".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface_raised),
+                border: Some(tokens.border),
+                text: Some(tokens.text),
+                border_width: Some(1.0),
+                radius: Some(4.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Always),
+    );
+
+    rules.push(
+        UiStyleRule::new(
+            UiStyleSelector::Class("electronics-delete-button".to_string()),
+            UiStylePatch {
+                fill: Some([180, 45, 45, 90]),
+                border: Some([0, 0, 0, 0]),
+                text: Some([255, 200, 200, 255]),
+                radius: Some(4.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Hovered),
+    );
+
+    rules.push(
+        UiStyleRule::new(
+            UiStyleSelector::Class("electronics-icon-button".to_string()),
+            UiStylePatch {
+                fill: Some([0, 0, 0, 0]),
+                border: Some([0, 0, 0, 0]),
+                text: Some(tokens.text_muted),
+                opacity: Some(0.35),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Disabled),
+    );
+
     UiStyleSheet { rules }
 }
 

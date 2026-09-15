@@ -313,12 +313,17 @@ The native input bridge translates wheel input into RafUI's content-offset
 convention. A wheel-down gesture increases the content offset and reveals
 lower content; a wheel-up gesture returns toward the top.
 
+The editor keeps its retained loading surface visible while Hub, workbench,
+and Electronics retained documents are constructed. It is a real startup
+stage, not a minimum cosmetic duration. Compilation that happens before the
+editor process exists remains outside this in-process surface.
+
 The first Hub pass used a temporary bitmap alphabet to prove the atlas path.
 RafUI now rasterizes a bundled vector font into the same bounded alpha atlas,
 so text stays proportional and localized without adding a second widget system
 widgets. The Hub does not continuously request repaint while idle. It asks for
 one follow-up frame only after an interaction changes retained state, avoiding
-an unnecessary present loop in the launcher.
+an unnecessary present loop while the application is static.
 
 ### Active Settings Migration
 

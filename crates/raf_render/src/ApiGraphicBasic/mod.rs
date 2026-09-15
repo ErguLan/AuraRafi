@@ -19,7 +19,7 @@ pub use canvas_presenter::CanvasTargetRect;
 pub use capabilities::{
     GraphicsAdapterPreference, GraphicsBackendId, GraphicsCapabilities, GraphicsMemoryBudget,
 };
-pub use device::SceneFrameCapture;
+pub use device::{SceneFrameCapture, SceneFrameMetrics};
 pub use editor_compositor::{
     EditorCanvasLayer, EditorComposedFrame, EditorCompositorMetrics, EditorUiLayer,
     NativeEditorCompositor,

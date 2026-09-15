@@ -250,7 +250,7 @@ fn empty_context_menu(
             border: tokens.border,
             text: tokens.text,
             border_width: 1.0,
-            radius: 4.0,
+            radius: 6.0,
             opacity: 1.0,
         })
         .focusable()
@@ -289,6 +289,7 @@ fn empty_context_menu(
         false,
     ));
     if can_paste {
+        menu = menu.with_child(menu_separator("hierarchy.empty-context-menu.sep", palette));
         menu = menu.with_child(menu_item(
             palette,
             "hierarchy.empty-context-menu.paste",
@@ -319,14 +320,14 @@ fn empty_primitive_menu(
         .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 5.0,
-            padding: UiSpacing::same(8.0),
+            gap: CONTEXT_MENU_GAP,
+            padding: UiSpacing::same(CONTEXT_MENU_PADDING),
             overflow: UiOverflow::ScrollY,
             ..UiLayout::absolute(authored_rect).with_z_index(230)
         })
         .with_style(UiStyle {
             fill: tokens.surface_raised,
-            border: tokens.accent,
+            border: tokens.border,
             text: tokens.text,
             border_width: 1.0,
             radius: 6.0,
@@ -355,6 +356,29 @@ fn empty_primitive_menu(
     menu
 }
 
+fn menu_separator(id: &str, palette: StudioUiPalette) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new(id, UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            padding: UiSpacing::xy(4.0, 2.0),
+            ..UiLayout::fixed(0.0, 5.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_style(UiStyle::transparent())
+        .with_child(
+            UiNode::new(format!("{id}.line"), UiNodeKind::Panel)
+                .with_layout(UiLayout::fixed(0.0, 1.0).with_width_mode(UiSizeMode::Fill))
+                .with_style(UiStyle {
+                    fill: [tokens.border[0], tokens.border[1], tokens.border[2], 120],
+                    border: [0, 0, 0, 0],
+                    text: [0, 0, 0, 0],
+                    border_width: 0.0,
+                    radius: 0.0,
+                    opacity: 0.7,
+                }),
+        )
+}
+
 fn menu_title(palette: StudioUiPalette, id: &str, text_key: &str, icon: UiIconId) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new(id, UiNodeKind::Toolbar)
@@ -362,7 +386,8 @@ fn menu_title(palette: StudioUiPalette, id: &str, text_key: &str, icon: UiIconId
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
             gap: 7.0,
-            ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
+            padding: UiSpacing::xy(6.0, 0.0),
+            ..UiLayout::fixed(0.0, CONTEXT_MENU_TITLE_HEIGHT).with_width_mode(UiSizeMode::Fill)
         })
         .with_icon(
             UiIcon::new(icon)
@@ -388,8 +413,8 @@ fn menu_item(
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
             gap: 8.0,
-            padding: UiSpacing::xy(9.0, 0.0),
-            ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
+            padding: UiSpacing::xy(8.0, 0.0),
+            ..UiLayout::fixed(0.0, CONTEXT_MENU_BUTTON_HEIGHT).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
             UiNode::new(format!("{id}.icon"), UiNodeKind::Label)
@@ -398,7 +423,7 @@ fn menu_item(
                         .with_size(UiIconSize::Small)
                         .with_tint(tokens.text_muted),
                 )
-                .with_layout(UiLayout::fixed(16.0, 18.0)),
+                .with_layout(UiLayout::fixed(16.0, 16.0)),
         )
         .with_child(
             UiNode::new(format!("{id}.label"), UiNodeKind::Label)
@@ -420,7 +445,7 @@ fn menu_item(
                         .with_size(UiIconSize::Small)
                         .with_tint(tokens.text_muted),
                 )
-                .with_layout(UiLayout::fixed(16.0, 18.0)),
+                .with_layout(UiLayout::fixed(16.0, 16.0)),
         );
     }
     item
@@ -436,13 +461,13 @@ fn primitive_menu_item(
         format!("hierarchy.primitive-option.{}", primitive_slug(primitive)),
         UiNodeKind::Button,
     )
-    .with_class("hierarchy-primitive-option")
+    .with_class("hierarchy-menu-button hierarchy-primitive-option")
     .with_layout(UiLayout {
         flow: UiFlow::Row,
         align_items: UiAlign::Center,
         gap: 8.0,
         padding: UiSpacing::xy(8.0, 0.0),
-        ..UiLayout::fixed(0.0, 31.0).with_width_mode(UiSizeMode::Fill)
+        ..UiLayout::fixed(0.0, CONTEXT_MENU_BUTTON_HEIGHT).with_width_mode(UiSizeMode::Fill)
     })
     .with_child(
         UiNode::new(
@@ -463,7 +488,7 @@ fn primitive_menu_item(
             .with_size(UiIconSize::Small)
             .with_tint(tokens.accent),
         )
-        .with_layout(UiLayout::fixed(16.0, 18.0)),
+        .with_layout(UiLayout::fixed(16.0, 16.0)),
     )
     .with_child(
         UiNode::new(
@@ -519,10 +544,10 @@ fn tabs(palette: StudioUiPalette, compact_tabs: bool, active_tab: &str) -> UiNod
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
-            gap: 0.0,
-            padding: UiSpacing::xy(2.0, 0.0),
+            gap: 2.0,
+            padding: UiSpacing::xy(2.0, 2.0),
             overflow: UiOverflow::Clip,
-            ..UiLayout::fixed(0.0, 25.0).with_width_mode(UiSizeMode::Fill)
+            ..UiLayout::fixed(0.0, 26.0).with_width_mode(UiSizeMode::Fill)
         });
     for (id, key, icon) in [
         ("hierarchy", "app.hierarchy", UiIconId::Scene),
@@ -547,7 +572,7 @@ fn tabs(palette: StudioUiPalette, compact_tabs: bool, active_tab: &str) -> UiNod
             })
             .interactive()
             .with_layout(if compact_tabs {
-                UiLayout::fixed(32.0, 25.0)
+                UiLayout::fixed(32.0, 22.0)
             } else {
                 let width = match id {
                     "hierarchy" => 86.0,
@@ -557,7 +582,7 @@ fn tabs(palette: StudioUiPalette, compact_tabs: bool, active_tab: &str) -> UiNod
                     "search" => 78.0,
                     _ => 80.0,
                 };
-                UiLayout::fixed(width, 25.0).with_text_safe_area(true)
+                UiLayout::fixed(width, 22.0).with_text_safe_area(true)
             })
             .with_icon(
                 UiIcon::new(icon)
@@ -1319,7 +1344,7 @@ fn indent_guide(
             text: tokens.border,
             border_width: 0.0,
             radius: 0.0,
-            opacity: 0.72,
+            opacity: 0.28,
         }),
     )
 }
@@ -1342,12 +1367,31 @@ fn context_menu(
         menu_rect.width,
         menu_rect.height,
     );
-    let title = match label {
-        Some(label) => UiNode::new("hierarchy.context-menu.title", UiNodeKind::Label)
-            .with_text_value(label.to_string()),
-        None => UiNode::new("hierarchy.context-menu.title", UiNodeKind::Label)
-            .with_text_key("app.hierarchy"),
+    let title_icon = if is_folder {
+        UiIconId::Folder
+    } else {
+        UiIconId::Node
     };
+    let mut title_node = UiNode::new("hierarchy.context-menu.title", UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 7.0,
+            padding: UiSpacing::xy(6.0, 0.0),
+            overflow: UiOverflow::Clip,
+            ..UiLayout::fixed(0.0, CONTEXT_MENU_TITLE_HEIGHT).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_icon(
+            UiIcon::new(title_icon)
+                .with_size(UiIconSize::Small)
+                .with_tint(tokens.accent),
+        );
+    title_node = match label {
+        Some(label) => title_node.with_text_value(label.to_string()),
+        None => title_node.with_text_key("app.hierarchy"),
+    };
+    title_node = title_node.with_text_style(UiTextStyle::panel_title(tokens.text));
+
     let mut menu = UiNode::new("hierarchy.context-menu", UiNodeKind::Menu)
         .with_class("hierarchy-context-menu")
         .with_material(UiSurfaceMaterial::TranslucentRaised)
@@ -1360,10 +1404,10 @@ fn context_menu(
         })
         .with_style(UiStyle {
             fill: tokens.surface_raised,
-            border: tokens.accent,
+            border: tokens.border,
             text: tokens.text,
             border_width: 1.0,
-            radius: 4.0,
+            radius: 6.0,
             opacity: 1.0,
         })
         .focusable()
@@ -1372,90 +1416,145 @@ fn context_menu(
             "hierarchy.menu.close",
         ))
         .with_accessibility_label_key("app.hierarchy")
-        .with_child(
-            title
-                .with_text_style(UiTextStyle::panel_title(tokens.text))
-                .with_layout(UiLayout {
-                    overflow: UiOverflow::Clip,
-                    ..UiLayout::fixed(0.0, CONTEXT_MENU_TITLE_HEIGHT)
-                        .with_width_mode(UiSizeMode::Fill)
-                }),
-        );
-    for (suffix, label, command) in [
-        (
-            "rename",
-            "app.rename",
-            format!("hierarchy.rename.begin:{id}"),
-        ),
-        (
-            "duplicate",
-            "app.duplicate_menu",
-            format!("hierarchy.duplicate:{id}"),
-        ),
-        ("copy", "app.copy_menu", format!("hierarchy.copy:{id}")),
-        (
-            "expand",
-            "app.expand_menu",
-            format!("hierarchy.expand-recursive:{id}"),
-        ),
-        (
-            "collapse",
-            "app.collapse_menu",
-            format!("hierarchy.collapse-recursive:{id}"),
-        ),
-        (
-            "select-children",
-            "app.select_children_menu",
-            format!("hierarchy.select-children:{id}"),
-        ),
-        (
-            "folder",
-            "app.add_folder",
-            format!("hierarchy.create-folder:{id}"),
-        ),
-        (
-            "entity",
-            "app.create_entity",
-            format!("hierarchy.create-entity:{id}"),
-        ),
-        ("focus", "app.focus_entity", format!("hierarchy.focus:{id}")),
-        (
-            "root",
-            "app.move_to_root",
-            format!("hierarchy.reparent-root:{id}"),
-        ),
-        (
-            "delete",
-            "app.delete_menu",
-            format!("hierarchy.delete:{id}"),
-        ),
-    ] {
-        menu = menu.with_child(small_button(
-            &format!("hierarchy.context-menu.{suffix}"),
-            label,
-            command,
-        ));
-    }
-    menu = menu.with_child(
-        small_button(
-            "hierarchy.context-menu.paste",
-            "app.paste_menu",
-            format!("hierarchy.paste:{id}"),
-        )
-        .disabled(!can_paste),
-    );
+        .with_child(title_node);
+
+    // Group 1: Edit actions
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.rename",
+        "app.rename",
+        Some(UiIconId::Select),
+        format!("hierarchy.rename.begin:{id}"),
+        false,
+        false,
+    ));
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.duplicate",
+        "app.duplicate_menu",
+        Some(UiIconId::Add),
+        format!("hierarchy.duplicate:{id}"),
+        false,
+        false,
+    ));
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.copy",
+        "app.copy_menu",
+        None,
+        format!("hierarchy.copy:{id}"),
+        false,
+        false,
+    ));
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.paste",
+        "app.paste_menu",
+        None,
+        format!("hierarchy.paste:{id}"),
+        false,
+        !can_paste,
+    ));
+
+    // Separator 1
+    menu = menu.with_child(menu_separator("hierarchy.context-menu.sep1", palette));
+
+    // Group 2: View and Navigation
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.focus",
+        "app.focus_entity",
+        Some(UiIconId::Focus),
+        format!("hierarchy.focus:{id}"),
+        false,
+        false,
+    ));
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.expand",
+        "app.expand_menu",
+        Some(UiIconId::ChevronDown),
+        format!("hierarchy.expand-recursive:{id}"),
+        false,
+        false,
+    ));
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.collapse",
+        "app.collapse_menu",
+        Some(UiIconId::ChevronRight),
+        format!("hierarchy.collapse-recursive:{id}"),
+        false,
+        false,
+    ));
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.select-children",
+        "app.select_children_menu",
+        Some(UiIconId::Select),
+        format!("hierarchy.select-children:{id}"),
+        false,
+        false,
+    ));
+
+    // Separator 2
+    menu = menu.with_child(menu_separator("hierarchy.context-menu.sep2", palette));
+
+    // Group 3: Structure and Hierarchy
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.entity",
+        "app.create_entity",
+        Some(UiIconId::Entity),
+        format!("hierarchy.create-entity:{id}"),
+        false,
+        false,
+    ));
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.folder",
+        "app.add_folder",
+        Some(UiIconId::Folder),
+        format!("hierarchy.create-folder:{id}"),
+        false,
+        false,
+    ));
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.root",
+        "app.move_to_root",
+        Some(UiIconId::Scene),
+        format!("hierarchy.reparent-root:{id}"),
+        false,
+        false,
+    ));
     if is_folder {
-        menu = menu.with_child(small_button(
+        menu = menu.with_child(context_menu_item(
+            palette,
             "hierarchy.context-menu.ungroup",
             "app.ungroup",
+            Some(UiIconId::Folder),
             format!("hierarchy.ungroup:{id}"),
+            false,
+            false,
         ));
     }
-    menu.with_child(small_button(
-        "hierarchy.context-menu.close",
-        "app.cancel",
-        "hierarchy.menu.close",
-    ))
+
+    // Separator 3
+    menu = menu.with_child(menu_separator("hierarchy.context-menu.sep3", palette));
+
+    // Group 4: Destructive
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.delete",
+        "app.delete_menu",
+        Some(UiIconId::Trash),
+        format!("hierarchy.delete:{id}"),
+        true,
+        false,
+    ));
+
+    menu
 }
 
 fn spacer(id: &str, height: f32) -> UiNode {
@@ -1463,16 +1562,18 @@ fn spacer(id: &str, height: f32) -> UiNode {
         .with_layout(UiLayout::fixed(0.0, height.max(0.0)).with_width_mode(UiSizeMode::Fill))
 }
 
-const CONTEXT_MENU_WIDTH: f32 = 244.0;
+const CONTEXT_MENU_WIDTH: f32 = 236.0;
 const EMPTY_CONTEXT_MENU_WIDTH: f32 = 226.0;
 const EMPTY_PRIMITIVE_MENU_WIDTH: f32 = 220.0;
 const HIERARCHY_ROOT_PADDING: f32 = 4.0;
 const CONTEXT_MENU_MARGIN: f32 = 8.0;
 const CONTEXT_MENU_PADDING: f32 = 6.0;
 const CONTEXT_MENU_GAP: f32 = 2.0;
-const CONTEXT_MENU_TITLE_HEIGHT: f32 = 24.0;
-const CONTEXT_MENU_BUTTON_HEIGHT: f32 = 27.0;
-const CONTEXT_MENU_BASE_BUTTON_COUNT: usize = 13;
+const CONTEXT_MENU_TITLE_HEIGHT: f32 = 26.0;
+const CONTEXT_MENU_BUTTON_HEIGHT: f32 = 26.0;
+const CONTEXT_MENU_BASE_BUTTON_COUNT: usize = 12;
+const CONTEXT_MENU_SEPARATOR_COUNT: usize = 3;
+const CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 5.0;
 
 pub(crate) fn empty_context_menu_rect(
     position: Option<[f32; 2]>,
@@ -1480,9 +1581,15 @@ pub(crate) fn empty_context_menu_rect(
     surface_size: [f32; 2],
 ) -> raf_ui::UiRect {
     let button_count = 3 + usize::from(can_paste);
+    let separator_height = if can_paste {
+        CONTEXT_MENU_SEPARATOR_HEIGHT + CONTEXT_MENU_GAP
+    } else {
+        0.0
+    };
     let natural_height = CONTEXT_MENU_PADDING * 2.0
         + CONTEXT_MENU_TITLE_HEIGHT
-        + button_count as f32 * (CONTEXT_MENU_BUTTON_HEIGHT + CONTEXT_MENU_GAP);
+        + button_count as f32 * (CONTEXT_MENU_BUTTON_HEIGHT + CONTEXT_MENU_GAP)
+        + separator_height;
     let height = bounded_menu_height(natural_height, surface_size[1]);
     let point = position.unwrap_or([CONTEXT_MENU_MARGIN, 130.0]);
     let x = clamp_menu_axis(point[0], surface_size[0].max(0.0), EMPTY_CONTEXT_MENU_WIDTH);
@@ -1501,7 +1608,9 @@ pub(crate) fn empty_primitive_menu_rect(
     } else {
         (main.x - EMPTY_PRIMITIVE_MENU_WIDTH - 6.0).max(CONTEXT_MENU_MARGIN)
     };
-    let natural_height = 38.0 + CREATEABLE_PRIMITIVES.len() as f32 * 36.0;
+    let natural_height = CONTEXT_MENU_PADDING * 2.0
+        + CONTEXT_MENU_TITLE_HEIGHT
+        + CREATEABLE_PRIMITIVES.len() as f32 * (CONTEXT_MENU_BUTTON_HEIGHT + CONTEXT_MENU_GAP);
     let height = bounded_menu_height(natural_height, surface_size[1]);
     let y = clamp_menu_axis(main.y, surface_size[1].max(0.0), height);
     raf_ui::UiRect::new(x, y, EMPTY_PRIMITIVE_MENU_WIDTH, height)
@@ -1515,7 +1624,8 @@ pub(crate) fn context_menu_rect(
     let button_count = CONTEXT_MENU_BASE_BUTTON_COUNT + if is_folder { 1 } else { 0 };
     let natural_height = CONTEXT_MENU_PADDING * 2.0
         + CONTEXT_MENU_TITLE_HEIGHT
-        + button_count as f32 * (CONTEXT_MENU_BUTTON_HEIGHT + CONTEXT_MENU_GAP);
+        + button_count as f32 * (CONTEXT_MENU_BUTTON_HEIGHT + CONTEXT_MENU_GAP)
+        + CONTEXT_MENU_SEPARATOR_COUNT as f32 * (CONTEXT_MENU_SEPARATOR_HEIGHT + CONTEXT_MENU_GAP);
     let viewport_width = surface_size[0].max(0.0);
     let viewport_height = surface_size[1].max(0.0);
     let height = bounded_menu_height(natural_height, viewport_height);
@@ -1571,19 +1681,77 @@ fn box_selection_node(palette: StudioUiPalette, selection: raf_ui::UiRect) -> Ui
         })
 }
 
-fn small_button(id: &str, text_key: &str, command: impl Into<String>) -> UiNode {
-    UiNode::new(id, UiNodeKind::Button)
-        .with_class("hierarchy-menu-button")
+fn context_menu_item(
+    palette: StudioUiPalette,
+    id: &str,
+    text_key: &str,
+    icon: Option<UiIconId>,
+    command: impl Into<String>,
+    danger: bool,
+    disabled: bool,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let class = if danger {
+        "hierarchy-menu-button hierarchy-menu-delete"
+    } else {
+        "hierarchy-menu-button"
+    };
+    let text_color = if disabled {
+        tokens.text_muted
+    } else if danger {
+        [240, 160, 160, 255]
+    } else {
+        [222, 226, 232, 255]
+    };
+    let mut item = UiNode::new(id, UiNodeKind::Button)
+        .with_class(class)
         .with_layout(UiLayout {
-            align_self: Some(UiAlign::Stretch),
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 8.0,
             padding: UiSpacing::xy(8.0, 0.0),
-            ..UiLayout::fixed(0.0, 27.0).with_width_mode(UiSizeMode::Fill)
+            ..UiLayout::fixed(0.0, CONTEXT_MENU_BUTTON_HEIGHT).with_width_mode(UiSizeMode::Fill)
         })
-        .with_text_key(text_key)
         .with_accessibility_label_key(text_key)
-        .with_text_style(UiTextStyle::button([222, 226, 232, 255]))
         .focusable()
-        .with_event(UiEventBinding::command(UiEventKind::Click, command))
+        .disabled(disabled)
+        .with_event(UiEventBinding::command(UiEventKind::Click, command));
+
+    if let Some(icon_id) = icon {
+        let icon_tint = if disabled {
+            tokens.text_muted
+        } else if danger {
+            [220, 110, 110, 255]
+        } else {
+            tokens.text_muted
+        };
+        item = item.with_child(
+            UiNode::new(format!("{id}.icon"), UiNodeKind::Label)
+                .with_icon(
+                    UiIcon::new(icon_id)
+                        .with_size(UiIconSize::Small)
+                        .with_tint(icon_tint),
+                )
+                .with_layout(UiLayout::fixed(16.0, 16.0)),
+        );
+    } else {
+        item = item.with_child(
+            UiNode::new(format!("{id}.icon-spacer"), UiNodeKind::Panel)
+                .with_layout(UiLayout::fixed(16.0, 16.0)),
+        );
+    }
+
+    item = item.with_child(
+        UiNode::new(format!("{id}.label"), UiNodeKind::Label)
+            .with_text_key(text_key)
+            .with_text_style(UiTextStyle::button(text_color))
+            .with_layout(UiLayout {
+                grow: 1.0,
+                ..UiLayout::fit_content().with_text_safe_area(true)
+            }),
+    );
+
+    item
 }
 
 fn icon_button(
@@ -1622,25 +1790,21 @@ fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             tokens.border,
             tokens.text,
         ),
-        class_rule(
-            "hierarchy-tabs",
-            tokens.surface_alt,
-            tokens.border,
-            tokens.text,
-        ),
-        class_rule(
-            "hierarchy-toolbar",
-            tokens.surface,
-            tokens.border,
-            tokens.text,
-        ),
-        class_rule("hierarchy-row", tokens.surface, tokens.border, tokens.text),
-        class_rule(
-            "hierarchy-row-selected",
-            selection_fill,
-            tokens.border,
-            tokens.text,
-        ),
+        UiStyleRule::new(
+            UiStyleSelector::Class("hierarchy-tabs".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface_alt),
+                border: Some(tokens.border),
+                text: Some(tokens.text),
+                border_width: Some(1.0),
+                radius: Some(4.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Always),
+        flat_class_rule("hierarchy-toolbar", tokens.surface, tokens.text),
+        flat_class_rule("hierarchy-row", [0, 0, 0, 0], tokens.text),
+        flat_class_rule("hierarchy-row-selected", selection_fill, tokens.text),
         class_rule(
             "hierarchy-row-drop-target",
             [116, 67, 24, 90],
@@ -1659,18 +1823,8 @@ fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             [0, 0, 0, 0],
             [0, 0, 0, 0],
         ),
-        class_rule(
-            "hierarchy-row-hidden",
-            tokens.surface,
-            tokens.border,
-            tokens.text_muted,
-        ),
-        class_rule(
-            "hierarchy-row-locked",
-            tokens.surface,
-            tokens.border,
-            tokens.text_muted,
-        ),
+        flat_class_rule("hierarchy-row-hidden", [0, 0, 0, 0], tokens.text_muted),
+        flat_class_rule("hierarchy-row-locked", [0, 0, 0, 0], tokens.text_muted),
         class_rule(
             "hierarchy-search",
             tokens.surface_alt,
@@ -1683,42 +1837,27 @@ fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             tokens.border,
             tokens.text_muted,
         ),
-        class_rule(
-            "hierarchy-row-action",
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            tokens.text_muted,
-        ),
-        class_rule(
+        flat_class_rule("hierarchy-row-action", [0, 0, 0, 0], tokens.text_muted),
+        flat_class_rule(
             "hierarchy-row-action-selected",
-            [0, 0, 0, 0],
             [0, 0, 0, 0],
             [255, 247, 232, 255],
         ),
-        class_rule(
-            "hierarchy-expand",
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            tokens.text_muted,
-        ),
-        class_rule(
-            "hierarchy-row-label",
-            [0, 0, 0, 0],
-            [0, 0, 0, 0],
-            tokens.text,
-        ),
-        class_rule(
-            "hierarchy-tab",
-            tokens.surface_alt,
-            tokens.border,
-            tokens.text_muted,
-        ),
-        class_rule(
-            "hierarchy-tab-active",
-            tokens.surface_raised,
-            tokens.accent,
-            tokens.text,
-        ),
+        flat_class_rule("hierarchy-expand", [0, 0, 0, 0], tokens.text_muted),
+        flat_class_rule("hierarchy-row-label", [0, 0, 0, 0], tokens.text),
+        flat_class_rule("hierarchy-tab", [0, 0, 0, 0], tokens.text_muted),
+        UiStyleRule::new(
+            UiStyleSelector::Class("hierarchy-tab-active".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface_raised),
+                border: Some(tokens.border),
+                text: Some(tokens.text),
+                border_width: Some(1.0),
+                radius: Some(3.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Always),
         class_rule(
             "hierarchy-tab-context",
             tokens.surface,
@@ -1770,15 +1909,10 @@ fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
         class_rule(
             "hierarchy-context-menu",
             tokens.surface_raised,
-            tokens.accent,
-            tokens.text,
-        ),
-        class_rule(
-            "hierarchy-menu-button",
-            tokens.surface_alt,
             tokens.border,
             tokens.text,
         ),
+        flat_class_rule("hierarchy-menu-button", [0, 0, 0, 0], tokens.text),
         class_rule(
             "hierarchy-rename-input",
             tokens.surface_alt,
@@ -1804,34 +1938,48 @@ fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             tokens.text,
         ),
     ];
-    rules.push(
+    rules.extend([
         UiStyleRule::new(
-            UiStyleSelector::Class("hierarchy-row-label".to_string()),
+            UiStyleSelector::Class("hierarchy-row".to_string()),
             UiStylePatch {
-                fill: Some(tokens.surface_raised),
-                border: Some(tokens.border),
-                border_width: Some(1.0),
-                radius: Some(2.0),
+                fill: Some(match palette {
+                    StudioUiPalette::IndustrialDark => [255, 255, 255, 12],
+                    StudioUiPalette::PaperLight => [0, 0, 0, 10],
+                }),
+                radius: Some(3.0),
                 ..UiStylePatch::default()
             },
         )
         .when(UiStyleRuleState::Hovered),
-    );
-    rules.extend([
         UiStyleRule::new(
-            UiStyleSelector::Class("hierarchy-row-label".to_string()),
+            UiStyleSelector::Class("hierarchy-row-hidden".to_string()),
             UiStylePatch {
-                border: Some(tokens.focus),
-                border_width: Some(1.0),
+                fill: Some(match palette {
+                    StudioUiPalette::IndustrialDark => [255, 255, 255, 8],
+                    StudioUiPalette::PaperLight => [0, 0, 0, 6],
+                }),
+                radius: Some(3.0),
                 ..UiStylePatch::default()
             },
         )
-        .when(UiStyleRuleState::Focused),
+        .when(UiStyleRuleState::Hovered),
+        UiStyleRule::new(
+            UiStyleSelector::Class("hierarchy-row-locked".to_string()),
+            UiStylePatch {
+                fill: Some(match palette {
+                    StudioUiPalette::IndustrialDark => [255, 255, 255, 8],
+                    StudioUiPalette::PaperLight => [0, 0, 0, 6],
+                }),
+                radius: Some(3.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Hovered),
         UiStyleRule::new(
             UiStyleSelector::Class("hierarchy-icon-button".to_string()),
             UiStylePatch {
                 fill: Some(tokens.surface_raised),
-                border: Some(tokens.focus),
+                border: Some(tokens.border),
                 text: Some(tokens.text),
                 ..UiStylePatch::default()
             },
@@ -1851,8 +1999,20 @@ fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             UiStyleSelector::Class("hierarchy-expand".to_string()),
             UiStylePatch {
                 fill: Some(tokens.surface_raised),
-                border: Some(tokens.focus),
+                border: Some([0, 0, 0, 0]),
                 text: Some(tokens.text),
+                radius: Some(3.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Hovered),
+        UiStyleRule::new(
+            UiStyleSelector::Class("hierarchy-row-action".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface_raised),
+                border: Some([0, 0, 0, 0]),
+                text: Some(tokens.text),
+                radius: Some(3.0),
                 ..UiStylePatch::default()
             },
         )
@@ -1860,9 +2020,13 @@ fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
         UiStyleRule::new(
             UiStyleSelector::Class("hierarchy-tab".to_string()),
             UiStylePatch {
-                fill: Some(tokens.surface_raised),
-                border: Some(tokens.border),
+                fill: Some(match palette {
+                    StudioUiPalette::IndustrialDark => [255, 255, 255, 12],
+                    StudioUiPalette::PaperLight => [0, 0, 0, 8],
+                }),
+                border: Some([0, 0, 0, 0]),
                 text: Some(tokens.text),
+                radius: Some(3.0),
                 ..UiStylePatch::default()
             },
         )
@@ -1871,8 +2035,9 @@ fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             UiStyleSelector::Class("hierarchy-menu-button".to_string()),
             UiStylePatch {
                 fill: Some(tokens.surface_raised),
-                border: Some(tokens.focus),
+                border: Some([0, 0, 0, 0]),
                 text: Some(tokens.text),
+                radius: Some(3.0),
                 ..UiStylePatch::default()
             },
         )
@@ -1880,16 +2045,42 @@ fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
         UiStyleRule::new(
             UiStyleSelector::Class("hierarchy-menu-button".to_string()),
             UiStylePatch {
-                fill: Some(tokens.surface),
-                border: Some(tokens.border),
+                fill: Some([0, 0, 0, 0]),
+                border: Some([0, 0, 0, 0]),
                 text: Some(tokens.text_muted),
-                opacity: Some(0.48),
+                opacity: Some(0.45),
                 ..UiStylePatch::default()
             },
         )
         .when(UiStyleRuleState::Disabled),
+        UiStyleRule::new(
+            UiStyleSelector::Class("hierarchy-menu-delete".to_string()),
+            UiStylePatch {
+                fill: Some([180, 45, 45, 90]),
+                border: Some([0, 0, 0, 0]),
+                text: Some([255, 210, 210, 255]),
+                radius: Some(3.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(UiStyleRuleState::Hovered),
     ]);
     UiStyleSheet { rules }
+}
+
+fn flat_class_rule(class: &str, fill: [u8; 4], text: [u8; 4]) -> UiStyleRule {
+    UiStyleRule::new(
+        UiStyleSelector::Class(class.to_string()),
+        UiStylePatch {
+            fill: Some(fill),
+            border: Some([0, 0, 0, 0]),
+            text: Some(text),
+            border_width: Some(0.0),
+            radius: Some(3.0),
+            ..UiStylePatch::default()
+        },
+    )
+    .when(UiStyleRuleState::Always)
 }
 
 fn class_rule(class: &str, fill: [u8; 4], border: [u8; 4], text: [u8; 4]) -> UiStyleRule {

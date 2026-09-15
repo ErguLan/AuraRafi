@@ -8,9 +8,10 @@ use std::collections::{BTreeSet, HashSet};
 
 use raf_ai::agent_runtime::AgentToolResult;
 use raf_core::agent_context::{
-    asset_inspect as core_asset_inspect, assets_catalog as core_assets_catalog, display_name,
-    display_path, resolve_target as resolve_core_target, scripts_catalog as core_scripts_catalog,
-    world_bounds, AgentObservationResult,
+    asset_inspect as core_asset_inspect, assets_catalog as core_assets_catalog,
+    assets_recommend as core_assets_recommend, display_name, display_path,
+    resolve_target as resolve_core_target, scene_check_overlaps as core_scene_check_overlaps,
+    scripts_catalog as core_scripts_catalog, world_bounds, AgentObservationResult,
 };
 use raf_core::project::{Project, ProjectType};
 use raf_core::scene::graph::{SceneGraph, SceneNode, SceneNodeId};
@@ -169,10 +170,12 @@ impl AgentObservationContext<'_> {
             "scene_outline" => Some(self.scene_outline(arguments)),
             "scene_query" => Some(self.scene_query(arguments)),
             "scene_spatial_map" => Some(self.scene_spatial_map(arguments)),
+            "scene_check_overlaps" => Some(self.scene_check_overlaps(arguments)),
             "scene_design_audit" => Some(self.scene_design_audit(arguments)),
             "scene_inspect" => Some(self.scene_inspect(arguments)),
             "selection_get" => Some(self.selection_get()),
             "assets_catalog" => Some(self.assets_catalog(arguments)),
+            "assets_recommend" => Some(self.assets_recommend(arguments)),
             "asset_inspect" => Some(self.asset_inspect(arguments)),
             "scripts_catalog" => Some(self.scripts_catalog(arguments)),
             "project_health" => Some(self.project_health(arguments)),
@@ -227,6 +230,14 @@ impl AgentObservationContext<'_> {
 
     fn scene_spatial_map(&self, arguments: &Value) -> AgentToolResult {
         observation_to_tool_result(raf_core::agent_context::scene_spatial_map(
+            self.scene,
+            arguments,
+            &self.selection.selected_nodes,
+        ))
+    }
+
+    fn scene_check_overlaps(&self, arguments: &Value) -> AgentToolResult {
+        observation_to_tool_result(core_scene_check_overlaps(
             self.scene,
             arguments,
             &self.selection.selected_nodes,
@@ -303,6 +314,16 @@ impl AgentObservationContext<'_> {
 
     fn assets_catalog(&self, arguments: &Value) -> AgentToolResult {
         observation_to_tool_result(core_assets_catalog(
+            self.scene,
+            self.assets,
+            arguments,
+            self.catalog_pending,
+            self.catalog_error,
+        ))
+    }
+
+    fn assets_recommend(&self, arguments: &Value) -> AgentToolResult {
+        observation_to_tool_result(core_assets_recommend(
             self.scene,
             self.assets,
             arguments,

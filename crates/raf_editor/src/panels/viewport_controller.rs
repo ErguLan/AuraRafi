@@ -269,6 +269,10 @@ impl NativeGameViewportController {
         self.bridge
             .update_camera(self.mode == NativeViewportMode::View2d);
         let view_proj = self.bridge.view_projection(size[0], size[1]);
+        let previous_hover = (
+            self.bridge.highlighted_gizmo_axis(),
+            self.bridge.highlighted_gizmo_scale_sign(),
+        );
 
         if self.edit_mode == NativeViewportEditMode::Object {
             if let Some(pointer) = before_capture.pointer_local {
@@ -302,7 +306,29 @@ impl NativeGameViewportController {
                         size[1],
                     );
                 }
+            } else {
+                // CursorLeft must clear a stale gizmo highlight, but doing so
+                // is still only a one-shot visual invalidation below. A
+                // passive pointer leaving the viewport must never become a
+                // continuous scene redraw source.
+                self.bridge.update_transform_hover(
+                    scene,
+                    None,
+                    &view_proj,
+                    [0.0, 0.0],
+                    size[0],
+                    size[1],
+                );
             }
+        } else {
+            self.bridge.update_transform_hover(
+                scene,
+                None,
+                &view_proj,
+                [0.0, 0.0],
+                size[0],
+                size[1],
+            );
         }
 
         if input.button_pressed(PointerButton::Secondary) {
@@ -391,8 +417,14 @@ impl NativeGameViewportController {
         let camera_transition_was_active = self.bridge.has_camera_transition();
         let camera_transition_active = self.bridge.update_camera_transitions(input.delta_seconds);
         update.camera_motion |= camera_transition_active;
+        let hover_changed = previous_hover.0 != self.bridge.highlighted_gizmo_axis()
+            || (previous_hover.1 - self.bridge.highlighted_gizmo_scale_sign()).abs() > f32::EPSILON;
         update.needs_redraw |= update.scene_changed
             || update.selection_changed
+            // Gizmos are part of the retained scene canvas today, so a real
+            // hover transition needs one refresh. Repeated movement over the
+            // same handle stays cached.
+            || hover_changed
             || routed.requires_continuous_redraw()
             // Keep one final frame queued so the renderer and compass both
             // receive the exact settled orientation.
@@ -1568,5 +1600,25 @@ mod tests {
         assert!((controller.wasd_speed - 2.75).abs() < f32::EPSILON);
         assert!(controller.invert_ws);
         assert!((controller.move_sensitivity - 1.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn passive_cursor_motion_does_not_invalidate_the_viewport() {
+        let mut controller = NativeGameViewportController::default();
+        let mut router = InputRouter::default();
+        let mut scene = SceneGraph::default();
+        let mut input = InputSnapshot::default();
+        input.pointer_position = Some([120.0, 80.0]);
+        input.pointer_delta = [1.0, -1.0];
+
+        let update = controller.process_input(
+            &input,
+            &mut router,
+            ViewportInputRect::new(0.0, 0.0, 800.0, 600.0),
+            &mut scene,
+        );
+
+        assert!(!update.camera_motion);
+        assert!(!update.needs_redraw);
     }
 }

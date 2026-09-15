@@ -8,14 +8,15 @@ use winit::window::{ResizeDirection, Window};
 
 use super::{
     CpuUiSurfaceHost, DirectUiSurfaceFrame, DirectUiSurfaceHost, NativeApplicationMenuAdapter,
-    UiSurface, UiSurfaceCpuMetrics,
+    UiSurface, UiSurfaceCpuMetrics, UiSurfaceGpuSharedResources,
 };
 use crate::api_graphic_basic::cad_surface_host::DirectCadSurfaceHost;
 use crate::api_graphic_basic::canvas_presenter::DirectCanvasPresenter;
 use crate::api_graphic_basic::canvas_presenter::DirectSceneSurfaceHost;
 use crate::api_graphic_basic::capabilities::{GraphicsAdapterPreference, GraphicsMemoryBudget};
 use crate::api_graphic_basic::device::{
-    BasicDevice, BasicDeviceConfig, SceneFrameOutput, SharedGraphicsContext,
+    wgpu_timestamp_features, BasicDevice, BasicDeviceConfig, SceneFrameOutput,
+    SharedGraphicsContext,
 };
 use crate::api_graphic_basic::{
     EditorCanvasLayer, EditorComposedFrame, EditorUiLayer, NativeEditorCompositor,
@@ -32,6 +33,26 @@ pub enum NativeWindowCommandResult {
     ShowSystemMenu,
 }
 
+/// Backend-neutral presentation mode reported to editor diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativePresentMode {
+    Vsync,
+    Immediate,
+    Mailbox,
+    Other,
+}
+
+impl NativePresentMode {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Vsync => "VSync",
+            Self::Immediate => "Immediate",
+            Self::Mailbox => "Mailbox",
+            Self::Other => "Present",
+        }
+    }
+}
+
 /// Opaque graphics construction context exposed to editor hosts.
 ///
 /// The concrete WGPU device and target format stay inside ApiGraphicBasic.
@@ -40,11 +61,18 @@ pub enum NativeWindowCommandResult {
 pub struct NativeGraphicsContext<'a> {
     device: &'a wgpu::Device,
     color_format: wgpu::TextureFormat,
+    ui_shared: &'a Arc<UiSurfaceGpuSharedResources>,
+    memory_budget: GraphicsMemoryBudget,
 }
 
 impl NativeGraphicsContext<'_> {
     pub fn create_ui_host(&self, surface: UiSurface, clear_color: [u8; 4]) -> DirectUiSurfaceHost {
-        DirectUiSurfaceHost::new(surface, self.device, self.color_format, clear_color)
+        DirectUiSurfaceHost::with_shared_and_budget(
+            surface,
+            self.ui_shared.clone(),
+            clear_color,
+            self.memory_budget,
+        )
     }
 
     pub fn create_cad_host(&self, clear_color: [u8; 4]) -> DirectCadSurfaceHost {
@@ -86,6 +114,7 @@ pub struct NativeUiWindowHost {
     queue: Arc<wgpu::Queue>,
     configuration: wgpu::SurfaceConfiguration,
     host_config: NativeUiWindowConfig,
+    ui_shared: Arc<UiSurfaceGpuSharedResources>,
 }
 
 impl NativeUiWindowHost {
@@ -117,11 +146,17 @@ impl NativeUiWindowHost {
             })
             .await
             .ok_or_else(|| "native UI adapter was not found".to_string())?;
+        let timestamp_features = wgpu_timestamp_features();
+        let optional_features = if adapter.features().contains(timestamp_features) {
+            timestamp_features
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label: Some("ApiGraphicBasic.NativeUiDevice"),
-                    required_features: wgpu::Features::empty(),
+                    required_features: optional_features,
                     required_limits: wgpu::Limits::downlevel_defaults(),
                     memory_hints: match host_config.adapter_preference {
                         GraphicsAdapterPreference::LowPower => wgpu::MemoryHints::MemoryUsage,
@@ -166,6 +201,7 @@ impl NativeUiWindowHost {
             desired_maximum_frame_latency: host_config.desired_maximum_frame_latency.clamp(1, 3),
         };
         surface.configure(&device, &configuration);
+        let ui_shared = Arc::new(UiSurfaceGpuSharedResources::new(&device, format));
 
         Ok(Self {
             window,
@@ -176,6 +212,7 @@ impl NativeUiWindowHost {
             queue: Arc::new(queue),
             configuration,
             host_config,
+            ui_shared,
         })
     }
 
@@ -227,6 +264,8 @@ impl NativeUiWindowHost {
         NativeGraphicsContext {
             device: self.device.as_ref(),
             color_format: self.configuration.format,
+            ui_shared: &self.ui_shared,
+            memory_budget: self.host_config.memory_budget,
         }
     }
 
@@ -254,6 +293,38 @@ impl NativeUiWindowHost {
 
     pub fn height(&self) -> u32 {
         self.configuration.height
+    }
+
+    pub fn presentation_mode(&self) -> NativePresentMode {
+        match self.configuration.present_mode {
+            wgpu::PresentMode::Fifo | wgpu::PresentMode::AutoVsync => NativePresentMode::Vsync,
+            wgpu::PresentMode::Immediate | wgpu::PresentMode::AutoNoVsync => {
+                NativePresentMode::Immediate
+            }
+            wgpu::PresentMode::Mailbox => NativePresentMode::Mailbox,
+            _ => NativePresentMode::Other,
+        }
+    }
+
+    /// Returns the refresh rate of the monitor currently carrying the
+    /// native window. Winit exposes this in milli-Hz; the scheduler only
+    /// needs a conservative whole-Hz cadence.
+    pub fn display_refresh_hz(&self) -> Option<u16> {
+        self.window.current_monitor().and_then(|monitor| {
+            let refresh_millihz = monitor.refresh_rate_millihertz()?;
+            (refresh_millihz > 0).then(|| {
+                ((refresh_millihz.saturating_add(500)) / 1000).clamp(1, u32::from(u16::MAX)) as u16
+            })
+        })
+    }
+
+    /// Returns the presentation cadence that should constrain CPU/GPU work.
+    /// Immediate mode deliberately returns `None`: there is no swapchain
+    /// refresh contract for the scheduler to mirror in that mode.
+    pub fn effective_present_refresh_hz(&self) -> Option<u16> {
+        matches!(self.presentation_mode(), NativePresentMode::Vsync)
+            .then(|| self.display_refresh_hz())
+            .flatten()
     }
 
     /// Applies the editor's VSync preference to the native swapchain. The

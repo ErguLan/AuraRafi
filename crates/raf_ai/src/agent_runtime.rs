@@ -4,6 +4,7 @@
 //! so the UI stays responsive. The caller calls `poll()` each frame to
 //! advance the state machine.
 
+use std::collections::HashSet;
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -179,6 +180,20 @@ pub enum AgentStatus {
     Error,
 }
 
+/// Lightweight live activity projected by native UI, CLI, and MCP clients.
+/// Elapsed time is derived on demand and is not emitted as a task event every
+/// second, keeping the shared lifecycle stream bounded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentActivitySnapshot {
+    pub status: AgentStatus,
+    pub elapsed_seconds: u64,
+    pub current_tool: Option<String>,
+    pub completed_tools: usize,
+    pub pending_tools: usize,
+    pub total_tools: usize,
+    pub turn: usize,
+}
+
 impl AgentStatus {
     /// Whether the agent currently owns the input flow.
     pub fn blocks_input(&self) -> bool {
@@ -231,11 +246,15 @@ pub struct AgentRuntime {
     pub events: Vec<AgentEvent>,
     max_turns: usize,
     turn_count: usize,
-    max_tool_calls: usize,
+    /// Optional per-run tool-call budget. `None` is the user-facing
+    /// unlimited mode; the turn guard still protects the editor from a
+    /// provider that loops forever without producing a final answer.
+    max_tool_calls: Option<usize>,
     tool_calls_executed: usize,
     max_tool_result_chars: usize,
     tool_execution_interval: Duration,
     last_tool_execution: Option<Instant>,
+    run_started_at: Option<Instant>,
     pending: Option<PendingResponse>,
     pending_tool_execution: Option<PendingToolExecution>,
     /// Ephemeral provider context loaded through a native read tool before a
@@ -258,15 +277,16 @@ impl AgentRuntime {
             status: AgentStatus::Done,
             last_error: None,
             events: Vec::new(),
-            max_turns: 16,
+            max_turns: 128,
             turn_count: 0,
-            max_tool_calls: 24,
+            max_tool_calls: None,
             tool_calls_executed: 0,
             max_tool_result_chars: 16 * 1024,
             // Give the editor a presentation frame between consecutive
             // scene/asset mutations requested by the model.
             tool_execution_interval: Duration::from_millis(40),
             last_tool_execution: None,
+            run_started_at: None,
             pending: None,
             pending_tool_execution: None,
             request_context: Vec::new(),
@@ -289,6 +309,7 @@ impl AgentRuntime {
         self.turn_count = 0;
         self.tool_calls_executed = 0;
         self.last_tool_execution = None;
+        self.run_started_at = None;
         self.pending_tool_execution = None;
         self.request_context.clear();
         self.streaming_message_index = None;
@@ -368,23 +389,26 @@ impl AgentRuntime {
         self.turn_count = 0;
         self.tool_calls_executed = 0;
         self.last_tool_execution = None;
+        self.run_started_at = Some(Instant::now());
         self.streaming_message_index = None;
         self.start_task();
+        self.repair_orphaned_tool_call_history();
         self.push_message(ChatMessage::user(&content));
         self.spawn_next_request(tools, execution_mode);
         self.sync_task();
     }
 
-    /// Sets bounded limits for one editor request. These limits make a model's
-    /// plan cooperative with the UI thread and the project's resource budget.
+    /// Sets limits for one editor request. `max_tool_calls = None` keeps the
+    /// tool-call budget unlimited for power users while `max_turns` remains a
+    /// high emergency guard against a provider loop.
     pub fn set_run_limits(
         &mut self,
         max_turns: usize,
-        max_tool_calls: usize,
+        max_tool_calls: Option<usize>,
         max_tool_result_chars: usize,
     ) {
         self.max_turns = max_turns.max(1);
-        self.max_tool_calls = max_tool_calls.max(1);
+        self.max_tool_calls = max_tool_calls.map(|limit| limit.max(1));
         self.max_tool_result_chars = max_tool_result_chars.max(256);
     }
 
@@ -485,18 +509,53 @@ impl AgentRuntime {
                 Some(serde_json::to_value(&tool_calls).unwrap_or_else(|_| serde_json::Value::Null)),
             );
 
-            let remaining_calls = self.max_tool_calls.saturating_sub(self.tool_calls_executed);
-            if tool_calls.len() > remaining_calls {
-                let error = format!(
-                    "The agent requested {} tool calls, but this run has a remaining budget of {}.",
-                    tool_calls.len(),
-                    remaining_calls
-                );
-                self.last_error = Some(error.clone());
-                self.status = AgentStatus::Error;
-                self.push_message(ChatMessage::assistant(&error));
-                self.emit(AgentEvent::StatusChanged(AgentStatus::Error, Some(error)));
-                return AgentStatus::Error;
+            if let Some(max_tool_calls) = self.max_tool_calls {
+                let remaining_calls = max_tool_calls.saturating_sub(self.tool_calls_executed);
+                if tool_calls.len() > remaining_calls {
+                    let error = format!(
+                        "The agent requested {} tool calls, but this run has a remaining budget of {}.",
+                        tool_calls.len(),
+                        remaining_calls
+                    );
+                    let requested_calls = tool_calls.len();
+                    // Keep the provider conversation well-formed even when the
+                    // model proposes a plan larger than the remaining budget.
+                    // An assistant tool-call message must be followed by one
+                    // tool result per call; otherwise a later "continue" sends
+                    // an orphaned tool-call message and providers reject it with
+                    // errors such as "tool call result does not follow tool call".
+                    self.pending_calls = tool_calls
+                        .into_iter()
+                        .map(|call| {
+                            let mut pending = PendingToolCall::new(
+                                call.id,
+                                call.function.name,
+                                Value::Null,
+                            );
+                            pending.result = Some(
+                                serde_json::json!({
+                                    "ok": false,
+                                    "summary": "Tool call rejected because the run budget was exceeded.",
+                                    "error": {
+                                        "code": "tool_call_budget_exceeded",
+                                        "message": error.as_str(),
+                                        "remaining_calls": remaining_calls,
+                                        "requested_calls": requested_calls
+                                    }
+                                })
+                                .to_string(),
+                            );
+                            pending
+                        })
+                        .collect();
+                    self.flush_pending_as_tool_messages();
+                    self.pending_calls.clear();
+                    self.last_error = Some(error.clone());
+                    self.status = AgentStatus::Error;
+                    self.push_message(ChatMessage::assistant(&error));
+                    self.emit(AgentEvent::StatusChanged(AgentStatus::Error, Some(error)));
+                    return AgentStatus::Error;
+                }
             }
 
             let pending: Vec<PendingToolCall> = tool_calls
@@ -633,6 +692,7 @@ impl AgentRuntime {
         self.turn_count = 0;
         self.tool_calls_executed = 0;
         self.last_tool_execution = None;
+        self.run_started_at = None;
         self.streaming_message_index = None;
         self.cancel_active_task();
         self.sync_task_events();
@@ -731,7 +791,16 @@ impl AgentRuntime {
                 let result = if call.approved == Some(false) {
                     "Denied by user.".to_string()
                 } else if let Some(error) = call.argument_error.as_deref() {
-                    format!("Error: {error}")
+                    serde_json::json!({
+                        "ok": false,
+                        "summary": "The provider returned malformed tool arguments.",
+                        "error": {
+                            "code": "invalid_tool_json",
+                            "message": error,
+                            "suggestion": "Retry the tool call with one JSON object that matches the advertised schema."
+                        }
+                    })
+                    .to_string()
                 } else {
                     if execution_mode == ToolExecutionMode::Inspect
                         && executor.kind(&call.name) == AgentToolKind::Mutation
@@ -800,6 +869,86 @@ impl AgentRuntime {
         }
     }
 
+    /// Remove invalid tool-call exchanges retained by older runs.
+    ///
+    /// A provider requires every assistant tool call to be followed by one
+    /// matching tool result. Older runtime versions could persist the
+    /// assistant message before rejecting an oversized plan, leaving a
+    /// conversation that fails again when the user presses Continue. Before a
+    /// new request, preserve valid exchanges and neutralize incomplete ones.
+    fn repair_orphaned_tool_call_history(&mut self) {
+        let original = std::mem::take(&mut self.messages);
+        let mut repaired = Vec::with_capacity(original.len());
+        let mut index = 0;
+        let mut changed = false;
+
+        while index < original.len() {
+            let message = original[index].clone();
+            if message.role == MessageRole::Assistant {
+                if let Some(calls) = message
+                    .tool_calls
+                    .as_ref()
+                    .and_then(|value| serde_json::from_value::<Vec<ToolCall>>(value.clone()).ok())
+                {
+                    let mut following_tools = Vec::new();
+                    while index + 1 + following_tools.len() < original.len()
+                        && original[index + 1 + following_tools.len()].role == MessageRole::Tool
+                    {
+                        following_tools.push(original[index + 1 + following_tools.len()].clone());
+                    }
+
+                    let expected_ids = calls
+                        .iter()
+                        .map(|call| call.id.clone())
+                        .collect::<HashSet<_>>();
+                    let actual_ids = following_tools
+                        .iter()
+                        .filter_map(|tool| {
+                            tool.tool_calls
+                                .as_ref()
+                                .and_then(|value| value.get("tool_call_id"))
+                                .and_then(Value::as_str)
+                                .map(str::to_string)
+                        })
+                        .collect::<HashSet<_>>();
+                    let valid = following_tools.len() == calls.len()
+                        && actual_ids.len() == calls.len()
+                        && actual_ids == expected_ids;
+
+                    if valid {
+                        repaired.push(message);
+                        repaired.extend(following_tools);
+                        index += 1 + calls.len();
+                        continue;
+                    }
+
+                    let mut sanitized = message;
+                    sanitized.tool_calls = None;
+                    repaired.push(sanitized);
+                    index += 1 + following_tools.len();
+                    changed = true;
+                    continue;
+                }
+            }
+
+            if message.role == MessageRole::Tool {
+                changed = true;
+                index += 1;
+                continue;
+            }
+
+            repaired.push(message);
+            index += 1;
+        }
+
+        if changed {
+            self.messages = repaired;
+            self.bump_message_revision();
+        } else {
+            self.messages = original;
+        }
+    }
+
     fn push_message(&mut self, message: ChatMessage) {
         self.messages.push(message.clone());
         self.bump_message_revision();
@@ -832,6 +981,38 @@ impl AgentRuntime {
 
     pub fn task_snapshots(&self) -> Vec<AgentTaskSnapshot> {
         self.task_manager.list()
+    }
+
+    /// Current user-visible work state. Terminal runs return `None` so idle
+    /// editor frames do not keep rebuilding the Agent surface.
+    pub fn activity_snapshot(&self) -> Option<AgentActivitySnapshot> {
+        if !matches!(
+            self.status,
+            AgentStatus::Thinking | AgentStatus::ExecutingTools | AgentStatus::AwaitingApproval
+        ) {
+            return None;
+        }
+        let pending_tools = self
+            .pending_calls
+            .iter()
+            .filter(|call| call.result.is_none())
+            .count();
+        Some(AgentActivitySnapshot {
+            status: self.status.clone(),
+            elapsed_seconds: self
+                .run_started_at
+                .map(|started| started.elapsed().as_secs())
+                .unwrap_or(0),
+            current_tool: self
+                .pending_calls
+                .iter()
+                .find(|call| call.result.is_none())
+                .map(|call| call.name.clone()),
+            completed_tools: self.tool_calls_executed,
+            pending_tools,
+            total_tools: self.tool_calls_executed.saturating_add(pending_tools),
+            turn: self.turn_count,
+        })
     }
 
     fn start_task(&mut self) {
@@ -884,14 +1065,23 @@ impl AgentRuntime {
                             .count(),
                     ) as u32,
                 ),
-                format!(
-                    "{} tool call(s) completed; {} pending.",
-                    self.tool_calls_executed,
-                    self.pending_calls
-                        .iter()
-                        .filter(|call| call.result.is_none())
-                        .count()
-                ),
+                self.pending_calls
+                    .iter()
+                    .find(|call| call.result.is_none())
+                    .map(|call| {
+                        format!(
+                            "Using {}; {} tool call(s) completed, {} pending.",
+                            call.name,
+                            self.tool_calls_executed,
+                            self.pending_calls
+                                .iter()
+                                .filter(|call| call.result.is_none())
+                                .count()
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        format!("{} tool call(s) completed.", self.tool_calls_executed)
+                    }),
             ),
             AgentStatus::AwaitingApproval => (
                 AgentTaskStatus::WaitingApproval,
@@ -1171,6 +1361,27 @@ mod tests {
         assert!(!AgentStatus::Done.blocks_input());
     }
 
+    #[test]
+    fn activity_snapshot_exposes_current_tool_and_progress() {
+        let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+        runtime.status = AgentStatus::ExecutingTools;
+        runtime.run_started_at = Some(Instant::now() - Duration::from_secs(7));
+        runtime.tool_calls_executed = 2;
+        runtime.turn_count = 3;
+        runtime.pending_calls = vec![
+            PendingToolCall::new("current", "scene_build", serde_json::json!({})),
+            PendingToolCall::new("next", "scene_verify", serde_json::json!({})),
+        ];
+
+        let activity = runtime.activity_snapshot().unwrap();
+
+        assert_eq!(activity.current_tool.as_deref(), Some("scene_build"));
+        assert_eq!(activity.completed_tools, 2);
+        assert_eq!(activity.pending_tools, 2);
+        assert_eq!(activity.total_tools, 4);
+        assert!(activity.elapsed_seconds >= 7);
+    }
+
     fn tool_call(id: &str, arguments: &str) -> ToolCall {
         ToolCall {
             id: id.to_string(),
@@ -1196,9 +1407,17 @@ mod tests {
     }
 
     #[test]
+    fn default_tool_call_budget_is_unlimited() {
+        let runtime = AgentRuntime::new(OpenAiConfig::default());
+
+        assert_eq!(runtime.max_tool_calls, None);
+        assert_eq!(runtime.max_turns, 128);
+    }
+
+    #[test]
     fn tool_call_budget_rejects_an_oversized_model_plan() {
         let mut runtime = AgentRuntime::new(OpenAiConfig::default());
-        runtime.set_run_limits(4, 1, 512);
+        runtime.set_run_limits(4, Some(1), 512);
         let message =
             assistant_with_tool_calls("", &[tool_call("first", "{}"), tool_call("second", "{}")]);
 
@@ -1210,6 +1429,50 @@ mod tests {
             .last_error
             .as_deref()
             .is_some_and(|error| error.contains("remaining budget of 1")));
+    }
+
+    #[test]
+    fn oversized_tool_plan_keeps_follow_up_history_provider_valid() {
+        let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+        runtime.set_run_limits(4, Some(1), 512);
+        let message =
+            assistant_with_tool_calls("", &[tool_call("first", "{}"), tool_call("second", "{}")]);
+
+        runtime.handle_assistant_message(message, None, &[], ToolExecutionMode::Inspect);
+
+        let provider_messages = runtime
+            .messages
+            .iter()
+            .map(message_to_openai)
+            .collect::<Vec<_>>();
+        assert_eq!(provider_messages.len(), 4);
+        assert_eq!(provider_messages[0].role, "assistant");
+        assert_eq!(provider_messages[0].tool_calls.as_ref().unwrap().len(), 2);
+        assert_eq!(provider_messages[1].role, "tool");
+        assert_eq!(provider_messages[2].role, "tool");
+        assert_eq!(provider_messages[1].tool_call_id.as_deref(), Some("first"));
+        assert_eq!(provider_messages[2].tool_call_id.as_deref(), Some("second"));
+        assert_eq!(provider_messages[3].role, "assistant");
+        assert!(provider_messages[1]
+            .content
+            .to_string()
+            .contains("tool_call_budget_exceeded"));
+    }
+
+    #[test]
+    fn persisted_orphaned_tool_calls_are_repaired_before_next_run() {
+        let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+        let calls = vec![tool_call("first", "{}"), tool_call("second", "{}")];
+        let mut assistant = ChatMessage::assistant("");
+        assistant.tool_calls = Some(serde_json::to_value(calls).unwrap());
+        runtime.messages = vec![assistant, ChatMessage::assistant("Budget exceeded")];
+
+        runtime.repair_orphaned_tool_call_history();
+
+        assert_eq!(runtime.messages.len(), 2);
+        assert!(runtime.messages[0].tool_calls.is_none());
+        assert_eq!(runtime.messages[1].content, "Budget exceeded");
+        assert!(message_to_openai(&runtime.messages[0]).tool_calls.is_none());
     }
 
     #[test]

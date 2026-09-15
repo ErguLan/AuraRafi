@@ -49,6 +49,7 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         "settings.script_runtime_enabled" => settings.script_runtime_enabled = value,
         "settings.script_hot_reload" => settings.script_hot_reload = value,
         "settings.agent_streaming_enabled" => settings.agent_streaming_enabled = value,
+        "settings.agent_tool_call_limit_enabled" => settings.agent_tool_call_limit_enabled = value,
         "settings.theme.dark" if value => settings.theme = raf_core::config::Theme::Dark,
         "settings.theme.light" if value => settings.theme = raf_core::config::Theme::Light,
         "settings.theme.system" if value => settings.theme = raf_core::config::Theme::System,
@@ -339,6 +340,12 @@ pub(crate) fn apply_settings_range(settings: &mut EngineSettings, key: &str, val
                 raf_core::config::AGENT_MAX_RESPONSE_TOKENS_MAX as f32,
             ) as u32;
         }
+        "settings.agent_max_tool_calls" => {
+            settings.agent_max_tool_calls = value.round().clamp(
+                raf_core::config::AGENT_MAX_TOOL_CALLS_MIN as f32,
+                raf_core::config::AGENT_MAX_TOOL_CALLS_MAX as f32,
+            ) as u32;
+        }
         _ => return false,
     }
     true
@@ -368,6 +375,7 @@ pub(crate) fn is_settings_numeric_text_key(key: &str) -> bool {
             | "settings.scale_sensitivity"
             | "settings.script_timeout_ms"
             | "settings.agent_max_response_tokens"
+            | "settings.agent_max_tool_calls"
     )
 }
 
@@ -481,6 +489,24 @@ mod tests {
             settings.agent_max_response_tokens,
             raf_core::config::AGENT_MAX_RESPONSE_TOKENS_MIN
         );
+        assert!(apply_settings_toggle(
+            &mut settings,
+            "settings.agent_tool_call_limit_enabled",
+            true
+        ));
+        assert!(settings.agent_tool_call_limit_enabled);
+        assert!(apply_settings_range(
+            &mut settings,
+            "settings.agent_max_tool_calls",
+            999_999.0
+        ));
+        assert_eq!(
+            settings.agent_max_tool_calls,
+            raf_core::config::AGENT_MAX_TOOL_CALLS_MAX
+        );
+        assert!(is_settings_numeric_text_key(
+            "settings.agent_max_tool_calls.text"
+        ));
         assert!(!apply_settings_range(
             &mut settings,
             "settings.ui_scale",

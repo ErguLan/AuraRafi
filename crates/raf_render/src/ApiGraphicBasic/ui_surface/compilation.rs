@@ -68,6 +68,7 @@ struct CachedPaint {
     layout_revision: u64,
     paint_revision: u64,
     atlas_revision: u64,
+    draw_list_revision: u64,
     resolved_text: Vec<String>,
     frame: Arc<UiSurfaceFrame>,
     draw_list: Arc<UiSurfaceDrawList>,
@@ -77,6 +78,7 @@ struct CachedPaint {
 pub(super) struct UiSurfaceCompiledFrame {
     pub frame: Arc<UiSurfaceFrame>,
     pub draw_list: Arc<UiSurfaceDrawList>,
+    pub draw_list_revision: u64,
 }
 
 /// Cache owned by a surface host. It is deliberately renderer-agnostic, so
@@ -86,6 +88,7 @@ pub(super) struct UiSurfaceCompilationCache {
     layout: Option<CachedLayout>,
     paint: Option<CachedPaint>,
     next_layout_revision: u64,
+    next_draw_list_revision: u64,
     paint_only_invalidated: bool,
     metrics: UiSurfaceCompileMetrics,
 }
@@ -231,6 +234,7 @@ impl UiSurfaceCompilationCache {
             return UiSurfaceCompiledFrame {
                 frame: Arc::clone(&cached.frame),
                 draw_list: Arc::clone(&cached.draw_list),
+                draw_list_revision: cached.draw_list_revision,
             };
         }
 
@@ -264,6 +268,7 @@ impl UiSurfaceCompilationCache {
             return UiSurfaceCompiledFrame {
                 frame: Arc::clone(&cached.frame),
                 draw_list: Arc::clone(&cached.draw_list),
+                draw_list_revision: cached.draw_list_revision,
             };
         }
         let frame =
@@ -289,13 +294,14 @@ impl UiSurfaceCompilationCache {
             } else {
                 Arc::clone(&cached_frame)
             };
-        let draw_list = if let Some(cached) = self.paint.as_ref().filter(|cached| {
-            cached.layout_revision == layout_revision
-                && cached.paint_revision == paint_revision
-                && cached.atlas_revision == atlas_revision
-                && cached.resolved_text == resolved_text
-        }) {
-            Arc::clone(&cached.draw_list)
+        let (draw_list, draw_list_revision) = if let Some(cached) =
+            self.paint.as_ref().filter(|cached| {
+                cached.layout_revision == layout_revision
+                    && cached.paint_revision == paint_revision
+                    && cached.atlas_revision == atlas_revision
+                    && cached.resolved_text == resolved_text
+            }) {
+            (Arc::clone(&cached.draw_list), cached.draw_list_revision)
         } else {
             session.sync_resolved_text(&frame, &resolved_text);
             let draw_list = Arc::new(UiSurfaceDrawList::build_with_resolved_text_values_at_scale(
@@ -305,18 +311,25 @@ impl UiSurfaceCompilationCache {
                 &resolved_text,
             ));
             self.metrics.paint_builds = self.metrics.paint_builds.saturating_add(1);
+            self.next_draw_list_revision = self.next_draw_list_revision.wrapping_add(1).max(1);
+            let draw_list_revision = self.next_draw_list_revision;
             self.paint = Some(CachedPaint {
                 layout_revision,
                 paint_revision,
                 atlas_revision: session.text_atlas.revision(),
+                draw_list_revision,
                 resolved_text,
                 frame: Arc::clone(&frame),
                 draw_list: Arc::clone(&draw_list),
             });
-            draw_list
+            (draw_list, draw_list_revision)
         };
 
-        UiSurfaceCompiledFrame { frame, draw_list }
+        UiSurfaceCompiledFrame {
+            frame,
+            draw_list,
+            draw_list_revision,
+        }
     }
 }
 

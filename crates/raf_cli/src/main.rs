@@ -626,6 +626,9 @@ impl HeadlessEngine {
                     | "scene.query"
                     | "scene.spatial_map"
                     | "scene.spatial"
+                    | "scene.overlaps"
+                    | "scene.check_overlaps"
+                    | "scene.diff"
                     | "scene.design_audit"
                     | "scene.layout_audit"
                     | "scene.design_check"
@@ -648,6 +651,27 @@ impl HeadlessEngine {
                 "Scene health diagnostics are currently available only for Game projects.",
             );
         }
+        if name == "scene.diff" {
+            let from_revision = request
+                .params
+                .get("from_revision")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| self.ledger.revision().saturating_sub(1));
+            return match self.ledger.diff_since(from_revision) {
+                Ok(data) => self.response(
+                    request.id,
+                    "Scene diff",
+                    vec![format!(
+                        "Scene changes from revision {from_revision} to {}.",
+                        self.ledger.revision()
+                    )],
+                    data,
+                    false,
+                    None,
+                ),
+                Err(error) => self.error(request.id, "Scene diff", error),
+            };
+        }
         let scene = load_project_scene(project);
         let assets = project_asset_paths(&project.path);
         let observation = match name {
@@ -655,6 +679,9 @@ impl HeadlessEngine {
             "scene.query" => agent_context::scene_query(&scene, &request.params, &[]),
             "scene.spatial_map" | "scene.spatial" => {
                 agent_context::scene_spatial_map(&scene, &request.params, &[])
+            }
+            "scene.overlaps" | "scene.check_overlaps" => {
+                agent_context::scene_check_overlaps(&scene, &request.params, &[])
             }
             "scene.design_audit" | "scene.layout_audit" | "scene.design_check" => {
                 agent_context::scene_design_audit(&scene, &request.params, &[])
@@ -666,6 +693,9 @@ impl HeadlessEngine {
             }
             "assets.catalog" | "assets.search" => {
                 agent_context::assets_catalog(&scene, &assets, &request.params, false, None)
+            }
+            "assets.recommend" => {
+                agent_context::assets_recommend(&scene, &assets, &request.params, false, None)
             }
             "scripts.catalog" | "scripts.search" => {
                 agent_context::scripts_catalog(&scene, &assets, &request.params)
@@ -858,6 +888,9 @@ impl CommandEndpoint for HeadlessEngine {
             | "scene.query"
             | "scene.spatial_map"
             | "scene.spatial"
+            | "scene.overlaps"
+            | "scene.check_overlaps"
+            | "scene.diff"
             | "scene.design_audit"
             | "scene.layout_audit"
             | "scene.design_check"
@@ -866,6 +899,7 @@ impl CommandEndpoint for HeadlessEngine {
             | "assets.catalog"
             | "assets.search"
             | "assets.inspect"
+            | "assets.recommend"
             | "scripts.catalog"
             | "scripts.search"
             | "project.health"
@@ -979,10 +1013,13 @@ fn headless_capability_values(catalog: &CapabilityCatalog) -> Vec<Value> {
         "scene.outline",
         "scene.query",
         "scene.spatial_map",
+        "scene.overlaps",
+        "scene.diff",
         "scene.design_audit",
         "scene.inspect",
         "selection.get",
         "assets.catalog",
+        "assets.recommend",
         "assets.inspect",
         "scripts.catalog",
         "project.health",
@@ -2134,6 +2171,8 @@ fn mcp_tool_command(name: &str) -> Option<&'static str> {
         "raf_scene_outline" => Some("scene.outline"),
         "raf_scene_query" => Some("scene.query"),
         "raf_scene_spatial_map" => Some("scene.spatial_map"),
+        "raf_scene_overlaps" => Some("scene.overlaps"),
+        "raf_scene_diff" => Some("scene.diff"),
         "raf_scene_design_audit" => Some("scene.design_audit"),
         "raf_scene_inspect" => Some("scene.inspect"),
         "raf_selection_get" => Some("selection.get"),
@@ -2143,6 +2182,7 @@ fn mcp_tool_command(name: &str) -> Option<&'static str> {
         "raf_task_events" => Some("task.events"),
         "raf_task_cancel" => Some("task.cancel"),
         "raf_assets_search" => Some("assets.catalog"),
+        "raf_assets_recommend" => Some("assets.recommend"),
         "raf_asset_inspect" => Some("assets.inspect"),
         "raf_scripts_search" => Some("scripts.catalog"),
         "raf_project_health" => Some("project.health"),
@@ -2150,6 +2190,10 @@ fn mcp_tool_command(name: &str) -> Option<&'static str> {
         "raf_transaction_undo" => Some("transaction.undo"),
         "raf_scene_create" => Some("game.add"),
         "raf_scene_update" => Some("game.update"),
+        "raf_scene_reparent" => Some("game.reparent"),
+        "raf_scene_duplicate" => Some("game.duplicate"),
+        "raf_scene_snap" => Some("game.snap"),
+        "raf_scene_instantiate_template" => Some("game.generate_prefab"),
         "raf_scene_build" | "raf_scene_apply" | "raf_scene_plan" => Some("game.build"),
         "raf_scene_reconcile" => Some("game.reconcile"),
         "raf_scene_repair" => Some("game.repair"),
@@ -2283,6 +2327,9 @@ fn mcp_semantic_tools() -> Vec<Value> {
                     ("query", json!({"type":"string"})),
                     ("root", json!({"type":"string","description":"Optional root ref, UUID, name or path to limit the query."})),
                     ("primitive", json!({"type":"string","enum":["group","empty","cube","sphere","plane","cylinder"]})),
+                    ("semantic_role", json!({"type":"string","description":"Exact role or parent role prefix."})),
+                    ("tags", json!({"type":"array","items":{"type":"string"},"maxItems":32})),
+                    ("match_all_tags", json!({"type":"boolean"})),
                     ("selected_only", json!({"type":"boolean"})),
                     ("include_hidden", json!({"type":"boolean"})),
                     ("cursor", json!({"type":"integer","minimum":0})),
@@ -2303,6 +2350,29 @@ fn mcp_semantic_tools() -> Vec<Value> {
                     ("cursor", json!({"type":"integer","minimum":0})),
                     ("limit", json!({"type":"integer","minimum":1,"maximum":128})),
                 ],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_overlaps",
+            "Check bounded world-space overlaps and return penetration plus deterministic scene_snap repair suggestions.",
+            schema(
+                vec![
+                    ("root", json!({"type":"string"})),
+                    ("include_hidden", json!({"type":"boolean"})),
+                    ("margin", json!({"type":"number","minimum":0})),
+                    ("max_pairs", json!({"type":"integer","minimum":1,"maximum":256})),
+                ],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_diff",
+            "Read retained created, updated and deleted scene UUIDs since a known revision.",
+            schema(
+                vec![("from_revision", json!({"type":"integer","minimum":0}))],
                 &[],
                 false,
             ),
@@ -2393,6 +2463,19 @@ fn mcp_semantic_tools() -> Vec<Value> {
             ),
         ),
         mcp_tool(
+            "raf_assets_recommend",
+            "Rank imported project assets for an authoring intent and explain every match.",
+            schema(
+                vec![
+                    ("intent", json!({"type":"string","minLength":1})),
+                    ("kind", json!({"type":"string","enum":["image","model","audio","script","data","file"]})),
+                    ("limit", json!({"type":"integer","minimum":1,"maximum":24})),
+                ],
+                &["intent"],
+                false,
+            ),
+        ),
+        mcp_tool(
             "raf_scripts_search",
             "List scripts attached to scene entities, bounded and searchable by path.",
             schema(
@@ -2467,6 +2550,71 @@ fn mcp_semantic_tools() -> Vec<Value> {
             "raf_scene_update",
             "Update one scene entity by stable ref, UUID, path or exact name. Unspecified transform fields remain unchanged.",
             schema(scene_update_properties(), &["target"], true),
+        ),
+        mcp_tool(
+            "raf_scene_reparent",
+            "Move an existing scene subtree to a new group while preserving its world transform by default.",
+            schema(
+                vec![
+                    ("target", json!({"type":"string"})),
+                    ("parent", json!({"type":"string"})),
+                    ("preserve_world", json!({"type":"boolean"})),
+                ],
+                &["target"],
+                true,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_duplicate",
+            "Duplicate a scene subtree into an optional parent or repeated offset array.",
+            schema(
+                vec![
+                    ("target", json!({"type":"string"})),
+                    ("parent", json!({"type":"string"})),
+                    ("name", json!({"type":"string"})),
+                    ("offset", json!({"type":"array","minItems":3,"maxItems":3,"items":{"type":"number"}})),
+                    ("count", json!({"type":"integer","minimum":1,"maximum":128})),
+                    ("axis", json!({"type":"string","enum":["x","y","z"]})),
+                    ("spacing", json!({"type":"number"})),
+                    ("preserve_world", json!({"type":"boolean"})),
+                ],
+                &["target"],
+                true,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_snap",
+            "Snap an entity to the grid, world floor, or another entity's world bounds.",
+            schema(
+                vec![
+                    ("target", json!({"type":"string"})),
+                    ("mode", json!({"type":"string","enum":["grid","floor","surface"]})),
+                    ("snap_to", json!({"type":"string"})),
+                    ("axis", json!({"type":"string","enum":["x","y","z"]})),
+                    ("placement", json!({"type":"string","enum":["before","after","center"]})),
+                    ("gap", json!({"type":"number","minimum":0})),
+                    ("grid", json!({"type":"number","exclusiveMinimum":0})),
+                ],
+                &["target", "mode"],
+                true,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_instantiate_template",
+            "Instantiate one or more registered native scene templates with parent and transform controls.",
+            schema(
+                vec![
+                    ("kind", json!({"type":"string"})),
+                    ("name", json!({"type":"string"})),
+                    ("parent", json!({"type":"string"})),
+                    ("transform", transform_schema()),
+                    ("count", json!({"type":"integer","minimum":1,"maximum":64})),
+                    ("axis", json!({"type":"string","enum":["x","y","z"]})),
+                    ("spacing", json!({"type":"number"})),
+                ],
+                &["kind"],
+                true,
+            ),
         ),
         mcp_tool(
             "raf_scene_build",
@@ -2660,7 +2808,7 @@ fn batch_operation_input_schema() -> Value {
                 "name",
                 json!({
                     "type":"string",
-                    "enum":["scene_create","scene_create_group","scene_update","scene_delete","scene_duplicate","scene_arrange","scene_reparent","scene_instantiate_prefab"]
+                    "enum":["scene_create","scene_create_group","scene_update","scene_delete","scene_duplicate","scene_arrange","scene_reparent","scene_snap","scene_instantiate_template"]
                 }),
             ),
             ("params", batch_operation_params_schema()),
@@ -2678,7 +2826,17 @@ fn batch_operation_params_schema() -> Value {
     properties.extend([
         ("target", json!({"type":"string","description":"Entity or group target."})),
         ("preserve_world", json!({"type":"boolean","description":"Keep world transform during reparenting."})),
-        ("spacing", json!({"type":"number","minimum":0.1,"maximum":10000.0,"description":"Grid spacing."})),
+        ("parent", json!({"type":"string","description":"Optional destination parent."})),
+        ("name", json!({"type":"string","description":"Optional generated name."})),
+        ("offset", json!({"type":"array","minItems":3,"maxItems":3,"items":{"type":"number"},"description":"World/local offset for repeated operations."})),
+        ("count", json!({"type":"integer","minimum":1,"maximum":128})),
+        ("axis", json!({"type":"string","enum":["x","y","z"]})),
+        ("spacing", json!({"type":"number","minimum":-10000.0,"maximum":10000.0,"description":"Grid or repetition spacing."})),
+        ("mode", json!({"type":"string","enum":["grid","floor","surface"]})),
+        ("snap_to", json!({"type":"string","description":"Surface target for scene_snap."})),
+        ("placement", json!({"type":"string","enum":["before","after","center"]})),
+        ("gap", json!({"type":"number","minimum":0})),
+        ("grid", json!({"type":"number","exclusiveMinimum":0})),
         ("factor", json!({"type":"number","minimum":-10000.0,"maximum":10000.0,"description":"Scale factor."})),
         ("x", json!({"type":"number","minimum":-100000.0,"maximum":100000.0})),
         ("y", json!({"type":"number","minimum":-100000.0,"maximum":100000.0})),

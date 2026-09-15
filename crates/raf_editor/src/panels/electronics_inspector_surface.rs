@@ -5,9 +5,9 @@ use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiIcon, UiIconId, UiIconSize, UiSurface,
 };
 use raf_ui::{
-    UiAlign, UiFlow, UiFontWeight, UiLayout, UiNode, UiNodeKind, UiOverflow, UiSizeMode, UiSpacing,
-    UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiTextInput,
-    UiTextRole, UiTextStyle,
+    UiAlign, UiFlow, UiFontWeight, UiJustify, UiLayout, UiNode, UiNodeKind, UiOverflow, UiSizeMode,
+    UiSpacing, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet,
+    UiTextInput, UiTextRole, UiTextStyle,
 };
 
 use crate::panels::inspector_surface::{inspector_style_sheet, sessions_content, InspectorTab};
@@ -87,13 +87,16 @@ fn tabs(palette: StudioUiPalette, active: InspectorTab) -> UiNode {
         .with_class("inspector-tabs")
         .with_layout(UiLayout {
             flow: UiFlow::Row,
-            gap: 4.0,
-            ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
+            align_items: UiAlign::Center,
+            gap: 2.0,
+            padding: UiSpacing::same(2.0),
+            ..UiLayout::fixed(0.0, 26.0).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(tab_button(
             palette,
             "electronics.inspector.properties-tab",
             "app.properties",
+            UiIconId::Settings,
             "inspector.tab:properties",
             active == InspectorTab::Properties,
         ))
@@ -101,6 +104,7 @@ fn tabs(palette: StudioUiPalette, active: InspectorTab) -> UiNode {
             palette,
             "electronics.inspector.sessions-tab",
             "app.sessions",
+            UiIconId::Scene,
             "inspector.tab:sessions",
             active == InspectorTab::Sessions,
         ))
@@ -110,6 +114,7 @@ fn tab_button(
     palette: StudioUiPalette,
     id: &str,
     label: &str,
+    icon: UiIconId,
     command: &str,
     active: bool,
 ) -> UiNode {
@@ -120,11 +125,16 @@ fn tab_button(
             "inspector-tab"
         })
         .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            justify_content: UiJustify::Center,
+            gap: 5.0,
             grow: 1.0,
-            min_size: [88.0, 28.0],
-            padding: UiSpacing::xy(8.0, 0.0),
-            ..UiLayout::fixed(0.0, 28.0)
+            min_size: [72.0, 22.0],
+            padding: UiSpacing::xy(6.0, 0.0),
+            ..UiLayout::fixed(0.0, 22.0)
         })
+        .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
         .with_text_key(label)
         .with_text_style(UiTextStyle::button(if active {
             palette.tokens().text

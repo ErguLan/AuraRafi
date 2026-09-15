@@ -6,9 +6,10 @@
 
 use super::*;
 use crate::panels::agent_surface::build_agent_surface;
-use crate::panels::editor_bottom_dock_surface::{build_console_surface, build_project_surface};
+use crate::panels::console_surface::build_console_surface;
 use crate::panels::electronics_context_menu_surface::build_electronics_context_menu_surface;
 use crate::panels::electronics_surface::build_electronics_analysis_surface;
+use crate::panels::project_surface::build_project_surface;
 
 impl NativeGameWorkbench {
     pub(super) fn build_surface(
@@ -81,7 +82,11 @@ impl NativeGameWorkbench {
                     _ => 238.0,
                 };
                 append(
-                    build_application_menu_popup_surface(self.palette, menu),
+                    build_application_menu_popup_surface_with_submenu(
+                        self.palette,
+                        menu,
+                        self.open_submenu.as_deref(),
+                    ),
                     EditorRect::new(
                         menu_x,
                         layout.application_bar.height - (1.0 - self.menu_motion.value()) * 8.0,
@@ -89,6 +94,27 @@ impl NativeGameWorkbench {
                         application_menu_popup_height(menu),
                     ),
                 );
+                if open_menu == "help" {
+                    if let Some(submenu) = menu.items.iter().find_map(|item| match item {
+                        raf_ui::UiMenuItem::Submenu(submenu)
+                            if self.open_submenu.as_deref() == Some(submenu.id.as_str()) =>
+                        {
+                            Some(submenu)
+                        }
+                        _ => None,
+                    }) {
+                        append(
+                            build_application_menu_popup_surface(self.palette, submenu),
+                            EditorRect::new(
+                                menu_x + APPLICATION_MENU_POPUP_WIDTH - 1.0,
+                                layout.application_bar.height
+                                    - (1.0 - self.menu_motion.value()) * 8.0,
+                                APPLICATION_MENU_POPUP_WIDTH,
+                                application_menu_popup_height(submenu),
+                            ),
+                        );
+                    }
+                }
             }
         }
 
@@ -435,15 +461,15 @@ impl NativeGameWorkbench {
                         build_assets_surface(
                             self.palette,
                             &assets,
-                            &self.assets_query,
-                            self.assets_filter,
+                            &self.assets_surface.query,
+                            self.assets_surface.filter,
                             None,
-                            self.assets_script_menu_open,
-                            &self.assets_script_name,
-                            self.assets_primitive_menu_open,
+                            self.assets_surface.script_menu_open,
+                            &self.assets_surface.script_name,
+                            self.assets_surface.primitive_menu_open,
                             None,
-                            self.assets_file_menu_open,
-                            &self.assets_file_name,
+                            self.assets_surface.file_menu_open,
+                            &self.assets_surface.file_name,
                         ),
                         content_rect,
                     );
@@ -629,7 +655,7 @@ fn status_items(
             format!("Actors: {}", scene.iter().count()),
             "Snap: On".to_string(),
             if workbench.agent_settings.show_fps_counter {
-                format!("FPS: {:.0}", workbench.presented_fps.max(0.0))
+                workbench.performance_status_text()
             } else {
                 "FPS: hidden".to_string()
             },

@@ -12,11 +12,12 @@ use super::compilation::{UiSurfaceCompilationCache, UiSurfaceCompileMetrics};
 use super::{
     NativeUiInputBridge, UiDispatchedAction, UiInputState, UiSurface, UiSurfaceDiagnostics,
     UiSurfaceDrawList, UiSurfaceFrame, UiSurfaceGpuMetrics, UiSurfaceGpuRenderer,
-    UiSurfaceImageStore, UiSurfaceSession,
+    UiSurfaceGpuSharedResources, UiSurfaceImageStore, UiSurfaceSession,
 };
 use raf_ui::UiEnvironment;
 
 use crate::api_graphic_basic::canvas_presenter::CanvasTargetRect;
+use crate::api_graphic_basic::capabilities::GraphicsMemoryBudget;
 
 pub struct DirectUiSurfaceHost {
     surface: UiSurface,
@@ -37,12 +38,38 @@ impl DirectUiSurfaceHost {
         color_format: wgpu::TextureFormat,
         clear_color: [u8; 4],
     ) -> Self {
+        Self::with_shared(
+            surface,
+            Arc::new(UiSurfaceGpuSharedResources::new(device, color_format)),
+            clear_color,
+        )
+    }
+
+    pub(crate) fn with_shared(
+        surface: UiSurface,
+        shared: Arc<UiSurfaceGpuSharedResources>,
+        clear_color: [u8; 4],
+    ) -> Self {
+        Self::with_shared_and_budget(
+            surface,
+            shared,
+            clear_color,
+            GraphicsMemoryBudget::default(),
+        )
+    }
+
+    pub(crate) fn with_shared_and_budget(
+        surface: UiSurface,
+        shared: Arc<UiSurfaceGpuSharedResources>,
+        clear_color: [u8; 4],
+        memory_budget: GraphicsMemoryBudget,
+    ) -> Self {
         Self {
             surface,
             surface_revision: 0,
             paint_revision: 0,
             session: UiSurfaceSession::default(),
-            compositor: UiSurfaceGpuRenderer::new(device, color_format),
+            compositor: UiSurfaceGpuRenderer::with_shared_and_budget(shared, memory_budget),
             images: UiSurfaceImageStore::default(),
             clear_color,
             compilation: UiSurfaceCompilationCache::default(),
@@ -341,12 +368,13 @@ impl DirectUiSurfaceHost {
         for quad in &compiled.draw_list.images {
             self.images.ensure_builtin_key(&quad.source_key);
         }
-        let metrics = self.compositor.render_at_scale(
+        let metrics = self.compositor.render_at_scale_with_revision(
             device,
             queue,
             target,
             target_size,
             logical_size,
+            compiled.draw_list_revision,
             &compiled.draw_list,
             &mut self.session.text_atlas,
             &self.images,
@@ -391,7 +419,7 @@ impl DirectUiSurfaceHost {
         for quad in &compiled.draw_list.images {
             self.images.ensure_builtin_key(&quad.source_key);
         }
-        let metrics = self.compositor.encode_in_rect(
+        let metrics = self.compositor.encode_in_rect_with_revision(
             device,
             queue,
             encoder,
@@ -399,6 +427,7 @@ impl DirectUiSurfaceHost {
             target_size,
             target_rect,
             logical_size,
+            compiled.draw_list_revision,
             &compiled.draw_list,
             &mut self.session.text_atlas,
             &self.images,

@@ -6,6 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 use uuid::Uuid;
@@ -327,6 +328,90 @@ impl TransactionLedger {
         &self.records
     }
 
+    /// Aggregate retained semantic scene changes after a known revision.
+    /// This is intentionally based on transaction evidence instead of a
+    /// second scene-history store, so native Agent, CLI and MCP share one
+    /// revision clock. Records are bounded; callers receive an explicit error
+    /// when the requested revision predates the retained window.
+    pub fn diff_since(&self, revision: Revision) -> Result<Value, String> {
+        if revision > self.revision {
+            return Err(format!(
+                "Revision {revision} is in the future; current revision is {}.",
+                self.revision
+            ));
+        }
+        let earliest = self
+            .records
+            .iter()
+            .filter(|record| record.changed)
+            .map(|record| record.revision_before)
+            .min()
+            .unwrap_or(self.revision);
+        if revision < earliest {
+            return Err(format!(
+                "Revision {revision} is no longer retained; the earliest available revision is {earliest}."
+            ));
+        }
+
+        let records = self
+            .records
+            .iter()
+            .filter(|record| record.changed && record.revision_after > revision)
+            .collect::<Vec<_>>();
+        let mut created = BTreeSet::new();
+        let mut deleted = BTreeSet::new();
+        let mut updated = BTreeSet::new();
+        for record in &records {
+            let Some(diff) = record.diff.as_ref() else {
+                continue;
+            };
+            for value in diff
+                .get("created")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                deleted.remove(value);
+                updated.remove(value);
+                created.insert(value.to_string());
+            }
+            for value in diff
+                .get("updated")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                if !created.contains(value) && !deleted.contains(value) {
+                    updated.insert(value.to_string());
+                }
+            }
+            for value in diff
+                .get("deleted")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+            {
+                if !created.remove(value) {
+                    deleted.insert(value.to_string());
+                }
+                updated.remove(value);
+            }
+        }
+        Ok(serde_json::json!({
+            "from_revision": revision,
+            "to_revision": self.revision,
+            "transactions": records.iter().map(|record| record.id).collect::<Vec<_>>(),
+            "created": created,
+            "deleted": deleted,
+            "updated": updated,
+            "complete": records.iter().all(|record| record.diff.is_some()),
+            "retained_from_revision": earliest
+        }))
+    }
+
     /// Attach a token only after the host has installed a real rollback
     /// snapshot. This keeps the generic gateway honest while allowing an
     /// editor-owned host to advertise undo after it has proven the snapshot
@@ -421,6 +506,40 @@ mod tests {
         assert_eq!(ledger.records().last().unwrap().diff, Some(diff.clone()));
         assert!(!ledger.attach_diff(id, serde_json::json!({"updated": []})));
         assert_eq!(ledger.records().last().unwrap().diff, Some(diff));
+    }
+
+    #[test]
+    fn diff_since_aggregates_retained_scene_changes() {
+        let mut ledger = TransactionLedger::new();
+        ledger.record_without_undo(
+            TransactionId::new(),
+            true,
+            Some(serde_json::json!({
+                "created": ["entity:a", "entity:b"],
+                "updated": [],
+                "deleted": []
+            })),
+            None,
+        );
+        ledger.record_without_undo(
+            TransactionId::new(),
+            true,
+            Some(serde_json::json!({
+                "created": [],
+                "updated": ["entity:a"],
+                "deleted": ["entity:b"]
+            })),
+            None,
+        );
+
+        let diff = ledger.diff_since(0).unwrap();
+
+        assert_eq!(diff["from_revision"], 0);
+        assert_eq!(diff["to_revision"], 2);
+        assert_eq!(diff["created"], serde_json::json!(["entity:a"]));
+        assert_eq!(diff["updated"], serde_json::json!([]));
+        assert_eq!(diff["deleted"], serde_json::json!([]));
+        assert_eq!(diff["complete"], true);
     }
 
     #[test]

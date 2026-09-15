@@ -8,6 +8,7 @@ use glam::{Mat4, Quat, Vec3};
 use serde::{Deserialize, Serialize};
 use std::cell::Cell;
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 use uuid::Uuid;
 
 use crate::scene::{AudioSource, Collider, RigidBody, SceneVariable, VariableValue};
@@ -278,6 +279,24 @@ pub struct SceneGraph {
     /// serialized; every graph mutator invalidates it before changing nodes.
     #[serde(skip)]
     render_cache: Cell<Option<u64>>,
+    /// Monotonic authoring revision used by editor surfaces to invalidate
+    /// retained projections without serializing or re-hashing the full graph.
+    /// It is runtime-local on purpose: persisted identity is still handled by
+    /// the document serializer at save/attach boundaries.
+    #[serde(skip, default = "initial_document_revision")]
+    document_revision: Cell<u64>,
+}
+
+static NEXT_DOCUMENT_REVISION: AtomicU64 = AtomicU64::new(1);
+
+fn next_document_revision() -> u64 {
+    NEXT_DOCUMENT_REVISION
+        .fetch_add(1, Ordering::Relaxed)
+        .max(1)
+}
+
+fn initial_document_revision() -> Cell<u64> {
+    Cell::new(next_document_revision())
 }
 
 impl SceneGraph {
@@ -287,12 +306,28 @@ impl SceneGraph {
             nodes: Vec::new(),
             roots: Vec::new(),
             render_cache: Cell::new(None),
+            document_revision: Cell::new(next_document_revision()),
         }
+    }
+
+    #[inline]
+    fn invalidate(&self) {
+        self.render_cache.set(None);
+        self.document_revision.set(next_document_revision());
+    }
+
+    /// Cheap change token for retained editor projections.
+    ///
+    /// Every graph mutator advances this value before exposing mutable state,
+    /// so consumers can compare revisions in O(1) instead of walking the
+    /// hierarchy every frame.
+    pub fn document_revision(&self) -> u64 {
+        self.document_revision.get()
     }
 
     /// Add a root node and return its id.
     pub fn add_root(&mut self, name: &str) -> SceneNodeId {
-        self.render_cache.set(None);
+        self.invalidate();
         let id = SceneNodeId(self.nodes.len());
         self.nodes.push(SceneNode::new(name));
         self.roots.push(id);
@@ -301,7 +336,7 @@ impl SceneGraph {
 
     /// Add a child node under the given parent. Returns the child's id.
     pub fn add_child(&mut self, parent: SceneNodeId, name: &str) -> SceneNodeId {
-        self.render_cache.set(None);
+        self.invalidate();
         let child_id = SceneNodeId(self.nodes.len());
         let mut child = SceneNode::new(name);
         child.parent = Some(parent);
@@ -317,7 +352,7 @@ impl SceneGraph {
         name: &str,
         primitive: Primitive,
     ) -> SceneNodeId {
-        self.render_cache.set(None);
+        self.invalidate();
         let child_id = SceneNodeId(self.nodes.len());
         let mut child = SceneNode::with_primitive(name, primitive);
         child.parent = Some(parent);
@@ -328,7 +363,7 @@ impl SceneGraph {
 
     /// Add a root folder node.
     pub fn add_root_folder(&mut self, name: &str) -> SceneNodeId {
-        self.render_cache.set(None);
+        self.invalidate();
         let id = SceneNodeId(self.nodes.len());
         self.nodes.push(SceneNode::folder(name));
         self.roots.push(id);
@@ -337,7 +372,7 @@ impl SceneGraph {
 
     /// Add a folder node under the given parent.
     pub fn add_child_folder(&mut self, parent: SceneNodeId, name: &str) -> SceneNodeId {
-        self.render_cache.set(None);
+        self.invalidate();
         let child_id = SceneNodeId(self.nodes.len());
         let mut child = SceneNode::folder(name);
         child.parent = Some(parent);
@@ -353,7 +388,7 @@ impl SceneGraph {
 
     /// Get a mutable reference to a node.
     pub fn get_mut(&mut self, id: SceneNodeId) -> Option<&mut SceneNode> {
-        self.render_cache.set(None);
+        self.invalidate();
         self.nodes.get_mut(id.0)
     }
 
@@ -519,7 +554,7 @@ impl SceneGraph {
 
     /// Add a root node with a specific primitive and return its id.
     pub fn add_root_with_primitive(&mut self, name: &str, primitive: Primitive) -> SceneNodeId {
-        self.render_cache.set(None);
+        self.invalidate();
         let id = SceneNodeId(self.nodes.len());
         self.nodes.push(SceneNode::with_primitive(name, primitive));
         self.roots.push(id);
@@ -590,7 +625,7 @@ impl SceneGraph {
             }
         }
 
-        self.render_cache.set(None);
+        self.invalidate();
         for &id in &sources {
             if let Some(old_parent) = self.nodes[id.0].parent {
                 self.nodes[old_parent.0]
@@ -632,7 +667,7 @@ impl SceneGraph {
             }
         }
 
-        self.render_cache.set(None);
+        self.invalidate();
         if let Some(old_parent) = self.nodes[id.0].parent {
             self.nodes[old_parent.0]
                 .children
@@ -713,7 +748,7 @@ impl SceneGraph {
             return false;
         }
 
-        self.render_cache.set(None);
+        self.invalidate();
         // Remove from parent's children list.
         if let Some(parent_id) = self.nodes[id.0].parent {
             if parent_id.0 < self.nodes.len() {
@@ -780,7 +815,7 @@ impl SceneGraph {
 
         let parent = self.nodes[id.0].parent;
         let children = self.nodes[id.0].children.clone();
-        self.render_cache.set(None);
+        self.invalidate();
 
         for child_id in &children {
             self.nodes[child_id.0].parent = parent;
@@ -882,7 +917,7 @@ impl SceneGraph {
         offset_root: bool,
     ) -> Option<SceneNodeId> {
         let source = self.nodes.get(source_id.0)?.clone();
-        self.render_cache.set(None);
+        self.invalidate();
         let new_id = SceneNodeId(self.nodes.len());
         let mut copy = source.clone();
         copy.uuid = Uuid::new_v4();
@@ -1111,5 +1146,17 @@ mod tests {
 
         assert_eq!(graph.all_live_ids(), vec![hidden]);
         assert_eq!(graph.all_valid_ids(), Vec::<SceneNodeId>::new());
+    }
+
+    #[test]
+    fn document_revision_advances_without_hashing_the_graph() {
+        let mut graph = SceneGraph::new();
+        let initial = graph.document_revision();
+        let node = graph.add_root("Root");
+        let added = graph.document_revision();
+        assert_ne!(added, initial);
+
+        graph.get_mut(node).unwrap().name = "Renamed".to_string();
+        assert_ne!(graph.document_revision(), added);
     }
 }

@@ -23,7 +23,7 @@ use raf_render::api_graphic_basic::ui_surface::{
     UiDispatchedAction, UiFlow, UiIconId, UiLayout, UiNode, UiNodeKind, UiStyle, UiStyleSheet,
     UiSurface,
 };
-use raf_render::api_graphic_basic::EditorUiLayer;
+use raf_render::api_graphic_basic::{EditorUiLayer, SceneFrameMetrics};
 use raf_render::bridge::RenderRuntime;
 use raf_ui::{UiColorMode, UiEnvironment, UiMotionSpec, UiRect, UiTween, UiWindowCommand};
 
@@ -32,7 +32,8 @@ use crate::agent_executor::{AgentEditorAction, AgentProjectContext, AgentToolExe
 use crate::application_bar_host::{register_bar_images, register_electronics_images};
 use crate::application_bar_surface::{
     application_menu_popup_height, build_application_bar_surface,
-    build_application_menu_popup_surface, APPLICATION_MENU_POPUP_WIDTH,
+    build_application_menu_popup_surface, build_application_menu_popup_surface_with_submenu,
+    APPLICATION_MENU_POPUP_WIDTH,
 };
 use crate::application_menu::{build_application_menu, ApplicationMenuState, ApplicationView};
 use crate::commands::catalog::CommandCatalog;
@@ -43,15 +44,17 @@ use crate::editor_layout::{EditorFrameLayout, EditorRect};
 use crate::electronics_controller::{ElectronicsTool, NativeElectronicsEditor};
 use crate::electronics_minimap;
 use crate::panels::ai_chat::{AgentAction, AgentPanel, AgentReadiness};
+use crate::panels::assets_surface::{asset_rows_with_builtins, build_assets_surface};
+use crate::panels::assets_surface_host::AssetsSurfaceHost;
 use crate::panels::editor_bottom_dock_host::EditorBottomDockHost;
 use crate::panels::editor_bottom_dock_surface::{
-    asset_rows_with_builtins, build_assets_surface, build_dock_splitter_surface,
-    build_drop_preview_surface, build_status_surface, build_tab_context_menu_surface,
-    build_tab_strip_surface, AssetFilter, BottomTabDragPreview,
+    build_dock_splitter_surface, build_drop_preview_surface, build_tab_context_menu_surface,
+    build_tab_strip_surface, BottomTabDragPreview,
 };
 use crate::panels::editor_panel_splitter_surface::{
     build_editor_splitter_surface, EditorSplitterKind,
 };
+use crate::panels::editor_status_surface::build_status_surface;
 use crate::panels::electronics_canvas_overlay_surface::build_electronics_canvas_overlay_surface;
 use crate::panels::electronics_inspector_surface::build_electronics_inspector_surface;
 use crate::panels::electronics_navigator_surface::build_electronics_navigator_surface;
@@ -92,8 +95,7 @@ mod surface;
 
 pub(crate) use helpers::{
     default_toolbar_state, hierarchy_drop_target_from_hovered, hierarchy_drop_target_is_valid,
-    hierarchy_fingerprint, inspector_section_from_slug, node_graph_fingerprint,
-    numeric_commit_field, set_inspector_section, unique_session_name,
+    inspector_section_from_slug, numeric_commit_field, set_inspector_section, unique_session_name,
 };
 pub(crate) use settings::{
     ai_provider_from_id, apply_settings_command, apply_settings_range, apply_settings_select,
@@ -103,12 +105,36 @@ pub(crate) use settings::{
 const WORKBENCH_CLEAR: [u8; 4] = [0, 0, 0, 0];
 const DEFAULT_PROJECT_NAME: &str = "Untitled Game";
 const AGENT_SCROLL_PROJECTION_STEP: f32 = 96.0;
+const MAX_ESTIMATED_CAPACITY_FPS: f32 = 10_000.0;
 
 fn next_agent_scroll_projection(current: f32, next: f32) -> Option<f32> {
     let next = next.max(0.0);
     let delta = (next - current).abs();
     (delta > f32::EPSILON && (next <= f32::EPSILON || delta >= AGENT_SCROLL_PROJECTION_STEP))
         .then_some(next)
+}
+
+/// Estimates raw frame capacity from measured work time, independently from
+/// the FPS that the window actually presents through VSync.
+///
+/// A missing GPU sample is intentionally ignored. The CPU sample still gives
+/// the HUD a useful estimate without pretending that the GPU was measured.
+fn estimated_capacity_fps(frame_cpu_ms: f32, frame_gpu_ms: Option<f32>) -> u32 {
+    let cpu_ms = if frame_cpu_ms.is_finite() && frame_cpu_ms > f32::EPSILON {
+        frame_cpu_ms
+    } else {
+        0.0
+    };
+    let gpu_ms = frame_gpu_ms
+        .filter(|value| value.is_finite() && *value > f32::EPSILON)
+        .unwrap_or(0.0);
+    let bottleneck_ms = cpu_ms.max(gpu_ms);
+    if bottleneck_ms <= f32::EPSILON {
+        return 0;
+    }
+    (1000.0 / bottleneck_ms)
+        .round()
+        .clamp(1.0, MAX_ESTIMATED_CAPACITY_FPS) as u32
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -134,6 +160,7 @@ pub enum NativeWorkbenchIntent {
     },
     ProjectSettingCommand(String),
     AgentSettingsChanged(EngineSettings),
+    OpenProjectFolder,
     Viewport(ViewportToolbarAction),
     Command(String),
     InspectorCommit {
@@ -170,6 +197,8 @@ pub struct NativeGameWorkbench {
     rect: EditorRect,
     host: DirectUiSurfaceHost,
     electronics_overlay_host: DirectUiSurfaceHost,
+    electronics_images_registered: bool,
+    electronics_overlay_images_registered: bool,
     electronics_overlay_key: Option<(u64, u64, [u32; 2], bool)>,
     electronics_overlay_canvas: EditorRect,
     electronics_overlay_active: bool,
@@ -184,13 +213,7 @@ pub struct NativeGameWorkbench {
     settings_section: SettingsSection,
     project_catalog: ProjectCatalog,
     last_catalog_revision: u64,
-    assets_query: String,
-    assets_filter: AssetFilter,
-    assets_script_menu_open: bool,
-    assets_script_name: String,
-    assets_file_menu_open: bool,
-    assets_file_name: String,
-    assets_refresh_requested: bool,
+    assets_surface: AssetsSurfaceHost,
     console: ConsolePanel,
     palette: StudioUiPalette,
     project_name: String,
@@ -222,13 +245,30 @@ pub struct NativeGameWorkbench {
     last_agent_revision: u64,
     agent_scroll_projection_offset: f32,
     open_menu: Option<String>,
+    open_submenu: Option<String>,
     search_restore_focus: Option<String>,
     menu_motion: UiTween,
     drag_motion: UiTween,
     agent_motion: UiTween,
     last_sync_time_seconds: f64,
     presented_fps: f32,
-    last_status_fps: u32,
+    estimated_capacity_fps: u32,
+    viewport_fps: f32,
+    frame_cpu_ms: f32,
+    frame_gpu_ms: f32,
+    frame_gpu_timing_sampled: bool,
+    scene_draw_calls: u32,
+    scene_upload_bytes: u64,
+    scene_upload_budget_exceeded: bool,
+    frame_activity_label: &'static str,
+    redraw_reason_label: &'static str,
+    canvas_status_label: &'static str,
+    target_fps: u16,
+    requested_target_fps: u16,
+    p95_frame_time_ms: f32,
+    hitch_count: u64,
+    presentation_label: &'static str,
+    last_status_text: String,
     last_status_refresh_seconds: f64,
     last_scene_fingerprint: u64,
     last_hierarchy_fingerprint: u64,
@@ -239,7 +279,6 @@ pub struct NativeGameWorkbench {
     hierarchy_primitive_menu_open: bool,
     hierarchy_menu_target: Option<(SceneNodeId, bool)>,
     hierarchy_menu_position: Option<[f32; 2]>,
-    assets_primitive_menu_open: bool,
     nodes_zoom: f32,
     last_node_fingerprint: u64,
     panel_resize: Option<WorkbenchResizeState>,
@@ -260,7 +299,6 @@ impl NativeGameWorkbench {
         );
         let mut host = graphics.create_ui_host(empty_surface, WORKBENCH_CLEAR);
         register_bar_images(host.images_mut());
-        register_electronics_images(host.images_mut());
         let overlay_surface = UiSurface::new(
             "editor.native.electronics.overlay.empty",
             palette,
@@ -272,13 +310,13 @@ impl NativeGameWorkbench {
             .with_style(UiStyle::transparent()),
         );
         let electronics_overlay_host = graphics.create_ui_host(overlay_surface, WORKBENCH_CLEAR);
-        let mut electronics_overlay_host = electronics_overlay_host;
-        register_electronics_images(electronics_overlay_host.images_mut());
         Self {
             region: InputRegionId::from_static("native.editor.workbench"),
             rect,
             host,
             electronics_overlay_host,
+            electronics_images_registered: false,
+            electronics_overlay_images_registered: false,
             electronics_overlay_key: None,
             electronics_overlay_canvas: EditorRect::default(),
             electronics_overlay_active: false,
@@ -293,13 +331,7 @@ impl NativeGameWorkbench {
             settings_section: SettingsSection::Appearance,
             project_catalog: ProjectCatalog::default(),
             last_catalog_revision: 0,
-            assets_query: String::new(),
-            assets_filter: AssetFilter::All,
-            assets_script_menu_open: false,
-            assets_script_name: "new_script".to_string(),
-            assets_file_menu_open: false,
-            assets_file_name: "new_file".to_string(),
-            assets_refresh_requested: false,
+            assets_surface: AssetsSurfaceHost::default(),
             console: ConsolePanel::default(),
             palette,
             project_name: DEFAULT_PROJECT_NAME.to_string(),
@@ -331,16 +363,33 @@ impl NativeGameWorkbench {
             last_agent_revision: 0,
             agent_scroll_projection_offset: 0.0,
             open_menu: None,
+            open_submenu: None,
             search_restore_focus: None,
             menu_motion: UiTween::new(0.0, UiMotionSpec::dock()),
             drag_motion: UiTween::new(0.0, UiMotionSpec::dock()),
             agent_motion: UiTween::new(1.0, UiMotionSpec::dock()),
             last_sync_time_seconds: 0.0,
             presented_fps: 0.0,
-            last_status_fps: 0,
+            estimated_capacity_fps: 0,
+            viewport_fps: 0.0,
+            frame_cpu_ms: 0.0,
+            frame_gpu_ms: 0.0,
+            frame_gpu_timing_sampled: false,
+            scene_draw_calls: 0,
+            scene_upload_bytes: 0,
+            scene_upload_budget_exceeded: false,
+            frame_activity_label: "Idle",
+            redraw_reason_label: "Idle",
+            canvas_status_label: "Idle",
+            target_fps: 0,
+            requested_target_fps: 0,
+            p95_frame_time_ms: 0.0,
+            hitch_count: 0,
+            presentation_label: "Present",
+            last_status_text: String::new(),
             last_status_refresh_seconds: 0.0,
             last_scene_fingerprint: 0,
-            last_hierarchy_fingerprint: 0,
+            last_hierarchy_fingerprint: u64::MAX,
             last_selection: Vec::new(),
             last_layout: None,
             last_history_state: (false, false, false),
@@ -348,7 +397,6 @@ impl NativeGameWorkbench {
             hierarchy_primitive_menu_open: false,
             hierarchy_menu_target: None,
             hierarchy_menu_position: None,
-            assets_primitive_menu_open: false,
             nodes_zoom: 1.0,
             last_node_fingerprint: 0,
             panel_resize: None,
@@ -456,6 +504,7 @@ impl NativeGameWorkbench {
         self.search_surface.close();
         self.search_restore_focus = None;
         self.open_menu = None;
+        self.open_submenu = None;
         self.agent_panel.close_menus();
         self.host
             .session_mut()
@@ -533,16 +582,25 @@ impl NativeGameWorkbench {
         &self.agent_settings
     }
 
+    pub(crate) fn active_session_id(&self) -> SessionId {
+        self.inspector_sessions.active_session
+    }
+
     pub fn set_engine_settings(&mut self, mut settings: EngineSettings) {
         settings.viewport_render_mode = settings.viewport_render_mode.normalized();
-        if self.agent_settings == settings {
-            return;
-        }
-        self.agent_settings = settings;
-        self.palette = match self.agent_settings.theme {
+        let next_palette = match settings.theme {
             Theme::Light => StudioUiPalette::PaperLight,
             Theme::Dark | Theme::System => StudioUiPalette::IndustrialDark,
         };
+        if self.agent_settings == settings && self.palette == next_palette {
+            return;
+        }
+        self.agent_settings = settings;
+        let palette_changed = self.palette != next_palette;
+        self.palette = next_palette;
+        if palette_changed {
+            self.electronics_overlay_key = None;
+        }
         self.toolbar_state.grid_visible = self.agent_settings.grid_visible;
         self.toolbar_state.labels_visible = self.agent_settings.show_viewport_labels;
         self.toolbar_state.render_style = ViewportRenderStyle::Solid;
@@ -602,6 +660,10 @@ impl NativeGameWorkbench {
 
     pub fn set_project_info(&mut self, name: impl Into<String>, project_type: ProjectType) {
         let name = name.into();
+        if project_type == ProjectType::Electronics && !self.electronics_images_registered {
+            register_electronics_images(self.host.images_mut());
+            self.electronics_images_registered = true;
+        }
         if self.project_name == name && self.project_type == project_type {
             return;
         }
@@ -639,6 +701,10 @@ impl NativeGameWorkbench {
             self.electronics_overlay_canvas = EditorRect::default();
             return;
         };
+        if !self.electronics_overlay_images_registered {
+            register_electronics_images(self.electronics_overlay_host.images_mut());
+            self.electronics_overlay_images_registered = true;
+        }
         self.electronics_overlay_canvas = canvas;
         let key = (
             editor.revision(),
@@ -681,6 +747,7 @@ impl NativeGameWorkbench {
         can_paste: bool,
         node_graph: &NodeGraph,
         selected_graph_node: Option<NodeId>,
+        node_graph_revision: u64,
         project: Option<&Project>,
         now_seconds: f64,
         compass: ViewportCompassState,
@@ -715,12 +782,12 @@ impl NativeGameWorkbench {
             .set_target(self.agent_panel.sidebar_open.then_some(1.0).unwrap_or(0.0));
         self.agent_motion
             .advance(delta as f32, self.agent_settings.prefers_reduced_motion);
-        self.hierarchy_folder_ids = scene
-            .iter()
-            .filter_map(|(id, node)| node.is_folder.then_some(id))
-            .collect();
-        let hierarchy_fingerprint = hierarchy_fingerprint(scene);
+        let hierarchy_fingerprint = scene.document_revision();
         if self.last_hierarchy_fingerprint != hierarchy_fingerprint {
+            self.hierarchy_folder_ids = scene
+                .iter()
+                .filter_map(|(id, node)| node.is_folder.then_some(id))
+                .collect();
             self.hierarchy_model.invalidate();
         }
         self.project_catalog
@@ -741,15 +808,15 @@ impl NativeGameWorkbench {
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
         }
-        if self.assets_refresh_requested {
+        if self.assets_surface.refresh_requested {
             self.project_catalog.refresh();
-            self.assets_refresh_requested = false;
+            self.assets_surface.refresh_requested = false;
         }
         let catalog_changed = self.project_catalog.poll();
         self.bottom_dock.sync_project_layout(project);
         self.sync_search_surface(layout, scene, project);
         let fingerprint = scene.render_fingerprint();
-        let node_fingerprint = node_graph_fingerprint(node_graph, selected_graph_node);
+        let node_fingerprint = node_graph_revision;
         let selection_changed = self.last_selection != selected;
         if self.project_type == ProjectType::Game && selection_changed {
             if self.agent_settings.hierarchy_expand_on_select {
@@ -762,18 +829,12 @@ impl NativeGameWorkbench {
             }
         }
         let layout_changed = self.last_layout != Some(layout);
-        let status_fps =
-            if self.project_type == ProjectType::Game && self.agent_settings.show_fps_counter {
-                self.presented_fps
-                    .is_finite()
-                    .then_some(self.presented_fps.round().max(0.0) as u32)
-                    .unwrap_or(0)
-            } else {
-                0
-            };
-        let status_fps_changed = status_fps != self.last_status_fps
-            && (self.last_status_fps == 0
-                || now_seconds - self.last_status_refresh_seconds >= 0.25);
+        let status_refresh_due = self.last_status_text.is_empty()
+            || now_seconds - self.last_status_refresh_seconds >= 0.25;
+        let status_text = status_refresh_due.then(|| self.performance_status_text());
+        let status_fps_changed = status_text
+            .as_ref()
+            .is_some_and(|status_text| status_text != &self.last_status_text);
         let electronics_revision = electronics.map_or(0, NativeElectronicsEditor::ui_revision);
         let agent_revision = self.agent_panel.visual_revision();
         let surface_changed = selection_changed
@@ -794,8 +855,8 @@ impl NativeGameWorkbench {
         if !surface_changed {
             if status_fps_changed && self.project_type == ProjectType::Game {
                 self.host
-                    .patch_text_value("editor.status.item.4", format!("FPS: {status_fps}"));
-                self.last_status_fps = status_fps;
+                    .patch_text_value("editor.status.item.4", status_text.clone().unwrap());
+                self.last_status_text = status_text.unwrap();
                 self.last_status_refresh_seconds = now_seconds;
             }
             return;
@@ -815,7 +876,7 @@ impl NativeGameWorkbench {
         self.host.set_surface(surface);
         self.host.session_mut().interaction.controls.set_text(
             "assets.search",
-            &self.assets_query,
+            &self.assets_surface.query,
             256,
         );
         self.host.session_mut().interaction.controls.set_text(
@@ -873,12 +934,12 @@ impl NativeGameWorkbench {
         );
         self.host.session_mut().interaction.controls.set_text(
             "assets.script-name",
-            &self.assets_script_name,
+            &self.assets_surface.script_name,
             128,
         );
         self.host.session_mut().interaction.controls.set_text(
             "assets.file-name",
-            &self.assets_file_name,
+            &self.assets_surface.file_name,
             256,
         );
         self.host.session_mut().interaction.controls.set_text(
@@ -928,8 +989,10 @@ impl NativeGameWorkbench {
         self.last_electronics_revision = electronics_revision;
         self.last_agent_revision = agent_revision;
         self.last_catalog_revision = self.project_catalog.revision();
-        self.last_status_fps = status_fps;
-        self.last_status_refresh_seconds = now_seconds;
+        if let Some(status_text) = status_text {
+            self.last_status_text = status_text;
+            self.last_status_refresh_seconds = now_seconds;
+        }
     }
 
     fn hierarchy_tree_viewport_height(&self, left: EditorRect) -> f32 {
@@ -1051,8 +1114,104 @@ impl NativeGameWorkbench {
         );
     }
 
-    pub fn set_presented_fps(&mut self, presented_fps: f32) {
-        self.presented_fps = presented_fps;
+    pub fn set_performance_metrics(
+        &mut self,
+        presented_fps: f32,
+        viewport_fps: f32,
+        frame_cpu_ms: f32,
+        capacity_cpu_ms: f32,
+        target_fps: u16,
+        requested_target_fps: u16,
+        p95_frame_time_ms: f32,
+        hitch_count: u64,
+        scene_metrics: SceneFrameMetrics,
+        presentation_label: &'static str,
+        frame_activity_label: &'static str,
+        redraw_reason_label: &'static str,
+        canvas_status_label: &'static str,
+    ) {
+        self.presented_fps = presented_fps.max(0.0);
+        self.estimated_capacity_fps = estimated_capacity_fps(
+            capacity_cpu_ms,
+            scene_metrics
+                .gpu_timing_sampled
+                .then_some(scene_metrics.gpu_frame_ms),
+        );
+        self.viewport_fps = viewport_fps.max(0.0);
+        self.frame_cpu_ms = frame_cpu_ms.max(0.0);
+        self.target_fps = target_fps;
+        self.requested_target_fps = requested_target_fps;
+        self.p95_frame_time_ms = p95_frame_time_ms.max(0.0);
+        self.hitch_count = hitch_count;
+        self.frame_gpu_ms = scene_metrics.gpu_frame_ms.max(0.0);
+        self.frame_gpu_timing_sampled = scene_metrics.gpu_timing_sampled;
+        self.scene_draw_calls = scene_metrics.total_draw_calls();
+        self.scene_upload_bytes = scene_metrics.frame_upload_bytes;
+        self.scene_upload_budget_exceeded = scene_metrics.upload_budget_exceeded;
+        self.presentation_label = presentation_label;
+        self.frame_activity_label = frame_activity_label;
+        self.redraw_reason_label = redraw_reason_label;
+        self.canvas_status_label = canvas_status_label;
+    }
+
+    pub(crate) fn performance_status_text(&self) -> String {
+        if !self.agent_settings.show_fps_counter {
+            return "FPS: hidden".to_string();
+        }
+        let effective_target = if self.target_fps == 0 {
+            "max".to_string()
+        } else {
+            self.target_fps.to_string()
+        };
+        let target = if self.requested_target_fps != self.target_fps {
+            let requested_target = if self.requested_target_fps == 0 {
+                "max".to_string()
+            } else {
+                self.requested_target_fps.to_string()
+            };
+            format!("{requested_target}>{effective_target}")
+        } else {
+            effective_target
+        };
+        let gpu = if self.frame_gpu_timing_sampled {
+            format!("{:.1}ms", self.frame_gpu_ms)
+        } else {
+            "--".to_string()
+        };
+        let viewport = if self.viewport_fps > f32::EPSILON {
+            format!("{:.0}", self.viewport_fps)
+        } else {
+            "--".to_string()
+        };
+        let upload_kib = self.scene_upload_bytes as f64 / 1024.0;
+        let upload_warning = if self.scene_upload_budget_exceeded {
+            "!"
+        } else {
+            ""
+        };
+        let capacity = if self.estimated_capacity_fps > 0 {
+            format!("~{}", self.estimated_capacity_fps)
+        } else {
+            "--".to_string()
+        };
+        format!(
+            "CAP:{capacity} FPS | FPS:{presented_fps:.0}/{target} | VP:{viewport} | CPU:{frame_cpu_ms:.1}ms | GPU:{gpu} | P95:{p95_frame_time_ms:.1}ms | D{scene_draw_calls} | U{upload_kib:.0}K{upload_warning} | H{hitch_count} | {frame_activity_label} | {redraw_reason_label} | {canvas_status_label} | {presentation_label}",
+            capacity = capacity,
+            presented_fps = self.presented_fps,
+            target = target,
+            viewport = viewport,
+            frame_cpu_ms = self.frame_cpu_ms,
+            gpu = gpu,
+            p95_frame_time_ms = self.p95_frame_time_ms,
+            scene_draw_calls = self.scene_draw_calls,
+            upload_kib = upload_kib,
+            upload_warning = upload_warning,
+            hitch_count = self.hitch_count,
+            frame_activity_label = self.frame_activity_label,
+            redraw_reason_label = self.redraw_reason_label,
+            canvas_status_label = self.canvas_status_label,
+            presentation_label = self.presentation_label,
+        )
     }
 
     pub fn set_inspector_transform_drag_active(&mut self, active: bool) {
@@ -1066,8 +1225,7 @@ impl NativeGameWorkbench {
     ///
     /// The registry remains the single source of truth. The native
     /// application receives `sessions.reload` after persistence and reloads
-    /// the active Electronics document without routing through a legacy UI
-    /// toolkit.
+    /// the active document without routing through a legacy UI toolkit.
     fn process_session_command(
         &mut self,
         name: &str,
@@ -1591,5 +1749,18 @@ mod tests {
         assert_eq!(next_agent_scroll_projection(0.0, 96.0), Some(96.0));
         assert_eq!(next_agent_scroll_projection(96.0, 40.0), None);
         assert_eq!(next_agent_scroll_projection(96.0, 0.0), Some(0.0));
+    }
+
+    #[test]
+    fn estimated_capacity_uses_the_slowest_measured_stage() {
+        assert_eq!(estimated_capacity_fps(3.1, Some(0.2)), 323);
+        assert_eq!(estimated_capacity_fps(1.0, Some(4.0)), 250);
+        assert_eq!(estimated_capacity_fps(4.0, None), 250);
+    }
+
+    #[test]
+    fn estimated_capacity_is_unknown_without_positive_samples() {
+        assert_eq!(estimated_capacity_fps(0.0, None), 0);
+        assert_eq!(estimated_capacity_fps(f32::NAN, Some(f32::INFINITY)), 0);
     }
 }

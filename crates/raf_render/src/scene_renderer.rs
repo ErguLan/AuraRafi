@@ -19,7 +19,7 @@ use glam::{Mat4, Vec3, Vec4};
 use std::collections::HashSet;
 use std::sync::Arc;
 
-use crate::api_graphic_basic::command_list::{BasicCommandList, GraphicCommand};
+use crate::api_graphic_basic::command_list::{BasicCommandList, BasicLine, GraphicCommand};
 use crate::api_graphic_basic::grid::{build_3d_grid, GridLineKind};
 use crate::api_graphic_basic::mesh::BasicMesh;
 use crate::api_graphic_basic::pipeline::BasicPipelineKind;
@@ -133,6 +133,9 @@ pub struct SceneRenderer {
     plane_basic_mesh: Arc<BasicMesh>,
     plane_edges: Vec<[Vec3; 2]>,
     plane_local_bounds: (Vec3, Vec3),
+    world_transforms: Option<(u64, WorldTransformCache)>,
+    render_jobs: Vec<RenderJob>,
+    selected_ids: HashSet<SceneNodeId>,
     /// Stats from the last frame.
     pub stats: FrameStats,
 }
@@ -183,6 +186,9 @@ impl SceneRenderer {
             plane_edges: primitives::extract_edges(&plane_mesh),
             plane_local_bounds,
             plane_mesh,
+            world_transforms: None,
+            render_jobs: Vec::new(),
+            selected_ids: HashSet::new(),
             stats: FrameStats::default(),
         }
     }
@@ -198,7 +204,7 @@ impl SceneRenderer {
     }
 
     fn collect_render_jobs(
-        &self,
+        &mut self,
         scene: &SceneGraph,
         frustum: &Frustum,
         camera_position: Vec3,
@@ -206,8 +212,21 @@ impl SceneRenderer {
         options: RenderOptions,
         mesh_override: Option<(SceneNodeId, &MeshData)>,
     ) -> (Vec<RenderJob>, FrameStats) {
-        let selected_ids: HashSet<_> = selected.iter().copied().collect();
-        let transforms = WorldTransformCache::build(scene);
+        self.selected_ids.clear();
+        self.selected_ids.extend(selected.iter().copied());
+        let scene_revision = scene.document_revision();
+        if self
+            .world_transforms
+            .as_ref()
+            .is_none_or(|(revision, _)| *revision != scene_revision)
+        {
+            self.world_transforms = Some((scene_revision, WorldTransformCache::build(scene)));
+        }
+        let transforms = &self
+            .world_transforms
+            .as_ref()
+            .expect("world transforms were initialized for the scene")
+            .1;
         let visibility = SceneVisibilityPolicy {
             world_stream: WorldStreamVisibility {
                 enabled: options.world_streaming_enabled,
@@ -215,7 +234,9 @@ impl SceneRenderer {
                 load_radius: options.world_stream_load_radius,
             },
         };
-        let mut jobs = Vec::new();
+        let mut jobs = std::mem::take(&mut self.render_jobs);
+        jobs.clear();
+        jobs.reserve(scene.len());
         let mut stats = FrameStats::default();
         let override_bounds = mesh_override.map(|(override_id, mesh)| (override_id, mesh.aabb()));
 
@@ -257,26 +278,45 @@ impl SceneRenderer {
                 primitive: node.primitive,
                 model,
                 base_color,
-                is_selected: selected_ids.contains(&id),
-                dist_to_camera: (center - camera_position).length(),
+                is_selected: self.selected_ids.contains(&id),
+                distance_squared: (center - camera_position).length_squared(),
                 is_transparent: base_color[3] < u8::MAX,
             });
         }
 
-        // Opaque geometry is front-to-back for early depth rejection;
-        // transparent geometry stays back-to-front. Entity ID breaks equal
-        // distances deterministically so camera motion cannot shuffle ties.
+        let max_opaque_distance_squared = jobs
+            .iter()
+            .filter(|job| !job.is_transparent)
+            .map(|job| job.distance_squared)
+            .fold(0.0_f32, f32::max);
+
+        // Opaque geometry keeps coarse front-to-back buckets for early depth
+        // rejection and groups identical primitive meshes inside each bucket.
+        // That preserves depth correctness while allowing the command list to
+        // turn repeated meshes into one instanced draw. Transparent geometry
+        // remains strictly back-to-front.
         jobs.sort_by(|a, b| {
             let order = match (a.is_transparent, b.is_transparent) {
                 (false, true) => std::cmp::Ordering::Less,
                 (true, false) => std::cmp::Ordering::Greater,
-                (false, false) => a
-                    .dist_to_camera
-                    .partial_cmp(&b.dist_to_camera)
-                    .unwrap_or(std::cmp::Ordering::Equal),
+                (false, false) => {
+                    opaque_depth_bucket(a.distance_squared, max_opaque_distance_squared)
+                        .cmp(&opaque_depth_bucket(
+                            b.distance_squared,
+                            max_opaque_distance_squared,
+                        ))
+                        .then_with(|| {
+                            primitive_batch_key(a.primitive).cmp(&primitive_batch_key(b.primitive))
+                        })
+                        .then_with(|| {
+                            a.distance_squared
+                                .partial_cmp(&b.distance_squared)
+                                .unwrap_or(std::cmp::Ordering::Equal)
+                        })
+                }
                 (true, true) => b
-                    .dist_to_camera
-                    .partial_cmp(&a.dist_to_camera)
+                    .distance_squared
+                    .partial_cmp(&a.distance_squared)
                     .unwrap_or(std::cmp::Ordering::Equal),
             };
             order.then_with(|| a.id.0.cmp(&b.id.0))
@@ -313,6 +353,8 @@ impl SceneRenderer {
         let frustum = Frustum::from_matrix(&vp);
         let light_dir = light_dir.normalize();
         let cam_eye = camera.eye();
+        let (jobs, mut stats) =
+            self.collect_render_jobs(scene, &frustum, cam_eye, selected, options, mesh_override);
 
         let cube_mesh = &self.cube_mesh;
         let cube_edges = self.cube_edges.as_slice();
@@ -322,9 +364,6 @@ impl SceneRenderer {
         let sphere_edges = self.sphere_edges.as_slice();
         let plane_mesh = &self.plane_mesh;
         let plane_edges = self.plane_edges.as_slice();
-        let (jobs, mut stats) =
-            self.collect_render_jobs(scene, &frustum, cam_eye, selected, options, mesh_override);
-
         if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
             draw_world_grid(
                 &mut self.framebuffer,
@@ -456,6 +495,8 @@ impl SceneRenderer {
             }
         }
 
+        self.render_jobs = jobs;
+        self.render_jobs.clear();
         self.stats = stats;
         self.framebuffer.pixels()
     }
@@ -481,6 +522,8 @@ impl SceneRenderer {
         let frustum = Frustum::from_matrix(&vp);
         let light_dir = light_dir.normalize();
         let cam_eye = camera.eye();
+        let (jobs, mut stats) =
+            self.collect_render_jobs(scene, &frustum, cam_eye, selected, options, mesh_override);
 
         let cube_mesh = &self.cube_mesh;
         let cube_basic_mesh = Arc::clone(&self.cube_basic_mesh);
@@ -494,10 +537,13 @@ impl SceneRenderer {
         let plane_mesh = &self.plane_mesh;
         let plane_basic_mesh = Arc::clone(&self.plane_basic_mesh);
         let plane_edges = self.plane_edges.as_slice();
-        let mut commands = BasicCommandList::new();
+        let override_edges = mesh_override.map(|(_, mesh)| primitives::extract_edges(mesh));
+        let override_basic_mesh = mesh_override.map(|(_, mesh)| Arc::new(mesh_to_basic(mesh)));
+        let mut commands = BasicCommandList::with_capacity(
+            jobs.len().saturating_add(6),
+            4 + usize::from(override_basic_mesh.is_some()),
+        );
         commands.clear(bg_color);
-        let (jobs, mut stats) =
-            self.collect_render_jobs(scene, &frustum, cam_eye, selected, options, mesh_override);
 
         let use_tonality = options.solid_face_tonality;
         let mut grid_drawn = false;
@@ -515,35 +561,26 @@ impl SceneRenderer {
                 grid_drawn = true;
             }
 
-            let override_mesh = mesh_override.and_then(|(override_id, override_mesh)| {
+            let job_override_mesh = mesh_override.and_then(|(override_id, override_mesh)| {
                 (override_id == job.id).then_some(override_mesh)
             });
-            let override_edges = override_mesh.map(primitives::extract_edges);
-            let override_basic_mesh = override_mesh.map(|mesh| Arc::new(mesh_to_basic(mesh)));
 
-            let (mesh, basic_mesh, edges): (&MeshData, Arc<BasicMesh>, &[[Vec3; 2]]) =
-                if let Some(override_mesh) = override_mesh {
+            let (mesh, basic_mesh): (&MeshData, Arc<BasicMesh>) =
+                if let Some(job_override_mesh) = job_override_mesh {
                     (
-                        override_mesh,
+                        job_override_mesh,
                         override_basic_mesh
-                            .unwrap_or_else(|| Arc::new(mesh_to_basic(override_mesh))),
-                        override_edges.as_deref().unwrap_or(&[]),
+                            .as_ref()
+                            .map(Arc::clone)
+                            .unwrap_or_else(|| Arc::new(mesh_to_basic(job_override_mesh))),
                     )
                 } else {
                     match job.primitive {
-                        Primitive::Cube => (cube_mesh, Arc::clone(&cube_basic_mesh), cube_edges),
-                        Primitive::Cylinder => (
-                            cylinder_mesh,
-                            Arc::clone(&cylinder_basic_mesh),
-                            cylinder_edges,
-                        ),
-                        Primitive::Sphere => {
-                            (sphere_mesh, Arc::clone(&sphere_basic_mesh), sphere_edges)
-                        }
-                        Primitive::Plane => {
-                            (plane_mesh, Arc::clone(&plane_basic_mesh), plane_edges)
-                        }
-                        _ => (cube_mesh, Arc::clone(&cube_basic_mesh), cube_edges),
+                        Primitive::Cube => (cube_mesh, Arc::clone(&cube_basic_mesh)),
+                        Primitive::Cylinder => (cylinder_mesh, Arc::clone(&cylinder_basic_mesh)),
+                        Primitive::Sphere => (sphere_mesh, Arc::clone(&sphere_basic_mesh)),
+                        Primitive::Plane => (plane_mesh, Arc::clone(&plane_basic_mesh)),
+                        _ => (cube_mesh, Arc::clone(&cube_basic_mesh)),
                     }
                 };
 
@@ -563,17 +600,32 @@ impl SceneRenderer {
             } else {
                 BasicPipelineKind::FlatColor
             });
-            let mesh_id = if override_mesh.is_some() {
+            let mesh_id = if job_override_mesh.is_some() {
                 commands.register_transient_mesh(basic_mesh)
             } else {
                 commands.register_mesh(basic_mesh)
             };
             commands.draw_mesh(mesh_id, job.model, color);
             stats.triangles_rendered += mesh.triangle_count() as u32;
+        }
 
+        // Edges are intentionally recorded after all mesh commands. Interleaving
+        // one line command per object would split otherwise compatible mesh
+        // runs and defeat instancing when surface edges are enabled.
+        for job in &jobs {
             let draw_surface_edges = options.solid_show_surface_edges;
-
             if draw_surface_edges || (options.selection_outline && job.is_selected) {
+                let edges = if mesh_override.is_some_and(|(override_id, _)| override_id == job.id) {
+                    override_edges.as_deref().unwrap_or(&[])
+                } else {
+                    match job.primitive {
+                        Primitive::Cube => cube_edges,
+                        Primitive::Cylinder => cylinder_edges,
+                        Primitive::Sphere => sphere_edges,
+                        Primitive::Plane => plane_edges,
+                        Primitive::Empty => &[],
+                    }
+                };
                 let edge_color = if job.is_selected && options.selection_outline {
                     let is_primary = options.primary_selected == Some(job.id.0 as u64);
                     if is_primary {
@@ -600,6 +652,8 @@ impl SceneRenderer {
             }
         }
 
+        self.render_jobs = jobs;
+        self.render_jobs.clear();
         self.stats = stats.clone();
 
         SceneRenderFrame {
@@ -729,8 +783,31 @@ struct RenderJob {
     model: Mat4,
     base_color: [u8; 4],
     is_selected: bool,
-    dist_to_camera: f32,
+    distance_squared: f32,
     is_transparent: bool,
+}
+
+const OPAQUE_DEPTH_BUCKET_COUNT: f32 = 32.0;
+
+#[inline]
+fn opaque_depth_bucket(distance_squared: f32, max_distance_squared: f32) -> u8 {
+    if !distance_squared.is_finite() || max_distance_squared <= f32::EPSILON {
+        return 0;
+    }
+    ((distance_squared.max(0.0) / max_distance_squared) * (OPAQUE_DEPTH_BUCKET_COUNT - 1.0))
+        .floor()
+        .clamp(0.0, OPAQUE_DEPTH_BUCKET_COUNT - 1.0) as u8
+}
+
+#[inline]
+const fn primitive_batch_key(primitive: Primitive) -> u8 {
+    match primitive {
+        Primitive::Cube => 0,
+        Primitive::Cylinder => 1,
+        Primitive::Sphere => 2,
+        Primitive::Plane => 3,
+        Primitive::Empty => 4,
+    }
 }
 
 fn mesh_to_basic(mesh: &MeshData) -> BasicMesh {
@@ -756,11 +833,16 @@ fn record_wireframe_overlay(
     model: &Mat4,
     color: [u8; 4],
 ) {
-    for edge in edges {
-        let start = (*model * edge[0].extend(1.0)).truncate();
-        let end = (*model * edge[1].extend(1.0)).truncate();
-        commands.draw_line(start, end, color, 1.0, false, -0.001);
-    }
+    commands.draw_line_batch(
+        edges.iter().map(|edge| BasicLine {
+            start: (*model * edge[0].extend(1.0)).truncate(),
+            end: (*model * edge[1].extend(1.0)).truncate(),
+            color,
+            width: 1.0,
+            depth_bias: -0.001,
+        }),
+        false,
+    );
 }
 
 fn record_world_grid(
@@ -781,17 +863,22 @@ fn record_world_grid(
     let bounds_min = Vec3::new(min_x, 0.0, min_z);
     let bounds_max = Vec3::new(max_x, 0.0, max_z);
 
-    for line in build_3d_grid(bounds_min, bounds_max, base_spacing) {
-        let color = match line.kind {
-            GridLineKind::Axis => [240, 146, 36, 255],
-            GridLineKind::Major => [200, 200, 206, 255],
-            GridLineKind::Minor => [224, 224, 228, 255],
-        };
-
-        let start = Vec3::new(line.start.x, grid_y, line.start.z);
-        let end = Vec3::new(line.end.x, grid_y, line.end.z);
-        commands.draw_line(start, end, color, 1.0, no_depth_test, DEPTH_BIAS);
-    }
+    commands.draw_line_batch(
+        build_3d_grid(bounds_min, bounds_max, base_spacing)
+            .into_iter()
+            .map(|line| BasicLine {
+                start: Vec3::new(line.start.x, grid_y, line.start.z),
+                end: Vec3::new(line.end.x, grid_y, line.end.z),
+                color: match line.kind {
+                    GridLineKind::Axis => [240, 146, 36, 255],
+                    GridLineKind::Major => [200, 200, 206, 255],
+                    GridLineKind::Minor => [224, 224, 228, 255],
+                },
+                width: 1.0,
+                depth_bias: DEPTH_BIAS,
+            }),
+        no_depth_test,
+    );
 }
 
 fn rasterize_clipped_triangle(
@@ -1221,5 +1308,129 @@ mod tests {
         assert!(expected_triangles > RenderConfig::editor_lightweight().max_triangles);
         assert_eq!(frame.stats.visible_entities, 4);
         assert_eq!(frame.stats.triangles_rendered, expected_triangles);
+    }
+
+    #[test]
+    fn opaque_meshes_batch_inside_the_same_depth_bucket() {
+        let mut scene = SceneGraph::new();
+        scene.add_root_with_primitive("Cube A", Primitive::Cube);
+        scene.add_root_with_primitive("Sphere", Primitive::Sphere);
+        scene.add_root_with_primitive("Cube B", Primitive::Cube);
+        let camera = Camera::default();
+        let mut renderer = SceneRenderer::new(320, 240);
+
+        let frame = renderer.build_frame(
+            &scene,
+            &camera,
+            320.0,
+            240.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::new(0.4, 1.0, 0.2),
+            RenderOptions::default(),
+            None,
+        );
+
+        assert!(frame.commands.commands().iter().any(|command| matches!(
+            command,
+            GraphicCommand::DrawMeshBatch { instances, .. } if instances.len() == 2
+        )));
+    }
+
+    #[test]
+    fn camera_only_frames_reuse_world_transform_cache() {
+        let mut scene = SceneGraph::new();
+        let cube = scene.add_root_with_primitive("Cube", Primitive::Cube);
+        let camera = Camera::default();
+        let mut renderer = SceneRenderer::new(320, 240);
+
+        let _ = renderer.build_frame(
+            &scene,
+            &camera,
+            320.0,
+            240.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::Y,
+            RenderOptions::default(),
+            None,
+        );
+        let cached_revision = renderer.world_transforms.as_ref().unwrap().0;
+        let _ = renderer.build_frame(
+            &scene,
+            &camera,
+            320.0,
+            240.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::Y,
+            RenderOptions::default(),
+            None,
+        );
+        assert_eq!(
+            renderer.world_transforms.as_ref().unwrap().0,
+            cached_revision
+        );
+
+        scene.get_mut(cube).unwrap().position = Vec3::X;
+        let _ = renderer.build_frame(
+            &scene,
+            &camera,
+            320.0,
+            240.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::Y,
+            RenderOptions::default(),
+            None,
+        );
+        assert_ne!(
+            renderer.world_transforms.as_ref().unwrap().0,
+            cached_revision
+        );
+    }
+
+    #[test]
+    fn surface_edges_do_not_break_mesh_instancing() {
+        let mut scene = SceneGraph::new();
+        scene.add_root_with_primitive("Cube A", Primitive::Cube);
+        scene.add_root_with_primitive("Cube B", Primitive::Cube);
+        let camera = Camera::default();
+        let mut renderer = SceneRenderer::new(320, 240);
+        let options = RenderOptions {
+            show_grid_3d: false,
+            solid_show_surface_edges: true,
+            ..RenderOptions::default()
+        };
+
+        let frame = renderer.build_frame(
+            &scene,
+            &camera,
+            320.0,
+            240.0,
+            &[],
+            [20, 20, 20, 255],
+            Vec3::Y,
+            options,
+            None,
+        );
+
+        assert!(matches!(
+            frame.commands.commands().first(),
+            Some(GraphicCommand::Clear { .. })
+        ));
+        assert!(frame.commands.commands().iter().any(|command| matches!(
+            command,
+            GraphicCommand::DrawMeshBatch { instances, .. } if instances.len() == 2
+        )));
+        assert_eq!(
+            frame
+                .commands
+                .commands()
+                .iter()
+                .filter(|command| matches!(command, GraphicCommand::DrawLineBatch { .. }))
+                .count(),
+            1
+        );
     }
 }

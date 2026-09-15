@@ -19,7 +19,7 @@ use serde_json::Value;
 use std::path::Path;
 
 use crate::agent_artifacts::capture_viewport_artifact;
-use crate::attached::AttachedCommandHost;
+use crate::attached::{AttachedCommandHost, PendingAttachedCommand};
 use crate::commands::game::{
     GameCommandContext, GameViewportPort, HeadlessGameViewportPort, SceneSelectionState,
 };
@@ -150,6 +150,7 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
 
 pub(crate) fn poll_attached_commands(
     attached_host: &mut AttachedCommandHost,
+    pending: Vec<PendingAttachedCommand>,
     attached_ledger: &mut TransactionLedger,
     runtime: Option<&mut NativeEditorRuntime>,
     mut workbench: Option<&mut NativeGameWorkbench>,
@@ -161,7 +162,6 @@ pub(crate) fn poll_attached_commands(
     catalog_error: Option<&str>,
     language: Language,
 ) -> AttachedPollResult {
-    let pending = attached_host.drain();
     if pending.is_empty() {
         return AttachedPollResult::default();
     }
@@ -214,12 +214,14 @@ pub(crate) fn poll_attached_commands(
             attached_host.respond(command, response);
             continue;
         }
+        let attached_revision = attached_ledger.revision();
         if let Some(response) = execute_attached_metadata(
             &command.request,
             project,
             scene,
             &selected,
-            attached_ledger.revision(),
+            attached_ledger,
+            attached_revision,
             project_assets,
             catalog_pending,
             catalog_error,
@@ -372,6 +374,9 @@ fn is_metadata_command(name: &str) -> bool {
             | "scene.query"
             | "scene.spatial_map"
             | "scene.spatial"
+            | "scene.overlaps"
+            | "scene.check_overlaps"
+            | "scene.diff"
             | "scene.design_audit"
             | "scene.layout_audit"
             | "scene.design_check"
@@ -382,6 +387,7 @@ fn is_metadata_command(name: &str) -> bool {
             | "assets.catalog"
             | "assets.search"
             | "assets.inspect"
+            | "assets.recommend"
             | "scripts.catalog"
             | "scripts.search"
             | "project.health"
@@ -835,6 +841,7 @@ fn execute_attached_metadata(
     project: Option<&Project>,
     scene: &SceneGraph,
     selected: &[SceneNodeId],
+    ledger: &TransactionLedger,
     revision: u64,
     project_assets: &[String],
     catalog_pending: bool,
@@ -857,6 +864,9 @@ fn execute_attached_metadata(
                 | "scene.query"
                 | "scene.spatial_map"
                 | "scene.spatial"
+                | "scene.overlaps"
+                | "scene.check_overlaps"
+                | "scene.diff"
                 | "scene.design_audit"
                 | "scene.layout_audit"
                 | "scene.design_check"
@@ -1076,6 +1086,35 @@ fn execute_attached_metadata(
             agent_context::scene_spatial_map(scene, &request.params, selected),
             revision,
         ),
+        "scene.overlaps" | "scene.check_overlaps" => observation_metadata_response(
+            request.id,
+            agent_context::scene_check_overlaps(scene, &request.params, selected),
+            revision,
+        ),
+        "scene.diff" => {
+            let from_revision = request
+                .params
+                .get("from_revision")
+                .and_then(Value::as_u64)
+                .unwrap_or_else(|| revision.saturating_sub(1));
+            match ledger.diff_since(from_revision) {
+                Ok(data) => metadata_response(
+                    request.id,
+                    "Scene diff",
+                    vec![format!(
+                        "Scene changes from revision {from_revision} to {revision}."
+                    )],
+                    data,
+                    revision,
+                ),
+                Err(error) => {
+                    let mut response =
+                        EngineCommandResponse::error(request.id, "Scene diff", error);
+                    response.revision = revision;
+                    response
+                }
+            }
+        }
         "scene.design_audit" | "scene.layout_audit" | "scene.design_check" => {
             observation_metadata_response(
                 request.id,
@@ -1107,6 +1146,17 @@ fn execute_attached_metadata(
         "assets.catalog" | "assets.search" => observation_metadata_response(
             request.id,
             agent_context::assets_catalog(
+                scene,
+                project_assets,
+                &request.params,
+                catalog_pending,
+                catalog_error,
+            ),
+            revision,
+        ),
+        "assets.recommend" => observation_metadata_response(
+            request.id,
+            agent_context::assets_recommend(
                 scene,
                 project_assets,
                 &request.params,

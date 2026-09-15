@@ -38,12 +38,20 @@ impl GraphicsCapabilities {
     }
 
     pub const fn wgpu(max_texture_dimension: u32, max_buffer_size: u64) -> Self {
+        Self::wgpu_with_timestamp_queries(max_texture_dimension, max_buffer_size, false)
+    }
+
+    pub const fn wgpu_with_timestamp_queries(
+        max_texture_dimension: u32,
+        max_buffer_size: u64,
+        timestamp_queries: bool,
+    ) -> Self {
         Self {
             backend: GraphicsBackendId::Wgpu,
             gpu_hardware: true,
             compute: true,
             indirect_draw: true,
-            timestamp_queries: false,
+            timestamp_queries,
             max_texture_dimension,
             max_buffer_size,
         }
@@ -52,8 +60,9 @@ impl GraphicsCapabilities {
 
 /// Explicit memory and frame budgets carried by the graphics device.
 ///
-/// These values are policy metadata in this first foundation. Cache eviction
-/// and upload enforcement will consume the same contract in later updates.
+/// Mesh residency, UI image residency and frame-upload checks consume this
+/// contract. A single cross-family ledger for every GPU owner remains a
+/// separate follow-up so each cache can keep its own eviction semantics.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GraphicsMemoryBudget {
     pub gpu_bytes: u64,
