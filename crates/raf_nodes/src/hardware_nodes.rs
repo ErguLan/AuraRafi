@@ -1,4 +1,4 @@
-use crate::node::{Node, NodeCategory, NodeId, NodePin, PinDataType, PinKind};
+use crate::node::{Node, NodeCategory, NodeId, NodePin, NodeProperty, PinDataType, PinKind};
 use uuid::Uuid;
 
 /// Hardware interaction nodes (Serial, Sensors, Actuators) mapped to Electronics.
@@ -39,6 +39,7 @@ impl HardwareNodes {
                 },
             ],
             position: [200.0, 600.0],
+            properties: vec![NodeProperty::new("port", "nodes.property.port", "COM3")],
         }
     }
 
@@ -76,6 +77,7 @@ impl HardwareNodes {
                 },
             ],
             position: [400.0, 600.0],
+            properties: vec![NodeProperty::new("port", "nodes.property.port", "COM3")],
         }
     }
 
@@ -113,6 +115,7 @@ impl HardwareNodes {
                 },
             ],
             position: [200.0, 750.0],
+            properties: vec![NodeProperty::new("pin", "nodes.property.pin", "A0")],
         }
     }
 
@@ -150,6 +153,7 @@ impl HardwareNodes {
                 },
             ],
             position: [400.0, 750.0],
+            properties: vec![NodeProperty::new("pin", "nodes.property.pin", "D0")],
         }
     }
 }

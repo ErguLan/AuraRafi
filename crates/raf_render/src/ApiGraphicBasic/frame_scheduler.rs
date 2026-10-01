@@ -243,6 +243,14 @@ pub struct DynamicResolutionController {
     scale: f32,
     smoothed_frame_ms: f32,
     under_budget_frames: u16,
+    #[serde(default = "default_resolution_limits")]
+    resolution_limits: [f32; 2],
+    #[serde(default)]
+    override_profile_minimum: bool,
+}
+
+fn default_resolution_limits() -> [f32; 2] {
+    [0.60, 1.0]
 }
 
 impl Default for DynamicResolutionController {
@@ -251,6 +259,8 @@ impl Default for DynamicResolutionController {
             scale: 1.0,
             smoothed_frame_ms: 0.0,
             under_budget_frames: 0,
+            resolution_limits: default_resolution_limits(),
+            override_profile_minimum: false,
         }
     }
 }
@@ -260,8 +270,52 @@ impl DynamicResolutionController {
         self.scale
     }
 
+    /// Sets project-local resolution limits without changing frame pacing.
+    /// Explicit efficiency mode may lower the profile's minimum scale.
+    pub fn set_resolution_limits(
+        &mut self,
+        min: f32,
+        max: f32,
+        override_profile_minimum: bool,
+    ) -> bool {
+        let max = if max.is_finite() {
+            max.clamp(0.35, 1.0)
+        } else {
+            1.0
+        };
+        let min = if min.is_finite() {
+            min.clamp(0.35, max)
+        } else {
+            0.60_f32.min(max)
+        };
+        if self.resolution_limits == [min, max]
+            && self.override_profile_minimum == override_profile_minimum
+        {
+            return false;
+        }
+        self.resolution_limits = [min, max];
+        self.override_profile_minimum = override_profile_minimum;
+        self.scale = self.scale.clamp(min, max);
+        self.under_budget_frames = 0;
+        true
+    }
+
+    fn effective_resolution_limits(&self, budget: FramePacingBudget) -> (f32, f32) {
+        let max = budget
+            .max_resolution_scale
+            .min(self.resolution_limits[1])
+            .clamp(0.35, 1.0);
+        let min = if self.override_profile_minimum {
+            self.resolution_limits[0]
+        } else {
+            budget.min_resolution_scale.max(self.resolution_limits[0])
+        }
+        .min(max);
+        (min, max)
+    }
+
     pub fn reset(&mut self, budget: FramePacingBudget) {
-        self.scale = budget.max_resolution_scale;
+        self.scale = self.effective_resolution_limits(budget).1;
         self.smoothed_frame_ms = 0.0;
         self.under_budget_frames = 0;
     }
@@ -273,15 +327,14 @@ impl DynamicResolutionController {
         cpu_ms: f32,
         gpu_ms: f32,
     ) -> f32 {
+        let (min_resolution_scale, max_resolution_scale) = self.effective_resolution_limits(budget);
         if budget.foreground_fps == 0 {
-            self.scale = budget.max_resolution_scale;
+            self.scale = max_resolution_scale;
             return self.scale;
         }
         let measured = cpu_ms.max(gpu_ms).max(0.0);
         if measured <= f32::EPSILON {
-            return self
-                .scale
-                .clamp(budget.min_resolution_scale, budget.max_resolution_scale);
+            return self.scale.clamp(min_resolution_scale, max_resolution_scale);
         }
         self.smoothed_frame_ms = if self.smoothed_frame_ms <= f32::EPSILON {
             measured
@@ -294,7 +347,7 @@ impl DynamicResolutionController {
             FrameActivity::Benchmark => 0,
         };
         if fps == 0 {
-            self.scale = budget.max_resolution_scale;
+            self.scale = max_resolution_scale;
             return self.scale;
         }
         let target_ms = 1000.0 / f32::from(fps);
@@ -302,7 +355,7 @@ impl DynamicResolutionController {
             let pressure = (target_ms / self.smoothed_frame_ms)
                 .sqrt()
                 .clamp(0.82, 0.96);
-            self.scale = (self.scale * pressure).max(budget.min_resolution_scale);
+            self.scale = (self.scale * pressure).max(min_resolution_scale);
             self.under_budget_frames = 0;
         } else if self.smoothed_frame_ms < target_ms * 0.70 {
             self.under_budget_frames = self.under_budget_frames.saturating_add(1);
@@ -312,15 +365,13 @@ impl DynamicResolutionController {
                 24
             };
             if self.under_budget_frames >= recovery_delay {
-                self.scale = (self.scale + 0.025).min(budget.max_resolution_scale);
+                self.scale = (self.scale + 0.025).min(max_resolution_scale);
                 self.under_budget_frames = 0;
             }
         } else {
             self.under_budget_frames = 0;
         }
-        self.scale = self
-            .scale
-            .clamp(budget.min_resolution_scale, budget.max_resolution_scale);
+        self.scale = self.scale.clamp(min_resolution_scale, max_resolution_scale);
         self.scale
     }
 }
@@ -773,5 +824,39 @@ mod tests {
         assert!(scheduler.request_frame(0.0).is_some());
 
         assert_eq!(scheduler.seconds_until_next_frame(1.0), None);
+    }
+
+    #[test]
+    fn project_resolution_limits_bound_adaptation_without_changing_frame_pacing() {
+        let budget = FramePacingBudget::eco();
+        let mut controller = DynamicResolutionController::default();
+        assert!(controller.set_resolution_limits(0.50, 0.85, true));
+        controller.reset(budget);
+        assert_eq!(controller.scale(), 0.85);
+
+        for _ in 0..12 {
+            controller.update(budget, FrameActivity::Interactive, 50.0, 0.0);
+        }
+        assert!((0.50..=0.85).contains(&controller.scale()));
+        assert!((controller.scale() - 0.50).abs() < f32::EPSILON);
+        assert_eq!(budget.foreground_fps, 60);
+
+        let performance_budget = FramePacingBudget::performance();
+        controller.reset(performance_budget);
+        for _ in 0..12 {
+            controller.update(performance_budget, FrameActivity::Interactive, 100.0, 0.0);
+        }
+        assert_eq!(controller.scale(), 0.50);
+
+        assert!(controller.set_resolution_limits(1.0, 1.0, false));
+        controller.update(budget, FrameActivity::Interactive, 50.0, 0.0);
+        assert_eq!(controller.scale(), 1.0);
+
+        assert!(controller.set_resolution_limits(0.60, 1.0, false));
+        controller.reset(performance_budget);
+        for _ in 0..12 {
+            controller.update(performance_budget, FrameActivity::Interactive, 100.0, 0.0);
+        }
+        assert_eq!(controller.scale(), 0.85);
     }
 }

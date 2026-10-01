@@ -4,8 +4,8 @@ use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiIcon, UiIconId, UiIconSize, UiSurface,
 };
 use raf_ui::{
-    UiAlign, UiEventBinding, UiEventKind, UiFlow, UiFontWeight, UiLayout, UiNode, UiNodeKind,
-    UiOverflow, UiSizeMode, UiSpacing, UiStylePatch, UiStyleRule, UiStyleRuleState,
+    UiAlign, UiEventBinding, UiEventKind, UiFontWeight, UiLayout, UiNode, UiNodeKind,
+    UiOverflow, UiStylePatch, UiStyleRule, UiStyleRuleState,
     UiStyleSelector, UiStyleSheet, UiTextRole, UiTextStyle,
 };
 
@@ -26,14 +26,15 @@ pub fn build_electronics_toolbar_surface(
 ) -> UiSurface {
     let mut root = UiNode::new("electronics.toolbar", UiNodeKind::Toolbar)
         .with_class("electronics-toolbar")
-        .with_layout(UiLayout {
-            flow: UiFlow::Row,
-            align_items: UiAlign::Center,
-            gap: 3.0,
-            padding: UiSpacing::xy(6.0, 3.0),
-            overflow: UiOverflow::ScrollX,
-            ..UiLayout::fixed(0.0, ELECTRONICS_TOOLBAR_HEIGHT).with_width_mode(UiSizeMode::Fill)
-        })
+        .with_layout(
+            UiLayout::row()
+                .align(UiAlign::Center)
+                .gap(3.0)
+                .padding_xy(6.0, 3.0)
+                .overflow(UiOverflow::ScrollX)
+                .fill_width()
+                .fixed_height(ELECTRONICS_TOOLBAR_HEIGHT),
+        )
         .with_child(mode_button(
             palette,
             "electronics.mode.schematic",
@@ -258,13 +259,14 @@ fn button(
         } else {
             ""
         })
-        .with_layout(UiLayout {
-            flow: UiFlow::Row,
-            align_items: UiAlign::Center,
-            gap: 5.0,
-            padding: UiSpacing::xy(8.0, 2.0),
-            ..UiLayout::fixed(0.0, 26.0).with_text_safe_area(true)
-        })
+        .with_layout(
+            UiLayout::row()
+                .align(UiAlign::Center)
+                .gap(5.0)
+                .padding_xy(8.0, 2.0)
+                .fixed_height(26.0)
+                .with_text_safe_area(true),
+        )
         .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small).with_tint(icon_tint))
         .with_text_key(label_key(command))
         .with_text_style(UiTextStyle {
@@ -314,9 +316,8 @@ fn action_icon_button(
 }
 
 fn separator(id: &str) -> UiNode {
-    UiNode::new(id, UiNodeKind::Panel)
+    crate::ui_atoms::UiSeparator::vertical(id, 18.0)
         .with_class("electronics-toolbar-separator")
-        .with_layout(UiLayout::fixed(1.0, 18.0))
 }
 
 fn tooltip_key(command: &str) -> &'static str {

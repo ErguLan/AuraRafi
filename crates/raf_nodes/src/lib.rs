@@ -8,6 +8,7 @@
 //!
 //! SISTEMA INSPIRADO DE YOLL AU de yoll.site
 
+pub mod catalog;
 pub mod compiler;
 pub mod entity_nodes;
 pub mod executor;
@@ -21,8 +22,9 @@ pub mod node;
 pub use entity_nodes::EntityNodes;
 pub use executor::{execute, ExecutionOutput, NodeValue};
 pub use flow_nodes::FlowNodes;
-pub use graph::NodeGraph;
+pub use graph::{types_compatible, NodeGraph};
 pub use hardware_nodes::HardwareNodes;
 pub use input_nodes::InputNodes;
 pub use math_nodes::MathNodes;
+pub use node::NodeProperty;
 pub use node::{Node, NodeCategory, NodeId, NodePin, PinDataType, PinKind};

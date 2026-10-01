@@ -17,7 +17,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RenderConfig {
     // -- Backend selection --
-    /// Use GPU-accelerated rendering (wgpu). If false, CPU painter only.
+    /// Project preference for GPU-backed rendering work.
+    ///
+    /// This does **not** select the process backend. Backend selection is the
+    /// global `RenderExecutionPolicy` (Auto/GpuPreferred => GPU, CpuOnly =>
+    /// CPU recovery). `use_gpu = false` only keeps optional GPU-heavy project
+    /// features off (potato / advanced-feature gate).
     /// Default: false (potato mode).
     pub use_gpu: bool,
 
@@ -91,8 +96,12 @@ pub struct RenderConfig {
     /// Advisory triangle workload used to size optional systems and tooling.
     /// It is never permission to discard visible editor geometry.
     pub max_triangles: u32,
-    /// Frame budget in milliseconds. If exceeded, auto-reduce detail.
-    /// Default: 33 (30fps minimum).
+    /// Work budget in milliseconds for rendering detail.
+    ///
+    /// Exceeding it auto-reduces quality (scale, picking, LOD). It is not a
+    /// presentation FPS cap: FrameScheduler / `fps_limit` own pacing. Potato
+    /// may use a larger work budget without lowering interactive FPS targets.
+    /// Default: 33 (quality reduction threshold, not a 30 FPS product target).
     pub frame_budget_ms: f32,
 
     // -- Depth accuracy (v0.8.0) --
@@ -224,11 +233,11 @@ impl RenderConfig {
         }
     }
 
-    /// Potato preset: absolute minimum, everything off.
+    /// Potato preset: absolute minimum optional work; presentation FPS stays free.
     pub fn potato() -> Self {
         Self {
             max_triangles: 2_000,
-            frame_budget_ms: 50.0, // 20fps budget
+            frame_budget_ms: 50.0, // quality reduction threshold, not an FPS cap
             max_texture_size: 256,
             ambient_intensity: 0.4,
             ..Default::default()

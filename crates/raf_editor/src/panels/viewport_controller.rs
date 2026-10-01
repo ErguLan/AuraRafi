@@ -4,9 +4,9 @@
 //! It owns camera/tool/selection gestures and records a renderer-owned gizmo;
 //! window placement, RafUI chrome, and final presentation stay outside.
 
-use glam::{Quat, Vec3};
+use glam::{Mat4, Quat, Vec3};
 use raf_core::config::EngineSettings;
-use raf_core::project::ProjectSettings;
+use raf_core::project::{GeometryDetailMode, ProjectSettings, TextureQualityMode};
 use raf_core::scene::{SceneGraph, SceneNodeId};
 use raf_core::{InputKey, InputOwner, InputRouter, InputSnapshot, PointerButton};
 use raf_render::api_graphic_basic::device::SceneFrameOutput;
@@ -19,6 +19,7 @@ use raf_render::gizmo::{GizmoAxis, GizmoMode};
 use raf_render::render_config::RenderConfig;
 use raf_render::scene_renderer::{RenderOptions, SceneRenderFrame, GRID_Y};
 use raf_render::WorldStreamConfig;
+use std::path::Path;
 
 use crate::building_mode::{self, Aabb};
 use crate::commands::game::GameViewportPort;
@@ -133,6 +134,8 @@ pub struct NativeGameViewportController {
     /// Fixed metric quantum used by the organized style (meters).
     pub building_snap_step: f32,
     render_config: RenderConfig,
+    geometry_detail: GeometryDetailMode,
+    texture_quality: TextureQualityMode,
     world_stream_config: WorldStreamConfig,
     bridge: ViewportBridge,
     free_drag: Option<FreeDragGesture>,
@@ -175,6 +178,8 @@ impl Default for NativeGameViewportController {
             building_organized: false,
             building_snap_step: 1.0,
             render_config: RenderConfig::editor_lightweight(),
+            geometry_detail: GeometryDetailMode::Adaptive,
+            texture_quality: TextureQualityMode::Adaptive,
             world_stream_config: WorldStreamConfig::default(),
             bridge: ViewportBridge::default(),
             free_drag: None,
@@ -188,6 +193,10 @@ impl Default for NativeGameViewportController {
 }
 
 impl NativeGameViewportController {
+    pub fn set_project_asset_root(&mut self, project_root: Option<&Path>) {
+        self.bridge.set_project_asset_root(project_root);
+    }
+
     pub fn bridge(&self) -> &ViewportBridge {
         &self.bridge
     }
@@ -241,6 +250,8 @@ impl NativeGameViewportController {
         // renderer stabilization. Project presets remain persisted for future
         // runtime use but do not switch viewport behavior yet.
         self.render_config = RenderConfig::editor_lightweight();
+        self.geometry_detail = settings.geometry_detail;
+        self.texture_quality = settings.texture_quality;
         self.world_stream_config = WorldStreamConfig::from_project_settings(settings);
     }
 
@@ -284,7 +295,7 @@ impl NativeGameViewportController {
                         pointer,
                         size[0],
                         size[1],
-                        self.gizmo_presentation_scale(),
+                        self.gizmo_scale_for_scene(scene, &view_proj, size),
                     );
                 } else if let Some((origin, scale_ref)) = self.gizmo_anchor(scene) {
                     self.bridge.update_transform_hover_world(
@@ -294,7 +305,7 @@ impl NativeGameViewportController {
                         pointer,
                         size[0],
                         size[1],
-                        self.gizmo_presentation_scale(),
+                        self.gizmo_scale_for_scene(scene, &view_proj, size),
                     );
                 } else {
                     self.bridge.update_transform_hover(
@@ -362,7 +373,7 @@ impl NativeGameViewportController {
                             pointer,
                             size[0],
                             size[1],
-                            self.gizmo_presentation_scale(),
+                            self.gizmo_scale_for_scene(scene, &view_proj, size),
                         );
                     } else {
                         self.bridge.begin_transform_drag_scaled(
@@ -372,7 +383,7 @@ impl NativeGameViewportController {
                             pointer,
                             size[0],
                             size[1],
-                            self.gizmo_presentation_scale(),
+                            self.gizmo_scale_for_scene(scene, &view_proj, size),
                         );
                     }
                 }
@@ -1234,6 +1245,8 @@ impl NativeGameViewportController {
             world_streaming_enabled: self.world_stream_config.enabled,
             world_stream_region_size: self.world_stream_config.region_size,
             world_stream_load_radius: self.world_stream_config.load_radius,
+            geometry_detail: self.geometry_detail,
+            texture_quality: self.texture_quality,
         }
     }
 
@@ -1256,14 +1269,19 @@ impl NativeGameViewportController {
                     origin,
                     entity_scale: scale_ref,
                     entity_axes: [Vec3::X, Vec3::Y, Vec3::Z],
-                    presentation_scale: self.gizmo_presentation_scale(),
+                    enabled_scale_axes: [true; 3],
+                    presentation_scale: self.gizmo_presentation_scale(
+                        origin,
+                        &frame.view_proj,
+                        [frame.width as f32, frame.height as f32],
+                    ),
                 }
                 .append_to(frame);
             }
             return;
         }
         let id = self.selected[0];
-        let Some(_) = scene.get(id) else {
+        let Some(node) = scene.get(id) else {
             return;
         };
         let world = scene.world_matrix(id);
@@ -1275,7 +1293,16 @@ impl NativeGameViewportController {
             origin: world.col(3).truncate(),
             entity_scale,
             entity_axes,
-            presentation_scale: self.gizmo_presentation_scale(),
+            enabled_scale_axes: if node.primitive == raf_core::scene::graph::Primitive::Plane {
+                [true, false, true]
+            } else {
+                [true; 3]
+            },
+            presentation_scale: self.gizmo_presentation_scale(
+                world.col(3).truncate(),
+                &frame.view_proj,
+                [frame.width as f32, frame.height as f32],
+            ),
         }
         .append_to(frame);
     }
@@ -1339,14 +1366,69 @@ impl NativeGameViewportController {
         }
     }
 
-    fn gizmo_presentation_scale(&self) -> f32 {
-        if self.bridge.gizmo().mode == GizmoMode::Scale {
-            1.0
-        } else {
-            let distance_factor = (self.bridge.orbit_distance() / 5.0).max(1.0);
-            let growth = self.gizmo_growth_scale.clamp(0.0, 100.0) / 100.0;
-            1.0 + (distance_factor - 1.0) * growth
+    /// World scale that lands the gizmo on a constant on-screen size.
+    ///
+    /// The old formula compared the orbit distance against a hardcoded `5.0`
+    /// reference, so it ignored the real distance to the selected object, the
+    /// viewport size and the projection. Measuring pixels-per-world-unit
+    /// through the real matrix keeps arrows, rings and their hit geometry
+    /// identical in size at any distance.
+    /// World point the gizmo is attached to, or `None` when it is not shown.
+    fn gizmo_origin(&self, scene: &SceneGraph) -> Option<Vec3> {
+        if self.edit_mode != NativeViewportEditMode::Object || self.selected.is_empty() {
+            return None;
         }
+        if self.selected.len() == 1 {
+            return scene.get(self.selected[0]).map(|node| node.position);
+        }
+        if !self.multi_select_gizmo_enabled {
+            return None;
+        }
+        self.gizmo_anchor(scene).map(|(origin, _)| origin)
+    }
+
+    /// [`Self::gizmo_presentation_scale`] resolved for the current selection.
+    fn gizmo_scale_for_scene(
+        &self,
+        scene: &SceneGraph,
+        view_proj: &Mat4,
+        size: [f32; 2],
+    ) -> f32 {
+        match self.gizmo_origin(scene) {
+            Some(origin) => self.gizmo_presentation_scale(origin, view_proj, size),
+            None => 1.0,
+        }
+    }
+
+    fn gizmo_presentation_scale(
+        &self,
+        origin: Vec3,
+        view_proj: &Mat4,
+        size: [f32; 2],
+    ) -> f32 {
+        let (base_world, target_pixels) = match self.bridge.gizmo().mode {
+            GizmoMode::Rotate => (
+                raf_render::picking::GIZMO_ROTATION_RADIUS,
+                raf_render::picking::GIZMO_TARGET_ROTATE_PIXELS,
+            ),
+            GizmoMode::Translate => (
+                raf_render::picking::GIZMO_LENGTH,
+                raf_render::picking::GIZMO_TARGET_TRANSLATE_PIXELS,
+            ),
+            // Scale handles are positioned by the object itself and their
+            // radius is already screen-space, so there is nothing to scale.
+            GizmoMode::Scale => return 1.0,
+        };
+        let pixels_per_unit =
+            raf_render::picking::pixels_per_world_unit(view_proj, size[0], size[1], origin);
+        if !pixels_per_unit.is_finite() || pixels_per_unit <= f32::EPSILON {
+            return 1.0;
+        }
+        // `gizmo_growth_scale` is the user size multiplier on top of the
+        // constant screen size: 0 keeps the standard size, 100 doubles it.
+        let growth = 1.0 + self.gizmo_growth_scale.clamp(0.0, 100.0) / 100.0;
+        let target = target_pixels * growth;
+        (target / (base_world * pixels_per_unit)).clamp(0.02, 60.0)
     }
 }
 
@@ -1600,6 +1682,20 @@ mod tests {
         assert!((controller.wasd_speed - 2.75).abs() < f32::EPSILON);
         assert!(controller.invert_ws);
         assert!((controller.move_sensitivity - 1.25).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn project_geometry_detail_reaches_the_viewport_renderer_options() {
+        let mut controller = NativeGameViewportController::default();
+        let mut settings = ProjectSettings::default();
+        settings.geometry_detail = GeometryDetailMode::Detailed;
+
+        controller.apply_project_settings(&settings);
+
+        assert_eq!(
+            controller.render_options().geometry_detail,
+            GeometryDetailMode::Detailed
+        );
     }
 
     #[test]

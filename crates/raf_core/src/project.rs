@@ -79,13 +79,24 @@ pub struct ProjectSettings {
     /// Save immediately after each committed editor action.
     #[serde(default)]
     pub linear_save: bool,
-    /// Preferred runtime preset for this specific project.
+    /// Legacy runtime preset retained for existing project files. The editor
+    /// viewport does not apply these effect presets.
     #[serde(default)]
     pub runtime_render_preset: RenderPreset,
-    /// Optional software depth pass for more accurate hidden-surface ordering.
+    /// Resolution policy for the editor viewport. This only changes render
+    /// resolution; it does not enable optional effects or alter frame pacing.
+    #[serde(default)]
+    pub viewport_resolution: ViewportResolutionMode,
+    /// Curved-geometry detail policy for the editor viewport.
+    #[serde(default)]
+    pub geometry_detail: GeometryDetailMode,
+    /// Per-project cap for decoded and resident base-color textures.
+    #[serde(default)]
+    pub texture_quality: TextureQualityMode,
+    /// Legacy software-depth preference retained for existing project files.
     #[serde(default)]
     pub depth_accurate: bool,
-    /// Internal resolution scale used by the software depth pass.
+    /// Legacy software-depth resolution scale retained for existing projects.
     #[serde(default = "default_depth_resolution_scale")]
     pub depth_resolution_scale: f32,
     /// Enable region-based scene visibility for large-world projects.
@@ -97,7 +108,8 @@ pub struct ProjectSettings {
     /// Number of visible regions kept around the viewport camera.
     #[serde(default = "default_world_stream_load_radius")]
     pub world_stream_load_radius: u32,
-    /// Positive values prefer lower detail as regions move away from the camera.
+    /// Legacy LOD bias retained for existing project files; visibility culling
+    /// does not currently consume it.
     #[serde(default)]
     pub world_stream_lod_bias: i8,
     /// Scene name to create/use by default.
@@ -171,6 +183,86 @@ fn default_building_snap_step() -> f32 {
     1.0
 }
 
+/// A bounded render-resolution policy for the editor viewport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ViewportResolutionMode {
+    /// Spend fewer GPU pixels and allow a lower resolution under pressure.
+    Efficient,
+    /// Keep native resolution unless measured frame cost requires scaling down.
+    Adaptive,
+    /// Keep the viewport at native resolution even when the frame budget is exceeded.
+    FullResolution,
+}
+
+/// Balances curved-mesh tessellation against the amount of visible detail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GeometryDetailMode {
+    /// Always use the lowest-cost curved meshes.
+    Efficient,
+    /// Choose detail from projected size, with hysteresis at LOD boundaries.
+    Adaptive,
+    /// Always use the highest built-in curved-mesh detail.
+    Detailed,
+}
+
+/// Hard image-dimension and residency caps for scene base-color textures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum TextureQualityMode {
+    /// 256px maximum and a 4 MiB CPU/GPU texture-cache budget.
+    Efficient,
+    /// 512px maximum and a 12 MiB CPU/GPU texture-cache budget.
+    Adaptive,
+    /// 1024px maximum and a 32 MiB CPU/GPU texture-cache budget.
+    Detailed,
+}
+
+impl Default for GeometryDetailMode {
+    fn default() -> Self {
+        Self::Adaptive
+    }
+}
+
+impl Default for TextureQualityMode {
+    fn default() -> Self {
+        Self::Adaptive
+    }
+}
+
+impl TextureQualityMode {
+    pub const fn max_dimension(self) -> u32 {
+        match self {
+            Self::Efficient => 256,
+            Self::Adaptive => 512,
+            Self::Detailed => 1024,
+        }
+    }
+
+    pub const fn cache_budget_bytes(self) -> u64 {
+        match self {
+            Self::Efficient => 4 * 1024 * 1024,
+            Self::Adaptive => 12 * 1024 * 1024,
+            Self::Detailed => 32 * 1024 * 1024,
+        }
+    }
+}
+
+impl Default for ViewportResolutionMode {
+    fn default() -> Self {
+        Self::Adaptive
+    }
+}
+
+impl ViewportResolutionMode {
+    /// Returns the minimum and maximum internal-resolution scale for this mode.
+    pub const fn resolution_range(self) -> (f32, f32) {
+        match self {
+            Self::Efficient => (0.50, 0.85),
+            Self::Adaptive => (0.60, 1.0),
+            Self::FullResolution => (1.0, 1.0),
+        }
+    }
+}
+
 fn default_electronics_grid_step_mm() -> f32 {
     20.0
 }
@@ -187,6 +279,9 @@ impl Default for ProjectSettings {
             pause_when_unfocused: true,
             linear_save: false,
             runtime_render_preset: RenderPreset::Potato,
+            viewport_resolution: ViewportResolutionMode::Adaptive,
+            geometry_detail: GeometryDetailMode::Adaptive,
+            texture_quality: TextureQualityMode::Adaptive,
             depth_accurate: false,
             depth_resolution_scale: default_depth_resolution_scale(),
             world_streaming_enabled: false,
@@ -410,6 +505,12 @@ mod tests {
     #[test]
     fn world_streaming_defaults_are_lightweight_and_persisted() {
         let settings = ProjectSettings::default();
+        assert_eq!(
+            settings.viewport_resolution,
+            ViewportResolutionMode::Adaptive
+        );
+        assert_eq!(settings.geometry_detail, GeometryDetailMode::Adaptive);
+        assert_eq!(settings.texture_quality, TextureQualityMode::Adaptive);
         assert!(!settings.world_streaming_enabled);
         assert_eq!(settings.world_stream_region_size, 128.0);
         assert_eq!(settings.world_stream_load_radius, 3);
@@ -417,6 +518,34 @@ mod tests {
 
         let serialized = ron::ser::to_string(&settings).expect("settings serialize");
         let loaded: ProjectSettings = ron::from_str(&serialized).expect("settings deserialize");
+        assert_eq!(loaded.viewport_resolution, ViewportResolutionMode::Adaptive);
+        assert_eq!(loaded.geometry_detail, GeometryDetailMode::Adaptive);
+        assert_eq!(loaded.texture_quality, TextureQualityMode::Adaptive);
         assert_eq!(loaded.world_stream_region_size, 128.0);
+    }
+
+    #[test]
+    fn texture_quality_modes_keep_explicit_dimension_and_memory_caps() {
+        assert_eq!(TextureQualityMode::Efficient.max_dimension(), 256);
+        assert_eq!(
+            TextureQualityMode::Efficient.cache_budget_bytes(),
+            4 * 1024 * 1024
+        );
+        assert_eq!(TextureQualityMode::Adaptive.max_dimension(), 512);
+        assert_eq!(
+            TextureQualityMode::Adaptive.cache_budget_bytes(),
+            12 * 1024 * 1024
+        );
+        assert_eq!(TextureQualityMode::Detailed.max_dimension(), 1024);
+        assert_eq!(
+            TextureQualityMode::Detailed.cache_budget_bytes(),
+            32 * 1024 * 1024
+        );
+    }
+
+    #[test]
+    fn older_settings_files_receive_adaptive_geometry_detail() {
+        let loaded: ProjectSettings = serde_json::from_str("{}").expect("legacy settings load");
+        assert_eq!(loaded.geometry_detail, GeometryDetailMode::Adaptive);
     }
 }

@@ -13,7 +13,10 @@ use raf_core::config::{
     EngineSettings, RenderExecutionPolicy, RenderPreset, RenderQuality, ScriptExecutionMode,
     ScriptLanguage, Theme,
 };
-use raf_core::project::{BuildingStyle, Project, ProjectSettings, ProjectType};
+use raf_core::project::{
+    BuildingStyle, GeometryDetailMode, Project, ProjectSettings, ProjectType, TextureQualityMode,
+    ViewportResolutionMode,
+};
 use raf_core::scene::SceneGraph;
 use raf_core::session::{ProjectSessionRegistry, SessionId};
 use raf_core::TransactionLedger;
@@ -154,6 +157,13 @@ fn native_environment(settings: &EngineSettings, logical_size: [f32; 2]) -> UiEn
         settings.ui_scale.clamp(0.5, 3.0)
     };
     environment
+}
+
+fn should_queue_eager_hierarchy_refresh(
+    quality: RenderQuality,
+    selection_changed: bool,
+) -> bool {
+    selection_changed && quality != RenderQuality::Potato
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -421,6 +431,51 @@ fn apply_project_setting_command(
         "project-settings.preset.high" if settings.allow_gpu_features => {
             let changed = settings.runtime_render_preset != RenderPreset::High;
             settings.runtime_render_preset = RenderPreset::High;
+            ProjectSettingsMutation::without_layout(changed)
+        }
+        "project-settings.viewport-resolution.efficient" => {
+            let changed = settings.viewport_resolution != ViewportResolutionMode::Efficient;
+            settings.viewport_resolution = ViewportResolutionMode::Efficient;
+            ProjectSettingsMutation::without_layout(changed)
+        }
+        "project-settings.viewport-resolution.adaptive" => {
+            let changed = settings.viewport_resolution != ViewportResolutionMode::Adaptive;
+            settings.viewport_resolution = ViewportResolutionMode::Adaptive;
+            ProjectSettingsMutation::without_layout(changed)
+        }
+        "project-settings.viewport-resolution.full" => {
+            let changed = settings.viewport_resolution != ViewportResolutionMode::FullResolution;
+            settings.viewport_resolution = ViewportResolutionMode::FullResolution;
+            ProjectSettingsMutation::without_layout(changed)
+        }
+        "project-settings.geometry-detail.efficient" => {
+            let changed = settings.geometry_detail != GeometryDetailMode::Efficient;
+            settings.geometry_detail = GeometryDetailMode::Efficient;
+            ProjectSettingsMutation::without_layout(changed)
+        }
+        "project-settings.geometry-detail.adaptive" => {
+            let changed = settings.geometry_detail != GeometryDetailMode::Adaptive;
+            settings.geometry_detail = GeometryDetailMode::Adaptive;
+            ProjectSettingsMutation::without_layout(changed)
+        }
+        "project-settings.geometry-detail.detailed" => {
+            let changed = settings.geometry_detail != GeometryDetailMode::Detailed;
+            settings.geometry_detail = GeometryDetailMode::Detailed;
+            ProjectSettingsMutation::without_layout(changed)
+        }
+        "project-settings.texture-quality.efficient" => {
+            let changed = settings.texture_quality != TextureQualityMode::Efficient;
+            settings.texture_quality = TextureQualityMode::Efficient;
+            ProjectSettingsMutation::without_layout(changed)
+        }
+        "project-settings.texture-quality.adaptive" => {
+            let changed = settings.texture_quality != TextureQualityMode::Adaptive;
+            settings.texture_quality = TextureQualityMode::Adaptive;
+            ProjectSettingsMutation::without_layout(changed)
+        }
+        "project-settings.texture-quality.detailed" => {
+            let changed = settings.texture_quality != TextureQualityMode::Detailed;
+            settings.texture_quality = TextureQualityMode::Detailed;
             ProjectSettingsMutation::without_layout(changed)
         }
         _ => ProjectSettingsMutation::default(),
@@ -851,6 +906,12 @@ impl NativeEditorApplication {
             runtime.set_project_type(project_type);
             runtime.set_layout_request(startup_layout);
             runtime.apply_engine_settings(&self.settings_state, allow_gpu_features);
+            runtime.set_project_asset_root(
+                self.project.as_ref().map(|project| project.path.as_path()),
+            );
+            if let Some(project) = self.project.as_ref() {
+                runtime.apply_project_settings(&project.settings);
+            }
             runtime.set_node_graph(startup_node_graph);
         }
 
@@ -1242,9 +1303,8 @@ impl NativeEditorApplication {
         let global_settings = self.settings_state.clone();
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.apply_engine_settings(&global_settings, project_settings.allow_gpu_features);
-            runtime
-                .game_viewport_mut()
-                .apply_project_settings(&project_settings);
+            runtime.apply_project_settings(&project_settings);
+            runtime.set_project_asset_root(Some(project.path.as_path()));
             runtime.request_canvas_frame();
         }
         if let Some(editor) = self.electronics_editor.as_mut() {
@@ -1538,6 +1598,7 @@ impl NativeEditorApplication {
         let exit_confirmation_was_open = self.exit_confirmation_open;
         let mut persist_agent_settings = false;
         let mut linear_save_requested = false;
+        let mut queue_hierarchy_refresh = false;
 
         if self.exit_confirmation_open {
             let action = self.process_exit_confirmation_input();
@@ -1610,6 +1671,7 @@ impl NativeEditorApplication {
             let Some(runtime) = self.runtime.as_mut() else {
                 return;
             };
+            let selected_before_input = runtime.game_viewport().selected.clone();
             let mut cursor_hint = self
                 .settings_open
                 .then(|| {
@@ -1654,7 +1716,7 @@ impl NativeEditorApplication {
                     runtime.active_frame_reason_label(),
                     runtime.canvas_status_label(),
                 );
-                let selected = runtime.game_viewport().selected.clone();
+                let selected = selected_before_input.clone();
                 let compass_state = if runtime.project_type() == ProjectType::Game
                     && runtime.game_viewport().mode == NativeViewportMode::View3d
                 {
@@ -1675,6 +1737,9 @@ impl NativeEditorApplication {
                     runtime.node_graph(),
                     runtime.selected_graph_node(),
                     runtime.node_graph_revision(),
+                    runtime.can_undo_node_graph(),
+                    runtime.can_redo_node_graph(),
+                    runtime.node_validation(),
                     self.project.as_ref(),
                     now,
                     compass_state,
@@ -2088,13 +2153,25 @@ impl NativeEditorApplication {
                 && runtime.project_type() == ProjectType::Game
             {
                 if let Some(workbench) = self.workbench.as_ref() {
-                    let viewport = runtime.game_viewport_mut();
-                    viewport.apply_engine_settings(workbench.engine_settings());
+                    runtime
+                        .game_viewport_mut()
+                        .apply_engine_settings(workbench.engine_settings());
                     if let Some(project) = self.project.as_ref() {
-                        viewport.apply_project_settings(&project.settings);
+                        runtime.apply_project_settings(&project.settings);
                     }
                 }
-                runtime.update_game_input(self.input.snapshot(), &mut self.scene);
+                let viewport_update =
+                    runtime.update_game_input(self.input.snapshot(), &mut self.scene);
+                let selection_changed = viewport_update.selection_changed
+                    || runtime.game_viewport().selected.as_slice()
+                        != selected_before_input.as_slice();
+                let quality = self
+                    .workbench
+                    .as_ref()
+                    .map(|workbench| workbench.engine_settings().render_quality);
+                queue_hierarchy_refresh = quality.is_some_and(|quality| {
+                    should_queue_eager_hierarchy_refresh(quality, selection_changed)
+                });
             }
         }
 
@@ -2295,6 +2372,14 @@ impl NativeEditorApplication {
         let presented_at = self.started_at.elapsed().as_secs_f64();
         let total_cpu_ms = redraw_started_at.elapsed().as_secs_f32() * 1000.0;
         runtime.finish_frame(presented_at, frame_cpu_ms, frame_gpu_ms, total_cpu_ms);
+        if queue_hierarchy_refresh {
+            // The workbench was synchronized before viewport input so
+            // retained UI keeps ownership of the pointer first. Low, Medium
+            // and High queue one follow-up UI frame after this presentation so
+            // a selection cannot leave Hierarchy stale until another pointer
+            // event. Potato keeps its intentional lazy path.
+            runtime.request_ui_frame();
+        }
         let initialize_workspace_after_present = loading_active && self.startup_loading_presented;
         if loading_active && !initialize_workspace_after_present {
             runtime.request_ui_frame();
@@ -2403,6 +2488,10 @@ impl NativeEditorApplication {
             .is_some_and(|project| project.settings.allow_gpu_features);
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.apply_engine_settings(&self.settings_state, allow_gpu_features);
+            if let Some(project) = self.project.as_ref() {
+                runtime.apply_project_settings(&project.settings);
+                runtime.set_project_asset_root(Some(project.path.as_path()));
+            }
         }
         self.electronics_editor = self
             .project
@@ -2716,6 +2805,9 @@ impl NativeEditorApplication {
             workbench.reset_input_state(runtime.input_router_mut());
         }
         self.project = None;
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.set_project_asset_root(None);
+        }
         self.attached_ledger = TransactionLedger::new();
         self.electronics_editor = None;
         self.electronics_canvas = None;
@@ -3033,6 +3125,27 @@ mod tests {
         assert_eq!(settings.runtime_render_preset, RenderPreset::Medium);
 
         assert!(
+            apply_project_setting_command(
+                &mut settings,
+                "project-settings.viewport-resolution.full",
+            )
+            .changed
+        );
+        assert_eq!(
+            settings.viewport_resolution,
+            ViewportResolutionMode::FullResolution
+        );
+
+        assert!(
+            apply_project_setting_command(
+                &mut settings,
+                "project-settings.geometry-detail.detailed",
+            )
+            .changed
+        );
+        assert_eq!(settings.geometry_detail, GeometryDetailMode::Detailed);
+
+        assert!(
             apply_project_setting_toggle(&mut settings, "project-settings.language.cpp", true,)
                 .changed
         );
@@ -3044,5 +3157,29 @@ mod tests {
         assert!(reset.changed);
         assert!(reset.layout_changed);
         assert!(settings.show_hierarchy_panel && settings.show_properties_panel);
+    }
+
+    #[test]
+    fn hierarchy_refresh_policy_is_lazy_only_for_potato() {
+        assert!(!should_queue_eager_hierarchy_refresh(
+            RenderQuality::Potato,
+            true
+        ));
+        assert!(!should_queue_eager_hierarchy_refresh(
+            RenderQuality::Low,
+            false
+        ));
+        assert!(should_queue_eager_hierarchy_refresh(
+            RenderQuality::Low,
+            true
+        ));
+        assert!(should_queue_eager_hierarchy_refresh(
+            RenderQuality::Medium,
+            true
+        ));
+        assert!(should_queue_eager_hierarchy_refresh(
+            RenderQuality::High,
+            true
+        ));
     }
 }

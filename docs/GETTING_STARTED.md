@@ -154,7 +154,8 @@ In electronics workspaces, the same area becomes a domain-specific inspector:
 
 - **Console**: Log messages with severity filters (Info, Warning, Error)
 - **Assets**: Browse and filter project assets
-- **Node Editor**: Visual scripting with connected nodes
+- **Node Editor**: Visual scripting authoring with typed connections and an
+  Inspector
 - **AI Chat**: Native RafUI Agent surface with sessions, approvals and the
   shared command boundary. Configure a verified OpenAI or OpenRouter transport
   before sending requests.
@@ -163,21 +164,25 @@ In electronics workspaces, the same area becomes a domain-specific inspector:
 
 The visual scripting system allows logic creation without code:
 
-1. Switch to the **Node Editor** tab at the bottom
-2. **Right-click** on the canvas to open the Add Node palette
-3. Choose a node type (On Start, Print, If Branch, etc.)
-4. **Drag** from an output pin to an input pin to connect nodes
-5. **Click** a node header to select it
-6. Press **Delete** to remove the selected node
+1. Switch to the **Nodes** tab at the bottom.
+2. Search or choose a node in the visible palette.
+3. Click a node to select it; edit its declared values in the right Inspector.
+4. Select an output pin and then a compatible input pin to connect nodes.
+5. Drag a node to reposition it; click a wire to disconnect it.
+6. Press **Delete** on a focused node to remove it. Use Ctrl+Z/Ctrl+Y for
+   node authoring history.
 
 ### Node Types
 
-- **Events**: On Start, On Update (triggers)
-- **Actions**: Print (output to console)
-- **Logic**: If Branch (conditional flow)
-- **Math**: Add (arithmetic operations)
+- **Events**: On Start, On Update, Key Press, Mouse Click
+- **Actions**: Print, Spawn Entity, Destroy Entity, Set Position
+- **Logic**: If, For Loop, While Loop, Delay
+- **Math**: Add, Greater Than, Less Than, Equals, Not Equals
+- **Electronics**: Serial Read, Serial Write, Read Sensor, Write Actuator
 
-The node executor is now wired into editor Play mode through `nodes.ron`, executing `On Start` and `On Update` entries from saved graphs.
+The native Nodes surface currently authors, validates, saves, and restores
+`nodes.ron`. It is not wired into editor Play mode yet; node execution remains
+behind the separate scripting/runtime integration boundary.
 
 ## Script Behaviors
 

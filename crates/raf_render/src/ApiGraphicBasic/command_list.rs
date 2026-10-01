@@ -1,7 +1,9 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::api_graphic_basic::mesh::BasicMesh;
 use crate::api_graphic_basic::pipeline::BasicPipelineKind;
+use crate::texture::CpuTexture;
 use glam::{Mat4, Vec3};
 
 /// Backend-neutral line instance recorded by a scene or CAD surface.
@@ -57,6 +59,8 @@ pub enum GraphicCommand {
         transform: Mat4,
         /// Color tint (RGBA).
         color: [u8; 4],
+        /// Frame-local base-color image, when the material has one.
+        texture_id: Option<usize>,
     },
     /// Draw several transforms of one registered mesh in a single instanced
     /// call when the backend supports it.
@@ -114,6 +118,8 @@ pub struct BasicCommandStats {
 pub struct BasicCommandList {
     commands: Vec<GraphicCommand>,
     meshes: Vec<Arc<BasicMesh>>,
+    textures: Vec<Arc<CpuTexture>>,
+    texture_ids: std::collections::HashMap<PathBuf, usize>,
     mesh_ids: std::collections::HashMap<usize, usize>,
     mesh_cacheable: Vec<bool>,
     current_pipeline: BasicPipelineKind,
@@ -131,6 +137,8 @@ impl BasicCommandList {
         Self {
             commands: Vec::with_capacity(command_capacity),
             meshes: Vec::with_capacity(mesh_capacity),
+            textures: Vec::new(),
+            texture_ids: std::collections::HashMap::new(),
             mesh_ids: std::collections::HashMap::with_capacity(mesh_capacity),
             mesh_cacheable: Vec::with_capacity(mesh_capacity),
             current_pipeline: BasicPipelineKind::FlatColor,
@@ -171,6 +179,18 @@ impl BasicCommandList {
         id
     }
 
+    /// Register a decoded scene texture once for this frame.
+    pub fn register_texture(&mut self, texture: Arc<CpuTexture>) -> usize {
+        let key = texture.source.clone();
+        if let Some(&id) = self.texture_ids.get(&key) {
+            return id;
+        }
+        let id = self.textures.len();
+        self.textures.push(texture);
+        self.texture_ids.insert(key, id);
+        id
+    }
+
     /// Add a pipeline binding command.
     pub fn set_pipeline(&mut self, pipeline: BasicPipelineKind) {
         if self.current_pipeline == pipeline {
@@ -205,6 +225,7 @@ impl BasicCommandList {
             Some(GraphicCommand::DrawMesh {
                 mesh_id: previous_mesh_id,
                 color: previous_color,
+                texture_id: None,
                 ..
             }) if *previous_mesh_id == mesh_id
                 && color[3] == u8::MAX
@@ -228,6 +249,29 @@ impl BasicCommandList {
             mesh_id,
             transform,
             color,
+            texture_id: None,
+        });
+    }
+
+    /// Draw a mesh with an optional frame-local base-color texture.
+    /// Textured draws stay individual so they cannot merge with an incompatible
+    /// material; the untextured path retains its existing instancing behavior.
+    pub fn draw_mesh_with_texture(
+        &mut self,
+        mesh_id: usize,
+        transform: Mat4,
+        color: [u8; 4],
+        texture_id: Option<usize>,
+    ) {
+        if texture_id.is_none() {
+            self.draw_mesh(mesh_id, transform, color);
+            return;
+        }
+        self.commands.push(GraphicCommand::DrawMesh {
+            mesh_id,
+            transform,
+            color,
+            texture_id,
         });
     }
 
@@ -402,10 +446,16 @@ impl BasicCommandList {
         self.mesh_cacheable.get(mesh_id).copied().unwrap_or(false)
     }
 
+    pub fn texture(&self, texture_id: usize) -> Option<&Arc<CpuTexture>> {
+        self.textures.get(texture_id)
+    }
+
     /// Clear the command list for the next frame.
     pub fn clear_commands(&mut self) {
         self.commands.clear();
         self.meshes.clear();
+        self.textures.clear();
+        self.texture_ids.clear();
         self.mesh_ids.clear();
         self.mesh_cacheable.clear();
         self.current_pipeline = BasicPipelineKind::FlatColor;
@@ -472,6 +522,43 @@ mod tests {
             GraphicCommand::DrawMeshBatch { mesh_id: id, instances }
                 if *id == mesh_id && instances.len() == 2
         ));
+    }
+
+    #[test]
+    fn textured_mesh_keeps_its_texture_binding_and_stays_out_of_batches() {
+        let mut commands = BasicCommandList::new();
+        let mesh_id = commands.register_mesh(Arc::new(BasicMesh::new(
+            vec![BasicVertex {
+                position: Vec3::ZERO,
+                normal: Vec3::Y,
+                uv: [0.0, 0.0],
+            }],
+            vec![0],
+        )));
+        let texture_id = commands.register_texture(Arc::new(CpuTexture {
+            data: vec![200, 180, 160, 255],
+            width: 1,
+            height: 1,
+            source: PathBuf::from("test-texture"),
+        }));
+
+        commands.draw_mesh_with_texture(mesh_id, Mat4::IDENTITY, [255; 4], Some(texture_id));
+        commands.draw_mesh_with_texture(
+            mesh_id,
+            Mat4::from_translation(Vec3::X),
+            [255; 4],
+            Some(texture_id),
+        );
+
+        assert_eq!(commands.texture(texture_id).unwrap().width, 1);
+        assert_eq!(commands.commands().len(), 2);
+        assert!(commands.commands().iter().all(|command| matches!(
+            command,
+            GraphicCommand::DrawMesh {
+                texture_id: Some(id),
+                ..
+            } if *id == texture_id
+        )));
     }
 
     #[test]

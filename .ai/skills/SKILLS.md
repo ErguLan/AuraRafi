@@ -72,8 +72,11 @@ una extensión del schematic/PCB.
 **Flujo**:
 
 1. Definir el dato y los pins en `raf_nodes`.
-2. Registrar la creación en la superficie de nodos actual.
-3. Implementar el match de ejecución y la serialización que corresponda.
+2. Registrar la fábrica y el descriptor estable en
+   `crates/raf_nodes/src/catalog.rs`; no crear una segunda lista dentro de la
+   superficie.
+3. Implementar el match de ejecución y la serialización sólo cuando la tarea
+   incluya el runtime; la superficie de authoring no activa Play.
 4. Verificar que el grafo se conserve en `nodes.ron` y que las mutaciones
    respeten la frontera de comandos/historial.
 

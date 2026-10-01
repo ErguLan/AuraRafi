@@ -2578,6 +2578,7 @@ dependencies = [
  "glam",
  "image",
  "pollster",
+ "raf_assets",
  "raf_core",
  "raf_electronics",
  "raf_ui",

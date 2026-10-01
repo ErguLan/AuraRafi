@@ -1,4 +1,4 @@
-use crate::node::{Node, NodeCategory, NodeId, NodePin, PinDataType, PinKind};
+use crate::node::{Node, NodeCategory, NodeId, NodePin, NodeProperty, PinDataType, PinKind};
 use uuid::Uuid;
 
 /// Input event nodes (Keyboard, Mouse, Timer) for v0.4.0
@@ -27,6 +27,7 @@ impl InputNodes {
                 },
             ],
             position: [100.0, 300.0],
+            properties: vec![NodeProperty::new("key", "nodes.property.key", "Space")],
         }
     }
 
@@ -64,6 +65,7 @@ impl InputNodes {
                 },
             ],
             position: [100.0, 450.0],
+            properties: vec![NodeProperty::new("button", "nodes.property.button", "Left")],
         }
     }
 
@@ -95,6 +97,11 @@ impl InputNodes {
                 },
             ],
             position: [300.0, 450.0],
+            properties: vec![NodeProperty::new(
+                "seconds",
+                "nodes.property.seconds",
+                "1.0",
+            )],
         }
     }
 }

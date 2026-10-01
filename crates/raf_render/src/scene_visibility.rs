@@ -74,7 +74,24 @@ impl SceneVisibilityPolicy {
         camera_position: Vec3,
         bounds: SceneObjectBounds,
     ) -> SceneVisibility {
-        if !self.intersects_loaded_regions(camera_position, bounds) {
+        self.classify_with_hysteresis(frustum, camera_position, bounds, false)
+    }
+
+    /// Keeps previously admitted objects through a wider unload boundary so
+    /// small camera movements do not make them blink at region edges.
+    pub fn classify_with_hysteresis(
+        self,
+        frustum: &Frustum,
+        camera_position: Vec3,
+        bounds: SceneObjectBounds,
+        previously_in_stream: bool,
+    ) -> SceneVisibility {
+        let in_stream = if previously_in_stream {
+            self.intersects_loaded_regions_with_hysteresis(camera_position, bounds, true)
+        } else {
+            self.intersects_loaded_regions(camera_position, bounds)
+        };
+        if !in_stream {
             return SceneVisibility::OutsideStream;
         }
         if !frustum.intersects_aabb(bounds.min, bounds.max) {
@@ -84,12 +101,27 @@ impl SceneVisibilityPolicy {
     }
 
     fn intersects_loaded_regions(self, camera_position: Vec3, bounds: SceneObjectBounds) -> bool {
+        self.intersects_loaded_regions_with_hysteresis(camera_position, bounds, false)
+    }
+
+    fn intersects_loaded_regions_with_hysteresis(
+        self,
+        camera_position: Vec3,
+        bounds: SceneObjectBounds,
+        previously_in_stream: bool,
+    ) -> bool {
         if !self.world_stream.enabled {
             return true;
         }
 
         let region_size = self.world_stream.region_size.clamp(16.0, 1024.0);
-        let radius = self.world_stream.load_radius.max(1) as i32;
+        let load_radius = self.world_stream.load_radius.max(1);
+        let radius = if previously_in_stream {
+            load_radius.saturating_add(2)
+        } else {
+            load_radius
+        }
+        .min(i32::MAX as u32) as i32;
         let camera_region_x = (camera_position.x / region_size).floor() as i32;
         let camera_region_z = (camera_position.z / region_size).floor() as i32;
         let loaded_min_x = (camera_region_x - radius) as f32 * region_size;
@@ -151,5 +183,40 @@ mod tests {
 
         assert!(policy.intersects_loaded_regions(Vec3::ZERO, crossing));
         assert!(!policy.intersects_loaded_regions(Vec3::ZERO, distant));
+    }
+
+    #[test]
+    fn streaming_uses_a_wider_unload_boundary_for_previously_admitted_objects() {
+        let policy = SceneVisibilityPolicy {
+            world_stream: WorldStreamVisibility {
+                enabled: true,
+                region_size: 100.0,
+                load_radius: 1,
+            },
+        };
+        let in_hysteresis_band = SceneObjectBounds {
+            min: Vec3::new(250.0, -1.0, -5.0),
+            max: Vec3::new(260.0, 1.0, 5.0),
+        };
+        let beyond_unload_radius = SceneObjectBounds {
+            min: Vec3::new(450.0, -1.0, -5.0),
+            max: Vec3::new(460.0, 1.0, 5.0),
+        };
+
+        assert!(!policy.intersects_loaded_regions_with_hysteresis(
+            Vec3::ZERO,
+            in_hysteresis_band,
+            false,
+        ));
+        assert!(policy.intersects_loaded_regions_with_hysteresis(
+            Vec3::ZERO,
+            in_hysteresis_band,
+            true,
+        ));
+        assert!(!policy.intersects_loaded_regions_with_hysteresis(
+            Vec3::ZERO,
+            beyond_unload_radius,
+            true,
+        ));
     }
 }

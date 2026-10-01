@@ -193,10 +193,15 @@ impl UiNode {
         self
     }
 
+    /// Adds one or more class tokens. A string with spaces registers each
+    /// token, so `with_class("asset-card asset-card-selected")` matches the
+    /// `Class("asset-card")` and `Class("asset-card-selected")` selectors
+    /// instead of a single unreachable `"asset-card asset-card-selected"`.
     pub fn with_class(mut self, class: impl Into<String>) -> Self {
-        let class = class.into();
-        if !class.is_empty() && !self.classes.iter().any(|existing| existing == &class) {
-            self.classes.push(class);
+        for class in class.into().split_whitespace() {
+            if !self.classes.iter().any(|existing| existing == class) {
+                self.classes.push(class.to_string());
+            }
         }
         self
     }
@@ -359,5 +364,52 @@ impl UiNode {
         self.children
             .iter_mut()
             .find_map(|child| child.find_mut(id))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{UiStylePatch, UiStyleRule, UiStyleSelector, UiStyleSheet};
+
+    #[test]
+    fn a_class_string_with_spaces_registers_every_token() {
+        let node = UiNode::new("card", UiNodeKind::Button)
+            .with_class("asset-card asset-card-selected")
+            .with_class("asset-card");
+
+        assert_eq!(node.classes, vec!["asset-card", "asset-card-selected"]);
+    }
+
+    #[test]
+    fn an_empty_class_string_registers_nothing() {
+        let node = UiNode::new("card", UiNodeKind::Button).with_class("   ");
+        assert!(node.classes.is_empty());
+    }
+
+    #[test]
+    fn class_tokens_reach_the_style_sheet_selectors() {
+        let node = UiNode::new("card", UiNodeKind::Button)
+            .with_class("assets-modal-option assets-modal-option-primary");
+        let sheet = UiStyleSheet {
+            rules: vec![
+                UiStyleRule::new(
+                    UiStyleSelector::Class("assets-modal-option".to_string()),
+                    UiStylePatch {
+                        fill: Some([20, 20, 24, 255]),
+                        ..UiStylePatch::default()
+                    },
+                ),
+                UiStyleRule::new(
+                    UiStyleSelector::Class("assets-modal-option-primary".to_string()),
+                    UiStylePatch {
+                        fill: Some([224, 116, 24, 255]),
+                        ..UiStylePatch::default()
+                    },
+                ),
+            ],
+        };
+
+        assert_eq!(sheet.resolve(&node).fill, [224, 116, 24, 255]);
     }
 }

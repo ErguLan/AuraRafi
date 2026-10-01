@@ -181,8 +181,9 @@ for the full architecture and roadmap.
 - **Tier 1 (Rhai)**: sandboxed, pure Rust, beginner-friendly. Primary language.
 - **Tier 2 (WASM Native Module)**: C++/Rust/Zig compiled to `.wasm`. Sandboxed
   via WASM runtime. The AuraRafi Host ABI is our own spec. Phase D.
-- **Tier 3 (Visual Nodes)**: no-code node graphs from `raf_nodes`. Interpreted
-  by the existing executor, wired to the Host API via `node_backend.rs`.
+- **Tier 3 (Visual Nodes)**: no-code node graphs from `raf_nodes`. The native
+  editor currently exposes authoring, validation, and persistence; execution
+  through `node_backend.rs` remains outside the active Play contract.
 
 All tiers call `ScriptContext` functions. No tier touches `SceneGraph`
 directly. Scripts hold `NodeHandle` values (opaque IDs), not references.
@@ -509,7 +510,8 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 - **Left**: Hierarchy panel (scene tree with collapsible nodes)
 - **Right**: Properties panel (transform, color/material, primitive type, visibility)
 - **Center**: Viewport (scene view) or Schematic view (electronics)
-- **Bottom (tabbed)**: Console, Assets, Node Editor, AI Chat
+- **Bottom (tabbed)**: Console, Assets, Agent, Project Settings, plus Nodes for
+  Game or DRC/Simulation for Electronics
 - **Bottom bar**: Status (project name, entity count, language, theme)
 
 ### Theme System
@@ -525,7 +527,8 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 - **Properties**: Transform editing, RGB color picker with 7 presets, primitive type dropdown, visibility toggle
 - **Console**: Log output with severity filters and auto-scroll
 - **Asset Browser**: Search, filter by type, grid display
-- **Node Editor**: Visual scripting canvas with bezier connections
+- **Node Editor**: Visual scripting authoring canvas with typed connections,
+  Inspector editing, validation, and bounded undo/redo
 - **Schematic View**: Electronics component placement and wiring
 - **Settings**: Theme, language, quality, editor prefs, Simple Mode toggle, target platform selector
 - **AI Chat**: Native RafUI Agent surface with sessions, model/mode controls,
@@ -575,20 +578,27 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 
 ## Visual Scripting (raf_nodes & raf_editor)
 
-- `Node`: Visual script building block with pins and position
-- `NodePin`: Typed connection point (Flow, Bool, Int, Float, String, Vec3)
-- `NodeGraph`: Collection of nodes and connections. Multiple flows supported via `Vec<NodeGraph>`.
-- `NodeCategory`: Event, Logic, Action, Math, Electronics, Variable
-- Built-in nodes: On Start, On Update, Print, If Branch, Loops (For, While), Compare (>, <, ==), Entity manipulation
-- **UI Architecture**: The active node surface is
-  `panels/nodes_surface.rs`, composed through the native workbench and RafUI.
-  Node interaction must remain in the retained surface and its typed action
-  boundary; the retired `NodeEditorPanel`/widget allocation recipe is not an
-  active implementation target.
-- **Undo/Redo**: Fully memory-backed history stack capable of holding up to 50 iterations (`history: Vec<(Vec<NodeGraph>, usize)>`), supporting global shortcuts (Ctrl+Z / Ctrl+Y).
-- **Executor**: Walks flow chains in topological order, evaluates data pins, handles conditional branching (If node), 10k step safety limit
-- `NodeValue`: Runtime value type with coercion (Bool, Int, Float, String, Vec3)
-- `ExecutionOutput`: Logs, final pin values, success/error status
+- `Node`: Visual script building block with pins, position, and serde-defaulted
+  authoring properties.
+- `NodePin`: Typed connection point (Flow, Bool, Int, Float, String, Vec3, Any).
+- `NodeGraph`: The current native document is one named graph containing nodes
+  and connections, persisted per project session in `nodes.ron`.
+- `NodeCategory`: Event, Logic, Action, Math, Electronics, Variable.
+- `raf_nodes::catalog`: Single stable factory/descriptor catalog shared by the
+  Game and Electronics Nodes palette.
+- **UI Architecture**: `panels/nodes_surface.rs` declares the retained RafUI
+  document; `nodes_canvas.rs` owns geometry and wire/grid paint helpers;
+  `nodes_surface_host.rs` owns transient drafts and pin selection. All of it
+  is composed through the native workbench and ApiGraphicBasic.
+- **Authoring mutations**: `NativeEditorRuntime` owns selection, drag commits,
+  checked connections, property commits, validation, and bounded graph
+  history. `native_editor_commands.rs` is the command translation boundary.
+- **Current scope**: Add, search, select, move, delete, connect, disconnect,
+  edit properties, validate, save, and restore are active. Play/runtime
+  execution and a separate script editor are outside this contract.
+- **Prepared execution**: `executor.rs`, `node_backend.rs`, `NodeValue`, and
+  `ExecutionOutput` remain runtime preparation and must not be treated as
+  evidence that the native editor executes Nodes from Play.
 
 ## AI Interface (raf_ai)
 

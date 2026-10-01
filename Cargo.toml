@@ -56,7 +56,6 @@ fluent-bundle = "0.15"
 
 # Async / Parallelism
 rayon = "1"
-tokio = { version = "1", features = ["rt", "macros"] }
 
 # Logging
 tracing = "0.1"

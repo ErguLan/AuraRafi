@@ -151,6 +151,10 @@ pub(crate) fn initial_node_graph(project: Option<&Project>) -> NodeGraph {
     std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| ron::from_str::<NodeGraph>(&raw).ok())
+        .map(|mut graph| {
+            raf_nodes::catalog::hydrate_properties(&mut graph);
+            graph
+        })
         .unwrap_or_else(|| NodeGraph::new("Main"))
 }
 
@@ -170,6 +174,10 @@ pub(crate) fn initial_node_graph_for_session(
     std::fs::read_to_string(path)
         .ok()
         .and_then(|raw| ron::from_str::<NodeGraph>(&raw).ok())
+        .map(|mut graph| {
+            raf_nodes::catalog::hydrate_properties(&mut graph);
+            graph
+        })
         .unwrap_or_else(|| NodeGraph::new("Main"))
 }
 

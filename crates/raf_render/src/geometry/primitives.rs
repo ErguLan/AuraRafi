@@ -92,10 +92,11 @@ pub fn cube(segments: usize) -> MeshData {
         ),
     ];
 
+    const FACE_UVS: [[f32; 2]; 4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
     for (corners, normal) in &faces {
         let base = mesh.vertex_count() as u32;
-        for corner in corners {
-            mesh.push_vertex(*corner, *normal);
+        for (index, corner) in corners.iter().enumerate() {
+            mesh.push_vertex_uv(*corner, *normal, FACE_UVS[index]);
         }
         mesh.push_quad(base, base + 1, base + 2, base + 3);
     }
@@ -143,10 +144,11 @@ pub fn cylinder(segments: usize) -> MeshData {
         let sin_a = angle.sin();
         let normal = Vec3::new(cos_a, 0.0, sin_a);
 
+        let u = i as f32 / seg as f32;
         // Top ring vertex
-        mesh.push_vertex(Vec3::new(r * cos_a, h, r * sin_a), normal);
+        mesh.push_vertex_uv(Vec3::new(r * cos_a, h, r * sin_a), normal, [u, 0.0]);
         // Bottom ring vertex
-        mesh.push_vertex(Vec3::new(r * cos_a, -h, r * sin_a), normal);
+        mesh.push_vertex_uv(Vec3::new(r * cos_a, -h, r * sin_a), normal, [u, 1.0]);
     }
 
     for i in 0..seg {
@@ -159,11 +161,15 @@ pub fn cylinder(segments: usize) -> MeshData {
     }
 
     // --- Top cap (fan from center, normal = +Y) ---
-    let top_center = mesh.push_vertex(Vec3::new(0.0, h, 0.0), Vec3::Y);
+    let top_center = mesh.push_vertex_uv(Vec3::new(0.0, h, 0.0), Vec3::Y, [0.5, 0.5]);
     let top_ring_base = mesh.vertex_count() as u32;
     for i in 0..seg {
         let angle = tau * (i as f32 / seg as f32);
-        mesh.push_vertex(Vec3::new(r * angle.cos(), h, r * angle.sin()), Vec3::Y);
+        mesh.push_vertex_uv(
+            Vec3::new(r * angle.cos(), h, r * angle.sin()),
+            Vec3::Y,
+            [0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin()],
+        );
     }
     for i in 0..seg {
         let next = (i + 1) % seg;
@@ -176,11 +182,15 @@ pub fn cylinder(segments: usize) -> MeshData {
     }
 
     // --- Bottom cap (fan from center, normal = -Y) ---
-    let bot_center = mesh.push_vertex(Vec3::new(0.0, -h, 0.0), Vec3::NEG_Y);
+    let bot_center = mesh.push_vertex_uv(Vec3::new(0.0, -h, 0.0), Vec3::NEG_Y, [0.5, 0.5]);
     let bot_ring_base = mesh.vertex_count() as u32;
     for i in 0..seg {
         let angle = tau * (i as f32 / seg as f32);
-        mesh.push_vertex(Vec3::new(r * angle.cos(), -h, r * angle.sin()), Vec3::NEG_Y);
+        mesh.push_vertex_uv(
+            Vec3::new(r * angle.cos(), -h, r * angle.sin()),
+            Vec3::NEG_Y,
+            [0.5 + 0.5 * angle.cos(), 0.5 + 0.5 * angle.sin()],
+        );
     }
     for i in 0..seg {
         let next = (i + 1) % seg;
@@ -229,7 +239,11 @@ pub fn sphere(stacks: usize, slices: usize) -> MeshData {
 
             let normal = Vec3::new(x, y, z);
             let position = normal * r;
-            mesh.push_vertex(position, normal);
+            mesh.push_vertex_uv(
+                position,
+                normal,
+                [j as f32 / sl as f32, i as f32 / st as f32],
+            );
         }
     }
 
@@ -262,12 +276,14 @@ pub fn plane(segments: usize) -> MeshData {
     let h = 0.5;
     let mut mesh = MeshData::with_capacity(4, 6);
 
-    let a = mesh.push_vertex(Vec3::new(-h, 0.0, -h), Vec3::Y);
-    let b = mesh.push_vertex(Vec3::new(h, 0.0, -h), Vec3::Y);
-    let c = mesh.push_vertex(Vec3::new(h, 0.0, h), Vec3::Y);
-    let d = mesh.push_vertex(Vec3::new(-h, 0.0, h), Vec3::Y);
+    let a = mesh.push_vertex_uv(Vec3::new(-h, 0.0, -h), Vec3::Y, [0.0, 0.0]);
+    let b = mesh.push_vertex_uv(Vec3::new(h, 0.0, -h), Vec3::Y, [1.0, 0.0]);
+    let c = mesh.push_vertex_uv(Vec3::new(h, 0.0, h), Vec3::Y, [1.0, 1.0]);
+    let d = mesh.push_vertex_uv(Vec3::new(-h, 0.0, h), Vec3::Y, [0.0, 1.0]);
 
-    mesh.push_quad(a, b, c, d);
+    // The XZ vertex order a-b-c-d winds toward -Y, opposite to the authored
+    // normals. Reverse it so the front-face winding agrees with +Y.
+    mesh.push_quad(a, d, c, b);
     mesh
 }
 
@@ -348,6 +364,43 @@ mod tests {
         assert_eq!(mesh.vertex_count(), 4);
         assert_eq!(mesh.triangle_count(), 2);
         assert!(mesh.validate().is_ok());
+    }
+
+    #[test]
+    fn plane_winding_matches_its_authored_normals() {
+        let mesh = plane(1);
+        for triangle in mesh.indices.chunks_exact(3) {
+            let a = mesh.positions[triangle[0] as usize];
+            let b = mesh.positions[triangle[1] as usize];
+            let c = mesh.positions[triangle[2] as usize];
+            let geometric_normal = (b - a).cross(c - a).normalize();
+            let authored_normal = mesh.normals[triangle[0] as usize];
+
+            assert!(geometric_normal.dot(authored_normal) > 0.99);
+        }
+    }
+
+    #[test]
+    fn built_in_meshes_have_finite_uvs_and_curved_seams_are_closed() {
+        let meshes = [cube(1), cylinder(8), sphere(4, 6), plane(1)];
+        for mesh in &meshes {
+            assert_eq!(mesh.uvs.len(), mesh.positions.len());
+            assert!(mesh.uvs.iter().flatten().all(|value| value.is_finite()));
+            assert!(mesh
+                .uvs
+                .iter()
+                .flatten()
+                .all(|value| (0.0..=1.0).contains(value)));
+            assert!(mesh.validate().is_ok());
+        }
+
+        let cylinder = cylinder(8);
+        assert_eq!(cylinder.uvs[0][0], 0.0);
+        assert_eq!(cylinder.uvs[16][0], 1.0);
+
+        let sphere = sphere(4, 6);
+        assert_eq!(sphere.uvs[0][0], 0.0);
+        assert_eq!(sphere.uvs[6][0], 1.0);
     }
 
     #[test]

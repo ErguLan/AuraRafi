@@ -4,14 +4,14 @@
 //! UV-mapped color sampling. Zero cost when textures_enabled = false.
 //!
 //! Uses pure Rust (no GPU upload). Images are stored as RGBA byte arrays.
-//! Supports PNG, JPG, BMP, TGA, WebP via the `image` crate (when available).
-//! Falls back to a 1x1 placeholder if the `image` crate is not in dependencies.
+//! Supports bounded PNG, JPG, BMP, TGA, and WebP decoding through `raf_assets`.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 /// A loaded texture stored in CPU memory.
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct CpuTexture {
     /// RGBA pixel data, row-major.
     pub data: Vec<u8>,
@@ -81,6 +81,45 @@ impl CpuTexture {
         }
     }
 
+    /// Bilinear sample converted from sRGB bytes to linear-light RGBA.
+    pub fn sample_uv_linear(&self, u: f32, v: f32) -> [f32; 4] {
+        if self.width == 0 || self.height == 0 {
+            return [1.0, 0.0, 1.0, 1.0];
+        }
+        let u = u.rem_euclid(1.0);
+        let v = v.rem_euclid(1.0);
+        let x = u * self.width as f32 - 0.5;
+        let y = v * self.height as f32 - 0.5;
+        let x0 = x.floor() as i64;
+        let y0 = y.floor() as i64;
+        let tx = x - x.floor();
+        let ty = y - y.floor();
+        let wrap = |coordinate: i64, size: u32| coordinate.rem_euclid(size as i64) as u32;
+        let sample = |px: i64, py: i64| {
+            let index = ((wrap(py, self.height) * self.width + wrap(px, self.width)) * 4) as usize;
+            if index.saturating_add(3) >= self.data.len() {
+                return [1.0, 0.0, 1.0, 1.0];
+            }
+            [
+                srgb_to_linear(self.data[index]),
+                srgb_to_linear(self.data[index + 1]),
+                srgb_to_linear(self.data[index + 2]),
+                self.data[index + 3] as f32 / 255.0,
+            ]
+        };
+        let top_left = sample(x0, y0);
+        let top_right = sample(x0 + 1, y0);
+        let bottom_left = sample(x0, y0 + 1);
+        let bottom_right = sample(x0 + 1, y0 + 1);
+        let mut result = [0.0; 4];
+        for channel in 0..4 {
+            let top = top_left[channel] + (top_right[channel] - top_left[channel]) * tx;
+            let bottom = bottom_left[channel] + (bottom_right[channel] - bottom_left[channel]) * tx;
+            result[channel] = top + (bottom - top) * ty;
+        }
+        result
+    }
+
     /// Downscale to fit within max_size (preserving aspect ratio).
     /// Returns a new texture if downscaled, or self if already fits.
     pub fn downscaled(&self, max_size: u32) -> Self {
@@ -117,15 +156,49 @@ impl CpuTexture {
     }
 }
 
-/// Texture cache: loads from disk, caches in memory, evicts by LRU.
+pub(crate) fn srgb_to_linear(channel: u8) -> f32 {
+    static TABLE: OnceLock<[f32; 256]> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        std::array::from_fn(|index| {
+            let value = index as f32 / 255.0;
+            if value <= 0.04045 {
+                value / 12.92
+            } else {
+                ((value + 0.055) / 1.055).powf(2.4)
+            }
+        })
+    })[channel as usize]
+}
+
+pub(crate) fn linear_to_srgb(channel: f32) -> u8 {
+    static TABLE: OnceLock<[u8; 4097]> = OnceLock::new();
+    let index = (channel.clamp(0.0, 1.0) * 4096.0).round() as usize;
+    TABLE.get_or_init(|| {
+        std::array::from_fn(|index| {
+            let value = index as f32 / 4096.0;
+            let srgb = if value <= 0.0031308 {
+                value * 12.92
+            } else {
+                1.055 * value.powf(1.0 / 2.4) - 0.055
+            };
+            (srgb * 255.0).round().clamp(0.0, 255.0) as u8
+        })
+    })[index]
+}
+
+/// Bounded decoded-image cache with deterministic LRU eviction.
 pub struct TextureCache {
-    textures: HashMap<String, CpuTexture>,
-    /// Maximum memory budget in bytes. Default: 50MB.
+    textures: HashMap<String, CachedTexture>,
     max_memory: usize,
-    /// Total memory used.
     used_memory: usize,
-    /// Maximum texture dimension (auto-downscale).
     max_texture_size: u32,
+    frame: u64,
+}
+
+struct CachedTexture {
+    texture: Option<Arc<CpuTexture>>,
+    bytes: usize,
+    last_used: u64,
 }
 
 impl TextureCache {
@@ -133,35 +206,67 @@ impl TextureCache {
     pub fn new(max_memory_mb: usize, max_texture_size: u32) -> Self {
         Self {
             textures: HashMap::new(),
-            max_memory: max_memory_mb * 1024 * 1024,
+            max_memory: max_memory_mb.saturating_mul(1024 * 1024),
             used_memory: 0,
-            max_texture_size,
+            max_texture_size: max_texture_size.clamp(1, 8192),
+            frame: 0,
         }
     }
 
-    /// Get or load a texture by file path.
-    /// Returns the checkerboard fallback if loading fails.
-    pub fn get_or_load(&mut self, path: &Path) -> &CpuTexture {
-        let key = path.to_string_lossy().to_string();
-        if !self.textures.contains_key(&key) {
-            let tex = load_texture_from_disk(path, self.max_texture_size);
-            self.used_memory += tex.memory_bytes();
-            self.textures.insert(key.clone(), tex);
+    /// Gets a cached image or decodes it once. Invalid files resolve to `None`.
+    pub fn get_or_load(&mut self, path: &Path) -> Option<Arc<CpuTexture>> {
+        self.get_or_load_with_budget(path, usize::MAX)
+    }
 
-            // Evict oldest if over budget.
-            while self.used_memory > self.max_memory && self.textures.len() > 1 {
-                if let Some(oldest_key) = self.textures.keys().next().cloned() {
-                    if oldest_key != key {
-                        if let Some(removed) = self.textures.remove(&oldest_key) {
-                            self.used_memory -= removed.memory_bytes();
-                        }
-                    } else {
-                        break;
-                    }
-                }
+    /// Loads a texture only when its bounded output fits the caller's
+    /// remaining frame budget. Oversized assets are skipped before pixel
+    /// decoding, preventing a large scene from repeatedly decoding textures
+    /// that cannot be retained in the current frame.
+    pub fn get_or_load_with_budget(
+        &mut self,
+        path: &Path,
+        frame_budget_bytes: usize,
+    ) -> Option<Arc<CpuTexture>> {
+        let key = path.to_string_lossy().to_string();
+        self.frame = self.frame.wrapping_add(1).max(1);
+        if let Some(entry) = self.textures.get_mut(&key) {
+            if entry.bytes > frame_budget_bytes {
+                return None;
+            }
+            entry.last_used = self.frame;
+            return entry.texture.clone();
+        }
+
+        if let Ok((width, height)) =
+            raf_assets::image_output_dimensions(path, self.max_texture_size)
+        {
+            let estimated_bytes = (width as usize)
+                .checked_mul(height as usize)
+                .and_then(|pixels| pixels.checked_mul(4))?;
+            if estimated_bytes > frame_budget_bytes {
+                return None;
             }
         }
-        self.textures.get(&key).unwrap()
+
+        let texture = load_texture_from_disk(path, self.max_texture_size).map(Arc::new);
+        let bytes = texture.as_ref().map_or(0, |texture| texture.memory_bytes());
+        if bytes > frame_budget_bytes {
+            return None;
+        }
+        let result = texture.clone();
+        if bytes <= self.max_memory {
+            self.used_memory = self.used_memory.saturating_add(bytes);
+            self.textures.insert(
+                key.clone(),
+                CachedTexture {
+                    texture,
+                    bytes,
+                    last_used: self.frame,
+                },
+            );
+            self.evict_to_limits(Some(&key));
+        }
+        result
     }
 
     /// Clear the entire cache.
@@ -172,90 +277,93 @@ impl TextureCache {
 
     /// Number of loaded textures.
     pub fn count(&self) -> usize {
-        self.textures.len()
+        self.textures
+            .values()
+            .filter(|entry| entry.texture.is_some())
+            .count()
     }
 
     /// Total memory used in bytes.
     pub fn memory_used(&self) -> usize {
         self.used_memory
     }
+
+    pub fn set_limits(&mut self, max_memory_bytes: usize, max_texture_size: u32) {
+        let next_texture_size = max_texture_size.clamp(1, 8192);
+        if next_texture_size != self.max_texture_size {
+            self.clear();
+            self.max_texture_size = next_texture_size;
+        }
+        self.max_memory = max_memory_bytes;
+        self.evict_to_limits(None);
+    }
+
+    pub fn invalidate(&mut self, path: &Path) {
+        let key = path.to_string_lossy().to_string();
+        if let Some(removed) = self.textures.remove(&key) {
+            self.used_memory = self.used_memory.saturating_sub(removed.bytes);
+        }
+    }
+
+    fn evict_to_limits(&mut self, protected: Option<&str>) {
+        while self.used_memory > self.max_memory || self.textures.len() > 512 {
+            let oldest = self
+                .textures
+                .iter()
+                .filter(|(key, _)| protected.is_none_or(|protected| key.as_str() != protected))
+                .min_by_key(|(_, texture)| texture.last_used)
+                .map(|(key, _)| key.clone());
+            let Some(oldest) = oldest else {
+                break;
+            };
+            if let Some(removed) = self.textures.remove(&oldest) {
+                self.used_memory = self.used_memory.saturating_sub(removed.bytes);
+            }
+        }
+    }
 }
 
 impl Default for TextureCache {
     fn default() -> Self {
-        Self::new(50, 512) // 50MB, max 512px
+        Self::new(12, 512)
     }
 }
 
-/// Load a texture from disk. Returns checkerboard on failure.
-fn load_texture_from_disk(path: &Path, max_size: u32) -> CpuTexture {
-    // Try to read the file as raw bytes.
-    let bytes = match std::fs::read(path) {
-        Ok(b) => b,
-        Err(_) => return CpuTexture::checkerboard(16),
-    };
-
-    // Try to parse as a simple format.
-    // For now, support raw RGBA if the file looks like it could be decoded.
-    // Full PNG/JPG support requires the `image` crate dependency.
-    // We provide a basic BMP/TGA parser for zero-dependency loading.
-    if let Some(tex) = try_parse_bmp(&bytes, path) {
-        return tex.downscaled(max_size);
-    }
-
-    // Fallback: if file exists but format unknown, show checkerboard.
-    CpuTexture::checkerboard(16)
-}
-
-/// Very basic BMP parser (uncompressed 24-bit or 32-bit).
-/// Covers the most common case for texture loading without external deps.
-fn try_parse_bmp(data: &[u8], source: &Path) -> Option<CpuTexture> {
-    if data.len() < 54 || data[0] != b'B' || data[1] != b'M' {
-        return None;
-    }
-    let offset = u32::from_le_bytes([data[10], data[11], data[12], data[13]]) as usize;
-    let width = u32::from_le_bytes([data[18], data[19], data[20], data[21]]);
-    let height = u32::from_le_bytes([data[22], data[23], data[24], data[25]]);
-    let bpp = u16::from_le_bytes([data[28], data[29]]);
-
-    if width == 0 || height == 0 || width > 8192 || height > 8192 {
-        return None;
-    }
-
-    let bytes_per_pixel = match bpp {
-        24 => 3,
-        32 => 4,
-        _ => return None,
-    };
-
-    let row_size = ((bytes_per_pixel * width as usize + 3) / 4) * 4; // BMP rows are 4-byte aligned
-    let mut rgba = Vec::with_capacity((width * height * 4) as usize);
-
-    // BMP stores rows bottom-to-top.
-    for y in (0..height).rev() {
-        let row_start = offset + y as usize * row_size;
-        for x in 0..width {
-            let px = row_start + x as usize * bytes_per_pixel;
-            if px + bytes_per_pixel > data.len() {
-                rgba.extend_from_slice(&[0, 0, 0, 255]);
-                continue;
-            }
-            let b = data[px];
-            let g = data[px + 1];
-            let r = data[px + 2];
-            let a = if bytes_per_pixel == 4 {
-                data[px + 3]
-            } else {
-                255
-            };
-            rgba.extend_from_slice(&[r, g, b, a]);
-        }
-    }
-
+/// Load a bounded decoded image from disk. Failure leaves the node's flat tint intact.
+fn load_texture_from_disk(path: &Path, max_size: u32) -> Option<CpuTexture> {
+    let decoded = raf_assets::decode_image(path, max_size)
+        .map_err(|error| {
+            tracing::warn!(path = ?path, %error, "Unable to load scene base-color texture");
+            error
+        })
+        .ok()?;
     Some(CpuTexture {
-        data: rgba,
-        width,
-        height,
-        source: source.to_path_buf(),
+        data: decoded.rgba8,
+        width: decoded.width,
+        height: decoded.height,
+        source: path.to_path_buf(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linear_bilinear_sampling_wraps_uv_and_preserves_uniform_color() {
+        let texture = CpuTexture {
+            data: [128, 64, 32, 255].repeat(4),
+            width: 2,
+            height: 2,
+            source: PathBuf::from("test-texture"),
+        };
+
+        let center = texture.sample_uv_linear(0.5, 0.5);
+        let wrapped = texture.sample_uv_linear(1.5, -0.5);
+        assert!((center[0] - srgb_to_linear(128)).abs() < 0.0001);
+        assert!((center[1] - srgb_to_linear(64)).abs() < 0.0001);
+        assert!((center[2] - srgb_to_linear(32)).abs() < 0.0001);
+        assert_eq!(center, wrapped);
+        assert_eq!(center[3], 1.0);
+    }
 }

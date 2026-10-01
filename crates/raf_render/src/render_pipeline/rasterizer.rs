@@ -18,6 +18,7 @@
 //! 4. Fill pixels between left and right, interpolating Z for depth test
 
 use super::framebuffer::Framebuffer;
+use crate::texture::{linear_to_srgb, srgb_to_linear, CpuTexture};
 
 /// A screen-space vertex ready for rasterization.
 #[derive(Debug, Clone, Copy)]
@@ -30,6 +31,120 @@ pub struct ScreenVertex {
     pub z: f32,
     /// Per-vertex lighting factor for Gouraud shading.
     pub shade: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct TexturedScreenVertex {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub shade: f32,
+    pub uv_over_w: [f32; 2],
+    pub inv_w: f32,
+}
+
+impl TexturedScreenVertex {
+    fn lerp(self, other: Self, amount: f32) -> Self {
+        Self {
+            x: self.x + (other.x - self.x) * amount,
+            y: self.y + (other.y - self.y) * amount,
+            z: self.z + (other.z - self.z) * amount,
+            shade: self.shade + (other.shade - self.shade) * amount,
+            uv_over_w: [
+                self.uv_over_w[0] + (other.uv_over_w[0] - self.uv_over_w[0]) * amount,
+                self.uv_over_w[1] + (other.uv_over_w[1] - self.uv_over_w[1]) * amount,
+            ],
+            inv_w: self.inv_w + (other.inv_w - self.inv_w) * amount,
+        }
+    }
+}
+
+/// Textured counterpart to `rasterize_triangle`. Scanline edge walking keeps
+/// work proportional to covered pixels; UVs are perspective-correct and
+/// bilinearly filtered in linear light to match the GPU sRGB path.
+pub fn rasterize_triangle_textured(
+    fb: &mut Framebuffer,
+    vertices: [TexturedScreenVertex; 3],
+    texture: &CpuTexture,
+    tint: [u8; 4],
+) {
+    let [v0, v1, v2] = vertices;
+    let area = (v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y);
+    if area >= 0.0 {
+        return;
+    }
+
+    let mut sorted = vertices;
+    if sorted[0].y > sorted[1].y {
+        sorted.swap(0, 1);
+    }
+    if sorted[1].y > sorted[2].y {
+        sorted.swap(1, 2);
+    }
+    if sorted[0].y > sorted[1].y {
+        sorted.swap(0, 1);
+    }
+    let [top, mid, bot] = sorted;
+    let total_height = bot.y - top.y;
+    if total_height < 0.5 {
+        return;
+    }
+    let fb_h = fb.height() as f32;
+    let tint_linear = [
+        srgb_to_linear(tint[0]),
+        srgb_to_linear(tint[1]),
+        srgb_to_linear(tint[2]),
+    ];
+    let alpha_tint = tint[3] as f32 / 255.0;
+    let y_start = top.y.ceil().max(0.0) as u32;
+    let y_end = bot.y.ceil().min(fb_h) as u32;
+    let inv_total_height = 1.0 / total_height;
+
+    for y in y_start..y_end {
+        let sample_y = y as f32 + 0.5;
+        let long = top.lerp(bot, (sample_y - top.y) * inv_total_height);
+        let short = if sample_y < mid.y {
+            let segment_height = mid.y - top.y;
+            if segment_height < 0.5 {
+                continue;
+            }
+            top.lerp(mid, (sample_y - top.y) / segment_height)
+        } else {
+            let segment_height = bot.y - mid.y;
+            if segment_height < 0.5 {
+                continue;
+            }
+            mid.lerp(bot, (sample_y - mid.y) / segment_height)
+        };
+        let (left, right) = if long.x < short.x {
+            (long, short)
+        } else {
+            (short, long)
+        };
+        let span = right.x - left.x;
+        if span < 0.5 {
+            continue;
+        }
+        let x_start = left.x.ceil().max(0.0) as u32;
+        let x_end = right.x.ceil().min(fb.width() as f32) as u32;
+        for x in x_start..x_end {
+            let t = ((x as f32 + 0.5) - left.x) / span;
+            let inv_w = left.inv_w + (right.inv_w - left.inv_w) * t;
+            if inv_w.abs() <= f32::EPSILON {
+                continue;
+            }
+            let u = (left.uv_over_w[0] + (right.uv_over_w[0] - left.uv_over_w[0]) * t) / inv_w;
+            let v = (left.uv_over_w[1] + (right.uv_over_w[1] - left.uv_over_w[1]) * t) / inv_w;
+            let z = left.z + (right.z - left.z) * t;
+            let shade = (left.shade + (right.shade - left.shade) * t).clamp(0.0, 1.0);
+            let sampled = texture.sample_uv_linear(u, v);
+            let alpha = (sampled[3] * alpha_tint * 255.0).round().clamp(0.0, 255.0) as u8;
+            let red = linear_to_srgb(sampled[0] * tint_linear[0] * shade);
+            let green = linear_to_srgb(sampled[1] * tint_linear[1] * shade);
+            let blue = linear_to_srgb(sampled[2] * tint_linear[2] * shade);
+            fb.blend_pixel(x, y, z, red, green, blue, alpha);
+        }
+    }
 }
 
 /// Rasterize a single triangle into the framebuffer.
@@ -721,5 +836,35 @@ mod tests {
         // Check midpoint
         let mid_idx = (50 * 100 + 50) * 4;
         assert_eq!(fb.pixels()[mid_idx], 255, "midpoint should be white");
+    }
+
+    #[test]
+    fn textured_front_face_samples_base_color() {
+        let mut fb = Framebuffer::new(100, 100);
+        fb.clear(0, 0, 0, 255);
+        let vertex = |x, y| TexturedScreenVertex {
+            x,
+            y,
+            z: 0.5,
+            shade: 1.0,
+            uv_over_w: [0.5, 0.5],
+            inv_w: 1.0,
+        };
+        let texture = CpuTexture {
+            data: vec![80, 120, 160, 255],
+            width: 1,
+            height: 1,
+            source: std::path::PathBuf::from("test-texture"),
+        };
+
+        rasterize_triangle_textured(
+            &mut fb,
+            [vertex(50.0, 10.0), vertex(10.0, 90.0), vertex(90.0, 90.0)],
+            &texture,
+            [255; 4],
+        );
+
+        let center = (60 * 100 + 50) * 4;
+        assert_eq!(&fb.pixels()[center..center + 4], &[80, 120, 160, 255]);
     }
 }

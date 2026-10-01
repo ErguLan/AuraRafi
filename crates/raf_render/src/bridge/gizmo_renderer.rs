@@ -8,10 +8,10 @@ use glam::Vec3;
 
 use crate::api_graphic_basic::command_list::{BasicCommandList, BasicScreenTriangle};
 use crate::gizmo::{GizmoAxis, GizmoMode};
-use crate::gizmo_visual::{append_arrowhead, GizmoVisualProfile};
+use crate::gizmo_visual::{self, GizmoVisualProfile};
 use crate::picking::{
-    gizmo_scale_handle_radius, project_gizmo_arrow_scaled, project_gizmo_scale_handles_oriented,
-    GIZMO_ARROWS, GIZMO_LENGTH, GIZMO_ROTATION_RADIUS,
+    gizmo_scale_handle_radius, project_gizmo_arrow_scaled,
+    project_gizmo_scale_handles_oriented_for_axes, GIZMO_ARROWS, GIZMO_ROTATION_RADIUS,
 };
 use crate::scene_renderer::SceneRenderFrame;
 
@@ -28,6 +28,8 @@ pub struct GizmoRenderSpec {
     pub entity_scale: Vec3,
     /// World directions of the entity's transformed local X/Y/Z axes.
     pub entity_axes: [Vec3; 3],
+    /// Local axes that have visible extent and can be meaningfully scaled.
+    pub enabled_scale_axes: [bool; 3],
     pub presentation_scale: f32,
 }
 
@@ -41,34 +43,34 @@ impl GizmoRenderSpec {
     }
 
     fn record_translation(self, frame: &mut SceneRenderFrame) {
-        let length = GIZMO_LENGTH * self.presentation_scale.max(0.1);
         let profile = GizmoVisualProfile::translation();
         for (index, arrow) in GIZMO_ARROWS.iter().enumerate() {
             let axis = axis_for_index(index);
             let color = self.axis_color(axis, arrow.color);
-            let width = if self.active_axis == axis {
-                profile.shaft_width + 0.75
-            } else {
-                profile.shaft_width
-            };
-            let tip = self.origin + arrow.axis * length;
-            frame
-                .commands
-                .draw_line(self.origin, tip, color, width, true, -0.99);
-
-            // The shaft remains world-space, but the head is a filled
-            // screen-facing billboard so perspective cannot turn it into the
-            // old four-edge pyramid.
-            if let Some(projected) = project_gizmo_arrow_scaled(
+            let Some(projected) = project_gizmo_arrow_scaled(
                 self.origin,
                 arrow,
                 self.presentation_scale,
                 &frame.view_proj,
                 frame.width as f32,
                 frame.height as f32,
-            ) {
-                append_arrowhead(&mut frame.commands, &projected, color, profile);
-            }
+            ) else {
+                continue;
+            };
+            // Dark rim first, then the colored shaft and head. The shaft stops
+            // at the head base, so no line can poke through the arrow tip.
+            let Some(geometry) =
+                gizmo_visual::append_arrow_outline(&mut frame.commands, &projected, profile)
+            else {
+                continue;
+            };
+            gizmo_visual::append_arrow_fill(
+                &mut frame.commands,
+                &projected,
+                color,
+                profile,
+                geometry,
+            );
         }
     }
 
@@ -79,25 +81,31 @@ impl GizmoRenderSpec {
             let axis = axis_for_index(axis_index);
             let fallback = GIZMO_ARROWS[axis_index].color;
             let color = self.axis_color(axis, fallback);
-            let width = self.axis_width(axis);
-            let mut previous = self.origin + axis_a * radius;
-            for step in 1..=48 {
-                let angle = (step as f32 / 48.0) * std::f32::consts::TAU;
-                let current =
-                    self.origin + axis_a * (angle.cos() * radius) + axis_b * (angle.sin() * radius);
-                frame
-                    .commands
-                    .draw_line(previous, current, color, width, true, -0.99);
-                previous = current;
+            let active = self.active_axis == axis;
+            // Two passes: a wider dark ring, then the colored one on top, so
+            // the ring stays readable over bright or busy geometry.
+            for (width, ring_color) in ring_passes(color, active) {
+                let mut previous = self.origin + axis_a * radius;
+                for step in 1..=48 {
+                    let angle = (step as f32 / 48.0) * std::f32::consts::TAU;
+                    let current = self.origin
+                        + axis_a * (angle.cos() * radius)
+                        + axis_b * (angle.sin() * radius);
+                    frame
+                        .commands
+                        .draw_line(previous, current, ring_color, width, true, -0.99);
+                    previous = current;
+                }
             }
         }
     }
 
     fn record_scale(self, frame: &mut SceneRenderFrame) {
-        let handles = project_gizmo_scale_handles_oriented(
+        let handles = project_gizmo_scale_handles_oriented_for_axes(
             self.origin,
             self.entity_scale,
             self.entity_axes,
+            self.enabled_scale_axes,
             &frame.view_proj,
             frame.width as f32,
             frame.height as f32,
@@ -108,8 +116,15 @@ impl GizmoRenderSpec {
                 && (self.active_scale_sign == 0.0
                     || (self.active_scale_sign.signum() - handle.sign).abs() < 0.1);
             let color = if active { ACTIVE_COLOR } else { HANDLE_COLOR };
-            let radius =
-                gizmo_scale_handle_radius(self.presentation_scale) + if active { 2.0 } else { 0.0 };
+            let radius = gizmo_scale_handle_radius(self.presentation_scale)
+                + if active { 2.0 } else { 0.0 };
+            // Dark disc first, colored disc on top.
+            append_screen_circle(
+                &mut frame.commands,
+                handle.center,
+                radius + HANDLE_OUTLINE_WIDTH,
+                HANDLE_OUTLINE_COLOR,
+            );
             append_screen_circle(&mut frame.commands, handle.center, radius, color);
         }
     }
@@ -121,14 +136,18 @@ impl GizmoRenderSpec {
             fallback
         }
     }
+}
 
-    fn axis_width(self, axis: GizmoAxis) -> f32 {
-        if self.active_axis == axis {
-            3.5
-        } else {
-            2.25
-        }
-    }
+/// Outline thickness drawn behind rotation rings and scale handles.
+const HANDLE_OUTLINE_WIDTH: f32 = 2.0;
+
+/// Width and color passes for a rotation ring: outline first, then the ring.
+fn ring_passes(color: [u8; 4], active: bool) -> [(f32, [u8; 4]); 2] {
+    let ring_width = if active { 3.5 } else { 2.25 };
+    [
+        (ring_width + HANDLE_OUTLINE_WIDTH * 2.0, HANDLE_OUTLINE_COLOR),
+        (ring_width, color),
+    ]
 }
 
 /// Record one filled, screen-facing handle. The command list is shared by the
@@ -179,13 +198,14 @@ mod tests {
     use glam::Mat4;
 
     #[test]
-    fn translation_records_screen_billboard_heads_separately_from_shafts() {
+    fn translation_records_screen_geometry_only_so_no_shaft_can_poke_out() {
         let mut frame = SceneRenderFrame {
             commands: BasicCommandList::new(),
             view_proj: Mat4::IDENTITY,
             light_dir: Vec3::Y,
             width: 800,
             height: 600,
+            texture_cache_budget_bytes: 0,
             stats: FrameStats::default(),
         };
 
@@ -196,28 +216,46 @@ mod tests {
             origin: Vec3::ZERO,
             entity_scale: Vec3::ONE,
             entity_axes: [Vec3::X, Vec3::Y, Vec3::Z],
+            enabled_scale_axes: [true; 3],
             presentation_scale: 1.0,
         }
         .append_to(&mut frame);
 
-        assert!(frame.commands.commands().iter().any(|command| matches!(
+        // Shaft and head are both screen-space now, so a world line can never
+        // reach past the arrowhead tip.
+        assert!(frame.commands.commands().iter().all(|command| matches!(
             command,
-            GraphicCommand::DrawScreenTriangleBatch { triangles } if !triangles.is_empty()
+            GraphicCommand::DrawScreenTriangleBatch { .. }
         )));
-        assert!(frame.commands.commands().iter().any(|command| matches!(
-            command,
-            GraphicCommand::DrawLineBatch { lines, no_depth_test: true } if !lines.is_empty()
-        )));
+        let triangles = frame
+            .commands
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                GraphicCommand::DrawScreenTriangleBatch { triangles } => Some(triangles.len()),
+                _ => None,
+            })
+            .unwrap_or(0);
+        // Each visible axis contributes eight triangles: a dark outline shaft,
+        // a collar, an outline head, then the colored shaft and head. An axis
+        // that projects to a point is skipped instead of drawing garbage.
+        assert!(triangles >= 8, "expected outlined screen geometry, got {triangles}");
+        assert_eq!(
+            triangles % 8,
+            0,
+            "outline and fill must stay paired per axis"
+        );
     }
 
     #[test]
-    fn scale_records_six_external_billboard_circles_without_internal_lines() {
+    fn scale_records_outlined_billboard_circles_without_internal_lines() {
         let mut frame = SceneRenderFrame {
             commands: BasicCommandList::new(),
             view_proj: Mat4::IDENTITY,
             light_dir: Vec3::Y,
             width: 800,
             height: 600,
+            texture_cache_budget_bytes: 0,
             stats: FrameStats::default(),
         };
 
@@ -228,6 +266,7 @@ mod tests {
             origin: Vec3::ZERO,
             entity_scale: Vec3::ONE,
             entity_axes: [Vec3::X, Vec3::Y, Vec3::Z],
+            enabled_scale_axes: [true; 3],
             presentation_scale: 1.0,
         }
         .append_to(&mut frame);
@@ -246,7 +285,9 @@ mod tests {
                     GraphicCommand::DrawScreenTriangleBatch { triangles } => Some(triangles.len()),
                     _ => None,
                 }),
-            Some(6 * 20 * 2)
+            // Six handles, each drawn twice: a dark outline disc and the
+            // colored disc on top of it.
+            Some(6 * 20 * 2 * 2)
         );
     }
 }

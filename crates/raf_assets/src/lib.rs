@@ -3,11 +3,13 @@
 //! Asset management for AuraRafi: importing, hot-reloading, and browsing.
 
 pub mod browser;
+pub mod image_asset;
 pub mod importer;
 pub mod primitive_manifest;
 pub mod primitives;
 
 pub use browser::AssetBrowser;
+pub use image_asset::{decode_image, image_output_dimensions, DecodedImage};
 pub use importer::{AssetImporter, AssetType};
 pub use primitive_manifest::{
     builtin_primitive_model_kinds, PrimitiveManifestError, PrimitiveModelManifest,

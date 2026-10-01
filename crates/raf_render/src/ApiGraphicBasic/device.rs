@@ -1,5 +1,6 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
@@ -14,10 +15,13 @@ use crate::api_graphic_basic::command_list::{BasicMeshInstance, GraphicCommand};
 use crate::api_graphic_basic::handles::{MeshHandle, TextureHandle};
 use crate::api_graphic_basic::mesh::BasicMesh;
 use crate::api_graphic_basic::pipeline::BasicPipelineKind;
-use crate::api_graphic_basic::resource_registry::{MeshRegistry, ResourceAdmission};
+use crate::api_graphic_basic::resource_registry::{
+    MeshRegistry, ResourceAdmission, TextureRegistry,
+};
 use crate::render_pipeline::framebuffer::Framebuffer;
 use crate::scene_renderer::{rasterize_basic_scene_frame, SceneRenderFrame};
 use crate::shaders::BASIC_SCENE_WGSL;
+use crate::texture::CpuTexture;
 
 /// Supported execution backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -107,6 +111,7 @@ pub struct SceneFrameMetrics {
     pub transient_mesh_slot_creations: u32,
     pub line_slot_creations: u32,
     pub mesh_upload_bytes: u64,
+    pub texture_upload_bytes: u64,
     pub uniform_upload_bytes: u64,
     pub uniform_uploads_skipped: u64,
     pub mesh_instance_upload_bytes: u64,
@@ -115,6 +120,9 @@ pub struct SceneFrameMetrics {
     pub overlay_slot_creations: u32,
     pub mesh_resident_bytes: u64,
     pub mesh_resident_entries: u32,
+    pub texture_resident_bytes: u64,
+    pub texture_resident_entries: u32,
+    pub texture_cache_evictions: u64,
     pub mesh_cache_evictions: u64,
     pub frame_upload_bytes: u64,
     pub upload_budget_exceeded: bool,
@@ -129,6 +137,7 @@ impl SceneFrameMetrics {
 
     pub const fn total_upload_bytes(self) -> u64 {
         self.mesh_upload_bytes
+            .saturating_add(self.texture_upload_bytes)
             .saturating_add(self.uniform_upload_bytes)
             .saturating_add(self.mesh_instance_upload_bytes)
             .saturating_add(self.line_upload_bytes)
@@ -648,6 +657,11 @@ struct GpuMeshBuffers {
     index_bytes: u64,
 }
 
+struct GpuSceneTexture {
+    _texture: Arc<wgpu::Texture>,
+    bind_group: Arc<wgpu::BindGroup>,
+}
+
 #[derive(Clone)]
 struct GpuUniformSlot {
     buffer: Arc<wgpu::Buffer>,
@@ -687,12 +701,13 @@ struct GpuTransientMeshSlot {
 struct GpuMeshVertex {
     position: [f32; 3],
     normal: [f32; 3],
+    uv: [f32; 2],
 }
 
 impl GpuMeshVertex {
     fn desc<'a>() -> wgpu::VertexBufferLayout<'a> {
-        const ATTRS: [wgpu::VertexAttribute; 2] =
-            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3];
+        const ATTRS: [wgpu::VertexAttribute; 3] =
+            wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x2];
 
         wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<GpuMeshVertex>() as wgpu::BufferAddress,
@@ -722,27 +737,27 @@ impl GpuMeshInstance {
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,
                 offset: 0,
-                shader_location: 2,
-            },
-            wgpu::VertexAttribute {
-                format: wgpu::VertexFormat::Float32x4,
-                offset: 16,
                 shader_location: 3,
             },
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,
-                offset: 32,
+                offset: 16,
                 shader_location: 4,
             },
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,
-                offset: 48,
+                offset: 32,
                 shader_location: 5,
             },
             wgpu::VertexAttribute {
                 format: wgpu::VertexFormat::Float32x4,
-                offset: 64,
+                offset: 48,
                 shader_location: 6,
+            },
+            wgpu::VertexAttribute {
+                format: wgpu::VertexFormat::Float32x4,
+                offset: 64,
+                shader_location: 7,
             },
         ];
         wgpu::VertexBufferLayout {
@@ -1067,16 +1082,25 @@ impl GpuTimestampState {
 struct GpuSceneState {
     color_format: wgpu::TextureFormat,
     mesh_bind_group_layout: wgpu::BindGroupLayout,
+    scene_texture_bind_group_layout: wgpu::BindGroupLayout,
+    scene_texture_sampler: wgpu::Sampler,
+    fallback_texture_bind_group: Arc<wgpu::BindGroup>,
     line_bind_group_layout: wgpu::BindGroupLayout,
     overlay_bind_group_layout: wgpu::BindGroupLayout,
     mesh_pipeline: wgpu::RenderPipeline,
+    mesh_two_sided_pipeline: wgpu::RenderPipeline,
     mesh_instanced_pipeline: wgpu::RenderPipeline,
+    mesh_instanced_two_sided_pipeline: wgpu::RenderPipeline,
     line_pipeline_depth: wgpu::RenderPipeline,
     line_pipeline_xray: wgpu::RenderPipeline,
     overlay_pipeline: wgpu::RenderPipeline,
     mesh_cache: HashMap<usize, MeshHandle>,
     mesh_registry: MeshRegistry<GpuMeshBuffers>,
     mesh_cache_limit: usize,
+    texture_registry: TextureRegistry<GpuSceneTexture>,
+    texture_handles: HashMap<PathBuf, TextureHandle>,
+    texture_cache_limit: usize,
+    texture_cache_budget_bytes: u64,
     mesh_uniform_reuse: UniformReuse<MeshUniforms>,
     line_uniform_reuse: UniformReuse<LineUniforms>,
     overlay_uniform_reuse: UniformReuse<OverlayUniforms>,
@@ -1094,6 +1118,79 @@ struct GpuSceneState {
     frame_index: u64,
     frame_upload_budget: u64,
     gpu_timing: Option<GpuTimestampState>,
+}
+
+fn create_scene_mesh_pipeline(
+    device: &wgpu::Device,
+    shader: &wgpu::ShaderModule,
+    layout: &wgpu::PipelineLayout,
+    color_format: wgpu::TextureFormat,
+    instanced: bool,
+    two_sided: bool,
+) -> wgpu::RenderPipeline {
+    let (label, vertex_entry, fragment_entry) = match (instanced, two_sided) {
+        (false, false) => ("ApiGraphicBasic.MeshPipeline", "mesh_vs", "mesh_fs"),
+        (false, true) => ("ApiGraphicBasic.MeshTwoSidedPipeline", "mesh_vs", "mesh_fs"),
+        (true, false) => (
+            "ApiGraphicBasic.MeshInstancedPipeline",
+            "mesh_instanced_vs",
+            "mesh_instanced_fs",
+        ),
+        (true, true) => (
+            "ApiGraphicBasic.MeshInstancedTwoSidedPipeline",
+            "mesh_instanced_vs",
+            "mesh_instanced_fs",
+        ),
+    };
+    let vertex_buffers = if instanced {
+        vec![GpuMeshVertex::desc(), GpuMeshInstance::desc()]
+    } else {
+        vec![GpuMeshVertex::desc()]
+    };
+
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some(label),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some(vertex_entry),
+            buffers: &vertex_buffers,
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some(fragment_entry),
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+            targets: &[Some(wgpu::ColorTargetState {
+                format: color_format,
+                blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            strip_index_format: None,
+            front_face: wgpu::FrontFace::Ccw,
+            cull_mode: if two_sided {
+                None
+            } else {
+                Some(wgpu::Face::Back)
+            },
+            unclipped_depth: false,
+            polygon_mode: wgpu::PolygonMode::Fill,
+            conservative: false,
+        },
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: wgpu::TextureFormat::Depth32Float,
+            depth_write_enabled: true,
+            depth_compare: wgpu::CompareFunction::LessEqual,
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
+        multisample: wgpu::MultisampleState::default(),
+        multiview: None,
+        cache: None,
+    })
 }
 
 impl GpuSceneState {
@@ -1122,6 +1219,46 @@ impl GpuSceneState {
                     count: None,
                 }],
             });
+        let scene_texture_bind_group_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("ApiGraphicBasic.SceneTextureBindGroupLayout"),
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
+        let scene_texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ApiGraphicBasic.SceneTextureSampler"),
+            address_mode_u: wgpu::AddressMode::Repeat,
+            address_mode_v: wgpu::AddressMode::Repeat,
+            address_mode_w: wgpu::AddressMode::Repeat,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::FilterMode::Linear,
+            ..wgpu::SamplerDescriptor::default()
+        });
+        let fallback_texture = create_gpu_scene_texture(
+            device,
+            queue,
+            &scene_texture_bind_group_layout,
+            &scene_texture_sampler,
+            &CpuTexture::solid(255, 255, 255),
+            "ApiGraphicBasic.SceneWhiteFallback",
+        );
         let line_bind_group_layout =
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("ApiGraphicBasic.LineBindGroupLayout"),
@@ -1153,88 +1290,41 @@ impl GpuSceneState {
 
         let mesh_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ApiGraphicBasic.MeshPipelineLayout"),
-            bind_group_layouts: &[&mesh_bind_group_layout],
+            bind_group_layouts: &[&mesh_bind_group_layout, &scene_texture_bind_group_layout],
             push_constant_ranges: &[],
         });
-        let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("ApiGraphicBasic.MeshPipeline"),
-            layout: Some(&mesh_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &shader,
-                entry_point: Some("mesh_vs"),
-                buffers: &[GpuMeshVertex::desc()],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("mesh_fs"),
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: color_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                strip_index_format: None,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                unclipped_depth: false,
-                polygon_mode: wgpu::PolygonMode::Fill,
-                conservative: false,
-            },
-            depth_stencil: Some(wgpu::DepthStencilState {
-                format: wgpu::TextureFormat::Depth32Float,
-                depth_write_enabled: true,
-                depth_compare: wgpu::CompareFunction::LessEqual,
-                stencil: wgpu::StencilState::default(),
-                bias: wgpu::DepthBiasState::default(),
-            }),
-            multisample: wgpu::MultisampleState::default(),
-            multiview: None,
-            cache: None,
-        });
-        let mesh_instanced_pipeline =
-            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("ApiGraphicBasic.MeshInstancedPipeline"),
-                layout: Some(&mesh_pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("mesh_instanced_vs"),
-                    buffers: &[GpuMeshVertex::desc(), GpuMeshInstance::desc()],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("mesh_instanced_fs"),
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: color_format,
-                        blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    strip_index_format: None,
-                    front_face: wgpu::FrontFace::Ccw,
-                    cull_mode: Some(wgpu::Face::Back),
-                    unclipped_depth: false,
-                    polygon_mode: wgpu::PolygonMode::Fill,
-                    conservative: false,
-                },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: wgpu::TextureFormat::Depth32Float,
-                    depth_write_enabled: true,
-                    depth_compare: wgpu::CompareFunction::LessEqual,
-                    stencil: wgpu::StencilState::default(),
-                    bias: wgpu::DepthBiasState::default(),
-                }),
-                multisample: wgpu::MultisampleState::default(),
-                multiview: None,
-                cache: None,
-            });
+        let mesh_pipeline = create_scene_mesh_pipeline(
+            device,
+            &shader,
+            &mesh_pipeline_layout,
+            color_format,
+            false,
+            false,
+        );
+        let mesh_two_sided_pipeline = create_scene_mesh_pipeline(
+            device,
+            &shader,
+            &mesh_pipeline_layout,
+            color_format,
+            false,
+            true,
+        );
+        let mesh_instanced_pipeline = create_scene_mesh_pipeline(
+            device,
+            &shader,
+            &mesh_pipeline_layout,
+            color_format,
+            true,
+            false,
+        );
+        let mesh_instanced_two_sided_pipeline = create_scene_mesh_pipeline(
+            device,
+            &shader,
+            &mesh_pipeline_layout,
+            color_format,
+            true,
+            true,
+        );
 
         let line_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ApiGraphicBasic.LinePipelineLayout"),
@@ -1368,16 +1458,25 @@ impl GpuSceneState {
         Self {
             color_format,
             mesh_bind_group_layout,
+            scene_texture_bind_group_layout,
+            scene_texture_sampler,
+            fallback_texture_bind_group: fallback_texture.bind_group,
             line_bind_group_layout,
             overlay_bind_group_layout,
             mesh_pipeline,
+            mesh_two_sided_pipeline,
             mesh_instanced_pipeline,
+            mesh_instanced_two_sided_pipeline,
             line_pipeline_depth,
             line_pipeline_xray,
             overlay_pipeline,
             mesh_cache: HashMap::new(),
             mesh_registry: MeshRegistry::new(memory_budget.gpu_bytes / 2),
             mesh_cache_limit: memory_budget.mesh_cache_entries as usize,
+            texture_registry: TextureRegistry::new(memory_budget.gpu_bytes / 8),
+            texture_handles: HashMap::new(),
+            texture_cache_limit: (memory_budget.texture_cache_entries as usize).min(512),
+            texture_cache_budget_bytes: memory_budget.gpu_bytes / 8,
             mesh_uniform_reuse: UniformReuse::default(),
             line_uniform_reuse: UniformReuse::default(),
             overlay_uniform_reuse: UniformReuse::default(),
@@ -1396,6 +1495,130 @@ impl GpuSceneState {
             frame_upload_budget: memory_budget.frame_upload_bytes,
             gpu_timing: GpuTimestampState::new(device, queue),
         }
+    }
+
+    fn prepare_scene_textures(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        frame: &SceneRenderFrame,
+    ) -> u64 {
+        let has_textured_draw = frame.commands.commands().iter().any(|command| {
+            let GraphicCommand::DrawMesh {
+                texture_id: Some(texture_id),
+                ..
+            } = command
+            else {
+                return false;
+            };
+            frame.commands.texture(*texture_id).is_some()
+        });
+        if !has_textured_draw {
+            // CAD overlays carry a zero budget; preserve the scene cache for
+            // them, while still applying changed quality caps on scene frames.
+            if frame.texture_cache_budget_bytes > 0 {
+                self.texture_cache_budget_bytes = frame
+                    .texture_cache_budget_bytes
+                    .min(self.texture_registry.budget_bytes());
+                self.texture_registry
+                    .set_budget_bytes(self.texture_cache_budget_bytes);
+                self.texture_handles
+                    .retain(|_, handle| self.texture_registry.contains(*handle));
+            }
+            return 0;
+        }
+
+        self.texture_cache_budget_bytes = frame
+            .texture_cache_budget_bytes
+            .min(self.texture_registry.budget_bytes());
+        self.texture_registry
+            .set_budget_bytes(self.texture_cache_budget_bytes);
+        self.texture_handles
+            .retain(|_, handle| self.texture_registry.contains(*handle));
+
+        let mut seen = HashSet::new();
+        let mut textures = Vec::new();
+        for command in frame.commands.commands() {
+            let GraphicCommand::DrawMesh {
+                texture_id: Some(texture_id),
+                ..
+            } = command
+            else {
+                continue;
+            };
+            let Some(texture) = frame.commands.texture(*texture_id) else {
+                continue;
+            };
+            if seen.insert(texture.source.clone()) {
+                textures.push(Arc::clone(texture));
+            }
+        }
+
+        let mut uploaded_bytes = 0_u64;
+        for texture in textures {
+            let key = texture.source.clone();
+            if let Some(handle) = self.texture_handles.get(&key).copied() {
+                if self
+                    .texture_registry
+                    .get(handle, self.frame_index)
+                    .is_some()
+                {
+                    self.texture_registry.pin(handle, true);
+                    continue;
+                }
+                self.texture_handles.remove(&key);
+            }
+            let bytes = texture.memory_bytes() as u64;
+            if bytes == 0
+                || bytes > self.texture_cache_budget_bytes
+                || uploaded_bytes.saturating_add(bytes) > self.frame_upload_budget
+            {
+                continue;
+            }
+            self.texture_handles
+                .retain(|_, handle| self.texture_registry.contains(*handle));
+            while self.texture_handles.len() >= self.texture_cache_limit
+                && self.texture_cache_limit > 0
+            {
+                let Some(evicted) = self.texture_registry.evict_least_recently_used_unpinned()
+                else {
+                    break;
+                };
+                self.texture_handles.retain(|_, handle| *handle != evicted);
+            }
+            if self.texture_cache_limit == 0
+                || self.texture_handles.len() >= self.texture_cache_limit
+            {
+                continue;
+            }
+            let gpu_texture = create_gpu_scene_texture(
+                device,
+                queue,
+                &self.scene_texture_bind_group_layout,
+                &self.scene_texture_sampler,
+                texture.as_ref(),
+                "ApiGraphicBasic.SceneAssetTexture",
+            );
+            let Ok(handle) = self.texture_registry.insert(
+                gpu_texture,
+                ResourceAdmission::pinned(bytes, self.frame_index),
+            ) else {
+                continue;
+            };
+            self.texture_handles.insert(key, handle);
+            uploaded_bytes = uploaded_bytes.saturating_add(bytes);
+            self.texture_handles
+                .retain(|_, handle| self.texture_registry.contains(*handle));
+        }
+        uploaded_bytes
+    }
+
+    fn scene_texture_bind_group(&mut self, texture: &CpuTexture) -> Arc<wgpu::BindGroup> {
+        let handle = self.texture_handles.get(&texture.source).copied();
+        handle
+            .and_then(|handle| self.texture_registry.get(handle, self.frame_index))
+            .map(|texture| Arc::clone(&texture.bind_group))
+            .unwrap_or_else(|| Arc::clone(&self.fallback_texture_bind_group))
     }
 
     fn render(
@@ -1422,6 +1645,7 @@ impl GpuSceneState {
         let color_view = Arc::clone(&target.color_view);
         let depth_view = Arc::clone(&target.depth_view);
         let clear_color = extract_clear_color(frame.commands.commands());
+        let texture_upload_bytes = self.prepare_scene_textures(device, queue, frame);
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ApiGraphicBasic.SceneEncoder"),
         });
@@ -1443,6 +1667,7 @@ impl GpuSceneState {
             line_instances: command_stats.line_instances,
             overlay_triangles: command_stats.overlay_triangles,
             target_rebuilds: u32::from(target_rebuilt),
+            texture_upload_bytes,
             ..SceneFrameMetrics::default()
         };
         let mut mesh_draw_index = 0usize;
@@ -1486,11 +1711,16 @@ impl GpuSceneState {
                         mesh_id,
                         transform,
                         color,
+                        texture_id,
                     } => {
                         let Some(mesh) = frame.commands.mesh_arc(*mesh_id) else {
                             continue;
                         };
                         let cacheable = frame.commands.mesh_cacheable(*mesh_id);
+                        let texture_bind_group = texture_id
+                            .and_then(|id| frame.commands.texture(id))
+                            .map(|texture| self.scene_texture_bind_group(texture))
+                            .unwrap_or_else(|| Arc::clone(&self.fallback_texture_bind_group));
                         self.draw_mesh(
                             device,
                             queue,
@@ -1499,7 +1729,10 @@ impl GpuSceneState {
                             *transform,
                             frame,
                             *color,
-                            matches!(current_pipeline, BasicPipelineKind::PbrLit),
+                            current_pipeline.is_lit(),
+                            current_pipeline.is_two_sided(),
+                            texture_bind_group.as_ref(),
+                            texture_id.is_some(),
                             cacheable,
                             mesh_draw_index,
                             &mut metrics,
@@ -1511,6 +1744,8 @@ impl GpuSceneState {
                             continue;
                         };
                         let cacheable = frame.commands.mesh_cacheable(*mesh_id);
+                        let fallback_texture_bind_group =
+                            Arc::clone(&self.fallback_texture_bind_group);
                         self.draw_mesh_batch(
                             device,
                             queue,
@@ -1518,7 +1753,9 @@ impl GpuSceneState {
                             mesh,
                             instances,
                             frame,
-                            matches!(current_pipeline, BasicPipelineKind::PbrLit),
+                            current_pipeline.is_lit(),
+                            current_pipeline.is_two_sided(),
+                            fallback_texture_bind_group.as_ref(),
                             cacheable,
                             mesh_draw_index,
                             &mut metrics,
@@ -1596,15 +1833,22 @@ impl GpuSceneState {
             );
         }
         queue.submit(std::iter::once(encoder.finish()));
+        for handle in self.texture_handles.values().copied() {
+            self.texture_registry.pin(handle, false);
+        }
         if let Some((slot, _, _, _)) = timestamp_plan {
             if let Some(timing) = self.gpu_timing.as_ref() {
                 timing.map_readback(slot);
             }
         }
         let residency = self.mesh_registry.metrics();
+        let texture_residency = self.texture_registry.metrics();
         metrics.mesh_resident_bytes = residency.resident_bytes;
         metrics.mesh_resident_entries = residency.resident_entries;
         metrics.mesh_cache_evictions = residency.evictions;
+        metrics.texture_resident_bytes = texture_residency.resident_bytes;
+        metrics.texture_resident_entries = texture_residency.resident_entries;
+        metrics.texture_cache_evictions = texture_residency.evictions;
         metrics.frame_upload_bytes = metrics.total_upload_bytes();
         metrics.upload_budget_exceeded = metrics.frame_upload_bytes > self.frame_upload_budget;
         metrics.frame_cpu_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
@@ -1690,6 +1934,9 @@ impl GpuSceneState {
         frame: &SceneRenderFrame,
         color: [u8; 4],
         lit: bool,
+        two_sided: bool,
+        texture_bind_group: &wgpu::BindGroup,
+        texture_enabled: bool,
         cacheable: bool,
         draw_index: usize,
         metrics: &mut SceneFrameMetrics,
@@ -1735,6 +1982,9 @@ impl GpuSceneState {
                             frame,
                             color,
                             lit,
+                            two_sided,
+                            texture_bind_group,
+                            texture_enabled,
                             draw_index,
                             metrics,
                         );
@@ -1752,6 +2002,9 @@ impl GpuSceneState {
                 frame,
                 color,
                 lit,
+                two_sided,
+                texture_bind_group,
+                texture_enabled,
                 draw_index,
                 metrics,
             );
@@ -1764,7 +2017,12 @@ impl GpuSceneState {
             normal_matrix: gpu_normal_matrix(transform),
             color: rgba8_to_f32(color),
             light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
-            params: [if lit { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            params: [
+                if lit { 1.0 } else { 0.0 },
+                if texture_enabled { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
         };
         write_uniform_if_changed(
             queue,
@@ -1776,8 +2034,13 @@ impl GpuSceneState {
         );
         metrics.mesh_draw_calls += 1;
 
-        pass.set_pipeline(&self.mesh_pipeline);
+        pass.set_pipeline(if two_sided {
+            &self.mesh_two_sided_pipeline
+        } else {
+            &self.mesh_pipeline
+        });
         pass.set_bind_group(0, uniform_slot.bind_group.as_ref(), &[]);
+        pass.set_bind_group(1, texture_bind_group, &[]);
         pass.set_vertex_buffer(0, cached_buffers.vertex_buffer.slice(..));
         pass.set_index_buffer(
             cached_buffers.index_buffer.slice(..),
@@ -1795,6 +2058,8 @@ impl GpuSceneState {
         instances: &[BasicMeshInstance],
         frame: &SceneRenderFrame,
         lit: bool,
+        two_sided: bool,
+        texture_bind_group: &wgpu::BindGroup,
         cacheable: bool,
         batch_index: usize,
         metrics: &mut SceneFrameMetrics,
@@ -1810,6 +2075,9 @@ impl GpuSceneState {
                     frame,
                     instance.color,
                     lit,
+                    two_sided,
+                    texture_bind_group,
+                    false,
                     cacheable,
                     batch_index,
                     metrics,
@@ -1828,6 +2096,9 @@ impl GpuSceneState {
                     frame,
                     instance.color,
                     lit,
+                    two_sided,
+                    texture_bind_group,
+                    false,
                     cacheable,
                     batch_index,
                     metrics,
@@ -1862,6 +2133,9 @@ impl GpuSceneState {
                             frame,
                             instance.color,
                             lit,
+                            two_sided,
+                            texture_bind_group,
+                            false,
                             cacheable,
                             batch_index,
                             metrics,
@@ -1892,6 +2166,9 @@ impl GpuSceneState {
                         frame,
                         instance.color,
                         lit,
+                        two_sided,
+                        texture_bind_group,
+                        false,
                         cacheable,
                         batch_index,
                         metrics,
@@ -1939,8 +2216,13 @@ impl GpuSceneState {
             std::mem::size_of_val(self.mesh_instance_scratch.as_slice()) as u64;
         metrics.mesh_draw_calls += 1;
 
-        pass.set_pipeline(&self.mesh_instanced_pipeline);
+        pass.set_pipeline(if two_sided {
+            &self.mesh_instanced_two_sided_pipeline
+        } else {
+            &self.mesh_instanced_pipeline
+        });
         pass.set_bind_group(0, uniform_slot.bind_group.as_ref(), &[]);
+        pass.set_bind_group(1, texture_bind_group, &[]);
         pass.set_vertex_buffer(0, cached_buffers.vertex_buffer.slice(..));
         pass.set_vertex_buffer(1, instance_slot.buffer.slice(..));
         pass.set_index_buffer(
@@ -2081,6 +2363,9 @@ impl GpuSceneState {
         frame: &SceneRenderFrame,
         color: [u8; 4],
         lit: bool,
+        two_sided: bool,
+        texture_bind_group: &wgpu::BindGroup,
+        texture_enabled: bool,
         draw_index: usize,
         metrics: &mut SceneFrameMetrics,
     ) {
@@ -2089,6 +2374,7 @@ impl GpuSceneState {
             .extend(mesh.vertices.iter().map(|vertex| GpuMeshVertex {
                 position: vertex.position.to_array(),
                 normal: vertex.normal.to_array(),
+                uv: vertex.uv,
             }));
         let vertex_bytes = std::mem::size_of_val(self.transient_vertex_scratch.as_slice()) as u64;
         let index_bytes = std::mem::size_of_val(mesh.indices.as_slice()) as u64;
@@ -2111,7 +2397,12 @@ impl GpuSceneState {
             normal_matrix: gpu_normal_matrix(transform),
             color: rgba8_to_f32(color),
             light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
-            params: [if lit { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            params: [
+                if lit { 1.0 } else { 0.0 },
+                if texture_enabled { 1.0 } else { 0.0 },
+                0.0,
+                0.0,
+            ],
         };
         write_uniform_if_changed(
             queue,
@@ -2124,8 +2415,13 @@ impl GpuSceneState {
         metrics.mesh_upload_bytes += vertex_bytes + index_bytes;
         metrics.mesh_draw_calls += 1;
 
-        pass.set_pipeline(&self.mesh_pipeline);
+        pass.set_pipeline(if two_sided {
+            &self.mesh_two_sided_pipeline
+        } else {
+            &self.mesh_pipeline
+        });
         pass.set_bind_group(0, uniform_slot.bind_group.as_ref(), &[]);
+        pass.set_bind_group(1, texture_bind_group, &[]);
         pass.set_vertex_buffer(0, transient.vertex_buffer.slice(..vertex_bytes));
         pass.set_index_buffer(
             transient.index_buffer.slice(..index_bytes),
@@ -2313,6 +2609,7 @@ fn create_gpu_mesh_buffers(device: &wgpu::Device, mesh: &BasicMesh) -> GpuMeshBu
         .map(|vertex| GpuMeshVertex {
             position: vertex.position.to_array(),
             normal: vertex.normal.to_array(),
+            uv: vertex.uv,
         })
         .collect();
     let vertex_bytes = std::mem::size_of_val(vertices.as_slice()) as u64;
@@ -2338,6 +2635,68 @@ fn create_gpu_mesh_buffers(device: &wgpu::Device, mesh: &BasicMesh) -> GpuMeshBu
         index_count: mesh.indices.len() as u32,
         vertex_bytes,
         index_bytes,
+    }
+}
+
+fn create_gpu_scene_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    image: &CpuTexture,
+    label: &str,
+) -> GpuSceneTexture {
+    let texture = Arc::new(device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: image.width.max(1),
+            height: image.height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    }));
+    queue.write_texture(
+        wgpu::ImageCopyTexture {
+            texture: texture.as_ref(),
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &image.data,
+        wgpu::ImageDataLayout {
+            offset: 0,
+            bytes_per_row: Some(image.width.max(1) * 4),
+            rows_per_image: Some(image.height.max(1)),
+        },
+        wgpu::Extent3d {
+            width: image.width.max(1),
+            height: image.height.max(1),
+            depth_or_array_layers: 1,
+        },
+    );
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind_group = Arc::new(device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some(label),
+        layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+        ],
+    }));
+    GpuSceneTexture {
+        _texture: texture,
+        bind_group,
     }
 }
 
@@ -2487,6 +2846,7 @@ mod tests {
             light_dir: Vec3::Y,
             width: 2,
             height: 1,
+            texture_cache_budget_bytes: 0,
             stats: FrameStats::default(),
         };
 
@@ -2581,6 +2941,7 @@ mod tests {
             light_dir: Vec3::Y,
             width: 64,
             height: 64,
+            texture_cache_budget_bytes: 0,
             stats: FrameStats::default(),
         };
 

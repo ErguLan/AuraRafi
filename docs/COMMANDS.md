@@ -130,6 +130,20 @@ Games:
 - `/game.create_group`, `/game.reparent`, `/game.build`, `/game.reconcile`, `/game.repair`
 - `/game.describe_scene`, `/game.focus`
 
+Native Nodes authoring command IDs (emitted by the retained Nodes surface):
+
+- `nodes.add.<slug>`, `nodes.select.<node-uuid>`, `nodes.delete.<node-uuid>`
+- `nodes.drag.start:<node-uuid>:<x>:<y>`, `nodes.drag.move:<node-uuid>:<x>:<y>`,
+  `nodes.drag.end`
+- `nodes.connect:<node-uuid>:<pin-uuid>:<node-uuid>:<pin-uuid>`
+- `nodes.disconnect.<connection-uuid>`
+- `nodes.property.set:<node-uuid>:<property>:<value>`
+- `nodes.new-graph`, `nodes.undo`, `nodes.redo`, `nodes.compile`
+
+These IDs are editor authoring commands, not a Play/runtime API. They mutate
+only the active session `NodeGraph`, through `NativeEditorRuntime`, and are
+persisted with `nodes.ron` by `/project.save`.
+
 The native Agent uses a semantic tool layer over these commands. Its compact
 tools are `project_summary`, `scene_outline`, `scene_query`,
 `scene_spatial_map`, `scene_check_overlaps`, `scene_diff`, `scene_design_audit`,

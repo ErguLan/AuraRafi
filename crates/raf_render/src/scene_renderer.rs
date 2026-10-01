@@ -5,7 +5,7 @@
 //!
 //! Pipeline stages:
 //! 1. Frustum cull (skip objects outside view)
-//! 2. Generate/cache mesh data per primitive type
+//! 2. Select cached geometry detail per visible curved primitive
 //! 3. Transform vertices: Object -> World -> Clip -> Screen
 //! 4. Backface cull + clip against near plane
 //! 5. Shade each triangle (flat shading)
@@ -16,7 +16,8 @@
 //! The editor's viewport host consumes its scene output directly.
 
 use glam::{Mat4, Vec3, Vec4};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use crate::api_graphic_basic::command_list::{BasicCommandList, BasicLine, GraphicCommand};
@@ -34,7 +35,9 @@ use crate::render_pipeline::rasterizer::{self, ScreenVertex};
 use crate::scene_visibility::{
     SceneObjectBounds, SceneVisibility, SceneVisibilityPolicy, WorldStreamVisibility,
 };
+use crate::texture::TextureCache;
 
+use raf_core::project::{GeometryDetailMode, TextureQualityMode};
 use raf_core::scene::graph::{Primitive, SceneGraph, SceneNodeId};
 use raf_core::scene::WorldTransformCache;
 
@@ -85,6 +88,10 @@ pub struct RenderOptions {
     pub world_stream_region_size: f32,
     /// Visible region radius around the camera.
     pub world_stream_load_radius: u32,
+    /// Tessellation policy for built-in curved meshes.
+    pub geometry_detail: GeometryDetailMode,
+    /// Hard CPU/GPU cache policy for project-owned base-color textures.
+    pub texture_quality: TextureQualityMode,
 }
 
 impl Default for RenderOptions {
@@ -105,7 +112,49 @@ impl Default for RenderOptions {
             world_streaming_enabled: false,
             world_stream_region_size: 128.0,
             world_stream_load_radius: 3,
+            geometry_detail: GeometryDetailMode::Adaptive,
+            texture_quality: TextureQualityMode::Adaptive,
         }
+    }
+}
+
+struct MeshDetailLevel {
+    mesh: MeshData,
+    basic_mesh: Arc<BasicMesh>,
+    edges: Vec<[Vec3; 2]>,
+}
+
+impl MeshDetailLevel {
+    fn new(mesh: MeshData) -> Self {
+        Self {
+            basic_mesh: Arc::new(mesh_to_basic(&mesh)),
+            edges: primitives::extract_edges(&mesh),
+            mesh,
+        }
+    }
+}
+
+struct CurvedMeshDetail {
+    levels: [MeshDetailLevel; 3],
+}
+
+impl CurvedMeshDetail {
+    fn new(low: MeshData, medium: MeshData, high: MeshData) -> Self {
+        Self {
+            levels: [
+                MeshDetailLevel::new(low),
+                MeshDetailLevel::new(medium),
+                MeshDetailLevel::new(high),
+            ],
+        }
+    }
+
+    fn level(&self, level: u8) -> &MeshDetailLevel {
+        &self.levels[level.min(2) as usize]
+    }
+
+    fn medium(&self) -> &MeshDetailLevel {
+        &self.levels[1]
     }
 }
 
@@ -116,18 +165,14 @@ impl Default for RenderOptions {
 pub struct SceneRenderer {
     /// The render target.
     framebuffer: Framebuffer,
-    /// Cached mesh data per primitive type.
+    /// Cached mesh data per primitive and curved-mesh detail level.
     cube_mesh: MeshData,
     cube_basic_mesh: Arc<BasicMesh>,
     cube_edges: Vec<[Vec3; 2]>,
     cube_local_bounds: (Vec3, Vec3),
-    cylinder_mesh: MeshData,
-    cylinder_basic_mesh: Arc<BasicMesh>,
-    cylinder_edges: Vec<[Vec3; 2]>,
+    cylinder_detail: CurvedMeshDetail,
     cylinder_local_bounds: (Vec3, Vec3),
-    sphere_mesh: MeshData,
-    sphere_basic_mesh: Arc<BasicMesh>,
-    sphere_edges: Vec<[Vec3; 2]>,
+    sphere_detail: CurvedMeshDetail,
     sphere_local_bounds: (Vec3, Vec3),
     plane_mesh: MeshData,
     plane_basic_mesh: Arc<BasicMesh>,
@@ -136,6 +181,14 @@ pub struct SceneRenderer {
     world_transforms: Option<(u64, WorldTransformCache)>,
     render_jobs: Vec<RenderJob>,
     selected_ids: HashSet<SceneNodeId>,
+    /// Reusable visibility history for the region-culling hysteresis band.
+    stream_visible_ids: HashSet<SceneNodeId>,
+    stream_history_revision: u64,
+    /// Last selected curved-mesh LOD, retained to avoid detail popping.
+    geometry_lod_by_id: HashMap<SceneNodeId, u8>,
+    geometry_lod_history_revision: u64,
+    asset_root: Option<PathBuf>,
+    texture_cache: TextureCache,
     /// Stats from the last frame.
     pub stats: FrameStats,
 }
@@ -147,6 +200,7 @@ pub struct SceneRenderFrame {
     pub light_dir: Vec3,
     pub width: u32,
     pub height: u32,
+    pub texture_cache_budget_bytes: u64,
     pub stats: FrameStats,
 }
 
@@ -160,12 +214,20 @@ impl SceneRenderer {
     /// Create a new renderer with initial viewport dimensions.
     pub fn new(width: u32, height: u32) -> Self {
         let cube_mesh = primitives::cube(1);
-        let cylinder_mesh = primitives::cylinder(32);
-        let sphere_mesh = primitives::sphere(16, 24);
         let plane_mesh = primitives::plane(1);
+        let cylinder_detail = CurvedMeshDetail::new(
+            primitives::cylinder(12),
+            primitives::cylinder(32),
+            primitives::cylinder(48),
+        );
+        let sphere_detail = CurvedMeshDetail::new(
+            primitives::sphere(8, 12),
+            primitives::sphere(16, 24),
+            primitives::sphere(24, 36),
+        );
         let cube_local_bounds = cube_mesh.aabb();
-        let cylinder_local_bounds = cylinder_mesh.aabb();
-        let sphere_local_bounds = sphere_mesh.aabb();
+        let cylinder_local_bounds = cylinder_detail.medium().mesh.aabb();
+        let sphere_local_bounds = sphere_detail.medium().mesh.aabb();
         let plane_local_bounds = plane_mesh.aabb();
 
         Self {
@@ -174,14 +236,10 @@ impl SceneRenderer {
             cube_edges: primitives::extract_edges(&cube_mesh),
             cube_local_bounds,
             cube_mesh,
-            cylinder_basic_mesh: Arc::new(mesh_to_basic(&cylinder_mesh)),
-            cylinder_edges: primitives::extract_edges(&cylinder_mesh),
+            cylinder_detail,
             cylinder_local_bounds,
-            cylinder_mesh,
-            sphere_basic_mesh: Arc::new(mesh_to_basic(&sphere_mesh)),
-            sphere_edges: primitives::extract_edges(&sphere_mesh),
+            sphere_detail,
             sphere_local_bounds,
-            sphere_mesh,
             plane_basic_mesh: Arc::new(mesh_to_basic(&plane_mesh)),
             plane_edges: primitives::extract_edges(&plane_mesh),
             plane_local_bounds,
@@ -189,8 +247,38 @@ impl SceneRenderer {
             world_transforms: None,
             render_jobs: Vec::new(),
             selected_ids: HashSet::new(),
+            stream_visible_ids: HashSet::new(),
+            stream_history_revision: 0,
+            geometry_lod_by_id: HashMap::new(),
+            geometry_lod_history_revision: 0,
+            asset_root: None,
+            texture_cache: TextureCache::default(),
             stats: FrameStats::default(),
         }
+    }
+
+    pub fn set_asset_root(&mut self, assets_root: Option<PathBuf>) {
+        if self.asset_root != assets_root {
+            self.asset_root = assets_root;
+            self.texture_cache.clear();
+        }
+    }
+
+    fn resolve_texture_path(&self, relative_path: &str) -> Option<PathBuf> {
+        let root = self.asset_root.as_ref()?;
+        let normalized = relative_path.replace('\\', "/");
+        let mut relative = PathBuf::new();
+        for component in Path::new(&normalized).components() {
+            match component {
+                Component::Normal(value) => relative.push(value),
+                _ => return None,
+            }
+        }
+        if relative.as_os_str().is_empty() {
+            return None;
+        }
+        let resolved = root.join(relative);
+        resolved.starts_with(root).then_some(resolved)
     }
 
     fn local_bounds_for_primitive(&self, primitive: Primitive) -> (Vec3, Vec3) {
@@ -208,6 +296,10 @@ impl SceneRenderer {
         scene: &SceneGraph,
         frustum: &Frustum,
         camera_position: Vec3,
+        camera_mode: CameraMode,
+        view: Mat4,
+        projection_scale_y: f32,
+        viewport_height: f32,
         selected: &[SceneNodeId],
         options: RenderOptions,
         mesh_override: Option<(SceneNodeId, &MeshData)>,
@@ -234,6 +326,26 @@ impl SceneRenderer {
                 load_radius: options.world_stream_load_radius,
             },
         };
+        if !options.world_streaming_enabled {
+            if self.stream_visible_ids.capacity() > 0 {
+                self.stream_visible_ids = HashSet::new();
+            }
+            self.stream_history_revision = scene_revision;
+        } else if self.stream_history_revision != scene_revision {
+            self.stream_visible_ids
+                .retain(|id| scene.is_valid_node(*id));
+            self.stream_history_revision = scene_revision;
+        }
+        if options.geometry_detail != GeometryDetailMode::Adaptive {
+            if self.geometry_lod_by_id.capacity() > 0 {
+                self.geometry_lod_by_id = HashMap::new();
+            }
+            self.geometry_lod_history_revision = scene_revision;
+        } else if self.geometry_lod_history_revision != scene_revision {
+            self.geometry_lod_by_id
+                .retain(|id, _| scene.is_valid_node(*id));
+            self.geometry_lod_history_revision = scene_revision;
+        }
         let mut jobs = std::mem::take(&mut self.render_jobs);
         jobs.clear();
         jobs.reserve(scene.len());
@@ -242,6 +354,10 @@ impl SceneRenderer {
 
         for (id, node) in scene.iter() {
             if !node.visible || matches!(node.primitive, Primitive::Empty) {
+                self.stream_visible_ids.remove(&id);
+                if options.geometry_detail == GeometryDetailMode::Adaptive {
+                    self.geometry_lod_by_id.remove(&id);
+                }
                 continue;
             }
             stats.total_entities += 1;
@@ -254,13 +370,28 @@ impl SceneRenderer {
                 .unwrap_or_else(|| self.local_bounds_for_primitive(node.primitive));
             let bounds = SceneObjectBounds::from_local_aabb(local_min, local_max, model);
 
-            match visibility.classify(frustum, camera_position, bounds) {
-                SceneVisibility::Visible => {}
+            let previously_in_stream =
+                options.world_streaming_enabled && self.stream_visible_ids.contains(&id);
+            match visibility.classify_with_hysteresis(
+                frustum,
+                camera_position,
+                bounds,
+                previously_in_stream,
+            ) {
+                SceneVisibility::Visible => {
+                    if options.world_streaming_enabled {
+                        self.stream_visible_ids.insert(id);
+                    }
+                }
                 SceneVisibility::OutsideFrustum => {
+                    if options.world_streaming_enabled {
+                        self.stream_visible_ids.insert(id);
+                    }
                     stats.frustum_culled_entities += 1;
                     continue;
                 }
                 SceneVisibility::OutsideStream => {
+                    self.stream_visible_ids.remove(&id);
                     stats.streaming_culled_entities += 1;
                     continue;
                 }
@@ -272,15 +403,50 @@ impl SceneRenderer {
                 base_color[3] = base_color[3].min(120);
             }
             let center = bounds.center();
+            let geometry_lod = if matches!(node.primitive, Primitive::Sphere | Primitive::Cylinder)
+                && mesh_override.is_none_or(|(override_id, _)| override_id != id)
+            {
+                let lod = match options.geometry_detail {
+                    GeometryDetailMode::Efficient => 0,
+                    GeometryDetailMode::Adaptive => {
+                        let projected_radius = projected_radius_pixels(
+                            bounds,
+                            camera_mode,
+                            view,
+                            projection_scale_y,
+                            viewport_height,
+                        );
+                        adaptive_geometry_lod(
+                            projected_radius,
+                            self.geometry_lod_by_id.get(&id).copied(),
+                        )
+                    }
+                    GeometryDetailMode::Detailed => 2,
+                };
+                if options.geometry_detail == GeometryDetailMode::Adaptive
+                    && (self.geometry_lod_by_id.contains_key(&id)
+                        || self.geometry_lod_by_id.len() < MAX_GEOMETRY_LOD_HISTORY_ENTRIES)
+                {
+                    self.geometry_lod_by_id.insert(id, lod);
+                }
+                lod
+            } else if options.geometry_detail == GeometryDetailMode::Adaptive {
+                self.geometry_lod_by_id.remove(&id);
+                1
+            } else {
+                1
+            };
 
             jobs.push(RenderJob {
                 id,
                 primitive: node.primitive,
+                geometry_lod,
                 model,
                 base_color,
                 is_selected: self.selected_ids.contains(&id),
                 distance_squared: (center - camera_position).length_squared(),
                 is_transparent: base_color[3] < u8::MAX,
+                base_color_texture: node.base_color_texture.clone(),
             });
         }
 
@@ -308,6 +474,7 @@ impl SceneRenderer {
                         .then_with(|| {
                             primitive_batch_key(a.primitive).cmp(&primitive_batch_key(b.primitive))
                         })
+                        .then_with(|| a.geometry_lod.cmp(&b.geometry_lod))
                         .then_with(|| {
                             a.distance_squared
                                 .partial_cmp(&b.distance_squared)
@@ -353,15 +520,27 @@ impl SceneRenderer {
         let frustum = Frustum::from_matrix(&vp);
         let light_dir = light_dir.normalize();
         let cam_eye = camera.eye();
-        let (jobs, mut stats) =
-            self.collect_render_jobs(scene, &frustum, cam_eye, selected, options, mesh_override);
+        let (jobs, mut stats) = self.collect_render_jobs(
+            scene,
+            &frustum,
+            cam_eye,
+            camera.mode,
+            view,
+            proj.y_axis.y,
+            h as f32,
+            selected,
+            options,
+            mesh_override,
+        );
+        self.texture_cache.set_limits(
+            options.texture_quality.cache_budget_bytes() as usize,
+            options.texture_quality.max_dimension(),
+        );
 
         let cube_mesh = &self.cube_mesh;
         let cube_edges = self.cube_edges.as_slice();
-        let cylinder_mesh = &self.cylinder_mesh;
-        let cylinder_edges = self.cylinder_edges.as_slice();
-        let sphere_mesh = &self.sphere_mesh;
-        let sphere_edges = self.sphere_edges.as_slice();
+        let cylinder_detail = &self.cylinder_detail;
+        let sphere_detail = &self.sphere_detail;
         let plane_mesh = &self.plane_mesh;
         let plane_edges = self.plane_edges.as_slice();
         if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
@@ -379,6 +558,11 @@ impl SceneRenderer {
         // Execute render jobs (now we can borrow framebuffer mutably)
         let use_tonality = options.solid_face_tonality;
         for job in &jobs {
+            let texture = job
+                .base_color_texture
+                .as_deref()
+                .and_then(|path| self.resolve_texture_path(path))
+                .and_then(|path| self.texture_cache.get_or_load(&path));
             let override_mesh = mesh_override.and_then(|(override_id, override_mesh)| {
                 (override_id == job.id).then_some(override_mesh)
             });
@@ -390,8 +574,14 @@ impl SceneRenderer {
                 } else {
                     match job.primitive {
                         Primitive::Cube => (cube_mesh, cube_edges),
-                        Primitive::Cylinder => (cylinder_mesh, cylinder_edges),
-                        Primitive::Sphere => (sphere_mesh, sphere_edges),
+                        Primitive::Cylinder => {
+                            let detail = cylinder_detail.level(job.geometry_lod);
+                            (&detail.mesh, detail.edges.as_slice())
+                        }
+                        Primitive::Sphere => {
+                            let detail = sphere_detail.level(job.geometry_lod);
+                            (&detail.mesh, detail.edges.as_slice())
+                        }
                         Primitive::Plane => (plane_mesh, plane_edges),
                         _ => (cube_mesh, cube_edges),
                     }
@@ -455,17 +645,22 @@ impl SceneRenderer {
                         ClipVertex {
                             position: c0,
                             shade: shade0,
+                            uv: mesh.uvs.get(i0).copied().unwrap_or([0.0, 0.0]),
                         },
                         ClipVertex {
                             position: c1,
                             shade: shade1,
+                            uv: mesh.uvs.get(i1).copied().unwrap_or([0.0, 0.0]),
                         },
                         ClipVertex {
                             position: c2,
                             shade: shade2,
+                            uv: mesh.uvs.get(i2).copied().unwrap_or([0.0, 0.0]),
                         },
                     ],
                     color,
+                    texture.as_deref(),
+                    job.primitive == Primitive::Plane,
                     vp_w,
                     vp_h,
                 );
@@ -522,18 +717,28 @@ impl SceneRenderer {
         let frustum = Frustum::from_matrix(&vp);
         let light_dir = light_dir.normalize();
         let cam_eye = camera.eye();
-        let (jobs, mut stats) =
-            self.collect_render_jobs(scene, &frustum, cam_eye, selected, options, mesh_override);
+        let (jobs, mut stats) = self.collect_render_jobs(
+            scene,
+            &frustum,
+            cam_eye,
+            camera.mode,
+            view,
+            proj.y_axis.y,
+            h as f32,
+            selected,
+            options,
+            mesh_override,
+        );
+        self.texture_cache.set_limits(
+            (options.texture_quality.cache_budget_bytes() / 2) as usize,
+            options.texture_quality.max_dimension(),
+        );
 
         let cube_mesh = &self.cube_mesh;
         let cube_basic_mesh = Arc::clone(&self.cube_basic_mesh);
         let cube_edges = self.cube_edges.as_slice();
-        let cylinder_mesh = &self.cylinder_mesh;
-        let cylinder_basic_mesh = Arc::clone(&self.cylinder_basic_mesh);
-        let cylinder_edges = self.cylinder_edges.as_slice();
-        let sphere_mesh = &self.sphere_mesh;
-        let sphere_basic_mesh = Arc::clone(&self.sphere_basic_mesh);
-        let sphere_edges = self.sphere_edges.as_slice();
+        let cylinder_detail = &self.cylinder_detail;
+        let sphere_detail = &self.sphere_detail;
         let plane_mesh = &self.plane_mesh;
         let plane_basic_mesh = Arc::clone(&self.plane_basic_mesh);
         let plane_edges = self.plane_edges.as_slice();
@@ -547,6 +752,13 @@ impl SceneRenderer {
 
         let use_tonality = options.solid_face_tonality;
         let mut grid_drawn = false;
+        let frame_texture_budget_bytes = options
+            .texture_quality
+            .cache_budget_bytes()
+            .saturating_sub(options.texture_quality.cache_budget_bytes() / 2);
+        let mut frame_texture_bytes = 0_u64;
+        let mut frame_texture_sources = HashSet::new();
+        let mut rejected_texture_sources = HashSet::new();
         for job in &jobs {
             if job.is_transparent && !grid_drawn {
                 if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
@@ -577,8 +789,14 @@ impl SceneRenderer {
                 } else {
                     match job.primitive {
                         Primitive::Cube => (cube_mesh, Arc::clone(&cube_basic_mesh)),
-                        Primitive::Cylinder => (cylinder_mesh, Arc::clone(&cylinder_basic_mesh)),
-                        Primitive::Sphere => (sphere_mesh, Arc::clone(&sphere_basic_mesh)),
+                        Primitive::Cylinder => {
+                            let detail = cylinder_detail.level(job.geometry_lod);
+                            (&detail.mesh, Arc::clone(&detail.basic_mesh))
+                        }
+                        Primitive::Sphere => {
+                            let detail = sphere_detail.level(job.geometry_lod);
+                            (&detail.mesh, Arc::clone(&detail.basic_mesh))
+                        }
                         Primitive::Plane => (plane_mesh, Arc::clone(&plane_basic_mesh)),
                         _ => (cube_mesh, Arc::clone(&cube_basic_mesh)),
                     }
@@ -595,17 +813,49 @@ impl SceneRenderer {
                 job.base_color
             };
 
-            commands.set_pipeline(if use_tonality {
-                BasicPipelineKind::PbrLit
-            } else {
-                BasicPipelineKind::FlatColor
+            let texture_id = job
+                .base_color_texture
+                .as_deref()
+                .and_then(|path| self.resolve_texture_path(path))
+                .and_then(|path| {
+                    if rejected_texture_sources.contains(&path) {
+                        return None;
+                    }
+                    if frame_texture_sources.contains(&path) {
+                        return self
+                            .texture_cache
+                            .get_or_load(&path)
+                            .map(|texture| commands.register_texture(texture));
+                    }
+
+                    let remaining = frame_texture_budget_bytes
+                        .saturating_sub(frame_texture_bytes)
+                        .min(usize::MAX as u64) as usize;
+                    let Some(texture) =
+                        self.texture_cache.get_or_load_with_budget(&path, remaining)
+                    else {
+                        rejected_texture_sources.insert(path);
+                        return None;
+                    };
+                    frame_texture_bytes =
+                        frame_texture_bytes.saturating_add(texture.memory_bytes() as u64);
+                    frame_texture_sources.insert(texture.source.clone());
+                    Some(commands.register_texture(texture))
+                });
+
+            let two_sided = job.primitive == Primitive::Plane;
+            commands.set_pipeline(match (use_tonality, two_sided) {
+                (true, true) => BasicPipelineKind::PbrLitTwoSided,
+                (true, false) => BasicPipelineKind::PbrLit,
+                (false, true) => BasicPipelineKind::FlatColorTwoSided,
+                (false, false) => BasicPipelineKind::FlatColor,
             });
             let mesh_id = if job_override_mesh.is_some() {
                 commands.register_transient_mesh(basic_mesh)
             } else {
                 commands.register_mesh(basic_mesh)
             };
-            commands.draw_mesh(mesh_id, job.model, color);
+            commands.draw_mesh_with_texture(mesh_id, job.model, color, texture_id);
             stats.triangles_rendered += mesh.triangle_count() as u32;
         }
 
@@ -620,8 +870,10 @@ impl SceneRenderer {
                 } else {
                     match job.primitive {
                         Primitive::Cube => cube_edges,
-                        Primitive::Cylinder => cylinder_edges,
-                        Primitive::Sphere => sphere_edges,
+                        Primitive::Cylinder => {
+                            cylinder_detail.level(job.geometry_lod).edges.as_slice()
+                        }
+                        Primitive::Sphere => sphere_detail.level(job.geometry_lod).edges.as_slice(),
                         Primitive::Plane => plane_edges,
                         Primitive::Empty => &[],
                     }
@@ -662,6 +914,7 @@ impl SceneRenderer {
             light_dir,
             width: w,
             height: h,
+            texture_cache_budget_bytes: options.texture_quality.cache_budget_bytes(),
             stats,
         }
     }
@@ -688,10 +941,14 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
                 mesh_id,
                 transform,
                 color,
+                texture_id,
             } => {
                 let Some(mesh) = frame.commands.mesh(*mesh_id) else {
                     continue;
                 };
+                let texture = texture_id
+                    .and_then(|id| frame.commands.texture(id))
+                    .map(Arc::as_ref);
                 rasterize_mesh_command(
                     framebuffer,
                     mesh,
@@ -702,6 +959,7 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
                     current_pipeline,
                     vp_w,
                     vp_h,
+                    texture,
                 );
             }
             GraphicCommand::DrawMeshBatch { mesh_id, instances } => {
@@ -719,6 +977,7 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
                         current_pipeline,
                         vp_w,
                         vp_h,
+                        None,
                     );
                 }
             }
@@ -780,14 +1039,65 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
 struct RenderJob {
     id: SceneNodeId,
     primitive: Primitive,
+    geometry_lod: u8,
     model: Mat4,
     base_color: [u8; 4],
     is_selected: bool,
     distance_squared: f32,
     is_transparent: bool,
+    base_color_texture: Option<String>,
 }
 
 const OPAQUE_DEPTH_BUCKET_COUNT: f32 = 32.0;
+
+const LOW_TO_MEDIUM_LOD_ENTER_RADIUS_PX: f32 = 18.0;
+const MEDIUM_TO_LOW_LOD_EXIT_RADIUS_PX: f32 = 12.0;
+const MEDIUM_TO_HIGH_LOD_ENTER_RADIUS_PX: f32 = 72.0;
+const HIGH_TO_MEDIUM_LOD_EXIT_RADIUS_PX: f32 = 56.0;
+const MAX_GEOMETRY_LOD_HISTORY_ENTRIES: usize = 16_384;
+
+fn projected_radius_pixels(
+    bounds: SceneObjectBounds,
+    camera_mode: CameraMode,
+    view: Mat4,
+    projection_scale_y: f32,
+    viewport_height: f32,
+) -> f32 {
+    let view_center = view.transform_point3(bounds.center());
+    let radius = (bounds.max - bounds.min).length() * 0.5;
+    let view_depth = match camera_mode {
+        CameraMode::Perspective => (-view_center.z).max(0.1),
+        CameraMode::Orthographic => 1.0,
+    };
+    let projected = radius * projection_scale_y.abs() * viewport_height.max(1.0) * 0.5 / view_depth;
+    if projected.is_finite() {
+        projected.max(0.0)
+    } else {
+        0.0
+    }
+}
+
+fn adaptive_geometry_lod(projected_radius_px: f32, previous_lod: Option<u8>) -> u8 {
+    let radius = if projected_radius_px.is_finite() {
+        projected_radius_px.max(0.0)
+    } else {
+        0.0
+    };
+    match previous_lod {
+        Some(0) if radius < LOW_TO_MEDIUM_LOD_ENTER_RADIUS_PX => 0,
+        Some(0) if radius >= MEDIUM_TO_HIGH_LOD_ENTER_RADIUS_PX => 2,
+        Some(0) => 1,
+        Some(1) if radius <= MEDIUM_TO_LOW_LOD_EXIT_RADIUS_PX => 0,
+        Some(1) if radius >= MEDIUM_TO_HIGH_LOD_ENTER_RADIUS_PX => 2,
+        Some(1) => 1,
+        Some(2) if radius > HIGH_TO_MEDIUM_LOD_EXIT_RADIUS_PX => 2,
+        Some(2) if radius <= MEDIUM_TO_LOW_LOD_EXIT_RADIUS_PX => 0,
+        Some(2) => 1,
+        _ if radius < LOW_TO_MEDIUM_LOD_ENTER_RADIUS_PX => 0,
+        _ if radius < MEDIUM_TO_HIGH_LOD_ENTER_RADIUS_PX => 1,
+        _ => 2,
+    }
+}
 
 #[inline]
 fn opaque_depth_bucket(distance_squared: f32, max_distance_squared: f32) -> u8 {
@@ -819,7 +1129,7 @@ fn mesh_to_basic(mesh: &MeshData) -> BasicMesh {
                 |(index, position)| crate::api_graphic_basic::mesh::BasicVertex {
                     position: *position,
                     normal: mesh.normals.get(index).copied().unwrap_or(Vec3::Y),
-                    uv: [0.0, 0.0],
+                    uv: mesh.uvs.get(index).copied().unwrap_or([0.0, 0.0]),
                 },
             )
             .collect(),
@@ -885,6 +1195,8 @@ fn rasterize_clipped_triangle(
     framebuffer: &mut Framebuffer,
     triangle: [ClipVertex; 3],
     color: [u8; 4],
+    texture: Option<&crate::texture::CpuTexture>,
+    two_sided: bool,
     vp_w: f32,
     vp_h: f32,
 ) -> u32 {
@@ -913,14 +1225,56 @@ fn rasterize_clipped_triangle(
     let Some(first) = to_screen(vertices[0]) else {
         return 0;
     };
+    let to_textured_screen = |vertex: ClipVertex| -> Option<rasterizer::TexturedScreenVertex> {
+        if vertex.position.w <= 1.0e-6 {
+            return None;
+        }
+        let inv_w = 1.0 / vertex.position.w;
+        let ndc_x = vertex.position.x * inv_w;
+        let ndc_y = vertex.position.y * inv_w;
+        let ndc_z = vertex.position.z * inv_w;
+        Some(rasterizer::TexturedScreenVertex {
+            x: (ndc_x + 1.0) * 0.5 * vp_w,
+            y: (1.0 - ndc_y) * 0.5 * vp_h,
+            z: (ndc_z + 1.0) * 0.5,
+            shade: vertex.shade,
+            uv_over_w: [vertex.uv[0] * inv_w, vertex.uv[1] * inv_w],
+            inv_w,
+        })
+    };
     let mut rendered = 0u32;
     for index in 1..vertices.len() - 1 {
-        let (Some(second), Some(third)) =
+        let (Some(mut second), Some(mut third)) =
             (to_screen(vertices[index]), to_screen(vertices[index + 1]))
         else {
             continue;
         };
-        if color[3] < u8::MAX {
+        if let Some(texture) = texture {
+            let (Some(textured_first), Some(mut textured_second), Some(mut textured_third)) = (
+                to_textured_screen(vertices[0]),
+                to_textured_screen(vertices[index]),
+                to_textured_screen(vertices[index + 1]),
+            ) else {
+                continue;
+            };
+            let textured_area = (textured_second.x - textured_first.x)
+                * (textured_third.y - textured_first.y)
+                - (textured_third.x - textured_first.x) * (textured_second.y - textured_first.y);
+            if two_sided && textured_area >= 0.0 {
+                std::mem::swap(&mut textured_second, &mut textured_third);
+            }
+            rasterizer::rasterize_triangle_textured(
+                framebuffer,
+                [textured_first, textured_second, textured_third],
+                texture,
+                color,
+            );
+        } else if color[3] < u8::MAX {
+            let area = (second.x - first.x) * (third.y - first.y)
+                - (third.x - first.x) * (second.y - first.y);
+            if two_sided && area >= 0.0 {
+                std::mem::swap(&mut second, &mut third);
+            }
             rasterizer::rasterize_triangle_blended(
                 framebuffer,
                 first,
@@ -932,6 +1286,11 @@ fn rasterize_clipped_triangle(
                 color[3],
             );
         } else {
+            let area = (second.x - first.x) * (third.y - first.y)
+                - (third.x - first.x) * (second.y - first.y);
+            if two_sided && area >= 0.0 {
+                std::mem::swap(&mut second, &mut third);
+            }
             rasterizer::rasterize_triangle(
                 framebuffer,
                 first,
@@ -958,10 +1317,11 @@ fn rasterize_mesh_command(
     pipeline: BasicPipelineKind,
     vp_w: f32,
     vp_h: f32,
+    texture: Option<&crate::texture::CpuTexture>,
 ) {
     let mvp = *view_proj * *model;
     let normal_mat = transform::normal_matrix(model);
-    let shaded = matches!(pipeline, BasicPipelineKind::PbrLit);
+    let shaded = pipeline.is_lit();
 
     for tri_idx in (0..mesh.indices.len()).step_by(3) {
         let i0 = mesh.indices[tri_idx] as usize;
@@ -1007,17 +1367,22 @@ fn rasterize_mesh_command(
                 ClipVertex {
                     position: c0,
                     shade: shade0,
+                    uv: mesh.vertices[i0].uv,
                 },
                 ClipVertex {
                     position: c1,
                     shade: shade1,
+                    uv: mesh.vertices[i1].uv,
                 },
                 ClipVertex {
                     position: c2,
                     shade: shade2,
+                    uv: mesh.vertices[i2].uv,
                 },
             ],
             color,
+            texture,
+            pipeline.is_two_sided(),
             vp_w,
             vp_h,
         );
@@ -1284,6 +1649,110 @@ mod tests {
     use crate::render_config::RenderConfig;
 
     #[test]
+    fn plane_two_sided_rasterization_accepts_both_windings() {
+        let vertices = [
+            ClipVertex {
+                position: Vec4::new(-0.8, -0.8, 0.0, 1.0),
+                shade: 1.0,
+                uv: [0.0, 0.0],
+            },
+            ClipVertex {
+                position: Vec4::new(0.8, -0.8, 0.0, 1.0),
+                shade: 1.0,
+                uv: [1.0, 0.0],
+            },
+            ClipVertex {
+                position: Vec4::new(0.8, 0.8, 0.0, 1.0),
+                shade: 1.0,
+                uv: [1.0, 1.0],
+            },
+        ];
+
+        let back_face = [vertices[0], vertices[2], vertices[1]];
+        let mut culled_framebuffer = Framebuffer::new(32, 32);
+        culled_framebuffer.clear(0, 0, 0, 255);
+        rasterize_clipped_triangle(
+            &mut culled_framebuffer,
+            back_face,
+            [255, 64, 32, 255],
+            None,
+            false,
+            32.0,
+            32.0,
+        );
+        assert!(!culled_framebuffer
+            .pixels()
+            .chunks_exact(4)
+            .any(|pixel| pixel[0] == 255));
+
+        for triangle in [vertices, back_face] {
+            let mut framebuffer = Framebuffer::new(32, 32);
+            framebuffer.clear(0, 0, 0, 255);
+            rasterize_clipped_triangle(
+                &mut framebuffer,
+                triangle,
+                [255, 64, 32, 255],
+                None,
+                true,
+                32.0,
+                32.0,
+            );
+
+            assert!(framebuffer
+                .pixels()
+                .chunks_exact(4)
+                .any(|pixel| pixel[0] == 255));
+        }
+    }
+
+    #[test]
+    fn adaptive_geometry_lod_hysteresis_prevents_boundary_chatter() {
+        assert_eq!(adaptive_geometry_lod(17.0, None), 0);
+        assert_eq!(adaptive_geometry_lod(19.0, Some(0)), 1);
+        assert_eq!(adaptive_geometry_lod(15.0, Some(1)), 1);
+        assert_eq!(adaptive_geometry_lod(11.0, Some(1)), 0);
+        assert_eq!(adaptive_geometry_lod(74.0, Some(1)), 2);
+        assert_eq!(adaptive_geometry_lod(64.0, Some(2)), 2);
+        assert_eq!(adaptive_geometry_lod(55.0, Some(2)), 1);
+    }
+
+    #[test]
+    fn geometry_detail_modes_change_curved_mesh_work() {
+        let mut scene = SceneGraph::new();
+        scene.add_root_with_primitive("Sphere", Primitive::Sphere);
+        let camera = Camera::default();
+        let mut renderer = SceneRenderer::new(320, 240);
+
+        let render_triangles = |renderer: &mut SceneRenderer, detail: GeometryDetailMode| {
+            renderer
+                .build_frame(
+                    &scene,
+                    &camera,
+                    320.0,
+                    240.0,
+                    &[],
+                    [20, 20, 20, 255],
+                    Vec3::Y,
+                    RenderOptions {
+                        show_grid_3d: false,
+                        geometry_detail: detail,
+                        ..RenderOptions::default()
+                    },
+                    None,
+                )
+                .stats
+                .triangles_rendered
+        };
+
+        let efficient = render_triangles(&mut renderer, GeometryDetailMode::Efficient);
+        let adaptive = render_triangles(&mut renderer, GeometryDetailMode::Adaptive);
+        let detailed = render_triangles(&mut renderer, GeometryDetailMode::Detailed);
+        assert_eq!(efficient, 8 * 12 * 2);
+        assert_eq!(detailed, 24 * 36 * 2);
+        assert!(adaptive >= efficient && adaptive <= detailed);
+    }
+
+    #[test]
     fn lightweight_scene_submission_keeps_all_visible_geometry() {
         let mut scene = SceneGraph::new();
         for index in 0..4 {
@@ -1291,7 +1760,7 @@ mod tests {
         }
         let camera = Camera::default();
         let mut renderer = SceneRenderer::new(320, 240);
-        let expected_triangles = renderer.sphere_mesh.triangle_count() as u32 * 4;
+        let expected_triangles = renderer.sphere_detail.medium().mesh.triangle_count() as u32 * 4;
 
         let frame = renderer.build_frame(
             &scene,

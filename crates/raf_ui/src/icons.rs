@@ -55,6 +55,11 @@ pub enum UiIconId {
     ZoomIn,
     ZoomOut,
     Trash,
+    Script,
+    File,
+    ExternalLink,
+    Pencil,
+    Copy,
     Settings,
     Menu,
     Warning,
@@ -63,6 +68,68 @@ pub enum UiIconId {
 }
 
 impl UiIconId {
+    /// Every semantic icon in the family. Coverage tests and tooling iterate
+    /// this instead of mirroring the enum by hand.
+    pub const ALL: [Self; 57] = [
+        Self::Select,
+        Self::Move,
+        Self::Rotate,
+        Self::Scale,
+        Self::Focus,
+        Self::Undo,
+        Self::Redo,
+        Self::Refresh,
+        Self::Grid,
+        Self::View2d,
+        Self::View3d,
+        Self::Shaded,
+        Self::Wireframe,
+        Self::Folder,
+        Self::Scene,
+        Self::Entity,
+        Self::Cube,
+        Self::Sphere,
+        Self::Plane,
+        Self::Cylinder,
+        Self::Eye,
+        Self::EyeOff,
+        Self::Lock,
+        Self::Unlock,
+        Self::ChevronLeft,
+        Self::ChevronRight,
+        Self::ChevronDown,
+        Self::More,
+        Self::Search,
+        Self::Filter,
+        Self::Add,
+        Self::Close,
+        Self::Play,
+        Self::Stop,
+        Self::Console,
+        Self::Assets,
+        Self::Project,
+        Self::Node,
+        Self::Agent,
+        Self::Schematic,
+        Self::Pcb,
+        Self::Wire,
+        Self::Route,
+        Self::BoardOutline,
+        Self::ZoomIn,
+        Self::ZoomOut,
+        Self::Trash,
+        Self::Script,
+        Self::File,
+        Self::ExternalLink,
+        Self::Pencil,
+        Self::Copy,
+        Self::Settings,
+        Self::Menu,
+        Self::Warning,
+        Self::Error,
+        Self::Success,
+    ];
+
     pub const fn key(self) -> &'static str {
         match self {
             Self::Select => "select",
@@ -112,6 +179,11 @@ impl UiIconId {
             Self::ZoomIn => "zoom-in",
             Self::ZoomOut => "zoom-out",
             Self::Trash => "trash",
+            Self::Script => "script",
+            Self::File => "file",
+            Self::ExternalLink => "external-link",
+            Self::Pencil => "pencil",
+            Self::Copy => "copy",
             Self::Settings => "settings",
             Self::Menu => "menu",
             Self::Warning => "warning",
@@ -203,5 +275,15 @@ mod tests {
 
         assert_eq!(icon.id.key(), "undo");
         assert_eq!(icon.size.logical_pixels(), 14);
+    }
+
+    #[test]
+    fn all_lists_every_icon_with_a_unique_key() {
+        let mut keys: Vec<&'static str> = UiIconId::ALL.iter().map(|id| id.key()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+
+        assert_eq!(keys.len(), UiIconId::ALL.len(), "icon keys must be unique");
+        assert_eq!(UiIconId::ALL.len(), 57);
     }
 }

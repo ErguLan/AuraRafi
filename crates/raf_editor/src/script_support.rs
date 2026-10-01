@@ -183,13 +183,21 @@ pub fn script_file_name(path: &str) -> String {
         .to_string()
 }
 
+/// Opens `path` in an external editor.
+///
+/// Named GUI launchers run first so the file opens in an editor window instead
+/// of whatever the desktop associates with the extension. The list is portable:
+/// a Linux host picks up Sublime, gedit, Kate or Mouse, and every host keeps
+/// the system default as the last resort.
 pub fn open_script_in_external_editor(path: &Path) -> bool {
-    if std::process::Command::new("code")
-        .arg(path.as_os_str())
-        .spawn()
-        .is_ok()
-    {
-        return true;
+    for launcher in ["code", "codium", "subl", "gedit", "kate", "mouse"] {
+        if std::process::Command::new(launcher)
+            .arg(path.as_os_str())
+            .spawn()
+            .is_ok()
+        {
+            return true;
+        }
     }
 
     #[cfg(target_os = "windows")]
@@ -270,6 +278,88 @@ pub fn open_path_in_file_manager(path: &Path) -> bool {
     }
 
     false
+}
+
+/// Documentation shown when Yoll IDE is not installed locally.
+pub const YOLL_IDE_DOCS_URL: &str = "https://yollct.com/#documentation/IDEYoll";
+
+/// Opens `path` with the operating system "Open with" chooser.
+///
+/// Windows exposes the shell dialog through `OpenAs_RunDLL`. macOS and Linux
+/// have no portable chooser, so they hand the file to the desktop association
+/// instead and the caller reports the honest outcome.
+pub fn open_with_system_dialog(path: &Path) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        if std::process::Command::new("rundll32")
+            .arg("shell32.dll,OpenAs_RunDLL")
+            .arg(path.as_os_str())
+            .spawn()
+            .is_ok()
+        {
+            return true;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if std::process::Command::new("open")
+            .arg("-a")
+            .arg("System Events")
+            .arg(path.as_os_str())
+            .spawn()
+            .is_ok()
+        {
+            return true;
+        }
+    }
+
+    open_path_in_file_manager(path)
+}
+
+/// Opens `url` with the default system browser.
+pub fn open_url(url: &str) -> bool {
+    #[cfg(target_os = "windows")]
+    {
+        if std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+            .is_ok()
+        {
+            return true;
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if std::process::Command::new("open").arg(url).spawn().is_ok() {
+            return true;
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        if std::process::Command::new("xdg-open").arg(url).spawn().is_ok() {
+            return true;
+        }
+    }
+
+    false
+}
+
+/// Opens `path` in Yoll IDE when the launcher is installed; otherwise falls
+/// back to the public IDE documentation so the action is never a dead click.
+pub fn open_in_yoll_ide(path: Option<&Path>) -> bool {
+    for launcher in ["yoll", "yoll-ide", "YollIDE"] {
+        let mut command = std::process::Command::new(launcher);
+        if let Some(path) = path {
+            command.arg(path.as_os_str());
+        }
+        if command.spawn().is_ok() {
+            return true;
+        }
+    }
+    open_url(YOLL_IDE_DOCS_URL)
 }
 
 fn analyze_script_file(path: &Path) -> (bool, bool) {

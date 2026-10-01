@@ -1,4 +1,4 @@
-use crate::node::{Node, NodeCategory, NodeId, NodePin, PinDataType, PinKind};
+use crate::node::{Node, NodeCategory, NodeId, NodePin, NodeProperty, PinDataType, PinKind};
 use uuid::Uuid;
 
 /// Entity manipulation nodes for v0.4.0 game logic
@@ -38,6 +38,11 @@ impl EntityNodes {
                 },
             ],
             position: [600.0, 200.0],
+            properties: vec![NodeProperty::new(
+                "entity_name",
+                "nodes.property.entity_name",
+                "Entity",
+            )],
         }
     }
 
@@ -68,6 +73,7 @@ impl EntityNodes {
                 },
             ],
             position: [600.0, 350.0],
+            properties: Vec::new(),
         }
     }
 
@@ -104,6 +110,7 @@ impl EntityNodes {
                 },
             ],
             position: [600.0, 500.0],
+            properties: Vec::new(),
         }
     }
 }

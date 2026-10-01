@@ -1,7 +1,7 @@
 // WGSL shaders module.
-// These shaders are prepared for when GPU rendering is enabled.
-// When use_gpu = false (default), this module is not loaded.
-// The shader source is embedded as string constants for zero-IO.
+// Loaded when the active execution path is GPU (RenderExecutionPolicy Auto or
+// GpuPreferred). RenderConfig::use_gpu only gates optional project features;
+// it does not by itself disable this module. Sources are string constants for zero-IO.
 
 /// Basic PBR vertex shader (WGSL).
 /// Transforms vertices and passes normals/UVs to fragment stage.
@@ -222,15 +222,39 @@ struct MeshUniforms {
 struct MeshVertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
+    @location(2) uv: vec2<f32>,
 };
 
 struct MeshVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) world_normal: vec3<f32>,
     @location(1) color: vec4<f32>,
+    @location(2) uv: vec2<f32>,
 };
 
 @group(0) @binding(0) var<uniform> mesh_uniforms: MeshUniforms;
+@group(1) @binding(0) var base_color_texture: texture_2d<f32>;
+@group(1) @binding(1) var base_color_sampler: sampler;
+
+fn srgb_channel_to_linear(value: f32) -> f32 {
+    if (value <= 0.04045) {
+        return value / 12.92;
+    }
+    return pow((value + 0.055) / 1.055, 2.4);
+}
+
+fn sample_base_color(uv: vec2<f32>, tint: vec4<f32>) -> vec4<f32> {
+    if (mesh_uniforms.params.y < 0.5) {
+        return tint;
+    }
+    let texel = textureSample(base_color_texture, base_color_sampler, uv);
+    let tint_linear = vec3<f32>(
+        srgb_channel_to_linear(tint.r),
+        srgb_channel_to_linear(tint.g),
+        srgb_channel_to_linear(tint.b),
+    );
+    return vec4<f32>(texel.rgb * tint_linear, texel.a * tint.a);
+}
 
 @vertex
 fn mesh_vs(input: MeshVertexInput) -> MeshVertexOutput {
@@ -238,13 +262,14 @@ fn mesh_vs(input: MeshVertexInput) -> MeshVertexOutput {
     output.clip_position = mesh_uniforms.mvp * vec4<f32>(input.position, 1.0);
     output.world_normal = normalize((mesh_uniforms.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz);
     output.color = mesh_uniforms.color;
+    output.uv = input.uv;
     return output;
 }
 
 @fragment
 fn mesh_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
     let lit = mesh_uniforms.params.x;
-    let base_color = input.color;
+    let base_color = sample_base_color(input.uv, input.color);
     if (lit < 0.5) {
         return base_color;
     }
@@ -257,11 +282,12 @@ fn mesh_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
 struct MeshInstancedVertexInput {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,
-    @location(2) model_0: vec4<f32>,
-    @location(3) model_1: vec4<f32>,
-    @location(4) model_2: vec4<f32>,
-    @location(5) model_3: vec4<f32>,
-    @location(6) color: vec4<f32>,
+    @location(2) uv: vec2<f32>,
+    @location(3) model_0: vec4<f32>,
+    @location(4) model_1: vec4<f32>,
+    @location(5) model_2: vec4<f32>,
+    @location(6) model_3: vec4<f32>,
+    @location(7) color: vec4<f32>,
 };
 
 @vertex
@@ -271,6 +297,7 @@ fn mesh_instanced_vs(input: MeshInstancedVertexInput) -> MeshVertexOutput {
     output.clip_position = mesh_uniforms.mvp * model * vec4<f32>(input.position, 1.0);
     output.world_normal = normalize((model * vec4<f32>(input.normal, 0.0)).xyz);
     output.color = input.color;
+    output.uv = input.uv;
     return output;
 }
 
@@ -278,12 +305,13 @@ fn mesh_instanced_vs(input: MeshInstancedVertexInput) -> MeshVertexOutput {
 fn mesh_instanced_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
     let lit = mesh_uniforms.params.x;
     if (lit < 0.5) {
-        return input.color;
+        return sample_base_color(input.uv, input.color);
     }
 
     let light_dir = normalize(mesh_uniforms.light_dir.xyz);
     let lambert = 0.3 + 0.7 * max(dot(normalize(input.world_normal), light_dir), 0.0);
-    return vec4<f32>(input.color.rgb * lambert, input.color.a);
+    let base_color = sample_base_color(input.uv, input.color);
+    return vec4<f32>(base_color.rgb * lambert, base_color.a);
 }
 
 struct LineUniforms {

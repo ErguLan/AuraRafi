@@ -236,6 +236,77 @@ impl UiLayout {
     pub const TEXT_SAFE_INSET_Y: f32 = 4.0;
     pub const LABEL_SAFE_INSET_X: f32 = 4.0;
 
+    pub fn row() -> Self {
+        Self {
+            flow: UiFlow::Row,
+            ..Self::default()
+        }
+    }
+
+    pub fn column() -> Self {
+        Self {
+            flow: UiFlow::Column,
+            ..Self::default()
+        }
+    }
+
+    pub fn gap(mut self, gap: f32) -> Self {
+        self.gap = gap.max(0.0);
+        self
+    }
+
+    pub fn padding(mut self, padding: UiSpacing) -> Self {
+        self.padding = padding;
+        self
+    }
+
+    pub fn padding_xy(mut self, x: f32, y: f32) -> Self {
+        self.padding = UiSpacing::xy(x, y);
+        self
+    }
+
+    pub fn align(mut self, align: UiAlign) -> Self {
+        self.align_items = align;
+        self
+    }
+
+    pub fn justify(mut self, justify: UiJustify) -> Self {
+        self.justify_content = justify;
+        self
+    }
+
+    pub fn overflow(mut self, overflow: UiOverflow) -> Self {
+        self.overflow = overflow;
+        self
+    }
+
+    pub fn fill_width(mut self) -> Self {
+        self.width_mode = UiSizeMode::Fill;
+        self
+    }
+
+    pub fn fill_height(mut self) -> Self {
+        self.height_mode = UiSizeMode::Fill;
+        self
+    }
+
+    pub fn fixed_width(mut self, width: f32) -> Self {
+        self.basis[0] = width.max(0.0);
+        self.width_mode = UiSizeMode::Fixed;
+        self
+    }
+
+    pub fn fixed_height(mut self, height: f32) -> Self {
+        self.basis[1] = height.max(0.0);
+        self.height_mode = UiSizeMode::Fixed;
+        self
+    }
+
+    pub fn grow(mut self, grow: f32) -> Self {
+        self.grow = grow.max(0.0);
+        self
+    }
+
     pub fn fill(flow: UiFlow) -> Self {
         Self {
             grow: 1.0,
@@ -341,5 +412,60 @@ impl UiLayout {
             resolved.grid.columns = columns;
         }
         resolved
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fluent_row_layout_matches_manual_initialization() {
+        let manual = UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 4.0,
+            padding: UiSpacing::xy(8.0, 6.0),
+            width_mode: UiSizeMode::Fill,
+            basis: [0.0, 26.0],
+            height_mode: UiSizeMode::Fixed,
+            overflow: UiOverflow::ScrollX,
+            ..UiLayout::default()
+        };
+
+        let fluent = UiLayout::row()
+            .align(UiAlign::Center)
+            .gap(4.0)
+            .padding_xy(8.0, 6.0)
+            .fill_width()
+            .fixed_height(26.0)
+            .overflow(UiOverflow::ScrollX);
+
+        assert_eq!(manual, fluent);
+    }
+
+    #[test]
+    fn fluent_column_layout_matches_manual_initialization() {
+        let manual = UiLayout {
+            flow: UiFlow::Column,
+            justify_content: UiJustify::SpaceBetween,
+            gap: 10.0,
+            padding: UiSpacing::same(12.0),
+            grow: 1.0,
+            width_mode: UiSizeMode::Fixed,
+            basis: [200.0, 0.0],
+            height_mode: UiSizeMode::Fill,
+            ..UiLayout::default()
+        };
+
+        let fluent = UiLayout::column()
+            .justify(UiJustify::SpaceBetween)
+            .gap(10.0)
+            .padding(UiSpacing::same(12.0))
+            .grow(1.0)
+            .fixed_width(200.0)
+            .fill_height();
+
+        assert_eq!(manual, fluent);
     }
 }

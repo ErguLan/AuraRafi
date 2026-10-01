@@ -553,55 +553,86 @@ impl NativeElectronicsEditor {
         self.touch();
     }
 
-    pub fn apply_ui_command(&mut self, command: &str) -> bool {
-        match command {
-            "electronics.select" => self.set_tool(ElectronicsTool::Select),
-            "electronics.pan" => self.set_tool(ElectronicsTool::Pan),
-            "electronics.wire" => self.set_tool(ElectronicsTool::Wire),
-            "electronics.route" => self.set_tool(ElectronicsTool::Route),
-            "electronics.place" => self.set_tool(ElectronicsTool::Place),
-            "electronics.board-outline" => self.set_tool(ElectronicsTool::BoardOutline),
-            "electronics.fit" => self.fit_view(),
-            "electronics.grid.toggle" => self.toggle_grid(),
-            "electronics.labels.toggle" => self.toggle_labels(),
-            "electronics.zoom-in" => self.zoom_in(),
-            "electronics.zoom-out" => self.zoom_out(),
-            "electronics.rotate" => {
+    pub fn dispatch_action(&mut self, action: crate::electronics_action::ElectronicsAction) -> bool {
+        use crate::electronics_action::ElectronicsAction;
+        match action {
+            ElectronicsAction::SelectTool(tool) => {
+                self.set_tool(tool);
+                true
+            }
+            ElectronicsAction::FitView => {
+                self.fit_view();
+                true
+            }
+            ElectronicsAction::ToggleGrid => {
+                self.toggle_grid();
+                true
+            }
+            ElectronicsAction::ToggleLabels => {
+                self.toggle_labels();
+                true
+            }
+            ElectronicsAction::ZoomIn => {
+                self.zoom_in();
+                true
+            }
+            ElectronicsAction::ZoomOut => {
+                self.zoom_out();
+                true
+            }
+            ElectronicsAction::Rotate => {
                 self.rotate_selected();
+                true
             }
-            "electronics.analysis.drc" => self.run_drc(),
-            "electronics.analysis.simulation" => self.run_simulation(),
-            "electronics.analysis.cancel" => {
-                self.cancel_analysis();
-            }
-            "electronics.mode.pcb" => self.set_surface(CadSurfaceKind::Pcb),
-            "electronics.mode.schematic" => self.set_surface(CadSurfaceKind::Schematic),
-            "electronics.pcb.sync" => {
-                self.sync_pcb_from_schematic();
-            }
-            "edit.undo" => {
-                self.undo();
-            }
-            "edit.redo" => {
-                self.redo();
-            }
-            "edit.delete" => {
+            ElectronicsAction::Delete => {
                 self.delete_selected();
+                true
             }
-            "project.save" => {}
-            "electronics.context.delete" => {
+            ElectronicsAction::Undo => {
+                self.undo();
+                true
+            }
+            ElectronicsAction::Redo => {
+                self.redo();
+                true
+            }
+            ElectronicsAction::SaveProject => true,
+            ElectronicsAction::SetSurface(surface) => {
+                self.set_surface(surface);
+                true
+            }
+            ElectronicsAction::SyncPcb => {
+                self.sync_pcb_from_schematic();
+                true
+            }
+            ElectronicsAction::RunDrc => {
+                self.run_drc();
+                true
+            }
+            ElectronicsAction::RunSimulation => {
+                self.run_simulation();
+                true
+            }
+            ElectronicsAction::CancelAnalysis => {
+                self.cancel_analysis();
+                true
+            }
+            ElectronicsAction::ContextDelete => {
                 self.delete_selected();
                 self.context_menu_position = None;
+                true
             }
-            "electronics.context.route" => {
+            ElectronicsAction::ContextRoute => {
                 self.route_selected_airwire();
                 self.context_menu_position = None;
+                true
             }
-            "electronics.context.select" | "electronics.context.properties" => {
+            ElectronicsAction::ContextSelect => {
                 self.context_menu_position = None;
                 self.touch_ui();
+                true
             }
-            "electronics.context.duplicate" => {
+            ElectronicsAction::ContextDuplicate => {
                 if let Some(selection) = self.selection {
                     if let Some(index) = self
                         .schematic
@@ -626,58 +657,68 @@ impl NativeElectronicsEditor {
                 }
                 self.context_menu_position = None;
                 self.touch_ui();
+                true
             }
-            "electronics.context.cancel" => {
+            ElectronicsAction::ContextCancel => {
                 self.wire_start = None;
                 self.context_menu_position = None;
                 self.touch_ui();
+                true
             }
-            _ => {
-                if let Some(value) = command.strip_prefix("electronics.inspector.value.commit:") {
-                    return self.set_selected_value(value);
+            ElectronicsAction::CommitInspectorValue(val) => self.set_selected_value(&val),
+            ElectronicsAction::SelectNavigator(idx) => self.select_component(idx),
+            ElectronicsAction::InspectNavigator(idx) => {
+                let selected = self.select_component(idx);
+                if selected {
+                    self.touch_ui();
                 }
-                if let Some(index) = command.strip_prefix("electronics.navigator.select.") {
-                    if let Ok(index) = index.parse::<usize>() {
-                        return self.select_component(index);
-                    }
-                }
-                if let Some(index) = command.strip_prefix("electronics.navigator.select-wire.") {
-                    if let Ok(index) = index.parse::<usize>() {
-                        return self.select_wire(index);
-                    }
-                }
-                if let Some(index) = command.strip_prefix("electronics.navigator.select-trace.") {
-                    if let Ok(index) = index.parse::<usize>() {
-                        return self.select_trace(index);
-                    }
-                }
-                if let Some(index) = command.strip_prefix("electronics.place.template.") {
-                    if let Ok(index) = index.parse::<usize>() {
-                        if index < self.library.components.len() {
-                            self.placement_template = Some(index);
-                            self.set_tool(ElectronicsTool::Place);
-                            return true;
-                        }
-                    }
-                }
-                if let Some(index) = command.strip_prefix("electronics.library.drag.start.") {
-                    if let Ok(index) = index.parse::<usize>() {
-                        return self.begin_library_drag(index);
-                    }
-                }
-                if command.starts_with("electronics.library.drag.move.")
-                    || command.starts_with("electronics.library.drag.end.")
-                {
-                    // Pointer coordinates are consumed by the native frame
-                    // so the controller can convert them against the actual
-                    // Electronics canvas. The command itself is retained as
-                    // a semantic no-op for direct/headless callers.
-                    return self.placement_drag_active;
-                }
-                return false;
+                selected
+            }
+            ElectronicsAction::SelectTab(_) => {
+                self.touch_ui();
+                true
             }
         }
-        true
+    }
+
+    pub fn apply_ui_command(&mut self, command: &str) -> bool {
+        if let Some(action) = crate::electronics_action::ElectronicsAction::parse(command) {
+            return self.dispatch_action(action);
+        }
+        if let Some(index) = command.strip_prefix("electronics.navigator.select-wire.") {
+            if let Ok(index) = index.parse::<usize>() {
+                return self.select_wire(index);
+            }
+        }
+        if let Some(index) = command.strip_prefix("electronics.navigator.select-trace.") {
+            if let Ok(index) = index.parse::<usize>() {
+                return self.select_trace(index);
+            }
+        }
+        if let Some(index) = command.strip_prefix("electronics.place.template.") {
+            if let Ok(index) = index.parse::<usize>() {
+                if index < self.library.components.len() {
+                    self.placement_template = Some(index);
+                    self.set_tool(ElectronicsTool::Place);
+                    return true;
+                }
+            }
+        }
+        if let Some(index) = command.strip_prefix("electronics.library.drag.start.") {
+            if let Ok(index) = index.parse::<usize>() {
+                return self.begin_library_drag(index);
+            }
+        }
+        if command.starts_with("electronics.library.drag.move.")
+            || command.starts_with("electronics.library.drag.end.")
+        {
+            // Pointer coordinates are consumed by the native frame
+            // so the controller can convert them against the actual
+            // Electronics canvas. The command itself is retained as
+            // a semantic no-op for direct/headless callers.
+            return self.placement_drag_active;
+        }
+        false
     }
 
     pub fn set_surface(&mut self, surface: CadSurfaceKind) {
@@ -1334,18 +1375,20 @@ mod tests {
     #[test]
     fn library_drag_only_commits_inside_the_canvas() {
         let mut editor = NativeElectronicsEditor::empty("Test");
-        let canvas = EditorRect::new(10.0, 20.0, 240.0, 180.0);
+        let canvas = EditorRect::new(10.0, 20.0, 640.0, 480.0);
 
         assert!(editor.begin_library_drag(0));
         assert_eq!(
             editor.placement_preview_asset_key(),
             Some("electronics://library/resistor.png")
         );
-        assert!(!editor.finish_library_drag_at(Some([400.0, 400.0]), canvas));
+        assert!(!editor.finish_library_drag_at(Some([2000.0, 2000.0]), canvas));
         assert!(editor.schematic.components.is_empty());
         assert_eq!(editor.placement_preview_asset_key(), None);
 
         assert!(editor.begin_library_drag(0));
+        // Top-left of a large canvas is clear of the minimap panel, which
+        // lives in the bottom-right corner and rejects placement.
         assert!(editor.finish_library_drag_at(Some([40.0, 50.0]), canvas));
         assert_eq!(editor.schematic.components.len(), 1);
         assert!(!editor.placement_drag_active);

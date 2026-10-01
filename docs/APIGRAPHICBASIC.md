@@ -163,6 +163,13 @@ resource destruction under one owner.
   the shared render policy, not individual panels.
 - Advanced render capabilities attach through shared resource/frame contracts.
   Prepared support is not the same as an enabled feature.
+- Work budgets and idle-zero-work keep the process light. They are not a
+  permanent low FPS target: when the user is interacting and frame time stays
+  inside budget, higher presented FPS is a desired product outcome.
+- Prove performance with multi-metric before/after evidence under the same
+  load (CPU, GPU, frame time, caches, memory). Never claim a gain from the HUD
+  FPS counter alone. Shared campaign rules live in
+  [`Optimization_USECASES.md`](Optimization_USECASES.md).
 - Game 2D is an orthographic 3D scene. The retired `Sprite2D` spelling remains
   only as a compatibility alias to `Plane`; RafUI owns interface overlays.
 

@@ -111,7 +111,7 @@ AuraRafi is designed to run on low-end hardware. Keep these principles in mind:
 ### High Priority
 
 - **Runtime Connection**: Connect scene editing and node execution to a real game runtime/play loop
-- **Rendering Pipeline**: Keep improving the CPU-first viewport while wiring the optional GPU path responsibly
+- **Rendering Pipeline**: Keep improving the GPU-first viewport under ApiGraphicBasic while preserving the CPU recovery path
 - **PCB Workflow**: Continue PCB routing, DRC, footprint coverage, and real Gerber layer emission
 - **Asset Pipeline**: Keep polishing thumbnails, import flows, and project-level asset feedback
 - **Documentation Accuracy**: Keep README/docs aligned with real implementation status, especially around prepared systems vs live systems

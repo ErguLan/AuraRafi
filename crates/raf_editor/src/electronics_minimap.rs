@@ -1,32 +1,48 @@
-//! Small native overview image for the Electronics viewport.
+//! Fine overview reconstruction of the live Electronics CAD document.
 //!
-//! The minimap is an overview, not a second schematic renderer. It intentionally
-//! draws only abstract component bodies, pins, connectivity and the viewport
-//! frame. Component artwork remains owned by the native SVG/PNG catalog used by
-//! the main RafUI canvas overlay.
+//! The minimap is a raster preview of the same `CadScene` and `CadCamera`
+//! used by the main canvas. It reconstructs the full board/design extent,
+//! layers connectivity under component bodies, and overlays the current
+//! viewport rectangle so navigation always has spatial context. It never
+//! mutates the document and never becomes a second schematic renderer;
+//! component artwork remains owned by the native PNG catalog on the main
+//! RafUI canvas overlay.
 
 use glam::Vec2;
-use raf_electronics::{CadObject, CadObjectKind, CadScene};
+use raf_electronics::{CadObject, CadObjectKind, CadScene, CadSurfaceKind};
 
-use crate::electronics_controller::{CadCamera, ElectronicsSelection};
+use crate::electronics_controller::{CadCamera, ElectronicsSelection, ElectronicsSelectionKind};
 
 pub const IMAGE_KEY: &str = "electronics://minimap";
-// Render at 2x the presentation size so the viewport frame and thin nets stay
-// crisp on high-density displays. The retained image is still presented at a
-// compact 220px width, so this does not change the layout contract.
+// Render at ~3.5x the presented image width so thin nets, outlines and the
+// viewport frame stay crisp on high-density displays. The retained image is
+// still presented inside a compact panel, so this does not change layout.
 pub const IMAGE_SIZE: [u32; 2] = [880, 560];
 
+/// Chrome header above the raster preview inside the minimap panel.
+pub const HEADER_HEIGHT: f32 = 28.0;
+const PANEL_WIDTH: f32 = 240.0;
+const PANEL_MARGIN: f32 = 12.0;
+const PANEL_PAD: f32 = 6.0;
+
 const BACKGROUND: [u8; 4] = [10, 12, 16, 246];
+const GRID: [u8; 4] = [28, 34, 42, 160];
 const BORDER: [u8; 4] = [74, 82, 96, 255];
+const VIEWPORT_FILL: [u8; 4] = [255, 172, 64, 28];
 const VIEWPORT: [u8; 4] = [255, 172, 64, 255];
-const COMPONENT: [u8; 4] = [190, 112, 34, 230];
-const COMPONENT_SELECTED: [u8; 4] = [255, 196, 96, 255];
+const COMPONENT_STROKE: [u8; 4] = [12, 14, 18, 220];
 const PIN: [u8; 4] = [216, 221, 227, 235];
 const WIRE: [u8; 4] = [216, 221, 227, 235];
-const TRACE: [u8; 4] = [212, 119, 26, 245];
-const AIRWIRE: [u8; 4] = [198, 204, 216, 180];
+const AIRWIRE: [u8; 4] = [198, 204, 216, 170];
 const DRC: [u8; 4] = [255, 112, 112, 255];
+const SELECTED_STROKE: [u8; 4] = [255, 166, 61, 255];
+const SELECTION_FILL: [u8; 4] = [255, 166, 61, 56];
 
+/// Builds the minimap RGBA preview from the live CAD scene and camera.
+///
+/// Bounds are the union of document content and the visible world rectangle,
+/// so the whole design stays visible while the viewport frame remains a
+/// meaningful navigation indicator even when the camera leaves the board.
 pub fn build_rgba(
     scene: &CadScene,
     camera: CadCamera,
@@ -38,20 +54,43 @@ pub fn build_rgba(
     let mut pixels = vec![0_u8; width * height * 4];
     fill(&mut pixels, BACKGROUND);
 
-    let (min, max) = overview_bounds(scene).unwrap_or_else(|| {
-        let bounds = camera.world_bounds(canvas_size.max(Vec2::ONE));
-        (
-            Vec2::new(bounds[0], bounds[2]),
-            Vec2::new(bounds[1], bounds[3]),
-        )
-    });
+    let canvas_size = canvas_size.max(Vec2::ONE);
+    let (min, max) = overview_bounds(scene, camera, canvas_size);
     let map = Map::new(min, max, width, height);
 
+    draw_background_grid(&mut pixels, &map);
+
+    // Connectivity first so component bodies sit above nets, matching the
+    // canvas paint order without inventing geometry the document lacks.
     for object in &scene.objects {
-        draw_object(&mut pixels, &map, object, selection);
+        if matches!(
+            object.kind,
+            CadObjectKind::BoardOutline | CadObjectKind::Airwire | CadObjectKind::Wire | CadObjectKind::Trace
+        ) {
+            draw_object(&mut pixels, &map, object, selection);
+        }
+    }
+    for object in &scene.objects {
+        if matches!(object.kind, CadObjectKind::Component | CadObjectKind::NetLabel) {
+            draw_object(&mut pixels, &map, object, selection);
+        }
+    }
+    for object in &scene.objects {
+        if matches!(
+            object.kind,
+            CadObjectKind::Pin | CadObjectKind::Pad | CadObjectKind::DrcMarker
+        ) {
+            draw_object(&mut pixels, &map, object, selection);
+        }
     }
 
-    let viewport = camera.world_bounds(canvas_size.max(Vec2::ONE));
+    let viewport = camera.world_bounds(canvas_size);
+    map.fill_rect(
+        &mut pixels,
+        Vec2::new(viewport[0], viewport[2]),
+        Vec2::new(viewport[1], viewport[3]),
+        VIEWPORT_FILL,
+    );
     map.border_rect(
         &mut pixels,
         Vec2::new(viewport[0], viewport[2]),
@@ -82,8 +121,12 @@ impl Map {
         max += padding;
         let center = (min + max) * 0.5;
         let span = max - min;
-        let aspect = width.saturating_sub(1).max(1) as f32 / height.saturating_sub(1).max(1) as f32;
-        let span = Vec2::new(span.x.max(span.y * aspect), span.y.max(span.x / aspect));
+        let aspect =
+            width.saturating_sub(1).max(1) as f32 / height.saturating_sub(1).max(1) as f32;
+        let span = Vec2::new(
+            span.x.max(span.y * aspect),
+            span.y.max(span.x / aspect),
+        );
         min = center - span * 0.5;
         max = center + span * 0.5;
         Self {
@@ -115,7 +158,14 @@ impl Map {
         }
     }
 
-    fn border_rect(self, pixels: &mut [u8], min: Vec2, max: Vec2, color: [u8; 4], radius: i32) {
+    fn border_rect(
+        self,
+        pixels: &mut [u8],
+        min: Vec2,
+        max: Vec2,
+        color: [u8; 4],
+        radius: i32,
+    ) {
         self.line(pixels, min, Vec2::new(max.x, min.y), color, radius);
         self.line(pixels, Vec2::new(max.x, min.y), max, color, radius);
         self.line(pixels, max, Vec2::new(min.x, max.y), color, radius);
@@ -135,6 +185,17 @@ impl Map {
             }
         }
     }
+
+    fn stroke_rect(
+        self,
+        pixels: &mut [u8],
+        min: Vec2,
+        max: Vec2,
+        color: [u8; 4],
+        radius: i32,
+    ) {
+        self.border_rect(pixels, min, max, color, radius);
+    }
 }
 
 fn draw_object(
@@ -146,48 +207,131 @@ fn draw_object(
     let selected = selection.is_some_and(|selection| {
         object.source_id == Some(selection.source_id)
             && matches!(
-                selection.kind,
-                crate::electronics_controller::ElectronicsSelectionKind::Component
-                    | crate::electronics_controller::ElectronicsSelectionKind::Pin
+                (selection.kind, object.kind),
+                (
+                    ElectronicsSelectionKind::Component | ElectronicsSelectionKind::Pin,
+                    CadObjectKind::Component | CadObjectKind::Pin | CadObjectKind::Pad
+                ) | (ElectronicsSelectionKind::Wire, CadObjectKind::Wire)
+                    | (ElectronicsSelectionKind::Trace, CadObjectKind::Trace)
             )
     });
     match object.kind {
         CadObjectKind::Component => {
             if let Some(rect) = object.rect {
-                let color = if selected {
-                    COMPONENT_SELECTED
+                let min = rect.center - rect.size.abs() * 0.5;
+                let max = rect.center + rect.size.abs() * 0.5;
+                let mut fill_color = object.color_rgba;
+                fill_color[3] = fill_color[3].saturating_sub(40).max(160);
+                if selected {
+                    fill_color = SELECTION_FILL;
+                }
+                map.fill_rect(pixels, min, max, fill_color);
+                let stroke = if selected {
+                    SELECTED_STROKE
                 } else {
-                    COMPONENT
+                    COMPONENT_STROKE
                 };
-                map.fill_rect(
-                    pixels,
-                    rect.center - rect.size.abs() * 0.5,
-                    rect.center + rect.size.abs() * 0.5,
-                    color,
-                );
+                map.stroke_rect(pixels, min, max, stroke, 1);
             }
         }
         CadObjectKind::Pin | CadObjectKind::Pad => {
             if let Some(rect) = object.rect {
-                map.fill_rect(
-                    pixels,
-                    rect.center - rect.size.abs() * 0.5,
-                    rect.center + rect.size.abs() * 0.5,
-                    if selected { COMPONENT_SELECTED } else { PIN },
-                );
+                let min = rect.center - rect.size.abs() * 0.5;
+                let max = rect.center + rect.size.abs() * 0.5;
+                let color = if selected { SELECTED_STROKE } else { pin_color(object) };
+                map.fill_rect(pixels, min, max, color);
+                if selected {
+                    map.stroke_rect(
+                        pixels,
+                        min - Vec2::splat(1.0),
+                        max + Vec2::splat(1.0),
+                        SELECTED_STROKE,
+                        1,
+                    );
+                }
             }
         }
-        CadObjectKind::Wire => draw_paths(pixels, map, object, WIRE, 2),
-        CadObjectKind::Trace => draw_paths(pixels, map, object, TRACE, 3),
+        CadObjectKind::Wire => {
+            let color = if selected { SELECTED_STROKE } else { wire_color(object) };
+            draw_paths(pixels, map, object, color, 2);
+        }
+        CadObjectKind::Trace => {
+            let color = if selected { SELECTED_STROKE } else { object.color_rgba };
+            draw_paths(pixels, map, object, color, 3);
+        }
         CadObjectKind::Airwire => draw_paths(pixels, map, object, AIRWIRE, 1),
-        CadObjectKind::BoardOutline => draw_paths(pixels, map, object, BORDER, 2),
+        CadObjectKind::BoardOutline => {
+            draw_paths(pixels, map, object, outline_color(object), 2);
+        }
         CadObjectKind::DrcMarker => {
             if let Some(rect) = object.rect {
                 let center = map.point(rect.center);
-                disc(pixels, map.width, map.height, center[0], center[1], 4, DRC);
+                disc(
+                    pixels,
+                    map.width,
+                    map.height,
+                    center[0],
+                    center[1],
+                    4,
+                    drc_color(object),
+                );
             }
         }
         CadObjectKind::NetLabel => {}
+    }
+}
+
+fn pin_color(object: &CadObject) -> [u8; 4] {
+    if object.color_rgba[3] == 0 {
+        PIN
+    } else {
+        let mut color = object.color_rgba;
+        if color[0] < 40 && color[1] < 40 && color[2] < 40 {
+            return PIN;
+        }
+        color[3] = color[3].max(220);
+        color
+    }
+}
+
+fn wire_color(object: &CadObject) -> [u8; 4] {
+    if object.color_rgba == [0, 0, 0, 0] {
+        WIRE
+    } else {
+        object.color_rgba
+    }
+}
+
+fn outline_color(object: &CadObject) -> [u8; 4] {
+    if object.color_rgba == [0, 0, 0, 0] {
+        BORDER
+    } else {
+        object.color_rgba
+    }
+}
+
+fn drc_color(object: &CadObject) -> [u8; 4] {
+    if object.color_rgba == [0, 0, 0, 0] {
+        DRC
+    } else {
+        object.color_rgba
+    }
+}
+
+fn draw_background_grid(pixels: &mut [u8], map: &Map) {
+    const CELLS_X: usize = 10;
+    const CELLS_Y: usize = 7;
+    for cell in 1..CELLS_X {
+        let x = (cell as f32 / CELLS_X as f32 * map.width.saturating_sub(1) as f32).round() as i32;
+        for y in 0..map.height as i32 {
+            put(pixels, map.width, map.height, x, y, GRID);
+        }
+    }
+    for cell in 1..CELLS_Y {
+        let y = (cell as f32 / CELLS_Y as f32 * map.height.saturating_sub(1) as f32).round() as i32;
+        for x in 0..map.width as i32 {
+            put(pixels, map.width, map.height, x, y, GRID);
+        }
     }
 }
 
@@ -207,7 +351,30 @@ fn draw_paths(pixels: &mut [u8], map: &Map, object: &CadObject, color: [u8; 4], 
     }
 }
 
-fn overview_bounds(scene: &CadScene) -> Option<(Vec2, Vec2)> {
+/// Union of content bounds and the camera's visible world rectangle.
+///
+/// Content keeps the whole board stable while zoomed in. The viewport is
+/// folded in so panning away from the design never drops the navigation
+/// indicator off the minimap. An empty document falls back to the viewport.
+fn overview_bounds(scene: &CadScene, camera: CadCamera, canvas_size: Vec2) -> (Vec2, Vec2) {
+    let viewport = camera.world_bounds(canvas_size.max(Vec2::ONE));
+    let viewport_min = Vec2::new(viewport[0], viewport[2]);
+    let viewport_max = Vec2::new(viewport[1], viewport[3]);
+    match content_bounds(scene) {
+        Some((min, max)) => (min.min(viewport_min), max.max(viewport_max)),
+        None => (viewport_min, viewport_max),
+    }
+}
+
+/// Whether the document has any navigable content worth framing.
+///
+/// Previews, net labels and DRC markers alone never count as content; they
+/// are transient chrome on top of an otherwise empty design.
+pub fn has_document_content(scene: &CadScene) -> bool {
+    content_bounds(scene).is_some()
+}
+
+fn content_bounds(scene: &CadScene) -> Option<(Vec2, Vec2)> {
     let mut bounds: Option<(Vec2, Vec2)> = None;
     for object in &scene.objects {
         if object.id.ends_with("preview")
@@ -234,26 +401,56 @@ fn overview_bounds(scene: &CadScene) -> Option<(Vec2, Vec2)> {
     bounds
 }
 
-/// Shared canvas-local rectangle for presentation and pointer routing.
+/// Full panel rectangle including the chrome header. Used for pointer
+/// routing so clicks on the header never fall through to the CAD canvas.
 pub fn overlay_rect(size: Vec2) -> raf_ui::UiRect {
-    let width = 220.0_f32.min((size.x - 24.0).max(1.0));
-    let height =
-        (width * IMAGE_SIZE[1] as f32 / IMAGE_SIZE[0] as f32).min((size.y - 24.0).max(1.0));
+    let max_width = (size.x - PANEL_MARGIN * 2.0).max(1.0);
+    let max_height = (size.y - PANEL_MARGIN * 2.0).max(1.0);
+    let width = PANEL_WIDTH.min(max_width);
+    let image_h = (width - PANEL_PAD * 2.0) * IMAGE_SIZE[1] as f32 / IMAGE_SIZE[0] as f32;
+    let height = (HEADER_HEIGHT + image_h + PANEL_PAD).min(max_height);
     raf_ui::UiRect::new(
-        (size.x - width - 12.0).max(0.0),
-        (size.y - height - 12.0).max(0.0),
+        (size.x - width - PANEL_MARGIN).max(0.0),
+        (size.y - height - PANEL_MARGIN).max(0.0),
         width,
         height,
     )
 }
 
-pub fn world_at(scene: &CadScene, local: Vec2, size: Vec2) -> Option<Vec2> {
-    let (min, max) = overview_bounds(scene)?;
-    let map = Map::new(min, max, IMAGE_SIZE[0] as usize, IMAGE_SIZE[1] as usize);
-    let rect = overlay_rect(size);
+/// Inner raster image rectangle below the chrome header. World mapping and
+/// image placement both use this rect so drag navigation stays pixel-true.
+pub fn image_rect(size: Vec2) -> raf_ui::UiRect {
+    let panel = overlay_rect(size);
+    let width = (panel.width - PANEL_PAD * 2.0).max(1.0);
+    let height = (width * IMAGE_SIZE[1] as f32 / IMAGE_SIZE[0] as f32)
+        .min((panel.height - HEADER_HEIGHT - PANEL_PAD).max(1.0));
+    raf_ui::UiRect::new(
+        panel.x + PANEL_PAD,
+        panel.y + HEADER_HEIGHT,
+        width,
+        height,
+    )
+}
+
+/// Maps a canvas-local pointer position to a world point on the document.
+///
+/// Uses the same content-union-viewport bounds as [`build_rgba`], so a drag
+/// on the minimap lands exactly where the overview paints that pixel.
+pub fn world_at(
+    scene: &CadScene,
+    camera: CadCamera,
+    canvas_size: Vec2,
+    local: Vec2,
+) -> Option<Vec2> {
+    let canvas_size = canvas_size.max(Vec2::ONE);
+    let rect = image_rect(canvas_size);
+    if rect.width <= f32::EPSILON || rect.height <= f32::EPSILON {
+        return None;
+    }
     let fraction = ((local - Vec2::new(rect.x, rect.y)) / Vec2::new(rect.width, rect.height))
         .clamp(Vec2::ZERO, Vec2::ONE);
-    Some(map.min + fraction * (map.max - map.min))
+    let (min, max) = overview_bounds(scene, camera, canvas_size);
+    Some(min + fraction * (max - min))
 }
 
 fn include(bounds: &mut Option<(Vec2, Vec2)>, point: Vec2) {
@@ -328,14 +525,23 @@ fn put(pixels: &mut [u8], width: usize, height: usize, x: i32, y: i32, color: [u
     pixels[index + 3] = (output_alpha * 255.0).round() as u8;
 }
 
+/// Surface label key for the minimap chrome header badge.
+pub fn surface_label_key(surface: CadSurfaceKind) -> &'static str {
+    match surface {
+        CadSurfaceKind::Schematic => "electronics.toolbar.schematic",
+        CadSurfaceKind::Pcb => "electronics.toolbar.pcb",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use raf_electronics::{ElectronicComponent, Schematic};
 
     #[test]
     fn empty_scene_still_produces_a_framed_overview() {
         let (size, pixels) = build_rgba(
-            &CadScene::from_schematic(&raf_electronics::Schematic::new("test")),
+            &CadScene::from_schematic(&Schematic::new("test")),
             CadCamera::default(),
             Vec2::new(640.0, 480.0),
             None,
@@ -346,5 +552,91 @@ mod tests {
             IMAGE_SIZE[0] as usize * IMAGE_SIZE[1] as usize * 4
         );
         assert_eq!(&pixels[..4], &BORDER);
+    }
+
+    #[test]
+    fn world_at_center_of_empty_minimap_maps_to_camera_center() {
+        let camera = CadCamera {
+            center: Vec2::new(50.0, 30.0),
+            zoom: 1.0,
+        };
+        let size = Vec2::new(640.0, 480.0);
+        let image = image_rect(size);
+        let local = Vec2::new(
+            image.x + image.width * 0.5,
+            image.y + image.height * 0.5,
+        );
+        let world = world_at(&CadScene::from_schematic(&Schematic::new("t")), camera, size, local)
+            .expect("empty minimap still maps");
+        assert!(
+            (world - camera.center).length() < 4.0,
+            "center pixel should resolve near the camera center, got {world:?}"
+        );
+    }
+
+    #[test]
+    fn image_rect_sits_below_header_inside_panel_and_canvas() {
+        let size = Vec2::new(400.0, 300.0);
+        let panel = overlay_rect(size);
+        let image = image_rect(size);
+        assert!(image.x >= panel.x - f32::EPSILON);
+        assert!(image.y >= panel.y + HEADER_HEIGHT - f32::EPSILON);
+        assert!(image.x + image.width <= panel.x + panel.width + f32::EPSILON);
+        assert!(image.y + image.height <= panel.y + panel.height + f32::EPSILON);
+        assert!(panel.x + panel.width <= size.x);
+        assert!(panel.y + panel.height <= size.y);
+    }
+
+    #[test]
+    fn component_body_uses_document_color_in_overview() {
+        let mut schematic = Schematic::new("colors");
+        let mut resistor = ElectronicComponent::resistor("10k");
+        resistor.position = Vec2::new(0.0, 0.0);
+        resistor.appearance.color = [10, 200, 50, 255];
+        schematic.add_component(resistor);
+
+        let camera = CadCamera {
+            center: Vec2::ZERO,
+            zoom: 1.0,
+        };
+        let (_, pixels) = build_rgba(
+            &CadScene::from_schematic(&schematic),
+            camera,
+            Vec2::new(640.0, 480.0),
+            None,
+        );
+        // Alpha blending against the dark overview background shifts the
+        // document color slightly, so assert the green-dominant signature of
+        // [10, 200, 50] rather than an exact channel match.
+        let hits = pixels
+            .chunks_exact(4)
+            .filter(|pixel| {
+                pixel[1] > 80
+                    && i32::from(pixel[1]) - i32::from(pixel[0]) > 40
+                    && i32::from(pixel[1]) - i32::from(pixel[2]) > 40
+                    && pixel[3] > 120
+            })
+            .count();
+        assert!(
+            hits > 40,
+            "expected the component body color in the overview, found {hits} green-dominant pixels"
+        );
+    }
+
+    #[test]
+    fn viewport_fill_is_present_when_camera_looks_at_content() {
+        let mut schematic = Schematic::new("vp");
+        schematic.add_component(ElectronicComponent::resistor("10k"));
+        let camera = CadCamera::default();
+        let (_, pixels) = build_rgba(
+            &CadScene::from_schematic(&schematic),
+            camera,
+            Vec2::new(640.0, 480.0),
+            None,
+        );
+        // VIEWPORT border color is pure orange at full alpha on the frame path;
+        // at least the translucent fill must lift some pixels above background blue.
+        let warm = pixels.chunks_exact(4).filter(|p| p[0] > p[2] + 10 && p[3] > 40).count();
+        assert!(warm > 100, "expected viewport/content warm pixels, found {warm}");
     }
 }

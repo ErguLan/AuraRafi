@@ -3,7 +3,6 @@
 //! Documents store only `UiImageSource` keys. This cache owns decoded pixels
 //! at the surface-host boundary, so a project can replace or unload icons
 //! without modifying serialized layout data.
-//! AI SLOP!!! But used like Fallback TO BE profesionals🥀🥀🥀
 use std::collections::BTreeMap;
 use std::path::Path;
 
@@ -11,6 +10,7 @@ use raf_ui::{UiColorPicker, UiIcon, UiIconId};
 
 const COLOR_PICKER_SOURCE_PREFIX: &str = "builtin://color-picker/hsv/";
 const COLOR_PICKER_IMAGE_SIZE: usize = UiColorPicker::CANVAS_SIZE as usize;
+const DEFAULT_UI_IMAGE_BUDGET_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct UiSurfaceImageData {
@@ -19,10 +19,31 @@ pub struct UiSurfaceImageData {
     pub revision: u64,
 }
 
-#[derive(Debug, Clone, Default)]
+/// CPU-side pixel residency for retained UI images.
+///
+/// The store is a work budget, not an FPS cap: it bounds decoded RGBA bytes
+/// and evicts the least-recently inserted/updated entry when admission would
+/// cross the budget. Oversized single images are rejected instead of
+/// ballooning process memory.
+#[derive(Debug, Clone)]
 pub struct UiSurfaceImageStore {
     images: BTreeMap<String, UiSurfaceImageData>,
     next_revision: u64,
+    budget_bytes: u64,
+    resident_bytes: u64,
+    evictions: u64,
+}
+
+impl Default for UiSurfaceImageStore {
+    fn default() -> Self {
+        Self {
+            images: BTreeMap::new(),
+            next_revision: 0,
+            budget_bytes: DEFAULT_UI_IMAGE_BUDGET_BYTES,
+            resident_bytes: 0,
+            evictions: 0,
+        }
+    }
 }
 
 impl UiSurfaceImageStore {
@@ -44,9 +65,43 @@ impl UiSurfaceImageStore {
                 height
             ));
         }
+        let key = key.into();
+        let incoming_bytes = pixels.len() as u64;
+        if incoming_bytes > self.budget_bytes {
+            return Err(format!(
+                "UI image '{}' needs {} bytes; budget is {} bytes.",
+                key, incoming_bytes, self.budget_bytes
+            ));
+        }
+        loop {
+            let replaced_bytes = self
+                .images
+                .get(&key)
+                .map(|image| image.pixels.len() as u64)
+                .unwrap_or(0);
+            let prospective = self
+                .resident_bytes
+                .saturating_sub(replaced_bytes)
+                .saturating_add(incoming_bytes);
+            if prospective <= self.budget_bytes {
+                break;
+            }
+            if self.evict_oldest_except(Some(key.as_str())).is_none() {
+                return Err(format!(
+                    "UI image '{}' needs {} resident bytes; budget is {} bytes.",
+                    key, prospective, self.budget_bytes
+                ));
+            }
+        }
+        if let Some(previous) = self.images.remove(&key) {
+            self.resident_bytes = self
+                .resident_bytes
+                .saturating_sub(previous.pixels.len() as u64);
+        }
         self.next_revision = self.next_revision.wrapping_add(1).max(1);
+        self.resident_bytes = self.resident_bytes.saturating_add(incoming_bytes);
         self.images.insert(
-            key.into(),
+            key,
             UiSurfaceImageData {
                 size: [width, height],
                 pixels,
@@ -64,7 +119,11 @@ impl UiSurfaceImageStore {
     }
 
     pub fn remove(&mut self, key: &str) -> Option<UiSurfaceImageData> {
-        self.images.remove(key)
+        let removed = self.images.remove(key)?;
+        self.resident_bytes = self
+            .resident_bytes
+            .saturating_sub(removed.pixels.len() as u64);
+        Some(removed)
     }
 
     pub fn get(&self, key: &str) -> Option<&UiSurfaceImageData> {
@@ -77,6 +136,46 @@ impl UiSurfaceImageStore {
 
     pub fn is_empty(&self) -> bool {
         self.images.is_empty()
+    }
+
+    pub fn budget_bytes(&self) -> u64 {
+        self.budget_bytes
+    }
+
+    pub fn resident_bytes(&self) -> u64 {
+        self.resident_bytes
+    }
+
+    pub fn evictions(&self) -> u64 {
+        self.evictions
+    }
+
+    pub fn set_budget_bytes(&mut self, budget_bytes: u64) {
+        self.budget_bytes = budget_bytes;
+        while self.resident_bytes > self.budget_bytes {
+            if self.evict_oldest().is_none() {
+                break;
+            }
+        }
+    }
+
+    fn evict_oldest(&mut self) -> Option<String> {
+        self.evict_oldest_except(None)
+    }
+
+    fn evict_oldest_except(&mut self, protect_key: Option<&str>) -> Option<String> {
+        let key = self
+            .images
+            .iter()
+            .filter(|(key, _)| protect_key.is_none_or(|protected| key.as_str() != protected))
+            .min_by_key(|(_, image)| image.revision)
+            .map(|(key, _)| key.clone())?;
+        let removed = self.images.remove(&key)?;
+        self.resident_bytes = self
+            .resident_bytes
+            .saturating_sub(removed.pixels.len() as u64);
+        self.evictions = self.evictions.saturating_add(1);
+        Some(key)
     }
 
     /// Ensures that a semantic RafUI icon has a renderer-owned source. The
@@ -190,7 +289,7 @@ fn builtin_icon_png(id: UiIconId) -> Option<&'static [u8]> {
         UiIconId::Focus => Some(include_bytes!("../../../assets/ui_icons/png/focus.png")),
         UiIconId::Undo => Some(include_bytes!("../../../assets/ui_icons/png/undo.png")),
         UiIconId::Redo => Some(include_bytes!("../../../assets/ui_icons/png/redo.png")),
-        UiIconId::Refresh => None,
+        UiIconId::Refresh => Some(include_bytes!("../../../assets/ui_icons/png/refresh.png")),
         UiIconId::Grid => Some(include_bytes!("../../../assets/ui_icons/png/grid.png")),
         UiIconId::View2d => Some(include_bytes!("../../../assets/ui_icons/png/view-2d.png")),
         UiIconId::View3d => Some(include_bytes!("../../../assets/ui_icons/png/view-3d.png")),
@@ -230,12 +329,21 @@ fn builtin_icon_png(id: UiIconId) -> Option<&'static [u8]> {
         UiIconId::Agent => Some(include_bytes!("../../../assets/ui_icons/png/agent.png")),
         UiIconId::Schematic => Some(include_bytes!("../../../assets/ui_icons/png/schematic.png")),
         UiIconId::Pcb => Some(include_bytes!("../../../assets/ui_icons/png/pcb.png")),
-        UiIconId::Wire
-        | UiIconId::Route
-        | UiIconId::BoardOutline
-        | UiIconId::ZoomIn
-        | UiIconId::ZoomOut
-        | UiIconId::Trash => None,
+        UiIconId::Wire => Some(include_bytes!("../../../assets/ui_icons/png/wire.png")),
+        UiIconId::Route => Some(include_bytes!("../../../assets/ui_icons/png/route.png")),
+        UiIconId::BoardOutline => Some(include_bytes!(
+            "../../../assets/ui_icons/png/board-outline.png"
+        )),
+        UiIconId::ZoomIn => Some(include_bytes!("../../../assets/ui_icons/png/zoom-in.png")),
+        UiIconId::ZoomOut => Some(include_bytes!("../../../assets/ui_icons/png/zoom-out.png")),
+        UiIconId::Trash => Some(include_bytes!("../../../assets/ui_icons/png/trash.png")),
+        UiIconId::Script => Some(include_bytes!("../../../assets/ui_icons/png/script.png")),
+        UiIconId::File => Some(include_bytes!("../../../assets/ui_icons/png/file.png")),
+        UiIconId::ExternalLink => Some(include_bytes!(
+            "../../../assets/ui_icons/png/external-link.png"
+        )),
+        UiIconId::Pencil => Some(include_bytes!("../../../assets/ui_icons/png/pencil.png")),
+        UiIconId::Copy => Some(include_bytes!("../../../assets/ui_icons/png/copy.png")),
         UiIconId::Settings => Some(include_bytes!("../../../assets/ui_icons/png/settings.png")),
         UiIconId::Menu => Some(include_bytes!("../../../assets/ui_icons/png/menu.png")),
         UiIconId::Warning => Some(include_bytes!("../../../assets/ui_icons/png/warning.png")),
@@ -294,6 +402,11 @@ fn icon_id_from_key(key: &str) -> Option<UiIconId> {
         UiIconId::ZoomIn,
         UiIconId::ZoomOut,
         UiIconId::Trash,
+        UiIconId::Script,
+        UiIconId::File,
+        UiIconId::ExternalLink,
+        UiIconId::Pencil,
+        UiIconId::Copy,
         UiIconId::Settings,
         UiIconId::Menu,
         UiIconId::Warning,
@@ -379,6 +492,21 @@ fn builtin_icon_pixels(id: UiIconId) -> Vec<u8> {
                     write_icon_pixel(pixels, x, y, (coverage * 255.0) as u8);
                 }
             }
+        }
+    };
+    // Shared document outline used by the file-like procedural icon fallbacks.
+    let file_outline = |pixels: &mut [u8], width: f32| {
+        let segments = [
+            ([16.0, 10.0], [40.0, 10.0]),
+            ([40.0, 10.0], [50.0, 20.0]),
+            ([50.0, 20.0], [50.0, 54.0]),
+            ([50.0, 54.0], [16.0, 54.0]),
+            ([16.0, 54.0], [16.0, 10.0]),
+            ([40.0, 10.0], [40.0, 20.0]),
+            ([40.0, 20.0], [50.0, 20.0]),
+        ];
+        for (a, b) in segments {
+            line(pixels, a, b, width);
         }
     };
     // I HATE THESE And No one should Replicated it!
@@ -683,6 +811,48 @@ fn builtin_icon_pixels(id: UiIconId) -> Vec<u8> {
             line(&mut pixels, [29.0, 27.0], [30.0, 44.0], 2.5);
             line(&mut pixels, [35.0, 27.0], [34.0, 44.0], 2.5);
         }
+        UiIconId::Script => {
+            file_outline(&mut pixels, stroke);
+            line(&mut pixels, [31.0, 30.0], [25.0, 36.0], 2.8);
+            line(&mut pixels, [25.0, 36.0], [31.0, 42.0], 2.8);
+            line(&mut pixels, [33.0, 43.0], [39.0, 29.0], 2.8);
+            line(&mut pixels, [35.0, 30.0], [41.0, 36.0], 2.8);
+            line(&mut pixels, [41.0, 36.0], [35.0, 42.0], 2.8);
+        }
+        UiIconId::File => {
+            file_outline(&mut pixels, stroke);
+            line(&mut pixels, [23.0, 30.0], [43.0, 30.0], 2.8);
+            line(&mut pixels, [23.0, 38.0], [43.0, 38.0], 2.8);
+            line(&mut pixels, [23.0, 46.0], [35.0, 46.0], 2.8);
+        }
+        UiIconId::ExternalLink => {
+            line(&mut pixels, [30.0, 34.0], [12.0, 34.0], stroke);
+            line(&mut pixels, [12.0, 34.0], [12.0, 52.0], stroke);
+            line(&mut pixels, [12.0, 52.0], [46.0, 52.0], stroke);
+            line(&mut pixels, [46.0, 52.0], [46.0, 38.0], stroke);
+            line(&mut pixels, [34.0, 30.0], [52.0, 12.0], stroke);
+            line(&mut pixels, [40.0, 12.0], [52.0, 12.0], stroke);
+            line(&mut pixels, [52.0, 12.0], [52.0, 24.0], stroke);
+        }
+        UiIconId::Pencil => {
+            line(&mut pixels, [16.0, 48.0], [19.0, 38.0], stroke);
+            line(&mut pixels, [19.0, 38.0], [42.0, 15.0], stroke);
+            line(&mut pixels, [42.0, 15.0], [50.0, 23.0], stroke);
+            line(&mut pixels, [50.0, 23.0], [27.0, 46.0], stroke);
+            line(&mut pixels, [27.0, 46.0], [16.0, 48.0], stroke);
+            line(&mut pixels, [19.0, 38.0], [27.0, 46.0], stroke);
+            line(&mut pixels, [42.0, 15.0], [50.0, 23.0], stroke);
+        }
+        UiIconId::Copy => {
+            line(&mut pixels, [10.0, 24.0], [40.0, 24.0], stroke);
+            line(&mut pixels, [40.0, 24.0], [40.0, 54.0], stroke);
+            line(&mut pixels, [40.0, 54.0], [10.0, 54.0], stroke);
+            line(&mut pixels, [10.0, 54.0], [10.0, 24.0], stroke);
+            line(&mut pixels, [18.0, 24.0], [18.0, 10.0], stroke);
+            line(&mut pixels, [18.0, 10.0], [48.0, 10.0], stroke);
+            line(&mut pixels, [48.0, 10.0], [48.0, 40.0], stroke);
+            line(&mut pixels, [48.0, 40.0], [40.0, 40.0], stroke);
+        }
         UiIconId::Settings => {
             circle(&mut pixels, [32.0, 32.0], 9.0, stroke);
             for angle in [0.0_f32, 1.047, 2.094, 3.141, 4.188, 5.235] {
@@ -744,6 +914,55 @@ mod tests {
         assert!(store.insert_rgba("icon", [2, 2], vec![255; 16]).is_ok());
         assert!(store.insert_rgba("bad", [2, 2], vec![255; 12]).is_err());
         assert_eq!(store.get("icon").unwrap().size, [2, 2]);
+        assert_eq!(store.resident_bytes(), 16);
+    }
+
+    #[test]
+    fn budget_rejects_oversized_single_image() {
+        let mut store = UiSurfaceImageStore::default();
+        store.set_budget_bytes(64);
+        assert!(store.insert_rgba("big", [8, 8], vec![0; 256]).is_err());
+        assert_eq!(store.len(), 0);
+        assert_eq!(store.resident_bytes(), 0);
+        assert_eq!(store.evictions(), 0);
+    }
+
+    #[test]
+    fn budget_evicts_oldest_revision_to_admit_new_image() {
+        let mut store = UiSurfaceImageStore::default();
+        store.set_budget_bytes(32);
+        assert!(store.insert_rgba("first", [2, 2], vec![1; 16]).is_ok());
+        assert!(store.insert_rgba("second", [2, 2], vec![2; 16]).is_ok());
+        assert!(store.insert_rgba("third", [2, 2], vec![3; 16]).is_ok());
+        assert!(store.get("first").is_none(), "oldest revision must evict");
+        assert!(store.get("second").is_some());
+        assert!(store.get("third").is_some());
+        assert_eq!(store.resident_bytes(), 32);
+        assert_eq!(store.evictions(), 1);
+    }
+
+    #[test]
+    fn replace_updates_resident_bytes_without_double_counting() {
+        let mut store = UiSurfaceImageStore::default();
+        assert!(store.insert_rgba("icon", [2, 2], vec![1; 16]).is_ok());
+        assert!(store.insert_rgba("icon", [4, 4], vec![2; 64]).is_ok());
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.resident_bytes(), 64);
+        assert_eq!(store.evictions(), 0);
+        assert!(store.remove("icon").is_some());
+        assert_eq!(store.resident_bytes(), 0);
+    }
+
+    #[test]
+    fn lowering_budget_evicts_until_resident_fits() {
+        let mut store = UiSurfaceImageStore::default();
+        assert!(store.insert_rgba("a", [2, 2], vec![1; 16]).is_ok());
+        assert!(store.insert_rgba("b", [2, 2], vec![2; 16]).is_ok());
+        assert!(store.insert_rgba("c", [2, 2], vec![3; 16]).is_ok());
+        store.set_budget_bytes(32);
+        assert!(store.resident_bytes() <= 32);
+        assert!(store.evictions() >= 1);
+        assert!(store.get("c").is_some(), "newest revision must survive");
     }
 
     #[test]
@@ -778,61 +997,17 @@ mod tests {
 
     #[test]
     fn every_semantic_icon_has_a_generated_runtime_asset() {
-        let icons = [
-            UiIconId::Select,
-            UiIconId::Move,
-            UiIconId::Rotate,
-            UiIconId::Scale,
-            UiIconId::Focus,
-            UiIconId::Undo,
-            UiIconId::Redo,
-            UiIconId::Grid,
-            UiIconId::View2d,
-            UiIconId::View3d,
-            UiIconId::Shaded,
-            UiIconId::Wireframe,
-            UiIconId::Folder,
-            UiIconId::Scene,
-            UiIconId::Entity,
-            UiIconId::Cube,
-            UiIconId::Sphere,
-            UiIconId::Plane,
-            UiIconId::Cylinder,
-            UiIconId::Eye,
-            UiIconId::EyeOff,
-            UiIconId::Lock,
-            UiIconId::Unlock,
-            UiIconId::ChevronLeft,
-            UiIconId::ChevronRight,
-            UiIconId::ChevronDown,
-            UiIconId::More,
-            UiIconId::Search,
-            UiIconId::Filter,
-            UiIconId::Add,
-            UiIconId::Close,
-            UiIconId::Play,
-            UiIconId::Stop,
-            UiIconId::Console,
-            UiIconId::Assets,
-            UiIconId::Project,
-            UiIconId::Node,
-            UiIconId::Agent,
-            UiIconId::Schematic,
-            UiIconId::Pcb,
-            UiIconId::Wire,
-            UiIconId::Route,
-            UiIconId::BoardOutline,
-            UiIconId::ZoomIn,
-            UiIconId::ZoomOut,
-            UiIconId::Trash,
-            UiIconId::Settings,
-            UiIconId::Menu,
-            UiIconId::Warning,
-            UiIconId::Error,
-            UiIconId::Success,
-        ];
+        for icon in UiIconId::ALL {
+            let png = builtin_icon_png(icon).unwrap_or_else(|| {
+                panic!("{} must ship a generated PNG master", icon.key())
+            });
+            assert!(!png.is_empty(), "{} PNG must not be empty", icon.key());
+            assert_eq!(
+                icon_id_from_key(icon.key()),
+                Some(icon),
+                "icon key mapping must be reversible"
+            );
 
-        for icon in icons {
             let mut store = UiSurfaceImageStore::default();
             let key = store.ensure_builtin_icon(UiIcon::new(icon));
             let image = store.get(&key).expect("generated icon asset");

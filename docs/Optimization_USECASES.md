@@ -2,7 +2,7 @@
 
 Status: active document of optimization use cases and rules.
 
-Revision date: 2026-09-14.
+Revision date: 2026-09-22.
 
 This document describes the technical mechanisms that keep AuraRafi lightweight
 and the concrete use cases where they apply. Its reference is the modern
@@ -24,10 +24,19 @@ own history.
 - **PREPARED**: a contract, type, or future infrastructure exists, but it must
   not be counted as active frame work.
 
+Status labels describe **code truth only**. They are not product acceptance.
+Until the OC-01 baseline and the manual window/DPI/GPU/low-end matrix in
+`Minimum tests per change` are run against the current checkout, every ACTIVE
+entry remains **window-unverified**: the path is wired, but visual acceptance
+and any FPS delta are still open.
+
 ## Technical objective
 
-Engine optimization does not mean raising the FPS counter at any cost. The goal
-is for visible work to remain proportional to what actually changed:
+Optimization has two goals that must hold at the same time.
+
+### Engineering — how a change is proven
+
+Visible work must stay proportional to what actually changed:
 
 1. An idle frame must not rebuild surfaces or submit continuous work.
 2. A UI change must not render the scene again when the canvas is still valid.
@@ -37,8 +46,29 @@ is for visible work to remain proportional to what actually changed:
    a bounded budget.
 5. Quality reduction must be explicit, reversible, and measurable.
 6. GPU and CPU must preserve the same visual semantics during recovery.
-7. No optimization may rely on an isolated FPS counter: CPU, GPU, P95, hitches,
-   draws, uploads, cache behavior, and memory must also be observed.
+7. A performance claim requires CPU, GPU, P95, hitches, draws, uploads, cache
+   behavior, and memory under the same load. The HUD FPS number alone is never
+   sufficient evidence in either direction.
+
+### Product — what the user should feel
+
+AuraRafi must stay a light companion process, not a system-hungry suite that
+devours a low-end PC the way heavy DCC or browser-class apps do:
+
+- Idle, unfocused, and minimized work stays near zero recurring presentation
+  and bounded memory.
+- Interactive work spends budget on the scene or document, not on rebuilding
+  unchanged surfaces.
+- Potato and desktop budgets cap residency, uploads, and feature cost. They are
+  **work limits**, not a permanent product target to keep FPS low.
+- When the user is interacting and hardware has headroom, **higher real
+  presented FPS is a desired outcome**. Reducing wasted work per frame is what
+  allows presented FPS to rise at equal or lower frame cost.
+
+A real FPS claim still needs the same executable, profile, resolution, scene,
+VSync policy, and multi-metric before/after comparison as any other optimization
+claim. Do not invent FPS from an unlocked counter, a lighter scene than the
+baseline, or a disabled feature the baseline was running.
 
 The ownership boundary is:
 
@@ -170,15 +200,18 @@ uploads, frequent repacks, or unbounded growth.
 weight, size, width, overflow, and line mode. It keeps used slots, marks a
 `dirty_region`, and synchronizes only the changed area. It compacts stale
 entries when stale space justifies a repack and grows in bounded steps when the
-content actually requires it. Images use retained resources, alpha-correct
+content actually requires it. GPU images use retained resources, alpha-correct
 mipmaps, and a byte/entry budget with LRU eviction; images used by the current
-frame are protected to prevent re-upload thrashing.
+frame are protected to prevent re-upload thrashing. The CPU
+`UiSurfaceImageStore` applies its own byte budget with revision-LRU eviction so
+decoded icons and procedural assets cannot grow without bound.
 
 **Expected result:** editing a label does not upload the entire atlas; browsing
 long content does not grow old glyphs without limit or trigger an upload storm.
 
 **Metrics:** requests, reused slots, new slots, overflow, occupancy, dirty
-region, texture bytes, repacks, resident bytes, and image evictions.
+region, texture bytes, repacks, resident bytes, image evictions, and CPU store
+budget/evictions.
 
 **Reference code:**
 
@@ -424,10 +457,13 @@ table containing:
 - uploaded and released bytes.
 
 This is partially implemented: the mesh registry maintains a byte budget and
-LRU eviction, and the RafUI GPU image cache maintains byte/entry budgets,
-protects images used in the current frame, and reports evictions. A global
-ledger shared by meshes, UI, atlas, CAD, and staging is still missing; current
-policies are owner-specific.
+LRU eviction; the RafUI GPU image cache maintains byte/entry budgets, protects
+images used in the current frame, and reports evictions; and the CPU
+`UiSurfaceImageStore` now enforces a byte budget with revision-LRU eviction and
+resident/eviction counters. A `ProcessMemoryLedger` type aggregates mesh, UI
+GPU/CPU image, atlas, and staging residency for audits, but end-to-end wiring
+from every owner into that ledger is still missing; enforcement policies remain
+owner-specific.
 
 Eviction must be incremental. Never clear an entire cache for a small overflow
 when an unpinned LRU resource can be evicted. Transient edit resources must stay
@@ -438,6 +474,8 @@ outside persistent residency.
 - `crates/raf_render/src/ApiGraphicBasic/resource_registry.rs`
 - `crates/raf_render/src/ApiGraphicBasic/device.rs`
 - `crates/raf_render/src/ApiGraphicBasic/ui_surface/gpu_renderer.rs`
+- `crates/raf_render/src/ApiGraphicBasic/ui_surface/images.rs`
+- `crates/raf_render/src/ApiGraphicBasic/memory_ledger.rs`
 
 ### OC-04 - Batching across surfaces [MEASURE_FIRST]
 
@@ -485,6 +523,45 @@ Disk work, discovery, and decoding that can leave the UI thread must do so
 without changing project ownership or creating a second source of truth. The
 loading screen must represent real phases, not an artificial delay.
 
+### OC-07 - Thread inventory and potato thread policy [PARTIAL]
+
+**Problem:** unnamed or unbounded background threads raise process footprint
+and make potato behavior hard to audit.
+
+**Current inventory (all spawned through `thread::Builder` with a stable
+name):**
+
+| Owner | Thread name | Role |
+| --- | --- | --- |
+| `attached.rs` | connection listener + client | attach transport |
+| `electronics_assets.rs` | asset worker | electronics asset load |
+| `electronics_analysis.rs` | `raf-electronics-analysis` | DRC/analysis off UI thread |
+| `native_studio.rs` | `raf-hub-discovery` | hub discovery |
+| `project_catalog.rs` | `raf-project-catalog` (x2) | catalog scan/open |
+| `raf_ai/agent_runtime.rs` | `agent-api-call` | remote agent call |
+| `raf_ai/agent_history.rs` | history worker | history persistence |
+
+**Active rule:** new background work uses `thread::Builder` with a `raf-` or
+domain-prefixed name so Task Manager and crash reports stay attributable.
+
+**Not yet active:** a central spawn gate that pauses or refuses non-critical
+workers under the potato profile, and cancellation on shutdown for every
+worker. Those remain follow-up work once OC-01 baseline shows real thread
+pressure.
+
+**Metrics:** live thread count by name, workers spawned while potato is
+active, and shutdown join failures.
+
+**Reference code:**
+
+- `crates/raf_editor/src/attached.rs`
+- `crates/raf_editor/src/electronics_assets.rs`
+- `crates/raf_editor/src/electronics_analysis.rs`
+- `crates/raf_editor/src/native_studio.rs`
+- `crates/raf_editor/src/project_catalog.rs`
+- `crates/raf_ai/src/agent_runtime.rs`
+- `crates/raf_ai/src/agent_history.rs`
+
 ## Non-regression rules
 
 - ApiGraphicBasic remains the public owner; WGPU does not leak into RafUI,
@@ -501,8 +578,14 @@ loading screen must represent real phases, not an artificial delay.
 - Prepared effects (PBR, shadows, post-processing, particles, and skeletal
   animation) are not activated as part of this campaign without a budget and
   measurement.
-- No FPS gain may be claimed from the displayed counter: a before/after
-  comparison under the same load is required.
+- No FPS gain may be claimed from the displayed counter alone: a before/after
+  comparison under the same load, with CPU, GPU, frame-time, cache, and memory
+  metrics, is required. When that comparison shows higher presented FPS at
+  equal or lower work, report it — higher interactive FPS is a desired product
+  outcome, not a marketing claim to suppress.
+- Work budgets, dynamic resolution, and potato profiles must not be used to
+  justify a permanently low interactive FPS target when frame time and pacing
+  already allow more.
 
 ## Minimum tests per change
 
@@ -548,8 +631,8 @@ frame without making it visible in metrics.
 
 ## Current pass status
 
-The following points were implemented in the modern path during the September
-14, 2026 pass:
+Code-true changes recorded for the September 14, 2026 pass (still
+**window-unverified** for product acceptance and FPS deltas):
 
 - Mesh, line, and overlay uniform reuse with a skipped-upload counter.
 - Retained RafUI geometry and `paint_runs` cache without hashing every quad on
@@ -560,14 +643,27 @@ The following points were implemented in the modern path during the September
   protection for images used by the current frame.
 - Metrics for residency, uploads, evictions, cache hits, and budget overflow.
 
-Budget implementation remains intentionally partial: meshes and images have
-independent enforcement, but the global ledger and cross-family eviction require
-measurements from a real scene before priorities are chosen. Cross-surface
-batching and drag-detail degradation remain `MEASURE_FIRST`; they are not
-enabled by intuition because they could break order, clipping, or input
-feedback.
+Code-true additions from the September 22, 2026 pass (Fase 2/Fase 3 alignment;
+still **window-unverified**):
 
-Automated evidence for this pass:
+- `use_gpu` and potato docs no longer imply a forced CPU backend or a permanent
+  low FPS target; `BackendConfig::potato()` is GPU-first via execution policy.
+- `frame_budget_ms` documented as a quality/work budget, not an FPS cap.
+- CPU `UiSurfaceImageStore` byte budget with revision-LRU eviction,
+  `resident_bytes`/`evictions` metrics, and oversized-image rejection.
+- `ProcessMemoryLedger` aggregation type for OC-03 cross-family residency
+  audits (wiring into every owner still open).
+- OC-07 thread inventory: all listed workers use named `thread::Builder`
+  spawns; a central potato spawn gate remains open.
+
+Budget implementation remains intentionally partial: meshes and images have
+independent enforcement, and the CPU image store now has its own budget, but
+cross-family eviction priorities still require measurements from a real scene
+before they are chosen. Cross-surface batching and drag-detail degradation
+remain `MEASURE_FIRST`; they are not enabled by intuition because they could
+break order, clipping, or input feedback.
+
+Automated evidence for the September 14, 2026 pass:
 
 1. `cargo test -p raf_render --lib --target-dir target_agent_validation` - 241
    tests passed.
@@ -579,5 +675,6 @@ Automated evidence for this pass:
    closed by validation; no immediate crash was observed.
 
 These checks do not replace manual testing with a window, GPU, DPI, scrolling,
-resizing, and loaded scenes. No concrete FPS gain is claimed until that testing
-is performed.
+resizing, and loaded scenes. Until the OC-01 baseline and that manual matrix
+exist for the current checkout, no concrete FPS gain, idle-power claim, or
+product acceptance is claimed for this pass.

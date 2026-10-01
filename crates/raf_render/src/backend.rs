@@ -90,9 +90,10 @@ pub struct BackendConfig {
     /// show a performance warning (not auto-switch).
     pub target_fps_floor: f32,
 
-    /// Frame time budget in milliseconds for rendering.
-    /// CPU painter should finish within this budget per frame.
-    /// If consistently exceeded, the engine reduces detail automatically.
+    /// Work budget in milliseconds for rendering detail.
+    ///
+    /// If consistently exceeded, the engine reduces detail. This is not a
+    /// presentation FPS cap; pacing lives in FrameScheduler / fps_limit.
     pub frame_budget_ms: f32,
 }
 
@@ -142,15 +143,19 @@ impl BackendConfig {
         }
     }
 
-    /// Potato-optimized config: absolute minimum resource usage.
+    /// Potato-optimized config: minimum resource usage on the normal GPU path.
+    ///
+    /// Potato is a work budget, not a forced CPU backend and not a low FPS
+    /// target. Backend still follows `RenderExecutionPolicy` (GPU-first in
+    /// Auto); CPU remains recovery via CpuOnly.
     pub fn potato() -> Self {
         Self {
-            backend: RenderBackend::CpuPainter,
-            gpu_suggest_threshold: 0, // Never suggest GPU
+            backend: RenderBackend::from_execution_policy(RenderExecutionPolicy::Auto),
+            gpu_suggest_threshold: 0, // No auto-switch hint; policy owns the path
             cpu_max_triangles: 2000,
             show_selector: false,
             target_fps_floor: 20.0,
-            frame_budget_ms: 33.0, // 30fps budget
+            frame_budget_ms: 33.0, // quality reduction threshold, not an FPS cap
         }
     }
 }
@@ -217,6 +222,8 @@ mod tests {
         let config = BackendConfig::potato();
         assert_eq!(config.cpu_max_triangles, 2000);
         assert!(!config.show_selector);
+        assert_eq!(config.backend, RenderBackend::GpuWgpu);
+        assert!(config.backend.uses_gpu());
     }
 
     #[test]

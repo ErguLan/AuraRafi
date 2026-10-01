@@ -44,7 +44,19 @@ use crate::editor_layout::{EditorFrameLayout, EditorRect};
 use crate::electronics_controller::{ElectronicsTool, NativeElectronicsEditor};
 use crate::electronics_minimap;
 use crate::panels::ai_chat::{AgentAction, AgentPanel, AgentReadiness};
-use crate::panels::assets_surface::{asset_rows_with_builtins, build_assets_surface};
+use crate::panels::assets_surface::{
+    asset_absolute_path, asset_rows_with_builtins, build_assets_backdrop_surface,
+    build_assets_context_menu_surface, build_assets_create_menu_surface,
+    build_assets_delete_modal_surface, build_assets_file_popover_surface,
+    build_assets_open_modal_surface, build_assets_primitive_popover_surface,
+    build_assets_rename_modal_surface, build_assets_script_popover_surface, build_assets_surface,
+    asset_visible_range, format_row_name, AssetFilter, AssetsMotion, AssetsOperation, AssetsStatus,
+    AssetsSurfaceParams, ASSET_CARD_MIN_VIEWPORT, ASSET_SELECTION_BAR_HEIGHT, ASSET_TOOLBAR_HEIGHT,
+    ASSETS_CONTEXT_MENU_BUILTIN_HEIGHT, ASSETS_CONTEXT_MENU_HEIGHT, ASSETS_CREATE_MENU_HEIGHT,
+    ASSETS_DELETE_MODAL_HEIGHT, ASSETS_FILE_POPOVER_HEIGHT, ASSETS_MENU_WIDTH, ASSETS_MODAL_WIDTH,
+    ASSETS_OPEN_MODAL_HEIGHT, ASSETS_POPOVER_WIDTH, ASSETS_PRIMITIVE_POPOVER_HEIGHT,
+    ASSETS_RENAME_MODAL_HEIGHT, ASSETS_SCRIPT_POPOVER_HEIGHT,
+};
 use crate::panels::assets_surface_host::AssetsSurfaceHost;
 use crate::panels::editor_bottom_dock_host::EditorBottomDockHost;
 use crate::panels::editor_bottom_dock_surface::{
@@ -64,9 +76,9 @@ use crate::panels::hierarchy_surface::{
     build_hierarchy_context_overlay_surface, build_hierarchy_surface,
 };
 use crate::panels::inspector_surface::{
-    build_inspector_surface_with_unit, InspectorDropdown, InspectorTab, InspectorViewState,
+    build_inspector_surface_with_assets, InspectorDropdown, InspectorTab, InspectorViewState,
 };
-use crate::panels::nodes_surface::build_nodes_surface_with_zoom;
+use crate::panels::nodes_surface_host::NodesSurfaceHost;
 use crate::panels::search_surface::{SearchResult, SearchResultKind, SearchSurfaceState};
 use crate::panels::search_surface_host::SearchSurfaceHost;
 use crate::panels::viewport_compass::{
@@ -105,6 +117,10 @@ pub(crate) use settings::{
 const WORKBENCH_CLEAR: [u8; 4] = [0, 0, 0, 0];
 const DEFAULT_PROJECT_NAME: &str = "Untitled Game";
 const AGENT_SCROLL_PROJECTION_STEP: f32 = 96.0;
+const ASSET_OPERATION_TIMEOUT_SECONDS: f64 = 6.0;
+/// Retained scroll view id of the Assets grid. The input layer routes its
+/// `ScrollTo` action with the same constant.
+pub(crate) const ASSETS_GRID_ID: &str = "assets.grid";
 const MAX_ESTIMATED_CAPACITY_FPS: f32 = 10_000.0;
 
 fn next_agent_scroll_projection(current: f32, next: f32) -> Option<f32> {
@@ -214,6 +230,12 @@ pub struct NativeGameWorkbench {
     project_catalog: ProjectCatalog,
     last_catalog_revision: u64,
     assets_surface: AssetsSurfaceHost,
+    assets_menu_motion: UiTween,
+    assets_view_motion: UiTween,
+    assets_highlight_motion: UiTween,
+    assets_filter_key: Option<AssetFilter>,
+    assets_project_root: Option<PathBuf>,
+    assets_scroll_offset: f32,
     console: ConsolePanel,
     palette: StudioUiPalette,
     project_name: String,
@@ -280,6 +302,13 @@ pub struct NativeGameWorkbench {
     hierarchy_menu_target: Option<(SceneNodeId, bool)>,
     hierarchy_menu_position: Option<[f32; 2]>,
     nodes_zoom: f32,
+    /// Canvas pan in world units. The Nodes canvas never grows with the graph,
+    /// so the viewport is panned instead of scrolled.
+    nodes_pan: [f32; 2],
+    /// Cached `[min_x, min_y, width, height]` of the authored graph, used by
+    /// the Fit command so input never walks the graph.
+    nodes_graph_bounds: [f32; 4],
+    nodes_host: NodesSurfaceHost,
     last_node_fingerprint: u64,
     panel_resize: Option<WorkbenchResizeState>,
 }
@@ -332,6 +361,12 @@ impl NativeGameWorkbench {
             project_catalog: ProjectCatalog::default(),
             last_catalog_revision: 0,
             assets_surface: AssetsSurfaceHost::default(),
+            assets_menu_motion: UiTween::new(0.0, UiMotionSpec::dock()),
+            assets_view_motion: UiTween::new(1.0, UiMotionSpec::dock()),
+            assets_highlight_motion: UiTween::new(0.0, UiMotionSpec::dock()),
+            assets_filter_key: None,
+            assets_project_root: None,
+            assets_scroll_offset: 0.0,
             console: ConsolePanel::default(),
             palette,
             project_name: DEFAULT_PROJECT_NAME.to_string(),
@@ -398,6 +433,9 @@ impl NativeGameWorkbench {
             hierarchy_menu_target: None,
             hierarchy_menu_position: None,
             nodes_zoom: 1.0,
+            nodes_pan: [0.0, 0.0],
+            nodes_graph_bounds: [0.0, 0.0, 0.0, 0.0],
+            nodes_host: NodesSurfaceHost::default(),
             last_node_fingerprint: 0,
             panel_resize: None,
         }
@@ -748,6 +786,9 @@ impl NativeGameWorkbench {
         node_graph: &NodeGraph,
         selected_graph_node: Option<NodeId>,
         node_graph_revision: u64,
+        node_can_undo: bool,
+        node_can_redo: bool,
+        node_validation: Option<&crate::native_editor_runtime::NodeGraphValidation>,
         project: Option<&Project>,
         now_seconds: f64,
         compass: ViewportCompassState,
@@ -782,6 +823,10 @@ impl NativeGameWorkbench {
             .set_target(self.agent_panel.sidebar_open.then_some(1.0).unwrap_or(0.0));
         self.agent_motion
             .advance(delta as f32, self.agent_settings.prefers_reduced_motion);
+        self.sync_assets_motion(delta, hierarchy_motion_disabled);
+        self.nodes_host.note_selection(selected_graph_node);
+        self.nodes_host
+            .tick_motion(delta, self.agent_settings.prefers_reduced_motion);
         let hierarchy_fingerprint = scene.document_revision();
         if self.last_hierarchy_fingerprint != hierarchy_fingerprint {
             self.hierarchy_folder_ids = scene
@@ -792,6 +837,7 @@ impl NativeGameWorkbench {
         }
         self.project_catalog
             .sync_project(project.map(|project| project.path.as_path()));
+        self.assets_project_root = project.map(|project| project.path.clone());
         let session_key = project.map(|project| (project.path.clone(), project.project_type));
         if self.inspector_sessions_key != session_key {
             self.inspector_sessions = project
@@ -813,10 +859,15 @@ impl NativeGameWorkbench {
             self.assets_surface.refresh_requested = false;
         }
         let catalog_changed = self.project_catalog.poll();
+        self.verify_assets_operation(now_seconds);
         self.bottom_dock.sync_project_layout(project);
         self.sync_search_surface(layout, scene, project);
         let fingerprint = scene.render_fingerprint();
         let node_fingerprint = node_graph_revision;
+        if self.last_node_fingerprint != node_fingerprint {
+            self.nodes_host.clear_pending_pin();
+            self.nodes_graph_bounds = nodes_graph_bounds(node_graph);
+        }
         let selection_changed = self.last_selection != selected;
         if self.project_type == ProjectType::Game && selection_changed {
             if self.agent_settings.hierarchy_expand_on_select {
@@ -851,7 +902,11 @@ impl NativeGameWorkbench {
             || self.last_catalog_revision != self.project_catalog.revision()
             || !self.menu_motion.is_settled()
             || !self.drag_motion.is_settled()
-            || !self.agent_motion.is_settled();
+            || !self.agent_motion.is_settled()
+            || !self.assets_menu_motion.is_settled()
+            || !self.assets_view_motion.is_settled()
+            || !self.assets_highlight_motion.is_settled()
+            || self.nodes_host.is_animating();
         if !surface_changed {
             if status_fps_changed && self.project_type == ProjectType::Game {
                 self.host
@@ -870,10 +925,41 @@ impl NativeGameWorkbench {
             can_paste,
             node_graph,
             selected_graph_node,
+            node_can_undo,
+            node_can_redo,
+            node_validation,
             project,
             electronics,
         );
         self.host.set_surface(surface);
+        self.host.session_mut().interaction.controls.set_text(
+            "nodes.search",
+            self.nodes_host.query(),
+            128,
+        );
+        // Keep the quick-add filter in sync with the host, and restore it after
+        // the popup is rebuilt so typing is never lost to a surface change.
+        if self.nodes_host.palette_popup().is_some() {
+            self.host
+                .session_mut()
+                .interaction
+                .controls
+                .set_text("nodes.palette-popup.search", self.nodes_host.palette_query(), 64);
+        }
+        if let Some(node) = selected_graph_node.and_then(|id| node_graph.node(id)) {
+            for property in &node.properties {
+                let key = format!("nodes.property.{}.{}", node.id.0, property.key);
+                let value = self
+                    .nodes_host
+                    .property_draft(&key)
+                    .unwrap_or(property.value.as_str());
+                self.host
+                    .session_mut()
+                    .interaction
+                    .controls
+                    .set_text(&key, value, 512);
+            }
+        }
         self.host.session_mut().interaction.controls.set_text(
             "assets.search",
             &self.assets_surface.query,
@@ -941,6 +1027,11 @@ impl NativeGameWorkbench {
             "assets.file-name",
             &self.assets_surface.file_name,
             256,
+        );
+        self.host.session_mut().interaction.controls.set_text(
+            "assets.rename-value",
+            &self.assets_surface.rename_value,
+            128,
         );
         self.host.session_mut().interaction.controls.set_text(
             "console.input",
@@ -1044,8 +1135,16 @@ impl NativeGameWorkbench {
             current
         }
         .clamp(0.0, max_offset);
-        if (next - self.hierarchy_scroll_offset).abs() > f32::EPSILON {
-            self.hierarchy_scroll_offset = next;
+        let scroll_changed = {
+            let controls = &mut self.host.session_mut().interaction.controls;
+            sync_hierarchy_scroll_state(
+                controls,
+                &mut self.hierarchy_scroll_offset,
+                next,
+                max_offset,
+            )
+        };
+        if scroll_changed {
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
     }
@@ -1332,8 +1431,112 @@ impl NativeGameWorkbench {
         !self.menu_motion.is_settled()
             || !self.drag_motion.is_settled()
             || !self.agent_motion.is_settled()
+            || !self.assets_menu_motion.is_settled()
+            || !self.assets_view_motion.is_settled()
+            || !self.assets_highlight_motion.is_settled()
+            || self.nodes_host.is_animating()
             || self.host.has_active_motion()
             || self.viewport_compass.has_active_motion()
+    }
+
+    /// Normalized 0..1 samples shared by the Assets panel and its overlays.
+    fn assets_motion(&self) -> AssetsMotion {
+        AssetsMotion {
+            overlay: self.assets_menu_motion.value(),
+            view: self.assets_view_motion.value(),
+            highlight: self.assets_highlight_motion.value(),
+        }
+    }
+
+    /// Advances every Assets tween from the workbench clock so the panel, its
+    /// overlays and the row highlight share one easing policy.
+    fn sync_assets_motion(&mut self, delta_seconds: f32, reduced_motion: bool) {
+        let overlay_open = self.assets_surface.has_open_overlay();
+        self.assets_menu_motion.set_target(if overlay_open { 1.0 } else { 0.0 });
+        if self.assets_filter_key != Some(self.assets_surface.filter) {
+            self.assets_filter_key = Some(self.assets_surface.filter);
+            self.assets_view_motion.set_immediate(0.0);
+        }
+        self.assets_view_motion.set_target(1.0);
+        if self.assets_surface.highlight_asset.is_some() {
+            let pulse_done =
+                self.assets_highlight_motion.is_settled() && self.assets_highlight_motion.value() >= 1.0;
+            if pulse_done {
+                self.assets_surface.highlight_asset = None;
+                self.assets_highlight_motion.set_target(0.0);
+            } else {
+                self.assets_highlight_motion.set_target(1.0);
+            }
+        } else {
+            self.assets_highlight_motion.set_target(0.0);
+        }
+        self.assets_menu_motion.advance(delta_seconds, reduced_motion);
+        self.assets_view_motion.advance(delta_seconds, reduced_motion);
+        self.assets_highlight_motion
+            .advance(delta_seconds, reduced_motion);
+    }
+
+    /// Records what the panel expects to see in the next catalog and shows the
+    /// pending line while the filesystem work runs. The panel never claims
+    /// success up front: `verify_assets_operation` decides the outcome.
+    fn begin_assets_operation(
+        &mut self,
+        expected_row: String,
+        expect_present: bool,
+        success_key: &'static str,
+        error_key: &'static str,
+    ) {
+        self.assets_surface.operation = Some(AssetsOperation {
+            expected_row,
+            expect_present,
+            started_seconds: self.last_sync_time_seconds,
+            catalog_revision: self.project_catalog.revision(),
+            success_key,
+            error_key,
+        });
+        self.assets_surface.refresh_requested = true;
+        self.assets_surface.status = Some(AssetsStatus::pending(raf_core::i18n::t(
+            "app.assets_status_working",
+            self.agent_panel.language,
+        )));
+    }
+
+    /// Compares the refreshed catalog with the operation the panel is waiting
+    /// for so the status line only reports work the filesystem really did.
+    fn verify_assets_operation(&mut self, now_seconds: f64) {
+        let Some(operation) = self.assets_surface.operation.clone() else {
+            return;
+        };
+        let language = self.agent_panel.language;
+        let revision_changed = self.project_catalog.revision() != operation.catalog_revision;
+        let observed = revision_changed
+            && (self
+                .project_catalog
+                .assets()
+                .iter()
+                .any(|row| *row == operation.expected_row)
+                == operation.expect_present);
+        let timed_out =
+            now_seconds - operation.started_seconds > ASSET_OPERATION_TIMEOUT_SECONDS;
+        if !observed && !timed_out {
+            return;
+        }
+        let row = operation.expected_row.clone();
+        self.assets_surface.operation = None;
+        self.assets_surface.status = Some(if observed {
+            AssetsStatus::success(format_row_name(
+                operation.success_key,
+                &row,
+                language,
+            ))
+        } else {
+            AssetsStatus::error(format_row_name(operation.error_key, &row, language))
+        });
+        if observed {
+            self.assets_surface.highlight_asset = Some(row);
+            self.assets_highlight_motion.set_immediate(0.0);
+        }
+        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
     }
 
     pub fn has_active_text_repeat(&self) -> bool {
@@ -1341,7 +1544,6 @@ impl NativeGameWorkbench {
             || self.viewport_compass.has_active_text_repeat()
             || self.search_surface.has_active_text_repeat()
     }
-
     pub fn needs_ui_frame(&self) -> bool {
         self.toolbar_revision != self.last_toolbar_revision
             || self.agent_panel.has_live_output()
@@ -1736,6 +1938,54 @@ impl NativeGameWorkbench {
         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         settings_changed
     }
+}
+
+/// `[min_x, min_y, width, height]` of every node in world units, including the
+/// implicit fallback positions used by nodes saved without one. Cached by
+/// `sync` so the Fit command never walks the graph from input.
+pub(crate) fn nodes_graph_bounds(graph: &NodeGraph) -> [f32; 4] {
+    let mut min = [f32::MAX, f32::MAX];
+    let mut max = [f32::MIN, f32::MIN];
+    for (index, node) in graph.nodes.iter().enumerate() {
+        let geometry = crate::panels::nodes_canvas::node_geometry(node, index, 1.0);
+        min[0] = min[0].min(geometry.position[0]);
+        min[1] = min[1].min(geometry.position[1]);
+        max[0] = max[0].max(geometry.position[0] + geometry.size[0]);
+        max[1] = max[1].max(geometry.position[1] + geometry.size[1]);
+    }
+    if min[0] > max[0] {
+        return [0.0, 0.0, 0.0, 0.0];
+    }
+    [min[0], min[1], max[0] - min[0], max[1] - min[1]]
+}
+
+fn sync_hierarchy_scroll_state(
+    controls: &mut raf_ui::UiControlState,
+    projection_offset: &mut f32,
+    requested_offset: f32,
+    max_offset: f32,
+) -> bool {
+    const SCROLL_ID: &str = "hierarchy.tree";
+
+    let previous_control_offset = controls.scroll_offset(SCROLL_ID);
+    let previous_projection_offset = *projection_offset;
+    let max_offset = if max_offset.is_finite() {
+        max_offset.max(0.0)
+    } else {
+        0.0
+    };
+    let requested_offset = if requested_offset.is_finite() {
+        requested_offset.clamp(0.0, max_offset)
+    } else {
+        0.0
+    };
+
+    controls.set_scroll_metrics(SCROLL_ID, [0.0, max_offset]);
+    let applied_offset = controls.set_scroll_offset(SCROLL_ID, [0.0, requested_offset]);
+    *projection_offset = applied_offset[1];
+
+    previous_control_offset != applied_offset
+        || (previous_projection_offset - applied_offset[1]).abs() > f32::EPSILON
 }
 
 #[cfg(test)]

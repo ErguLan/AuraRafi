@@ -352,8 +352,9 @@ presentation, prepared scripting preferences, supported AI provider settings,
 Agent mode, and target-platform flags. API keys are represented by transient
 password input state and are redacted from disk when credential persistence is
 disabled. The global console switch remains a capability gate; each project
-keeps its own command permission. Nodes are intentionally not exposed here
-while that product area is being redesigned.
+keeps its own command permission. Nodes-specific execution settings are not
+exposed here; the active Nodes surface owns graph authoring state, while runtime
+settings remain outside the current Play contract.
 
 Settings ownership, draft/save lifecycle, validation boundaries, DPI behavior,
 and the split between app, retained document, host, and ApiGraphicBasic
@@ -411,12 +412,15 @@ the same document for Game and Electronics, while the center canvas stays
 renderer-owned and is never redrawn as a generic UI widget.
 
 The current live editor downbar adapters are the fixed bottom tab strip,
-Console, Assets, Project, and Project Settings. They are rendered by RafUI
-through ApiGraphicBasic and the native compositor. Node Editor,
-Agent, Properties, and Sessions are intentionally not default tabs during this
-stabilization pass; they must be added only when their real bodies and state
-contracts are ready. This keeps the active shell truthful while removing the
-old hand-painted tab controls from the editor chrome.
+Console, Assets, Agent, and Project Settings. Game adds the Nodes tab;
+Electronics adds DRC and Simulation. They are rendered by RafUI through
+ApiGraphicBasic and the native compositor. The Nodes tab is an authoring
+surface for the session graph with its own retained body, Inspector, typed
+connections, and validation; it does not execute graph logic from Play.
+Legacy Project layouts remain readable, while Properties and Sessions stay
+outside the default downbar until their real bodies and state contracts are
+ready. This keeps the active shell truthful while removing the old hand-painted
+tab controls from the editor chrome.
 
 Electronics also uses the retained contextual strip for Schematic and PCB.
 Its intent boundary retains cross-probe selection and PCB synchronization in

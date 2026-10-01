@@ -6,6 +6,7 @@ use glam::Vec4;
 pub struct ClipVertex {
     pub position: Vec4,
     pub shade: f32,
+    pub uv: [f32; 2],
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -38,6 +39,10 @@ pub fn clip_triangle_to_near(input: [ClipVertex; 3]) -> ClippedTriangle {
                 output[output_len] = ClipVertex {
                     position: previous.position + (current.position - previous.position) * t,
                     shade: previous.shade + (current.shade - previous.shade) * t,
+                    uv: [
+                        previous.uv[0] + (current.uv[0] - previous.uv[0]) * t,
+                        previous.uv[1] + (current.uv[1] - previous.uv[1]) * t,
+                    ],
                 };
                 output_len += 1;
             }
@@ -64,6 +69,7 @@ mod tests {
         ClipVertex {
             position: Vec4::new(0.0, 0.0, z, 1.0),
             shade: 1.0,
+            uv: [0.0, 0.0],
         }
     }
 

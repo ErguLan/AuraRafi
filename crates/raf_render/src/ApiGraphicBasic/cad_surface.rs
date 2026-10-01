@@ -159,6 +159,7 @@ pub fn build_cad_surface_frame(
             light_dir: Vec3::Z,
             width,
             height,
+            texture_cache_budget_bytes: 0,
             stats: FrameStats {
                 total_entities: scene.objects.len() as u32,
                 visible_entities,

@@ -29,6 +29,7 @@ pub enum InspectorDropdown {
     Primitive,
     Collider,
     BodyType,
+    Texture,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -145,6 +146,28 @@ pub fn build_inspector_surface_with_unit(
     view: InspectorViewState,
     display_unit: DisplayUnit,
 ) -> UiSurface {
+    build_inspector_surface_with_assets(
+        palette,
+        scene,
+        selected,
+        sessions,
+        transition,
+        view,
+        display_unit,
+        &[],
+    )
+}
+
+pub fn build_inspector_surface_with_assets(
+    palette: StudioUiPalette,
+    scene: &SceneGraph,
+    selected: Option<SceneNodeId>,
+    sessions: &ProjectSessionRegistry,
+    transition: f32,
+    view: InspectorViewState,
+    display_unit: DisplayUnit,
+    project_assets: &[String],
+) -> UiSurface {
     let mut root_style = palette.panel_style();
     root_style.opacity = (0.55 + transition.clamp(0.0, 1.0) * 0.45).clamp(0.0, 1.0);
     let root = UiNode::new("inspector.root", UiNodeKind::Root)
@@ -166,6 +189,7 @@ pub fn build_inspector_surface_with_unit(
             sessions,
             view,
             display_unit,
+            project_assets,
         ));
 
     let mut surface = UiSurface::new("editor.inspector", palette, root);
@@ -337,6 +361,7 @@ fn content(
     sessions: &ProjectSessionRegistry,
     view: InspectorViewState,
     display_unit: DisplayUnit,
+    project_assets: &[String],
 ) -> UiNode {
     if view.tab == InspectorTab::Sessions {
         return sessions_content(palette, sessions);
@@ -466,6 +491,12 @@ fn content(
                 primitive_selected_index,
             ))
             .with_child(section_label(palette, "app.material"))
+            .with_child(texture_dropdown(
+                palette,
+                node.base_color_texture.as_deref(),
+                project_assets,
+                view.dropdown,
+            ))
             .with_child(color_picker(palette, node.color, view.color_picker))
             .with_child(range_labeled(
                 palette,
@@ -546,6 +577,62 @@ fn content(
             ..UiLayout::fill(UiFlow::Column)
         })
         .with_child(scroll)
+}
+
+fn texture_dropdown(
+    palette: StudioUiPalette,
+    current: Option<&str>,
+    project_assets: &[String],
+    open: Option<InspectorDropdown>,
+) -> UiNode {
+    let supported = project_assets
+        .iter()
+        .filter(|asset| is_supported_texture_path(asset))
+        .take(512)
+        .cloned()
+        .collect::<Vec<_>>();
+    let selected = current.unwrap_or_default();
+    let mut options = Vec::with_capacity(supported.len() + 1);
+    options.push(UiSelectOption::new("", "app.no_texture"));
+    options.extend(
+        supported
+            .into_iter()
+            .map(|asset| UiSelectOption::new(asset.clone(), asset)),
+    );
+    let selected_index = options
+        .iter()
+        .position(|option| option.value == selected)
+        .unwrap_or(0);
+    dropdown_field(
+        palette,
+        "inspector.base-color-texture",
+        "app.base_color_texture",
+        InspectorDropdown::Texture,
+        open,
+        options,
+        selected_index,
+    )
+}
+
+fn is_supported_texture_path(value: &str) -> bool {
+    let normalized = value.replace('\\', "/");
+    if normalized.is_empty()
+        || normalized.starts_with('/')
+        || normalized.contains(':')
+        || normalized
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return false;
+    }
+    matches!(
+        std::path::Path::new(&normalized)
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "bmp" | "tga" | "webp")
+    )
 }
 
 pub(crate) fn sessions_content(
@@ -1303,6 +1390,7 @@ fn dropdown_field(
                 flow: UiFlow::Column,
                 gap: 1.0,
                 padding: UiSpacing::same(3.0),
+                overflow: UiOverflow::ScrollY,
                 ..UiLayout::absolute(UiRect::new(0.0, 29.0, 252.0, menu_height)).with_z_index(24)
             });
         for (index, option) in options.iter().enumerate() {
@@ -2588,5 +2676,46 @@ mod tests {
         .expect("active session row should exist");
 
         assert_eq!(row.layout.basis, [0.0, 28.0]);
+    }
+
+    #[test]
+    fn texture_dropdown_lists_only_safe_supported_project_images() {
+        let mut scene = SceneGraph::new();
+        let selected = scene.add_root_with_primitive("Textured", raf_core::scene::Primitive::Cube);
+        let sessions = ProjectSessionRegistry::new(ProjectType::Game);
+        let assets = vec![
+            "textures/albedo.png".to_string(),
+            "notes.txt".to_string(),
+            "../outside.png".to_string(),
+        ];
+        let surface = build_inspector_surface_with_assets(
+            StudioUiPalette::IndustrialDark,
+            &scene,
+            Some(selected),
+            &sessions,
+            1.0,
+            InspectorViewState {
+                dropdown: Some(InspectorDropdown::Texture),
+                ..InspectorViewState::default()
+            },
+            DisplayUnit::Metric,
+            &assets,
+        );
+
+        assert!(find_node(
+            &surface.root,
+            "inspector.base-color-texture.option.textures/albedo.png"
+        )
+        .is_some());
+        assert!(find_node(
+            &surface.root,
+            "inspector.base-color-texture.option.notes.txt"
+        )
+        .is_none());
+        assert!(find_node(
+            &surface.root,
+            "inspector.base-color-texture.option.../outside.png"
+        )
+        .is_none());
     }
 }

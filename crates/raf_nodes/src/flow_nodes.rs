@@ -1,4 +1,4 @@
-use crate::node::{Node, NodeCategory, NodeId, NodePin, PinDataType, PinKind};
+use crate::node::{Node, NodeCategory, NodeId, NodePin, NodeProperty, PinDataType, PinKind};
 use uuid::Uuid;
 
 /// Flow control nodes for the visual scripting engine (v0.4.0)
@@ -51,6 +51,10 @@ impl FlowNodes {
                 },
             ],
             position: [400.0, 300.0],
+            properties: vec![
+                NodeProperty::new("start", "nodes.property.start", "0"),
+                NodeProperty::new("end", "nodes.property.end", "1"),
+            ],
         }
     }
 
@@ -88,6 +92,7 @@ impl FlowNodes {
                 },
             ],
             position: [400.0, 450.0],
+            properties: Vec::new(),
         }
     }
 }

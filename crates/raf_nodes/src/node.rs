@@ -39,12 +39,40 @@ pub enum PinDataType {
 }
 
 /// A connection point on a node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NodePin {
     pub id: Uuid,
     pub name: String,
     pub kind: PinKind,
     pub data_type: PinDataType,
+}
+
+/// A small persisted authoring value owned by a node instance.
+///
+/// The runtime may later interpret these values through the Host API. Keeping
+/// them on the node now makes the Inspector real without coupling RafUI to
+/// execution or introducing a second document model.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NodeProperty {
+    pub key: String,
+    #[serde(default)]
+    pub label_key: String,
+    #[serde(default)]
+    pub value: String,
+}
+
+impl NodeProperty {
+    pub fn new(
+        key: impl Into<String>,
+        label_key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            label_key: label_key.into(),
+            value: value.into(),
+        }
+    }
 }
 
 /// Category of node for the palette/toolbar.
@@ -84,7 +112,7 @@ impl NodeCategory {
 }
 
 /// A visual scripting node.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub id: NodeId,
     pub name: String,
@@ -93,6 +121,9 @@ pub struct Node {
     pub pins: Vec<NodePin>,
     /// Position on the node editor canvas.
     pub position: [f32; 2],
+    /// Optional instance values edited by the native Nodes Inspector.
+    #[serde(default)]
+    pub properties: Vec<NodeProperty>,
 }
 
 impl Node {
@@ -110,6 +141,7 @@ impl Node {
                 data_type: PinDataType::Flow,
             }],
             position: [100.0, 100.0],
+            properties: Vec::new(),
         }
     }
 
@@ -135,6 +167,7 @@ impl Node {
                 },
             ],
             position: [100.0, 200.0],
+            properties: Vec::new(),
         }
     }
 
@@ -166,6 +199,7 @@ impl Node {
                 },
             ],
             position: [300.0, 100.0],
+            properties: vec![NodeProperty::new("message", "nodes.property.message", "")],
         }
     }
 
@@ -203,6 +237,7 @@ impl Node {
                 },
             ],
             position: [300.0, 300.0],
+            properties: Vec::new(),
         }
     }
 
@@ -234,6 +269,7 @@ impl Node {
                 },
             ],
             position: [500.0, 200.0],
+            properties: Vec::new(),
         }
     }
 }

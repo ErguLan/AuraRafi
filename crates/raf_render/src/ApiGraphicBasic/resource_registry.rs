@@ -308,4 +308,23 @@ mod tests {
         assert!(arena.contains(newest));
         assert_eq!(arena.metrics().evictions, 1);
     }
+
+    #[test]
+    fn frame_pinned_resources_survive_cache_admission_pressure() {
+        let mut arena = TextureRegistry::new(16);
+        let visible = arena
+            .insert(1_u8, ResourceAdmission::pinned(8, 1))
+            .expect("visible texture fits");
+        let stale = arena
+            .insert(2_u8, ResourceAdmission::cached(8, 2))
+            .expect("stale texture fits");
+
+        arena
+            .insert(3_u8, ResourceAdmission::cached(8, 3))
+            .expect("new texture evicts the stale entry");
+
+        assert!(arena.contains(visible));
+        assert!(!arena.contains(stale));
+        assert_eq!(arena.metrics().resident_bytes, 16);
+    }
 }

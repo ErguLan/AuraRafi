@@ -35,6 +35,8 @@ pub struct MeshData {
     pub positions: Vec<Vec3>,
     /// Vertex normals in object space (unit length).
     pub normals: Vec<Vec3>,
+    /// Texture coordinates in the mesh's authored UV space.
+    pub uvs: Vec<[f32; 2]>,
     /// Triangle indices (groups of 3, CCW winding).
     pub indices: Vec<u32>,
 }
@@ -45,6 +47,7 @@ impl MeshData {
         Self {
             positions: Vec::new(),
             normals: Vec::new(),
+            uvs: Vec::new(),
             indices: Vec::new(),
         }
     }
@@ -54,6 +57,7 @@ impl MeshData {
         Self {
             positions: Vec::with_capacity(vertex_count),
             normals: Vec::with_capacity(vertex_count),
+            uvs: Vec::with_capacity(vertex_count),
             indices: Vec::with_capacity(index_count),
         }
     }
@@ -70,9 +74,15 @@ impl MeshData {
 
     /// Push a vertex (position + normal). Returns the vertex index.
     pub fn push_vertex(&mut self, position: Vec3, normal: Vec3) -> u32 {
+        self.push_vertex_uv(position, normal, [0.0, 0.0])
+    }
+
+    /// Push a vertex with an authored texture coordinate. Returns its index.
+    pub fn push_vertex_uv(&mut self, position: Vec3, normal: Vec3, uv: [f32; 2]) -> u32 {
         let index = self.positions.len() as u32;
         self.positions.push(position);
         self.normals.push(normal);
+        self.uvs.push(uv);
         index
     }
 
@@ -123,6 +133,9 @@ impl MeshData {
         if self.normals.len() != self.positions.len() {
             return Err("normals.len() != positions.len()");
         }
+        if self.uvs.len() != self.positions.len() {
+            return Err("uvs.len() != positions.len()");
+        }
         if self.indices.len() % 3 != 0 {
             return Err("indices.len() is not a multiple of 3");
         }
@@ -166,6 +179,7 @@ mod tests {
         mesh.push_triangle(a, b, c);
 
         assert_eq!(mesh.vertex_count(), 3);
+        assert_eq!(mesh.uvs.len(), 3);
         assert_eq!(mesh.triangle_count(), 1);
         assert!(mesh.validate().is_ok());
     }

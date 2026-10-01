@@ -69,6 +69,26 @@ impl HierarchyModel {
             self.rebuild(scene);
         }
 
+        // A retained surface can deliver one input event before the next
+        // layout pass has measured its viewport. Keep the virtual projection
+        // valid in that transition instead of allowing an old scroll offset
+        // to point past the cached rows and paint an empty tree.
+        let row_height = if row_height.is_finite() {
+            row_height.max(1.0)
+        } else {
+            DEFAULT_ROW_HEIGHT
+        };
+        let viewport_height = if viewport_height.is_finite() {
+            viewport_height.max(row_height)
+        } else {
+            row_height
+        };
+        let max_scroll_offset = (self.rows.len() as f32 * row_height - viewport_height).max(0.0);
+        let scroll_offset = if scroll_offset.is_finite() {
+            scroll_offset.clamp(0.0, max_scroll_offset)
+        } else {
+            0.0
+        };
         let range = UiVirtualRange::for_vertical_list(
             self.rows.len(),
             scroll_offset,
@@ -239,6 +259,22 @@ mod tests {
             view.rows.first().map(|row| row.name.as_str()),
             Some("Entity 0")
         );
+    }
+
+    #[test]
+    fn projection_clamps_stale_scroll_before_slicing_rows() {
+        let mut scene = SceneGraph::new();
+        let root = scene.add_root("World");
+        for index in 0..20 {
+            scene.add_child(root, &format!("Entity {index}"));
+        }
+
+        let mut model = HierarchyModel::default();
+        let view = model.refresh(&scene, "", false, f32::MAX, 0.0, 26.0);
+
+        assert_eq!(view.total_rows, 21);
+        assert!(!view.rows.is_empty());
+        assert_eq!(view.rows.last().map(|row| row.name.as_str()), Some("Entity 19"));
     }
 
     #[test]

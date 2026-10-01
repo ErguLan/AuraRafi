@@ -621,7 +621,7 @@ fn default_tabs_for_type(project_type: ProjectType) -> Vec<DockTab> {
         DockTab::new("assets", "app.studio_assets", UiIconId::Assets),
     ];
     if project_type == ProjectType::Game {
-        tabs.push(DockTab::new("nodes", "app.nodes", UiIconId::Node));
+        tabs.push(DockTab::new("nodes", "nodes.tab", UiIconId::Node));
     } else {
         tabs.push(DockTab::new("drc", "DRC", UiIconId::Warning));
         tabs.push(DockTab::new("simulation", "Simulation", UiIconId::Play));

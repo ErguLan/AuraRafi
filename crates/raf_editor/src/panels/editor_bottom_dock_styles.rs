@@ -433,7 +433,6 @@ pub(crate) fn bottom_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 UiStylePatch {
                     fill: Some(tokens.surface),
                     border: Some(tokens.border),
-                    border_width: Some(1.0),
                     radius: Some(4.0),
                     text: Some(tokens.text),
                     ..UiStylePatch::default()
@@ -690,7 +689,367 @@ pub(crate) fn bottom_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                     fill: Some([13, 24, 34, 255]),
                     ..UiStylePatch::default()
                 },
-            ),
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-content".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-toolbar".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(0.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-grid".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-breadcrumb".to_string()),
+                UiStylePatch {
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-count".to_string()),
+                UiStylePatch {
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-sidebar-count".to_string()),
+                UiStylePatch {
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-script-languages".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-create-trigger".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent),
+                    border: Some(tokens.accent_hot),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    text: Some([255, 255, 255, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-create-trigger".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent_hot),
+                    border: Some(tokens.accent_hot),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-create-trigger-open".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent_hot),
+                    border: Some(tokens.accent_hot),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-action-busy".to_string()),
+                UiStylePatch {
+                    opacity: Some(0.55),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-chip".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-chip".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-chip-active".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent),
+                    border: Some(tokens.accent_hot),
+                    text: Some([255, 255, 255, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-card-selected".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-card-highlight".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-status".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-status-line".to_string()),
+                UiStylePatch {
+                    radius: Some(3.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-status-pending".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-status-success".to_string()),
+                UiStylePatch {
+                    fill: Some([24, 60, 38, 255]),
+                    border: Some(tokens.positive),
+                    border_width: Some(1.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-status-error".to_string()),
+                UiStylePatch {
+                    fill: Some([74, 26, 30, 255]),
+                    border: Some(tokens.danger),
+                    border_width: Some(1.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-status-action".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-status-action".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.accent),
+                    border: Some(tokens.accent_hot),
+                    text: Some([255, 255, 255, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-file-action".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-file-action".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-primitive-popover-option".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(4.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-primitive-popover-option".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-primitive-cancel".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(2.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-primitive-cancel".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-selection-bar".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-card-action".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(3.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("asset-card-action".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.accent),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-icon-tile".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(4.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-recommended-badge".to_string()),
+                UiStylePatch {
+                    fill: Some([120, 58, 10, 220]),
+                    border: Some([255, 255, 255, 120]),
+                    border_width: Some(1.0),
+                    radius: Some(9.0),
+                    text: Some([255, 255, 255, 255]),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("assets-modal-path".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(4.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
         ],
     }
 }

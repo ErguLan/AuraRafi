@@ -33,15 +33,17 @@ impl AnalysisTask {
         let (sender, receiver) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
         let worker_cancel = Arc::clone(&cancel);
-        thread::spawn(move || {
-            let result = match kind {
-                AnalysisKind::Drc => AnalysisResult::Drc(schematic.run_drc()),
-                AnalysisKind::Simulation => AnalysisResult::Simulation(schematic.simulate_dc()),
-            };
-            if !worker_cancel.load(Ordering::Acquire) {
-                let _ = sender.send(result);
-            }
-        });
+        let _ = thread::Builder::new()
+            .name("raf-electronics-analysis".to_string())
+            .spawn(move || {
+                let result = match kind {
+                    AnalysisKind::Drc => AnalysisResult::Drc(schematic.run_drc()),
+                    AnalysisKind::Simulation => AnalysisResult::Simulation(schematic.simulate_dc()),
+                };
+                if !worker_cancel.load(Ordering::Acquire) {
+                    let _ = sender.send(result);
+                }
+            });
         Self {
             kind,
             cancel,

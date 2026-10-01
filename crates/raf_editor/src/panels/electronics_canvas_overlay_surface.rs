@@ -10,15 +10,18 @@ use glam::Vec2;
 use raf_electronics::{CadObject, CadObjectKind};
 use raf_render::api_graphic_basic::ui_surface::{StudioUiPalette, UiSurface};
 use raf_ui::{
-    UiFlow, UiFontWeight, UiImage, UiImageFit, UiImageSource, UiLayout, UiNode, UiNodeKind,
-    UiOverflow, UiRect, UiStyle, UiTextRole, UiTextStyle,
+    UiAccessibilityRole, UiAlign, UiFlow, UiFontWeight, UiImage, UiImageFit, UiImageSource,
+    UiJustify, UiLayout, UiNode, UiNodeKind, UiOverflow, UiRect, UiStyle, UiTextOverflow,
+    UiTextRole, UiTextStyle, UiTokens,
 };
 
 use crate::editor_layout::EditorRect;
 use crate::electronics_controller::{
     ElectronicsSelectionKind, ElectronicsTool, NativeElectronicsEditor,
 };
-use crate::electronics_minimap::IMAGE_KEY as MINIMAP_IMAGE_KEY;
+use crate::electronics_minimap::{
+    self, HEADER_HEIGHT, IMAGE_KEY as MINIMAP_IMAGE_KEY, surface_label_key,
+};
 
 const LABEL_HEIGHT: f32 = 18.0;
 const LABEL_GAP: f32 = 4.0;
@@ -27,8 +30,14 @@ const MAX_LABEL_WIDTH: f32 = 180.0;
 const COMPONENT_Z_INDEX: i16 = 0;
 const COMPONENT_PREVIEW_Z_INDEX: i16 = 4;
 const MINIMAP_Z_INDEX: i16 = 5;
+const MINIMAP_HEADER_Z_INDEX: i16 = 6;
+const MINIMAP_CONTENT_Z_INDEX: i16 = 7;
 const LABEL_Z_INDEX: i16 = 10;
 const HINT_Z_INDEX: i16 = 20;
+const MINIMAP_PAD: f32 = 6.0;
+const MINIMAP_HEADER_PAD: f32 = 8.0;
+const BADGE_HEIGHT: f32 = 16.0;
+const BADGE_MIN_WIDTH: f32 = 34.0;
 
 /// Builds only the labels that are visible in the current CAD camera.
 ///
@@ -82,7 +91,7 @@ pub fn build_electronics_canvas_overlay_surface(
                 format!("electronics.canvas.component-image.{index}"),
                 UiImage {
                     source: UiImageSource::new(asset_key),
-                    fit: UiImageFit::Contain,
+                fit: UiImageFit::Stretch,
                     tint: is_placement_preview.then_some([255, 255, 255, 156]),
                 },
             )
@@ -178,18 +187,7 @@ pub fn build_electronics_canvas_overlay_surface(
         }
     }
 
-    let minimap_rect = crate::electronics_minimap::overlay_rect(canvas_size);
-    root = root.with_child(
-        UiNode::image(
-            "electronics.canvas.minimap",
-            UiImage {
-                source: UiImageSource::new(MINIMAP_IMAGE_KEY),
-                fit: UiImageFit::Contain,
-                tint: None,
-            },
-        )
-        .with_layout(UiLayout::absolute(minimap_rect).with_z_index(MINIMAP_Z_INDEX)),
-    );
+    root = root.with_child(build_minimap_chrome(tokens, editor, canvas_size));
 
     let hint_width: f32 = 320.0;
     let hint_height: f32 = 28.0;
@@ -240,6 +238,153 @@ fn tool_hint_key(tool: ElectronicsTool) -> &'static str {
     }
 }
 
+/// Builds the retained minimap chrome: panel shell, header with surface
+/// badge, raster preview, and empty state. Hit-testing uses the full panel
+/// rect; world mapping uses only the inner image rect.
+fn build_minimap_chrome(
+    tokens: UiTokens,
+    editor: &NativeElectronicsEditor,
+    canvas_size: Vec2,
+) -> UiNode {
+    let panel = electronics_minimap::overlay_rect(canvas_size);
+    let image = electronics_minimap::image_rect(canvas_size);
+    let mut panel_node = UiNode::new("electronics.canvas.minimap", UiNodeKind::Panel)
+        .with_class("electronics-minimap")
+        .with_layout(UiLayout::absolute(panel).with_z_index(MINIMAP_Z_INDEX))
+        .with_style(UiStyle {
+            fill: tokens.surface_raised,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: 4.0,
+            opacity: 0.98,
+        })
+        .with_tooltip_key("electronics.minimap.tooltip")
+        .with_accessibility_label_key("electronics.minimap.tooltip")
+        .with_accessibility_role(UiAccessibilityRole::Status);
+
+    let header = UiNode::new("electronics.canvas.minimap.header", UiNodeKind::Toolbar)
+        .with_class("electronics-minimap-header")
+        .with_layout(
+            UiLayout::absolute(UiRect::new(
+                panel.x,
+                panel.y,
+                panel.width,
+                HEADER_HEIGHT,
+            ))
+            .with_z_index(MINIMAP_HEADER_Z_INDEX),
+        )
+        .with_style(UiStyle {
+            fill: tokens.surface_alt,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 0.0,
+            radius: 4.0,
+            opacity: 1.0,
+        })
+        .with_child(
+            UiNode::new("electronics.canvas.minimap.title", UiNodeKind::Label)
+                .with_layout(UiLayout::absolute(UiRect::new(
+                    panel.x + MINIMAP_HEADER_PAD,
+                    panel.y + 4.0,
+                    (panel.width - BADGE_MIN_WIDTH - MINIMAP_HEADER_PAD * 3.0).max(1.0),
+                    HEADER_HEIGHT - 8.0,
+                )))
+                .with_text_key("app.electronics_minimap")
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_text_style(UiTextStyle {
+                    role: UiTextRole::Label,
+                    size_px: 11.0,
+                    line_height_px: HEADER_HEIGHT - 8.0,
+                    weight: UiFontWeight::Medium,
+                    color: tokens.text,
+                    inherit_color: false,
+                }),
+        )
+        .with_child(build_surface_badge(tokens, editor, panel));
+    panel_node = panel_node.with_child(header);
+
+    panel_node = panel_node.with_child(
+        UiNode::image(
+            "electronics.canvas.minimap.image",
+            UiImage {
+                source: UiImageSource::new(MINIMAP_IMAGE_KEY),
+                fit: UiImageFit::Contain,
+                tint: None,
+            },
+        )
+        .with_layout(UiLayout::absolute(image).with_z_index(MINIMAP_CONTENT_Z_INDEX)),
+    );
+
+    if !electronics_minimap::has_document_content(editor.scene()) {
+        panel_node = panel_node.with_child(
+            UiNode::new("electronics.canvas.minimap.empty", UiNodeKind::Label)
+                .with_layout(
+                    UiLayout::absolute(UiRect::new(
+                        image.x,
+                        image.y + image.height * 0.5 - 10.0,
+                        image.width,
+                        20.0,
+                    ))
+                    .with_z_index(MINIMAP_CONTENT_Z_INDEX)
+                    .with_text_safe_area(true),
+                )
+                .with_text_key("app.schematic_empty")
+                .with_text_style(UiTextStyle {
+                    role: UiTextRole::Body,
+                    size_px: 11.0,
+                    line_height_px: 20.0,
+                    weight: UiFontWeight::Regular,
+                    color: tokens.text_muted,
+                    inherit_color: false,
+                }),
+        );
+    }
+
+    panel_node
+}
+
+fn build_surface_badge(tokens: UiTokens, editor: &NativeElectronicsEditor, panel: UiRect) -> UiNode {
+    let label_key = surface_label_key(editor.active_surface());
+    let badge_width = BADGE_MIN_WIDTH.max(panel.width * 0.28);
+    UiNode::new("electronics.canvas.minimap.badge", UiNodeKind::Panel)
+        .with_layout(
+            UiLayout {
+                flow: UiFlow::Row,
+                align_items: UiAlign::Center,
+                justify_content: UiJustify::Center,
+                ..UiLayout::absolute(UiRect::new(
+                    panel.x + panel.width - badge_width - MINIMAP_PAD,
+                    panel.y + (HEADER_HEIGHT - BADGE_HEIGHT) * 0.5,
+                    badge_width,
+                    BADGE_HEIGHT,
+                ))
+            },
+        )
+        .with_style(UiStyle {
+            fill: tokens.accent,
+            border: tokens.accent_hot,
+            text: [18, 18, 20, 255],
+            border_width: 1.0,
+            radius: 3.0,
+            opacity: 1.0,
+        })
+        .with_child(
+            UiNode::new("electronics.canvas.minimap.badge.label", UiNodeKind::Label)
+                .with_text_key(label_key)
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_text_style(UiTextStyle {
+                    role: UiTextRole::Label,
+                    size_px: 9.0,
+                    line_height_px: BADGE_HEIGHT - 2.0,
+                    weight: UiFontWeight::Bold,
+                    color: [18, 18, 20, 255],
+                    inherit_color: false,
+                }),
+        )
+        .with_accessibility_label_key(label_key)
+}
+
 fn label_anchor(object: &CadObject) -> Option<Vec2> {
     match object.kind {
         CadObjectKind::Component => object
@@ -282,5 +427,54 @@ mod tests {
         assert_eq!(surface.root.kind, UiNodeKind::Overlay);
         assert_eq!(surface.root.layout.overflow, UiOverflow::Clip);
         assert!(surface.root.layout.rect.is_none());
+    }
+
+    #[test]
+    fn minimap_chrome_exposes_header_image_and_empty_state() {
+        let editor = NativeElectronicsEditor::empty("test");
+        let surface = build_electronics_canvas_overlay_surface(
+            StudioUiPalette::IndustrialDark,
+            &editor,
+            EditorRect::new(0.0, 0.0, 640.0, 480.0),
+        );
+
+        let panel = surface
+            .root
+            .find("electronics.canvas.minimap")
+            .expect("minimap panel");
+        assert_eq!(panel.kind, UiNodeKind::Panel);
+        assert_eq!(
+            panel.tooltip_key.as_deref(),
+            Some("electronics.minimap.tooltip")
+        );
+        assert!(panel
+            .children
+            .iter()
+            .any(|child| child.id == "electronics.canvas.minimap.header"));
+        assert!(panel
+            .children
+            .iter()
+            .any(|child| child.id == "electronics.canvas.minimap.image"));
+        assert!(panel
+            .children
+            .iter()
+            .any(|child| child.id == "electronics.canvas.minimap.empty"));
+        let panel_rect = panel.layout.rect.expect("panel rect");
+        let header_rect = panel.children[0].layout.rect.expect("header rect");
+        assert_eq!(
+            header_rect,
+            UiRect::new(panel_rect.x, panel_rect.y, panel_rect.width, HEADER_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn minimap_image_rect_sits_below_header_and_inside_panel() {
+        let size = Vec2::new(640.0, 480.0);
+        let panel = electronics_minimap::overlay_rect(size);
+        let image = electronics_minimap::image_rect(size);
+        assert!(image.y >= panel.y + HEADER_HEIGHT - f32::EPSILON);
+        assert!(image.x >= panel.x - f32::EPSILON);
+        assert!(image.x + image.width <= panel.x + panel.width + f32::EPSILON);
+        assert!(image.y + image.height <= panel.y + panel.height + f32::EPSILON);
     }
 }

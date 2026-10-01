@@ -1,4 +1,4 @@
-use crate::node::{Node, NodeCategory, NodeId, NodePin, PinDataType, PinKind};
+use crate::node::{Node, NodeCategory, NodeId, NodePin, NodeProperty, PinDataType, PinKind};
 use uuid::Uuid;
 
 /// Math and Comparison nodes for v0.4.0 visual scripting
@@ -40,6 +40,10 @@ impl MathNodes {
                 },
             ],
             position: [500.0, 400.0],
+            properties: vec![
+                NodeProperty::new("a", "nodes.property.a", "0"),
+                NodeProperty::new("b", "nodes.property.b", "0"),
+            ],
         }
     }
 }

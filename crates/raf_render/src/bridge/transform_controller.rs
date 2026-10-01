@@ -5,11 +5,19 @@
 
 use glam::{Mat4, Vec3};
 
-use raf_core::scene::graph::{SceneGraph, SceneNodeId};
+use raf_core::scene::graph::{Primitive, SceneGraph, SceneNodeId};
 
 use crate::gizmo::{GizmoAxis, GizmoMode, GizmoState};
 use crate::math::transform;
 use crate::picking;
+
+fn enabled_scale_axes(primitive: Primitive) -> [bool; 3] {
+    if primitive == Primitive::Plane {
+        [true, false, true]
+    } else {
+        [true; 3]
+    }
+}
 
 #[derive(Debug)]
 pub struct ViewportTransformController {
@@ -145,7 +153,7 @@ impl ViewportTransformController {
             self.hover_scale_sign = 0.0;
             return;
         };
-        let Some(_) = scene.get(id) else {
+        let Some(node) = scene.get(id) else {
             self.gizmo.active_axis = GizmoAxis::None;
             self.hover_scale_sign = 0.0;
             return;
@@ -172,11 +180,12 @@ impl ViewportTransformController {
                 vp_h,
             ),
             GizmoMode::Scale => {
-                let hit = picking::pick_gizmo_scale_handle_scaled_oriented(
+                let hit = picking::pick_gizmo_scale_handle_scaled_oriented_for_axes(
                     pointer_local,
                     entity_pos,
                     entity_scale,
                     entity_axes,
+                    enabled_scale_axes(node.primitive),
                     presentation_scale,
                     view_proj,
                     vp_w,
@@ -224,6 +233,7 @@ impl ViewportTransformController {
         let Some(node) = scene.get(id) else {
             return;
         };
+        let scale_axes = enabled_scale_axes(node.primitive);
         let world = scene.world_matrix(id);
         let entity_pos = world.col(3).truncate();
         let (entity_axes, entity_scale) = picking::gizmo_scale_basis(world);
@@ -250,11 +260,12 @@ impl ViewportTransformController {
                 vp_h,
             ),
             GizmoMode::Scale => {
-                let picked = picking::pick_gizmo_scale_handle_scaled_oriented(
+                let picked = picking::pick_gizmo_scale_handle_scaled_oriented_for_axes(
                     pointer_local,
                     entity_pos,
                     entity_scale,
                     entity_axes,
+                    scale_axes,
                     presentation_scale,
                     view_proj,
                     vp_w,
@@ -271,10 +282,10 @@ impl ViewportTransformController {
                     self.hover_scale_sign.signum()
                 };
                 let hovered = match self.gizmo.active_axis {
-                    GizmoAxis::X => Some((0, 0.0, hover_sign)),
-                    GizmoAxis::Y => Some((1, 0.0, hover_sign)),
-                    GizmoAxis::Z => Some((2, 0.0, hover_sign)),
-                    GizmoAxis::None => None,
+                    GizmoAxis::X if scale_axes[0] => Some((0, 0.0, hover_sign)),
+                    GizmoAxis::Y if scale_axes[1] => Some((1, 0.0, hover_sign)),
+                    GizmoAxis::Z if scale_axes[2] => Some((2, 0.0, hover_sign)),
+                    GizmoAxis::None | GizmoAxis::X | GizmoAxis::Y | GizmoAxis::Z => None,
                 };
                 let hit = hovered.or(picked);
                 self.drag_scale_sign = hit.map(|(_, _, sign)| sign).unwrap_or(1.0);

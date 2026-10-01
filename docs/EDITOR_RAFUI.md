@@ -197,8 +197,9 @@ tambien aplica al panel nuevo y se documenta la migracion.
 Toda opcion debe tener estado draft, aplicar/cancelar y persistencia coherente
 con el host actual. Las preferencias de Game y Electronics se separan en la
 UI cuando su dominio difiere; el grid y snap compartidos siguen siendo
-preferencias del editor. Nodes queda fuera de este contrato mientras se
-rediseña su producto. No se agrega una opcion solo para ocultar un bug de
+preferencias del editor. Nodes participa en este contrato como superficie de
+autoría retained: su documento se describe en `docs/NODES_SYSTEM.md` y sus
+mutaciones pasan por el runtime/comando nativo. No se agrega una opcion solo para ocultar un bug de
 layout que debe corregirse en la superficie o el host.
 
 ## Interaccion y foco

@@ -160,7 +160,17 @@ pub const GIZMO_LENGTH: f32 = 1.2;
 pub const GIZMO_ROTATION_RADIUS: f32 = 1.35;
 
 /// Base radius of scale handles in screen pixels.
-pub const GIZMO_SCALE_HANDLE_RADIUS: f32 = 8.0;
+pub const GIZMO_SCALE_HANDLE_RADIUS: f32 = 9.0;
+
+/// On-screen length of a translate arrow, in pixels.
+///
+/// The editor keeps the gizmo at a constant apparent size by scaling the world
+/// geometry until its projected length matches this target, so arrows stay
+/// grabbable whether the camera is one unit away or two hundred.
+pub const GIZMO_TARGET_TRANSLATE_PIXELS: f32 = 104.0;
+
+/// On-screen radius of a rotation ring, in pixels.
+pub const GIZMO_TARGET_ROTATE_PIXELS: f32 = 96.0;
 
 /// World-space gap between a scale handle and the selected object's face.
 ///
@@ -177,9 +187,44 @@ pub const GIZMO_SCALE_HANDLE_PICK_PADDING: f32 = 12.0;
 /// Resolve the visible and interactive scale-handle radius for the current
 /// camera distance. The lower bound keeps handles comfortable up close, while
 /// the cap prevents a distant camera from producing oversized controls.
-pub fn gizmo_scale_handle_radius(presentation_scale: f32) -> f32 {
-    let distance_growth = (presentation_scale.max(1.0) * 0.32).clamp(1.0, 1.8);
-    GIZMO_SCALE_HANDLE_RADIUS * distance_growth
+pub fn gizmo_scale_handle_radius(_presentation_scale: f32) -> f32 {
+    // Constant screen size: the handle no longer shrinks with camera distance.
+    // Growth is expressed through the ring/arrow size instead.
+    GIZMO_SCALE_HANDLE_RADIUS
+}
+
+/// Pixels covered by one world unit at `point`, measured through the real
+/// projection instead of a hardcoded field of view.
+///
+/// The probe follows the body diagonal so the measurement stays valid for any
+/// camera orientation, and it returns `0.0` when the point is not projectable.
+pub fn pixels_per_world_unit(
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+    point: Vec3,
+) -> f32 {
+    // The largest of the three projected axes is the local scale that is not
+    // foreshortened. Measuring a fixed direction instead would collapse on the
+    // common three-quarter view, where one axis points at the camera, and the
+    // gizmo would blow up exactly when the user looks at it head-on.
+    const STEP: f32 = 0.5;
+    let Some(anchor) = project_to_screen(point, view_proj, vp_w, vp_h) else {
+        return 0.0;
+    };
+    let mut best = 0.0_f32;
+    for axis in [Vec3::X, Vec3::Y, Vec3::Z] {
+        let Some(offset) = project_to_screen(point + axis * STEP, view_proj, vp_w, vp_h) else {
+            continue;
+        };
+        let dx = offset[0] - anchor[0];
+        let dy = offset[1] - anchor[1];
+        let pixels = (dx * dx + dy * dy).sqrt() / STEP;
+        if pixels.is_finite() {
+            best = best.max(pixels);
+        }
+    }
+    best
 }
 
 /// Invisible screen-space radius for translate-arrow picking. The shaft stays
@@ -276,6 +321,27 @@ pub fn project_gizmo_scale_handles_oriented(
     vp_w: f32,
     vp_h: f32,
 ) -> Vec<GizmoScaleHandle> {
+    project_gizmo_scale_handles_oriented_for_axes(
+        entity_pos,
+        entity_scale,
+        entity_axes,
+        [true; 3],
+        view_proj,
+        vp_w,
+        vp_h,
+    )
+}
+
+/// Project scale handles only for enabled local axes.
+pub fn project_gizmo_scale_handles_oriented_for_axes(
+    entity_pos: Vec3,
+    entity_scale: Vec3,
+    entity_axes: [Vec3; 3],
+    enabled_axes: [bool; 3],
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Vec<GizmoScaleHandle> {
     let handles = [
         (0usize, 1.0f32),
         (0usize, -1.0f32),
@@ -288,6 +354,9 @@ pub fn project_gizmo_scale_handles_oriented(
     handles
         .iter()
         .filter_map(|(axis_index, sign)| {
+            if !enabled_axes[*axis_index] {
+                return None;
+            }
             let world_position = gizmo_scale_handle_world_position(
                 entity_pos,
                 entity_scale,
@@ -474,14 +543,40 @@ pub fn pick_gizmo_scale_handle_scaled_oriented(
     vp_w: f32,
     vp_h: f32,
 ) -> Option<(usize, f32, f32)> {
+    pick_gizmo_scale_handle_scaled_oriented_for_axes(
+        click,
+        entity_pos,
+        entity_scale,
+        entity_axes,
+        [true; 3],
+        presentation_scale,
+        view_proj,
+        vp_w,
+        vp_h,
+    )
+}
+
+/// Hit-test only the projected scale handles for enabled local axes.
+pub fn pick_gizmo_scale_handle_scaled_oriented_for_axes(
+    click: [f32; 2],
+    entity_pos: Vec3,
+    entity_scale: Vec3,
+    entity_axes: [Vec3; 3],
+    enabled_axes: [bool; 3],
+    presentation_scale: f32,
+    view_proj: &Mat4,
+    vp_w: f32,
+    vp_h: f32,
+) -> Option<(usize, f32, f32)> {
     let pick_radius =
         gizmo_scale_handle_radius(presentation_scale) + GIZMO_SCALE_HANDLE_PICK_PADDING;
     let mut best: Option<(usize, f32, f32)> = None;
 
-    for handle in project_gizmo_scale_handles_oriented(
+    for handle in project_gizmo_scale_handles_oriented_for_axes(
         entity_pos,
         entity_scale,
         entity_axes,
+        enabled_axes,
         view_proj,
         vp_w,
         vp_h,
@@ -784,6 +879,7 @@ fn intersect_ray_sphere(origin: Vec3, dir: Vec3, center: Vec3, radius: f32) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::camera::Camera;
     use glam::Quat;
 
     #[test]
@@ -845,6 +941,49 @@ mod tests {
         assert!(handles[1].center[0] < 300.0);
         assert!(handles[2].center[1] < 225.0);
         assert!(handles[3].center[1] > 375.0);
+    }
+
+    #[test]
+    fn plane_scale_handles_exclude_the_zero_extent_normal_axis() {
+        let entity_axes = [Vec3::X, Vec3::Y, Vec3::Z];
+        let all_handles = project_gizmo_scale_handles_oriented(
+            Vec3::ZERO,
+            Vec3::splat(0.5),
+            entity_axes,
+            &Mat4::IDENTITY,
+            800.0,
+            600.0,
+        );
+        let normal_handle = all_handles
+            .iter()
+            .find(|handle| handle.axis_index == 1)
+            .expect("the unrestricted gizmo includes its Y handles");
+        let plane_axes = [true, false, true];
+
+        let handles = project_gizmo_scale_handles_oriented_for_axes(
+            Vec3::ZERO,
+            Vec3::splat(0.5),
+            entity_axes,
+            plane_axes,
+            &Mat4::IDENTITY,
+            800.0,
+            600.0,
+        );
+        let picked_normal = pick_gizmo_scale_handle_scaled_oriented_for_axes(
+            normal_handle.center,
+            Vec3::ZERO,
+            Vec3::splat(0.5),
+            entity_axes,
+            plane_axes,
+            1.0,
+            &Mat4::IDENTITY,
+            800.0,
+            600.0,
+        );
+
+        assert_eq!(handles.len(), 4);
+        assert!(handles.iter().all(|handle| handle.axis_index != 1));
+        assert!(picked_normal.is_none());
     }
 
     #[test]
@@ -917,5 +1056,115 @@ mod tests {
 
         let delta = wrapped_angle_delta(first, second);
         assert!((delta - 2.0f32.to_radians()).abs() < 1e-4);
+    }
+
+    /// A translate arrow must land on the same pixel length whether the camera
+    /// sits next to the object or far away from it.
+    ///
+    /// The editor solves `presentation_scale` from the measured
+    /// pixels-per-world-unit, so this test pins the contract that scale formula
+    /// depends on: same target pixels at any distance.
+    #[test]
+    fn a_solved_presentation_scale_keeps_the_arrow_the_same_size_on_screen() {
+        let (width, height) = (1280.0_f32, 720.0_f32);
+        let mut lengths = Vec::new();
+
+        for distance in [3.0_f32, 40.0, 300.0] {
+            let camera = Camera {
+                position: Vec3::new(distance * 0.6, distance * 0.5, distance * 0.6),
+                target: Vec3::ZERO,
+                ..Camera::default()
+            };
+            let view_proj = camera.view_projection(width, height);
+            let pixels_per_unit = pixels_per_world_unit(&view_proj, width, height, Vec3::ZERO);
+            assert!(pixels_per_unit > 0.0, "distance {distance}");
+
+            let scale = (GIZMO_TARGET_TRANSLATE_PIXELS / (GIZMO_LENGTH * pixels_per_unit))
+                .clamp(0.02, 60.0);
+            let arrow = project_gizmo_arrow_scaled(
+                Vec3::ZERO,
+                &GIZMO_ARROWS[0],
+                scale,
+                &view_proj,
+                width,
+                height,
+            )
+            .expect("arrow projects");
+
+            let dx = arrow.head_tip[0] - arrow.start[0];
+            let dy = arrow.head_tip[1] - arrow.start[1];
+            lengths.push((dx * dx + dy * dy).sqrt());
+        }
+
+        // A single world scale cannot cancel perspective exactly, so the
+        // contract is "constant within a small band", not "pixel perfect".
+        for length in &lengths {
+            let error = (length - GIZMO_TARGET_TRANSLATE_PIXELS).abs();
+            assert!(
+                error <= GIZMO_TARGET_TRANSLATE_PIXELS * 0.1,
+                "expected about {GIZMO_TARGET_TRANSLATE_PIXELS} px, measured {length}"
+            );
+        }
+        let spread = lengths.iter().cloned().fold(0.0_f32, f32::max)
+            - lengths.iter().cloned().fold(f32::INFINITY, f32::min);
+        assert!(
+            spread <= GIZMO_TARGET_TRANSLATE_PIXELS * 0.1,
+            "arrow size must not depend on camera distance, spread was {spread} px"
+        );
+    }
+
+    /// A ring radius solved the same way keeps the rotation gizmo usable from
+    /// any distance instead of collapsing into the object silhouette.
+    #[test]
+    fn a_solved_presentation_scale_keeps_the_rotation_ring_constant_on_screen() {
+        let (width, height) = (1280.0_f32, 720.0_f32);
+        for distance in [2.0_f32, 60.0, 400.0] {
+            let camera = Camera {
+                position: Vec3::new(distance * 0.5, distance * 0.4, distance * 0.7),
+                target: Vec3::ZERO,
+                ..Camera::default()
+            };
+            let view_proj = camera.view_projection(width, height);
+            let pixels_per_unit = pixels_per_world_unit(&view_proj, width, height, Vec3::ZERO);
+            let scale = (GIZMO_TARGET_ROTATE_PIXELS / (GIZMO_ROTATION_RADIUS * pixels_per_unit))
+                .clamp(0.02, 60.0);
+            let radius_world = GIZMO_ROTATION_RADIUS * scale;
+
+            let Some(anchor) = project_to_screen(Vec3::ZERO, &view_proj, width, height) else {
+                panic!("origin projects at {distance}");
+            };
+            // The scale comes from the least foreshortened axis, so the ring
+            // radius is measured on the three basis axes and the largest one
+            // must land on the target. The others stay shorter by perspective,
+            // which is the correct projection behaviour.
+            let mut largest: f32 = 0.0;
+            for edge in [
+                Vec3::new(radius_world, 0.0, 0.0),
+                Vec3::new(0.0, radius_world, 0.0),
+                Vec3::new(0.0, 0.0, radius_world),
+            ] {
+                let Some(point) = project_to_screen(edge, &view_proj, width, height) else {
+                    continue;
+                };
+                let dx = point[0] - anchor[0];
+                let dy = point[1] - anchor[1];
+                largest = largest.max((dx * dx + dy * dy).sqrt());
+            }
+            assert!(
+                (largest - GIZMO_TARGET_ROTATE_PIXELS).abs() <= GIZMO_TARGET_ROTATE_PIXELS * 0.1,
+                "distance {distance}: expected about {GIZMO_TARGET_ROTATE_PIXELS} px, measured {largest}"
+            );
+        }
+    }
+
+    /// Scale handles are screen-space already, so their radius must not drift
+    /// with the presentation scale anymore.
+    #[test]
+    fn scale_handles_keep_a_constant_pixel_radius() {
+        assert_eq!(
+            gizmo_scale_handle_radius(0.2),
+            gizmo_scale_handle_radius(12.0)
+        );
+        assert_eq!(gizmo_scale_handle_radius(1.0), GIZMO_SCALE_HANDLE_RADIUS);
     }
 }

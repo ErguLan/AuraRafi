@@ -131,8 +131,16 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 * `src/panels/hierarchy_model.rs`, `hierarchy_surface.rs`: Scene tree model and
   retained hierarchy surface.
 * `src/panels/inspector_surface.rs`: Selected-node forms and transform commits.
-* `src/panels/editor_bottom_dock_surface.rs`: Console, Assets, Project and
-  Agent bottom-dock surfaces.
+* `src/panels/editor_bottom_dock_surface.rs`: Bottom-dock chrome, tab strip,
+  splitter and context-menu surfaces. Panel content is split into focused
+  surfaces, including Console, Assets, Project, Nodes and Agent.
+* `src/panels/nodes_surface.rs`: Retained Nodes authoring surface for the
+  session-scoped graph.
+* `src/panels/nodes_canvas.rs`: Nodes grid, typed-pin geometry and wire paint
+  helpers using ordinary RafUI quads.
+* `src/panels/nodes_catalog.rs`, `nodes_surface_host.rs`: UI catalog mapping
+  and transient query/property/pin interaction state.
+* `src/nodes_history.rs`: Bounded authoring-only graph undo/redo history.
 * `src/panels/primitive_create.rs`, `search_surface.rs`,
   `viewport_toolbar_surface.rs`: focused retained authoring surfaces.
 
@@ -198,8 +206,11 @@ recoverable through version history and the stabilization archive.
 * `src/pcb/layout.rs`: Tracks footprint offsets, layers, drill holes, and routes airwires.
 
 #### 6. `raf_nodes` (Visual Scripting)
-* `src/node.rs`: Struct definition for pins and parameters.
-* `src/compiler.rs` & `src/executor.rs`: Compiles graphs and runs visual scripting flows.
+* `src/node.rs`: Struct definition for pins, categories, and persisted authoring properties.
+* `src/catalog.rs`: Stable built-in node descriptors and factories shared by Game and Electronics authoring.
+* `src/graph.rs`: Session graph, checked connections, and authoring diagnostics.
+* `src/compiler.rs`: Current validation-only compiler boundary; it does not execute or emit runtime code.
+* `src/executor.rs`: Prepared runtime infrastructure, outside the active native Play contract.
 
 #### 7. `raf_script` (Scripting Runtime + Host API)
 * `src/host_api.rs`: `ScriptContext`, `InputSnapshot`, `AudioCommandQueue`, `TimeInfo`. The single entry point for all script execution.

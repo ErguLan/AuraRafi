@@ -129,6 +129,11 @@ an alternative UI ownership path, and it must not be removed blindly.
   quality preset.
 - PBR, shadows, post-processing, skeletal animation, and particles must reuse
   the same resource, frame graph, and budget contracts.
+- Work budgets and idle-zero-work keep AuraRafi a light companion process. They
+  are not a permanent low FPS target: interactive headroom may raise presented
+  FPS when frame time and pacing allow. Performance claims need multi-metric
+  before/after evidence, never the HUD FPS counter alone. Campaign rules:
+  `docs/Optimization_USECASES.md`.
 
 ### Scene viewport integrity (implemented 2026-07-19)
 

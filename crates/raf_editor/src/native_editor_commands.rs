@@ -107,6 +107,30 @@ fn parse_node_color(value: &str) -> Option<raf_core::scene::NodeColor> {
     ))
 }
 
+fn validate_project_texture_path(value: &str) -> Option<Option<String>> {
+    if value.is_empty() {
+        return Some(None);
+    }
+    let normalized = value.replace('\\', "/");
+    if normalized.starts_with('/')
+        || normalized.contains(':')
+        || normalized
+            .split('/')
+            .any(|component| component.is_empty() || matches!(component, "." | ".."))
+    {
+        return None;
+    }
+    let extension = std::path::Path::new(&normalized)
+        .extension()
+        .and_then(|extension| extension.to_str())?
+        .to_ascii_lowercase();
+    matches!(
+        extension.as_str(),
+        "png" | "jpg" | "jpeg" | "bmp" | "tga" | "webp"
+    )
+    .then_some(Some(normalized))
+}
+
 fn parse_collider_type(value: &str) -> Option<raf_core::scene::ColliderType> {
     match value.trim().to_ascii_lowercase().as_str() {
         "none" => Some(raf_core::scene::ColliderType::None),
@@ -495,6 +519,19 @@ pub(crate) fn apply_workbench_intents(
                             });
                         }
                     }
+                } else if let Some(raw) = command.strip_prefix("inspector.base-color-texture:") {
+                    if let Some((raw_id, raw_path)) = raw.split_once(':') {
+                        if let Ok(id) = raw_id.parse::<usize>() {
+                            if let Some(path) = validate_project_texture_path(raw_path) {
+                                let id = SceneNodeId(id);
+                                runtime.mutate_scene(scene, |scene| {
+                                    if let Some(node) = scene.get_mut(id) {
+                                        node.base_color_texture = path;
+                                    }
+                                });
+                            }
+                        }
+                    }
                 } else if let Some(raw_id) = command.strip_prefix("inspector.visibility:") {
                     if let Ok(id) = raw_id.parse::<usize>() {
                         let id = SceneNodeId(id);
@@ -715,6 +752,7 @@ pub(crate) fn apply_workbench_intents(
                     if let Some(project) = project {
                         if let Err(error) = create_asset_script(&project.path, language, &name) {
                             tracing::warn!(%error, "native asset script creation failed");
+                            console_outputs.push(CommandOutput::error("Create script", error));
                         }
                     }
                 } else if let Some(raw) = command.strip_prefix("assets.create-file:") {
@@ -725,11 +763,172 @@ pub(crate) fn apply_workbench_intents(
                             .and_then(|_| std::fs::write(&path, ""))
                         {
                             tracing::warn!(%error, path = %path.display(), "native asset file creation failed");
+                            console_outputs.push(CommandOutput::error("Create file", error.to_string()));
                         }
                     }
-                } else if let Some(slug) = command.strip_prefix("nodes.add.") {
-                    if let Some(node) = node_from_slug(slug) {
+                } else if let Some(raw) = command.strip_prefix("assets.rename:") {
+                    let (row, new_name) = match raw.split_once(':') {
+                        Some((row, new_name)) => (row, new_name),
+                        None => (raw, ""),
+                    };
+                    if let Some(project) = project {
+                        if let Err(error) = rename_asset_file(&project.path, row, new_name) {
+                            tracing::warn!(%error, row, "native asset rename failed");
+                            console_outputs.push(CommandOutput::error("Rename asset", error));
+                        }
+                    }
+                } else if let Some(row) = command.strip_prefix("assets.duplicate:") {
+                    if let Some(project) = project {
+                        if let Err(error) = duplicate_asset_file(&project.path, row) {
+                            tracing::warn!(%error, row, "native asset duplication failed");
+                            console_outputs.push(CommandOutput::error("Duplicate asset", error));
+                        }
+                    }
+                } else if let Some(row) = command.strip_prefix("assets.delete:") {
+                    if let Some(project) = project {
+                        if let Err(error) = delete_asset_file(&project.path, row) {
+                            tracing::warn!(%error, row, "native asset deletion failed");
+                            console_outputs.push(CommandOutput::error("Delete asset", error));
+                        }
+                    }
+                } else if let Some(row) = command.strip_prefix("assets.reveal:") {
+                    if let Some(path) = project.and_then(|project| asset_absolute_path_of(&project.path, row)) {
+                        if !crate::script_support::open_path_in_file_manager(&path) {
+                            console_outputs.push(CommandOutput::error(
+                                "Show in file manager",
+                                "the system file manager could not be opened".to_string(),
+                            ));
+                        }
+                    }
+                } else if let Some(row) = command.strip_prefix("assets.open.manager:") {
+                    if let Some(path) = project.and_then(|project| asset_absolute_path_of(&project.path, row)) {
+                        if !crate::script_support::open_path_in_file_manager(&path) {
+                            console_outputs.push(CommandOutput::error(
+                                "Show in file manager",
+                                "the system file manager could not be opened".to_string(),
+                            ));
+                        }
+                    }
+                } else if let Some(row) = command.strip_prefix("assets.open.with:") {
+                    if let Some(path) = project.and_then(|project| asset_absolute_path_of(&project.path, row)) {
+                        if !crate::script_support::open_with_system_dialog(&path) {
+                            console_outputs.push(CommandOutput::error(
+                                "Open with",
+                                "no system application chooser is available".to_string(),
+                            ));
+                        }
+                    }
+                } else if let Some(row) = command.strip_prefix("assets.open.editor:") {
+                    match project.and_then(|project| asset_absolute_path_of(&project.path, row)) {
+                        Some(path) if crate::script_support::open_script_in_external_editor(&path) => {}
+                        _ => console_outputs.push(CommandOutput::error(
+                            "Open in editor",
+                            "no external editor could be launched for this asset".to_string(),
+                        )),
+                    }
+                } else if let Some(row) = command.strip_prefix("assets.open.yoll:") {
+                    let path = project.and_then(|project| asset_absolute_path_of(&project.path, row));
+                    if !crate::script_support::open_in_yoll_ide(path.as_deref()) {
+                        console_outputs.push(CommandOutput::error(
+                            "Open in Yoll IDE",
+                            "Yoll IDE is not installed; its documentation was opened instead"
+                                .to_string(),
+                        ));
+                    }
+                } else if let Some(raw) = command.strip_prefix("nodes.add.at:") {
+                    // Quick-add from the canvas palette: the spawn point is
+                    // already in world units and snapped by the host. This must
+                    // be tested before the plain `nodes.add.` prefix.
+                    let mut parts = raw.split(':');
+                    let (Some(slug), Some(raw_x), Some(raw_y)) =
+                        (parts.next(), parts.next(), parts.next())
+                    else {
+                        continue;
+                    };
+                    if let (Some(mut node), (Ok(x), Ok(y))) = (
+                        raf_nodes::catalog::create(slug),
+                        (
+                            raw_x.trim().parse::<f32>(),
+                            raw_y.trim().parse::<f32>(),
+                        ),
+                    ) {
+                        if x.is_finite() && y.is_finite() {
+                            node.position = [x, y];
+                        }
                         runtime.add_graph_node(node);
+                    }
+                } else if let Some(slug) = command.strip_prefix("nodes.add.") {
+                    if let Some(node) = raf_nodes::catalog::create(slug) {
+                        runtime.add_graph_node(node);
+                    }
+                } else if let Some(raw) = command.strip_prefix("nodes.connect:") {
+                    let mut parts = raw.splitn(4, ':');
+                    let (
+                        Some(raw_first_node),
+                        Some(raw_first_pin),
+                        Some(raw_second_node),
+                        Some(raw_second_pin),
+                    ) = (parts.next(), parts.next(), parts.next(), parts.next())
+                    else {
+                        continue;
+                    };
+                    let parsed = (
+                        uuid::Uuid::parse_str(raw_first_node),
+                        uuid::Uuid::parse_str(raw_first_pin),
+                        uuid::Uuid::parse_str(raw_second_node),
+                        uuid::Uuid::parse_str(raw_second_pin),
+                    );
+                    if let (Ok(first_node), Ok(first_pin), Ok(second_node), Ok(second_pin)) = parsed
+                    {
+                        if let Err(error) = runtime.connect_graph_pins(
+                            raf_nodes::NodeId(first_node),
+                            first_pin,
+                            raf_nodes::NodeId(second_node),
+                            second_pin,
+                        ) {
+                            tracing::warn!(%error, "native node connection rejected");
+                        }
+                    }
+                } else if let Some(raw) = command.strip_prefix("nodes.disconnect.") {
+                    if let Ok(connection_id) = uuid::Uuid::parse_str(raw) {
+                        runtime.disconnect_graph_connection(connection_id);
+                    }
+                } else if let Some(raw) = command.strip_prefix("nodes.disconnect_all.") {
+                    if let Ok(node_id) = uuid::Uuid::parse_str(raw) {
+                        let node_id = raf_nodes::NodeId(node_id);
+                        let connections_to_remove: Vec<uuid::Uuid> = runtime
+                            .node_graph()
+                            .connections
+                            .iter()
+                            .filter(|c| c.from_node == node_id || c.to_node == node_id)
+                            .map(|c| c.id)
+                            .collect();
+                        for conn_id in connections_to_remove {
+                            runtime.disconnect_graph_connection(conn_id);
+                        }
+                    }
+                } else if let Some(raw) = command.strip_prefix("nodes.duplicate.") {
+                    if let Ok(node_id) = uuid::Uuid::parse_str(raw) {
+                        let node_id = raf_nodes::NodeId(node_id);
+                        if let Some(node) = runtime.node_graph().node(node_id).cloned() {
+                            let mut duplicate = node.clone();
+                            duplicate.id = raf_nodes::NodeId::new();
+                            duplicate.position = [node.position[0] + 28.0, node.position[1] + 28.0];
+                            for pin in &mut duplicate.pins {
+                                pin.id = uuid::Uuid::new_v4();
+                            }
+                            runtime.add_graph_node(duplicate);
+                        }
+                    }
+                } else if let Some(raw) = command.strip_prefix("nodes.property.set:") {
+                    let mut parts = raw.splitn(3, ':');
+                    let (Some(raw_node), Some(key), Some(value)) =
+                        (parts.next(), parts.next(), parts.next())
+                    else {
+                        continue;
+                    };
+                    if let Ok(node_id) = uuid::Uuid::parse_str(raw_node) {
+                        runtime.update_graph_node_property(raf_nodes::NodeId(node_id), key, value);
                     }
                 } else if let Some(raw) = command.strip_prefix("nodes.drag.start:") {
                     let mut parts = raw.split(':');
@@ -771,10 +970,18 @@ pub(crate) fn apply_workbench_intents(
                     }
                 } else if command == "nodes.new-graph" {
                     runtime.reset_graph();
+                } else if command == "nodes.undo" {
+                    runtime.undo_node_graph();
+                } else if command == "nodes.redo" {
+                    runtime.redo_node_graph();
+                } else if command == "nodes.clear-selection" {
+                    runtime.clear_graph_selection();
                 } else if command == "nodes.compile" {
+                    let success = runtime.validate_node_graph();
                     tracing::info!(
                         nodes = runtime.node_graph().nodes.len(),
                         links = runtime.node_graph().connections.len(),
+                        success,
                         "native node graph validation requested"
                     );
                 } else {
@@ -786,34 +993,143 @@ pub(crate) fn apply_workbench_intents(
     (console_outputs, saved_document)
 }
 
-fn node_from_slug(slug: &str) -> Option<raf_nodes::Node> {
-    Some(match slug {
-        "on-start" => raf_nodes::Node::on_start(),
-        "on-update" => raf_nodes::Node::on_update(),
-        "print" => raf_nodes::Node::print_action(),
-        "if" => raf_nodes::Node::if_branch(),
-        "add" => raf_nodes::Node::add_math(),
-        "for-loop" => raf_nodes::flow_nodes::FlowNodes::for_loop(),
-        "while-loop" => raf_nodes::flow_nodes::FlowNodes::while_loop(),
-        "greater-than" => raf_nodes::math_nodes::MathNodes::compare(">"),
-        "less-than" => raf_nodes::math_nodes::MathNodes::compare("<"),
-        "equals" => raf_nodes::math_nodes::MathNodes::compare("=="),
-        "spawn-entity" => raf_nodes::entity_nodes::EntityNodes::spawn_entity(),
-        "destroy-entity" => raf_nodes::entity_nodes::EntityNodes::destroy_entity(),
-        "set-position" => raf_nodes::entity_nodes::EntityNodes::set_position(),
-        "key-press" => raf_nodes::input_nodes::InputNodes::key_press(),
-        "mouse-click" => raf_nodes::input_nodes::InputNodes::mouse_click(),
-        "delay" => raf_nodes::input_nodes::InputNodes::timer_delay(),
-        _ => return None,
-    })
-}
-
 fn sanitize_asset_name(value: &str) -> String {
     let value = value.trim();
     let sanitized: String = value
         .chars()
         .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
         .take(64)
+        .collect();
+    if sanitized.is_empty() {
+        "new_asset".to_string()
+    } else {
+        sanitized
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Assets rows: one convention shared by the filesystem work and the panel
+// expectation the workbench verifies against the next catalog.
+// ---------------------------------------------------------------------------
+
+/// Folder and extension a script creation publishes for `language`.
+fn asset_script_target(language: &str) -> (&'static str, &'static str) {
+    match language {
+        "rust" => ("scripts", "rs"),
+        "cpp" => ("scripts", "cpp"),
+        _ => ("scripts", "rhai"),
+    }
+}
+
+/// Catalog row a script creation would publish.
+pub(crate) fn asset_script_row(language: &str, name: &str) -> String {
+    let (folder, extension) = asset_script_target(language);
+    format!("{folder}/{}.{extension}", sanitize_asset_name(name))
+}
+
+/// Catalog row a plain file creation would publish.
+pub(crate) fn asset_file_row(name: &str) -> String {
+    format!("{}.txt", sanitize_asset_name(name))
+}
+
+/// Catalog row a rename would publish, keeping the file in its current folder.
+pub(crate) fn asset_rename_row(row: &str, new_name: &str) -> String {
+    match row.rsplit_once('/') {
+        Some((folder, _)) => format!("{folder}/{new_name}"),
+        None => new_name.to_string(),
+    }
+}
+
+/// Catalog row a duplication would publish, appending `_copy` to the stem.
+pub(crate) fn asset_duplicate_row(row: &str) -> String {
+    let (folder, file_name) = match row.rsplit_once('/') {
+        Some((folder, file_name)) => (folder, file_name),
+        None => ("", row),
+    };
+    let (stem, extension) = match file_name.rsplit_once('.') {
+        Some((stem, extension)) => (stem, Some(extension)),
+        None => (file_name, None),
+    };
+    let duplicated = match extension {
+        Some(extension) => format!("{stem}_copy.{extension}"),
+        None => format!("{stem}_copy"),
+    };
+    if folder.is_empty() {
+        duplicated
+    } else {
+        format!("{folder}/{duplicated}")
+    }
+}
+
+/// Absolute path of a catalog row, or `None` for virtual built-in rows.
+pub(crate) fn asset_absolute_path_of(
+    project_root: &std::path::Path,
+    row: &str,
+) -> Option<std::path::PathBuf> {
+    if row.starts_with("builtin://") {
+        return None;
+    }
+    Some(project_root.join("assets").join(row))
+}
+
+/// Renames an asset file to a new name inside its current folder.
+pub(crate) fn rename_asset_file(
+    project_root: &std::path::Path,
+    row: &str,
+    new_name: &str,
+) -> Result<(), String> {
+    let source = asset_absolute_path_of(project_root, row).ok_or("builtin asset has no file")?;
+    if !source.is_file() {
+        return Err(format!("asset not found: {}", source.display()));
+    }
+    let sanitized = sanitize_asset_file_name(new_name);
+    let target = source.with_file_name(&sanitized);
+    if target == source {
+        return Err("the new name matches the current name".to_string());
+    }
+    if target.exists() {
+        return Err(format!("asset already exists: {}", target.display()));
+    }
+    std::fs::rename(&source, &target).map_err(|error| error.to_string())
+}
+
+/// Copies an asset file next to itself with a `_copy` suffix.
+pub(crate) fn duplicate_asset_file(
+    project_root: &std::path::Path,
+    row: &str,
+) -> Result<(), String> {
+    let source = asset_absolute_path_of(project_root, row).ok_or("builtin asset has no file")?;
+    if !source.is_file() {
+        return Err(format!("asset not found: {}", source.display()));
+    }
+    let target_row = asset_duplicate_row(row);
+    let target = asset_absolute_path_of(project_root, &target_row)
+        .ok_or("duplicate target is not a file")?;
+    if target.exists() {
+        return Err(format!("asset already exists: {}", target.display()));
+    }
+    std::fs::copy(&source, &target).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Deletes an asset file from the project.
+pub(crate) fn delete_asset_file(project_root: &std::path::Path, row: &str) -> Result<(), String> {
+    let target = asset_absolute_path_of(project_root, row).ok_or("builtin asset has no file")?;
+    if !target.is_file() {
+        return Err(format!("asset not found: {}", target.display()));
+    }
+    std::fs::remove_file(&target).map_err(|error| error.to_string())
+}
+
+/// Keeps a user-typed file name but rejects separators and reserved characters.
+fn sanitize_asset_file_name(value: &str) -> String {
+    let value = value.trim();
+    let sanitized: String = value
+        .chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.' | ' ')
+        })
+        .take(96)
         .collect();
     if sanitized.is_empty() {
         "new_asset".to_string()
@@ -861,5 +1177,49 @@ pub(crate) fn parse_primitive_slug(value: &str) -> Option<Primitive> {
         "plane" | "floor" => Some(Primitive::Plane),
         "cylinder" => Some(Primitive::Cylinder),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asset_rows_follow_the_catalog_convention_shared_with_the_panel() {
+        assert_eq!(asset_script_row("rust", "player"), "scripts/player.rs");
+        assert_eq!(asset_script_row("cpp", "level"), "scripts/level.cpp");
+        assert_eq!(asset_script_row("rhai", "loop"), "scripts/loop.rhai");
+        assert_eq!(asset_file_row("data"), "data.txt");
+        assert_eq!(
+            asset_rename_row("scripts/player.rs", "hero.rs"),
+            "scripts/hero.rs"
+        );
+        assert_eq!(asset_rename_row("notes.txt", "readme.txt"), "readme.txt");
+    }
+
+    #[test]
+    fn asset_creation_rows_sanitize_the_typed_name() {
+        assert_eq!(asset_file_row("../evil name"), "evilname.txt");
+        assert_eq!(asset_script_row("rust", "  "), "scripts/new_asset.rs");
+    }
+
+    #[test]
+    fn asset_duplicate_rows_append_copy_to_the_stem() {
+        assert_eq!(
+            asset_duplicate_row("scripts/player.rs"),
+            "scripts/player_copy.rs"
+        );
+        assert_eq!(asset_duplicate_row("notes.txt"), "notes_copy.txt");
+        assert_eq!(asset_duplicate_row("README"), "README_copy");
+    }
+
+    #[test]
+    fn builtin_rows_never_resolve_to_a_file_on_disk() {
+        let root = std::path::Path::new("C:/project");
+        assert!(asset_absolute_path_of(root, "builtin://primitive/cube").is_none());
+        assert_eq!(
+            asset_absolute_path_of(root, "scripts/player.rs"),
+            Some(std::path::PathBuf::from("C:/project/assets/scripts/player.rs"))
+        );
     }
 }

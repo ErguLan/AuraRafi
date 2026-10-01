@@ -3,11 +3,12 @@
 //! Winit feeds an `InputSnapshot`; RafUI surfaces and the active canvas share
 //! this router, while ApiGraphicBasic owns frame pacing and composition.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use raf_core::config::EngineSettings;
-use raf_core::project::ProjectType;
+use raf_core::project::{ProjectSettings, ProjectType, ViewportResolutionMode};
 use raf_core::scene::SceneGraph;
 use raf_core::{InputRouter, InputSnapshot, Revision, UndoToken};
 use raf_render::api_graphic_basic::{
@@ -20,6 +21,7 @@ use crate::editor_command_registry::{EditorCommandAvailability, EditorCommandReg
 use crate::editor_layout::{
     EditorFrameLayout, EditorLayoutRequest, EDITOR_DOCK_MAX_HEIGHT, EDITOR_DOCK_MIN_HEIGHT,
 };
+use crate::nodes_history::NodeGraphHistory;
 use crate::panels::viewport_controller::{NativeGameViewportController, NativeViewportUpdate};
 use crate::scene_history::SceneHistory;
 
@@ -61,6 +63,9 @@ pub struct NativeEditorRuntime {
     node_graph_revision: u64,
     selected_graph_node: Option<raf_nodes::NodeId>,
     node_drag: Option<(raf_nodes::NodeId, [f32; 2], [f32; 2])>,
+    node_drag_before: Option<raf_nodes::NodeGraph>,
+    node_graph_history: NodeGraphHistory,
+    node_validation: Option<NodeGraphValidation>,
 }
 
 #[derive(Clone)]
@@ -74,6 +79,16 @@ struct AttachedSceneUndo {
     revision_after: Revision,
     before: SceneGraph,
     after_fingerprint: u64,
+}
+
+/// Last authoring validation report shown by the Nodes surface.
+///
+/// It contains diagnostics only. Keeping it in the editor runtime makes the
+/// result available to the retained surface without enabling node execution.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct NodeGraphValidation {
+    pub errors: Vec<raf_nodes::graph::GraphDiagnostic>,
+    pub warnings: Vec<raf_nodes::graph::GraphDiagnostic>,
 }
 
 impl NativeEditorRuntime {
@@ -109,6 +124,9 @@ impl NativeEditorRuntime {
             node_graph_revision: 1,
             selected_graph_node: None,
             node_drag: None,
+            node_drag_before: None,
+            node_graph_history: NodeGraphHistory::default(),
+            node_validation: None,
         }
     }
 
@@ -124,6 +142,18 @@ impl NativeEditorRuntime {
         self.node_graph_revision
     }
 
+    pub fn node_validation(&self) -> Option<&NodeGraphValidation> {
+        self.node_validation.as_ref()
+    }
+
+    pub fn can_undo_node_graph(&self) -> bool {
+        self.node_graph_history.can_undo()
+    }
+
+    pub fn can_redo_node_graph(&self) -> bool {
+        self.node_graph_history.can_redo()
+    }
+
     fn advance_node_graph_revision(&mut self) {
         self.node_graph_revision = self.node_graph_revision.wrapping_add(1).max(1);
     }
@@ -132,6 +162,9 @@ impl NativeEditorRuntime {
         self.node_graph = graph;
         self.selected_graph_node = None;
         self.node_drag = None;
+        self.node_drag_before = None;
+        self.node_graph_history.clear();
+        self.node_validation = None;
         self.advance_node_graph_revision();
         self.request_document_frame();
     }
@@ -147,26 +180,43 @@ impl NativeEditorRuntime {
     }
 
     pub fn add_graph_node(&mut self, node: raf_nodes::Node) {
+        let before = self.node_graph.clone();
         let id = self.node_graph.add_node(node);
         self.selected_graph_node = Some(id);
+        self.node_graph_history
+            .checkpoint(&before, &self.node_graph);
+        self.node_validation = None;
         self.advance_node_graph_revision();
         self.request_document_frame();
     }
 
     pub fn delete_graph_node(&mut self, id: raf_nodes::NodeId) {
+        if self.node_graph.node(id).is_none() {
+            return;
+        }
+        let before = self.node_graph.clone();
         self.node_graph.remove_node(id);
         self.node_drag = None;
+        self.node_drag_before = None;
         if self.selected_graph_node == Some(id) {
             self.selected_graph_node = None;
         }
+        self.node_graph_history
+            .checkpoint(&before, &self.node_graph);
+        self.node_validation = None;
         self.advance_node_graph_revision();
         self.request_document_frame();
     }
 
     pub fn reset_graph(&mut self) {
+        let before = self.node_graph.clone();
         self.node_graph = raf_nodes::NodeGraph::new("Main");
         self.selected_graph_node = None;
         self.node_drag = None;
+        self.node_drag_before = None;
+        self.node_graph_history
+            .checkpoint(&before, &self.node_graph);
+        self.node_validation = None;
         self.advance_node_graph_revision();
         self.request_document_frame();
     }
@@ -185,6 +235,7 @@ impl NativeEditorRuntime {
             self.selected_graph_node = Some(id);
             self.advance_node_graph_revision();
         }
+        self.node_drag_before = Some(self.node_graph.clone());
         self.node_drag = Some((id, pointer, origin_position));
         self.request_ui_frame();
     }
@@ -208,7 +259,131 @@ impl NativeEditorRuntime {
 
     pub fn end_graph_node_drag(&mut self) {
         self.node_drag = None;
+        if let Some(before) = self.node_drag_before.take() {
+            let changed = before != self.node_graph;
+            self.node_graph_history
+                .checkpoint(&before, &self.node_graph);
+            if changed {
+                self.node_validation = None;
+                self.request_document_frame();
+                return;
+            }
+        }
         self.request_ui_frame();
+    }
+
+    pub fn connect_graph_pins(
+        &mut self,
+        first_node: raf_nodes::NodeId,
+        first_pin: uuid::Uuid,
+        second_node: raf_nodes::NodeId,
+        second_pin: uuid::Uuid,
+    ) -> Result<(), String> {
+        let before = self.node_graph.clone();
+        match self
+            .node_graph
+            .try_connect(first_node, first_pin, second_node, second_pin)
+        {
+            Ok(_connection_id) => {
+                self.node_graph_history
+                    .checkpoint(&before, &self.node_graph);
+                self.node_validation = None;
+                self.advance_node_graph_revision();
+                self.request_document_frame();
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn disconnect_graph_connection(&mut self, connection_id: uuid::Uuid) {
+        if !self
+            .node_graph
+            .connections
+            .iter()
+            .any(|connection| connection.id == connection_id)
+        {
+            return;
+        }
+        let before = self.node_graph.clone();
+        self.node_graph.disconnect(connection_id);
+        self.node_graph_history
+            .checkpoint(&before, &self.node_graph);
+        self.node_validation = None;
+        self.advance_node_graph_revision();
+        self.request_document_frame();
+    }
+
+    pub fn update_graph_node_property(
+        &mut self,
+        node_id: raf_nodes::NodeId,
+        key: &str,
+        value: &str,
+    ) {
+        let before = self.node_graph.clone();
+        if !self.node_graph.set_node_property(node_id, key, value) {
+            return;
+        }
+        self.node_graph_history
+            .checkpoint(&before, &self.node_graph);
+        self.selected_graph_node = Some(node_id);
+        self.node_validation = None;
+        self.advance_node_graph_revision();
+        self.request_document_frame();
+    }
+
+    pub fn clear_graph_selection(&mut self) {
+        if self.selected_graph_node.take().is_some() {
+            self.node_drag = None;
+            self.node_drag_before = None;
+            self.advance_node_graph_revision();
+            self.request_ui_frame();
+        }
+    }
+
+    pub fn undo_node_graph(&mut self) -> bool {
+        let Some(previous) = self.node_graph_history.undo(&self.node_graph) else {
+            return false;
+        };
+        self.node_graph = previous;
+        self.selected_graph_node = None;
+        self.node_drag = None;
+        self.node_drag_before = None;
+        self.node_validation = None;
+        self.advance_node_graph_revision();
+        self.request_document_frame();
+        true
+    }
+
+    pub fn redo_node_graph(&mut self) -> bool {
+        let Some(next) = self.node_graph_history.redo(&self.node_graph) else {
+            return false;
+        };
+        self.node_graph = next;
+        self.selected_graph_node = None;
+        self.node_drag = None;
+        self.node_drag_before = None;
+        self.node_validation = None;
+        self.advance_node_graph_revision();
+        self.request_document_frame();
+        true
+    }
+
+    pub fn validate_node_graph(&mut self) -> bool {
+        let result = raf_nodes::compiler::compile(&self.node_graph);
+        let success = result.success;
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+        for diagnostic in result.diagnostics {
+            match diagnostic.severity {
+                raf_nodes::graph::GraphDiagnosticSeverity::Error => errors.push(diagnostic),
+                raf_nodes::graph::GraphDiagnosticSeverity::Warning => warnings.push(diagnostic),
+            }
+        }
+        self.node_validation = Some(NodeGraphValidation { errors, warnings });
+        self.advance_node_graph_revision();
+        self.request_ui_frame();
+        success
     }
 
     pub fn input_router(&self) -> &InputRouter {
@@ -795,6 +970,28 @@ impl NativeEditorRuntime {
         self.graphics.set_frame_pacing_profile(profile);
         self.dynamic_resolution
             .reset(self.graphics.scheduler().budget());
+    }
+
+    /// Applies project-local viewport options on top of the global engine policy.
+    pub fn apply_project_settings(&mut self, settings: &ProjectSettings) {
+        self.game_viewport.apply_project_settings(settings);
+        let (min_scale, max_scale) = settings.viewport_resolution.resolution_range();
+        if self.dynamic_resolution.set_resolution_limits(
+            min_scale,
+            max_scale,
+            settings.viewport_resolution == ViewportResolutionMode::Efficient,
+        ) {
+            self.dynamic_resolution
+                .reset(self.graphics.scheduler().budget());
+            self.graphics.request_frame(FrameInvalidation::EXPLICIT);
+        }
+    }
+
+    pub fn set_project_asset_root(&mut self, project_root: Option<&Path>) {
+        self.game_viewport.set_project_asset_root(project_root);
+        self.cached_game_canvas = None;
+        self.graphics
+            .request_frame(FrameInvalidation::ASSET_UPLOAD | FrameInvalidation::EXPLICIT);
     }
 
     pub fn apply_engine_settings(

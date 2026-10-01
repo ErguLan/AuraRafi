@@ -3,8 +3,11 @@
 //! Project settings are deliberately separate from engine settings. They are
 //! serialized with the active project and never modify global preferences.
 
-use raf_core::config::{RenderPreset, ScriptExecutionMode, ScriptLanguage};
-use raf_core::project::{BuildingStyle, Project, ProjectType};
+use raf_core::config::{ScriptExecutionMode, ScriptLanguage};
+use raf_core::project::{
+    BuildingStyle, GeometryDetailMode, Project, ProjectType, TextureQualityMode,
+    ViewportResolutionMode,
+};
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAction, UiAlign, UiCompactMode, UiEventBinding, UiEventKind, UiFlow,
     UiLayout, UiNode, UiNodeKind, UiOverflow, UiRange, UiScrollAxis, UiSizeMode, UiSpacing,
@@ -335,74 +338,86 @@ fn scripting(palette: StudioUiPalette, project: &Project) -> UiNode {
 
 fn graphics(palette: StudioUiPalette, project: &Project) -> UiNode {
     section(palette, "project-settings.graphics", "app.graphics_policy")
-        .with_child(toggle_row(
+        .with_child(segment_row(
             palette,
-            "project-settings.allow-gpu-features",
-            "app.allow_gpu_features",
-            "project-settings.allow-gpu-features",
-            project.settings.allow_gpu_features,
-        ))
-        .with_child(toggle_row(
-            palette,
-            "project-settings.depth-accurate",
-            "app.depth_accurate",
-            "project-settings.depth-accurate",
-            project.settings.depth_accurate,
-        ))
-        .with_child(range_row_disabled(
-            palette,
-            "project-settings.depth-resolution-scale",
-            "app.depth_resolution_scale",
-            "project-settings.depth-resolution-scale",
-            project.settings.depth_resolution_scale,
-            0.35,
-            1.0,
-            0.05,
-            format!("{:.2}x", project.settings.depth_resolution_scale),
-            !project.settings.depth_accurate,
-        ))
-        .with_child(segment_row_with_disabled_values(
-            palette,
-            "project-settings.render-preset",
-            "app.render_preset",
+            "project-settings.viewport-resolution",
+            "app.viewport_resolution",
             &[
                 (
-                    "app.project_render_preset_potato",
-                    "project-settings.preset.potato",
-                    project.settings.runtime_render_preset == RenderPreset::Potato,
+                    "app.graphics_efficiency",
+                    "project-settings.viewport-resolution.efficient",
+                    project.settings.viewport_resolution == ViewportResolutionMode::Efficient,
                 ),
                 (
-                    "app.project_render_preset_low",
-                    "project-settings.preset.low",
-                    project.settings.runtime_render_preset == RenderPreset::Low,
+                    "app.graphics_adaptive",
+                    "project-settings.viewport-resolution.adaptive",
+                    project.settings.viewport_resolution == ViewportResolutionMode::Adaptive,
                 ),
                 (
-                    "app.project_render_preset_medium",
-                    "project-settings.preset.medium",
-                    project.settings.runtime_render_preset == RenderPreset::Medium,
-                ),
-                (
-                    "app.project_render_preset_high",
-                    "project-settings.preset.high",
-                    project.settings.runtime_render_preset == RenderPreset::High,
+                    "app.graphics_full_resolution",
+                    "project-settings.viewport-resolution.full",
+                    project.settings.viewport_resolution == ViewportResolutionMode::FullResolution,
                 ),
             ],
-            false,
-            if project.settings.allow_gpu_features {
-                &[]
-            } else {
-                &[
-                    "project-settings.preset.medium",
-                    "project-settings.preset.high",
-                ]
-            },
         ))
+        .with_child(viewport_resolution_description(palette, project))
+        .with_child(segment_row(
+            palette,
+            "project-settings.geometry-detail",
+            "app.geometry_detail",
+            &[
+                (
+                    "app.graphics_efficiency",
+                    "project-settings.geometry-detail.efficient",
+                    project.settings.geometry_detail == GeometryDetailMode::Efficient,
+                ),
+                (
+                    "app.graphics_adaptive",
+                    "project-settings.geometry-detail.adaptive",
+                    project.settings.geometry_detail == GeometryDetailMode::Adaptive,
+                ),
+                (
+                    "app.graphics_detailed",
+                    "project-settings.geometry-detail.detailed",
+                    project.settings.geometry_detail == GeometryDetailMode::Detailed,
+                ),
+            ],
+        ))
+        .with_child(geometry_detail_description(palette, project))
+        .with_child(segment_row(
+            palette,
+            "project-settings.texture-quality",
+            "app.texture_quality",
+            &[
+                (
+                    "app.graphics_efficiency",
+                    "project-settings.texture-quality.efficient",
+                    project.settings.texture_quality == TextureQualityMode::Efficient,
+                ),
+                (
+                    "app.graphics_adaptive",
+                    "project-settings.texture-quality.adaptive",
+                    project.settings.texture_quality == TextureQualityMode::Adaptive,
+                ),
+                (
+                    "app.graphics_detailed",
+                    "project-settings.texture-quality.detailed",
+                    project.settings.texture_quality == TextureQualityMode::Detailed,
+                ),
+            ],
+        ))
+        .with_child(texture_quality_description(palette, project))
         .with_child(toggle_row(
             palette,
             "project-settings.world-streaming",
-            "app.world_streaming",
+            "app.large_scene_culling",
             "project-settings.world-streaming",
             project.settings.world_streaming_enabled,
+        ))
+        .with_child(graphics_help_text(
+            palette,
+            "project-settings.large-scene-culling-description",
+            "app.large_scene_culling_desc",
         ))
         .with_child(range_row_disabled(
             palette,
@@ -428,18 +443,44 @@ fn graphics(palette: StudioUiPalette, project: &Project) -> UiNode {
             project.settings.world_stream_load_radius.to_string(),
             !project.settings.world_streaming_enabled,
         ))
-        .with_child(range_row_disabled(
-            palette,
-            "project-settings.stream-lod-bias",
-            "app.world_stream_lod_bias",
-            "project-settings.stream-lod-bias",
-            project.settings.world_stream_lod_bias as f32,
-            0.0,
-            4.0,
-            1.0,
-            project.settings.world_stream_lod_bias.to_string(),
-            !project.settings.world_streaming_enabled,
-        ))
+}
+
+fn geometry_detail_description(palette: StudioUiPalette, project: &Project) -> UiNode {
+    let key = match project.settings.geometry_detail {
+        GeometryDetailMode::Efficient => "app.geometry_detail_efficiency_desc",
+        GeometryDetailMode::Adaptive => "app.geometry_detail_adaptive_desc",
+        GeometryDetailMode::Detailed => "app.geometry_detail_detailed_desc",
+    };
+    graphics_help_text(palette, "project-settings.geometry-detail-description", key)
+}
+
+fn texture_quality_description(palette: StudioUiPalette, project: &Project) -> UiNode {
+    let key = match project.settings.texture_quality {
+        TextureQualityMode::Efficient => "app.texture_quality_efficiency_desc",
+        TextureQualityMode::Adaptive => "app.texture_quality_adaptive_desc",
+        TextureQualityMode::Detailed => "app.texture_quality_detailed_desc",
+    };
+    graphics_help_text(palette, "project-settings.texture-quality-description", key)
+}
+
+fn viewport_resolution_description(palette: StudioUiPalette, project: &Project) -> UiNode {
+    let key = match project.settings.viewport_resolution {
+        ViewportResolutionMode::Efficient => "app.graphics_efficiency_desc",
+        ViewportResolutionMode::Adaptive => "app.graphics_adaptive_desc",
+        ViewportResolutionMode::FullResolution => "app.graphics_full_resolution_desc",
+    };
+    graphics_help_text(
+        palette,
+        "project-settings.viewport-resolution-description",
+        key,
+    )
+}
+
+fn graphics_help_text(palette: StudioUiPalette, id: &str, key: &str) -> UiNode {
+    UiNode::new(id, UiNodeKind::Label)
+        .with_text_key(key)
+        .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
+        .with_layout(UiLayout::fixed(0.0, 44.0).with_width_mode(UiSizeMode::Fill))
 }
 
 fn section(palette: StudioUiPalette, id: &str, title_key: &str) -> UiNode {
@@ -911,6 +952,14 @@ mod tests {
             .expect("overview section");
         assert_eq!(overview.layout.basis[0], CONTENT_WIDTH);
         assert_eq!(overview.layout.width_mode, UiSizeMode::Fixed);
+        assert!(surface
+            .root
+            .find("project-settings.geometry-detail.control")
+            .is_some());
+        assert!(surface
+            .root
+            .find("project-settings.geometry-detail-description")
+            .is_some());
 
         let toggle = surface
             .root

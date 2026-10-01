@@ -10,6 +10,7 @@ pub mod device;
 pub mod editor_compositor;
 pub mod frame_scheduler;
 pub mod handles;
+pub mod memory_ledger;
 pub mod mesh;
 pub mod pipeline;
 pub mod resource_registry;
@@ -32,6 +33,7 @@ pub use handles::{
     BufferHandle, GraphicsHandle, MaterialHandle, MeshHandle, PipelineHandle, SamplerHandle,
     SurfaceHandle, TextureHandle,
 };
+pub use memory_ledger::ProcessMemoryLedger;
 pub use resource_registry::{
     BufferRegistry, MaterialRegistry, MeshRegistry, PipelineRegistry, ResourceAdmission,
     ResourceArena, ResourceArenaMetrics, ResourceBudgetError, SamplerRegistry, TextureRegistry,

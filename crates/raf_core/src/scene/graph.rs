@@ -116,6 +116,9 @@ pub struct SceneNode {
     pub primitive: Primitive,
     /// Display color.
     pub color: NodeColor,
+    /// Project-relative base-color image under the project's `assets` folder.
+    #[serde(default)]
+    pub base_color_texture: Option<String>,
     /// Parent index, `None` for root nodes.
     pub parent: Option<SceneNodeId>,
     /// Child indices.
@@ -176,6 +179,7 @@ impl SceneNode {
             scale: Vec3::ONE,
             primitive: Primitive::Empty,
             color: NodeColor::default(),
+            base_color_texture: None,
             parent: None,
             children: Vec::new(),
             visible: true,
@@ -206,6 +210,7 @@ impl SceneNode {
             scale: Vec3::ONE,
             primitive,
             color: NodeColor::for_primitive(primitive),
+            base_color_texture: None,
             parent: None,
             children: Vec::new(),
             visible: true,
@@ -537,6 +542,14 @@ impl SceneGraph {
             }
             for channel in [node.color.r, node.color.g, node.color.b, node.color.a] {
                 mix_render_fingerprint(&mut hash, channel as u64);
+            }
+            if let Some(texture) = node.base_color_texture.as_deref() {
+                mix_render_fingerprint(&mut hash, texture.len() as u64);
+                for byte in texture.as_bytes() {
+                    mix_render_fingerprint(&mut hash, u64::from(*byte));
+                }
+            } else {
+                mix_render_fingerprint(&mut hash, u64::MAX);
             }
         }
 

@@ -1201,15 +1201,16 @@ fn viewport(
             "settings.multi_select_gizmo_enabled",
             settings.multi_select_gizmo_enabled,
         ))
-        .with_child(range_row(
+        .with_child(range_row_with_description(
             palette,
             "settings.gizmo-growth",
-            "settings.gizmo_growth_scale",
+            "settings.gizmo_size",
             settings.gizmo_growth_scale,
             0.0,
             100.0,
             1.0,
             format!("{:.0}%", settings.gizmo_growth_scale),
+            "settings.gizmo_size_desc",
         ))
         .with_child(range_row(
             palette,

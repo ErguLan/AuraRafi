@@ -7,6 +7,13 @@
 
 use super::*;
 
+fn rect_contains(rect: raf_ui::UiRect, point: [f32; 2]) -> bool {
+    point[0] >= rect.x
+        && point[0] <= rect.x + rect.width
+        && point[1] >= rect.y
+        && point[1] <= rect.y + rect.height
+}
+
 fn pan_button_for_press(
     tool: ElectronicsTool,
     space_pan: bool,
@@ -73,12 +80,11 @@ impl NativeElectronicsEditor {
         };
         let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
         self.ensure_camera(canvas);
-        let minimap = crate::electronics_minimap::overlay_rect(size);
-        let over_minimap = pointer[0] >= minimap.x
-            && pointer[0] <= minimap.x + minimap.width
-            && pointer[1] >= minimap.y
-            && pointer[1] <= minimap.y + minimap.height;
-        if over_minimap
+        let panel = crate::electronics_minimap::overlay_rect(size);
+        let image = crate::electronics_minimap::image_rect(size);
+        let over_panel = rect_contains(panel, pointer);
+        let over_image = rect_contains(image, pointer);
+        if over_image
             && input.button_pressed(PointerButton::Primary)
             && !router.has_pointer_capture()
         {
@@ -91,9 +97,12 @@ impl NativeElectronicsEditor {
             );
         }
         if self.minimap_drag {
-            if let Some(center) =
-                crate::electronics_minimap::world_at(&self.scene, Vec2::from(pointer), size)
-            {
+            if let Some(center) = crate::electronics_minimap::world_at(
+                &self.scene,
+                self.camera,
+                size,
+                Vec2::from(pointer),
+            ) {
                 self.camera.center = center;
                 self.touch();
             }
@@ -108,7 +117,7 @@ impl NativeElectronicsEditor {
                 request_redraw: true,
             };
         }
-        if over_minimap && !owns_gesture {
+        if over_panel && !owns_gesture {
             return ElectronicsInputResult::default();
         }
         let world = self.camera.world_from_screen(Vec2::from(pointer), size);
@@ -702,14 +711,9 @@ impl NativeElectronicsEditor {
         let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
         self.ensure_camera(canvas);
         let local = pointer.and_then(|point| canvas.local_point(point));
-        let minimap = crate::electronics_minimap::overlay_rect(size);
+        let panel = crate::electronics_minimap::overlay_rect(size);
         let world = local
-            .filter(|point| {
-                !(point[0] >= minimap.x
-                    && point[0] <= minimap.x + minimap.width
-                    && point[1] >= minimap.y
-                    && point[1] <= minimap.y + minimap.height)
-            })
+            .filter(|point| !rect_contains(panel, *point))
             .map(|point| self.camera.world_from_screen(Vec2::from(point), size));
         let changed = world.is_some_and(|world| self.place_component(world));
         self.placement_drag_active = false;
@@ -730,14 +734,9 @@ impl NativeElectronicsEditor {
         let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
         let pointer = input.pointer_position;
         let local = pointer.and_then(|point| canvas.local_point(point));
-        let minimap = crate::electronics_minimap::overlay_rect(size);
+        let panel = crate::electronics_minimap::overlay_rect(size);
         let world = local
-            .filter(|point| {
-                !(point[0] >= minimap.x
-                    && point[0] <= minimap.x + minimap.width
-                    && point[1] >= minimap.y
-                    && point[1] <= minimap.y + minimap.height)
-            })
+            .filter(|point| !rect_contains(panel, *point))
             .map(|point| {
                 self.ensure_camera(canvas);
                 self.snap_world(self.camera.world_from_screen(Vec2::from(point), size))

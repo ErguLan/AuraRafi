@@ -9,6 +9,11 @@ use crate::panels::agent_surface::build_agent_surface;
 use crate::panels::console_surface::build_console_surface;
 use crate::panels::electronics_context_menu_surface::build_electronics_context_menu_surface;
 use crate::panels::electronics_surface::build_electronics_analysis_surface;
+use crate::panels::nodes_surface::{
+    build_nodes_context_menu_surface, build_nodes_palette_popup_surface,
+    build_nodes_surface_with_host, NODES_CONTEXT_MENU_HEIGHT, NODES_CONTEXT_MENU_WIDTH,
+    NODES_PALETTE_POPUP_HEIGHT, NODES_PALETTE_POPUP_WIDTH,
+};
 use crate::panels::project_surface::build_project_surface;
 
 impl NativeGameWorkbench {
@@ -22,6 +27,9 @@ impl NativeGameWorkbench {
         can_paste: bool,
         node_graph: &NodeGraph,
         selected_graph_node: Option<NodeId>,
+        node_can_undo: bool,
+        node_can_redo: bool,
+        node_validation: Option<&crate::native_editor_runtime::NodeGraphValidation>,
         project: Option<&Project>,
         electronics: Option<&NativeElectronicsEditor>,
     ) -> UiSurface {
@@ -274,7 +282,7 @@ impl NativeGameWorkbench {
                 );
             } else {
                 append(
-                    build_inspector_surface_with_unit(
+                    build_inspector_surface_with_assets(
                         self.palette,
                         scene,
                         selected.first().copied(),
@@ -282,6 +290,7 @@ impl NativeGameWorkbench {
                         1.0,
                         self.inspector_view,
                         self.agent_settings.display_unit,
+                        self.project_catalog.assets(),
                     ),
                     right,
                 );
@@ -341,6 +350,7 @@ impl NativeGameWorkbench {
         let dock_groups = self.bottom_dock.groups().to_vec();
         let dock_group_rects = self.dock_group_rects(layout);
         let agent_scroll_offset = self.agent_scroll_projection_offset;
+        let mut assets_panel_rect: Option<EditorRect> = None;
         for (group_id, group_rect) in &dock_group_rects {
             let Some(group) = dock_groups.iter().find(|group| group.id == *group_id) else {
                 continue;
@@ -388,11 +398,18 @@ impl NativeGameWorkbench {
                     content_rect,
                 ),
                 "nodes" => append(
-                    build_nodes_surface_with_zoom(
+                    build_nodes_surface_with_host(
                         self.palette,
                         node_graph,
                         selected_graph_node,
                         self.nodes_zoom,
+                        self.nodes_pan,
+                        [content_rect.width, content_rect.height],
+                        &self.nodes_host,
+                        node_can_undo,
+                        node_can_redo,
+                        node_validation,
+                        self.agent_panel.language,
                     ),
                     content_rect,
                 ),
@@ -457,22 +474,42 @@ impl NativeGameWorkbench {
                 ),
                 "assets" => {
                     let assets = asset_rows_with_builtins(self.project_catalog.assets());
+                    let grid_viewport = (content_rect.height
+                        - ASSET_TOOLBAR_HEIGHT
+                        - ASSET_SELECTION_BAR_HEIGHT)
+                        .max(ASSET_CARD_MIN_VIEWPORT);
+                    let visible_range = asset_visible_range(
+                        &assets,
+                        &self.assets_surface.query,
+                        self.assets_surface.filter,
+                        &self.assets_surface.script_extension,
+                        self.assets_surface.sort,
+                        self.assets_scroll_offset,
+                        grid_viewport,
+                        self.assets_surface.view,
+                    );
                     append(
-                        build_assets_surface(
-                            self.palette,
-                            &assets,
-                            &self.assets_surface.query,
-                            self.assets_surface.filter,
-                            None,
-                            self.assets_surface.script_menu_open,
-                            &self.assets_surface.script_name,
-                            self.assets_surface.primitive_menu_open,
-                            None,
-                            self.assets_surface.file_menu_open,
-                            &self.assets_surface.file_name,
-                        ),
+                        build_assets_surface(AssetsSurfaceParams {
+                            palette: self.palette,
+                            rows: &assets,
+                            language: self.agent_panel.language,
+                            query: &self.assets_surface.query,
+                            filter: self.assets_surface.filter,
+                            script_extension: &self.assets_surface.script_extension,
+                            sort: self.assets_surface.sort,
+                            view: self.assets_surface.view,
+                            selected: self.assets_surface.selected_asset.as_deref(),
+                            highlight: self.assets_surface.highlight_asset.as_deref(),
+                            status: self.assets_surface.status.as_ref(),
+                            pending: self.project_catalog.is_pending(),
+                            catalog_error: self.project_catalog.error(),
+                            visible_range: Some(visible_range),
+                            create_open: self.assets_surface.create_menu_open,
+                            motion: self.assets_motion(),
+                        }),
                         content_rect,
                     );
+                    assets_panel_rect = Some(content_rect);
                 }
                 "project-settings" => {
                     if let Some(project) = project {
@@ -574,6 +611,182 @@ impl NativeGameWorkbench {
             );
         }
 
+        if let Some(menu) = self.nodes_host.context_menu() {
+            if let Some(surface) = build_nodes_context_menu_surface(
+                self.palette,
+                node_graph,
+                menu.node_id,
+                self.agent_panel.language,
+            ) {
+                // Window-level overlay: clamped against the window and nudged
+                // by the entrance tween so the menu settles into place.
+                let entrance = (1.0 - self.nodes_host.menu_motion()) * 6.0;
+                append(
+                    surface,
+                    EditorRect::new(
+                        menu.position[0].clamp(
+                            0.0,
+                            (layout.window.width - NODES_CONTEXT_MENU_WIDTH).max(0.0),
+                        ),
+                        menu.position[1].clamp(
+                            0.0,
+                            (layout.window.height - NODES_CONTEXT_MENU_HEIGHT).max(0.0),
+                        ) - entrance,
+                        NODES_CONTEXT_MENU_WIDTH,
+                        NODES_CONTEXT_MENU_HEIGHT,
+                    ),
+                );
+            }
+        }
+
+        // Assets menus, popovers and modals are window-level so the dock panel
+        // never clips them. Anchors are clamped to the window and nudged by the
+        // shared entrance tween.
+        if let Some(panel) = assets_panel_rect {
+            let window = layout.window;
+            let slide = (1.0 - self.assets_menu_motion.value()) * 6.0;
+            let toolbar_anchor = [panel.x + 10.0, panel.y + ASSET_TOOLBAR_HEIGHT];
+            let project_root = self.assets_project_root.as_deref();
+            let modal = self
+                .assets_surface
+                .open_asset
+                .as_ref()
+                .map(|row| {
+                    (
+                        build_assets_open_modal_surface(
+                            self.palette,
+                            row,
+                            &asset_absolute_path(project_root, row),
+                        ),
+                        ASSETS_OPEN_MODAL_HEIGHT,
+                    )
+                })
+                .or_else(|| {
+                    self.assets_surface
+                        .rename_asset
+                        .as_ref()
+                        .map(|row| {
+                            (
+                                build_assets_rename_modal_surface(self.palette, row),
+                                ASSETS_RENAME_MODAL_HEIGHT,
+                            )
+                        })
+                })
+                .or_else(|| {
+                    self.assets_surface
+                        .delete_asset
+                        .as_ref()
+                        .map(|row| {
+                            (
+                                build_assets_delete_modal_surface(self.palette, row),
+                                ASSETS_DELETE_MODAL_HEIGHT,
+                            )
+                        })
+                });
+            if let Some((surface, height)) = modal {
+                append(
+                    build_assets_backdrop_surface(self.palette),
+                    EditorRect::new(window.x, window.y, window.width, window.height),
+                );
+                append(
+                    surface,
+                    EditorRect::new(
+                        window.x + (window.width - ASSETS_MODAL_WIDTH) * 0.5,
+                        window.y + (window.height - height) * 0.5,
+                        ASSETS_MODAL_WIDTH,
+                        height,
+                    ),
+                );
+            } else if let Some(context) = self.assets_surface.context_menu.as_ref() {
+                let height = if context.builtin {
+                    ASSETS_CONTEXT_MENU_BUILTIN_HEIGHT
+                } else {
+                    ASSETS_CONTEXT_MENU_HEIGHT
+                };
+                append(
+                    build_assets_context_menu_surface(
+                        self.palette,
+                        &context.row,
+                        context.builtin,
+                        &asset_absolute_path(project_root, &context.row),
+                    ),
+                    assets_overlay_rect(
+                        window,
+                        context.position,
+                        [ASSETS_MENU_WIDTH, height],
+                        slide,
+                    ),
+                );
+            } else if self.assets_surface.create_menu_open {
+                append(
+                    build_assets_create_menu_surface(self.palette),
+                    assets_overlay_rect(
+                        window,
+                        toolbar_anchor,
+                        [ASSETS_MENU_WIDTH, ASSETS_CREATE_MENU_HEIGHT],
+                        slide,
+                    ),
+                );
+            } else if self.assets_surface.script_menu_open {
+                append(
+                    build_assets_script_popover_surface(
+                        self.palette,
+                        &self.assets_surface.script_name,
+                    ),
+                    assets_overlay_rect(
+                        window,
+                        toolbar_anchor,
+                        [ASSETS_POPOVER_WIDTH, ASSETS_SCRIPT_POPOVER_HEIGHT],
+                        slide,
+                    ),
+                );
+            } else if self.assets_surface.file_menu_open {
+                append(
+                    build_assets_file_popover_surface(
+                        self.palette,
+                        &self.assets_surface.file_name,
+                    ),
+                    assets_overlay_rect(
+                        window,
+                        toolbar_anchor,
+                        [ASSETS_POPOVER_WIDTH, ASSETS_FILE_POPOVER_HEIGHT],
+                        slide,
+                    ),
+                );
+            } else if self.assets_surface.primitive_menu_open {
+                append(
+                    build_assets_primitive_popover_surface(self.palette),
+                    assets_overlay_rect(
+                        window,
+                        toolbar_anchor,
+                        [ASSETS_POPOVER_WIDTH, ASSETS_PRIMITIVE_POPOVER_HEIGHT],
+                        slide,
+                    ),
+                );
+            }
+        }
+
+        if let Some(popup) = self.nodes_host.palette_popup() {
+            if let Some(surface) =
+                build_nodes_palette_popup_surface(self.palette, &self.nodes_host, self.agent_panel.language)
+            {
+                let entrance = (1.0 - self.nodes_host.menu_motion()) * 6.0;
+                append(
+                    surface,
+                    EditorRect::new(
+                        popup.position[0]
+                            .clamp(0.0, (layout.window.width - NODES_PALETTE_POPUP_WIDTH).max(0.0)),
+                        popup.position[1].clamp(
+                            0.0,
+                            (layout.window.height - NODES_PALETTE_POPUP_HEIGHT).max(0.0),
+                        ) - entrance,
+                        NODES_PALETTE_POPUP_WIDTH,
+                        NODES_PALETTE_POPUP_HEIGHT,
+                    ),
+                );
+            }
+        }
+
         let root = UiNode::new("editor.native.workbench.root", UiNodeKind::Root)
             .with_layout(UiLayout::fill(UiFlow::None))
             .with_style(UiStyle::transparent());
@@ -589,6 +802,28 @@ impl NativeGameWorkbench {
             retained_tooltips: self.project_type == ProjectType::Electronics,
         }
     }
+}
+
+/// Clamps an Assets overlay to the window so a menu, popover or modal is
+/// always fully reachable even when the panel sits against a window edge.
+fn assets_overlay_rect(
+    window: EditorRect,
+    anchor: [f32; 2],
+    size: [f32; 2],
+    slide: f32,
+) -> EditorRect {
+    EditorRect::new(
+        anchor[0].clamp(
+            window.x,
+            (window.x + window.width - size[0]).max(window.x),
+        ),
+        (anchor[1] + slide).clamp(
+            window.y,
+            (window.y + window.height - size[1]).max(window.y),
+        ),
+        size[0],
+        size[1],
+    )
 }
 
 fn status_items(

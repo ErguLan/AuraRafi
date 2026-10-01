@@ -25,7 +25,7 @@ API), Unreal (C++ + Blueprint share the reflection layer), and Godot
 |------|----------|----------|---------|-------------|
 | 1 | Rhai | Beginners, game designers | Full | Interpreted (~10-70x native on tight numeric loops, fine for game logic) |
 | 2 | WASM Native Module (C++, Rust, Zig, AssemblyScript) | Advanced users, performance-critical code | Full (WASM sandbox) | Near-native (~2-5x native) |
-| 3 | Visual Nodes | Non-programmers, prototyping | Full (executor is in-process) | Interpreted graph walk |
+| 3 | Visual Nodes | Non-programmers, prototyping | Authoring now; runtime boundary reserved | Validation now; interpreted graph walk planned |
 
 Tier 1 ships first as the executable script path. Tier 3 exists as editor and
 executor infrastructure, but scene-mutating node bridges are still pending.
@@ -33,15 +33,35 @@ Tier 2 is designed now and waits for an approved WASM runtime dependency.
 
 ---
 
-## 2. Current State Audit
+## 2. Current State
 
-Three disconnected systems exist today. This section is the honest baseline.
+The repository contains prepared scripting/runtime code and an active native
+Nodes authoring surface. These are related layers, but they are not the same
+feature and must not be described as one connected Play path.
 
-### 2.1 Visual Nodes (`crates/raf_nodes/`)
-- Full canvas UI with pan/zoom, palette, drag-to-connect, undo/redo, multi-flow (`crates/raf_editor/src/panels/node_editor.rs`).
-- Working interpreter (`executor.rs`) that walks flow chains, evaluates data pins, handles If branches.
-- **Gap**: `Spawn Entity`, `Destroy Entity`, `Set Position` nodes only log `"deferring to ECS Bridge"`. They do not touch `SceneGraph`. They are visually functional but inert in runtime.
-- `compiler.rs` is a stub that validates connectivity only.
+### 2.1 Visual Nodes authoring (`crates/raf_nodes/` + `raf_editor`)
+
+- `NodeGraph` is the session-scoped persisted document. It currently contains
+  one named graph with nodes and connections; a collection of runtime flows is
+  not exposed by the native editor contract.
+- The native surface is
+  `crates/raf_editor/src/panels/nodes_surface.rs`, composed through RafUI and
+  ApiGraphicBasic. Geometry, grid, ports, and wire quads are isolated in
+  `nodes_canvas.rs`; transient query, drafts, and pending-pin state live in
+  `nodes_surface_host.rs`.
+- The shared `raf_nodes::catalog` owns stable built-in node slugs and factories
+  for Game and Electronics categories. The surface does not keep a second
+  preset table.
+- Nodes can be added, selected, moved, deleted, connected through checked
+  typed pins, disconnected, edited in the right Inspector, searched, and
+  validated. Node authoring has a bounded local undo/redo history.
+- `nodes.ron` is loaded and saved with the project session. New persisted
+  properties use serde defaults so older documents remain readable.
+- `compiler.rs` is currently a graph validator. It reports connectivity and
+  typing diagnostics; it does not compile executable code.
+- The executor and `raf_script::backends::node_backend` remain prepared
+  execution infrastructure. Scene-mutating node bridges are not enabled by
+  the top-level Play flow in this contract.
 
 ### 2.2 External Scripts (`crates/raf_editor/src/script_support.rs` + `panels/behaviors.rs`)
 - Detects `.rs`, `.cpp`, `.rhai`, `.lua`, `.py`, `.js`, `.ts` by extension.
@@ -55,9 +75,13 @@ Three disconnected systems exist today. This section is the honest baseline.
 - **Gap**: The product Play button is still guarded; this is prepared
   infrastructure, not the active game loop.
 
-### 2.3 CommandBus (`crates/raf_core/src/command.rs`)
-- Full serializable command bus with submit/flush/record/undo/redo.
-- **Gap**: Removed from `app.rs` as dead code two sessions ago. The bus exists in `raf_core` but nothing wires it.
+### 2.3 Command boundary (`raf_editor`)
+
+The native Nodes surface emits command names through the workbench input
+boundary. `native_editor_commands.rs` translates them into
+`NativeEditorRuntime` graph methods. This is the active authoring path for
+selection, graph mutations, validation, and persistence. It must not be
+replaced with a second surface-local mutation path.
 
 ### 2.4 Console Commands (`crates/raf_editor/src/commands/`)
 - Slash command parser with handlers for `game.*`, `electronics.*`, `pcb.*`, `workspace.*`.
@@ -270,19 +294,34 @@ with only `on_update` runs every frame. A script with neither is a no-op
 
 ---
 
-## 7. How Visual Nodes Run
+## 7. Visual Nodes execution boundary
 
-### 7.1 Phase 1 (immediate): Interpreted graph walk
-The existing `executor.rs` already walks the flow chain correctly. The only
-change is: where it currently logs `"deferring to ECS Bridge"`, it calls the
-Host API instead.
+The active native Nodes feature is authoring only. Its current compiler
+validates graph structure, pin direction, duplicate links, occupied inputs,
+and compatible data types. The authoring surface saves `NodeGraph` in
+`nodes.ron`, but the top-level Play flow does not execute that graph.
 
-- `Spawn Entity` node -> `ctx.spawn_entity(name, primitive)`
-- `Set Position` node -> `ctx.set_position(handle, x, y, z)`
-- `Destroy Entity` node -> `ctx.destroy_entity(handle)`
+The executor and node backend below are preparation for a later runtime pass.
+They must remain behind the runtime boundary until scene mutation, lifecycle,
+logs, locking, and failure handling are integrated as one product flow. In
+particular, the following are not promises of the current editor:
 
-The executor receives a `&mut ScriptContext` for the duration of the walk.
-This is the minimal wiring to make nodes functional.
+- `Spawn Entity`, `Set Position`, and `Destroy Entity` do not mutate the live
+  editor `SceneGraph` from the Nodes surface.
+- `compiler.rs` does not emit Rhai or native executable code.
+- Opening the Nodes tab does not start an execution loop.
+
+### 7.1 Planned interpreted graph walk
+
+When runtime integration is explicitly resumed, the executor may call the
+shared Host API for operations such as:
+
+- `Spawn Entity` -> `ctx.spawn_entity(...)`
+- `Set Position` -> `ctx.set_position(...)`
+- `Destroy Entity` -> `ctx.destroy_entity(...)`
+
+That work belongs to the runtime/Host API contract, not to the retained UI
+surface or its command adapter.
 
 ### 7.2 Phase 2 (future): Compile to Rhai source
 `compiler.rs` (currently a stub) gains a `compile_to_rhai(graph) -> String`
@@ -330,7 +369,7 @@ Following the pattern in `docs/COMMANDS.md`, a new `script` domain is added.
     Executes on_start once in editor (testing, not runtime).
 
 /script.compile_nodes flow=Main output=player_controller.rhai
-    Compiles a node graph to Rhai source via compiler.rs Phase 2.
+    Planned command. It is not an active compiler output path yet.
 ```
 
 ### 8.2 Domain
@@ -529,10 +568,13 @@ The crate compiles and tests the Rhai backend plus the first runtime session.
 - Hot-reload via `notify` watcher.
 - `/script.run` command for one-shot testing through the same runtime session.
 
-### Phase C: Visual node wiring (next)
-- Replace `executor.rs` "deferring to ECS Bridge" with Host API calls.
-- Add `Call Script Function` node to palette.
-- Node execution in Play mode via `node_backend.rs`.
+### Phase C: Visual node runtime wiring (future)
+- Integrate the prepared `executor.rs` with the shared Host API only after the
+  product Play boundary is explicitly reopened.
+- Add `Call Script Function` only with a concrete persisted-node contract and
+  lifecycle/error policy.
+- Keep scene mutation, logs, locking, and runtime ownership outside the RafUI
+  authoring surface.
 
 ### Phase D: WASM Native Modules (when runtime is built)
 - Choose WASM runtime (wasmtime or lightweight alternative).
@@ -557,7 +599,7 @@ The crate compiles and tests the Rhai backend plus the first runtime session.
 
 | Document | Status |
 |----------|--------|
-| `docs/NODES_SYSTEM.md` | Updated to reference this doc for runtime behavior. |
+| `docs/NODES_SYSTEM.md` | Current authoring contract; this document owns the future execution boundary. |
 | `docs/CPP_MODDING.md` | Superseded by Section 4 (WASM). Kept for historical reference until Phase D. |
 | `docs/COMMANDS.md` | Extended with `script.*` domain (Section 8). |
 | `docs/ARCHITECTURE.md` | New "Scripting" section pointing here. |
@@ -571,7 +613,8 @@ The crate compiles and tests the Rhai backend plus the first runtime session.
 - Three tiers (Rhai, WASM, Visual Nodes) share one Host API.
 - Rhai is the primary beginner language. Its speed is fine for game logic.
 - WASM replaces raw C++ FFI. It is sandboxed, multi-language, hot-reloadable, and our own Host ABI makes it "propio".
-- Visual Nodes are interpreted now, compilable to Rhai later, and can call Rhai functions.
+- Visual Nodes are authoring-ready now; graph execution and Rhai compilation
+  remain future runtime work.
 - Commands can create, attach, validate, and run scripts.
 - Everything is in SI units via `units.rs`.
 - The `raf_script` crate is the single home for all scripting logic.

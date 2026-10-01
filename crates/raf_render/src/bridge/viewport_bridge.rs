@@ -4,6 +4,7 @@
 //! so the editor host can stay focused on retained layout and painting.
 
 use glam::{Mat4, Vec3};
+use std::path::Path;
 
 use raf_core::agent_context::world_bounds;
 use raf_core::scene::graph::{SceneGraph, SceneNodeId};
@@ -119,6 +120,11 @@ impl ViewportBridge {
 
     pub fn camera(&self) -> &Camera {
         &self.camera
+    }
+
+    pub fn set_project_asset_root(&mut self, project_root: Option<&Path>) {
+        self.renderer
+            .set_asset_root(project_root.map(|root| root.join("assets")));
     }
 
     pub fn editor_camera_block(&self) -> EditorCameraBlock {

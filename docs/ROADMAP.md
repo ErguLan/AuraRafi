@@ -58,7 +58,7 @@ GPU execution when available and CPU recovery for constrained hardware:
 - [x] Collider system: AABB auto-fit, ConvexHull, MeshCollider with intersection tests and wireframe viz
 - [x] Mesh merge: combine multiple meshes into one, vertex welding, source tracking for unmerge
 - [x] Mesh groups: group entities by ID to move/transform together
-- [x] Render backend switch: CPU painter (default, zero GPU) / GPU wgpu (opt-in), frame budget, adaptive detail, potato preset
+- [x] Render backend switch with frame budget, adaptive detail, and potato preset (active path is GPU-first under ApiGraphicBasic with CPU recovery; the early CPU-painter default was superseded)
 - [x] Native Electronics document authority: `Schematic` + `PcbLayout`,
   renderer-neutral `CadScene`, retained RafUI and shared command gateway
 - [x] Depth-sorted rendering (painter's algorithm): all faces from all entities sorted by depth before drawing -- eliminates Z-fighting/overlap artifacts, O(n log n) per frame
