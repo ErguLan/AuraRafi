@@ -48,7 +48,7 @@ What works today after launch:
 
 - Game projects open with the scene editor, hierarchy, properties, asset browser, and a scene viewport routed through the shared graphics runtime (GPU when available, CPU fallback retained).
 - Game projects also expose a native RafUI Nodes tab backed by `raf_nodes`; the active graph is loaded from and saved to the current session.
-- Game runtime foundations remain in the repository, but live Play mode is currently temporarily disconnected while renderer/runtime truth is being stabilized.
+- Manual Game Play launches an isolated local runtime in a separate or shared window. Rhai and supported Nodes flows use the same Host API; cameras are optional entity components. See [Local Runtime](docs/LOCAL_RUNTIME.md) and [Camera Runtime](docs/CAMERA_RUNTIME.md) for verification status and limits.
 - Electronics projects enter the shared native CAD canvas. The electronics
   domain, checks, simulation and exports remain available, while rich
   schematic/PCB authoring is intentionally passive during the current Game

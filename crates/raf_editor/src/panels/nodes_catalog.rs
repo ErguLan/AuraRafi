@@ -17,6 +17,20 @@ pub fn icon_for_slug(slug: &str) -> UiIconId {
         "spawn-entity" => UiIconId::Cube,
         "destroy-entity" => UiIconId::Close,
         "set-position" => UiIconId::Move,
+        "set-local-position" | "get-position" => UiIconId::Move,
+        "set-rotation" | "look-at" => UiIconId::Rotate,
+        "add-camera"
+        | "remove-camera"
+        | "activate-camera"
+        | "clear-camera"
+        | "get-active-camera"
+        | "set-camera-fov"
+        | "set-camera-clip"
+        | "set-camera-projection"
+        | "follow-camera" => UiIconId::Camera,
+        "get-entity" => UiIconId::Entity,
+        "get-parent" | "find-child" | "set-parent" | "detach-parent" => UiIconId::Folder,
+        "on-late-update" => UiIconId::Refresh,
         "key-press" | "serial-read" | "serial-write" => UiIconId::Node,
         "mouse-click" => UiIconId::Entity,
         "read-sensor" | "write-actuator" => UiIconId::BoardOutline,
@@ -126,6 +140,34 @@ pub fn pin_type_key(data_type: raf_nodes::PinDataType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn camera_and_hierarchy_nodes_have_complete_bilingual_labels() {
+        for &(slug, _, _) in raf_nodes::scene_nodes::SCENE_NODES {
+            let node = raf_nodes::catalog::create(slug).unwrap();
+            let descriptor = raf_nodes::catalog::descriptor_for_slug(slug).unwrap();
+            let mut keys = vec![
+                descriptor.label_key.to_string(),
+                descriptor.description_key.to_string(),
+            ];
+            keys.extend(
+                node.pins
+                    .iter()
+                    .map(|pin| pin_label_key(&node, &pin.name).unwrap()),
+            );
+            keys.extend(
+                node.properties
+                    .iter()
+                    .map(|property| property_label_key(&property.key)),
+            );
+            for language in [raf_core::Language::English, raf_core::Language::Spanish] {
+                for key in &keys {
+                    assert_ne!(raf_core::i18n::t(key, language), *key, "{slug}: {key}");
+                }
+            }
+        }
+        assert_eq!(icon_for_slug("clear-camera"), UiIconId::Camera);
+    }
 
     #[test]
     fn event_pin_keys_match_the_locale_contract() {

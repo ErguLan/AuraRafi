@@ -12,6 +12,8 @@ members = [
     "crates/raf_net",
     "crates/raf_hardware",
     "crates/raf_script",
+    "crates/raf_runtime",
+    "crates/raf_player",
     "crates/raf_cli",
     "editor",
 ]
@@ -114,6 +116,8 @@ raf_ai = { path = "crates/raf_ai" }
 raf_net = { path = "crates/raf_net" }
 raf_hardware = { path = "crates/raf_hardware" }
 raf_script = { path = "crates/raf_script" }
+raf_runtime = { path = "crates/raf_runtime" }
+raf_player = { path = "crates/raf_player" }
 
 [profile.release]
 opt-level = 3

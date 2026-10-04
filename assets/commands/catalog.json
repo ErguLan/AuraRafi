@@ -1,6 +1,13 @@
 {
   "version": 1,
   "commands": [
+    {"name":"runtime.play","aliases":[],"domain":"game","category":"local_runtime","description_key":"commands.runtime.play.desc","parameters":[],"examples":["/runtime.play"]},
+    {"name":"runtime.pause","aliases":[],"domain":"game","category":"local_runtime","description_key":"commands.runtime.pause.desc","parameters":[],"examples":["/runtime.pause"]},
+    {"name":"runtime.resume","aliases":[],"domain":"game","category":"local_runtime","description_key":"commands.runtime.resume.desc","parameters":[],"examples":["/runtime.resume"]},
+    {"name":"runtime.step","aliases":[],"domain":"game","category":"local_runtime","description_key":"commands.runtime.step.desc","parameters":[],"examples":["/runtime.step"]},
+    {"name":"runtime.stop","aliases":[],"domain":"game","category":"local_runtime","description_key":"commands.runtime.stop.desc","parameters":[],"examples":["/runtime.stop"]},
+    {"name":"runtime.reload","aliases":[],"domain":"game","category":"local_runtime","description_key":"commands.runtime.reload.desc","parameters":[],"examples":["/runtime.reload"]},
+    {"name":"runtime.next","aliases":[],"domain":"game","category":"local_runtime","description_key":"commands.runtime.next.desc","parameters":[],"examples":["/runtime.next"]},
     {
       "name": "help",
       "aliases": ["h", "?"],
@@ -414,6 +421,25 @@
         {"name": "preserve_world", "kind": "bool", "required": false, "default": "true", "description_key": "commands.param.preserve_world"}
       ],
       "examples": ["/game.reparent target=Shelf parent=Store", "/game.reparent target=Shelf parent=root"]
+    },
+    {
+      "name": "game.camera",
+      "aliases": [],
+      "domain": "game",
+      "category": "scene",
+      "description_key": "commands.game_camera.desc",
+      "parameters": [
+        {"name":"action","kind":"enum","required":false,"default":"set","description_key":"commands.param.camera_action"},
+        {"name":"target","kind":"string","required":false,"description_key":"commands.param.target"},
+        {"name":"name","kind":"string","required":false,"description_key":"commands.param.name"},
+        {"name":"parent","kind":"string","required":false,"description_key":"commands.param.parent"},
+        {"name":"fov","kind":"f32","required":false,"description_key":"camera.fov_degrees"},
+        {"name":"near","kind":"f32","required":false,"description_key":"camera.near"},
+        {"name":"far","kind":"f32","required":false,"description_key":"camera.far"},
+        {"name":"orthographic","kind":"bool","required":false,"description_key":"camera.orthographic"},
+        {"name":"ortho_scale","kind":"f32","required":false,"description_key":"camera.ortho_scale"}
+      ],
+      "examples":["/game.camera action=create name=Camera","/game.camera action=add target=Player","/game.camera target=Camera fov=70 near=0.1 far=500"]
     },
     {
       "name": "game.snap",
@@ -973,10 +999,9 @@
       "category": "script",
       "description_key": "commands.script_compile_nodes.desc",
       "parameters": [
-        {"name": "flow", "kind": "string", "required": false, "description_key": "commands.param.name", "default": "Main"},
-        {"name": "output", "kind": "string", "required": false, "description_key": "commands.param.path", "default": "compiled.rhai"}
+        {"name": "file", "kind": "string", "required": true, "description_key": "commands.param.path"}
       ],
-      "examples": ["/script.compile_nodes flow=Main output=compiled.rhai"]
+      "examples": ["/script.compile_nodes file=nodes.ron"]
     },
     {
       "name": "ui.document.describe",

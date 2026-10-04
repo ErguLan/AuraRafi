@@ -13,6 +13,31 @@ current presentation boundary is
 
 ## Current decisions absorbed here
 
+Local Runtime implementation: `raf_runtime` owns isolated scene snapshots,
+fixed-step simulation and bounded Rhai execution, independently of windows.
+`raf_player` owns native presentation using the existing RafUI/ApiGraphicBasic
+contracts. `native_game_runtime.rs` is the manual editor launch/control adapter;
+the executable's `--runtime` route skips editor/Hub/Agent initialization.
+Play never invokes Cargo and never writes simulation changes into the project.
+Both window modes reuse the startup loading document. Runtime never implicitly
+creates a character/camera. New Game projects seed an editable Camera template
+with its UUID configured as startup; loading existing scenes never injects it.
+Attached Agent/CLI/MCP runtime activation stays forbidden.
+See `docs/LOCAL_RUNTIME.md` for acceptance status and explicit limitations;
+build success is not proof of live window behavior or low-resource performance.
+
+Camera/Nodes update (2026-10-03): a camera is an optional component on any
+scene entity, including a visible Part. Startup selection is one project
+UUID, copied into each player's transient view state; Rhai and Nodes may
+override it without editing project settings. Other than the explicit new-Game
+Camera template, no camera/character/rig is injected. Stable reference lookup, explicit local/world
+transforms, hierarchy changes, lens validation and camera selection live in
+the shared ScriptContext/NodeHandle API. Late-update runs after physics.
+The active session Nodes snapshot compiles through
+`raf_nodes::runtime_compiler` into a global Rhai attachment with the same
+sandbox and Host API; the legacy executor is not the Play path. C++/WASM and
+server networking remain unimplemented adapters. See CAMERA_RUNTIME.md.
+
 This section is the active decision register. Historical ADR files are not a
 second authority. When an older note conflicts with this section or with the
 active code map below, this document and the live code win.
@@ -210,6 +235,8 @@ recoverable through version history and the stabilization archive.
 * `src/catalog.rs`: Stable built-in node descriptors and factories shared by Game and Electronics authoring.
 * `src/graph.rs`: Session graph, checked connections, and authoring diagnostics.
 * `src/compiler.rs`: Current validation-only compiler boundary; it does not execute or emit runtime code.
+* `src/runtime_compiler.rs`: Bounded Game graph-to-Rhai compilation for the isolated Play snapshot and source-only authoring checks.
+* `src/scene_nodes.rs`: Camera, hierarchy, reference, late-update and event node descriptors shared by the catalog.
 * `src/executor.rs`: Prepared runtime infrastructure, outside the active native Play contract.
 
 #### 7. `raf_script` (Scripting Runtime + Host API)

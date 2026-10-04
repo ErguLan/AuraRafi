@@ -122,15 +122,7 @@ pub fn build_nodes_surface_with_host(
     let tokens = palette.tokens();
     let palette_panel = build_palette(palette, host, language, can_undo, can_redo);
     let graph_panel = build_graph_panel(
-        palette,
-        graph,
-        selected,
-        zoom,
-        pan,
-        viewport,
-        host,
-        validation,
-        language,
+        palette, graph, selected, zoom, pan, viewport, host, validation, language,
     );
     let inspector = selected
         .and_then(|id| graph.node(id))
@@ -327,8 +319,8 @@ fn build_palette(
     );
 
     // Section 4: ACCORDION LIST OF CATEGORIES AND NODES
-    let mut list = UiNode::scroll_view("nodes.palette.list", UiScrollAxis::Vertical)
-        .with_layout(UiLayout {
+    let mut list =
+        UiNode::scroll_view("nodes.palette.list", UiScrollAxis::Vertical).with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 4.0,
             grow: 1.0,
@@ -385,74 +377,71 @@ fn build_palette(
             UiIconId::ChevronDown
         };
 
-        let cat_header = UiNode::new(
-            format!("nodes.cat.btn.{cat_slug}"),
-            UiNodeKind::Button,
-        )
-        .with_class("nodes-cat-header")
-        .with_layout(UiLayout {
-            flow: UiFlow::Row,
-            align_items: UiAlign::Center,
-            gap: 6.0,
-            padding: UiSpacing::xy(6.0, 0.0),
-            ..UiLayout::fixed(0.0, 22.0).with_width_mode(UiSizeMode::Fill)
-        })
-        .with_style(UiStyle {
-            fill: [cat_color[0], cat_color[1], cat_color[2], 28],
-            border: [cat_color[0], cat_color[1], cat_color[2], 75],
-            text: tokens.text,
-            border_width: 1.0,
-            radius: 4.0,
-            opacity: 1.0,
-        })
-        .with_icon(
-            UiIcon::new(nodes_catalog::category_icon(category))
-                .with_size(UiIconSize::Small)
-                .with_tint(cat_color),
-        )
-        .with_child(
-            UiNode::new(format!("nodes.cat.title.{cat_slug}"), UiNodeKind::Label)
-                .with_text_value(cat_name)
-                .with_text_style(UiTextStyle {
-                    role: UiTextRole::Button,
-                    size_px: 10.5,
-                    line_height_px: 14.0,
-                    weight: UiFontWeight::Bold,
-                    color: tokens.text,
-                    inherit_color: false,
-                })
-                .with_text_overflow(UiTextOverflow::Ellipsis)
-                .with_layout(UiLayout {
-                    grow: 1.0,
-                    ..UiLayout::fit_content()
-                }),
-        )
-        .with_child(
-            UiNode::new(format!("nodes.cat.count.{cat_slug}"), UiNodeKind::Label)
-                .with_text_value(format!("({})", matching_nodes.len()))
-                .with_text_style(UiTextStyle {
-                    role: UiTextRole::Label,
-                    size_px: 9.0,
-                    line_height_px: 12.0,
-                    weight: UiFontWeight::Regular,
-                    color: cat_color,
-                    inherit_color: false,
-                }),
-        )
-        .with_child(
-            UiNode::new(format!("nodes.cat.chev.{cat_slug}"), UiNodeKind::Label)
-                .with_icon(
-                    UiIcon::new(chevron_icon)
-                        .with_size(UiIconSize::Small)
-                        .with_tint(tokens.text_muted),
-                )
-                .with_layout(UiLayout::fixed(14.0, 14.0)),
-        )
-        .focusable()
-        .with_event(UiEventBinding::command(
-            UiEventKind::Click,
-            format!("nodes.toggle_category.{cat_slug}"),
-        ));
+        let cat_header = UiNode::new(format!("nodes.cat.btn.{cat_slug}"), UiNodeKind::Button)
+            .with_class("nodes-cat-header")
+            .with_layout(UiLayout {
+                flow: UiFlow::Row,
+                align_items: UiAlign::Center,
+                gap: 6.0,
+                padding: UiSpacing::xy(6.0, 0.0),
+                ..UiLayout::fixed(0.0, 22.0).with_width_mode(UiSizeMode::Fill)
+            })
+            .with_style(UiStyle {
+                fill: [cat_color[0], cat_color[1], cat_color[2], 28],
+                border: [cat_color[0], cat_color[1], cat_color[2], 75],
+                text: tokens.text,
+                border_width: 1.0,
+                radius: 4.0,
+                opacity: 1.0,
+            })
+            .with_icon(
+                UiIcon::new(nodes_catalog::category_icon(category))
+                    .with_size(UiIconSize::Small)
+                    .with_tint(cat_color),
+            )
+            .with_child(
+                UiNode::new(format!("nodes.cat.title.{cat_slug}"), UiNodeKind::Label)
+                    .with_text_value(cat_name)
+                    .with_text_style(UiTextStyle {
+                        role: UiTextRole::Button,
+                        size_px: 10.5,
+                        line_height_px: 14.0,
+                        weight: UiFontWeight::Bold,
+                        color: tokens.text,
+                        inherit_color: false,
+                    })
+                    .with_text_overflow(UiTextOverflow::Ellipsis)
+                    .with_layout(UiLayout {
+                        grow: 1.0,
+                        ..UiLayout::fit_content()
+                    }),
+            )
+            .with_child(
+                UiNode::new(format!("nodes.cat.count.{cat_slug}"), UiNodeKind::Label)
+                    .with_text_value(format!("({})", matching_nodes.len()))
+                    .with_text_style(UiTextStyle {
+                        role: UiTextRole::Label,
+                        size_px: 9.0,
+                        line_height_px: 12.0,
+                        weight: UiFontWeight::Regular,
+                        color: cat_color,
+                        inherit_color: false,
+                    }),
+            )
+            .with_child(
+                UiNode::new(format!("nodes.cat.chev.{cat_slug}"), UiNodeKind::Label)
+                    .with_icon(
+                        UiIcon::new(chevron_icon)
+                            .with_size(UiIconSize::Small)
+                            .with_tint(tokens.text_muted),
+                    )
+                    .with_layout(UiLayout::fixed(14.0, 14.0)),
+            )
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                format!("nodes.toggle_category.{cat_slug}"),
+            ));
 
         list = list.with_child(cat_header);
 
@@ -465,66 +454,67 @@ fn build_palette(
 
                 // One line per node. The description moved to the tooltip: two
                 // lines per row meant only six nodes fit on screen.
-                let item_btn = UiNode::new(
-                    format!("nodes.palette.{node_slug}"),
-                    UiNodeKind::Button,
-                )
-                .with_class("nodes-palette-card")
-                .with_layout(UiLayout {
-                    flow: UiFlow::Row,
-                    align_items: UiAlign::Center,
-                    gap: 8.0,
-                    padding: UiSpacing::xy(8.0, 0.0),
-                    ..UiLayout::fixed(0.0, 26.0).with_width_mode(UiSizeMode::Fill)
-                })
-                .with_style(UiStyle {
-                    fill: tokens.surface_alt,
-                    border: tokens.border,
-                    text: tokens.text,
-                    border_width: 1.0,
-                    radius: 4.0,
-                    opacity: 1.0,
-                })
-                .with_icon(
-                    UiIcon::new(icon_id)
-                        .with_size(UiIconSize::Small)
-                        .with_tint(cat_color),
-                )
-                .with_child(
-                    UiNode::new(format!("nodes.palette.{node_slug}.name"), UiNodeKind::Label)
-                        .with_text_value(localized_node_title)
-                        .with_text_style(UiTextStyle {
-                            role: UiTextRole::Button,
-                            size_px: 11.0,
-                            line_height_px: 26.0,
-                            weight: UiFontWeight::Regular,
-                            color: tokens.text,
-                            inherit_color: false,
-                        })
-                        .with_text_overflow(UiTextOverflow::Ellipsis)
+                let item_btn =
+                    UiNode::new(format!("nodes.palette.{node_slug}"), UiNodeKind::Button)
+                        .with_class("nodes-palette-card")
                         .with_layout(UiLayout {
-                            grow: 1.0,
+                            flow: UiFlow::Row,
+                            align_items: UiAlign::Center,
+                            gap: 8.0,
+                            padding: UiSpacing::xy(8.0, 0.0),
                             ..UiLayout::fixed(0.0, 26.0).with_width_mode(UiSizeMode::Fill)
-                        }),
-                )
-                .with_child(
-                    UiNode::new(
-                        format!("nodes.palette.{node_slug}.add_icon"),
-                        UiNodeKind::Label,
-                    )
-                    .with_icon(
-                        UiIcon::new(UiIconId::Add)
-                            .with_size(UiIconSize::Small)
-                            .with_tint(tokens.text_muted),
-                    )
-                    .with_layout(UiLayout::fixed(12.0, 12.0)),
-                )
-                .with_tooltip_key(descriptor.description_key)
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
-                    format!("nodes.add.{node_slug}"),
-                ));
+                        })
+                        .with_style(UiStyle {
+                            fill: tokens.surface_alt,
+                            border: tokens.border,
+                            text: tokens.text,
+                            border_width: 1.0,
+                            radius: 4.0,
+                            opacity: 1.0,
+                        })
+                        .with_icon(
+                            UiIcon::new(icon_id)
+                                .with_size(UiIconSize::Small)
+                                .with_tint(cat_color),
+                        )
+                        .with_child(
+                            UiNode::new(
+                                format!("nodes.palette.{node_slug}.name"),
+                                UiNodeKind::Label,
+                            )
+                            .with_text_value(localized_node_title)
+                            .with_text_style(UiTextStyle {
+                                role: UiTextRole::Button,
+                                size_px: 11.0,
+                                line_height_px: 26.0,
+                                weight: UiFontWeight::Regular,
+                                color: tokens.text,
+                                inherit_color: false,
+                            })
+                            .with_text_overflow(UiTextOverflow::Ellipsis)
+                            .with_layout(UiLayout {
+                                grow: 1.0,
+                                ..UiLayout::fixed(0.0, 26.0).with_width_mode(UiSizeMode::Fill)
+                            }),
+                        )
+                        .with_child(
+                            UiNode::new(
+                                format!("nodes.palette.{node_slug}.add_icon"),
+                                UiNodeKind::Label,
+                            )
+                            .with_icon(
+                                UiIcon::new(UiIconId::Add)
+                                    .with_size(UiIconSize::Small)
+                                    .with_tint(tokens.text_muted),
+                            )
+                            .with_layout(UiLayout::fixed(12.0, 12.0)),
+                        )
+                        .with_tooltip_key(descriptor.description_key)
+                        .focusable()
+                        .with_event(UiEventBinding::command(
+                            UiEventKind::Click,
+                            format!("nodes.add.{node_slug}"),
+                        ));
 
                 list = list.with_child(item_btn);
             }
@@ -744,20 +734,16 @@ fn build_graph_panel(
                 .with_text_style(UiTextStyle::panel_title(tokens.text))
                 .with_text_overflow(UiTextOverflow::Ellipsis),
         )
-        .with_child(
-            stat_pill(
-                "nodes.graph.node-count",
-                format!("{} nodes", graph.nodes.len()),
-                tokens.accent,
-            ),
-        )
-        .with_child(
-            stat_pill(
-                "nodes.graph.wire-count",
-                format!("{} wires", graph.connections.len()),
-                tokens.text_muted,
-            ),
-        )
+        .with_child(stat_pill(
+            "nodes.graph.node-count",
+            format!("{} nodes", graph.nodes.len()),
+            tokens.accent,
+        ))
+        .with_child(stat_pill(
+            "nodes.graph.wire-count",
+            format!("{} wires", graph.connections.len()),
+            tokens.text_muted,
+        ))
         // Zoom percentage badge
         .with_child(
             UiNode::new("nodes.zoom.badge", UiNodeKind::Button)
@@ -777,7 +763,10 @@ fn build_graph_panel(
                 )
                 .with_tooltip_value("Reset zoom (100%)")
                 .focusable()
-                .with_event(UiEventBinding::command(UiEventKind::Click, "nodes.zoom.reset")),
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    "nodes.zoom.reset",
+                )),
         )
         .with_child(icon_button(
             "nodes.zoom.out",
@@ -804,7 +793,12 @@ fn build_graph_panel(
                     ..UiLayout::fit_content().fixed_height(26.0)
                 })
                 .with_style(UiStyle {
-                    fill: [tokens.accent_hot[0], tokens.accent_hot[1], tokens.accent_hot[2], 40],
+                    fill: [
+                        tokens.accent_hot[0],
+                        tokens.accent_hot[1],
+                        tokens.accent_hot[2],
+                        40,
+                    ],
                     border: tokens.accent_hot,
                     text: tokens.text,
                     border_width: 1.0,
@@ -962,9 +956,14 @@ fn build_graph_panel(
     }
 
     // 2. Cables (persisted + in-flight elastic wire)
-    for child in
-        nodes_canvas::build_connections(palette, graph, zoom, pan, canvas_size, host.wire_drag().as_ref())
-    {
+    for child in nodes_canvas::build_connections(
+        palette,
+        graph,
+        zoom,
+        pan,
+        canvas_size,
+        host.wire_drag().as_ref(),
+    ) {
         canvas = canvas.with_child(child);
     }
 
@@ -1019,11 +1018,7 @@ fn hud_tool_button(
             } else {
                 [0, 0, 0, 0]
             },
-            border: if active {
-                tokens.accent
-            } else {
-                [0, 0, 0, 0]
-            },
+            border: if active { tokens.accent } else { [0, 0, 0, 0] },
             text: tokens.text,
             border_width: if active { 1.5 } else { 0.0 },
             radius: 4.0,
@@ -1032,7 +1027,11 @@ fn hud_tool_button(
         .with_icon(
             UiIcon::new(icon)
                 .with_size(UiIconSize::Small)
-                .with_tint(if active { tokens.accent } else { tokens.text_muted }),
+                .with_tint(if active {
+                    tokens.accent
+                } else {
+                    tokens.text_muted
+                }),
         )
         .with_tooltip_value(tooltip)
         .focusable()
@@ -1326,9 +1325,7 @@ fn build_node_card(
     // painted one pixel below the card instead of a shadow map.
     card = card.with_child(
         UiNode::new(format!("nodes.card.{id}.shadow"), UiNodeKind::Panel)
-            .with_layout(
-                UiLayout::absolute(UiRect::new(0.0, 3.0, width, height)).with_z_index(-1),
-            )
+            .with_layout(UiLayout::absolute(UiRect::new(0.0, 3.0, width, height)).with_z_index(-1))
             .with_style(UiStyle {
                 fill: [0, 0, 0, 110],
                 border: [0, 0, 0, 0],
@@ -1496,7 +1493,12 @@ fn build_node_card(
     let pending_info = pending_pin.and_then(|pending| {
         let source_node = graph.node(pending.node_id)?;
         let source_pin = source_node.pins.iter().find(|p| p.id == pending.pin_id)?;
-        Some((pending.node_id, pending.pin_id, source_pin.kind, source_pin.data_type))
+        Some((
+            pending.node_id,
+            pending.pin_id,
+            source_pin.kind,
+            source_pin.data_type,
+        ))
     });
 
     for pin in &node.pins {
@@ -1523,7 +1525,10 @@ fn build_node_card(
             Some((p_node, p_pin, p_kind, p_type)) => {
                 if p_node == node.id && p_pin == pin.id {
                     (true, false)
-                } else if p_node != node.id && p_kind != pin.kind && raf_nodes::types_compatible(p_type, pin.data_type) {
+                } else if p_node != node.id
+                    && p_kind != pin.kind
+                    && raf_nodes::types_compatible(p_type, pin.data_type)
+                {
                     (false, true)
                 } else {
                     (false, false)
@@ -1549,7 +1554,12 @@ fn build_node_card(
                 UiFontWeight::Regular
             },
             color: if is_dimmed {
-                [tokens.text_muted[0], tokens.text_muted[1], tokens.text_muted[2], 75]
+                [
+                    tokens.text_muted[0],
+                    tokens.text_muted[1],
+                    tokens.text_muted[2],
+                    75,
+                ]
             } else if output {
                 tokens.text
             } else {
@@ -1639,7 +1649,11 @@ fn pin_button(
             fill: fill_color,
             border: border_color,
             text: tokens.text,
-            border_width: if is_self_pending || is_compatible { 3.0 } else { 2.0 },
+            border_width: if is_self_pending || is_compatible {
+                3.0
+            } else {
+                2.0
+            },
             radius: rect.width * 0.5,
             opacity: if is_dimmed { 0.35 } else { 1.0 },
         })
@@ -1659,7 +1673,11 @@ fn pin_button(
             UiEventKind::DragStart,
             format!(
                 "nodes.wire.start.{node_id}:{pin_id}:{}",
-                if matches!(pin.kind, PinKind::Output) { "out" } else { "in" }
+                if matches!(pin.kind, PinKind::Output) {
+                    "out"
+                } else {
+                    "in"
+                }
             ),
         ))
         .with_event(UiEventBinding::command(
@@ -1732,15 +1750,14 @@ pub fn build_nodes_palette_popup_surface(
         NodeCategory::Variable,
     ];
 
-    let mut list = UiNode::new("nodes.palette-popup.list", UiNodeKind::Panel).with_layout(
-        UiLayout {
+    let mut list =
+        UiNode::new("nodes.palette-popup.list", UiNodeKind::Panel).with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 2.0,
             ..UiLayout::fixed(0.0, 0.0)
                 .with_width_mode(UiSizeMode::Fill)
                 .with_height_mode(UiSizeMode::FitContent)
-        },
-    );
+        });
 
     let mut matches = 0usize;
     for category in categories {
@@ -1769,7 +1786,10 @@ pub fn build_nodes_palette_popup_surface(
 
         list = list.with_child(
             UiNode::new(
-                format!("nodes.palette-popup.cat.{}", nodes_catalog::category_slug(category)),
+                format!(
+                    "nodes.palette-popup.cat.{}",
+                    nodes_catalog::category_slug(category)
+                ),
                 UiNodeKind::Label,
             )
             .with_text_key(nodes_catalog::category_key(category))
@@ -2154,12 +2174,11 @@ fn build_inspector(
                             }),
                     )
                     .with_child(
-                        UiNode::new("nodes.inspector.header_spacer", UiNodeKind::Panel).with_layout(
-                            UiLayout {
+                        UiNode::new("nodes.inspector.header_spacer", UiNodeKind::Panel)
+                            .with_layout(UiLayout {
                                 grow: 1.0,
                                 ..UiLayout::fit_content()
-                            },
-                        ),
+                            }),
                     )
                     .with_child(
                         UiNode::new("nodes.inspector.status_badge", UiNodeKind::Label)
@@ -2275,12 +2294,7 @@ fn build_inspector(
                 .iter()
                 .any(|c| c.to_node == node.id && c.to_pin == pin.id);
             content = content.with_child(inspector_pin_row(
-                palette,
-                node,
-                pin,
-                index,
-                is_linked,
-                language,
+                palette, node, pin, index, is_linked, language,
             ));
         }
     }
@@ -2563,7 +2577,11 @@ fn inspector_pin_row(
                 size_px: 8.5,
                 line_height_px: 12.0,
                 weight: UiFontWeight::Bold,
-                color: if is_linked { tokens.accent } else { tokens.text_muted },
+                color: if is_linked {
+                    tokens.accent
+                } else {
+                    tokens.text_muted
+                },
                 inherit_color: false,
             }),
         )
@@ -2689,7 +2707,12 @@ fn nodes_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 UiStyleSelector::Class("nodes-cat-header".to_string()),
                 UiStylePatch {
                     border_width: Some(1.5),
-                    fill: Some([tokens.surface_raised[0], tokens.surface_raised[1], tokens.surface_raised[2], 180]),
+                    fill: Some([
+                        tokens.surface_raised[0],
+                        tokens.surface_raised[1],
+                        tokens.surface_raised[2],
+                        180,
+                    ]),
                     ..UiStylePatch::default()
                 },
             )
@@ -2737,7 +2760,12 @@ fn nodes_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 UiStylePatch {
                     border: Some(tokens.accent_hot),
                     border_width: Some(3.0),
-                    fill: Some([tokens.accent_hot[0], tokens.accent_hot[1], tokens.accent_hot[2], 200]),
+                    fill: Some([
+                        tokens.accent_hot[0],
+                        tokens.accent_hot[1],
+                        tokens.accent_hot[2],
+                        200,
+                    ]),
                     ..UiStylePatch::default()
                 },
             )
@@ -2768,7 +2796,12 @@ fn nodes_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                     border: Some(tokens.accent_hot),
                     border_width: Some(1.5),
                     opacity: Some(1.0),
-                    fill: Some([tokens.surface_raised[0], tokens.surface_raised[1], tokens.surface_raised[2], 255]),
+                    fill: Some([
+                        tokens.surface_raised[0],
+                        tokens.surface_raised[1],
+                        tokens.surface_raised[2],
+                        255,
+                    ]),
                     ..UiStylePatch::default()
                 },
             )

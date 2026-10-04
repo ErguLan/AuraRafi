@@ -53,6 +53,8 @@ impl ProjectType {
 /// Per-project settings stored inside `project.ron`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectSettings {
+    #[serde(default)]
+    pub runtime: crate::runtime_config::ProjectRuntimeSettings,
     /// Show the hierarchy panel while editing this project.
     #[serde(default = "default_true")]
     pub show_hierarchy_panel: bool,
@@ -271,6 +273,7 @@ impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
             show_hierarchy_panel: true,
+            runtime: crate::runtime_config::ProjectRuntimeSettings::default(),
             show_properties_panel: true,
             enable_console_commands: false,
             allow_gpu_features: false,
@@ -336,13 +339,16 @@ impl Project {
         parent_dir: &Path,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let project_dir = parent_dir.join(name);
+        if project_dir.join(Self::META_FILE).exists() {
+            return Err(format!("project already exists: '{}'", project_dir.display()).into());
+        }
         create_project_directory(&project_dir, "project directory")?;
         create_project_directory(&project_dir.join("assets"), "assets directory")?;
         create_project_directory(&project_dir.join("scenes"), "scenes directory")?;
         create_project_directory(&project_dir.join("scripts"), "scripts directory")?;
 
         let now = Utc::now();
-        let project = Self {
+        let mut project = Self {
             id: Uuid::new_v4(),
             name: name.to_string(),
             project_type,
@@ -360,6 +366,24 @@ impl Project {
                 project_dir.display()
             )
         })?;
+        if project_type == ProjectType::Game {
+            // Seed an editable template, never a runtime fallback or controller.
+            let mut scene = crate::scene::SceneGraph::new();
+            let camera_id = scene.add_root("Camera");
+            let camera = scene.get_mut(camera_id).expect("new camera entity");
+            camera.game_camera = Some(crate::runtime_config::GameCamera::default());
+            camera.position = glam::Vec3::new(0.0, 2.0, 6.0);
+            camera.rotation.x = -15.0;
+            project.settings.runtime.active_camera = Some(camera.uuid);
+            let session = sessions.active().expect("new project has a Main session");
+            let scene_path = session.path(&project_dir, &session.scene_file);
+            scene.save_ron(&scene_path).map_err(|error| {
+                format!(
+                    "could not initialize Game scene '{}': {error}",
+                    scene_path.display()
+                )
+            })?;
+        }
         project.save().map_err(|error| {
             format!(
                 "could not write project metadata '{}': {error}",
@@ -488,6 +512,40 @@ mod tests {
             .path
             .join(ProjectSessionRegistry::FILE_NAME)
             .is_file());
+
+        let sessions = ProjectSessionRegistry::load_or_legacy(&project.path, ProjectType::Game);
+        let session = sessions.active().expect("Main session");
+        let scene: crate::scene::SceneGraph = ron::from_str(
+            &std::fs::read_to_string(session.path(&project.path, &session.scene_file)).unwrap(),
+        )
+        .expect("persisted Game template");
+        assert_eq!(scene.len(), 1);
+        let (_, camera) = scene.iter().next().unwrap();
+        assert_eq!(camera.name, "Camera");
+        assert_eq!(camera.primitive, crate::scene::Primitive::Empty);
+        assert_eq!(camera.position, glam::Vec3::new(0.0, 2.0, 6.0));
+        assert!(camera.scripts.is_empty());
+        assert!(camera.game_camera.as_ref().unwrap().validate().is_ok());
+        assert_eq!(project.settings.runtime.active_camera, Some(camera.uuid));
+        assert_eq!(
+            Project::load(&project.path)
+                .unwrap()
+                .settings
+                .runtime
+                .active_camera,
+            Some(camera.uuid)
+        );
+        assert!(Project::create("Working", ProjectType::Game, &root).is_err());
+        assert_eq!(Project::load(&project.path).unwrap().id, project.id);
+        let electronics = Project::create("Circuit", ProjectType::Electronics, &root).unwrap();
+        assert_eq!(electronics.settings.runtime.active_camera, None);
+        let electronics_sessions =
+            ProjectSessionRegistry::load_or_legacy(&electronics.path, ProjectType::Electronics);
+        let electronics_main = electronics_sessions.active().unwrap();
+        assert!(!electronics_main
+            .path(&electronics.path, &electronics_main.scene_file)
+            .exists());
+        assert_eq!(crate::scene::SceneGraph::new().len(), 0);
 
         let blocked_parent = root.join("not-a-directory");
         std::fs::write(&blocked_parent, "blocker").expect("create blocker file");

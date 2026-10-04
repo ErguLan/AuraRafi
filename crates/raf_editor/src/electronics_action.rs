@@ -17,6 +17,7 @@ pub enum ElectronicsAction {
     FitView,
     ToggleGrid,
     ToggleLabels,
+    ToggleSnap,
     ZoomIn,
     ZoomOut,
 
@@ -26,6 +27,20 @@ pub enum ElectronicsAction {
     Undo,
     Redo,
     SaveProject,
+
+    /// Confirms the armed destructive action.
+    ConfirmDelete,
+    /// Dismisses the armed destructive action.
+    CancelPending,
+    /// Moves the document selection to the object behind an analysis finding.
+    FocusAnalysisIssue {
+        panel: String,
+        index: usize,
+    },
+    /// Moves the document selection to the component a finding named.
+    FocusAnalysisComponent {
+        source_id: uuid::Uuid,
+    },
 
     // Workspace Mode
     SetSurface(CadSurfaceKind),
@@ -64,12 +79,15 @@ impl ElectronicsAction {
             "electronics.fit" => Some(Self::FitView),
             "electronics.grid.toggle" => Some(Self::ToggleGrid),
             "electronics.labels.toggle" => Some(Self::ToggleLabels),
+            "electronics.snap.toggle" => Some(Self::ToggleSnap),
             "electronics.zoom-in" => Some(Self::ZoomIn),
             "electronics.zoom-out" => Some(Self::ZoomOut),
             "electronics.rotate" => Some(Self::Rotate),
             "electronics.analysis.drc" => Some(Self::RunDrc),
             "electronics.analysis.simulation" => Some(Self::RunSimulation),
             "electronics.analysis.cancel" => Some(Self::CancelAnalysis),
+            "electronics.delete.confirm" => Some(Self::ConfirmDelete),
+            "electronics.delete.cancel" => Some(Self::CancelPending),
             "electronics.mode.schematic" => Some(Self::SetSurface(CadSurfaceKind::Schematic)),
             "electronics.mode.pcb" => Some(Self::SetSurface(CadSurfaceKind::Pcb)),
             "electronics.pcb.sync" => Some(Self::SyncPcb),
@@ -87,6 +105,20 @@ impl ElectronicsAction {
             _ => {
                 if let Some(val) = command.strip_prefix("electronics.inspector.value.commit:") {
                     Some(Self::CommitInspectorValue(val.to_string()))
+                } else if let Some(target) =
+                    command.strip_prefix("electronics.analysis.focus_line:")
+                {
+                    let (panel, index) = target.rsplit_once(':')?;
+                    Some(Self::FocusAnalysisIssue {
+                        panel: panel.to_string(),
+                        index: index.parse().ok()?,
+                    })
+                } else if let Some(target) =
+                    command.strip_prefix("electronics.analysis.focus_component:")
+                {
+                    uuid::Uuid::parse_str(target)
+                        .ok()
+                        .map(|source_id| Self::FocusAnalysisComponent { source_id })
                 } else if let Some(idx) = command.strip_prefix("electronics.navigator.select.") {
                     idx.parse::<usize>().ok().map(Self::SelectNavigator)
                 } else if let Some(idx) = command.strip_prefix("electronics.navigator.inspect.") {
@@ -114,6 +146,7 @@ impl ElectronicsAction {
             Self::FitView => "electronics.fit".to_string(),
             Self::ToggleGrid => "electronics.grid.toggle".to_string(),
             Self::ToggleLabels => "electronics.labels.toggle".to_string(),
+            Self::ToggleSnap => "electronics.snap.toggle".to_string(),
             Self::ZoomIn => "electronics.zoom-in".to_string(),
             Self::ZoomOut => "electronics.zoom-out".to_string(),
             Self::Rotate => "electronics.rotate".to_string(),
@@ -127,6 +160,14 @@ impl ElectronicsAction {
             Self::Redo => "edit.redo".to_string(),
             Self::Delete => "edit.delete".to_string(),
             Self::SaveProject => "project.save".to_string(),
+            Self::ConfirmDelete => "electronics.delete.confirm".to_string(),
+            Self::CancelPending => "electronics.delete.cancel".to_string(),
+            Self::FocusAnalysisIssue { panel, index } => {
+                format!("electronics.analysis.focus_line:{panel}:{index}")
+            }
+            Self::FocusAnalysisComponent { source_id } => {
+                format!("electronics.analysis.focus_component:{source_id}")
+            }
             Self::ContextDelete => "electronics.context.delete".to_string(),
             Self::ContextRoute => "electronics.context.route".to_string(),
             Self::ContextSelect => "electronics.context.select".to_string(),
@@ -160,10 +201,7 @@ mod tests {
             ElectronicsAction::parse("electronics.navigator.select.3"),
             Some(ElectronicsAction::SelectNavigator(3))
         );
-        assert_eq!(
-            ElectronicsAction::parse("unknown.command"),
-            None
-        );
+        assert_eq!(ElectronicsAction::parse("unknown.command"), None);
     }
 
     #[test]
@@ -172,5 +210,63 @@ mod tests {
         let cmd = action.to_command_string();
         assert_eq!(cmd, "electronics.inspector.value.commit:4.7uF");
         assert_eq!(ElectronicsAction::parse(&cmd), Some(action));
+    }
+
+    #[test]
+    fn parses_delete_confirmation_and_analysis_focus() {
+        assert_eq!(
+            ElectronicsAction::parse("electronics.delete.confirm"),
+            Some(ElectronicsAction::ConfirmDelete)
+        );
+        assert_eq!(
+            ElectronicsAction::parse("electronics.delete.cancel"),
+            Some(ElectronicsAction::CancelPending)
+        );
+        assert_eq!(
+            ElectronicsAction::parse("electronics.analysis.focus_line:drc:2"),
+            Some(ElectronicsAction::FocusAnalysisIssue {
+                panel: "drc".to_string(),
+                index: 2
+            })
+        );
+    }
+
+    #[test]
+    fn analysis_focus_round_trips() {
+        let action = ElectronicsAction::FocusAnalysisIssue {
+            panel: "simulation".to_string(),
+            index: 7,
+        };
+        let cmd = action.to_command_string();
+        assert_eq!(cmd, "electronics.analysis.focus_line:simulation:7");
+        assert_eq!(ElectronicsAction::parse(&cmd), Some(action));
+    }
+
+    #[test]
+    fn analysis_component_focus_round_trips() {
+        let source_id = uuid::Uuid::from_u128(0x1234_5678_9abc_def0_1234_5678_9abc_def0);
+        let action = ElectronicsAction::FocusAnalysisComponent { source_id };
+        let cmd = action.to_command_string();
+        assert_eq!(
+            cmd,
+            format!("electronics.analysis.focus_component:{source_id}")
+        );
+        assert_eq!(ElectronicsAction::parse(&cmd), Some(action));
+    }
+
+    #[test]
+    fn rejects_malformed_analysis_focus() {
+        assert_eq!(
+            ElectronicsAction::parse("electronics.analysis.focus_line:"),
+            None
+        );
+        assert_eq!(
+            ElectronicsAction::parse("electronics.analysis.focus_line:drc:x"),
+            None
+        );
+        assert_eq!(
+            ElectronicsAction::parse("electronics.analysis.focus_component:not-a-uuid"),
+            None
+        );
     }
 }

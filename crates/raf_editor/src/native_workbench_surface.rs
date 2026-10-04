@@ -7,8 +7,15 @@
 use super::*;
 use crate::panels::agent_surface::build_agent_surface;
 use crate::panels::console_surface::build_console_surface;
-use crate::panels::electronics_context_menu_surface::build_electronics_context_menu_surface;
-use crate::panels::electronics_surface::build_electronics_analysis_surface;
+use crate::panels::electronics_context_menu_surface::{
+    build_electronics_context_menu_surface, ELECTRONICS_CONTEXT_MENU_HEIGHT,
+    ELECTRONICS_CONTEXT_MENU_WIDTH,
+};
+use crate::panels::electronics_surface::{
+    build_electronics_analysis_surface, build_electronics_delete_backdrop_surface,
+    build_electronics_delete_modal_surface, ElectronicsAnalysisMotion,
+    ELECTRONICS_DELETE_MODAL_HEIGHT, ELECTRONICS_DELETE_MODAL_WIDTH,
+};
 use crate::panels::nodes_surface::{
     build_nodes_context_menu_surface, build_nodes_palette_popup_surface,
     build_nodes_surface_with_host, NODES_CONTEXT_MENU_HEIGHT, NODES_CONTEXT_MENU_WIDTH,
@@ -56,15 +63,41 @@ impl NativeGameWorkbench {
             rules.extend(surface.style_sheet.rules);
         };
 
-        append(
-            build_application_bar_surface(
-                self.palette,
-                &self.project_name,
-                self.project_type,
-                self.open_menu.as_deref(),
-            ),
-            layout.application_bar,
+        let mut application_bar = build_application_bar_surface(
+            self.palette,
+            &self.project_name,
+            self.project_type,
+            self.open_menu.as_deref(),
         );
+        if self.project_type == ProjectType::Game {
+            let children = &mut application_bar.root.children;
+            let index = children
+                .iter()
+                .position(|node| node.id == "application-bar.drag-region")
+                .unwrap_or(children.len());
+            children.insert(
+                index,
+                raf_player::surface::runtime_controls(self.palette, &self.runtime_toolbar),
+            );
+            if layout.window.width < 1600.0 {
+                children.retain(|node| {
+                    node.id != "application-bar.context"
+                        && !node.id.starts_with("application-bar.saved")
+                });
+            }
+            if layout.window.width < 1300.0 {
+                children.retain(|node| !node.id.starts_with("application-bar.command-search"));
+            }
+            if layout.window.width < 1100.0 {
+                if let Some(project) = children
+                    .iter_mut()
+                    .find(|node| node.id == "application-bar.project")
+                {
+                    project.layout.basis[0] = 108.0;
+                }
+            }
+        }
+        append(application_bar, layout.application_bar);
 
         let menu = build_application_menu(ApplicationMenuState {
             project_type: self.project_type,
@@ -81,14 +114,19 @@ impl NativeGameWorkbench {
         });
         if let Some(open_menu) = self.open_menu.as_deref() {
             if let Some(menu) = menu.menus.iter().find(|menu| menu.id == open_menu) {
-                let menu_x = match open_menu {
-                    "file" => 238.0,
-                    "edit" => 294.0,
-                    "view" => 350.0,
-                    "project" => 410.0,
-                    "help" => 486.0,
-                    _ => 238.0,
-                };
+                let menu_x =
+                    match open_menu {
+                        "file" => 238.0,
+                        "edit" => 294.0,
+                        "view" => 350.0,
+                        "project" => 410.0,
+                        "help" => 486.0,
+                        _ => 238.0,
+                    } - if self.project_type == ProjectType::Game && layout.window.width < 1100.0 {
+                        40.0
+                    } else {
+                        0.0
+                    };
                 append(
                     build_application_menu_popup_surface_with_submenu(
                         self.palette,
@@ -213,10 +251,12 @@ impl NativeGameWorkbench {
                     electronics.map_or(ElectronicsTool::Select, NativeElectronicsEditor::tool),
                     electronics.is_none_or(NativeElectronicsEditor::grid_visible),
                     electronics.is_none_or(NativeElectronicsEditor::labels_visible),
+                    electronics.is_none_or(NativeElectronicsEditor::snap_enabled),
                     electronics.is_some_and(NativeElectronicsEditor::can_undo),
                     electronics.is_some_and(NativeElectronicsEditor::can_redo),
                     electronics.is_some_and(|editor| editor.selection().is_some()),
                     electronics.is_some_and(NativeElectronicsEditor::can_rotate_selection),
+                    layout.canvas.width,
                 )
             } else {
                 build_viewport_toolbar_surface(self.palette, self.toolbar_state)
@@ -245,6 +285,7 @@ impl NativeGameWorkbench {
                             .as_ref()
                             .is_some_and(|selected| selected.object_id.starts_with("airwire:"))
                 });
+                let entrance = self.electronics_menu_entrance();
                 append(
                     build_electronics_context_menu_surface(
                         self.palette,
@@ -252,9 +293,48 @@ impl NativeGameWorkbench {
                         can_duplicate,
                         can_route,
                     ),
-                    EditorRect::new(position[0], position[1], 212.0, 224.0),
+                    clamp_rect_to_window(
+                        EditorRect::new(
+                            position[0],
+                            position[1] - (1.0 - entrance) * 6.0,
+                            ELECTRONICS_CONTEXT_MENU_WIDTH,
+                            ELECTRONICS_CONTEXT_MENU_HEIGHT,
+                        ),
+                        layout.window,
+                    ),
                 );
             }
+        }
+
+        // Destructive confirmation is a blocking, window-space overlay: the scrim
+        // covers the whole window so it cannot be mistaken for a panel, and the
+        // modal itself is centred and clamped so it stays fully readable.
+        if let Some(editor) = electronics.filter(|editor| editor.delete_confirm_pending()) {
+            let item_count = editor.selection().map_or(0, |selection| {
+                usize::from(
+                    selection.kind
+                        != crate::electronics_controller::ElectronicsSelectionKind::Other,
+                )
+            });
+            append(
+                build_electronics_delete_backdrop_surface(self.palette),
+                layout.window,
+            );
+            let modal = EditorRect::new(
+                layout.window.x + (layout.window.width - ELECTRONICS_DELETE_MODAL_WIDTH) * 0.5,
+                layout.window.y + (layout.window.height - ELECTRONICS_DELETE_MODAL_HEIGHT) * 0.5,
+                ELECTRONICS_DELETE_MODAL_WIDTH,
+                ELECTRONICS_DELETE_MODAL_HEIGHT,
+            );
+            append(
+                build_electronics_delete_modal_surface(
+                    self.palette,
+                    UiRect::new(modal.x, modal.y, modal.width, modal.height),
+                    item_count,
+                    self.electronics_menu_entrance(),
+                ),
+                modal,
+            );
         }
 
         if let Some(right) = layout.right_panel {
@@ -374,6 +454,20 @@ impl NativeGameWorkbench {
                 group_rect.width,
                 (group_rect.height - tab_height).max(1.0),
             );
+            let analysis_panel =
+                electronics_model::ElectronicsAnalysisPanel::from_tab(&group.active_tab);
+            if let Some(panel) = analysis_panel {
+                self.note_electronics_tab(panel.tab_id());
+            }
+            // The panel swap slides a few pixels and settles through the shared
+            // crossfade curve instead of hard cutting between tabs.
+            let crossfade = self.electronics_tab_crossfade();
+            let analysis_rect = EditorRect::new(
+                content_rect.x,
+                content_rect.y + (1.0 - crossfade) * 8.0,
+                content_rect.width,
+                content_rect.height,
+            );
             match group.active_tab.as_str() {
                 "console" => append(
                     build_console_surface(
@@ -426,58 +520,43 @@ impl NativeGameWorkbench {
                     ),
                     content_rect,
                 ),
-                "drc" => append(
+                electronics_model::ELECTRONICS_ANALYSIS_DRC_TAB => append(
                     build_electronics_analysis_surface(
                         self.palette,
-                        "DESIGN RULE CHECK",
-                        &electronics
-                            .map(|editor| {
-                                electronics_model::analysis_lines(
-                                    editor,
-                                    "drc",
-                                    self.agent_panel.language,
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                vec![crate::panels::electronics_surface::ElectronicsAnalysisLine::normal(
-                                    raf_core::i18n::t(
-                                        "electronics.analysis.unavailable",
-                                        self.agent_panel.language,
-                                    ),
-                                )]
-                            }),
+                        electronics_model::ELECTRONICS_ANALYSIS_DRC_TAB,
+                        &electronics_analysis_lines(
+                            electronics,
+                            electronics_model::ElectronicsAnalysisPanel::Drc,
+                            self.agent_panel.language,
+                        ),
+                        ElectronicsAnalysisMotion::new(
+                            crossfade,
+                            self.electronics_analysis_phase(),
+                        ),
                     ),
-                    content_rect,
+                    analysis_rect,
                 ),
-                "simulation" => append(
+                electronics_model::ELECTRONICS_ANALYSIS_SIMULATION_TAB => append(
                     build_electronics_analysis_surface(
                         self.palette,
-                        "SIMULATION",
-                        &electronics
-                            .map(|editor| {
-                                electronics_model::analysis_lines(
-                                    editor,
-                                    "simulation",
-                                    self.agent_panel.language,
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                vec![crate::panels::electronics_surface::ElectronicsAnalysisLine::normal(
-                                    raf_core::i18n::t(
-                                        "electronics.analysis.unavailable",
-                                        self.agent_panel.language,
-                                    ),
-                                )]
-                            }),
+                        electronics_model::ELECTRONICS_ANALYSIS_SIMULATION_TAB,
+                        &electronics_analysis_lines(
+                            electronics,
+                            electronics_model::ElectronicsAnalysisPanel::Simulation,
+                            self.agent_panel.language,
+                        ),
+                        ElectronicsAnalysisMotion::new(
+                            crossfade,
+                            self.electronics_analysis_phase(),
+                        ),
                     ),
-                    content_rect,
+                    analysis_rect,
                 ),
                 "assets" => {
                     let assets = asset_rows_with_builtins(self.project_catalog.assets());
-                    let grid_viewport = (content_rect.height
-                        - ASSET_TOOLBAR_HEIGHT
-                        - ASSET_SELECTION_BAR_HEIGHT)
-                        .max(ASSET_CARD_MIN_VIEWPORT);
+                    let grid_viewport =
+                        (content_rect.height - ASSET_TOOLBAR_HEIGHT - ASSET_SELECTION_BAR_HEIGHT)
+                            .max(ASSET_CARD_MIN_VIEWPORT);
                     let visible_range = asset_visible_range(
                         &assets,
                         &self.assets_surface.query,
@@ -662,26 +741,20 @@ impl NativeGameWorkbench {
                     )
                 })
                 .or_else(|| {
-                    self.assets_surface
-                        .rename_asset
-                        .as_ref()
-                        .map(|row| {
-                            (
-                                build_assets_rename_modal_surface(self.palette, row),
-                                ASSETS_RENAME_MODAL_HEIGHT,
-                            )
-                        })
+                    self.assets_surface.rename_asset.as_ref().map(|row| {
+                        (
+                            build_assets_rename_modal_surface(self.palette, row),
+                            ASSETS_RENAME_MODAL_HEIGHT,
+                        )
+                    })
                 })
                 .or_else(|| {
-                    self.assets_surface
-                        .delete_asset
-                        .as_ref()
-                        .map(|row| {
-                            (
-                                build_assets_delete_modal_surface(self.palette, row),
-                                ASSETS_DELETE_MODAL_HEIGHT,
-                            )
-                        })
+                    self.assets_surface.delete_asset.as_ref().map(|row| {
+                        (
+                            build_assets_delete_modal_surface(self.palette, row),
+                            ASSETS_DELETE_MODAL_HEIGHT,
+                        )
+                    })
                 });
             if let Some((surface, height)) = modal {
                 append(
@@ -742,10 +815,7 @@ impl NativeGameWorkbench {
                 );
             } else if self.assets_surface.file_menu_open {
                 append(
-                    build_assets_file_popover_surface(
-                        self.palette,
-                        &self.assets_surface.file_name,
-                    ),
+                    build_assets_file_popover_surface(self.palette, &self.assets_surface.file_name),
                     assets_overlay_rect(
                         window,
                         toolbar_anchor,
@@ -767,15 +837,19 @@ impl NativeGameWorkbench {
         }
 
         if let Some(popup) = self.nodes_host.palette_popup() {
-            if let Some(surface) =
-                build_nodes_palette_popup_surface(self.palette, &self.nodes_host, self.agent_panel.language)
-            {
+            if let Some(surface) = build_nodes_palette_popup_surface(
+                self.palette,
+                &self.nodes_host,
+                self.agent_panel.language,
+            ) {
                 let entrance = (1.0 - self.nodes_host.menu_motion()) * 6.0;
                 append(
                     surface,
                     EditorRect::new(
-                        popup.position[0]
-                            .clamp(0.0, (layout.window.width - NODES_PALETTE_POPUP_WIDTH).max(0.0)),
+                        popup.position[0].clamp(
+                            0.0,
+                            (layout.window.width - NODES_PALETTE_POPUP_WIDTH).max(0.0),
+                        ),
                         popup.position[1].clamp(
                             0.0,
                             (layout.window.height - NODES_PALETTE_POPUP_HEIGHT).max(0.0),
@@ -804,6 +878,34 @@ impl NativeGameWorkbench {
     }
 }
 
+/// Builds the retained analysis lines for one dock panel, including the
+/// workbench-level notices (stale synchronization and surface errors) so a
+/// failure is never presented as if it were a design result.
+fn electronics_analysis_lines(
+    editor: Option<&NativeElectronicsEditor>,
+    panel: electronics_model::ElectronicsAnalysisPanel,
+    language: raf_core::config::Language,
+) -> Vec<crate::panels::electronics_surface::ElectronicsAnalysisLine> {
+    let Some(editor) = editor else {
+        return vec![
+            crate::panels::electronics_surface::ElectronicsAnalysisLine::normal(raf_core::i18n::t(
+                "electronics.analysis.unavailable",
+                language,
+            )),
+        ];
+    };
+    let mut lines = electronics_model::analysis_lines(editor, panel, language);
+    for notice in electronics_model::notice_lines(editor, language) {
+        lines.push(
+            crate::panels::electronics_surface::ElectronicsAnalysisLine::with_tone(
+                notice,
+                crate::panels::electronics_surface::ElectronicsAnalysisTone::Failed,
+            ),
+        );
+    }
+    lines
+}
+
 /// Clamps an Assets overlay to the window so a menu, popover or modal is
 /// always fully reachable even when the panel sits against a window edge.
 fn assets_overlay_rect(
@@ -813,16 +915,27 @@ fn assets_overlay_rect(
     slide: f32,
 ) -> EditorRect {
     EditorRect::new(
-        anchor[0].clamp(
-            window.x,
-            (window.x + window.width - size[0]).max(window.x),
-        ),
-        (anchor[1] + slide).clamp(
-            window.y,
-            (window.y + window.height - size[1]).max(window.y),
-        ),
+        anchor[0].clamp(window.x, (window.x + window.width - size[0]).max(window.x)),
+        (anchor[1] + slide).clamp(window.y, (window.y + window.height - size[1]).max(window.y)),
         size[0],
         size[1],
+    )
+}
+
+/// Keeps a floating menu fully inside the window.
+/// A context menu is opened at the raw pointer position, so a right-click near
+/// the right or bottom edge would otherwise place most of the menu offscreen
+/// with no way to reach the last items. The menu flips to the other side of the
+/// pointer when it does not fit, matching the contract in
+/// `docs/EDITOR_RAFUI.md`.
+fn clamp_rect_to_window(rect: EditorRect, window: EditorRect) -> EditorRect {
+    let max_x = (window.x + window.width - rect.width).max(window.x);
+    let max_y = (window.y + window.height - rect.height).max(window.y);
+    EditorRect::new(
+        rect.x.clamp(window.x, max_x),
+        rect.y.clamp(window.y, max_y),
+        rect.width,
+        rect.height,
     )
 }
 
@@ -862,6 +975,24 @@ fn status_items(
         let grid_step = electronics
             .map(NativeElectronicsEditor::grid_step)
             .unwrap_or(workbench.agent_settings.electronics_grid_step_mm);
+        // Divergence and unresolved failures stay visible in the status bar so
+        // they are not only discoverable by opening the analysis dock.
+        let notices = electronics
+            .map(|editor| {
+                let first = editor.surface_errors().last().cloned().or_else(|| {
+                    editor
+                        .sync_is_stale()
+                        .then(|| translate("electronics.sync.pcb_stale"))
+                });
+                first.unwrap_or_else(|| {
+                    if editor.is_dirty() {
+                        translate("app.electronics_modified")
+                    } else {
+                        translate("app.electronics_saved")
+                    }
+                })
+            })
+            .unwrap_or_default();
         vec![
             workbench.project_name.clone(),
             surface,
@@ -877,11 +1008,7 @@ fn status_items(
                 translate("app.electronics_grid_status"),
                 grid_step
             ),
-            if electronics.is_some_and(NativeElectronicsEditor::is_dirty) {
-                translate("app.electronics_modified")
-            } else {
-                translate("app.electronics_saved")
-            },
+            notices,
         ]
     } else {
         vec![

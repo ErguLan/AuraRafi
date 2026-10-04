@@ -28,6 +28,8 @@ pub enum ScriptError {
     InvalidArgument(String),
     /// Script exceeded the per-frame operation limit.
     Timeout,
+    /// The user cancelled preparation or stopped the runtime.
+    Cancelled,
     /// The Host API version declared by the script does not match the engine.
     VersionMismatch { expected: u32, found: u32 },
     /// I/O error reading a script file.
@@ -46,7 +48,8 @@ impl fmt::Display for ScriptError {
             Self::WasmNotImplemented => write!(f, "WASM backend not implemented yet"),
             Self::InvalidHandle(h) => write!(f, "Invalid node handle: {}", h),
             Self::InvalidArgument(msg) => write!(f, "Invalid script argument: {}", msg),
-            Self::Timeout => write!(f, "Script exceeded per-frame operation limit"),
+            Self::Timeout => write!(f, "Script exceeded its execution budget"),
+            Self::Cancelled => write!(f, "Script execution cancelled"),
             Self::VersionMismatch { expected, found } => {
                 write!(
                     f,

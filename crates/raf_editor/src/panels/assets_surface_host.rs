@@ -4,9 +4,7 @@
 //! needed to rebuild it and leaves filesystem and scene mutations at the
 //! application boundary.
 
-use super::assets_surface::{
-    AssetFilter, AssetSort, AssetViewMode, AssetsOperation, AssetsStatus,
-};
+use super::assets_surface::{AssetFilter, AssetSort, AssetViewMode, AssetsOperation, AssetsStatus};
 
 /// Pointer-anchored context menu for a single asset row.
 #[derive(Debug, Clone, PartialEq)]
@@ -104,9 +102,8 @@ impl AssetsSurfaceHost {
     }
 
     pub(crate) fn close_modals(&mut self) -> bool {
-        let was_open = self.open_asset.is_some()
-            || self.rename_asset.is_some()
-            || self.delete_asset.is_some();
+        let was_open =
+            self.open_asset.is_some() || self.rename_asset.is_some() || self.delete_asset.is_some();
         self.open_asset = None;
         self.rename_asset = None;
         self.delete_asset = None;

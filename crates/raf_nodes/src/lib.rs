@@ -18,6 +18,8 @@ pub mod hardware_nodes;
 pub mod input_nodes;
 pub mod math_nodes;
 pub mod node;
+pub mod runtime_compiler;
+pub mod scene_nodes;
 
 pub use entity_nodes::EntityNodes;
 pub use executor::{execute, ExecutionOutput, NodeValue};

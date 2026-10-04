@@ -256,6 +256,90 @@ fn runtime(
             "app.default_scene_name",
             &project.settings.default_scene_name,
         ))
+        .with_child(runtime_text_row(
+            palette,
+            "active_camera",
+            "runtime.active_camera",
+            64,
+        ))
+        .with_child(runtime_text_row(
+            palette,
+            "startup_session",
+            "runtime.startup_session",
+            64,
+        ))
+        .with_child(runtime_text_row(
+            palette,
+            "input_actions",
+            "runtime.input_actions",
+            8192,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.runtime-fixed-hz",
+            "runtime.fixed_hz",
+            "project-settings.runtime-fixed-hz",
+            project.settings.runtime.fixed_hz as f32,
+            15.0,
+            120.0,
+            1.0,
+            project.settings.runtime.fixed_hz.to_string(),
+            false,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.runtime-max-entities",
+            "runtime.max_entities",
+            "project-settings.runtime-max-entities",
+            project.settings.runtime.max_entities as f32,
+            100.0,
+            100_000.0,
+            100.0,
+            project.settings.runtime.max_entities.to_string(),
+            false,
+        ))
+        .with_child(segment_row(
+            palette,
+            "project-settings.runtime-camera-actions",
+            "runtime.active_camera",
+            &[
+                (
+                    "runtime.configure_camera",
+                    "project-settings.runtime.camera.selected",
+                    false,
+                ),
+                (
+                    "runtime.clear_camera",
+                    "project-settings.runtime.camera.clear",
+                    false,
+                ),
+            ],
+        ))
+}
+
+fn runtime_text_row(
+    palette: StudioUiPalette,
+    field: &str,
+    label: &str,
+    max_length: usize,
+) -> UiNode {
+    row(
+        palette,
+        format!("project-settings.runtime-{field}"),
+        label.to_owned(),
+        UiNode::text_input(
+            format!("project-settings.runtime-{field}.control"),
+            UiTextInput {
+                value_key: format!("project-settings.runtime.{field}"),
+                placeholder_key: None,
+                max_length,
+                multiline: false,
+                password: false,
+                submit_command: Some(format!("project-settings.commit_text:runtime.{field}")),
+            },
+        )
+        .with_layout(UiLayout::fixed(CONTROL_WIDTH, 30.0)),
+    )
 }
 
 fn saving(palette: StudioUiPalette, project: &Project) -> UiNode {

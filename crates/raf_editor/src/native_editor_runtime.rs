@@ -637,6 +637,13 @@ impl NativeEditorRuntime {
         changed
     }
 
+    /// Record an already validated command-kernel mutation as one undo action.
+    pub(crate) fn record_scene_change(&mut self, before: SceneGraph, scene: &SceneGraph) {
+        if self.history.record_if_changed(before, scene) {
+            self.request_document_frame();
+        }
+    }
+
     pub fn duplicate_selected(&mut self, scene: &mut SceneGraph) {
         self.duplicate_selection(scene);
     }
@@ -1263,6 +1270,9 @@ impl NativeEditorRuntime {
         }
         self.canvas_renders = self.canvas_renders.saturating_add(1);
         self.scene_rendered_this_frame = true;
+        self.game_viewport.set_camera_helper_pixel_scale(
+            source_size[0] as f32 / self.layout.canvas.width.max(1.0),
+        );
         let output = self
             .game_viewport
             .render(&mut self.graphics, scene, source_size);

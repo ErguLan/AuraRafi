@@ -222,6 +222,9 @@ impl NativeGameWorkbench {
                     "project-settings.default_scene_name" => {
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
+                    key if key.starts_with("project-settings.runtime.") => {
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
                     _ => {}
                 },
                 UiAction::SetToggle { key, value } => {
@@ -440,6 +443,10 @@ impl NativeGameWorkbench {
                     }
                 }
                 UiAction::Command { name } => {
+                    if name.starts_with("runtime.") {
+                        intents.push(NativeWorkbenchIntent::Command(name.clone()));
+                        continue;
+                    }
                     if name == crate::application_menu::command::SEARCH_OPEN {
                         self.open_search();
                         self.open_menu = None;
@@ -711,13 +718,12 @@ impl NativeGameWorkbench {
                             continue;
                         };
                         if let Some(drag) = self.nodes_host.wire_drag() {
-                            if drag.from_node != raf_nodes::NodeId(node_id) || drag.from_pin != pin_id {
+                            if drag.from_node != raf_nodes::NodeId(node_id)
+                                || drag.from_pin != pin_id
+                            {
                                 intents.push(NativeWorkbenchIntent::Command(format!(
                                     "nodes.connect:{}:{}:{}:{}",
-                                    drag.from_node.0,
-                                    drag.from_pin,
-                                    node_id,
-                                    pin_id,
+                                    drag.from_node.0, drag.from_pin, node_id, pin_id,
                                 )));
                             }
                         }
@@ -759,10 +765,10 @@ impl NativeGameWorkbench {
                             .context_menu()
                             .map(|menu| menu.node_id.0.to_string());
                         if menu_target.as_deref() != Some(raw) {
-            self.nodes_host.close_context_menu();
-            if self.nodes_host.close_palette_popup() {
-                self.host.session_mut().interaction.focus.clear_focus();
-            }
+                            self.nodes_host.close_context_menu();
+                            if self.nodes_host.close_palette_popup() {
+                                self.host.session_mut().interaction.focus.clear_focus();
+                            }
                         }
                         intents.push(NativeWorkbenchIntent::Command(name.clone()));
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -1213,14 +1219,16 @@ impl NativeGameWorkbench {
                             let menus = self.assets_surface.close_menus();
                             let modals = self.assets_surface.close_modals();
                             if menus || modals {
-                                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                                self.toolbar_revision =
+                                    self.toolbar_revision.wrapping_add(1).max(1);
                             }
                             continue;
                         }
                         "assets.rename.cancel" | "assets.delete.cancel" => {
                             let changed = self.assets_surface.close_modals();
                             if changed {
-                                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                                self.toolbar_revision =
+                                    self.toolbar_revision.wrapping_add(1).max(1);
                             }
                             continue;
                         }
@@ -1553,10 +1561,9 @@ impl NativeGameWorkbench {
                                     "app.assets_status_delete_failed",
                                 );
                                 self.assets_surface.delete_asset = None;
-                                intents
-                                    .push(NativeWorkbenchIntent::Command(format!(
-                                        "assets.delete:{row}"
-                                    )));
+                                intents.push(NativeWorkbenchIntent::Command(format!(
+                                    "assets.delete:{row}"
+                                )));
                                 self.toolbar_revision =
                                     self.toolbar_revision.wrapping_add(1).max(1);
                                 true
@@ -1569,16 +1576,18 @@ impl NativeGameWorkbench {
                                     "app.assets_status_duplicated",
                                     "app.assets_status_duplicate_failed",
                                 );
-                                intents
-                                    .push(NativeWorkbenchIntent::Command(format!(
-                                        "assets.duplicate:{row}"
-                                    )));
+                                intents.push(NativeWorkbenchIntent::Command(format!(
+                                    "assets.duplicate:{row}"
+                                )));
                                 self.toolbar_revision =
                                     self.toolbar_revision.wrapping_add(1).max(1);
                                 true
                             }
-                            "assets.reveal" | "assets.open.with" | "assets.open.yoll"
-                            | "assets.open.editor" | "assets.open.manager" => {
+                            "assets.reveal"
+                            | "assets.open.with"
+                            | "assets.open.yoll"
+                            | "assets.open.editor"
+                            | "assets.open.manager" => {
                                 self.assets_surface.close_menus();
                                 self.assets_surface.close_modals();
                                 intents.push(NativeWorkbenchIntent::Command(name.clone()));
@@ -1957,6 +1966,24 @@ impl NativeGameWorkbench {
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
+                    if let Some(field) = name.strip_prefix("inspector.camera.commit:") {
+                        if let Some(target) = selected.first().copied() {
+                            let value = self
+                                .host
+                                .session()
+                                .interaction
+                                .controls
+                                .text(&format!("inspector.camera.{field}.text"))
+                                .to_string();
+                            intents.push(NativeWorkbenchIntent::InspectorCommit {
+                                target,
+                                field: format!("camera.{field}"),
+                                value,
+                            });
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        }
+                        continue;
+                    }
                     if name == "inspector.numeric.commit" {
                         let Some(target) = selected.first().copied() else {
                             continue;
@@ -2079,7 +2106,23 @@ impl NativeGameWorkbench {
                     || id.starts_with("nodes.palette-popup.")
             });
         let nodes_tab_active = self.bottom_dock.has_active_tab("nodes");
-        if nodes_tab_active && snapshot.modifiers.command_modifier() && !nodes_text_input_focused
+        // The Nodes dock stays reachable from an Electronics project, so its
+        // single-key and undo bindings used to fire from anywhere: `F` over the
+        // schematic both framed the schematic and re-framed a graph the user was
+        // not looking at, and `Ctrl+Z` undid the node graph and the documents in
+        // the same keypress. A keyboard binding belongs to the surface the user
+        // is actually working on, so outside a Game project it only applies while
+        // the pointer is over the Nodes canvas. The wheel and middle-drag arms
+        // were already spatially bounded; they share the gate so the whole block
+        // has one rule instead of three.
+        let pointer_in_nodes_canvas = snapshot
+            .pointer_position
+            .is_some_and(|pointer| self.nodes_canvas_point(pointer).is_some());
+        let nodes_surface_active =
+            nodes_tab_active && (self.project_type == ProjectType::Game || pointer_in_nodes_canvas);
+        if nodes_surface_active
+            && snapshot.modifiers.command_modifier()
+            && !nodes_text_input_focused
         {
             let nodes_command = if snapshot.key_pressed(raf_core::InputKey::Z) {
                 Some("nodes.undo")
@@ -2094,7 +2137,7 @@ impl NativeGameWorkbench {
         }
         // Nodes viewport navigation: wheel zooms around the pointer, the middle
         // button pans, and `F` frames the graph. Text fields keep the keyboard.
-        if nodes_tab_active && !nodes_text_input_focused {
+        if nodes_surface_active && !nodes_text_input_focused {
             if snapshot.key_pressed(raf_core::InputKey::F) {
                 self.nodes_fit_view();
             }
@@ -2182,6 +2225,35 @@ impl NativeGameWorkbench {
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
             let hovered = self.host.session().interaction.focus.hovered.clone();
+            // The Electronics context menu is drawn by this retained surface, but
+            // the CAD canvas only runs its own input path while nothing is
+            // hovered. A press that landed on a panel therefore left the menu
+            // open with no way to dismiss it, which is the outside-click rule of
+            // the menu contract. One pointer gesture closes it here through the
+            // same semantic command its own items already dispatch, so there is
+            // no second close path, and nothing steals focus from the control the
+            // user actually pressed.
+            //
+            // `hovered` is what separates this from a press on the bare canvas:
+            // the canvas has no retained target under it and already dismisses
+            // the menu itself. `electronics.context.cancel` also ends a pending
+            // wire, and deliberately does not resolve an armed deletion
+            // confirmation, so it can never cancel a dialog the user did not
+            // click.
+            if self.electronics_menu_open
+                && hovered.is_some()
+                && !hovered
+                    .as_deref()
+                    .is_some_and(is_electronics_context_menu_target)
+            {
+                intents.push(NativeWorkbenchIntent::Command(
+                    "electronics.context.cancel".to_string(),
+                ));
+                // The dismissal is emitted after the activity accounting for this
+                // frame, so the revision is bumped here to guarantee the retained
+                // chrome is rebuilt for the closed menu.
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
             if self.hierarchy_renaming.is_some()
                 && !hovered
                     .as_deref()
@@ -2595,6 +2667,15 @@ fn inspector_dropdown_navigation_command(
     })
 }
 
+/// True for a retained target that belongs to the Electronics context menu.
+///
+/// The menu is published as a root node plus one node per item, so both prefixes
+/// have to be recognized. A press on the menu itself must not be treated as the
+/// outside click that dismisses it; the item commands already close the menu.
+fn is_electronics_context_menu_target(target: &str) -> bool {
+    target == "electronics.context-menu" || target.starts_with("electronics.context.")
+}
+
 fn is_supported_texture_asset(value: &str) -> bool {
     let normalized = value.replace('\\', "/");
     if normalized.is_empty()
@@ -2620,9 +2701,8 @@ fn hierarchy_context_selection_intent(
     target: SceneNodeId,
     selected: &[SceneNodeId],
 ) -> Option<NativeWorkbenchIntent> {
-    (!selected.contains(&target)).then(|| {
-        NativeWorkbenchIntent::Command(format!("hierarchy.select:{}:replace", target.0))
-    })
+    (!selected.contains(&target))
+        .then(|| NativeWorkbenchIntent::Command(format!("hierarchy.select:{}:replace", target.0)))
 }
 
 #[cfg(test)]

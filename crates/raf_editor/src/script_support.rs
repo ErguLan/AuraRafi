@@ -48,7 +48,7 @@ impl ScriptLanguage {
     }
 
     pub fn is_engine_supported(self) -> bool {
-        matches!(self, Self::Rust | Self::Cpp | Self::Rhai)
+        self == Self::Rhai
     }
 }
 
@@ -63,6 +63,7 @@ pub struct ScriptCatalogEntry {
 
 #[derive(Debug, Clone)]
 pub struct ScriptValidation {
+    pub syntax_error: Option<String>,
     pub exists: bool,
     pub supported: bool,
     pub language: ScriptLanguage,
@@ -143,6 +144,7 @@ pub fn validate_attached_script(
 
     let Some(root) = assets_root else {
         return ScriptValidation {
+            syntax_error: None,
             exists: false,
             supported,
             language,
@@ -155,6 +157,7 @@ pub fn validate_attached_script(
     let absolute_path = root.join(PathBuf::from(relative_path));
     if !absolute_path.exists() {
         return ScriptValidation {
+            syntax_error: None,
             exists: false,
             supported,
             language,
@@ -164,8 +167,22 @@ pub fn validate_attached_script(
         };
     }
 
-    let (has_on_start, has_on_update) = analyze_script_file(&absolute_path);
+    let validation = if language == ScriptLanguage::Rhai {
+        Some(raf_script::runtime::validate_rhai_file(
+            assets_root,
+            relative_path,
+        ))
+    } else {
+        None
+    };
+    let (has_on_start, has_on_update) = validation
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .map(|script| (script.has_on_start, script.has_on_update))
+        .unwrap_or_default();
+    let syntax_error = validation.and_then(|result| result.err());
     ScriptValidation {
+        syntax_error,
         exists: true,
         supported,
         language,
@@ -339,7 +356,11 @@ pub fn open_url(url: &str) -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        if std::process::Command::new("xdg-open").arg(url).spawn().is_ok() {
+        if std::process::Command::new("xdg-open")
+            .arg(url)
+            .spawn()
+            .is_ok()
+        {
             return true;
         }
     }
@@ -363,12 +384,24 @@ pub fn open_in_yoll_ide(path: Option<&Path>) -> bool {
 }
 
 fn analyze_script_file(path: &Path) -> (bool, bool) {
-    let Ok(contents) = std::fs::read_to_string(path) else {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
         return (false, false);
     };
-
-    let lower = contents.to_lowercase();
-    let has_on_start = lower.contains("fn on_start") || lower.contains("void on_start(");
-    let has_on_update = lower.contains("fn on_update") || lower.contains("void on_update(");
-    (has_on_start, has_on_update)
+    let mut contents = String::new();
+    if file
+        .take(256 * 1024 + 1)
+        .read_to_string(&mut contents)
+        .is_err()
+        || contents.len() > 256 * 1024
+    {
+        return (false, false);
+    }
+    if ScriptLanguage::from_path(&path.to_string_lossy()) == ScriptLanguage::Rhai {
+        let (start, update, _) =
+            raf_script::backends::rhai_backend::analyze_entry_points(&contents);
+        (start, update)
+    } else {
+        (false, false)
+    }
 }

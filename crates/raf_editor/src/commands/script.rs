@@ -327,7 +327,9 @@ fn validate_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) 
 
     let validation = validate_attached_script(ctx.assets_root, file);
 
-    let status = if !validation.exists {
+    let status = if validation.syntax_error.is_some() {
+        "syntax error"
+    } else if !validation.exists {
         "missing"
     } else if !validation.supported {
         "unsupported"
@@ -342,6 +344,9 @@ fn validate_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) 
         format!("Language: {}", validation.language.label()),
         format!("Status: {}", status),
     ];
+    if let Some(error) = &validation.syntax_error {
+        lines.push(error.clone());
+    }
 
     if validation.has_on_start || validation.has_on_update {
         let hooks = match (validation.has_on_start, validation.has_on_update) {
@@ -353,7 +358,7 @@ fn validate_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) 
         lines.push(format!("Hooks: {}", hooks));
     }
 
-    let level = if validation.exists && validation.supported {
+    let level = if validation.exists && validation.supported && validation.syntax_error.is_none() {
         "info"
     } else {
         "warning"
@@ -370,6 +375,7 @@ fn validate_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) 
             "has_on_start": validation.has_on_start,
             "has_on_update": validation.has_on_update,
             "status": status,
+            "syntax_error": validation.syntax_error,
         }),
     );
 
@@ -453,25 +459,58 @@ fn run_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> Co
 }
 
 /// Compile a node graph flow to Rhai source.
-/// Phase E: this will use raf_nodes::compiler.
-fn compile_nodes(command: &ParsedCommand, _ctx: &mut ScriptCommandContext<'_>) -> CommandOutput {
-    let flow = command.arg("flow").unwrap_or("Main");
-    let output = command.arg("output").unwrap_or("compiled.rhai");
-
-    CommandOutput::warning(
-        "Compile nodes",
-        vec![
-            format!("Flow: {}", flow),
-            format!("Output: {}", output),
-            "Node-to-Rhai compilation is Phase E of the scripting roadmap.".to_string(),
-            "See docs/SCRIPTING_SYSTEM.md section 7.2 for details.".to_string(),
-        ],
-        serde_json::json!({
-            "flow": flow,
-            "output": output,
-            "status": "phase_e_not_started",
-        }),
-    )
+/// Returns real Rhai source without executing it or overwriting a file.
+fn compile_nodes(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> CommandOutput {
+    let result = (|| -> Result<String, String> {
+        let root = ctx
+            .assets_root
+            .and_then(Path::parent)
+            .ok_or("No project folder.")?
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        let relative = command
+            .arg("file")
+            .ok_or("Missing file= relative path to saved nodes.ron.")?;
+        let path = root
+            .join(relative)
+            .canonicalize()
+            .map_err(|e| e.to_string())?;
+        if !path.starts_with(&root) || path.extension().and_then(|s| s.to_str()) != Some("ron") {
+            return Err("Node graph must be a project-local RON file.".into());
+        }
+        if std::fs::metadata(&path).map_err(|e| e.to_string())?.len() > 1024 * 1024 {
+            return Err("Node graph exceeds 1 MiB.".into());
+        }
+        use std::io::Read;
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|e| e.to_string())?
+            .take(1024 * 1024 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| e.to_string())?;
+        if bytes.len() > 1024 * 1024 {
+            return Err("Node graph exceeds 1 MiB.".into());
+        }
+        let source = String::from_utf8(bytes).map_err(|e| e.to_string())?;
+        let graph: raf_nodes::NodeGraph = ron::from_str(&source).map_err(|e| e.to_string())?;
+        let source = raf_nodes::runtime_compiler::to_rhai(&graph)?;
+        let engine = raf_script::backends::rhai_backend::create_engine(100_000);
+        raf_script::backends::rhai_backend::compile_source(
+            &engine,
+            "nodes-generated.rhai",
+            &source,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(source)
+    })();
+    match result {
+        Ok(source) => CommandOutput::info(
+            "Compile nodes",
+            vec!["Generated Rhai source; no execution or file write.".into()],
+            serde_json::json!({"status":"compiled","source":source}),
+        ),
+        Err(error) => CommandOutput::error("Compile nodes", error),
+    }
 }
 
 fn normalize_script_path(file: &str) -> String {
@@ -494,11 +533,15 @@ fn rhai_template(name: &str) -> String {
 //
 // Lifecycle hooks (all optional):
 //   fn on_start()        - called once when the scene loads
-//   fn on_update(dt)     - called every frame, dt in seconds
+//   fn on_update(dt)     - called each simulation tick, dt in seconds
+//   fn on_fixed_update(dt) - called before physics
+//   fn on_late_update(dt) - called after physics; camera follow belongs here
 //   fn on_destroy()      - called once when the scene unloads
 //
 // Available functions:
 //   get_node(name) -> Handle
+//   entity(uuid_or_path) -> Handle; check is_valid(handle) before use
+//   activate_camera(handle) -> select a camera for this runtime instance
 //   spawn_entity(name, primitive) -> Handle
 //   destroy_entity(handle)
 //   set_position(handle, x, y, z)     // meters

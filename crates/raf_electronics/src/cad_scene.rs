@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::component::ElectronicComponent;
 use crate::drc::{DrcIssue, DrcReport, DrcSeverity};
+use crate::netlist::Netlist;
 use crate::pcb::{footprint_definition, PcbLayer, PcbLayout};
 use crate::schematic::{component_pin_world_position, Schematic};
 
@@ -86,6 +89,9 @@ pub struct CadObject {
     pub line_paths: Vec<Vec<Vec2>>,
     pub label: Option<String>,
     pub net: Option<String>,
+    /// Stable connectivity identity used for cross-probing and net highlighting.
+    #[serde(default)]
+    pub net_id: Option<usize>,
     pub color_rgba: [u8; 4],
 }
 
@@ -110,6 +116,7 @@ impl CadObject {
             line_paths: Vec::new(),
             label: None,
             net: None,
+            net_id: None,
             color_rgba,
         }
     }
@@ -134,6 +141,7 @@ impl CadObject {
             line_paths: Vec::new(),
             label: None,
             net: None,
+            net_id: None,
             color_rgba,
         }
     }
@@ -189,6 +197,13 @@ impl CadScene {
             }
             hash.write_option_str(object.label.as_deref());
             hash.write_option_str(object.net.as_deref());
+            match object.net_id {
+                Some(id) => {
+                    hash.write_u8(1);
+                    hash.write_usize(id);
+                }
+                None => hash.write_u8(0),
+            }
             hash.write_bytes(&object.color_rgba);
         }
 
@@ -201,11 +216,31 @@ impl CadScene {
             objects: Vec::new(),
         };
 
-        for component in &schematic.components {
-            push_schematic_component(&mut scene.objects, component);
+        // Connectivity is resolved exactly once per rebuild and shared by every
+        // object of the document, so a wire, its label and the pins it touches
+        // all report the same `net_id`.
+        let netlist = schematic.netlist();
+        let mut net_ids = NetIdentityMap::new();
+        for net in &netlist.nets {
+            net_ids.intern(&net.name);
+        }
+        for wire in &schematic.wires {
+            net_ids.intern(&wire.net);
+        }
+        let pin_net_ids = pin_net_ids(&netlist, &net_ids);
+
+        for (component_index, component) in schematic.components.iter().enumerate() {
+            push_schematic_component(
+                &mut scene.objects,
+                component_index,
+                component,
+                &net_ids,
+                &pin_net_ids,
+            );
         }
 
         for wire in &schematic.wires {
+            let net_id = net_ids.get(&wire.net);
             let mut object = CadObject::polyline(
                 format!("wire:{}", wire.id),
                 Some(wire.id),
@@ -216,6 +251,7 @@ impl CadScene {
                 [216, 221, 227, 255],
             );
             object.net = Some(wire.net.clone());
+            object.net_id = net_id;
             scene.objects.push(object);
 
             if !wire.net.trim().is_empty() {
@@ -230,6 +266,7 @@ impl CadScene {
                 );
                 label.label = Some(wire.net.clone());
                 label.net = Some(wire.net.clone());
+                label.net_id = net_id;
                 scene.objects.push(label);
             }
         }
@@ -248,6 +285,8 @@ impl CadScene {
             surface: CadSurfaceKind::Pcb,
             objects: Vec::new(),
         };
+
+        let net_ids = pcb_net_ids(layout);
 
         scene.objects.push(CadObject::polyline(
             "board_outline",
@@ -274,6 +313,8 @@ impl CadScene {
 
             for (pad_index, pad) in footprint.pads.iter().enumerate() {
                 let center = component.position + rotate_vec2(pad.offset, component.rotation);
+                let net = component.pad_nets.get(pad_index).cloned();
+                let net_id = net.as_deref().and_then(|net| net_ids.get(net));
                 let mut object = CadObject::rect(
                     format!("pad:{}:{pad_index}", component.component_id),
                     Some(component.component_id),
@@ -284,7 +325,8 @@ impl CadScene {
                     [212, 119, 26, 255],
                 );
                 object.label = Some(pad.name.clone());
-                object.net = component.pad_nets.get(pad_index).cloned();
+                object.net = net;
+                object.net_id = net_id;
                 scene.objects.push(object);
             }
         }
@@ -303,10 +345,12 @@ impl CadScene {
                 },
             );
             object.net = Some(trace.net.clone());
+            object.net_id = net_ids.get(&trace.net);
             scene.objects.push(object);
         }
 
         for (index, airwire) in layout.airwires.iter().enumerate() {
+            let net_id = net_ids.get(&airwire.net);
             let mut object = CadObject::polyline(
                 format!("airwire:{index}"),
                 None,
@@ -317,6 +361,7 @@ impl CadScene {
                 [245, 245, 246, 180],
             );
             object.net = Some(airwire.net.clone());
+            object.net_id = net_id;
             scene.objects.push(object);
         }
 
@@ -404,7 +449,13 @@ impl CadFingerprint {
     }
 }
 
-fn push_schematic_component(objects: &mut Vec<CadObject>, component: &ElectronicComponent) {
+fn push_schematic_component(
+    objects: &mut Vec<CadObject>,
+    component_index: usize,
+    component: &ElectronicComponent,
+    net_ids: &NetIdentityMap,
+    pin_net_ids: &PinNetIds,
+) {
     if !component.visible {
         return;
     }
@@ -422,7 +473,7 @@ fn push_schematic_component(objects: &mut Vec<CadObject>, component: &Electronic
     body.label = Some(format!("{} {}", component.designator, component.value));
     objects.push(body);
 
-    for pin in &component.pins {
+    for (pin_index, pin) in component.pins.iter().enumerate() {
         let pin_center = component_pin_world_position(component, pin);
         let pin_size = rotate_extent(Vec2::new(10.0, 10.0), component.rotation);
         let mut object = CadObject::rect(
@@ -439,8 +490,89 @@ fn push_schematic_component(objects: &mut Vec<CadObject>, component: &Electronic
         if !pin.net.trim().is_empty() {
             object.net = Some(pin.net.clone());
         }
+        object.net_id = pin_net_ids
+            .get(&(component_index, pin_index))
+            .copied()
+            .or_else(|| net_ids.get(&pin.net));
         objects.push(object);
     }
+}
+
+/// Maps every netlist pin to the stable identity assigned to its net.
+///
+/// The netlist already encodes "pin within tolerance of a wire endpoint", so its
+/// membership is the authoritative answer for pins that no wire label names.
+fn pin_net_ids(netlist: &Netlist, net_ids: &NetIdentityMap) -> PinNetIds {
+    let mut map = PinNetIds::new();
+    for net in &netlist.nets {
+        let Some(net_id) = net_ids.get(&net.name) else {
+            continue;
+        };
+        for &(component_index, pin_index) in &net.pins {
+            map.insert((component_index, pin_index), net_id);
+        }
+    }
+    map
+}
+
+/// Net name to stable identity map shared by every CAD surface builder.
+type PinNetIds = HashMap<(usize, usize), usize>;
+
+/// Deterministic net name to stable identity map.
+///
+/// Ids are handed out in document order (netlist order first, then the remaining
+/// names in the order they appear) and never come from memory addresses or from
+/// a counter that survives between calls, so rebuilding an identical document
+/// always produces identical ids. Other layers can pin, highlight or cross-probe
+/// a net from `CadObject::net_id` without re-deriving connectivity.
+///
+/// Blank names are never interned: a wire without a net label carries no
+/// identity and stays `None` on the scene.
+struct NetIdentityMap {
+    ids: HashMap<String, usize>,
+}
+
+impl NetIdentityMap {
+    fn new() -> Self {
+        Self {
+            ids: HashMap::new(),
+        }
+    }
+
+    /// Registers a non-blank net name if needed and returns its stable id.
+    fn intern(&mut self, net_name: &str) -> Option<usize> {
+        let name = net_name.trim();
+        if name.is_empty() {
+            return None;
+        }
+        if let Some(existing) = self.ids.get(name) {
+            return Some(*existing);
+        }
+        let next = self.ids.len();
+        self.ids.insert(name.to_string(), next);
+        Some(next)
+    }
+
+    fn get(&self, net_name: &str) -> Option<usize> {
+        self.ids.get(net_name.trim()).copied()
+    }
+}
+
+/// Interns every net name carried by a PCB layout in document order.
+fn pcb_net_ids(layout: &PcbLayout) -> NetIdentityMap {
+    let mut map = NetIdentityMap::new();
+    for component in &layout.components {
+        for net_name in &component.pad_nets {
+            map.intern(net_name);
+        }
+    }
+    for trace in &layout.traces {
+        map.intern(&trace.net);
+    }
+    for airwire in &layout.airwires {
+        map.intern(&airwire.net);
+    }
+    map
 }
 
 fn schematic_pin_paths(center: Vec2, rotation_degrees: f32) -> Vec<Vec<Vec2>> {
@@ -755,5 +887,78 @@ mod tests {
                 Vec2::new(80.0, 90.0),
             ]
         );
+    }
+
+    #[test]
+    fn wire_label_and_touched_pins_share_one_stable_net_id() {
+        let mut schematic = Schematic::new("Net identity");
+        let mut left = ElectronicComponent::resistor("10k");
+        left.position = Vec2::new(100.0, 100.0);
+        let left_id = left.id;
+        schematic.add_component(left);
+        let mut right = ElectronicComponent::resistor("4.7k");
+        right.position = Vec2::new(140.0, 100.0);
+        let right_id = right.id;
+        schematic.add_component(right);
+        schematic.add_wire(Vec2::new(120.0, 100.0), Vec2::new(120.0, 100.0), "VCC");
+
+        let scene = CadScene::from_schematic(&schematic);
+
+        let wire_ids = ids_of_kind(&scene, CadObjectKind::Wire);
+        assert_eq!(wire_ids.len(), 1);
+        let expected = wire_ids[0].expect("wire net id");
+        assert_eq!(
+            ids_of_kind(&scene, CadObjectKind::NetLabel),
+            vec![Some(expected)]
+        );
+
+        let joined_pins = scene
+            .objects
+            .iter()
+            .filter(|object| object.kind == CadObjectKind::Pin && object.net_id == Some(expected))
+            .filter(|object| {
+                object.source_id == Some(left_id) || object.source_id == Some(right_id)
+            })
+            .count();
+        assert_eq!(
+            joined_pins, 2,
+            "both wire endpoints should report the net id"
+        );
+    }
+
+    #[test]
+    fn net_ids_are_stable_across_identical_rebuilds() {
+        let mut schematic = Schematic::new("Stable net identity");
+        let mut component = ElectronicComponent::resistor("10k");
+        component.position = Vec2::new(0.0, 200.0);
+        schematic.add_component(component);
+        schematic.add_wire(Vec2::new(0.0, 0.0), Vec2::new(40.0, 0.0), "SIG_A");
+        schematic.add_wire(Vec2::new(60.0, 0.0), Vec2::new(80.0, 0.0), "SIG_B");
+
+        let first = CadScene::from_schematic(&schematic);
+        let second = CadScene::from_schematic(&schematic);
+
+        let ids = |scene: &CadScene| -> Vec<Option<usize>> {
+            scene.objects.iter().map(|object| object.net_id).collect()
+        };
+        assert_eq!(ids(&first), ids(&second));
+
+        let wire_ids = ids_of_kind(&first, CadObjectKind::Wire);
+        assert_eq!(wire_ids.len(), 2);
+        assert!(wire_ids.iter().all(|id| id.is_some()));
+        assert_ne!(
+            wire_ids[0], wire_ids[1],
+            "different nets must not share an identity"
+        );
+        assert_eq!(ids_of_kind(&first, CadObjectKind::NetLabel), wire_ids);
+    }
+
+    fn ids_of_kind(scene: &CadScene, kind: CadObjectKind) -> Vec<Option<usize>> {
+        scene
+            .objects
+            .iter()
+            .filter(|object| object.kind == kind)
+            .map(|object| object.net_id)
+            .collect()
     }
 }

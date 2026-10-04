@@ -146,6 +146,8 @@ pub struct NativeGameViewportController {
     /// True when the latest organized-resolution frame had to back the
     /// gesture off against a wall. Drives the contact outline overlay.
     collision_contact: bool,
+    camera_helper_pixel_scale: f32,
+    camera_helpers: raf_render::bridge::camera_helpers::CameraHelperCache,
 }
 
 impl Default for NativeGameViewportController {
@@ -188,11 +190,17 @@ impl Default for NativeGameViewportController {
             viewport_active: true,
             gesture_start: None,
             collision_contact: false,
+            camera_helper_pixel_scale: 1.0,
+            camera_helpers: Default::default(),
         }
     }
 }
 
 impl NativeGameViewportController {
+    /// Physical/adaptive scene pixels per logical authoring point.
+    pub fn set_camera_helper_pixel_scale(&mut self, scale: f32) {
+        self.camera_helper_pixel_scale = scale.clamp(0.1, 8.0);
+    }
     pub fn set_project_asset_root(&mut self, project_root: Option<&Path>) {
         self.bridge.set_project_asset_root(project_root);
     }
@@ -449,17 +457,25 @@ impl NativeGameViewportController {
         let height = size[1].max(1);
         self.bridge
             .update_camera(self.mode == NativeViewportMode::View2d);
-        let light_dir = Vec3::new(0.4, 0.8, 0.6).normalize();
+        let light_dir = raf_render::scene_renderer::SCENE_LIGHT_DIRECTION.normalize();
         let mut frame = self.bridge.build_scene_frame(
             scene,
             width as f32,
             height as f32,
             &self.selected,
-            [240, 240, 242, 255],
+            raf_render::scene_renderer::SCENE_BACKGROUND,
             light_dir,
             self.render_options(),
             self.edit_mode == NativeViewportEditMode::Vertex,
         );
+        if self.bridge.gizmo().visible {
+            self.camera_helpers.append_to(
+                scene,
+                &mut frame,
+                &self.selected,
+                self.camera_helper_pixel_scale,
+            );
+        }
         self.append_renderer_owned_gizmo(scene, &mut frame);
         self.append_collision_contact_outline(scene, &mut frame);
         frame
@@ -1388,24 +1404,14 @@ impl NativeGameViewportController {
     }
 
     /// [`Self::gizmo_presentation_scale`] resolved for the current selection.
-    fn gizmo_scale_for_scene(
-        &self,
-        scene: &SceneGraph,
-        view_proj: &Mat4,
-        size: [f32; 2],
-    ) -> f32 {
+    fn gizmo_scale_for_scene(&self, scene: &SceneGraph, view_proj: &Mat4, size: [f32; 2]) -> f32 {
         match self.gizmo_origin(scene) {
             Some(origin) => self.gizmo_presentation_scale(origin, view_proj, size),
             None => 1.0,
         }
     }
 
-    fn gizmo_presentation_scale(
-        &self,
-        origin: Vec3,
-        view_proj: &Mat4,
-        size: [f32; 2],
-    ) -> f32 {
+    fn gizmo_presentation_scale(&self, origin: Vec3, view_proj: &Mat4, size: [f32; 2]) -> f32 {
         let (base_world, target_pixels) = match self.bridge.gizmo().mode {
             GizmoMode::Rotate => (
                 raf_render::picking::GIZMO_ROTATION_RADIUS,

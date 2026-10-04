@@ -516,6 +516,7 @@ fn content(
         view.components,
     ));
     if view.components {
+        scroll = scroll.with_child(camera_section(palette, node));
         scroll = scroll.with_child(section_title(
             palette,
             "app.variables",
@@ -2000,6 +2001,70 @@ fn toggle_row(palette: StudioUiPalette, label_key: &str, value_key: &str, value:
         )
 }
 
+fn camera_section(palette: StudioUiPalette, node: &raf_core::scene::SceneNode) -> UiNode {
+    let mut section = UiNode::new("inspector.camera", UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 4.0,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(section_label(palette, "camera.component"))
+        .with_child(toggle_row(
+            palette,
+            "camera.enabled",
+            "inspector.camera.enabled",
+            node.game_camera.is_some(),
+        ));
+    if let Some(lens) = &node.game_camera {
+        section = section.with_child(toggle_row(
+            palette,
+            "camera.orthographic",
+            "inspector.camera.orthographic",
+            lens.orthographic,
+        ));
+        for field in ["fov_degrees", "near", "far", "ortho_scale"] {
+            let key = format!("inspector.camera.{field}.text");
+            section = section.with_child(
+                UiNode::new(format!("{key}.row"), UiNodeKind::Toolbar)
+                    .with_layout(UiLayout {
+                        flow: UiFlow::Row,
+                        gap: 6.0,
+                        ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
+                    })
+                    .with_child(
+                        section_label(palette, &format!("camera.{field}")).with_layout(UiLayout {
+                            grow: 1.0,
+                            ..UiLayout::fit_content()
+                        }),
+                    )
+                    .with_child(
+                        UiNode::text_input(
+                            &key,
+                            UiTextInput {
+                                value_key: key.clone(),
+                                placeholder_key: None,
+                                max_length: 24,
+                                multiline: false,
+                                password: false,
+                                submit_command: Some(format!("inspector.camera.commit:{field}")),
+                            },
+                        )
+                        .with_class("inspector-input")
+                        .with_layout(UiLayout::fixed(100.0, 28.0))
+                        .focusable(),
+                    ),
+            );
+        }
+        section = section.with_child(action_button(
+            palette,
+            "inspector.camera.startup",
+            "camera.use_startup",
+            "project-settings.runtime.camera.selected".into(),
+        ));
+    }
+    section
+}
+
 fn text_field(
     id: &str,
     value_key: &str,
@@ -2645,6 +2710,31 @@ mod tests {
         node.children
             .iter()
             .find_map(|candidate| find_node(candidate, id))
+    }
+
+    #[test]
+    fn camera_inspector_exposes_only_authored_component_controls() {
+        let mut scene = SceneGraph::new();
+        let part = scene.add_root_with_primitive("Part", Primitive::Cube);
+        let section = camera_section(StudioUiPalette::IndustrialDark, scene.get(part).unwrap());
+        assert!(find_node(&section, "inspector.camera.enabled").is_some());
+        assert!(find_node(&section, "inspector.camera.startup").is_none());
+        assert!(scene.get(part).unwrap().game_camera.is_none());
+        scene.get_mut(part).unwrap().game_camera =
+            Some(raf_core::runtime_config::GameCamera::default());
+        let section = camera_section(StudioUiPalette::IndustrialDark, scene.get(part).unwrap());
+        for field in ["fov_degrees", "near", "far", "ortho_scale"] {
+            let input = find_node(&section, &format!("inspector.camera.{field}.text")).unwrap();
+            assert!(input.focusable);
+            assert_eq!(input.kind, UiNodeKind::TextInput);
+            let config = input.control.text_input().expect("camera lens input");
+            assert_eq!(
+                config.submit_command.as_deref(),
+                Some(format!("inspector.camera.commit:{field}").as_str())
+            );
+        }
+        assert!(find_node(&section, "inspector.camera.startup").is_some());
+        assert_eq!(scene.get(part).unwrap().primitive, Primitive::Cube);
     }
 
     #[test]

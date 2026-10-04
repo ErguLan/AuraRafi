@@ -116,8 +116,8 @@ impl GizmoRenderSpec {
                 && (self.active_scale_sign == 0.0
                     || (self.active_scale_sign.signum() - handle.sign).abs() < 0.1);
             let color = if active { ACTIVE_COLOR } else { HANDLE_COLOR };
-            let radius = gizmo_scale_handle_radius(self.presentation_scale)
-                + if active { 2.0 } else { 0.0 };
+            let radius =
+                gizmo_scale_handle_radius(self.presentation_scale) + if active { 2.0 } else { 0.0 };
             // Dark disc first, colored disc on top.
             append_screen_circle(
                 &mut frame.commands,
@@ -145,7 +145,10 @@ const HANDLE_OUTLINE_WIDTH: f32 = 2.0;
 fn ring_passes(color: [u8; 4], active: bool) -> [(f32, [u8; 4]); 2] {
     let ring_width = if active { 3.5 } else { 2.25 };
     [
-        (ring_width + HANDLE_OUTLINE_WIDTH * 2.0, HANDLE_OUTLINE_COLOR),
+        (
+            ring_width + HANDLE_OUTLINE_WIDTH * 2.0,
+            HANDLE_OUTLINE_COLOR,
+        ),
         (ring_width, color),
     ]
 }
@@ -223,10 +226,11 @@ mod tests {
 
         // Shaft and head are both screen-space now, so a world line can never
         // reach past the arrowhead tip.
-        assert!(frame.commands.commands().iter().all(|command| matches!(
-            command,
-            GraphicCommand::DrawScreenTriangleBatch { .. }
-        )));
+        assert!(frame
+            .commands
+            .commands()
+            .iter()
+            .all(|command| matches!(command, GraphicCommand::DrawScreenTriangleBatch { .. })));
         let triangles = frame
             .commands
             .commands()
@@ -239,7 +243,10 @@ mod tests {
         // Each visible axis contributes eight triangles: a dark outline shaft,
         // a collar, an outline head, then the colored shaft and head. An axis
         // that projects to a point is skipped instead of drawing garbage.
-        assert!(triangles >= 8, "expected outlined screen geometry, got {triangles}");
+        assert!(
+            triangles >= 8,
+            "expected outlined screen geometry, got {triangles}"
+        );
         assert_eq!(
             triangles % 8,
             0,

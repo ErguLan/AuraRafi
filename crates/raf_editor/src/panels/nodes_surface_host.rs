@@ -111,8 +111,17 @@ impl NodesSurfaceHost {
         self.wire_drag
     }
 
-    pub fn begin_wire_drag(&mut self, from_node: NodeId, from_pin: Uuid, pointer: [f32; 2], is_output: bool) {
-        self.pending_pin = Some(PendingPin { node_id: from_node, pin_id: from_pin });
+    pub fn begin_wire_drag(
+        &mut self,
+        from_node: NodeId,
+        from_pin: Uuid,
+        pointer: [f32; 2],
+        is_output: bool,
+    ) {
+        self.pending_pin = Some(PendingPin {
+            node_id: from_node,
+            pin_id: from_pin,
+        });
         self.wire_drag = Some(NodesWireDrag {
             from_node,
             from_pin,
@@ -359,11 +368,17 @@ mod tests {
         assert!(host.has_open_overlay());
 
         host.open_palette_popup([120.0, 140.0], [48.0, 72.0]);
-        assert!(host.context_menu().is_none(), "one gesture opens one overlay");
+        assert!(
+            host.context_menu().is_none(),
+            "one gesture opens one overlay"
+        );
         let popup = host.palette_popup().expect("palette is open");
         assert_eq!(popup.position, [120.0, 140.0]);
         assert_eq!(popup.spawn, [48.0, 72.0]);
-        assert!(host.palette_query().is_empty(), "a fresh popup starts empty");
+        assert!(
+            host.palette_query().is_empty(),
+            "a fresh popup starts empty"
+        );
 
         host.set_palette_query("print");
         assert!(host.close_palette_popup());

@@ -159,11 +159,28 @@ fn native_environment(settings: &EngineSettings, logical_size: [f32; 2]) -> UiEn
     environment
 }
 
-fn should_queue_eager_hierarchy_refresh(
-    quality: RenderQuality,
-    selection_changed: bool,
-) -> bool {
+fn should_queue_eager_hierarchy_refresh(quality: RenderQuality, selection_changed: bool) -> bool {
     selection_changed && quality != RenderQuality::Potato
+}
+
+/// Global accelerator for an Electronics project.
+///
+/// The same `editor_shortcuts` catalog the application menus advertise is used
+/// here, so a visible accelerator cannot drift from the behavior again. Only
+/// global chords are considered: viewport single-key gestures belong to the CAD
+/// canvas, and a focused text field already filters the input out.
+fn electronics_shortcut_command(
+    input: &raf_core::InputSnapshot,
+    text_input_focused: bool,
+    has_selection: bool,
+) -> Option<&'static str> {
+    let context = crate::editor_shortcuts::ShortcutContext {
+        keyboard_captured_by_text: text_input_focused,
+        modal_open: false,
+        viewport_active: false,
+        has_selection,
+    };
+    crate::editor_shortcuts::global_command(input, context)
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -302,6 +319,18 @@ fn apply_project_setting_range(
         (min + ((value.clamp(min, max) - min) / step).round() * step).clamp(min, max)
     };
     let changed = match key {
+        "project-settings.runtime-fixed-hz" => {
+            let next = value.round().clamp(15.0, 120.0) as u32;
+            let changed = next != settings.runtime.fixed_hz;
+            settings.runtime.fixed_hz = next;
+            changed
+        }
+        "project-settings.runtime-max-entities" => {
+            let next = value.round().clamp(100.0, 100_000.0) as usize;
+            let changed = next != settings.runtime.max_entities;
+            settings.runtime.max_entities = next;
+            changed
+        }
         "project-settings.building-snap-step" => {
             let next = snap(value, 0.5, 2.0, 0.05);
             if (settings.building_snap_step - next).abs() <= f32::EPSILON {
@@ -520,6 +549,9 @@ pub struct NativeEditorApplication {
     compositor: Option<NativeEditorCompositor>,
     input: NativeUiInputBridge,
     runtime: Option<NativeEditorRuntime>,
+    game_runtime: crate::native_game_runtime::NativeRuntimeController,
+    pending_runtime_command: Option<String>,
+    next_runtime_frame: Instant,
     workbench: Option<NativeGameWorkbench>,
     studio: Option<NativeStudioSurface>,
     settings_surface: Option<SettingsSurfaceHost>,
@@ -554,6 +586,10 @@ pub struct NativeEditorApplication {
     observed_scene_revision: u64,
     observed_scene_render_fingerprint: u64,
     pending_document_saved: bool,
+    /// Set when part of a save failed. The dirty marker must not be cleared while
+    /// this is true, otherwise the editor claims to be saved while one of the
+    /// documents never reached the disk.
+    pending_document_save_failed: bool,
     last_auto_save_at: Instant,
 }
 
@@ -574,6 +610,9 @@ impl Default for NativeEditorApplication {
             compositor: None,
             input: NativeUiInputBridge::default(),
             runtime: None,
+            game_runtime: crate::native_game_runtime::NativeRuntimeController::default(),
+            pending_runtime_command: None,
+            next_runtime_frame: Instant::now(),
             workbench: None,
             studio: None,
             settings_surface: None,
@@ -608,12 +647,61 @@ impl Default for NativeEditorApplication {
             observed_scene_revision,
             observed_scene_render_fingerprint,
             pending_document_saved: false,
+            pending_document_save_failed: false,
             last_auto_save_at: Instant::now(),
         }
     }
 }
 
 impl NativeEditorApplication {
+    fn apply_runtime_command(&mut self, command: &str) {
+        let result = match command {
+            "runtime.play" => match (self.project.as_ref(), self.window_host.as_ref()) {
+                (Some(project), Some(host)) => self
+                    .game_runtime
+                    .launch(
+                        project,
+                        &self.scene,
+                        self.runtime.as_ref().map(|runtime| runtime.node_graph()),
+                        &self.settings_state,
+                        host,
+                    )
+                    .map(|_| ()),
+                _ => Err("open a Game project before starting runtime".into()),
+            },
+            "runtime.pause" => self
+                .game_runtime
+                .control(raf_runtime::RuntimeControl::Pause),
+            "runtime.resume" => self
+                .game_runtime
+                .control(raf_runtime::RuntimeControl::Resume),
+            "runtime.step" => self.game_runtime.control(raf_runtime::RuntimeControl::Step),
+            "runtime.stop" => self.game_runtime.control(raf_runtime::RuntimeControl::Stop),
+            "runtime.reload" => self
+                .game_runtime
+                .control(raf_runtime::RuntimeControl::Reload),
+            "runtime.next" => {
+                self.game_runtime.select_next();
+                Ok(())
+            }
+            _ => Err(format!("unknown local runtime command: {command}")),
+        };
+        if let Err(error) = result {
+            if let Some(workbench) = &mut self.workbench {
+                workbench
+                    .log_console_output(crate::commands::CommandOutput::error("Runtime", error));
+            }
+        }
+        if let Some(runtime) = &mut self.runtime {
+            runtime.input_router_mut().cancel_all();
+            runtime.request_ui_frame();
+        }
+        self.input.snapshot_mut().cancel_all();
+        self.next_runtime_frame = Instant::now();
+        if let Some(window) = &self.window {
+            window.request_redraw();
+        }
+    }
     fn resumed_native(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;
@@ -1015,7 +1103,57 @@ impl NativeEditorApplication {
             .settings_state
             .auto_save_interval_seconds
             .clamp(30, 600);
+        // Electronics authoring produces long, unrecoverable stretches: a user
+        // can move parts and route traces for minutes without ever triggering a
+        // scene checkpoint. Halving the interval there caps the exposure without
+        // touching the Game path or the persisted setting.
+        let interval = if self.is_electronics_project() {
+            (interval / 2).clamp(15, 600)
+        } else {
+            interval
+        };
         Some(self.last_auto_save_at + Duration::from_secs(u64::from(interval)))
+    }
+
+    fn is_electronics_project(&self) -> bool {
+        self.project
+            .as_ref()
+            .is_some_and(|project| project.project_type == ProjectType::Electronics)
+    }
+
+    /// Saves both documents and only reports success when every write landed.
+    ///
+    /// `editor.save` writes the schematic and the PCB. A partial success used to
+    /// still clear the dirty marker, so the editor claimed to be saved while one
+    /// of the two documents was missing from disk.
+    fn save_electronics_documents(&mut self) -> bool {
+        let Some(project) = self.project.as_ref() else {
+            return false;
+        };
+        let Some(editor) = self.electronics_editor.as_mut() else {
+            return false;
+        };
+        match editor.save(project) {
+            Ok(()) => {
+                editor.clear_surface_errors_for_key("electronics.error.save_failed");
+                true
+            }
+            Err(error) => {
+                tracing::error!(%error, "native electronics document save failed");
+                let language = self.settings_state.language;
+                let message = raf_core::i18n::t("electronics.error.save_failed", language);
+                editor.push_surface_error(message);
+                false
+            }
+        }
+    }
+
+    /// Pushes a localized failure into the live Electronics surface so nothing
+    /// depends on the log alone.
+    fn push_electronics_error(&mut self, key: &str) {
+        if let Some(editor) = self.electronics_editor.as_mut() {
+            editor.push_surface_error(raf_core::i18n::t(key, self.settings_state.language));
+        }
     }
 
     fn maybe_auto_save(&mut self) {
@@ -1035,7 +1173,10 @@ impl NativeEditorApplication {
                 self.mark_document_saved();
                 tracing::info!("native automatic document save completed");
             }
-            Err(error) => tracing::warn!(%error, "native automatic document save failed"),
+            Err(error) => {
+                tracing::warn!(%error, "native automatic document save failed");
+                self.push_electronics_error("electronics.error.save_failed");
+            }
         }
     }
 
@@ -1088,6 +1229,9 @@ impl NativeEditorApplication {
                     }
                     Err(error) => {
                         tracing::warn!(%error, "native save before returning to Hub failed");
+                        // The user is about to leave the project. A silent failure
+                        // here is how unsaved work disappears.
+                        self.push_electronics_error("electronics.error.save_failed");
                         if let Some(runtime) = self.runtime.as_mut() {
                             runtime.request_animation_frame();
                         }
@@ -1266,6 +1410,68 @@ impl NativeEditorApplication {
     }
 
     fn apply_project_setting_text_intent(&mut self, key: String, value: String) {
+        if let Some(field) = key.strip_prefix("project-settings.runtime.") {
+            let result = self.project.as_mut().map(|project| -> Result<(), String> {
+                let settings = &mut project.settings.runtime;
+                match field {
+                    "active_camera" | "startup_session" => {
+                        let id = if value.trim().is_empty() {
+                            None
+                        } else {
+                            Some(
+                                uuid::Uuid::parse_str(value.trim())
+                                    .map_err(|e| format!("invalid UUID: {e}"))?,
+                            )
+                        };
+                        let target = if field == "active_camera" {
+                            &mut settings.active_camera
+                        } else {
+                            &mut settings.startup_session
+                        };
+                        *target = id;
+                        Ok(())
+                    }
+                    "input_actions" => {
+                        let actions: Vec<raf_core::runtime_config::RuntimeInputAction> =
+                            serde_json::from_str(&value)
+                                .map_err(|e| format!("input actions JSON: {e}"))?;
+                        let mut names = std::collections::HashSet::new();
+                        if actions.len() > 128
+                            || actions.iter().any(|a| {
+                                a.name.is_empty()
+                                    || a.name.len() > 128
+                                    || !names.insert(a.name.to_ascii_lowercase())
+                                    || a.keys.len() > 16
+                                    || a.keys.iter().any(|k| k.len() > 64)
+                            })
+                        {
+                            return Err(
+                                "input actions exceed limits or contain invalid/duplicate names"
+                                    .into(),
+                            );
+                        }
+                        settings.input_actions = actions;
+                        Ok(())
+                    }
+                    _ => Err("unknown runtime project setting".into()),
+                }
+            });
+            match result {
+                Some(Ok(())) => self.commit_project_settings_mutation(
+                    ProjectSettingsMutation::without_layout(true),
+                ),
+                Some(Err(error)) => {
+                    if let Some(workbench) = &mut self.workbench {
+                        workbench.log_console_output(crate::commands::CommandOutput::error(
+                            "Runtime settings",
+                            error,
+                        ));
+                    }
+                }
+                None => {}
+            }
+            return;
+        }
         let mutation = if key == "project-settings.default_scene_name" {
             let value = value.trim();
             if value.is_empty() {
@@ -1287,6 +1493,47 @@ impl NativeEditorApplication {
     }
 
     fn apply_project_setting_command_intent(&mut self, command: String) {
+        if command == "project-settings.runtime.camera.selected"
+            || command == "project-settings.runtime.camera.clear"
+        {
+            let target = self
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.game_viewport().selected.first().copied());
+            let configured = if command.ends_with(".clear") {
+                Some(None)
+            } else if let Some(id) = target {
+                let uuid = self
+                    .scene
+                    .get(id)
+                    .filter(|_| self.scene.is_valid_node(id))
+                    .map(|node| node.uuid);
+                if let Some(runtime) = &mut self.runtime {
+                    runtime.mutate_scene(&mut self.scene, |scene| {
+                        if let Some(node) = scene.get_mut(id) {
+                            node.game_camera.get_or_insert_with(Default::default);
+                        }
+                    });
+                }
+                uuid.map(Some)
+            } else {
+                None
+            };
+            if let Some(camera) = configured {
+                if let Some(project) = &mut self.project {
+                    project.settings.runtime.active_camera = camera;
+                }
+                self.commit_project_settings_mutation(ProjectSettingsMutation::without_layout(
+                    true,
+                ));
+            } else if let Some(workbench) = &mut self.workbench {
+                workbench.log_console_output(crate::commands::CommandOutput::error(
+                    "Game camera",
+                    "select an object before configuring a game camera",
+                ));
+            }
+            return;
+        }
         let mutation = self
             .project
             .as_mut()
@@ -1570,6 +1817,41 @@ impl NativeEditorApplication {
     }
 
     fn redraw(&mut self) {
+        if self.game_runtime.in_place.is_some() {
+            let mut finished = false;
+            if let (Some(player), Some(host), Some(compositor)) = (
+                self.game_runtime.in_place.as_mut(),
+                self.window_host.as_mut(),
+                self.compositor.as_mut(),
+            ) {
+                if let Err(error) = player.draw(host, compositor, &self.input) {
+                    tracing::warn!(%error, "in-place runtime presentation failed");
+                    player.control(raf_runtime::RuntimeControl::Stop);
+                }
+                finished = player.should_close();
+                if let Some(workbench) = &mut self.workbench {
+                    for message in player.drain_diagnostics() {
+                        workbench.log_console_output(crate::commands::CommandOutput::info(
+                            "Runtime",
+                            vec![message],
+                            serde_json::json!({ "source": "local-runtime" }),
+                        ));
+                    }
+                }
+                self.next_runtime_frame = Instant::now() + player.frame_interval();
+            }
+            self.input.begin_frame();
+            if finished {
+                self.game_runtime.finish_in_place();
+                if let Some(runtime) = &mut self.runtime {
+                    runtime.request_canvas_frame();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            return;
+        }
         let now = self.elapsed_seconds();
         let present_refresh_hz = self
             .window_host
@@ -1598,7 +1880,12 @@ impl NativeEditorApplication {
         let exit_confirmation_was_open = self.exit_confirmation_open;
         let mut persist_agent_settings = false;
         let mut linear_save_requested = false;
+        // Switching the Electronics surface materializes the PCB projection, which
+        // is a risk moment: a crash right after the tab switch would otherwise lose
+        // the derived board.
+        let mut electronics_surface_switched = false;
         let mut queue_hierarchy_refresh = false;
+        let mut project_save_requested = false;
 
         if self.exit_confirmation_open {
             let action = self.process_exit_confirmation_input();
@@ -1680,6 +1967,16 @@ impl NativeEditorApplication {
                         .map(SettingsSurfaceHost::cursor_hint)
                 })
                 .flatten();
+            // Keyboard ownership is resolved once per frame. The CAD canvas guard
+            // and the shortcut dispatcher have to agree, otherwise a focused text
+            // field still loses keys to the canvas.
+            let text_input_owned = if self.settings_open {
+                true
+            } else {
+                self.workbench
+                    .as_ref()
+                    .is_some_and(|workbench| workbench.captures_keyboard_input())
+            };
             if let Some(workbench) = self.workbench.as_mut() {
                 workbench.set_inspector_transform_drag_active(
                     runtime.project_type() == ProjectType::Game
@@ -1849,7 +2146,18 @@ impl NativeEditorApplication {
                                 }
                             }
                             crate::native_workbench::NativeWorkbenchIntent::Command(command) => {
-                                if command == "sessions.reload" {
+                                if let Some(raw) = command.strip_prefix("console.submit:").filter(|raw| raw.trim().starts_with("/runtime.")) {
+                                    let allowed = self.settings_state.command_console_enabled && self.project.as_ref().is_some_and(|project| project.settings.enable_console_commands);
+                                    if !allowed {
+                                        workbench.log_console_output(crate::commands::CommandOutput::error("Runtime", "manual console commands are disabled"));
+                                    } else if raw.trim().split_whitespace().count() != 1 {
+                                        workbench.log_console_output(crate::commands::CommandOutput::error("Runtime", "runtime controls do not accept arguments"));
+                                    } else {
+                                        self.pending_runtime_command = Some(raw.trim().trim_start_matches('/').to_string());
+                                    }
+                                } else if command.starts_with("runtime.") {
+                                    self.pending_runtime_command = Some(command);
+                                } else if command == "sessions.reload" {
                                     let next_session_id = workbench.active_session_id();
                                     if next_session_id != previous_session_id {
                                         if let Some(project) = self.project.as_ref() {
@@ -1931,7 +2239,21 @@ impl NativeEditorApplication {
                                         );
                                         continue;
                                     }
-                                    if command != "sessions.reload" {
+                                    if command != "sessions.reload"
+                                        // `project.save` belongs to the application
+                                        // boundary: the controller does not own the
+                                        // project session, and the dedicated handler
+                                        // below is what actually writes both documents.
+                                        && command
+                                            != crate::application_menu::command::PROJECT_SAVE
+                                    {
+                                        if matches!(
+                                            command.as_str(),
+                                            crate::application_menu::command::VIEW_SCHEMATIC
+                                                | crate::application_menu::command::VIEW_PCB
+                                        ) {
+                                            electronics_surface_switched = true;
+                                        }
                                         let response =
                                             crate::native_attached_executor::execute_native_ui_intent(
                                                 editor,
@@ -1944,6 +2266,16 @@ impl NativeEditorApplication {
                                                 title = %response.title,
                                                 "native Electronics UI command was rejected"
                                             );
+                                            // A rejected command must reach the
+                                            // user, not only the log.
+                                            let message = format!(
+                                                "{}: {command}",
+                                                raf_core::i18n::t(
+                                                    "electronics.error.command_rejected",
+                                                    self.settings_state.language
+                                                )
+                                            );
+                                            editor.push_surface_error(message);
                                         }
                                     }
                                 }
@@ -1956,19 +2288,53 @@ impl NativeEditorApplication {
                                     ) if command == crate::application_menu::command::PROJECT_SAVE
                                 )
                             }) {
-                                if let Some(project) = self.project.as_ref() {
-                                    if let Err(error) = save_project_document(
-                                        project,
-                                        &self.scene,
-                                        runtime.node_graph(),
-                                    ) {
-                                        tracing::warn!(%error, "native project save failed");
+                                let project_saved = match self.project.as_ref() {
+                                    Some(project) => {
+                                        match save_project_document(
+                                            project,
+                                            &self.scene,
+                                            runtime.node_graph(),
+                                        ) {
+                                            Ok(()) => true,
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    %error,
+                                                    "native project save failed"
+                                                );
+                                                editor.push_surface_error(raf_core::i18n::t(
+                                                    "electronics.error.project_save_failed",
+                                                    self.settings_state.language,
+                                                ));
+                                                false
+                                            }
+                                        }
                                     }
-                                    if let Err(error) = editor.save(project) {
-                                        tracing::warn!(%error, "native electronics document save failed");
-                                    } else {
-                                        self.pending_document_saved = true;
-                                    }
+                                    None => false,
+                                };
+                                // `editor.save` writes the schematic and the
+                                // PCB. The dirty marker is only cleared when
+                                // both landed on disk.
+                                let documents_saved = match self.project.as_ref() {
+                                    Some(project) => match editor.save(project) {
+                                        Ok(()) => true,
+                                        Err(error) => {
+                                            tracing::warn!(
+                                                %error,
+                                                "native electronics document save failed"
+                                            );
+                                            editor.push_surface_error(raf_core::i18n::t(
+                                                "electronics.error.save_failed",
+                                                self.settings_state.language,
+                                            ));
+                                            false
+                                        }
+                                    },
+                                    None => false,
+                                };
+                                if project_saved && documents_saved {
+                                    self.pending_document_saved = true;
+                                } else {
+                                    self.pending_document_save_failed = true;
                                 }
                             }
                         }
@@ -1988,7 +2354,11 @@ impl NativeEditorApplication {
                     }
                     if runtime.project_type() == ProjectType::Electronics {
                         let electronics_canvas_rect = runtime.layout().electronics_canvas();
-                        if !workbench.has_interactive_hover() {
+                        // Pointer hover alone is not a keyboard decision. A focused
+                        // inspector or navigator text control must keep the
+                        // keyboard, otherwise typing "r" rotates the component and
+                        // Delete removes the selection while the user is typing.
+                        if !workbench.has_interactive_hover() && !text_input_owned {
                             if let Some(editor) = self.electronics_editor.as_mut() {
                                 let result = editor.process_input(
                                     self.input.snapshot(),
@@ -2070,10 +2440,7 @@ impl NativeEditorApplication {
                     window.set_cursor(native_cursor_icon(cursor));
                 }
             }
-            let text_input_focused = self
-                .workbench
-                .as_ref()
-                .is_some_and(|workbench| workbench.captures_keyboard_input());
+            let text_input_focused = text_input_owned;
             let focused_text_rect = if self.settings_open {
                 self.settings_surface
                     .as_ref()
@@ -2110,6 +2477,56 @@ impl NativeEditorApplication {
                     text_input_focused,
                     self.project.is_some(),
                 )
+            } else if !self.settings_open
+                && !self.exit_confirmation_open
+                && !exit_confirmation_was_open
+                && runtime.project_type() == ProjectType::Electronics
+            {
+                // Electronics offers the same accelerators in its Edit and File
+                // menus, so Ctrl+S must work there too. `runtime.dispatch_shortcuts`
+                // is not reused: it applies the commands to the Game scene, which
+                // would make Ctrl+Z undo scene history instead of the documents.
+                let has_electronics_selection = self
+                    .electronics_editor
+                    .as_ref()
+                    .and_then(NativeElectronicsEditor::selection)
+                    .is_some();
+                match electronics_shortcut_command(
+                    self.input.snapshot(),
+                    text_input_focused,
+                    has_electronics_selection,
+                ) {
+                    Some(value) if value == crate::application_menu::command::PROJECT_SAVE => {
+                        vec![value.to_string()]
+                    }
+                    Some(value) if value == crate::application_menu::command::SEARCH_OPEN => {
+                        vec![value.to_string()]
+                    }
+                    Some(value) if value == crate::application_menu::command::EDIT_UNDO => {
+                        if let Some(editor) = self.electronics_editor.as_mut() {
+                            editor.undo();
+                        }
+                        vec![value.to_string()]
+                    }
+                    Some(value) if value == crate::application_menu::command::EDIT_REDO => {
+                        if let Some(editor) = self.electronics_editor.as_mut() {
+                            editor.redo();
+                        }
+                        vec![value.to_string()]
+                    }
+                    // Delete is destructive, so it only arms the confirmation the
+                    // Electronics surface presents.
+                    Some(value) if value == crate::application_menu::command::EDIT_DELETE => {
+                        if let Some(editor) = self.electronics_editor.as_mut() {
+                            editor.request_delete_selected();
+                        }
+                        vec![value.to_string()]
+                    }
+                    // Clipboard and duplicate have no Electronics document model yet,
+                    // and Select All is single-selection here. Ignoring them keeps the
+                    // accelerator honest instead of mutating the Game scene.
+                    _ => Vec::new(),
+                }
             } else {
                 Vec::new()
             };
@@ -2126,26 +2543,10 @@ impl NativeEditorApplication {
                 .iter()
                 .any(|command| command == crate::application_menu::command::PROJECT_SAVE)
             {
-                if let Some(project) = self.project.as_ref() {
-                    if let Err(error) =
-                        save_project_document(project, &self.scene, runtime.node_graph())
-                    {
-                        tracing::warn!(%error, "native project save failed");
-                    } else {
-                        self.pending_document_saved = true;
-                        tracing::info!(path = %project.path.display(), "native project and scene saved");
-                    }
-                    if runtime.project_type() == ProjectType::Electronics {
-                        if let Some(editor) = self.electronics_editor.as_mut() {
-                            if let Err(error) = editor.save(project) {
-                                tracing::warn!(%error, "native electronics document save failed");
-                            } else {
-                                self.pending_document_saved = true;
-                                tracing::info!(path = %project.path.display(), "native electronics documents saved");
-                            }
-                        }
-                    }
-                }
+                // Deferred past the runtime borrow: persisting a document takes
+                // `&mut self`, and `runtime` is a mutable borrow of this same
+                // state that is still needed below.
+                project_save_requested = true;
             }
             if !self.settings_open
                 && !self.exit_confirmation_open
@@ -2175,13 +2576,75 @@ impl NativeEditorApplication {
             }
         }
 
+        if project_save_requested {
+            let is_electronics = self
+                .runtime
+                .as_ref()
+                .is_some_and(|runtime| runtime.project_type() == ProjectType::Electronics);
+            let node_graph = self.runtime.as_ref().map(|runtime| runtime.node_graph());
+            let project_result = match (self.project.as_ref(), node_graph) {
+                (Some(project), Some(node_graph)) => {
+                    save_project_document(project, &self.scene, node_graph)
+                }
+                _ => Ok(()),
+            };
+            let project_saved = match project_result {
+                Ok(()) => {
+                    if let Some(project) = self.project.as_ref() {
+                        tracing::info!(path = %project.path.display(), "native project and scene saved");
+                    }
+                    true
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "native project save failed");
+                    false
+                }
+            };
+            if !project_saved {
+                self.push_electronics_error("electronics.error.project_save_failed");
+            }
+            // The Electronics documents must land too, and a partial save must
+            // not be reported as a successful one.
+            let documents_saved = if is_electronics {
+                self.save_electronics_documents()
+            } else {
+                true
+            };
+            if project_saved && documents_saved {
+                self.pending_document_saved = true;
+            } else {
+                self.pending_document_save_failed = true;
+            }
+        }
+
+        if electronics_surface_switched && self.has_unsaved_changes() {
+            // Risk moment: the PCB projection was just materialized. Persisting it
+            // here means a crash right after the tab switch cannot lose the board.
+            match self.save_current_documents() {
+                Ok(()) => {
+                    self.mark_document_saved();
+                    tracing::info!("native Electronics save after surface switch completed");
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        "native Electronics save after surface switch failed"
+                    );
+                    self.push_electronics_error("electronics.error.save_failed");
+                }
+            }
+        }
+
         if linear_save_requested && self.has_unsaved_changes() {
             match self.save_current_documents() {
                 Ok(()) => {
                     self.mark_document_saved();
                     tracing::info!("native linear project save completed");
                 }
-                Err(error) => tracing::warn!(%error, "native linear project save failed"),
+                Err(error) => {
+                    tracing::warn!(%error, "native linear project save failed");
+                    self.push_electronics_error("electronics.error.save_failed");
+                }
             }
         }
 
@@ -2266,6 +2729,8 @@ impl NativeEditorApplication {
                 &mut self.electronics_frame_key,
                 electronics_canvas_rect,
                 canvas_target,
+                native_palette(self.settings_state.theme),
+                self.input.scale_factor() as f32,
             );
             self.electronics_canvas
                 .as_mut()
@@ -2571,6 +3036,7 @@ impl NativeEditorApplication {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.game_runtime.stop_all();
                 self.persist_settings();
                 event_loop.exit();
             }
@@ -2651,6 +3117,9 @@ impl NativeEditorApplication {
                 if self.input.ingest(&other) {
                     if let Some(runtime) = self.runtime.as_mut() {
                         if let Some(focused) = focused {
+                            if let Some(player) = &mut self.game_runtime.in_place {
+                                player.set_focused(focused);
+                            }
                             runtime.set_window_focused(focused);
                             if !focused {
                                 runtime.input_router_mut().cancel_all();
@@ -2666,6 +3135,28 @@ impl NativeEditorApplication {
     }
 
     fn about_to_wait_native(&mut self, event_loop: &ActiveEventLoop) {
+        if let Some(command) = self.pending_runtime_command.take() {
+            self.apply_runtime_command(&command);
+        }
+        let diagnostics = self.game_runtime.poll();
+        if let Some(workbench) = &mut self.workbench {
+            for message in diagnostics {
+                workbench.log_console_output(crate::commands::CommandOutput::info(
+                    "Runtime",
+                    vec![message],
+                    serde_json::json!({ "source": "local-runtime" }),
+                ));
+            }
+            if workbench.set_runtime_toolbar(self.game_runtime.toolbar_state(&self.settings_state))
+            {
+                if let Some(runtime) = &mut self.runtime {
+                    runtime.request_ui_frame();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+        }
         // Attached CLI/MCP clients wake this loop through the user-event
         // proxy; draining here answers them without waiting for a rendered
         // frame. Document serialization is revision-gated and never belongs
@@ -2714,9 +3205,26 @@ impl NativeEditorApplication {
         if attached_result.document_saved {
             self.pending_document_saved = true;
         }
+        if self.game_runtime.in_place.is_some() {
+            if Instant::now() >= self.next_runtime_frame {
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                self.next_runtime_frame
+                    .max(Instant::now() + Duration::from_millis(1)),
+            ));
+            return;
+        }
         if self.pending_document_saved {
             self.pending_document_saved = false;
-            self.mark_document_saved();
+            // A partial save must not clear the dirty marker: the editor would
+            // then claim everything is on disk while a document is missing.
+            if !self.pending_document_save_failed {
+                self.mark_document_saved();
+            }
+            self.pending_document_save_failed = false;
         }
         if let Some((key, value)) = self.pending_project_range.take() {
             self.apply_project_setting_range_intent(key, value);
@@ -2790,9 +3298,18 @@ impl NativeEditorApplication {
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
         }
+        if self.game_runtime.has_instances() {
+            let runtime_deadline = Instant::now() + Duration::from_millis(100);
+            let deadline = match event_loop.control_flow() {
+                ControlFlow::WaitUntil(existing) => existing.min(runtime_deadline),
+                _ => runtime_deadline,
+            };
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        }
     }
 
     fn return_to_hub(&mut self, open_create: bool) {
+        self.game_runtime.stop_all();
         self.settings_open = false;
         self.settings_restore_focus = None;
         self.pending_settings_open = None;
@@ -3020,6 +3537,8 @@ fn sync_electronics_canvas(
     frame_key: &mut Option<(u64, [u32; 2])>,
     logical_rect: crate::editor_layout::EditorRect,
     target_rect: raf_render::api_graphic_basic::CanvasTargetRect,
+    palette: raf_render::api_graphic_basic::ui_surface::StudioUiPalette,
+    scale_factor: f32,
 ) {
     let Some(editor) = editor else {
         return;
@@ -3040,7 +3559,7 @@ fn sync_electronics_canvas(
         }
         raf_electronics::CadSurfaceKind::Pcb => raf_render::bridge::GraphicsSurfaceKind::PcbCanvas,
     });
-    let options = editor.render_options(logical_rect);
+    let options = editor.render_options(logical_rect, palette, scale_factor);
     canvas.rebuild(editor.scene(), key.1, options);
     *frame_key = Some(key);
 }

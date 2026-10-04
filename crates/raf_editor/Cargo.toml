@@ -12,6 +12,8 @@ raf_assets = { workspace = true }
 raf_electronics = { workspace = true }
 raf_nodes = { workspace = true }
 raf_script = { workspace = true }
+raf_runtime = { workspace = true }
+raf_player = { workspace = true }
 raf_ai = { workspace = true }
 raf_ui = { workspace = true }
 winit = { workspace = true }

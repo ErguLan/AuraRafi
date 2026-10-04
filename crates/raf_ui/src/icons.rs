@@ -24,6 +24,7 @@ pub enum UiIconId {
     Folder,
     Scene,
     Entity,
+    Camera,
     Cube,
     Sphere,
     Plane,
@@ -41,6 +42,8 @@ pub enum UiIconId {
     Add,
     Close,
     Play,
+    Pause,
+    StepForward,
     Stop,
     Console,
     Assets,
@@ -70,7 +73,7 @@ pub enum UiIconId {
 impl UiIconId {
     /// Every semantic icon in the family. Coverage tests and tooling iterate
     /// this instead of mirroring the enum by hand.
-    pub const ALL: [Self; 57] = [
+    pub const ALL: [Self; 60] = [
         Self::Select,
         Self::Move,
         Self::Rotate,
@@ -87,6 +90,7 @@ impl UiIconId {
         Self::Folder,
         Self::Scene,
         Self::Entity,
+        Self::Camera,
         Self::Cube,
         Self::Sphere,
         Self::Plane,
@@ -104,6 +108,8 @@ impl UiIconId {
         Self::Add,
         Self::Close,
         Self::Play,
+        Self::Pause,
+        Self::StepForward,
         Self::Stop,
         Self::Console,
         Self::Assets,
@@ -148,6 +154,7 @@ impl UiIconId {
             Self::Folder => "folder",
             Self::Scene => "scene",
             Self::Entity => "entity",
+            Self::Camera => "camera",
             Self::Cube => "cube",
             Self::Sphere => "sphere",
             Self::Plane => "plane",
@@ -165,6 +172,8 @@ impl UiIconId {
             Self::Add => "add",
             Self::Close => "close",
             Self::Play => "play",
+            Self::Pause => "pause",
+            Self::StepForward => "step-forward",
             Self::Stop => "stop",
             Self::Console => "console",
             Self::Assets => "assets",
@@ -284,6 +293,6 @@ mod tests {
         keys.dedup();
 
         assert_eq!(keys.len(), UiIconId::ALL.len(), "icon keys must be unique");
-        assert_eq!(UiIconId::ALL.len(), 57);
+        assert_eq!(UiIconId::ALL.len(), 60);
     }
 }

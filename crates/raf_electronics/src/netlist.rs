@@ -4,8 +4,9 @@
 //! nets (groups of connected pins). This is the foundation for
 //! simulation, DRC, and export.
 
-use crate::schematic::Schematic;
+use crate::schematic::{Schematic, Wire};
 use glam::Vec2;
+use std::collections::HashMap;
 use uuid::Uuid;
 const _GRID_STEP: f32 = 20.0;
 /// Tolerance for matching pin positions to wire endpoints (in grid units).
@@ -43,10 +44,14 @@ impl Netlist {
     /// Build a netlist from a schematic.
     ///
     /// Algorithm:
-    /// 1. Compute the world position of every pin.
+    /// 1. Compute the world position of every pin once.
     /// 2. For each wire, find which pins are within tolerance of each endpoint.
     /// 3. Use union-find to group pins connected through wires.
     /// 4. Assign net names (from wire labels or auto N001, N002, ...).
+    ///
+    /// Pin lookups go through a spatial hash instead of scanning every pin, and
+    /// wire endpoints are resolved once instead of once per wire pair, so the
+    /// junction pass no longer costs O(wires^2 * pins).
     pub fn from_schematic(schematic: &Schematic) -> Self {
         let components: Vec<NetlistComponent> = schematic
             .components
@@ -62,12 +67,13 @@ impl Netlist {
             .collect();
 
         // Collect all pins with their world positions.
-        // Each entry: (component_index, pin_index, world_position)
-        let mut pin_positions: Vec<(usize, usize, Vec2)> = Vec::new();
+        // Each entry: (component_index, pin_index) paired with its world position.
+        let mut pin_index: Vec<(usize, usize)> = Vec::new();
+        let mut pin_positions: Vec<Vec2> = Vec::new();
         for (ci, comp) in schematic.components.iter().enumerate() {
             for (pi, pin) in comp.pins.iter().enumerate() {
-                let world = crate::schematic::component_pin_world_position(comp, pin);
-                pin_positions.push((ci, pi, world));
+                pin_index.push((ci, pi));
+                pin_positions.push(crate::schematic::component_pin_world_position(comp, pin));
             }
         }
 
@@ -94,28 +100,25 @@ impl Netlist {
             }
         }
 
+        // Wire endpoints are resolved once here. Anchor resolution walks the
+        // component list, so repeating it inside the wire-pair loop was the
+        // dominant cost of netlist extraction on dense schematics.
+        let grid = PinGrid::new(&pin_positions);
+        let wire_endpoints: Vec<[Vec2; 2]> = schematic
+            .wires
+            .iter()
+            .map(|wire| {
+                [
+                    resolve_wire_point(schematic, wire, true),
+                    resolve_wire_point(schematic, wire, false),
+                ]
+            })
+            .collect();
+
         // For each wire, find pins near its endpoints and union them.
-        for wire in &schematic.wires {
-            let wire_start = wire
-                .start_anchor
-                .and_then(|anchor| schematic.resolve_anchor(anchor))
-                .unwrap_or_else(|| Vec2::new(wire.start.x, wire.start.y));
-            let wire_end = wire
-                .end_anchor
-                .and_then(|anchor| schematic.resolve_anchor(anchor))
-                .unwrap_or_else(|| Vec2::new(wire.end.x, wire.end.y));
-
-            let mut start_pins: Vec<usize> = Vec::new();
-            let mut end_pins: Vec<usize> = Vec::new();
-
-            for (idx, (_ci, _pi, pos)) in pin_positions.iter().enumerate() {
-                if pos.distance(wire_start) < POSITION_TOLERANCE {
-                    start_pins.push(idx);
-                }
-                if pos.distance(wire_end) < POSITION_TOLERANCE {
-                    end_pins.push(idx);
-                }
-            }
+        for endpoints in &wire_endpoints {
+            let start_pins = grid.near(endpoints[0]);
+            let end_pins = grid.near(endpoints[1]);
 
             // Union all start-side pins together.
             for i in 1..start_pins.len() {
@@ -132,43 +135,22 @@ impl Netlist {
         }
 
         // Also union wires that share endpoints (wire junctions).
-        // Represented as virtual pin indices starting after real pins.
-        // Simpler approach: for each pair of wires sharing an endpoint,
-        // find pins near each shared endpoint and union them.
-        for i in 0..schematic.wires.len() {
-            for j in (i + 1)..schematic.wires.len() {
-                let wi = &schematic.wires[i];
-                let wj = &schematic.wires[j];
-                let points_i = [
-                    wi.start_anchor
-                        .and_then(|anchor| schematic.resolve_anchor(anchor))
-                        .unwrap_or_else(|| Vec2::new(wi.start.x, wi.start.y)),
-                    wi.end_anchor
-                        .and_then(|anchor| schematic.resolve_anchor(anchor))
-                        .unwrap_or_else(|| Vec2::new(wi.end.x, wi.end.y)),
-                ];
-                let points_j = [
-                    wj.start_anchor
-                        .and_then(|anchor| schematic.resolve_anchor(anchor))
-                        .unwrap_or_else(|| Vec2::new(wj.start.x, wj.start.y)),
-                    wj.end_anchor
-                        .and_then(|anchor| schematic.resolve_anchor(anchor))
-                        .unwrap_or_else(|| Vec2::new(wj.end.x, wj.end.y)),
-                ];
-
-                for pi in &points_i {
-                    for pj in &points_j {
-                        if pi.distance(*pj) < POSITION_TOLERANCE {
-                            // These two wire endpoints meet; union any pins near them.
-                            let mut nearby: Vec<usize> = Vec::new();
-                            for (idx, (_ci, _pi, pos)) in pin_positions.iter().enumerate() {
-                                if pos.distance(*pi) < POSITION_TOLERANCE {
-                                    nearby.push(idx);
-                                }
-                            }
-                            for k in 1..nearby.len() {
-                                union(&mut parent, nearby[0], nearby[k]);
-                            }
+        // For each pair of wires sharing an endpoint, union any pins near them.
+        // Nothing can share an endpoint with a single wire, so skip the pass.
+        if wire_endpoints.len() >= 2 {
+            for i in 0..wire_endpoints.len() {
+                for j in (i + 1)..wire_endpoints.len() {
+                    for pi in &wire_endpoints[i] {
+                        let shares_endpoint = wire_endpoints[j]
+                            .iter()
+                            .any(|pj| pi.distance(*pj) < POSITION_TOLERANCE);
+                        if !shares_endpoint {
+                            continue;
+                        }
+                        // These two wire endpoints meet; union any pins near them.
+                        let nearby = grid.near(*pi);
+                        for k in 1..nearby.len() {
+                            union(&mut parent, nearby[0], nearby[k]);
                         }
                     }
                 }
@@ -179,30 +161,24 @@ impl Netlist {
         let mut net_map: std::collections::HashMap<usize, Vec<(usize, usize)>> =
             std::collections::HashMap::new();
 
-        for (idx, (ci, pi, _pos)) in pin_positions.iter().enumerate() {
+        for (idx, key) in pin_index.iter().enumerate() {
             let root = find(&mut parent, idx);
-            net_map.entry(root).or_default().push((*ci, *pi));
+            net_map.entry(root).or_default().push(*key);
         }
 
         // Determine net names from wire labels.
         let mut net_names: std::collections::HashMap<usize, String> =
             std::collections::HashMap::new();
 
-        for wire in &schematic.wires {
+        for (index, wire) in schematic.wires.iter().enumerate() {
             if wire.net.is_empty() {
                 continue;
             }
-            let wire_start = wire
-                .start_anchor
-                .and_then(|anchor| schematic.resolve_anchor(anchor))
-                .unwrap_or_else(|| Vec2::new(wire.start.x, wire.start.y));
-            // Find any pin near this wire's start to get its root.
-            for (idx, (_ci, _pi, pos)) in pin_positions.iter().enumerate() {
-                if pos.distance(wire_start) < POSITION_TOLERANCE {
-                    let root = find(&mut parent, idx);
-                    net_names.entry(root).or_insert_with(|| wire.net.clone());
-                    break;
-                }
+            let wire_start = wire_endpoints[index][0];
+            // Find the first pin near this wire's start to get its root.
+            if let Some(&pin) = grid.near(wire_start).first() {
+                let root = find(&mut parent, pin);
+                net_names.entry(root).or_insert_with(|| wire.net.clone());
             }
         }
 
@@ -241,6 +217,81 @@ impl Netlist {
                 .iter()
                 .any(|&(ci, pi)| ci == comp_index && pi == pin_index)
         })
+    }
+}
+
+/// Resolves a wire endpoint, preferring the persisted anchor when it is set.
+fn resolve_wire_point(schematic: &Schematic, wire: &Wire, start: bool) -> Vec2 {
+    let (anchor, point) = if start {
+        (wire.start_anchor, wire.start)
+    } else {
+        (wire.end_anchor, wire.end)
+    };
+    match anchor.and_then(|anchor| schematic.resolve_anchor(anchor)) {
+        Some(resolved) => resolved,
+        None => point,
+    }
+}
+
+/// Uniform spatial hash over pin world positions.
+///
+/// The junction pass asks for "every pin within `POSITION_TOLERANCE` of this
+/// point" once per wire pair, which made extraction O(wires^2 * pins). Bucketing
+/// the pins once makes each lookup cheap without changing which pins match: the
+/// cell size equals the match radius, so any pin closer than the radius is always
+/// inside the 3x3 cell block around the query point.
+struct PinGrid {
+    cell_size: f32,
+    points: Vec<Vec2>,
+    buckets: HashMap<(i64, i64), Vec<usize>>,
+}
+
+impl PinGrid {
+    fn new(points: &[Vec2]) -> Self {
+        let cell_size = POSITION_TOLERANCE;
+        let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+        for (index, point) in points.iter().enumerate() {
+            buckets
+                .entry(Self::cell_of(*point, cell_size))
+                .or_default()
+                .push(index);
+        }
+
+        Self {
+            cell_size,
+            points: points.to_vec(),
+            buckets,
+        }
+    }
+
+    fn cell_of(point: Vec2, cell_size: f32) -> (i64, i64) {
+        (
+            (point.x / cell_size).floor() as i64,
+            (point.y / cell_size).floor() as i64,
+        )
+    }
+
+    /// Indices of the pins strictly within `POSITION_TOLERANCE` of `point`,
+    /// ascending so callers see a stable order.
+    fn near(&self, point: Vec2) -> Vec<usize> {
+        let (cell_x, cell_y) = Self::cell_of(point, self.cell_size);
+        let mut matches = Vec::new();
+
+        for offset_x in -1..=1 {
+            for offset_y in -1..=1 {
+                let Some(bucket) = self.buckets.get(&(cell_x + offset_x, cell_y + offset_y)) else {
+                    continue;
+                };
+                for &index in bucket {
+                    if self.points[index].distance(point) < POSITION_TOLERANCE {
+                        matches.push(index);
+                    }
+                }
+            }
+        }
+
+        matches.sort_unstable();
+        matches
     }
 }
 
@@ -329,6 +380,56 @@ mod tests {
         let nl = Netlist::from_schematic(&sch);
         let net = nl.net_for_pin(0, 1).expect("R1 pin 2 should be connected");
         assert_eq!(net.name, "NET_A");
+        assert!(net.pins.iter().any(|&(ci, pi)| ci == 1 && pi == 0));
+    }
+
+    #[test]
+    fn pin_grid_matches_a_brute_force_tolerance_scan() {
+        let points = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.9, 0.0),
+            Vec2::new(2.1, 0.0),
+            Vec2::new(-1.5, 1.5),
+            Vec2::new(40.0, -20.0),
+            Vec2::new(40.0, -20.5),
+        ];
+        let grid = PinGrid::new(&points);
+        let probes = [
+            Vec2::new(0.0, 0.0),
+            Vec2::new(2.0, 0.0),
+            Vec2::new(-2.0, 2.0),
+            Vec2::new(40.0, -20.0),
+            Vec2::new(100.0, 100.0),
+        ];
+
+        for probe in probes {
+            let mut expected = Vec::new();
+            for (index, point) in points.iter().enumerate() {
+                if point.distance(probe) < POSITION_TOLERANCE {
+                    expected.push(index);
+                }
+            }
+            assert_eq!(grid.near(probe), expected, "probe {probe:?}");
+        }
+    }
+
+    #[test]
+    fn pins_inside_the_match_tolerance_share_a_net() {
+        let mut sch = Schematic::new("Tolerance");
+        let mut r1 = ElectronicComponent::resistor("10k");
+        r1.position = Vec2::new(100.0, 100.0);
+        sch.add_component(r1);
+        let mut r2 = ElectronicComponent::resistor("4.7k");
+        r2.position = Vec2::new(140.0, 100.0);
+        sch.add_component(r2);
+
+        // The endpoint is deliberately off the shared pin location but still
+        // inside POSITION_TOLERANCE.
+        sch.add_wire(Vec2::new(120.0, 100.0), Vec2::new(120.0, 101.5), "VCC");
+
+        let nl = Netlist::from_schematic(&sch);
+        let net = nl.net_for_pin(0, 1).expect("R1 pin 2 should be connected");
+        assert_eq!(net.name, "VCC");
         assert!(net.pins.iter().any(|&(ci, pi)| ci == 1 && pi == 0));
     }
 }

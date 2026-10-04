@@ -1,9 +1,9 @@
 # Nodes authoring system
 
 This document describes the visual-node authoring path that is active in the
-native editor. It is intentionally narrower than the future scripting/runtime
-architecture: editing a graph is available now; executing that graph from
-Play is not part of this contract.
+native editor. Supported Game flows now compile to Rhai for isolated manual
+Play through the shared Host API. See CAMERA_RUNTIME.md for active capabilities,
+budgets and unsupported nodes; native visual acceptance remains separate.
 
 ## Ownership and modules
 
@@ -20,6 +20,8 @@ The persisted model lives in `crates/raf_nodes`:
 - `compiler.rs` currently validates the graph and returns compatibility message
   summaries plus structured diagnostics. The editor localizes those diagnostics;
   the compiler does not produce executable code or start a runtime.
+- `runtime_compiler.rs` is the separate bounded graph-to-Rhai backend used by
+  Play; it delegates scene operations to the same Host API as written scripts.
 
 The native editor presentation lives in `crates/raf_editor`:
 
@@ -67,17 +69,16 @@ translation keys.
 
 ## Scope boundary
 
-The Nodes document is authoring state. This pass does not add or advertise:
+The Nodes document remains authoring state; Play consumes a snapshot, not
+the live editor scene. This implementation does not add or advertise:
 
-- Play/Stop integration or a game runtime loop;
-- scene-mutating node execution;
 - a separate script editor;
 - a second graph document format or a parallel renderer;
 - a new widget toolkit.
 
-`raf_nodes::executor`, `raf_script`, and Host API documentation describe
-prepared or future execution layers. They must not be read as proof that the
-native Nodes surface currently executes graphs.
+The legacy `raf_nodes::executor` / `node_backend` are not the Play path.
+Opening the Nodes tab still does not execute a graph. Play compiles supported
+nodes and rejects unsupported behavior; Compile validates/returns source only.
 
 ## Extension rules
 

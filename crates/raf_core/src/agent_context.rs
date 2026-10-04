@@ -200,6 +200,7 @@ pub fn scene_fingerprint(scene: &SceneGraph) -> BTreeMap<String, Value> {
                     "source_asset": node.source_asset,
                     "source_schema_version": node.source_schema_version,
                     "scripts": node.scripts,
+                    "game_camera": node.game_camera,
                     "semantic_role": node.semantic_role,
                     "stable_key": node.stable_key,
                     "tags": node.tags,
@@ -2120,6 +2121,7 @@ fn scene_item(scene: &SceneGraph, id: SceneNodeId, include_details: bool) -> Opt
     );
     item.insert("kind".to_string(), json!(node_kind(node)));
     item.insert("primitive".to_string(), json!(node.primitive.label()));
+    item.insert("has_camera".to_string(), json!(node.game_camera.is_some()));
     item.insert("is_folder".to_string(), json!(node.is_folder));
     item.insert("visible".to_string(), json!(node.visible));
     item.insert("locked".to_string(), json!(node.locked));
@@ -2160,6 +2162,7 @@ fn scene_item(scene: &SceneGraph, id: SceneNodeId, include_details: bool) -> Opt
         );
         item.insert("source_asset".to_string(), json!(node.source_asset));
         item.insert("scripts".to_string(), json!(node.scripts));
+        item.insert("game_camera".to_string(), json!(node.game_camera));
         item.insert(
             "name_sanitized".to_string(),
             json!(presentation_name(id, node) != node.name),
@@ -2579,6 +2582,35 @@ fn orphaned_entities_in_scope(scene: &SceneGraph, scope: &HashSet<SceneNodeId>) 
 mod tests {
     use super::*;
     use crate::scene::Primitive;
+
+    #[test]
+    fn camera_components_are_observable_and_lens_changes_produce_semantic_diffs() {
+        let mut scene = SceneGraph::new();
+        let part = scene.add_root_with_primitive("CameraPart", Primitive::Cube);
+        let before = scene_fingerprint(&scene);
+        scene.get_mut(part).unwrap().game_camera =
+            Some(crate::runtime_config::GameCamera::default());
+        let added = scene_fingerprint(&scene);
+        let uuid = scene.get(part).unwrap().uuid.to_string();
+        assert_eq!(
+            scene_diff(&before, &added).unwrap()["updated"],
+            json!([uuid])
+        );
+        let item = scene_item(&scene, part, true).unwrap();
+        assert_eq!(item["has_camera"], true);
+        assert_eq!(item["primitive"], "Cube");
+        assert_eq!(item["game_camera"]["fov_degrees"], 60.0);
+        scene
+            .get_mut(part)
+            .unwrap()
+            .game_camera
+            .as_mut()
+            .unwrap()
+            .fov_degrees = 75.0;
+        assert!(scene_diff(&added, &scene_fingerprint(&scene)).is_some());
+        scene.get_mut(part).unwrap().game_camera = None;
+        assert_eq!(scene_fingerprint(&scene), before);
+    }
 
     #[test]
     fn scene_context_uses_one_live_count_and_sanitizes_display_names() {

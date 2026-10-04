@@ -267,7 +267,13 @@ impl SettingsSurfaceHost {
     }
 
     pub fn commit_numeric_drafts(&mut self) -> bool {
-        const NUMERIC_KEYS: [&str; 19] = [
+        const NUMERIC_KEYS: [&str; 25] = [
+            "settings.runtime.max_instances",
+            "settings.runtime.width",
+            "settings.runtime.height",
+            "settings.runtime.fps_limit",
+            "settings.runtime.script_budget_ms",
+            "settings.runtime.script_operation_limit",
             "settings.theme_experimental",
             "settings.font_size",
             "settings.ui_scale",
@@ -410,6 +416,30 @@ impl SettingsSurfaceHost {
 
     fn seed_numeric_inputs(&mut self) {
         let values = [
+            (
+                "settings.runtime.max_instances.text",
+                self.draft.runtime.max_instances.to_string(),
+            ),
+            (
+                "settings.runtime.width.text",
+                self.draft.runtime.window_size[0].to_string(),
+            ),
+            (
+                "settings.runtime.height.text",
+                self.draft.runtime.window_size[1].to_string(),
+            ),
+            (
+                "settings.runtime.fps_limit.text",
+                self.draft.runtime.fps_limit.to_string(),
+            ),
+            (
+                "settings.runtime.script_budget_ms.text",
+                self.draft.runtime.script_budget_ms.to_string(),
+            ),
+            (
+                "settings.runtime.script_operation_limit.text",
+                self.draft.runtime.script_operation_limit.to_string(),
+            ),
             (
                 "settings.theme_experimental.text",
                 format!("{:.0}", self.draft.theme_experimental),

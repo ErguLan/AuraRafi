@@ -6,6 +6,8 @@ Inspect first with `engine.status`, `project.info`, `capabilities.list`,
 Useful attached scene commands:
 
 - `game.add`: create a primitive with a safe name and optional transform;
+- `game.camera action=create|add|set|remove`: create an explicit camera or manage
+  the camera component on an entity without replacing its geometry;
 - `game.select`: select by stable id or name;
 - `game.rename`: rename a selected/targeted entity;
 - `game.duplicate`: duplicate a node with an explicit offset;
@@ -23,7 +25,8 @@ Useful scripting commands:
 - `script.detach file=scripts/controller.rhai entity=Horse`;
 - `script.list`;
 - `script.validate file=scripts/controller.rhai`;
-- `script.compile_nodes flow=Main output=scripts/generated.rhai`.
+- `script.compile_nodes file=nodes.ron`: validate a bounded project-local graph
+  and return its compiled Rhai source without executing or writing it.
 
 `script.run` is an editor-only authoring check for `on_start`; it does not
 start the product Runtime. Check the catalog returned by `capabilities.list`

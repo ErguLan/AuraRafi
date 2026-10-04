@@ -10,6 +10,11 @@ use super::cad_surface::{
     build_cad_surface_frame, CadSurfaceFrame, CadSurfaceHitRegion, CadSurfaceOptions,
 };
 
+/// Retained CAD frame plus the presentation target that draws it.
+///
+/// The host owns the last built frame so an idle surface does no work: geometry
+/// is recorded only when a caller asks for a rebuild, and presentation reuses
+/// whatever frame is already resident.
 pub struct DirectCadSurfaceHost {
     scene_host: DirectSceneSurfaceHost,
     frame: Option<CadSurfaceFrame>,
@@ -27,6 +32,7 @@ impl DirectCadSurfaceHost {
         }
     }
 
+    /// Records a new CAD frame for the given physical target size.
     pub fn rebuild(
         &mut self,
         scene: &CadScene,
@@ -38,14 +44,32 @@ impl DirectCadSurfaceHost {
         self.frame.as_ref().expect("CAD frame was just built")
     }
 
+    /// The retained frame, if one was ever built.
     pub fn frame(&self) -> Option<&CadSurfaceFrame> {
         self.frame.as_ref()
     }
 
+    /// Retained AGB pick regions of the last built frame.
+    ///
+    /// This is the legacy CAD pick path. Editing gestures belong to
+    /// `raf_electronics::cad_interaction::pick_editable`, which also refuses to
+    /// let a painted `NetLabel`, `Airwire` or `DrcMarker` win a click over the
+    /// geometry underneath, and which resolves selection back to the document.
+    /// Hosts that resolve picking there can build with
+    /// `CadSurfaceOptions::collect_hit_regions = false` and stop paying for the
+    /// per-object string clones; kept here because it is public API of
+    /// `raf_render`.
     pub fn hit_test(&self, point: Vec2) -> Option<&CadSurfaceHitRegion> {
         self.frame.as_ref()?.hit_test(point)
     }
 
+    /// Renders the retained frame with an explicit `BasicDevice`.
+    ///
+    /// The editor does not use this path: `NativeElectronicsCanvas::render_layer`
+    /// hands the same `SceneRenderFrame` to the shared `RenderRuntime`, so
+    /// Schematic, PCB, Scene and RafUI all present through one executor. This
+    /// remains for a host that owns a concrete `BasicDevice` and wants to draw
+    /// the CAD frame without the shared runtime.
     pub fn render(
         &mut self,
         basic_device: &mut BasicDevice,

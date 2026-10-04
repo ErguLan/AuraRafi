@@ -48,6 +48,18 @@ impl ElectronicsHistory {
         !self.redo.is_empty()
     }
 
+    /// Number of stacked undo entries.
+    ///
+    /// Used to prove that a navigation action, such as changing the active
+    /// surface, did not silently push a document edit onto the undo stack.
+    pub fn len(&self) -> usize {
+        self.undo.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.undo.is_empty()
+    }
+
     pub fn record(
         &mut self,
         before: ElectronicsDocumentSnapshot,

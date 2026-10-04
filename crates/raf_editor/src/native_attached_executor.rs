@@ -170,6 +170,11 @@ pub(crate) fn poll_attached_commands(
     let mut runtime = runtime;
     for command in pending {
         let request_id = command.request.id;
+        if command.request.name.starts_with("runtime.") {
+            attached_host.respond(command, EngineCommandResponse::error(request_id, "Manual runtime control required",
+                "Use native Play controls or the local console. Agent/CLI/MCP runtime activation is disabled."));
+            continue;
+        }
         let selected = runtime
             .as_deref()
             .map(|runtime| runtime.game_viewport().selected.clone())

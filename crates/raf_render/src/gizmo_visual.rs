@@ -161,7 +161,10 @@ pub fn arrowhead_triangle(
     length: f32,
     half_width: f32,
 ) -> [BasicScreenTriangle; 1] {
-    let base = [tip[0] - direction[0] * length, tip[1] - direction[1] * length];
+    let base = [
+        tip[0] - direction[0] * length,
+        tip[1] - direction[1] * length,
+    ];
     let left = [
         base[0] + perpendicular[0] * half_width,
         base[1] + perpendicular[1] * half_width,

@@ -16,6 +16,7 @@ pub struct HierarchyRow {
     pub name: String,
     pub primitive: Primitive,
     pub is_folder: bool,
+    pub is_camera: bool,
     pub visible: bool,
     pub locked: bool,
     pub has_children: bool,
@@ -195,6 +196,7 @@ impl HierarchyModel {
             name: node.name.clone(),
             primitive: node.primitive,
             is_folder: node.is_folder,
+            is_camera: node.game_camera.is_some(),
             visible: node.visible,
             locked: node.locked,
             has_children: !node.children.is_empty(),
@@ -274,7 +276,10 @@ mod tests {
 
         assert_eq!(view.total_rows, 21);
         assert!(!view.rows.is_empty());
-        assert_eq!(view.rows.last().map(|row| row.name.as_str()), Some("Entity 19"));
+        assert_eq!(
+            view.rows.last().map(|row| row.name.as_str()),
+            Some("Entity 19")
+        );
     }
 
     #[test]

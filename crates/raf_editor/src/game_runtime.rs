@@ -51,7 +51,8 @@ impl RuntimeInputState {
             }
         }
         Self { snapshot }
-    }}
+    }
+}
 
 #[derive(Debug, Default)]
 pub struct RuntimeReport {

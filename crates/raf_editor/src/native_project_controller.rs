@@ -36,6 +36,7 @@ pub(crate) fn game_capabilities(project_type: ProjectType) -> Vec<String> {
         "game.batch",
         "game.create_group",
         "game.reparent",
+        "game.camera",
         "game.build",
         "game.reconcile",
         "game.repair",

@@ -150,23 +150,47 @@ const DESCRIPTORS: &[NodeDescriptor] = &[
 ];
 
 pub fn descriptors() -> &'static [NodeDescriptor] {
-    DESCRIPTORS
+    static ALL: std::sync::OnceLock<Vec<NodeDescriptor>> = std::sync::OnceLock::new();
+    ALL.get_or_init(|| {
+        let mut descriptors = DESCRIPTORS.to_vec();
+        descriptors.extend(
+            crate::scene_nodes::SCENE_NODES
+                .iter()
+                .map(|(slug, _, action)| NodeDescriptor {
+                    slug,
+                    label_key: Box::leak(
+                        format!("nodes.preset.{}", slug.replace('-', "_")).into_boxed_str(),
+                    ),
+                    description_key: Box::leak(
+                        format!("nodes.description.{}", slug.replace('-', "_")).into_boxed_str(),
+                    ),
+                    category: if slug.starts_with("on-") {
+                        NodeCategory::Event
+                    } else if *action {
+                        NodeCategory::Action
+                    } else {
+                        NodeCategory::Variable
+                    },
+                }),
+        );
+        descriptors
+    })
 }
 
 pub fn descriptor_for_slug(slug: &str) -> Option<&'static NodeDescriptor> {
-    DESCRIPTORS
+    descriptors()
         .iter()
         .find(|descriptor| descriptor.slug == slug)
 }
 
 pub fn descriptor_for_node(node: &Node) -> Option<&'static NodeDescriptor> {
-    DESCRIPTORS
+    descriptors()
         .iter()
         .find(|descriptor| node_name_matches(node, descriptor.slug))
 }
 
 pub fn create(slug: &str) -> Option<Node> {
-    Some(match slug {
+    let mut node = match slug {
         "on-start" => Node::on_start(),
         "on-update" => Node::on_update(),
         "print" => Node::print_action(),
@@ -188,8 +212,35 @@ pub fn create(slug: &str) -> Option<Node> {
         "serial-write" => HardwareNodes::serial_write(),
         "read-sensor" => HardwareNodes::sensor_input(),
         "write-actuator" => HardwareNodes::actuator_output(),
-        _ => return None,
-    })
+        _ => return crate::scene_nodes::create(slug),
+    };
+    let mut add = |key: &str, value: &str| {
+        if !node.properties.iter().any(|p| p.key == key) {
+            node.properties.push(crate::NodeProperty::new(
+                key,
+                format!("nodes.property.{key}"),
+                value,
+            ));
+        }
+    };
+    match slug {
+        "destroy-entity" => add("entity", ""),
+        "set-position" => {
+            add("entity", "");
+            add("position", "0,0,0");
+        }
+        "spawn-entity" => {
+            add("position", "0,0,0");
+            add("primitive", "empty");
+        }
+        "add" => {
+            add("a", "0");
+            add("b", "0");
+        }
+        "if" | "while-loop" => add("condition", "false"),
+        _ => {}
+    }
+    Some(node)
 }
 
 /// Backfill properties introduced after older `nodes.ron` documents were
@@ -237,6 +288,8 @@ fn node_name_matches(node: &Node, slug: &str) -> bool {
         "serial-write" => node.name == "Serial Write",
         "read-sensor" => node.name == "Read Sensor",
         "write-actuator" => node.name == "Write Actuator",
-        _ => false,
+        _ => crate::scene_nodes::SCENE_NODES
+            .iter()
+            .any(|(s, name, _)| *s == slug && node.name == *name),
     }
 }

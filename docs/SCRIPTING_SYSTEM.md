@@ -5,12 +5,15 @@ covers the three scripting tiers, the shared Host API, how visual nodes
 execute, how commands create scripts, the security model, configuration
 surfaces, and a phased mini-roadmap.
 
-Status: **Architecture prepared for runtime.** `raf_script::runtime` is a
-small lifecycle harness that can load attached Rhai scripts, compile them, run
-`on_start`, and run `on_update(dt)` through the shared Host API on a cloned
-scene. It is intentionally not advertised as the game runtime yet; the product
-Play flow stays guarded until editor/runtime state, logs, physics, nodes, and
-scene locking are reconnected end to end.
+Status: **Local Rhai runtime implementation.** Manual Play connects
+`raf_runtime` and `raf_player`; acceptance evidence is maintained in
+[Local Runtime](LOCAL_RUNTIME.md). Each attachment has persistent isolated
+scope/owner state; shared files compile once. Public hooks are `on_start()`,
+`on_update(dt)`, `on_fixed_update(dt)`, `on_event(name, value)` and
+`on_destroy()` and `on_late_update(dt)`. Update hooks execute at the configured
+fixed simulation frequency, independently of display pacing; late-update
+follows physics. Supported Nodes compile to Rhai in the local runtime.
+WASM remains reserved. See [Camera Runtime](CAMERA_RUNTIME.md).
 
 ---
 
@@ -25,19 +28,18 @@ API), Unreal (C++ + Blueprint share the reflection layer), and Godot
 |------|----------|----------|---------|-------------|
 | 1 | Rhai | Beginners, game designers | Full | Interpreted (~10-70x native on tight numeric loops, fine for game logic) |
 | 2 | WASM Native Module (C++, Rust, Zig, AssemblyScript) | Advanced users, performance-critical code | Full (WASM sandbox) | Near-native (~2-5x native) |
-| 3 | Visual Nodes | Non-programmers, prototyping | Authoring now; runtime boundary reserved | Validation now; interpreted graph walk planned |
+| 3 | Visual Nodes | Non-programmers, prototyping | Same bounded Rhai sandbox in Play | Graph-to-Rhai compilation |
 
-Tier 1 ships first as the executable script path. Tier 3 exists as editor and
-executor infrastructure, but scene-mutating node bridges are still pending.
+Tier 1 is the executable script path. Tier 3 emits Rhai through
+`raf_nodes::runtime_compiler` and uses the same Host API.
 Tier 2 is designed now and waits for an approved WASM runtime dependency.
 
 ---
 
 ## 2. Current State
 
-The repository contains prepared scripting/runtime code and an active native
-Nodes authoring surface. These are related layers, but they are not the same
-feature and must not be described as one connected Play path.
+The native Nodes authoring document and isolated local Play world are
+separate ownership layers connected by a snapshot/compile boundary.
 
 ### 2.1 Visual Nodes authoring (`crates/raf_nodes/` + `raf_editor`)
 
@@ -59,21 +61,22 @@ feature and must not be described as one connected Play path.
   properties use serde defaults so older documents remain readable.
 - `compiler.rs` is currently a graph validator. It reports connectivity and
   typing diagnostics; it does not compile executable code.
-- The executor and `raf_script::backends::node_backend` remain prepared
-  execution infrastructure. Scene-mutating node bridges are not enabled by
-  the top-level Play flow in this contract.
+- The legacy executor/node_backend are compatibility preparation, not the
+  Play path. `runtime_compiler` generates a global Rhai attachment; the
+  unsaved active graph or saved startup-session graph is included in Play.
 
 ### 2.2 External Scripts (`crates/raf_editor/src/script_support.rs` + `panels/behaviors.rs`)
 - Detects `.rs`, `.cpp`, `.rhai`, `.lua`, `.py`, `.js`, `.ts` by extension.
-- `is_engine_supported()` returns true only for Rust, C++, Rhai.
-- Scans `assets/` for script files, validates presence of `on_start`/`on_update` by text search.
+- `is_engine_supported()` returns true only for Rhai execution; native source
+  files remain authoring assets, not executable runtime modules.
+- Rhai validation uses the actual compiler/AST and project-confined paths.
 - `SceneNode.scripts: Vec<String>` stores relative paths.
 - `behaviors.rs` panel attaches/detaches scripts, shows validation status, opens VS Code.
 - `raf_script::runtime::RhaiScriptRuntime` can load attached `.rhai` files
   from project or assets script folders and execute lifecycle functions on a
   cloned scene for isolated runtime-prep tests.
-- **Gap**: The product Play button is still guarded; this is prepared
-  infrastructure, not the active game loop.
+- Manual native Play consumes these Rhai attachments. Attached Agent/CLI/MCP
+  activation remains blocked; native/WASM adapters are future work.
 
 ### 2.3 Command boundary (`raf_editor`)
 
@@ -296,15 +299,14 @@ with only `on_update` runs every frame. A script with neither is a no-op
 
 ## 7. Visual Nodes execution boundary
 
-The active native Nodes feature is authoring only. Its current compiler
+The native Nodes authoring validator
 validates graph structure, pin direction, duplicate links, occupied inputs,
 and compatible data types. The authoring surface saves `NodeGraph` in
-`nodes.ron`, but the top-level Play flow does not execute that graph.
+`nodes.ron`. Local Play consumes an isolated snapshot compiled to Rhai.
 
-The executor and node backend below are preparation for a later runtime pass.
-They must remain behind the runtime boundary until scene mutation, lifecycle,
-logs, locking, and failure handling are integrated as one product flow. In
-particular, the following are not promises of the current editor:
+The legacy executor/node backend below remain historical preparation. The
+active backend and its restrictions are defined in CAMERA_RUNTIME.md.
+The authoring boundary remains:
 
 - `Spawn Entity`, `Set Position`, and `Destroy Entity` do not mutate the live
   editor `SceneGraph` from the Nodes surface.
@@ -323,13 +325,13 @@ shared Host API for operations such as:
 That work belongs to the runtime/Host API contract, not to the retained UI
 surface or its command adapter.
 
-### 7.2 Phase 2 (future): Compile to Rhai source
-`compiler.rs` (currently a stub) gains a `compile_to_rhai(graph) -> String`
-pass. This produces readable Rhai source from a node graph, viewable in the
-editor ("View as Code"). This unifies the execution path: a compiled node
-graph runs through the same Rhai backend as a hand-written script.
+### 7.2 Active graph-to-Rhai compilation
+`runtime_compiler::to_rhai` emits bounded source and explicit unsupported-node
+errors. Native Compile returns that source; Play attaches the graph snapshot
+through the same Rhai backend as a hand-written script. A dedicated code
+viewer remains future work.
 
-### 7.3 Call Script Function node
+### 7.3 Call Script Function node (future, not implemented)
 A new visual node `Call Script Function` lets a node graph invoke a function
 defined in a `.rhai` script:
 
@@ -369,7 +371,8 @@ Following the pattern in `docs/COMMANDS.md`, a new `script` domain is added.
     Executes on_start once in editor (testing, not runtime).
 
 /script.compile_nodes flow=Main output=player_controller.rhai
-    Planned command. It is not an active compiler output path yet.
+    Historical syntax; use /script.compile_nodes file=nodes.ron.
+    Returns generated Rhai in structured output; no file write or execution.
 ```
 
 ### 8.2 Domain
@@ -415,7 +418,7 @@ These are rules, not suggestions. They apply to all scripting code.
 |------|-----------|---------|--------|-----|
 | Rhai | Blocked | Blocked | Sandbox | `set_max_operations` timeout per frame |
 | WASM | Blocked unless granted | Blocked unless granted | Sandbox (linear memory) | Fuel/timeout via runtime |
-| Visual Nodes | N/A (in-process) | N/A | N/A | Step limit in executor (already 10,000) |
+| Visual Nodes | Same Rhai limits in Play | Same Rhai limits | Same Rhai limits | 4096 flow steps/hook, plus Rhai time/operation budgets |
 
 Rhai and WASM cannot crash the engine. Visual Nodes cannot either (the
 executor is Rust code that validates every call). The only way to crash the
@@ -430,7 +433,7 @@ responsibility.
 |------|-----------|
 | Rhai | `notify` crate (already a workspace dep) watches `assets/scripts/`. On change, re-create `Engine`, re-register Host API, re-compile, call `on_start`. |
 | WASM | Watch `assets/scripts/*.wasm`. On change, drop instance, re-instantiate module, re-wire imports, call `on_start`. |
-| Visual Nodes | Already has auto-save (30s). On document change, re-walk graph next frame. |
+| Visual Nodes | Persisted with the authoring session. Changes require Stop/Play; the runtime snapshot is immutable. |
 
 Hot-reload is opt-in via `script_hot_reload` setting (default true).
 
@@ -568,9 +571,9 @@ The crate compiles and tests the Rhai backend plus the first runtime session.
 - Hot-reload via `notify` watcher.
 - `/script.run` command for one-shot testing through the same runtime session.
 
-### Phase C: Visual node runtime wiring (future)
-- Integrate the prepared `executor.rs` with the shared Host API only after the
-  product Play boundary is explicitly reopened.
+### Phase C: Visual node runtime wiring (implemented locally)
+- Supported graphs compile through `runtime_compiler.rs` and attach as Rhai
+  to the isolated Play world, not through the legacy `executor.rs`.
 - Add `Call Script Function` only with a concrete persisted-node contract and
   lifecycle/error policy.
 - Keep scene mutation, logs, locking, and runtime ownership outside the RafUI
@@ -583,10 +586,10 @@ The crate compiles and tests the Rhai backend plus the first runtime session.
 - WASM Host ABI version 1 spec document.
 - Deprecate `docs/CPP_MODDING.md`.
 
-### Phase E: Compile nodes to Rhai (future)
-- `compiler.rs` gains `compile_to_rhai(graph) -> String`.
-- "View as Code" button in node editor.
-- `/script.compile_nodes` command.
+### Phase E: Compile nodes to Rhai (implemented; dedicated code viewer future)
+- `runtime_compiler::to_rhai(graph)` generates bounded runtime source.
+- Nodes Compile returns source in the native console.
+- `/script.compile_nodes file=nodes.ron` compiles saved project-local graphs.
 
 ### Phase F: Standalone runtime export (future)
 - `ScriptContext` runs without editor dependencies.
@@ -599,7 +602,7 @@ The crate compiles and tests the Rhai backend plus the first runtime session.
 
 | Document | Status |
 |----------|--------|
-| `docs/NODES_SYSTEM.md` | Current authoring contract; this document owns the future execution boundary. |
+| `docs/NODES_SYSTEM.md` | Current authoring contract; CAMERA_RUNTIME.md defines active execution and limits. |
 | `docs/CPP_MODDING.md` | Superseded by Section 4 (WASM). Kept for historical reference until Phase D. |
 | `docs/COMMANDS.md` | Extended with `script.*` domain (Section 8). |
 | `docs/ARCHITECTURE.md` | New "Scripting" section pointing here. |
@@ -613,9 +616,8 @@ The crate compiles and tests the Rhai backend plus the first runtime session.
 - Three tiers (Rhai, WASM, Visual Nodes) share one Host API.
 - Rhai is the primary beginner language. Its speed is fine for game logic.
 - WASM replaces raw C++ FFI. It is sandboxed, multi-language, hot-reloadable, and our own Host ABI makes it "propio".
-- Visual Nodes are authoring-ready now; graph execution and Rhai compilation
-  remain future runtime work.
+- Supported Visual Nodes execute through Rhai in isolated manual Play.
 - Commands can create, attach, validate, and run scripts.
 - Everything is in SI units via `units.rs`.
 - The `raf_script` crate is the single home for all scripting logic.
-- Runtime does not exist yet; this architecture is the contract for when it does.
+- The local runtime exists; server transport and C++/WASM remain future work.

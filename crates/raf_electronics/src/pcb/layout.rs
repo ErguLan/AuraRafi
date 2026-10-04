@@ -116,6 +116,10 @@ pub struct PcbLayout {
     pub components: Vec<PcbComponentPlacement>,
     pub traces: Vec<PcbTrace>,
     pub airwires: Vec<PcbAirwire>,
+    /// Traces orphaned by the last schematic sync; retained for explicit review
+    /// instead of being deleted without notice.
+    #[serde(default)]
+    pub removed_traces: Vec<PcbTrace>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -134,6 +138,7 @@ impl PcbLayout {
             components: Vec::new(),
             traces: Vec::new(),
             airwires: Vec::new(),
+            removed_traces: Vec::new(),
         }
     }
 
@@ -223,7 +228,21 @@ impl PcbLayout {
         summary.nets = net_names.len();
 
         self.components = synced;
-        self.traces.retain(|trace| net_names.contains(&trace.net));
+        // Traces whose net no longer exists are not deleted here. Dropping them
+        // silently destroyed user routing that the editor could neither report
+        // nor offer back, so they are parked in `removed_traces` for the UI to
+        // review and let the user re-apply or discard explicitly.
+        let mut orphaned = Vec::new();
+        let mut retained = Vec::with_capacity(self.traces.len());
+        for trace in self.traces.drain(..) {
+            if net_names.contains(&trace.net) {
+                retained.push(trace);
+            } else {
+                orphaned.push(trace);
+            }
+        }
+        self.traces = retained;
+        self.removed_traces = orphaned;
         self.rebuild_airwires();
         summary
     }
@@ -321,13 +340,7 @@ impl PcbLayout {
                 }
             }
 
-            for a in 0..nodes.len() {
-                for b in (a + 1)..nodes.len() {
-                    if nodes[a].distance(nodes[b]) <= CONNECT_EPSILON {
-                        dsu.union(a, b);
-                    }
-                }
-            }
+            connect_close_nodes(&nodes, &mut dsu);
 
             let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
             for pad_index in 0..pad_node_count {
@@ -356,6 +369,47 @@ impl PcbLayout {
             }
         }
     }
+}
+
+/// Buckets node indices by position rounded to `CONNECT_EPSILON`.
+///
+/// `rebuild_airwires` used to test every pair of nodes of a net, which is
+/// quadratic and dominates the sync once a net carries routed traces. Two nodes
+/// within `CONNECT_EPSILON` can differ by at most one cell on each axis, so
+/// scanning the 3x3 cell block finds exactly the same pairs the quadratic sweep
+/// did while visiting each candidate a constant number of times.
+fn connect_close_nodes(nodes: &[Vec2], dsu: &mut DisjointSet) {
+    let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    for (index, node) in nodes.iter().enumerate() {
+        buckets.entry(node_cell(*node)).or_default().push(index);
+    }
+
+    for (index, node) in nodes.iter().enumerate() {
+        let (cell_x, cell_y) = node_cell(*node);
+        for offset_x in -1..=1 {
+            for offset_y in -1..=1 {
+                let Some(bucket) = buckets.get(&(cell_x + offset_x, cell_y + offset_y)) else {
+                    continue;
+                };
+                for &other in bucket {
+                    // Only look forward so every close pair is visited once.
+                    if other <= index {
+                        continue;
+                    }
+                    if node.distance(nodes[other]) <= CONNECT_EPSILON {
+                        dsu.union(index, other);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn node_cell(node: Vec2) -> (i64, i64) {
+    (
+        (node.x / CONNECT_EPSILON).floor() as i64,
+        (node.y / CONNECT_EPSILON).floor() as i64,
+    )
 }
 
 struct DisjointSet {
@@ -410,5 +464,81 @@ mod tests {
 
         assert_eq!(layout.components[0].component_id, component_id);
         assert_eq!(layout.components[0].position, Vec2::new(210.0, 90.0));
+    }
+
+    fn trace_for(net: &str) -> PcbTrace {
+        PcbTrace {
+            id: Uuid::new_v4(),
+            net: net.to_string(),
+            layer: PcbLayer::TopCopper,
+            width: 6.0,
+            points: vec![Vec2::new(10.0, 10.0), Vec2::new(20.0, 10.0)],
+        }
+    }
+
+    #[test]
+    fn sync_keeps_traces_whose_net_disappeared_and_reports_them() {
+        let mut schematic = Schematic::new("Board");
+        schematic.add_component(ElectronicComponent::resistor("10k"));
+
+        let mut layout = PcbLayout::new("Board");
+        let _ = layout.sync_from_schematic(&schematic);
+        let live_net = layout.components[0].pad_nets[0].clone();
+        let orphaned = trace_for("GONE_NET");
+        layout.traces.push(trace_for(&live_net));
+        layout.traces.push(orphaned.clone());
+
+        let _ = layout.sync_from_schematic(&schematic);
+
+        assert!(
+            layout.traces.iter().all(|trace| trace.net != "GONE_NET"),
+            "traces must not be deleted by the sync"
+        );
+        assert!(layout.traces.iter().any(|trace| trace.net == live_net));
+        assert_eq!(layout.removed_traces, vec![orphaned]);
+    }
+
+    /// Maps every node to the lowest index of its group so two disjoint sets can
+    /// be compared by partition instead of by the arbitrary root they picked.
+    fn canonical_groups(dsu: &mut DisjointSet, count: usize) -> Vec<usize> {
+        let roots: Vec<usize> = (0..count).map(|index| dsu.find(index)).collect();
+        (0..count)
+            .map(|index| {
+                let root = roots[index];
+                roots
+                    .iter()
+                    .position(|other| *other == root)
+                    .expect("root belongs to at least one node")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn close_node_search_matches_a_quadratic_sweep() {
+        let nodes = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(6.0, 0.0),
+            Vec2::new(0.0, 5.9),
+            Vec2::new(6.1, 0.0),
+            Vec2::new(40.0, 40.0),
+            Vec2::new(40.0, 46.0),
+        ];
+
+        let mut grid_set = DisjointSet::new(nodes.len());
+        connect_close_nodes(&nodes, &mut grid_set);
+
+        let mut sweep_set = DisjointSet::new(nodes.len());
+        for a in 0..nodes.len() {
+            for b in (a + 1)..nodes.len() {
+                if nodes[a].distance(nodes[b]) <= CONNECT_EPSILON {
+                    sweep_set.union(a, b);
+                }
+            }
+        }
+
+        assert_eq!(
+            canonical_groups(&mut grid_set, nodes.len()),
+            canonical_groups(&mut sweep_set, nodes.len())
+        );
     }
 }

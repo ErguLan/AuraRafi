@@ -15,8 +15,12 @@ pub mod netlist;
 pub mod pcb;
 pub mod schematic;
 pub mod simulation;
+pub mod storage;
 
-pub use cad_interaction::{pick as pick_cad_object, CadInteractionState, CadPickHit, CadSelection};
+pub use cad_interaction::{
+    pick as pick_cad_object, pick_editable as pick_editable_cad_object, CadInteractionState,
+    CadPickHit, CadSelection,
+};
 pub use cad_scene::{
     orthogonal_wire_points, CadLayerKind, CadObject, CadObjectKind, CadPickPriority, CadRect,
     CadScene, CadSurfaceKind,

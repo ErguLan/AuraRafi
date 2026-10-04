@@ -198,12 +198,7 @@ pub fn gizmo_scale_handle_radius(_presentation_scale: f32) -> f32 {
 ///
 /// The probe follows the body diagonal so the measurement stays valid for any
 /// camera orientation, and it returns `0.0` when the point is not projectable.
-pub fn pixels_per_world_unit(
-    view_proj: &Mat4,
-    vp_w: f32,
-    vp_h: f32,
-    point: Vec3,
-) -> f32 {
+pub fn pixels_per_world_unit(view_proj: &Mat4, vp_w: f32, vp_h: f32, point: Vec3) -> f32 {
     // The largest of the three projected axes is the local scale that is not
     // foreshortened. Measuring a fixed direction instead would collapse on the
     // common three-quarter view, where one axis points at the camera, and the

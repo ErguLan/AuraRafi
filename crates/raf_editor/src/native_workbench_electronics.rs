@@ -6,7 +6,9 @@
 
 use std::collections::HashSet;
 
-use crate::electronics_controller::{ElectronicsSelectionKind, NativeElectronicsEditor};
+use crate::electronics_controller::{
+    ElectronicsReportLineKind, ElectronicsSelectionKind, NativeElectronicsEditor,
+};
 use crate::panels::electronics_navigator_surface::{
     ElectronicsLibraryEntry, ElectronicsNavigatorEntry,
 };
@@ -14,6 +16,52 @@ use crate::panels::electronics_surface::{ElectronicsAnalysisLine, ElectronicsAna
 use raf_core::{i18n, Language};
 use raf_electronics::CadSurfaceKind;
 use raf_render::api_graphic_basic::ui_surface::UiIconId;
+
+/// Retained dock tab ids of the two Electronics analysis panels.
+pub(crate) const ELECTRONICS_ANALYSIS_DRC_TAB: &str = "drc";
+pub(crate) const ELECTRONICS_ANALYSIS_SIMULATION_TAB: &str = "simulation";
+
+/// Which analysis dock panel is being presented.
+///
+/// The dock used to pass the display string as the discriminant and the surface
+/// decided DRC vs simulation with `title.contains("simulation")`, so any wording
+/// change silently rendered the simulation tab as a DRC panel. The panel identity
+/// is now an explicit enum owned here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ElectronicsAnalysisPanel {
+    Drc,
+    Simulation,
+}
+
+impl ElectronicsAnalysisPanel {
+    /// Resolves a retained dock tab id. Unknown tabs are not an analysis panel.
+    pub(crate) fn from_tab(tab: &str) -> Option<Self> {
+        match tab {
+            ELECTRONICS_ANALYSIS_DRC_TAB => Some(Self::Drc),
+            ELECTRONICS_ANALYSIS_SIMULATION_TAB => Some(Self::Simulation),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn tab_id(self) -> &'static str {
+        match self {
+            Self::Drc => ELECTRONICS_ANALYSIS_DRC_TAB,
+            Self::Simulation => ELECTRONICS_ANALYSIS_SIMULATION_TAB,
+        }
+    }
+
+    pub(crate) fn title_key(self) -> &'static str {
+        match self {
+            Self::Drc => "electronics.analysis.drc_title",
+            Self::Simulation => "electronics.analysis.simulation_title",
+        }
+    }
+
+    /// i18n title. Presentation only: the panel identity never depends on it.
+    pub(crate) fn title(self, language: Language) -> String {
+        i18n::t(self.title_key(), language)
+    }
+}
 
 pub(crate) struct ElectronicsInspectorData {
     pub title: String,
@@ -159,26 +207,28 @@ pub(crate) struct ElectronicsWorkbenchData {
 
 pub(crate) fn analysis_lines(
     editor: &NativeElectronicsEditor,
-    tab: &str,
+    panel: ElectronicsAnalysisPanel,
     language: Language,
 ) -> Vec<ElectronicsAnalysisLine> {
     let label = |key: &str| i18n::t(key, language);
     let metric = |key: &str, value: usize| {
         ElectronicsAnalysisLine::normal(format!("{}: {value}", label(key)))
     };
-    match tab {
-        "drc" => {
-            let mut lines = vec![
-                metric(
-                    "electronics.analysis.components",
-                    editor.schematic().components.len(),
-                ),
-                metric("electronics.analysis.wires", editor.schematic().wires.len()),
-                metric(
-                    "electronics.analysis.nets",
-                    editor.schematic().netlist().nets.len(),
-                ),
-            ];
+    let mut lines = Vec::new();
+    match panel {
+        ElectronicsAnalysisPanel::Drc => {
+            lines.push(metric(
+                "electronics.analysis.components",
+                editor.schematic().components.len(),
+            ));
+            lines.push(metric(
+                "electronics.analysis.wires",
+                editor.schematic().wires.len(),
+            ));
+            lines.push(metric(
+                "electronics.analysis.nets",
+                editor.schematic().netlist().nets.len(),
+            ));
             if editor.analysis_running() {
                 lines.push(ElectronicsAnalysisLine::with_tone(
                     format!(
@@ -227,26 +277,29 @@ pub(crate) fn analysis_lines(
                     ElectronicsAnalysisTone::Normal,
                 ));
             }
+            if editor.drc_is_stale() && editor.drc_report().is_some() {
+                lines.push(ElectronicsAnalysisLine::with_tone(
+                    label("electronics.analysis.drc_stale"),
+                    ElectronicsAnalysisTone::Issues,
+                ));
+            }
             if editor.drc_lines().is_empty() {
                 lines.push(ElectronicsAnalysisLine::normal(label(
                     "electronics.analysis.run_design_check",
                 )));
             } else {
-                lines.extend(editor.drc_lines().iter().cloned().map(classify_report_line));
+                lines.extend(editor.drc_lines().iter().map(report_tone));
             }
-            lines
         }
-        "simulation" => {
-            let mut lines = vec![
-                metric(
-                    "electronics.analysis.components",
-                    editor.schematic().components.len(),
-                ),
-                metric(
-                    "electronics.analysis.nets",
-                    editor.schematic().netlist().nets.len(),
-                ),
-            ];
+        ElectronicsAnalysisPanel::Simulation => {
+            lines.push(metric(
+                "electronics.analysis.components",
+                editor.schematic().components.len(),
+            ));
+            lines.push(metric(
+                "electronics.analysis.nets",
+                editor.schematic().netlist().nets.len(),
+            ));
             if editor.analysis_running() {
                 lines.push(ElectronicsAnalysisLine::with_tone(
                     format!(
@@ -273,36 +326,61 @@ pub(crate) fn analysis_lines(
                     "electronics.analysis.run_dc_solver",
                 )));
             } else {
-                lines.extend(
-                    editor
-                        .simulation_lines()
-                        .iter()
-                        .cloned()
-                        .map(classify_report_line),
-                );
+                if editor.simulation_is_stale() {
+                    lines.push(ElectronicsAnalysisLine::with_tone(
+                        label("electronics.analysis.simulation_stale"),
+                        ElectronicsAnalysisTone::Issues,
+                    ));
+                }
+                lines.extend(editor.simulation_lines().iter().map(report_tone));
             }
-            lines
         }
-        _ => vec![ElectronicsAnalysisLine::normal(label(
-            "electronics.analysis.unavailable",
-        ))],
+    }
+    lines
+}
+
+/// Maps the structured line kind onto the dock tone.
+///
+/// Classification is never derived from the rendered text: an `[ERROR]
+/// short_circuit:` line used to fall through to gray because it contained none of
+/// the English words the dock searched for.
+fn report_tone(
+    line: &crate::electronics_controller::ElectronicsReportLine,
+) -> ElectronicsAnalysisLine {
+    let tone = match line.kind {
+        ElectronicsReportLineKind::Status
+        | ElectronicsReportLineKind::Message
+        | ElectronicsReportLineKind::Info => ElectronicsAnalysisTone::Normal,
+        ElectronicsReportLineKind::Running => ElectronicsAnalysisTone::Running,
+        ElectronicsReportLineKind::Passed => ElectronicsAnalysisTone::Passed,
+        ElectronicsReportLineKind::Issues | ElectronicsReportLineKind::Warning => {
+            ElectronicsAnalysisTone::Issues
+        }
+        ElectronicsReportLineKind::Failed | ElectronicsReportLineKind::Error => {
+            ElectronicsAnalysisTone::Failed
+        }
+    };
+    // A finding that names a component becomes a navigation target, so clicking
+    // the row selects and reveals it instead of leaving the user to hunt for it.
+    match line.target {
+        Some(source_id) => ElectronicsAnalysisLine::with_target(
+            line.text.clone(),
+            tone,
+            crate::panels::electronics_surface::ElectronicsAnalysisTarget::Component { source_id },
+        ),
+        None => ElectronicsAnalysisLine::with_tone(line.text.clone(), tone),
     }
 }
 
-fn classify_report_line(text: String) -> ElectronicsAnalysisLine {
-    let normalized = text.to_ascii_lowercase();
-    let tone = if normalized.contains("running") {
-        ElectronicsAnalysisTone::Running
-    } else if normalized.contains("passed") || normalized.contains("converged") {
-        ElectronicsAnalysisTone::Passed
-    } else if normalized.contains("issues") || normalized.contains("not converged") {
-        ElectronicsAnalysisTone::Issues
-    } else if normalized.contains("cancelled") || normalized.contains("failed") {
-        ElectronicsAnalysisTone::Failed
-    } else {
-        ElectronicsAnalysisTone::Normal
-    };
-    ElectronicsAnalysisLine::with_tone(text, tone)
+/// Workbench-level notices the dock and the status bar must show. Kept separate
+/// from the analysis lines so a failure is never presented as a design result.
+pub(crate) fn notice_lines(editor: &NativeElectronicsEditor, language: Language) -> Vec<String> {
+    let mut notices = Vec::new();
+    if editor.sync_is_stale() {
+        notices.push(i18n::t("electronics.sync.pcb_stale", language));
+    }
+    notices.extend(editor.surface_errors().iter().cloned());
+    notices
 }
 
 impl ElectronicsWorkbenchData {
@@ -471,15 +549,59 @@ fn electronics_icon_for_category(category: &str) -> UiIconId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::electronics_controller::{ElectronicsReportLine, NativeElectronicsEditor};
 
     #[test]
     fn analysis_metrics_follow_the_requested_locale() {
         let editor = NativeElectronicsEditor::empty("Test");
-        let english = analysis_lines(&editor, "drc", Language::English);
-        let spanish = analysis_lines(&editor, "drc", Language::Spanish);
+        let english = analysis_lines(&editor, ElectronicsAnalysisPanel::Drc, Language::English);
+        let spanish = analysis_lines(&editor, ElectronicsAnalysisPanel::Drc, Language::Spanish);
 
         assert!(english[0].text.starts_with("Components:"));
         assert!(spanish[0].text.starts_with("Componentes:"));
         assert_ne!(english[0].text, spanish[0].text);
+    }
+
+    #[test]
+    fn a_stale_drc_result_is_still_listed_with_an_obsolete_notice() {
+        let mut editor = NativeElectronicsEditor::empty("Test");
+        editor.run_drc();
+        editor
+            .schematic
+            .add_component(raf_electronics::component::ElectronicComponent::resistor(
+                "10k",
+            ));
+        editor.rebuild_scene();
+
+        let lines = analysis_lines(&editor, ElectronicsAnalysisPanel::Drc, Language::English);
+        assert!(lines
+            .iter()
+            .any(|line| line.text == "Outdated: the schematic changed after this check."));
+        assert!(lines.iter().any(|line| line.tone
+            == crate::panels::electronics_surface::ElectronicsAnalysisTone::Passed
+            || line.tone == crate::panels::electronics_surface::ElectronicsAnalysisTone::Issues));
+    }
+
+    #[test]
+    fn line_tone_comes_from_the_structured_kind_not_from_the_text() {
+        let error = ElectronicsReportLine {
+            kind: ElectronicsReportLineKind::Error,
+            target: None,
+            text: "[ERROR] short_circuit: N001 shorts VCC to GND".to_string(),
+        };
+        assert_eq!(
+            report_tone(&error).tone,
+            crate::panels::electronics_surface::ElectronicsAnalysisTone::Failed
+        );
+
+        let neutral = ElectronicsReportLine {
+            kind: ElectronicsReportLineKind::Info,
+            target: None,
+            text: "issues: nothing to report".to_string(),
+        };
+        assert_eq!(
+            report_tone(&neutral).tone,
+            crate::panels::electronics_surface::ElectronicsAnalysisTone::Normal
+        );
     }
 }

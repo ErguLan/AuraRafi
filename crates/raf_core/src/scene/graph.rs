@@ -144,6 +144,9 @@ pub struct SceneNode {
     /// Physics body state for runtime simulation.
     #[serde(default)]
     pub rigid_body: RigidBody,
+    /// Explicit game camera component. Ordinary objects never become cameras implicitly.
+    #[serde(default)]
+    pub game_camera: Option<crate::runtime_config::GameCamera>,
     /// Organizational folder/group node inside the hierarchy.
     #[serde(default)]
     pub is_folder: bool,
@@ -190,6 +193,7 @@ impl SceneNode {
             audio_source: AudioSource::default(),
             collider: Collider::default(),
             rigid_body: RigidBody::default(),
+            game_camera: None,
             is_folder: false,
             source_asset: None,
             source_schema_version: None,
@@ -221,6 +225,7 @@ impl SceneNode {
             audio_source: AudioSource::default(),
             collider: Collider::default(),
             rigid_body: RigidBody::default(),
+            game_camera: None,
             is_folder: false,
             source_asset: None,
             source_schema_version: None,

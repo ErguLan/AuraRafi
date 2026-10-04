@@ -13,6 +13,7 @@ mod diagnostics;
 mod direct_host;
 mod gpu_renderer;
 mod images;
+pub mod loading;
 mod native_input;
 mod native_window;
 mod presentation;

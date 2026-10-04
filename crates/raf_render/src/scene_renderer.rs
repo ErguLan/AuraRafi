@@ -210,6 +210,11 @@ pub struct SceneRenderFrame {
 /// rides along an object being dragged. It stays flat and quiet.
 pub const GRID_Y: f32 = -0.02;
 
+/// Current scene environment shared by the editor and local Play, independent
+/// of the chrome theme. Gradient/skybox environment data is not active yet.
+pub const SCENE_BACKGROUND: [u8; 4] = [240, 240, 242, 255];
+pub const SCENE_LIGHT_DIRECTION: Vec3 = Vec3::new(0.4, 0.8, 0.6);
+
 impl SceneRenderer {
     /// Create a new renderer with initial viewport dimensions.
     pub fn new(width: u32, height: u32) -> Self {
@@ -1857,6 +1862,58 @@ mod tests {
             renderer.world_transforms.as_ref().unwrap().0,
             cached_revision
         );
+    }
+
+    #[test]
+    fn shared_scene_environment_clears_empty_views_and_still_renders_geometry() {
+        let mut scene = SceneGraph::new();
+        let camera = Camera::default();
+        let mut renderer = SceneRenderer::new(64, 64);
+        let options = RenderOptions {
+            show_grid_3d: false,
+            selection_outline: false,
+            ..RenderOptions::default()
+        };
+        let pixels = renderer.render(
+            &scene,
+            &camera,
+            64.0,
+            64.0,
+            &[],
+            SCENE_BACKGROUND,
+            SCENE_LIGHT_DIRECTION,
+            options,
+            None,
+        );
+        assert!(pixels
+            .chunks_exact(4)
+            .all(|pixel| pixel == SCENE_BACKGROUND));
+        scene.add_root_with_primitive("Cube", Primitive::Cube);
+        let frame = renderer.build_frame(
+            &scene,
+            &camera,
+            64.0,
+            64.0,
+            &[],
+            SCENE_BACKGROUND,
+            SCENE_LIGHT_DIRECTION,
+            options,
+            None,
+        );
+        assert!(matches!(
+            frame.commands.commands().first(),
+            Some(GraphicCommand::Clear {
+                r: 240,
+                g: 240,
+                b: 242,
+                a: 255
+            })
+        ));
+        assert_eq!(frame.stats.visible_entities, 1);
+        assert!(frame.commands.commands().iter().any(|command| matches!(
+            command,
+            GraphicCommand::DrawMesh { .. } | GraphicCommand::DrawMeshBatch { .. }
+        )));
     }
 
     #[test]

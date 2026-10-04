@@ -2,6 +2,7 @@
 //!
 //! Keeps editor-facing viewport orchestration out of UI surface builders.
 
+pub mod camera_helpers;
 pub mod editor_camera;
 pub mod gizmo_renderer;
 pub mod input_handler;

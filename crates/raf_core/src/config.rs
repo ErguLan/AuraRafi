@@ -286,6 +286,9 @@ impl TargetPlatform {
 /// Complete engine settings, persisted to disk as RON.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EngineSettings {
+    /// Local Play preferences; independent of background editor script tooling.
+    #[serde(default)]
+    pub runtime: crate::runtime_config::RuntimePreferences,
     // -- Appearance --
     pub theme: Theme,
     #[serde(default)]
@@ -737,6 +740,7 @@ impl Default for EngineSettings {
             gizmo_growth_scale: 0.0,
             wasd_speed: 1.0,
             script_runtime_enabled: false,
+            runtime: crate::runtime_config::RuntimePreferences::default(),
             default_script_language: ScriptLanguage::Rhai,
             script_hot_reload: true,
             script_timeout_ms: 100,

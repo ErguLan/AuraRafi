@@ -8,6 +8,7 @@
 
 pub mod node_backend;
 pub mod rhai_backend;
+mod rhai_scene_api;
 pub mod wasm_backend;
 
 use crate::errors::ScriptError;

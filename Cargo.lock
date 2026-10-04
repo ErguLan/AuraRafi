@@ -189,7 +189,9 @@ dependencies = [
  "raf_editor",
  "raf_electronics",
  "raf_net",
+ "raf_player",
  "raf_render",
+ "serde_json",
  "tracing",
  "tracing-subscriber",
  "winit",
@@ -2511,7 +2513,9 @@ dependencies = [
  "raf_core",
  "raf_electronics",
  "raf_nodes",
+ "raf_player",
  "raf_render",
+ "raf_runtime",
  "raf_script",
  "raf_ui",
  "ron",
@@ -2568,6 +2572,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "raf_player"
+version = "0.9.8"
+dependencies = [
+ "glam",
+ "image",
+ "pollster",
+ "raf_core",
+ "raf_render",
+ "raf_runtime",
+ "raf_script",
+ "raf_ui",
+ "ron",
+ "serde",
+ "serde_json",
+ "tracing",
+ "uuid",
+ "winit",
+]
+
+[[package]]
 name = "raf_render"
 version = "0.9.8"
 dependencies = [
@@ -2587,6 +2611,20 @@ dependencies = [
  "tracing",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "raf_runtime"
+version = "0.9.8"
+dependencies = [
+ "glam",
+ "raf_core",
+ "raf_nodes",
+ "raf_script",
+ "ron",
+ "serde",
+ "serde_json",
+ "uuid",
 ]
 
 [[package]]

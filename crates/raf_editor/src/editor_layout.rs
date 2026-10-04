@@ -15,7 +15,46 @@ pub const EDITOR_DOCK_MIN_HEIGHT: f32 = 112.0;
 /// is still limited by the current window so a small viewport remains usable.
 pub const EDITOR_DOCK_MAX_HEIGHT: f32 = 4096.0;
 pub const EDITOR_DOCK_MIN_WORKSPACE_HEIGHT: f32 = 120.0;
+/// Height of the reserved Electronics band when it is one row, in logical
+/// points. It is the single control track plus the vertical padding that keeps
+/// the row breathing inside the band.
 pub const ELECTRONICS_TOOLBAR_HEIGHT: f32 = 46.0;
+/// Height of the reserved Electronics band when the document row and the
+/// view/history row stack, in logical points: two control tracks, the gap
+/// between them and the vertical padding.
+///
+/// The band grows instead of scrolling because a horizontal scroll owner has no
+/// reachable thumb in this compositor, so an overflowing band would hide
+/// controls instead of moving them.
+pub const ELECTRONICS_TOOLBAR_STACKED_HEIGHT: f32 = 76.0;
+/// Canvas width from which the Electronics band prints localized labels next to
+/// the controls whose glyph does not already state what they do.
+///
+/// The measured worst case is the Spanish PCB row at 794.1 points (Ubuntu
+/// Medium 11px against `locales/es.json`, plus the padding the compositor forces
+/// on a labelled control), so this leaves room for atlas rounding and for a
+/// longer translation. It also covers the default 1600-point window, whose
+/// Electronics canvas is 844 points.
+pub const ELECTRONICS_TOOLBAR_LABELLED_WIDTH: f32 = 840.0;
+/// Canvas width below which the Electronics band stacks into two rows.
+///
+/// The measured worst single glyph-only row is the PCB row at 506 points, so
+/// every canvas above this width still gets one 46-point band.
+pub const ELECTRONICS_TOOLBAR_STACKED_WIDTH: f32 = 530.0;
+
+/// Height the Electronics band reserves for one canvas width.
+///
+/// The band is the only element between the application bar and the CAD canvas,
+/// so its height has to be derived from the same number the toolbar surface
+/// derives its density from. Anything else would let the document paint over the
+/// renderer-owned canvas or leave a dead strip above it.
+pub fn electronics_toolbar_height(canvas_width: f32) -> f32 {
+    if canvas_width < ELECTRONICS_TOOLBAR_STACKED_WIDTH {
+        ELECTRONICS_TOOLBAR_STACKED_HEIGHT
+    } else {
+        ELECTRONICS_TOOLBAR_HEIGHT
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditorWorkbenchKind {
@@ -138,8 +177,12 @@ impl EditorFrameLayout {
     /// Returns the rectangular ApiGraphicBasic/RafUI canvas below the native
     /// Electronics toolbar. Game continues to use `canvas` unchanged because
     /// its toolbar is a separate overlay policy.
+    ///
+    /// The reserved height depends on the canvas width, because the band stacks
+    /// into two rows when one row cannot hold every control without scrolling.
     pub fn electronics_canvas(self) -> EditorRect {
-        let toolbar_height = ELECTRONICS_TOOLBAR_HEIGHT.min(self.canvas.height.max(0.0));
+        let toolbar_height =
+            electronics_toolbar_height(self.canvas.width).min(self.canvas.height.max(0.0));
         EditorRect::new(
             self.canvas.x,
             self.canvas.y + toolbar_height,
@@ -321,6 +364,51 @@ mod tests {
         assert_eq!(
             canvas.height,
             layout.canvas.height - ELECTRONICS_TOOLBAR_HEIGHT
+        );
+    }
+
+    #[test]
+    fn a_narrow_electronics_canvas_reserves_the_stacked_band() {
+        // The default window keeps the one-row band, so the common case does not
+        // give up canvas height.
+        let wide = EditorFrameLayout::compute(EditorLayoutRequest::electronics([1600.0, 900.0]));
+        assert!(wide.canvas.width >= ELECTRONICS_TOOLBAR_LABELLED_WIDTH);
+        assert_eq!(
+            electronics_toolbar_height(wide.canvas.width),
+            ELECTRONICS_TOOLBAR_HEIGHT
+        );
+
+        // A window that leaves a canvas too narrow for one row reserves the two
+        // row band instead, so no control is ever clipped out of reach.
+        let narrow = EditorFrameLayout::compute(EditorLayoutRequest::electronics([1280.0, 800.0]));
+        assert!(narrow.canvas.width < ELECTRONICS_TOOLBAR_STACKED_WIDTH);
+        assert_eq!(
+            electronics_toolbar_height(narrow.canvas.width),
+            ELECTRONICS_TOOLBAR_STACKED_HEIGHT
+        );
+        let canvas = narrow.electronics_canvas();
+        assert_eq!(
+            canvas.y,
+            narrow.canvas.y + ELECTRONICS_TOOLBAR_STACKED_HEIGHT
+        );
+        assert_eq!(
+            canvas.height,
+            narrow.canvas.height - ELECTRONICS_TOOLBAR_STACKED_HEIGHT
+        );
+        // The label breakpoint sits between the two, so it never asks for a band
+        // the layout would not reserve.
+        assert!(ELECTRONICS_TOOLBAR_STACKED_WIDTH < ELECTRONICS_TOOLBAR_LABELLED_WIDTH);
+        assert_eq!(
+            electronics_toolbar_height(ELECTRONICS_TOOLBAR_LABELLED_WIDTH),
+            ELECTRONICS_TOOLBAR_HEIGHT
+        );
+        assert_eq!(
+            electronics_toolbar_height(ELECTRONICS_TOOLBAR_STACKED_WIDTH),
+            ELECTRONICS_TOOLBAR_HEIGHT
+        );
+        assert_eq!(
+            electronics_toolbar_height(ELECTRONICS_TOOLBAR_STACKED_WIDTH - 1.0),
+            ELECTRONICS_TOOLBAR_STACKED_HEIGHT
         );
     }
 }

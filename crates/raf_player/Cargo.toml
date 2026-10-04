@@ -1,0 +1,22 @@
+[package]
+name = "raf_player"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lightweight native local runtime host"
+
+[dependencies]
+raf_runtime.workspace = true
+raf_core.workspace = true
+raf_script.workspace = true
+raf_render.workspace = true
+raf_ui.workspace = true
+winit.workspace = true
+glam.workspace = true
+serde_json.workspace = true
+serde.workspace = true
+ron.workspace = true
+uuid.workspace = true
+tracing.workspace = true
+image.workspace = true
+pollster = "0.3"

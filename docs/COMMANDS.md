@@ -30,9 +30,18 @@ so an agent can talk to an open interface or to a headless process without
 importing a Console screen. Real execution still requires a project and a
 domain executor; the protocol does not fake mutations.
 
-This surface does not activate Play, Stop, or Runtime. Scene, asset, and CAD
-commands remain document-editing operations and their responses must be able
-to enter the existing undo history.
+Attached Agent, CLI and MCP commands cannot activate Play, Stop or Runtime.
+Scene, asset and CAD commands remain reversible document-editing operations.
+
+### Manual native runtime controls
+
+In a Game project, the native top bar exposes Play, Pause, one-fixed-tick Step
+and Stop. With both console gates enabled, the local console also accepts
+`/runtime.play`, `/runtime.pause`, `/runtime.resume`, `/runtime.step`,
+`/runtime.stop`, `/runtime.reload` and `/runtime.next`, without arguments.
+These commands are manual host controls, not document mutations or Agent
+tools. Attached requests are explicitly rejected. `/runtime.next` selects
+another active separate-window instance. See [Local Runtime](LOCAL_RUNTIME.md).
 
 ### Headless CLI and MCP adapters
 
@@ -253,8 +262,9 @@ Script commands manage `.rhai` and `.cpp` files in `assets/scripts/`.
 a scene entity by name. The shared Rhai runtime session now exists in
 `raf_script`; `/script.run` executes `on_start` once against a cloned scene so
 the editor document is not mutated.
-`/script.compile_nodes` is prepared for the future node-runtime connection and
-does not activate a product runtime.
+`/script.compile_nodes file=nodes.ron` validates a project-local graph and
+returns generated, syntax-checked Rhai source. It does not execute the graph,
+write a generated file or activate the product runtime.
 See `docs/SCRIPTING_SYSTEM.md` for the full scripting architecture.
 
 For external authoring setup and Windows examples, see
@@ -353,6 +363,18 @@ Limits:
 - common binary/build folders are skipped
 
 ## Extending Commands
+
+Camera authoring uses `/game.camera action=create|add|remove|set` with an
+explicit target for existing entities. Optional lens fields are `fov`,
+`near`, `far`, `orthographic` and `ortho_scale`; create also accepts
+`name` and `parent`. It preserves a Part's geometry, validates before
+mutation and never starts Play. Native Inspector/Hierarchy use this same
+kernel and scene undo history; attached changes retain confirmation/revision
+and undo-token requirements.
+
+`/script.compile_nodes file=<project-relative nodes.ron>` compiles a saved
+graph and returns real Rhai source in JSON. It does not write a file or
+execute the scene. The native Nodes Compile action uses the unsaved graph.
 
 1. Add the command definition to `assets/commands/catalog.json`.
 2. Use a domain: `shared`, `game`, or `electronics`.

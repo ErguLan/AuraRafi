@@ -163,21 +163,21 @@ Prepared rendering goals in this phase also include:
       camera; legacy `Sprite2D` data is loaded as `Plane` (textured assets
       remain future)
 
-## v0.8.0 - Game Runtime (Prepared, Not Product-Active)
+## v0.8.0 - Game Runtime (Local implementation; acceptance tracked separately)
 
-The product Play/runtime flow is intentionally guarded while the renderer and
-editor surface architecture are stabilized. Current work should be treated as
-prepared infrastructure: cloned scene execution, Rhai lifecycle harness, input
-snapshot shape, and future service boundaries.
+Manual native Play now connects the isolated runtime and player. Checkboxes
+below describe implementation, not a claim of complete native acceptance or
+low-spec performance. See LOCAL_RUNTIME.md and CAMERA_RUNTIME.md for evidence.
 
-- [ ] Editor-integrated Play/Stop flow for game projects
+- [x] Editor-integrated manual Play/Stop flow for game projects
 - [x] Runtime-prep scene cloning so tests do not mutate the edit document
-- [ ] Scene loading and runtime initialization from saved project state
+- [x] Scene loading and runtime initialization from saved project state
 - [x] Node graph persistence as `nodes.ron`
-- [ ] Runtime execution of saved node graphs through `On Start` and `On Update`
+- [x] Supported saved/unsaved node graphs compile to Rhai in Play; start, update, late-update and events
 - [x] Keyboard input snapshot shape for future runtime scripts
 - [x] External `.rhai` lifecycle harness for prepared runtime tests
 - [ ] Script-facing access to `self`, `parent`, entity paths, variables, movement, velocity, and audio triggers
+      (self, hierarchy, stable references, movement, camera/lens and basic audio exist; velocity API remains)
 - [ ] Basic collision detection through scene colliders
 - [ ] Simple physics (gravity, damping, velocity, trigger-only bodies)
 - [ ] Audio playback for entity audio sources inside Play mode
@@ -187,7 +187,7 @@ snapshot shape, and future service boundaries.
 Follow-up work after 0.8.0:
 
 - [ ] Separate game runtime binary
-- [ ] Fixed-timestep loop decoupled from editor frame timing
+- [x] Fixed-timestep loop decoupled from editor frame timing
 - [ ] Animation system (keyframe-based, bone hierarchy)
 - [ ] Connect animation collision to playback (check colliders each animation step, trigger response on hit)
 - [ ] IK (Inverse Kinematics) for procedural foot placement and hand grabs

@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::PathBuf;
 
 use raf_core::ai::AgentMode;
-use raf_core::config::{EngineSettings, RenderQuality, Theme};
+use raf_core::config::{EngineSettings, Language, RenderQuality, Theme};
 use raf_core::project::{Project, ProjectType};
 use raf_core::scene::{SceneGraph, SceneNodeId};
 use raf_core::session::{ProjectSessionRegistry, SessionId};
@@ -45,17 +45,18 @@ use crate::electronics_controller::{ElectronicsTool, NativeElectronicsEditor};
 use crate::electronics_minimap;
 use crate::panels::ai_chat::{AgentAction, AgentPanel, AgentReadiness};
 use crate::panels::assets_surface::{
-    asset_absolute_path, asset_rows_with_builtins, build_assets_backdrop_surface,
-    build_assets_context_menu_surface, build_assets_create_menu_surface,
-    build_assets_delete_modal_surface, build_assets_file_popover_surface,
-    build_assets_open_modal_surface, build_assets_primitive_popover_surface,
-    build_assets_rename_modal_surface, build_assets_script_popover_surface, build_assets_surface,
-    asset_visible_range, format_row_name, AssetFilter, AssetsMotion, AssetsOperation, AssetsStatus,
-    AssetsSurfaceParams, ASSET_CARD_MIN_VIEWPORT, ASSET_SELECTION_BAR_HEIGHT, ASSET_TOOLBAR_HEIGHT,
+    asset_absolute_path, asset_rows_with_builtins, asset_visible_range,
+    build_assets_backdrop_surface, build_assets_context_menu_surface,
+    build_assets_create_menu_surface, build_assets_delete_modal_surface,
+    build_assets_file_popover_surface, build_assets_open_modal_surface,
+    build_assets_primitive_popover_surface, build_assets_rename_modal_surface,
+    build_assets_script_popover_surface, build_assets_surface, format_row_name, AssetFilter,
+    AssetsMotion, AssetsOperation, AssetsStatus, AssetsSurfaceParams,
     ASSETS_CONTEXT_MENU_BUILTIN_HEIGHT, ASSETS_CONTEXT_MENU_HEIGHT, ASSETS_CREATE_MENU_HEIGHT,
     ASSETS_DELETE_MODAL_HEIGHT, ASSETS_FILE_POPOVER_HEIGHT, ASSETS_MENU_WIDTH, ASSETS_MODAL_WIDTH,
     ASSETS_OPEN_MODAL_HEIGHT, ASSETS_POPOVER_WIDTH, ASSETS_PRIMITIVE_POPOVER_HEIGHT,
-    ASSETS_RENAME_MODAL_HEIGHT, ASSETS_SCRIPT_POPOVER_HEIGHT,
+    ASSETS_RENAME_MODAL_HEIGHT, ASSETS_SCRIPT_POPOVER_HEIGHT, ASSET_CARD_MIN_VIEWPORT,
+    ASSET_SELECTION_BAR_HEIGHT, ASSET_TOOLBAR_HEIGHT,
 };
 use crate::panels::assets_surface_host::AssetsSurfaceHost;
 use crate::panels::editor_bottom_dock_host::EditorBottomDockHost;
@@ -67,7 +68,9 @@ use crate::panels::editor_panel_splitter_surface::{
     build_editor_splitter_surface, EditorSplitterKind,
 };
 use crate::panels::editor_status_surface::build_status_surface;
-use crate::panels::electronics_canvas_overlay_surface::build_electronics_canvas_overlay_surface;
+use crate::panels::electronics_canvas_overlay_surface::{
+    build_electronics_canvas_overlay_surface, ElectronicsCanvasOverlayParams,
+};
 use crate::panels::electronics_inspector_surface::build_electronics_inspector_surface;
 use crate::panels::electronics_navigator_surface::build_electronics_navigator_surface;
 use crate::panels::electronics_toolbar_surface::build_electronics_toolbar_surface;
@@ -215,7 +218,7 @@ pub struct NativeGameWorkbench {
     electronics_overlay_host: DirectUiSurfaceHost,
     electronics_images_registered: bool,
     electronics_overlay_images_registered: bool,
-    electronics_overlay_key: Option<(u64, u64, [u32; 2], bool)>,
+    electronics_overlay_key: Option<(u64, u64, [u32; 2], bool, StudioUiPalette, Language, f32)>,
     electronics_overlay_canvas: EditorRect,
     electronics_overlay_active: bool,
     search_surface: SearchSurfaceHost,
@@ -247,6 +250,25 @@ pub struct NativeGameWorkbench {
     hierarchy_active_tab: String,
     electronics_navigator_tab: String,
     electronics_library_query: String,
+    /// Entrance sample for Electronics menus and the canvas-local overlay.
+    /// 1.0 means settled closed, 0.0 means fully open.
+    electronics_menu_motion: UiTween,
+    /// Crossfade sample used when the Electronics dock swaps between the DRC and
+    /// simulation panels. 1.0 means the new panel is fully presented.
+    electronics_tab_motion: UiTween,
+    /// Latest observable Electronics menu state, refreshed from the editor before
+    /// `tick_electronics_motion` runs so the tween stays a pure function of time.
+    electronics_menu_open: bool,
+    /// Last Electronics analysis dock tab, used to restart the crossfade.
+    electronics_active_tab: Option<String>,
+    /// Whether an Electronics analysis task is in flight, sampled from the editor
+    /// so the indeterminate progress sweep only advances while work is running.
+    electronics_analysis_running: bool,
+    /// 0..1 sweep of the indeterminate analysis progress track.
+    electronics_analysis_phase: f32,
+    /// Opacity of the canvas tool hint. Recedes while a floating menu owns the
+    /// pointer so the hint never competes with the menu it would sit under.
+    electronics_hint_motion: UiTween,
     electronics_value_draft: Option<(Uuid, String)>,
     inspector_session_name: String,
     hierarchy_bookmarks: [bool; 3],
@@ -256,6 +278,7 @@ pub struct NativeGameWorkbench {
     inspector_view: InspectorViewState,
     inspector_transform_drag_active: bool,
     toolbar_state: ViewportToolbarState,
+    runtime_toolbar: raf_player::surface::RuntimeToolbarState,
     bottom_dock: EditorBottomDockHost,
     inspector_sessions: ProjectSessionRegistry,
     inspector_sessions_key: Option<(PathBuf, ProjectType)>,
@@ -378,6 +401,13 @@ impl NativeGameWorkbench {
             hierarchy_active_tab: "hierarchy".to_string(),
             electronics_navigator_tab: "library".to_string(),
             electronics_library_query: String::new(),
+            electronics_menu_motion: UiTween::new(1.0, UiMotionSpec::dock()),
+            electronics_tab_motion: UiTween::new(1.0, UiMotionSpec::dock()),
+            electronics_menu_open: false,
+            electronics_active_tab: None,
+            electronics_analysis_running: false,
+            electronics_analysis_phase: 0.0,
+            electronics_hint_motion: UiTween::new(1.0, UiMotionSpec::dock()),
             electronics_value_draft: None,
             inspector_session_name: String::new(),
             hierarchy_bookmarks: [false; 3],
@@ -387,6 +417,7 @@ impl NativeGameWorkbench {
             inspector_view: InspectorViewState::default(),
             inspector_transform_drag_active: false,
             toolbar_state: default_toolbar_state(),
+            runtime_toolbar: raf_player::surface::RuntimeToolbarState::default(),
             bottom_dock: EditorBottomDockHost::default(),
             inspector_sessions: ProjectSessionRegistry::new(ProjectType::Game),
             inspector_sessions_key: None,
@@ -591,6 +622,14 @@ impl NativeGameWorkbench {
         self.console.log_command_output(output);
         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
     }
+    pub fn set_runtime_toolbar(&mut self, state: raf_player::surface::RuntimeToolbarState) -> bool {
+        if self.runtime_toolbar == state {
+            return false;
+        }
+        self.runtime_toolbar = state;
+        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        true
+    }
 
     pub fn persist_project_layout(&mut self) {
         self.bottom_dock.persist_project_layout();
@@ -744,17 +783,27 @@ impl NativeGameWorkbench {
             self.electronics_overlay_images_registered = true;
         }
         self.electronics_overlay_canvas = canvas;
+        // The overlay document is retained RafUI, so its cache key must cover
+        // every input that can change the resolved document: scene revision,
+        // retained UI revision, canvas size, label visibility, and the two
+        // presentation inputs the document reads (palette and language) plus
+        // the host-owned hint opacity sample. Omitting the last two left the
+        // overlay stale after a theme or language change.
         let key = (
             editor.revision(),
             editor.ui_revision(),
             canvas.logical_size(),
             editor.labels_visible(),
+            self.palette,
+            self.agent_panel.language,
+            self.electronics_hint_fade(),
         );
         if self.electronics_overlay_key == Some(key) {
             self.electronics_overlay_active = true;
             return;
         }
         let (minimap_size, minimap_pixels) = electronics_minimap::build_rgba(
+            electronics_minimap::MinimapColors::from_palette(self.palette),
             editor.scene(),
             editor.camera(),
             glam::Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0)),
@@ -770,6 +819,10 @@ impl NativeGameWorkbench {
                 self.palette,
                 editor,
                 canvas,
+                ElectronicsCanvasOverlayParams::new(
+                    self.electronics_hint_fade(),
+                    self.agent_panel.language,
+                ),
             ));
         self.electronics_overlay_key = Some(key);
         self.electronics_overlay_active = true;
@@ -824,6 +877,16 @@ impl NativeGameWorkbench {
         self.agent_motion
             .advance(delta as f32, self.agent_settings.prefers_reduced_motion);
         self.sync_assets_motion(delta, hierarchy_motion_disabled);
+        // Electronics motion shares the same clock and reduced-motion policy as
+        // the rest of the shell.
+        self.electronics_menu_open = self.project_type == ProjectType::Electronics
+            && (electronics
+                .and_then(NativeElectronicsEditor::context_menu_position)
+                .is_some()
+                || electronics.is_some_and(|editor| editor.delete_confirm_pending()));
+        self.electronics_analysis_running =
+            electronics.is_some_and(NativeElectronicsEditor::analysis_running);
+        self.tick_electronics_motion(delta, hierarchy_motion_disabled);
         self.nodes_host.note_selection(selected_graph_node);
         self.nodes_host
             .tick_motion(delta, self.agent_settings.prefers_reduced_motion);
@@ -906,6 +969,8 @@ impl NativeGameWorkbench {
             || !self.assets_menu_motion.is_settled()
             || !self.assets_view_motion.is_settled()
             || !self.assets_highlight_motion.is_settled()
+            || !self.electronics_menu_motion.is_settled()
+            || !self.electronics_tab_motion.is_settled()
             || self.nodes_host.is_animating();
         if !surface_changed {
             if status_fps_changed && self.project_type == ProjectType::Game {
@@ -940,11 +1005,11 @@ impl NativeGameWorkbench {
         // Keep the quick-add filter in sync with the host, and restore it after
         // the popup is rebuilt so typing is never lost to a surface change.
         if self.nodes_host.palette_popup().is_some() {
-            self.host
-                .session_mut()
-                .interaction
-                .controls
-                .set_text("nodes.palette-popup.search", self.nodes_host.palette_query(), 64);
+            self.host.session_mut().interaction.controls.set_text(
+                "nodes.palette-popup.search",
+                self.nodes_host.palette_query(),
+                64,
+            );
         }
         if let Some(node) = selected_graph_node.and_then(|id| node_graph.node(id)) {
             for property in &node.properties {
@@ -1434,9 +1499,87 @@ impl NativeGameWorkbench {
             || !self.assets_menu_motion.is_settled()
             || !self.assets_view_motion.is_settled()
             || !self.assets_highlight_motion.is_settled()
+            || !self.electronics_menu_motion.is_settled()
+            || !self.electronics_tab_motion.is_settled()
             || self.nodes_host.is_animating()
             || self.host.has_active_motion()
             || self.viewport_compass.has_active_motion()
+    }
+
+    /// Advances the Electronics entrance and panel crossfade tweens.
+    ///
+    /// Called from the same place the other shell motions are advanced, so both
+    /// follow the workbench clock and the global reduced-motion preference.
+    pub(crate) fn tick_electronics_motion(&mut self, delta_seconds: f32, reduced_motion: bool) {
+        self.electronics_menu_motion
+            .set_target(if self.electronics_menu_open { 0.0 } else { 1.0 });
+        self.electronics_menu_motion
+            .advance(delta_seconds, reduced_motion);
+        self.electronics_tab_motion.set_target(1.0);
+        self.electronics_tab_motion
+            .advance(delta_seconds, reduced_motion);
+        self.electronics_hint_motion
+            .set_target(if self.electronics_menu_open {
+                0.25
+            } else {
+                1.0
+            });
+        self.electronics_hint_motion
+            .advance(delta_seconds, reduced_motion);
+        // Indeterminate progress sweep for the DRC/Simulation dock. It only
+        // advances while an analysis actually runs, so an idle editor never
+        // pays for it, and a reduced-motion host parks it at a fixed point
+        // instead of animating.
+        if self.electronics_analysis_running && !reduced_motion {
+            self.electronics_analysis_phase =
+                (self.electronics_analysis_phase + delta_seconds * 0.55).fract();
+        } else if !self.electronics_analysis_running {
+            self.electronics_analysis_phase = 0.0;
+        }
+    }
+
+    /// 0..1 sweep of the indeterminate analysis progress track.
+    ///
+    /// The host owns the clock so the surface stays declarative. Returns
+    /// `0.0` when no analysis is running, which the surface renders as a
+    /// static track rather than an empty one.
+    pub(crate) fn electronics_analysis_phase(&self) -> f32 {
+        if self.electronics_analysis_running {
+            self.electronics_analysis_phase
+        } else {
+            0.0
+        }
+    }
+
+    /// Opacity sample for the canvas tool hint.
+    ///
+    /// The hint explains what the active tool expects, which is only useful
+    /// while the pointer is working on the canvas. It recedes behind a
+    /// floating menu so the two never overlap.
+    pub(crate) fn electronics_hint_fade(&self) -> f32 {
+        self.electronics_hint_motion.value()
+    }
+
+    /// Electronics menu entrance sample: 0.0 fully open, 1.0 fully closed.
+    pub(crate) fn electronics_menu_entrance(&self) -> f32 {
+        self.electronics_menu_motion.value()
+    }
+
+    /// Electronics dock panel crossfade sample: 1.0 means settled on the new
+    /// panel, lower values mean the swap is still in progress.
+    pub(crate) fn electronics_tab_crossfade(&self) -> f32 {
+        self.electronics_tab_motion.value()
+    }
+
+    /// Restarts the panel crossfade when the Electronics dock changes its active
+    /// analysis tab, so the swap reads as a transition instead of a hard cut.
+    pub(crate) fn note_electronics_tab(&mut self, tab: &str) {
+        if self.electronics_active_tab.as_deref() == Some(tab) {
+            return;
+        }
+        self.electronics_active_tab = Some(tab.to_string());
+        self.electronics_tab_motion.set_immediate(0.0);
+        self.electronics_tab_motion.set_target(1.0);
     }
 
     /// Normalized 0..1 samples shared by the Assets panel and its overlays.
@@ -1452,15 +1595,16 @@ impl NativeGameWorkbench {
     /// overlays and the row highlight share one easing policy.
     fn sync_assets_motion(&mut self, delta_seconds: f32, reduced_motion: bool) {
         let overlay_open = self.assets_surface.has_open_overlay();
-        self.assets_menu_motion.set_target(if overlay_open { 1.0 } else { 0.0 });
+        self.assets_menu_motion
+            .set_target(if overlay_open { 1.0 } else { 0.0 });
         if self.assets_filter_key != Some(self.assets_surface.filter) {
             self.assets_filter_key = Some(self.assets_surface.filter);
             self.assets_view_motion.set_immediate(0.0);
         }
         self.assets_view_motion.set_target(1.0);
         if self.assets_surface.highlight_asset.is_some() {
-            let pulse_done =
-                self.assets_highlight_motion.is_settled() && self.assets_highlight_motion.value() >= 1.0;
+            let pulse_done = self.assets_highlight_motion.is_settled()
+                && self.assets_highlight_motion.value() >= 1.0;
             if pulse_done {
                 self.assets_surface.highlight_asset = None;
                 self.assets_highlight_motion.set_target(0.0);
@@ -1470,8 +1614,10 @@ impl NativeGameWorkbench {
         } else {
             self.assets_highlight_motion.set_target(0.0);
         }
-        self.assets_menu_motion.advance(delta_seconds, reduced_motion);
-        self.assets_view_motion.advance(delta_seconds, reduced_motion);
+        self.assets_menu_motion
+            .advance(delta_seconds, reduced_motion);
+        self.assets_view_motion
+            .advance(delta_seconds, reduced_motion);
         self.assets_highlight_motion
             .advance(delta_seconds, reduced_motion);
     }
@@ -1516,19 +1662,14 @@ impl NativeGameWorkbench {
                 .iter()
                 .any(|row| *row == operation.expected_row)
                 == operation.expect_present);
-        let timed_out =
-            now_seconds - operation.started_seconds > ASSET_OPERATION_TIMEOUT_SECONDS;
+        let timed_out = now_seconds - operation.started_seconds > ASSET_OPERATION_TIMEOUT_SECONDS;
         if !observed && !timed_out {
             return;
         }
         let row = operation.expected_row.clone();
         self.assets_surface.operation = None;
         self.assets_surface.status = Some(if observed {
-            AssetsStatus::success(format_row_name(
-                operation.success_key,
-                &row,
-                language,
-            ))
+            AssetsStatus::success(format_row_name(operation.success_key, &row, language))
         } else {
             AssetsStatus::error(format_row_name(operation.error_key, &row, language))
         });
@@ -1772,7 +1913,21 @@ impl NativeGameWorkbench {
         let Some(node) = scene.get(id) else {
             return;
         };
+        let focused = self.host.session().interaction.focus.focused.clone();
         let controls = &mut self.host.session_mut().interaction.controls;
+        if let Some(lens) = &node.game_camera {
+            for (field, value) in [
+                ("fov_degrees", lens.fov_degrees),
+                ("near", lens.near),
+                ("far", lens.far),
+                ("ortho_scale", lens.ortho_scale),
+            ] {
+                let key = format!("inspector.camera.{field}.text");
+                if focused.as_deref() != Some(key.as_str()) || !controls.has_text(&key) {
+                    controls.set_text(key, value.to_string(), 24);
+                }
+            }
+        }
         let name = self
             .inspector_name_editing
             .as_ref()
@@ -1813,6 +1968,42 @@ impl NativeGameWorkbench {
         let controls = &mut self.host.session_mut().interaction.controls;
         let values = [
             (
+                "project-settings.runtime.active_camera",
+                "project-settings.runtime-active_camera.control",
+                project
+                    .settings
+                    .runtime
+                    .active_camera
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+            ),
+            (
+                "project-settings.runtime.startup_session",
+                "project-settings.runtime-startup_session.control",
+                project
+                    .settings
+                    .runtime
+                    .startup_session
+                    .map(|id| id.to_string())
+                    .unwrap_or_default(),
+            ),
+            (
+                "project-settings.runtime.input_actions",
+                "project-settings.runtime-input_actions.control",
+                serde_json::to_string(&project.settings.runtime.input_actions)
+                    .unwrap_or_else(|_| "[]".into()),
+            ),
+            (
+                "project-settings.runtime-fixed-hz.text",
+                "project-settings.runtime-fixed-hz.value",
+                project.settings.runtime.fixed_hz.to_string(),
+            ),
+            (
+                "project-settings.runtime-max-entities.text",
+                "project-settings.runtime-max-entities.value",
+                project.settings.runtime.max_entities.to_string(),
+            ),
+            (
                 "project-settings.building-snap-step.text",
                 "project-settings.building-snap-step.value",
                 format!("{:.2}", project.settings.building_snap_step),
@@ -1845,7 +2036,15 @@ impl NativeGameWorkbench {
         ];
         for (key, node_id, value) in values {
             if !controls.has_text(key) || focused.as_deref() != Some(node_id) {
-                controls.set_text(key, value, 256);
+                controls.set_text(
+                    key,
+                    value,
+                    if key == "project-settings.runtime.input_actions" {
+                        8192
+                    } else {
+                        256
+                    },
+                );
             }
         }
     }

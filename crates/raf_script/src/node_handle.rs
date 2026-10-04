@@ -13,6 +13,8 @@ use crate::value::ScriptValue;
 use crate::ScriptResult;
 use glam::Vec3;
 use raf_core::scene::graph::{NodeColor, SceneNodeId};
+use raf_core::scene::VariableValue;
+use uuid::Uuid;
 
 /// Version of the Host API. Bump on breaking changes.
 pub const HOST_API_VERSION: u32 = 1;
@@ -24,17 +26,54 @@ pub const HOST_API_VERSION: u32 = 1;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeHandle {
     id: u64,
+    instance_id: u64,
+    identity: Option<Uuid>,
 }
 
 impl NodeHandle {
     /// Create a handle from a scene node id.
     pub fn from_scene_id(id: SceneNodeId) -> Self {
-        Self { id: id.0 as u64 }
+        Self {
+            id: id.0 as u64,
+            instance_id: 0,
+            identity: None,
+        }
     }
 
     /// Create a handle from a raw u64 (used by Rhai/WASM interop).
     pub fn from_raw(raw: u64) -> Self {
-        Self { id: raw }
+        Self {
+            id: raw,
+            instance_id: 0,
+            identity: None,
+        }
+    }
+
+    /// Missing references never alias index zero or any active entity.
+    pub fn invalid() -> Self {
+        Self::from_raw(u64::MAX)
+    }
+
+    pub(crate) fn scoped(id: SceneNodeId, ctx: &ScriptContext<'_>) -> Self {
+        Self {
+            id: id.0 as u64,
+            instance_id: ctx.instance_id,
+            identity: ctx.scene.get(id).map(|node| node.uuid),
+        }
+    }
+
+    pub(crate) fn resolve(&self, ctx: &ScriptContext<'_>) -> ScriptResult<SceneNodeId> {
+        let id = self.to_scene_id();
+        if self.id == u64::MAX
+            || self.instance_id != ctx.instance_id
+            || !ctx.scene.is_valid_node(id)
+            || self
+                .identity
+                .is_some_and(|identity| ctx.scene.get(id).map(|n| n.uuid) != Some(identity))
+        {
+            return Err(ScriptError::InvalidHandle(self.id));
+        }
+        Ok(id)
     }
 
     /// Convert back to a SceneNodeId for internal use.
@@ -49,7 +88,7 @@ impl NodeHandle {
 
     /// Check if the entity still exists in the scene.
     pub fn is_valid(&self, ctx: &ScriptContext<'_>) -> bool {
-        ctx.scene.get(self.to_scene_id()).is_some()
+        self.resolve(ctx).is_ok()
     }
 
     /// Set world-space position in meters.
@@ -60,12 +99,26 @@ impl NodeHandle {
         y: f32,
         z: f32,
     ) -> ScriptResult<()> {
-        let id = self.to_scene_id();
+        ensure_finite([x, y, z])?;
+        let id = self.resolve(ctx)?;
+        let parent = ctx.scene.get(id).and_then(|node| node.parent);
+        let position = if let Some(parent) = parent {
+            let matrix = ctx.scene.world_matrix(parent);
+            if matrix.determinant().abs() < 1e-8 {
+                return Err(ScriptError::InvalidArgument(
+                    "parent transform is singular".into(),
+                ));
+            }
+            matrix.inverse().transform_point3(Vec3::new(x, y, z))
+        } else {
+            Vec3::new(x, y, z)
+        };
+        ensure_finite(position.to_array())?;
         let node = ctx
             .scene
             .get_mut(id)
             .ok_or_else(|| ScriptError::InvalidHandle(self.id))?;
-        node.position = Vec3::new(x, y, z);
+        node.position = position;
         Ok(())
     }
 
@@ -77,12 +130,15 @@ impl NodeHandle {
         y: f32,
         z: f32,
     ) -> ScriptResult<()> {
-        let id = self.to_scene_id();
+        ensure_finite([x, y, z])?;
+        let id = self.resolve(ctx)?;
         let node = ctx
             .scene
             .get_mut(id)
             .ok_or_else(|| ScriptError::InvalidHandle(self.id))?;
-        node.rotation = Vec3::new(x, y, z);
+        let rotation = Vec3::new(x.to_degrees(), y.to_degrees(), z.to_degrees());
+        ensure_finite(rotation.to_array())?;
+        node.rotation = rotation;
         Ok(())
     }
 
@@ -94,7 +150,8 @@ impl NodeHandle {
         y: f32,
         z: f32,
     ) -> ScriptResult<()> {
-        let id = self.to_scene_id();
+        ensure_finite([x, y, z])?;
+        let id = self.resolve(ctx)?;
         let node = ctx
             .scene
             .get_mut(id)
@@ -105,27 +162,34 @@ impl NodeHandle {
 
     /// Get world-space position in meters.
     pub fn get_position(&self, ctx: &ScriptContext<'_>) -> ScriptResult<[f32; 3]> {
-        let node = ctx
+        let id = self.resolve(ctx)?;
+        let position = ctx
             .scene
-            .get(self.to_scene_id())
-            .ok_or_else(|| ScriptError::InvalidHandle(self.id))?;
-        Ok(node.position.to_array())
+            .world_matrix(id)
+            .transform_point3(Vec3::ZERO)
+            .to_array();
+        ensure_finite(position)?;
+        Ok(position)
     }
 
     /// Get euler rotation in radians.
     pub fn get_rotation(&self, ctx: &ScriptContext<'_>) -> ScriptResult<[f32; 3]> {
         let node = ctx
             .scene
-            .get(self.to_scene_id())
+            .get(self.resolve(ctx)?)
             .ok_or_else(|| ScriptError::InvalidHandle(self.id))?;
-        Ok(node.rotation.to_array())
+        Ok([
+            node.rotation.x.to_radians(),
+            node.rotation.y.to_radians(),
+            node.rotation.z.to_radians(),
+        ])
     }
 
     /// Get scale.
     pub fn get_scale(&self, ctx: &ScriptContext<'_>) -> ScriptResult<[f32; 3]> {
         let node = ctx
             .scene
-            .get(self.to_scene_id())
+            .get(self.resolve(ctx)?)
             .ok_or_else(|| ScriptError::InvalidHandle(self.id))?;
         Ok(node.scale.to_array())
     }
@@ -138,13 +202,9 @@ impl NodeHandle {
         dy: f32,
         dz: f32,
     ) -> ScriptResult<()> {
-        let id = self.to_scene_id();
-        let node = ctx
-            .scene
-            .get_mut(id)
-            .ok_or_else(|| ScriptError::InvalidHandle(self.id))?;
-        node.position += Vec3::new(dx, dy, dz);
-        Ok(())
+        ensure_finite([dx, dy, dz])?;
+        let [x, y, z] = self.get_position(ctx)?;
+        self.set_position(ctx, x + dx, y + dy, z + dz)
     }
 
     /// Rotate by a delta in radians.
@@ -155,12 +215,15 @@ impl NodeHandle {
         dy: f32,
         dz: f32,
     ) -> ScriptResult<()> {
-        let id = self.to_scene_id();
+        ensure_finite([dx, dy, dz])?;
+        let id = self.resolve(ctx)?;
         let node = ctx
             .scene
             .get_mut(id)
             .ok_or_else(|| ScriptError::InvalidHandle(self.id))?;
-        node.rotation += Vec3::new(dx, dy, dz);
+        let rotation = node.rotation + Vec3::new(dx.to_degrees(), dy.to_degrees(), dz.to_degrees());
+        ensure_finite(rotation.to_array())?;
+        node.rotation = rotation;
         Ok(())
     }
 
@@ -173,7 +236,7 @@ impl NodeHandle {
         b: u8,
         a: u8,
     ) -> ScriptResult<()> {
-        let id = self.to_scene_id();
+        let id = self.resolve(ctx)?;
         let node = ctx
             .scene
             .get_mut(id)
@@ -184,7 +247,7 @@ impl NodeHandle {
 
     /// Set visibility.
     pub fn set_visible(&self, ctx: &mut ScriptContext<'_>, visible: bool) -> ScriptResult<()> {
-        let id = self.to_scene_id();
+        let id = self.resolve(ctx)?;
         let node = ctx
             .scene
             .get_mut(id)
@@ -195,7 +258,12 @@ impl NodeHandle {
 
     /// Set the entity name.
     pub fn set_name(&self, ctx: &mut ScriptContext<'_>, name: &str) -> ScriptResult<()> {
-        let id = self.to_scene_id();
+        if name.is_empty() || name.len() > 256 {
+            return Err(ScriptError::InvalidArgument(
+                "name must contain 1..256 bytes".into(),
+            ));
+        }
+        let id = self.resolve(ctx)?;
         let node = ctx
             .scene
             .get_mut(id)
@@ -208,19 +276,75 @@ impl NodeHandle {
     pub fn get_property(&self, ctx: &ScriptContext<'_>, key: &str) -> ScriptResult<ScriptValue> {
         let node = ctx
             .scene
-            .get(self.to_scene_id())
+            .get(self.resolve(ctx)?)
             .ok_or_else(|| ScriptError::InvalidHandle(self.id))?;
         match key {
             "name" => Ok(ScriptValue::String(node.name.clone())),
             "visible" => Ok(ScriptValue::Bool(node.visible)),
-            "position" => Ok(ScriptValue::Vec3(node.position.to_array())),
-            "rotation" => Ok(ScriptValue::Vec3(node.rotation.to_array())),
+            "position" => Ok(ScriptValue::Vec3(self.get_position(ctx)?)),
+            "rotation" => Ok(ScriptValue::Vec3(self.get_rotation(ctx)?)),
             "scale" => Ok(ScriptValue::Vec3(node.scale.to_array())),
             "color" => {
                 let c = node.color;
                 Ok(ScriptValue::Color([c.r, c.g, c.b, c.a]))
             }
-            _ => Ok(ScriptValue::None),
+            _ => Ok(match node.get_variable(key) {
+                Some(VariableValue::Bool(value)) => ScriptValue::Bool(*value),
+                Some(VariableValue::Number(value)) => ScriptValue::Float(*value),
+                Some(VariableValue::Text(value)) => ScriptValue::String(value.clone()),
+                None => ScriptValue::None,
+            }),
         }
+    }
+
+    /// Custom parameters use the persisted scene variable contract.
+    pub fn set_property(
+        &self,
+        ctx: &mut ScriptContext<'_>,
+        key: &str,
+        value: ScriptValue,
+    ) -> ScriptResult<()> {
+        let id = self.resolve(ctx)?;
+        if key.is_empty()
+            || key.len() > 128
+            || matches!(
+                key,
+                "name" | "visible" | "position" | "rotation" | "scale" | "color"
+            )
+        {
+            return Err(ScriptError::InvalidArgument("invalid variable name".into()));
+        }
+        let value = match value {
+            ScriptValue::Bool(value) => VariableValue::Bool(value),
+            ScriptValue::Int(value) => VariableValue::Number(value as f32),
+            ScriptValue::Float(value) if value.is_finite() => VariableValue::Number(value),
+            ScriptValue::String(value) if value.len() <= 4096 => VariableValue::Text(value),
+            _ => {
+                return Err(ScriptError::InvalidArgument(
+                    "variable requires Bool, finite Number or bounded Text".into(),
+                ))
+            }
+        };
+        let node = ctx
+            .scene
+            .get_mut(id)
+            .ok_or(ScriptError::InvalidHandle(self.id))?;
+        if node.get_variable(key).is_none() && node.variables.len() >= 128 {
+            return Err(ScriptError::InvalidArgument(
+                "entity variable limit exceeded".into(),
+            ));
+        }
+        node.set_variable(key, value);
+        Ok(())
+    }
+}
+
+fn ensure_finite(values: [f32; 3]) -> ScriptResult<()> {
+    if values.iter().all(|value| value.is_finite()) {
+        Ok(())
+    } else {
+        Err(ScriptError::InvalidArgument(
+            "transform values must be finite".into(),
+        ))
     }
 }

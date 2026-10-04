@@ -272,39 +272,41 @@ pub fn build_connections(
         // Disconnect affordance. It sits on the wire, so it stays small and
         // translucent until the pointer reaches it.
         let knot_size = 11.0 * zoom.clamp(0.8, 1.2);
-        let knot = UiNode::new(
-            format!("nodes.connection.{id}.knot"),
-            UiNodeKind::Button,
-        )
-        .with_class("nodes-connection-knot")
-        .with_layout(
-            UiLayout::absolute(UiRect::new(
-                mid_pt[0] - knot_size * 0.5,
-                mid_pt[1] - knot_size * 0.5,
-                knot_size,
-                knot_size,
-            ))
-            .with_z_index(Z_WIRE_KNOT),
-        )
-        .with_style(UiStyle {
-            fill: [tokens.background[0], tokens.background[1], tokens.background[2], 190],
-            border: color,
-            text: tokens.text,
-            border_width: 1.0,
-            radius: knot_size * 0.5,
-            opacity: 0.45,
-        })
-        .with_icon(
-            UiIcon::new(UiIconId::Close)
-                .with_size(UiIconSize::Custom((knot_size * 0.6) as u16))
-                .with_tint(color),
-        )
-        .with_tooltip_value("Click to disconnect wire")
-        .focusable()
-        .with_event(UiEventBinding::command(
-            UiEventKind::Click,
-            format!("nodes.disconnect.{id}"),
-        ));
+        let knot = UiNode::new(format!("nodes.connection.{id}.knot"), UiNodeKind::Button)
+            .with_class("nodes-connection-knot")
+            .with_layout(
+                UiLayout::absolute(UiRect::new(
+                    mid_pt[0] - knot_size * 0.5,
+                    mid_pt[1] - knot_size * 0.5,
+                    knot_size,
+                    knot_size,
+                ))
+                .with_z_index(Z_WIRE_KNOT),
+            )
+            .with_style(UiStyle {
+                fill: [
+                    tokens.background[0],
+                    tokens.background[1],
+                    tokens.background[2],
+                    190,
+                ],
+                border: color,
+                text: tokens.text,
+                border_width: 1.0,
+                radius: knot_size * 0.5,
+                opacity: 0.45,
+            })
+            .with_icon(
+                UiIcon::new(UiIconId::Close)
+                    .with_size(UiIconSize::Custom((knot_size * 0.6) as u16))
+                    .with_tint(color),
+            )
+            .with_tooltip_value("Click to disconnect wire")
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                format!("nodes.disconnect.{id}"),
+            ));
         result.push(knot);
     }
 
@@ -338,8 +340,8 @@ pub fn build_connections(
                 const PROBE: usize = 8;
                 for step in 1..=PROBE {
                     let point = eval_bezier(p0, p1, p2, p3, step as f32 / PROBE as f32);
-                    length +=
-                        ((point[0] - previous[0]).powi(2) + (point[1] - previous[1]).powi(2)).sqrt();
+                    length += ((point[0] - previous[0]).powi(2) + (point[1] - previous[1]).powi(2))
+                        .sqrt();
                     previous = point;
                 }
                 let samples = ((length / (DRAG_THICKNESS * 0.6)).ceil() as usize).clamp(6, 220);
@@ -363,12 +365,15 @@ pub fn build_connections(
                 let tip_size = 12.0 * zoom.clamp(0.8, 1.2);
                 result.push(
                     UiNode::new("nodes.wire.drag.tip", UiNodeKind::Panel)
-                        .with_layout(UiLayout::absolute(UiRect::new(
-                            to[0] - tip_size * 0.5,
-                            to[1] - tip_size * 0.5,
-                            tip_size,
-                            tip_size,
-                        )).with_z_index(Z_WIRE_KNOT))
+                        .with_layout(
+                            UiLayout::absolute(UiRect::new(
+                                to[0] - tip_size * 0.5,
+                                to[1] - tip_size * 0.5,
+                                tip_size,
+                                tip_size,
+                            ))
+                            .with_z_index(Z_WIRE_KNOT),
+                        )
                         .with_style(UiStyle {
                             fill: color,
                             border: [255, 255, 255, 255],
@@ -447,12 +452,12 @@ pub fn pin_rect(node: &Node, pin: &NodePin, zoom: f32) -> UiRect {
 
 pub fn pin_color(data_type: PinDataType, accent: [u8; 4]) -> [u8; 4] {
     match data_type {
-        PinDataType::Flow => [255, 255, 255, 255],     // Execution flow: solid white
-        PinDataType::Bool => [132, 204, 22, 255],      // Boolean: vibrant lime
-        PinDataType::Int => [6, 182, 212, 255],        // Integer: electric cyan
-        PinDataType::Float => [14, 165, 233, 255],     // Float: sky cyan
-        PinDataType::String => [245, 158, 11, 255],    // String: golden amber
-        PinDataType::Vec3 => [249, 115, 22, 255],      // Vec3: bright coral/orange
+        PinDataType::Flow => [255, 255, 255, 255], // Execution flow: solid white
+        PinDataType::Bool => [132, 204, 22, 255],  // Boolean: vibrant lime
+        PinDataType::Int => [6, 182, 212, 255],    // Integer: electric cyan
+        PinDataType::Float => [14, 165, 233, 255], // Float: sky cyan
+        PinDataType::String => [245, 158, 11, 255], // String: golden amber
+        PinDataType::Vec3 => [249, 115, 22, 255],  // Vec3: bright coral/orange
         PinDataType::Any => accent,
     }
 }

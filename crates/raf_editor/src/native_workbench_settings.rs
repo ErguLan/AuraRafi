@@ -47,6 +47,8 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         "settings.responsive_layout" => settings.responsive_layout = value,
         "settings.headless" => settings.headless = value,
         "settings.script_runtime_enabled" => settings.script_runtime_enabled = value,
+        "settings.runtime.hot_reload" => settings.runtime.hot_reload = value,
+        "settings.runtime.diagnostics" => settings.runtime.diagnostics = value,
         "settings.script_hot_reload" => settings.script_hot_reload = value,
         "settings.agent_streaming_enabled" => settings.agent_streaming_enabled = value,
         "settings.agent_tool_call_limit_enabled" => settings.agent_tool_call_limit_enabled = value,
@@ -223,6 +225,21 @@ pub(crate) fn apply_settings_command(settings: &mut EngineSettings, key: &str) -
 
 pub(crate) fn apply_settings_select(settings: &mut EngineSettings, key: &str, value: &str) -> bool {
     match key {
+        "settings.runtime.launch_mode" => {
+            settings.runtime.launch_mode = match value {
+                "separate" => raf_core::runtime_config::RuntimeLaunchMode::SeparateWindow,
+                "same" => raf_core::runtime_config::RuntimeLaunchMode::SameWindow,
+                _ => return false,
+            }
+        }
+        "settings.runtime.error_policy" => {
+            settings.runtime.error_policy = match value {
+                "pause" => raf_core::runtime_config::RuntimeErrorPolicy::Pause,
+                "disable" => raf_core::runtime_config::RuntimeErrorPolicy::DisableScript,
+                "stop" => raf_core::runtime_config::RuntimeErrorPolicy::Stop,
+                _ => return false,
+            }
+        }
         "settings.quality" => {
             settings.render_quality = match value {
                 "potato" => {
@@ -301,6 +318,25 @@ pub(crate) fn apply_settings_range(settings: &mut EngineSettings, key: &str, val
         return false;
     };
     match key {
+        "settings.runtime.max_instances" => {
+            settings.runtime.max_instances = value.round().clamp(1.0, 4.0) as u32
+        }
+        "settings.runtime.width" => {
+            settings.runtime.window_size[0] = value.round().clamp(640.0, 1920.0) as u32
+        }
+        "settings.runtime.height" => {
+            settings.runtime.window_size[1] = value.round().clamp(360.0, 1080.0) as u32
+        }
+        "settings.runtime.fps_limit" => {
+            settings.runtime.fps_limit = value.round().clamp(15.0, 120.0) as u32
+        }
+        "settings.runtime.script_budget_ms" => {
+            settings.runtime.script_budget_ms = value.round().clamp(1.0, 100.0) as u32
+        }
+        "settings.runtime.script_operation_limit" => {
+            settings.runtime.script_operation_limit =
+                value.round().clamp(1000.0, 1_000_000.0) as u64
+        }
         "settings.theme_experimental" => settings.theme_experimental = value.clamp(0.0, 100.0),
         "settings.font_size" => settings.font_size = value.clamp(10.0, 24.0),
         "settings.ui_scale" => settings.ui_scale = value.clamp(0.5, 3.0),
@@ -357,7 +393,13 @@ pub(crate) fn is_settings_numeric_text_key(key: &str) -> bool {
     };
     matches!(
         key,
-        "settings.theme_experimental"
+        "settings.runtime.max_instances"
+            | "settings.runtime.width"
+            | "settings.runtime.height"
+            | "settings.runtime.fps_limit"
+            | "settings.runtime.script_budget_ms"
+            | "settings.runtime.script_operation_limit"
+            | "settings.theme_experimental"
             | "settings.font_size"
             | "settings.ui_scale"
             | "settings.fps_limit"
@@ -580,5 +622,31 @@ mod tests {
             settings.viewport_render_mode,
             raf_core::config::ViewportRenderMode::Solid
         );
+    }
+    #[test]
+    fn runtime_settings_reach_the_player_policy() {
+        let mut settings = EngineSettings::default();
+        assert!(apply_settings_select(
+            &mut settings,
+            "settings.runtime.launch_mode",
+            "same"
+        ));
+        assert!(apply_settings_toggle(
+            &mut settings,
+            "settings.runtime.hot_reload",
+            false
+        ));
+        assert!(apply_settings_range(
+            &mut settings,
+            "settings.runtime.fps_limit",
+            30.0
+        ));
+        let policy = raf_runtime::manifest::RuntimeHostSettings::from_engine(&settings);
+        assert_eq!(
+            policy.runtime.launch_mode,
+            raf_core::runtime_config::RuntimeLaunchMode::SameWindow
+        );
+        assert_eq!(policy.runtime.fps_limit, 30);
+        assert!(!policy.runtime.hot_reload);
     }
 }

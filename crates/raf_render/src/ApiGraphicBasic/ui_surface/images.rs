@@ -321,6 +321,7 @@ fn builtin_icon_png(id: UiIconId) -> Option<&'static [u8]> {
         UiIconId::Add => Some(include_bytes!("../../../assets/ui_icons/png/add.png")),
         UiIconId::Close => Some(include_bytes!("../../../assets/ui_icons/png/close.png")),
         UiIconId::Play => Some(include_bytes!("../../../assets/ui_icons/png/play.png")),
+        UiIconId::Pause | UiIconId::StepForward | UiIconId::Camera => None,
         UiIconId::Stop => Some(include_bytes!("../../../assets/ui_icons/png/stop.png")),
         UiIconId::Console => Some(include_bytes!("../../../assets/ui_icons/png/console.png")),
         UiIconId::Assets => Some(include_bytes!("../../../assets/ui_icons/png/assets.png")),
@@ -371,6 +372,7 @@ fn icon_id_from_key(key: &str) -> Option<UiIconId> {
         UiIconId::Folder,
         UiIconId::Scene,
         UiIconId::Entity,
+        UiIconId::Camera,
         UiIconId::Cube,
         UiIconId::Sphere,
         UiIconId::Plane,
@@ -388,6 +390,8 @@ fn icon_id_from_key(key: &str) -> Option<UiIconId> {
         UiIconId::Add,
         UiIconId::Close,
         UiIconId::Play,
+        UiIconId::Pause,
+        UiIconId::StepForward,
         UiIconId::Stop,
         UiIconId::Console,
         UiIconId::Assets,
@@ -682,6 +686,21 @@ fn builtin_icon_pixels(id: UiIconId) -> Vec<u8> {
                 line(&mut pixels, [18.0, 39.0], [39.0, 39.0], 2.5);
             }
         }
+        UiIconId::Camera => {
+            for (a, b) in [
+                ([10.0, 22.0], [42.0, 22.0]),
+                ([42.0, 22.0], [42.0, 46.0]),
+                ([42.0, 46.0], [10.0, 46.0]),
+                ([10.0, 46.0], [10.0, 22.0]),
+                ([42.0, 28.0], [54.0, 20.0]),
+                ([54.0, 20.0], [54.0, 48.0]),
+                ([54.0, 48.0], [42.0, 40.0]),
+            ] {
+                line(&mut pixels, a, b, stroke);
+            }
+            circle(&mut pixels, [22.0, 16.0], 6.0, stroke);
+            circle(&mut pixels, [35.0, 16.0], 6.0, stroke);
+        }
         UiIconId::Entity | UiIconId::Cube => {
             line(&mut pixels, [32.0, 10.0], [52.0, 21.0], stroke);
             line(&mut pixels, [52.0, 21.0], [52.0, 44.0], stroke);
@@ -729,6 +748,14 @@ fn builtin_icon_pixels(id: UiIconId) -> Vec<u8> {
             filled_triangle(&mut pixels, [[20.0, 12.0], [50.0, 32.0], [20.0, 52.0]]);
         }
         UiIconId::Stop => filled_rect(&mut pixels, 15, 15, 49, 49),
+        UiIconId::Pause => {
+            filled_rect(&mut pixels, 17, 14, 27, 50);
+            filled_rect(&mut pixels, 37, 14, 47, 50);
+        }
+        UiIconId::StepForward => {
+            filled_triangle(&mut pixels, [[16.0, 14.0], [16.0, 50.0], [40.0, 32.0]]);
+            filled_rect(&mut pixels, 44, 14, 50, 50);
+        }
         UiIconId::Console => {
             line(&mut pixels, [10.0, 15.0], [54.0, 15.0], stroke);
             line(&mut pixels, [54.0, 15.0], [54.0, 49.0], stroke);
@@ -998,10 +1025,18 @@ mod tests {
     #[test]
     fn every_semantic_icon_has_a_generated_runtime_asset() {
         for icon in UiIconId::ALL {
-            let png = builtin_icon_png(icon).unwrap_or_else(|| {
-                panic!("{} must ship a generated PNG master", icon.key())
-            });
-            assert!(!png.is_empty(), "{} PNG must not be empty", icon.key());
+            if let Some(png) = builtin_icon_png(icon) {
+                assert!(!png.is_empty(), "{} PNG must not be empty", icon.key());
+            } else {
+                assert!(
+                    matches!(
+                        icon,
+                        UiIconId::Camera | UiIconId::Pause | UiIconId::StepForward
+                    ),
+                    "{} must ship a PNG master or an explicit procedural icon",
+                    icon.key()
+                );
+            }
             assert_eq!(
                 icon_id_from_key(icon.key()),
                 Some(icon),

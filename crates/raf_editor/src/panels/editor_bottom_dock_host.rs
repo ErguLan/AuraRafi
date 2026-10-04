@@ -623,8 +623,19 @@ fn default_tabs_for_type(project_type: ProjectType) -> Vec<DockTab> {
     if project_type == ProjectType::Game {
         tabs.push(DockTab::new("nodes", "nodes.tab", UiIconId::Node));
     } else {
-        tabs.push(DockTab::new("drc", "DRC", UiIconId::Warning));
-        tabs.push(DockTab::new("simulation", "Simulation", UiIconId::Play));
+        // The tab titles are localization keys. The previous literals "DRC" and
+        // "Simulation" were not catalog keys, so the renderer fell back to the
+        // key itself and an editor running in Spanish showed English titles.
+        tabs.push(DockTab::new(
+            "drc",
+            "app.electronics_drc",
+            UiIconId::Warning,
+        ));
+        tabs.push(DockTab::new(
+            "simulation",
+            "app.electronics_simulation",
+            UiIconId::Play,
+        ));
     }
     tabs.push(DockTab::new("agent", "app.agent_tab", UiIconId::Agent));
     tabs.push(DockTab::new(

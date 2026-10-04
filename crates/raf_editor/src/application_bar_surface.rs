@@ -2,7 +2,7 @@
 //!
 //! This is the first native-shell surface: menus and settings entry points
 //! are presented here, while the host translates commands to the application.
-//! Build, Play and runtime-status controls are intentionally absent for now.
+//! The native Game workbench composes local Play controls into this shared bar.
 
 use raf_core::project::ProjectType;
 use raf_render::api_graphic_basic::ui_surface::{

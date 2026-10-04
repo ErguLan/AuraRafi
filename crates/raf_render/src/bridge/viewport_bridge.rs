@@ -416,6 +416,21 @@ impl ViewportBridge {
         vp_w: f32,
         vp_h: f32,
     ) -> Option<SceneNodeId> {
+        if self.gizmo().visible
+            && self
+                .picking_policy
+                .layer_mask
+                .contains(crate::bridge::PickingLayer::Gizmo)
+        {
+            if let Some(id) = super::camera_helpers::pick_camera(
+                scene,
+                view_proj,
+                [screen_x, screen_y],
+                [vp_w, vp_h],
+            ) {
+                return Some(id);
+            }
+        }
         self.edit_session.pick_entity_with_policy(
             scene,
             view_proj,

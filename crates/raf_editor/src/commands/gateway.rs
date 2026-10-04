@@ -196,8 +196,8 @@ fn validate_execution_budget(
                 ),
             "game.add" | "scene.add" | "game.create" | "scene.create" | "game.create_group"
             | "scene.create_group" | "game.update" | "scene.update" | "game.reparent"
-            | "scene.reparent" | "game.delete" | "scene.delete" | "game.arrange_grid"
-            | "scene.arrange" | "game.snap" | "scene.snap" => 1,
+            | "game.camera" | "scene.reparent" | "game.delete" | "scene.delete"
+            | "game.arrange_grid" | "scene.arrange" | "game.snap" | "scene.snap" => 1,
             "game.duplicate"
             | "scene.duplicate"
             | "game.generate_prefab"
@@ -230,6 +230,9 @@ fn validate_execution_budget(
 
 fn requested_scene_entities(name: &str, params: &Value) -> usize {
     match name {
+        "game.camera" => {
+            usize::from(params.get("action").and_then(Value::as_str) == Some("create"))
+        }
         "game.add" | "scene.add" | "game.create" | "scene.create" | "game.create_group"
         | "scene.create_group" => 1,
         "game.duplicate"
@@ -263,6 +266,13 @@ fn requested_scene_entities(name: &str, params: &Value) -> usize {
                             .trim_start_matches('/')
                             .to_ascii_lowercase();
                         match operation_name.as_str() {
+                            "game.camera" => usize::from(
+                                operation
+                                    .get("params")
+                                    .and_then(|p| p.get("action"))
+                                    .and_then(Value::as_str)
+                                    == Some("create"),
+                            ),
                             "scene_create" | "game.add" | "scene_create_group"
                             | "game.create_group" => 1,
                             "scene_duplicate"

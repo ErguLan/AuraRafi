@@ -14,6 +14,8 @@ use raf_core::scene::SceneGraph;
 use crate::node_handle::NodeHandle;
 use crate::value::ScriptValue;
 use crate::ScriptResult;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 /// Snapshot of input state for one frame. Filled by the editor/runtime
 /// from the host window's input events. Engine-agnostic: does not depend
@@ -53,6 +55,17 @@ impl InputSnapshot {
 #[derive(Debug, Clone, Default)]
 pub struct AudioCommandQueue {
     pub commands: Vec<AudioCommand>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ScriptEvent {
+    pub name: String,
+    pub target: Option<NodeHandle>,
+    pub value: ScriptValue,
+}
+#[derive(Debug, Clone, Default)]
+pub struct ScriptEventQueue {
+    pub events: Vec<ScriptEvent>,
 }
 
 /// A single audio command emitted by a script.
@@ -112,13 +125,69 @@ impl Default for TimeInfo {
 /// Scripts receive this and call Host API functions on it. The context
 /// owns mutable access to the scene, audio queue, and read-only input/time.
 pub struct ScriptContext<'a> {
+    pub view: &'a mut crate::view::RuntimeViewState,
     pub scene: &'a mut SceneGraph,
     pub input: &'a InputSnapshot,
     pub audio: &'a mut AudioCommandQueue,
+    pub events: &'a mut ScriptEventQueue,
     pub time: TimeInfo,
+    /// Namespace shared by scripts within one runtime, never across players.
+    pub instance_id: u64,
+    pub owner: Option<SceneNodeId>,
+    /// Includes tombstones so repeated spawn/destroy cannot grow without bound.
+    pub entity_limit: usize,
+    pub cancellation: Option<&'a AtomicBool>,
+    pub deadline: Option<Instant>,
 }
 
 impl<'a> ScriptContext<'a> {
+    /// Events are delivered at the next safe tick, never by a reentrant call.
+    pub fn emit_event(
+        &mut self,
+        target: Option<NodeHandle>,
+        name: &str,
+        value: ScriptValue,
+    ) -> ScriptResult<()> {
+        if self.events.events.len() >= 256 || name.is_empty() || name.len() > 128 {
+            return Err(crate::ScriptError::InvalidArgument(
+                "event queue budget exceeded or invalid event name".into(),
+            ));
+        }
+        if let Some(target) = target {
+            target.resolve(self)?;
+        }
+        match &value {
+            ScriptValue::None | ScriptValue::Bool(_) | ScriptValue::Int(_) => {}
+            ScriptValue::Float(v) if v.is_finite() => {}
+            ScriptValue::String(v) if v.len() <= 4096 => {}
+            _ => {
+                return Err(crate::ScriptError::InvalidArgument(
+                    "event payload requires a bounded scalar value".into(),
+                ))
+            }
+        }
+        self.events.events.push(ScriptEvent {
+            name: name.into(),
+            target,
+            value,
+        });
+        Ok(())
+    }
+    pub fn check_budget(&self) -> ScriptResult<()> {
+        if self
+            .cancellation
+            .is_some_and(|flag| flag.load(Ordering::Relaxed))
+        {
+            return Err(crate::ScriptError::Cancelled);
+        }
+        if self
+            .deadline
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            return Err(crate::ScriptError::Timeout);
+        }
+        Ok(())
+    }
     /// Delta time in seconds (convenience accessor).
     pub fn delta_time(&self) -> f32 {
         self.time.delta_time
@@ -135,45 +204,73 @@ impl<'a> ScriptContext<'a> {
 
     /// Find a root-level entity by name.
     pub fn get_node(&self, name: &str) -> Option<NodeHandle> {
-        for &id in self.scene.roots() {
-            if let Some(node) = self.scene.get(id) {
-                if node.name == name {
-                    return Some(NodeHandle::from_scene_id(id));
-                }
-            }
+        if name.is_empty() {
+            return None;
         }
-        // Search recursively in children if not found at root level.
-        for &id in self.scene.roots() {
-            if let Some(found) = self.find_child_recursive(id, name) {
-                return Some(found);
-            }
+        let mut matches = self
+            .scene
+            .iter()
+            .filter(|(id, node)| self.scene.is_valid_node(*id) && node.name == name);
+        let (id, _) = matches.next()?;
+        // Ambiguous names are not an implicit association either.
+        if matches.next().is_some() {
+            return None;
         }
-        None
+        Some(NodeHandle::scoped(id, self))
     }
 
-    fn find_child_recursive(&self, id: SceneNodeId, name: &str) -> Option<NodeHandle> {
-        let node = self.scene.get(id)?;
-        if node.name == name {
-            return Some(NodeHandle::from_scene_id(id));
+    pub fn self_node(&self) -> Option<NodeHandle> {
+        let id = self.owner?;
+        self.scene
+            .is_valid_node(id)
+            .then(|| NodeHandle::scoped(id, self))
+    }
+
+    pub fn find_child(&self, parent: NodeHandle, name: &str) -> ScriptResult<Option<NodeHandle>> {
+        let id = parent.resolve(self)?;
+        let node = self
+            .scene
+            .get(id)
+            .ok_or(crate::ScriptError::InvalidHandle(parent.raw()))?;
+        let mut matches = node.children.iter().filter(|id| {
+            self.scene.is_valid_node(**id)
+                && self.scene.get(**id).is_some_and(|node| node.name == name)
+        });
+        let Some(&child) = matches.next() else {
+            return Ok(None);
+        };
+        if matches.next().is_some() {
+            return Ok(None);
         }
-        for &child_id in &node.children {
-            if let Some(found) = self.find_child_recursive(child_id, name) {
-                return Some(found);
-            }
-        }
-        None
+        Ok(Some(NodeHandle::scoped(child, self)))
+    }
+
+    pub fn get_parent(&self, child: NodeHandle) -> ScriptResult<Option<NodeHandle>> {
+        let id = child.resolve(self)?;
+        Ok(self
+            .scene
+            .get(id)
+            .and_then(|node| node.parent)
+            .filter(|id| self.scene.is_valid_node(*id))
+            .map(|id| NodeHandle::scoped(id, self)))
     }
 
     /// Spawn a new entity with a primitive shape. Returns a handle.
     pub fn spawn_entity(&mut self, name: &str, primitive: &str) -> ScriptResult<NodeHandle> {
-        let prim = parse_primitive(primitive);
+        if self.scene.len() >= self.entity_limit || name.is_empty() || name.len() > 256 {
+            return Err(crate::ScriptError::InvalidArgument(
+                "entity budget exceeded or invalid name".into(),
+            ));
+        }
+        let prim = parse_primitive(primitive)?;
         let id = self.scene.add_root_with_primitive(name, prim);
-        Ok(NodeHandle::from_scene_id(id))
+        Ok(NodeHandle::scoped(id, self))
     }
 
     /// Destroy an entity by handle.
     pub fn destroy_entity(&mut self, handle: NodeHandle) -> ScriptResult<()> {
-        let removed = self.scene.remove_node(handle.to_scene_id());
+        let id = handle.resolve(self)?;
+        let removed = self.scene.remove_node(id);
         if removed {
             Ok(())
         } else {
@@ -206,17 +303,23 @@ impl<'a> ScriptContext<'a> {
 
     /// Play an audio asset by name.
     pub fn play_audio(&mut self, name: &str) {
-        self.audio.play(name);
+        if self.audio.commands.len() < 256 {
+            self.audio.play(name);
+        }
     }
 
     /// Stop a playing audio asset.
     pub fn stop_audio(&mut self, name: &str) {
-        self.audio.stop(name);
+        if self.audio.commands.len() < 256 {
+            self.audio.stop(name);
+        }
     }
 
     /// Set the volume of an audio source (0.0 to 1.0).
     pub fn set_volume(&mut self, name: &str, volume: f32) {
-        self.audio.set_volume(name, volume);
+        if self.audio.commands.len() < 256 {
+            self.audio.set_volume(name, volume.clamp(0.0, 1.0));
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -245,22 +348,27 @@ impl<'a> ScriptContext<'a> {
         _function: &str,
         _args: Vec<ScriptValue>,
     ) -> ScriptResult<ScriptValue> {
-        // Implemented in the runtime system (Phase B). The Host API
-        // signature is stable; the body wires up when ScriptRuntime exists.
-        Ok(ScriptValue::None)
+        Err(crate::ScriptError::InvalidArgument(
+            "direct inter-script calls are not supported; use emit_event or send_event".into(),
+        ))
     }
 }
 
 /// Parse a primitive name string into a `Primitive` enum value.
-fn parse_primitive(name: &str) -> raf_core::scene::Primitive {
+fn parse_primitive(name: &str) -> ScriptResult<raf_core::scene::Primitive> {
     use raf_core::scene::Primitive;
-    match name.to_lowercase().as_str() {
+    Ok(match name.to_lowercase().as_str() {
         "cube" | "box" => Primitive::Cube,
         "sphere" | "ball" => Primitive::Sphere,
         "plane" | "ground" => Primitive::Plane,
         "cylinder" | "tube" => Primitive::Cylinder,
         // Sprite2D was retired: 2D game content is an orthographic 3D plane.
         "sprite" | "sprite2d" | "billboard" => Primitive::Plane,
-        _ => Primitive::Empty,
-    }
+        "empty" | "group" => Primitive::Empty,
+        _ => {
+            return Err(crate::ScriptError::InvalidArgument(format!(
+                "unknown primitive: {name}"
+            )))
+        }
+    })
 }

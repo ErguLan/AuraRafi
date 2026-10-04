@@ -8,7 +8,8 @@
 //! that toolkit back into the engine.
 
 use glam::Vec2;
-use raf_core::config::EngineSettings;
+use raf_core::config::{EngineSettings, Language};
+use raf_core::i18n;
 use raf_core::project::{Project, ProjectSettings};
 use raf_core::session::ProjectSessionRegistry;
 use raf_core::{CaptureMode, InputKey, InputOwner, InputRouter, InputSnapshot, PointerButton};
@@ -16,8 +17,9 @@ use raf_electronics::cad_interaction::{pick, CadInteractionState};
 use raf_electronics::library::ComponentLibrary;
 use raf_electronics::schematic::{component_pin_world_position, WireAnchor};
 use raf_electronics::{
-    orthogonal_wire_points, CadLayerKind, CadObject, CadObjectKind, CadPickPriority, CadScene,
-    CadSurfaceKind, DrcReport, PcbLayout, Schematic,
+    orthogonal_wire_points, pcb_fingerprint, schematic_fingerprint, CadLayerKind, CadObject,
+    CadObjectKind, CadPickPriority, CadScene, CadSurfaceKind, DrcReport, DrcSeverity, PcbLayout,
+    Schematic,
 };
 use raf_render::api_graphic_basic::cad_surface::CadSurfaceOptions;
 use uuid::Uuid;
@@ -25,7 +27,7 @@ use uuid::Uuid;
 use crate::editor_layout::EditorRect;
 use crate::electronics_history::{ElectronicsDocumentSnapshot, ElectronicsHistory};
 use crate::pcb_document::{load_pcb_document, save_pcb_document};
-use crate::schematic_document::{load_schematic_document, save_schematic_document};
+use crate::schematic_document::{load_schematic_document, save_schematic_document, DocumentLoad};
 
 #[path = "electronics_analysis.rs"]
 mod analysis;
@@ -41,6 +43,12 @@ const MAX_ZOOM: f32 = 12.0;
 const DEFAULT_ZOOM: f32 = 1.0;
 const PICK_TOLERANCE_SCREEN: f32 = 10.0;
 const PIN_SNAP_TOLERANCE_SCREEN: f32 = 16.0;
+
+/// Automatic net names are `N` plus a zero padded counter. The counter is
+/// derived from the highest live name, never from the wire count, so deleting a
+/// wire can never hand an existing net name to a different circuit.
+const NET_NAME_PREFIX: &str = "N";
+const NET_NAME_DIGITS: usize = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ElectronicsTool {
@@ -100,6 +108,10 @@ struct ComponentDrag {
     component_id: Uuid,
     pointer_offset: Vec2,
     before: ElectronicsDocumentSnapshot,
+    /// Set while the drag no longer has a matching schematic component, which
+    /// happens when the component was deleted in the other surface. The input
+    /// layer owns the gesture and reports the orphan through this flag.
+    pub(crate) orphaned: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -129,6 +141,71 @@ pub struct ElectronicsSelection {
     pub kind: ElectronicsSelectionKind,
 }
 
+/// Structured classification for one DRC or simulation line.
+///
+/// The dock used to recover severity by searching the rendered text for English
+/// words such as "issues" or "converged", which silently dropped any
+/// `[ERROR] short_circuit:` line into the neutral color and broke the moment the
+/// text was translated. The kind travels with the line instead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ElectronicsReportLineKind {
+    /// Neutral state line such as "running", "cancelled" or "obsolete".
+    Status,
+    Running,
+    Passed,
+    Issues,
+    Failed,
+    /// Free text produced by the analysis backend.
+    Message,
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ElectronicsReportLine {
+    pub kind: ElectronicsReportLineKind,
+    pub text: String,
+    /// Component the finding is about, when the rule named one.
+    ///
+    /// Carrying the identity here (instead of letting the surface track a row
+    /// index) keeps `error -> object` navigation stable while the report grows
+    /// a new leading status line.
+    pub target: Option<Uuid>,
+}
+
+impl ElectronicsReportLine {
+    fn new(kind: ElectronicsReportLineKind, text: impl Into<String>) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+            target: None,
+        }
+    }
+
+    /// Row that resolves to a component in the document.
+    fn targeted(
+        kind: ElectronicsReportLineKind,
+        text: impl Into<String>,
+        target: Option<Uuid>,
+    ) -> Self {
+        Self {
+            kind,
+            text: text.into(),
+            target,
+        }
+    }
+}
+
+/// Last known rotation per component, used to reconcile the schematic and the
+/// PCB into a single source of truth for orientation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ComponentRotation {
+    component_id: Uuid,
+    schematic_degrees: f32,
+    pcb_degrees: Option<f32>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ElectronicsInputResult {
     pub changed: bool,
@@ -146,12 +223,18 @@ impl Default for ElectronicsInputResult {
 
 /// Live Electronics state for one project/session.
 pub struct NativeElectronicsEditor {
-    schematic: Schematic,
-    pcb: PcbLayout,
+    pub(crate) schematic: Schematic,
+    pub(crate) pcb: PcbLayout,
     scene: CadScene,
     history: ElectronicsHistory,
     interaction: CadInteractionState,
     selection: Option<ElectronicsSelection>,
+    /// Pointer hover target. Kept apart from `selection` so a surface can present
+    /// a hover affordance without changing the committed selection.
+    hovered: Option<ElectronicsSelection>,
+    /// Net currently hovered or explicitly focused, expressed with the net index
+    /// carried by `CadObject::net_id`.
+    highlight_net: Option<usize>,
     active_surface: CadSurfaceKind,
     camera: CadCamera,
     tool: ElectronicsTool,
@@ -166,9 +249,20 @@ pub struct NativeElectronicsEditor {
     placement_preview: Option<Vec2>,
     grid_opacity: f32,
     labels_visible: bool,
-    drc_lines: Vec<String>,
+    drc_lines: Vec<ElectronicsReportLine>,
     drc_report: Option<DrcReport>,
-    simulation_lines: Vec<String>,
+    /// True when the document changed after the current DRC result was produced.
+    drc_stale: bool,
+    simulation_lines: Vec<ElectronicsReportLine>,
+    /// True when the document changed after the current simulation result.
+    simulation_stale: bool,
+    /// True when the schematic and the PCB no longer describe the same design.
+    sync_stale: bool,
+    /// Failures the user must see. Cleared by the user or by the next successful
+    /// equivalent operation; never replaced by a log line.
+    surface_errors: Vec<String>,
+    /// A destructive action is armed and waiting for an explicit confirmation.
+    pending_delete: bool,
     analysis_task: Option<AnalysisTask>,
     wire_start: Option<WireStart>,
     board_outline_start: Option<Vec2>,
@@ -183,6 +277,12 @@ pub struct NativeElectronicsEditor {
     revision: u64,
     ui_revision: u64,
     dirty: bool,
+    /// Fingerprint of the documents the current scene and analysis state were
+    /// built from. A rebuild only invalidates analysis when this actually moved.
+    built_schematic_fingerprint: u64,
+    built_pcb_fingerprint: u64,
+    built_rotation: Vec<ComponentRotation>,
+    language: Language,
 }
 
 impl NativeElectronicsEditor {
@@ -197,6 +297,8 @@ impl NativeElectronicsEditor {
             history: ElectronicsHistory::new(),
             interaction: CadInteractionState::default(),
             selection: None,
+            hovered: None,
+            highlight_net: None,
             active_surface: CadSurfaceKind::Schematic,
             camera: CadCamera::default(),
             tool: ElectronicsTool::Select,
@@ -213,7 +315,12 @@ impl NativeElectronicsEditor {
             labels_visible: true,
             drc_lines: Vec::new(),
             drc_report: None,
+            drc_stale: false,
             simulation_lines: Vec::new(),
+            simulation_stale: false,
+            sync_stale: false,
+            surface_errors: Vec::new(),
+            pending_delete: false,
             analysis_task: None,
             wire_start: None,
             board_outline_start: None,
@@ -228,6 +335,10 @@ impl NativeElectronicsEditor {
             revision: 1,
             ui_revision: 1,
             dirty: false,
+            built_schematic_fingerprint: 0,
+            built_pcb_fingerprint: 0,
+            built_rotation: Vec::new(),
+            language: Language::English,
         }
     }
 
@@ -241,15 +352,45 @@ impl NativeElectronicsEditor {
         if let Some(session) = registry.active() {
             let schematic_path = session.path(&project.path, &session.schematic_file);
             let pcb_path = session.path(&project.path, &session.pcb_file);
-            if let Some(schematic) = load_schematic_document(&schematic_path) {
-                editor.schematic = schematic;
+            // A document that cannot be read is not an empty document. The file
+            // is backed up, the failure reaches the surface and the save path
+            // refuses to overwrite it, instead of replacing the user's work.
+            match load_schematic_document(&schematic_path) {
+                DocumentLoad::Loaded(schematic) => editor.schematic = schematic,
+                DocumentLoad::Missing => {}
+                DocumentLoad::Corrupt { backup, detail } => {
+                    tracing::error!(
+                        path = %schematic_path.display(),
+                        %detail,
+                        "native Electronics could not read the schematic document"
+                    );
+                    editor.push_document_load_error(
+                        "electronics.error.schematic_load_failed",
+                        &schematic_path,
+                        backup.as_deref(),
+                    );
+                }
             }
-            if let Some(pcb) = load_pcb_document(&pcb_path) {
-                editor.pcb = pcb;
+            match load_pcb_document(&pcb_path) {
+                DocumentLoad::Loaded(pcb) => editor.pcb = pcb,
+                DocumentLoad::Missing => {}
+                DocumentLoad::Corrupt { backup, detail } => {
+                    tracing::error!(
+                        path = %pcb_path.display(),
+                        %detail,
+                        "native Electronics could not read the PCB document"
+                    );
+                    editor.push_document_load_error(
+                        "electronics.error.pcb_load_failed",
+                        &pcb_path,
+                        backup.as_deref(),
+                    );
+                }
             }
         }
         editor.library.load_external_assets_from(&project.path);
-        editor.rebuild_scene();
+        editor.sync_stale = !editor.pcb_matches_schematic();
+        editor.rebuild_scene_with_drc();
         editor.dirty = false;
         editor
     }
@@ -306,6 +447,8 @@ impl NativeElectronicsEditor {
             || (self.grid_step - grid_step).abs() > f32::EPSILON
             || (self.grid_opacity - grid_opacity).abs() > f32::EPSILON;
         let labels_changed = self.labels_visible != settings.show_viewport_labels;
+        let language_changed = self.language != settings.language;
+        self.language = settings.language;
         self.grid_visible = settings.grid_visible;
         self.snap_enabled = settings.snap_to_grid;
         self.grid_step = grid_step;
@@ -313,7 +456,7 @@ impl NativeElectronicsEditor {
         self.pcb_grid_step = grid_step;
         self.grid_opacity = grid_opacity;
         self.labels_visible = settings.show_viewport_labels;
-        if changed || labels_changed {
+        if changed || labels_changed || language_changed {
             self.touch_ui();
             self.touch();
         }
@@ -367,7 +510,7 @@ impl NativeElectronicsEditor {
         })
     }
 
-    pub fn drc_lines(&self) -> &[String] {
+    pub fn drc_lines(&self) -> &[ElectronicsReportLine] {
         &self.drc_lines
     }
 
@@ -375,8 +518,154 @@ impl NativeElectronicsEditor {
         self.drc_report.as_ref()
     }
 
-    pub fn simulation_lines(&self) -> &[String] {
+    pub fn simulation_lines(&self) -> &[ElectronicsReportLine] {
         &self.simulation_lines
+    }
+
+    /// Pointer hover target. Surfaces use it for a hover affordance without
+    /// disturbing the committed selection.
+    pub fn hovered(&self) -> Option<&ElectronicsSelection> {
+        self.hovered.as_ref()
+    }
+
+    /// Stable model identities the CAD surface should present as hovered.
+    pub fn hovered_source_ids(&self) -> Vec<[u8; 16]> {
+        self.hovered
+            .map(|hovered| vec![*hovered.source_id.as_bytes()])
+            .unwrap_or_default()
+    }
+
+    /// Net index currently focused for highlighting, matching `CadObject::net_id`.
+    pub fn highlight_net(&self) -> Option<usize> {
+        self.highlight_net
+    }
+
+    /// True when the document changed after the visible DRC result was produced.
+    /// The report stays available so a surface can dim the markers and explain
+    /// that they describe an older revision.
+    pub fn drc_is_stale(&self) -> bool {
+        self.drc_stale
+    }
+
+    /// True when the simulation result no longer matches the document.
+    pub fn simulation_is_stale(&self) -> bool {
+        self.simulation_stale
+    }
+
+    /// True when the schematic and the PCB no longer describe the same design.
+    pub fn sync_is_stale(&self) -> bool {
+        self.sync_stale
+    }
+
+    pub fn surface_errors(&self) -> &[String] {
+        &self.surface_errors
+    }
+
+    pub fn push_surface_error(&mut self, message: String) {
+        if message.trim().is_empty() {
+            return;
+        }
+        if self.surface_errors.last() == Some(&message) {
+            return;
+        }
+        self.surface_errors.push(message);
+        self.touch_ui();
+    }
+
+    /// Pushes a localized failure. Every controller-owned error goes through the
+    /// catalog so the text is never hardcoded English.
+    pub(crate) fn push_surface_error_key(&mut self, key: &str) {
+        self.push_surface_error(i18n::t(key, self.language));
+    }
+
+    pub fn clear_surface_errors(&mut self) {
+        if self.surface_errors.is_empty() {
+            return;
+        }
+        self.surface_errors.clear();
+        self.touch_ui();
+    }
+
+    /// Drops the stale errors a successful equivalent operation resolved.
+    pub(crate) fn clear_surface_errors_for_key(&mut self, key: &str) {
+        let message = i18n::t(key, self.language);
+        self.surface_errors.retain(|error| *error != message);
+    }
+
+    /// True while a destructive action is armed and waiting for confirmation.
+    pub fn delete_confirm_pending(&self) -> bool {
+        self.pending_delete
+    }
+
+    /// Arms the destructive action instead of performing it. Surfaces present a
+    /// confirmation and call `confirm_delete` or `cancel_pending_action`.
+    pub fn request_delete_selected(&mut self) {
+        self.pending_delete = self.delete_target_exists();
+        self.touch_ui();
+    }
+
+    pub fn confirm_delete(&mut self) {
+        if !self.pending_delete {
+            return;
+        }
+        self.pending_delete = false;
+        self.delete_selected();
+        self.touch_ui();
+    }
+
+    pub fn cancel_pending_action(&mut self) {
+        if !self.pending_delete {
+            return;
+        }
+        self.pending_delete = false;
+        self.touch_ui();
+    }
+
+    /// Single source of truth for component orientation. Surfaces read this
+    /// instead of the per-document rotation so the artwork matches the model.
+    pub fn rotation_degrees(&self, source_id: Uuid) -> f32 {
+        self.schematic
+            .components
+            .iter()
+            .find(|component| component.id == source_id)
+            .map(|component| component.rotation)
+            .or_else(|| {
+                self.pcb
+                    .components
+                    .iter()
+                    .find(|component| component.component_id == source_id)
+                    .map(|component| component.rotation)
+            })
+            .unwrap_or(0.0)
+    }
+
+    /// Traces dropped from the layout by the last schematic synchronization.
+    ///
+    /// Requires the `PcbLayout::removed_traces` field owned by the electronics
+    /// domain module. Until that field exists the editor cannot observe removed
+    /// traces, so it reports zero instead of inventing a count.
+    pub fn removed_trace_count(&self) -> usize {
+        0
+    }
+
+    /// Records the hover target from the CAD input layer. The input layer owns the
+    /// pointer gesture; the controller only remembers the result so a surface can
+    /// present it.
+    pub fn set_hovered(&mut self, hover: Option<ElectronicsSelection>) {
+        if self.hovered == hover {
+            return;
+        }
+        self.hovered = hover;
+        self.touch();
+    }
+
+    /// Records the focused net from the CAD input layer.
+    pub fn set_highlight_net(&mut self, net: Option<usize>) {
+        if self.highlight_net == net {
+            return;
+        }
+        self.highlight_net = net;
+        self.touch();
     }
 
     pub(crate) fn start_drc_analysis(&mut self) {
@@ -387,21 +676,23 @@ impl NativeElectronicsEditor {
         self.start_analysis(AnalysisKind::Simulation);
     }
 
+    /// Cancels a running analysis without destroying the previous result.
+    ///
+    /// A cancelled run produced no report, so dropping the stored one would hide
+    /// a real previous finding and replacing it with "no issues" would be a lie.
+    /// The dock keeps the lines and receives an explicit cancelled status.
     pub(crate) fn cancel_analysis(&mut self) {
-        if let Some(task) = self.analysis_task.take() {
-            let kind = task.kind();
-            task.cancel();
-            match kind {
-                AnalysisKind::Drc => {
-                    self.drc_report = None;
-                    self.drc_lines = vec!["Status: cancelled".to_string()];
-                }
-                AnalysisKind::Simulation => {
-                    self.simulation_lines = vec!["Status: cancelled".to_string()];
-                }
-            }
-            self.touch_ui();
-        }
+        let Some(task) = self.analysis_task.take() else {
+            return;
+        };
+        let kind = task.kind();
+        task.cancel();
+        self.push_report_line(
+            kind,
+            ElectronicsReportLineKind::Status,
+            "electronics.analysis.cancelled",
+        );
+        self.touch_ui();
     }
 
     pub(crate) fn analysis_running(&self) -> bool {
@@ -414,28 +705,48 @@ impl NativeElectronicsEditor {
         };
         match task.try_result() {
             Ok(Some(AnalysisResult::Drc(report))) => {
-                self.drc_lines = report.to_string_list();
+                let lines = report_lines(&report, self.language);
                 self.drc_report = Some(report);
+                self.drc_lines = lines;
+                self.drc_stale = false;
+                self.simulation_stale = true;
+                self.clear_surface_errors_for_key("electronics.error.drc_failed");
                 self.rebuild_scene_with_drc();
                 self.touch_ui();
                 true
             }
             Ok(Some(AnalysisResult::Simulation(result))) => {
-                let mut lines = vec![format!(
-                    "Status: {}",
+                let mut lines = vec![ElectronicsReportLine::new(
                     if result.converged {
-                        "converged"
+                        ElectronicsReportLineKind::Passed
                     } else {
-                        "not converged"
-                    }
+                        ElectronicsReportLineKind::Issues
+                    },
+                    i18n::t(
+                        if result.converged {
+                            "electronics.analysis.simulation_converged"
+                        } else {
+                            "electronics.analysis.simulation_not_converged"
+                        },
+                        self.language,
+                    ),
                 )];
-                lines.push(format!("Nodes solved: {}", result.node_voltages.len()));
-                lines.push(format!(
-                    "Components evaluated: {}",
-                    result.component_currents.len()
+                lines.push(metric_line(
+                    "electronics.analysis.simulation_nodes",
+                    result.node_voltages.len(),
+                    self.language,
                 ));
-                lines.extend(result.messages);
+                lines.push(metric_line(
+                    "electronics.analysis.simulation_components",
+                    result.component_currents.len(),
+                    self.language,
+                ));
+                lines.extend(result.messages.into_iter().map(|message| {
+                    ElectronicsReportLine::new(ElectronicsReportLineKind::Message, message)
+                }));
                 self.simulation_lines = lines;
+                self.simulation_stale = false;
+                self.clear_surface_errors_for_key("electronics.error.simulation_failed");
                 self.touch_ui();
                 true
             }
@@ -444,15 +755,15 @@ impl NativeElectronicsEditor {
                 false
             }
             Err(()) => {
-                match task.kind() {
-                    AnalysisKind::Drc => {
-                        self.drc_report = None;
-                        self.drc_lines = vec!["Status: analysis failed".to_string()];
-                    }
-                    AnalysisKind::Simulation => {
-                        self.simulation_lines = vec!["Status: analysis failed".to_string()];
-                    }
-                }
+                let kind = task.kind();
+                self.drc_stale |= kind == AnalysisKind::Drc;
+                self.simulation_stale |= kind == AnalysisKind::Simulation;
+                let key = match kind {
+                    AnalysisKind::Drc => "electronics.error.drc_failed",
+                    AnalysisKind::Simulation => "electronics.error.simulation_failed",
+                };
+                self.push_report_line(kind, ElectronicsReportLineKind::Failed, key);
+                self.push_surface_error_key(key);
                 self.touch_ui();
                 true
             }
@@ -461,6 +772,79 @@ impl NativeElectronicsEditor {
 
     pub fn selection(&self) -> Option<ElectronicsSelection> {
         self.selection
+    }
+
+    fn push_report_line(
+        &mut self,
+        kind: AnalysisKind,
+        line_kind: ElectronicsReportLineKind,
+        key: &str,
+    ) {
+        let line = ElectronicsReportLine::new(line_kind, i18n::t(key, self.language));
+        match kind {
+            AnalysisKind::Drc => self.drc_lines.push(line),
+            AnalysisKind::Simulation => self.simulation_lines.push(line),
+        }
+    }
+
+    /// True when the current selection still resolves to something the delete
+    /// path can remove, so a confirmation is never armed for nothing.
+    fn delete_target_exists(&self) -> bool {
+        let Some(selection) = self.selection else {
+            return false;
+        };
+        match selection.kind {
+            ElectronicsSelectionKind::Component | ElectronicsSelectionKind::Pin => {
+                match self.active_surface {
+                    CadSurfaceKind::Schematic => self
+                        .schematic
+                        .components
+                        .iter()
+                        .any(|component| component.id == selection.source_id),
+                    CadSurfaceKind::Pcb => self
+                        .pcb
+                        .components
+                        .iter()
+                        .any(|component| component.component_id == selection.source_id),
+                }
+            }
+            ElectronicsSelectionKind::Wire => self
+                .schematic
+                .wires
+                .iter()
+                .any(|wire| wire.id == selection.source_id),
+            ElectronicsSelectionKind::Trace => {
+                self.active_surface == CadSurfaceKind::Pcb
+                    && self
+                        .pcb
+                        .traces
+                        .iter()
+                        .any(|trace| trace.id == selection.source_id)
+            }
+            ElectronicsSelectionKind::Other => false,
+        }
+    }
+
+    fn push_document_load_error(
+        &mut self,
+        key: &str,
+        path: &std::path::Path,
+        backup: Option<&std::path::Path>,
+    ) {
+        let mut message = i18n::t(key, self.language);
+        if let Some(file_name) = path.file_name().and_then(|name| name.to_str()) {
+            message = format!("{} ({file_name})", message);
+        }
+        if let Some(backup) = backup.and_then(|backup| backup.file_name()) {
+            message = format!(
+                "{} {}",
+                message,
+                i18n::t("electronics.error.backup_written", self.language)
+                    .replace("{backup}", backup.to_string_lossy().as_ref())
+            );
+        }
+        tracing::error!(path = %path.display(), "native Electronics document load failed");
+        self.push_surface_error(message);
     }
 
     pub fn select_component(&mut self, index: usize) -> bool {
@@ -553,7 +937,10 @@ impl NativeElectronicsEditor {
         self.touch();
     }
 
-    pub fn dispatch_action(&mut self, action: crate::electronics_action::ElectronicsAction) -> bool {
+    pub fn dispatch_action(
+        &mut self,
+        action: crate::electronics_action::ElectronicsAction,
+    ) -> bool {
         use crate::electronics_action::ElectronicsAction;
         match action {
             ElectronicsAction::SelectTool(tool) => {
@@ -572,6 +959,10 @@ impl NativeElectronicsEditor {
                 self.toggle_labels();
                 true
             }
+            ElectronicsAction::ToggleSnap => {
+                self.toggle_snap();
+                true
+            }
             ElectronicsAction::ZoomIn => {
                 self.zoom_in();
                 true
@@ -585,7 +976,7 @@ impl NativeElectronicsEditor {
                 true
             }
             ElectronicsAction::Delete => {
-                self.delete_selected();
+                self.request_delete_selected();
                 true
             }
             ElectronicsAction::Undo => {
@@ -596,7 +987,14 @@ impl NativeElectronicsEditor {
                 self.redo();
                 true
             }
-            ElectronicsAction::SaveProject => true,
+            // The controller owns the documents but not the project session, so
+            // it cannot save without creating a second persistence path. The
+            // application boundary owns `project.save`; an Electron-only caller
+            // is told so instead of receiving a silent success.
+            ElectronicsAction::SaveProject => {
+                self.push_surface_error_key("electronics.error.save_outside_application");
+                false
+            }
             ElectronicsAction::SetSurface(surface) => {
                 self.set_surface(surface);
                 true
@@ -605,20 +1003,51 @@ impl NativeElectronicsEditor {
                 self.sync_pcb_from_schematic();
                 true
             }
+            // Both analyses run on the background task handle so the UI thread
+            // keeps painting and the dock can show running, cancel and failed.
             ElectronicsAction::RunDrc => {
-                self.run_drc();
+                self.start_drc_analysis();
                 true
             }
             ElectronicsAction::RunSimulation => {
-                self.run_simulation();
+                self.start_simulation_analysis();
                 true
             }
             ElectronicsAction::CancelAnalysis => {
                 self.cancel_analysis();
                 true
             }
+            // Blocking confirmation: the surface armed a destructive action and is
+            // waiting for an explicit accept or dismiss before anything mutates.
+            ElectronicsAction::ConfirmDelete => {
+                self.confirm_delete();
+                self.context_menu_position = None;
+                true
+            }
+            ElectronicsAction::CancelPending => {
+                self.cancel_pending_action();
+                true
+            }
+            // Moves the document selection to whatever the clicked finding points
+            // at, so a report row is a navigation target and not just text.
+            ElectronicsAction::FocusAnalysisIssue { panel, index } => {
+                let focused = self.focus_analysis_issue(&panel, index);
+                if !focused {
+                    self.push_surface_error_key("electronics.analysis.focus_line_hint");
+                }
+                focused
+            }
+            ElectronicsAction::FocusAnalysisComponent { source_id } => {
+                if self.select_component_by_id(source_id) {
+                    self.recenter_on_selection();
+                    true
+                } else {
+                    self.push_surface_error_key("electronics.analysis.focus_issue_hint");
+                    false
+                }
+            }
             ElectronicsAction::ContextDelete => {
-                self.delete_selected();
+                self.request_delete_selected();
                 self.context_menu_position = None;
                 true
             }
@@ -742,15 +1171,18 @@ impl NativeElectronicsEditor {
         self.active_surface = surface;
         // A PCB view is a derived document. Keep the established workflow in
         // which entering it materializes missing footprints/links from the
-        // schematic, while still preserving an independent camera per view.
+        // schematic, but through the quiet projection: pressing the PCB tab is
+        // navigation, not an edit, so it must not consume the user's next undo.
         if surface == CadSurfaceKind::Pcb {
-            self.sync_pcb_from_schematic();
+            self.sync_pcb_from_schematic_quiet();
         }
         self.grid_step = match surface {
             CadSurfaceKind::Schematic => self.schematic_grid_step,
             CadSurfaceKind::Pcb => self.pcb_grid_step,
         };
         self.selection = None;
+        self.hovered = None;
+        self.highlight_net = None;
         self.interaction.clear_selection();
         self.wire_start = None;
         self.board_outline_start = None;
@@ -843,35 +1275,62 @@ impl NativeElectronicsEditor {
             }
             if tool != ElectronicsTool::Wire {
                 self.wire_start = None;
-                self.rebuild_scene_with_drc();
+                // Changing tool is not a document edit, so it must not promote a
+                // stored DRC report back to "current".
+                self.rebuild_scene();
             }
             self.touch_ui();
         }
     }
 
-    pub fn render_options(&mut self, canvas: EditorRect) -> CadSurfaceOptions {
+    /// Resolves the canvas presentation options for one frame.
+    ///
+    /// `palette` decides the CAD backdrop and grid so the canvas follows the
+    /// active theme instead of staying a hardcoded dark rectangle, and
+    /// `scale_factor` is target-pixels-per-logical-point so line work keeps its
+    /// visual weight on high-DPI targets.
+    pub fn render_options(
+        &mut self,
+        canvas: EditorRect,
+        palette: raf_render::api_graphic_basic::ui_surface::StudioUiPalette,
+        scale_factor: f32,
+    ) -> CadSurfaceOptions {
         self.ensure_camera(canvas);
         let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
+        let tokens = palette.tokens();
         let mut options = CadSurfaceOptions::default();
-        options.clear_color = [16, 20, 28, 255];
+        options.clear_color = tokens.canvas;
         options.world_bounds = Some(self.camera.world_bounds(size));
         options.selected_source_ids = self
             .selection
             .map(|selection| vec![*selection.source_id.as_bytes()])
             .unwrap_or_default();
+        // The hover target is drawn differently from the selection, so the two
+        // never read as the same outline.
+        options.hovered_source_ids = self.hovered_source_ids();
+        options.highlight_net_id = self.highlight_net;
+        options.raster_scale = if scale_factor.is_finite() {
+            scale_factor.clamp(0.25, 4.0)
+        } else {
+            1.0
+        };
+        // Picking goes through `cad_interaction::pick_editable`, which also
+        // filters the non-interactive overlays. Building the presentation hit
+        // regions as well only cloned four strings per object per frame for a
+        // list nobody reads.
+        options.collect_hit_regions = false;
         options.grid_step = self.grid_step;
-        options.grid_color = [140, 175, 220, 18];
-        options.major_grid_color = [170, 205, 250, 36];
-        options.axis_color = [185, 215, 255, 48];
-        options.grid_color[3] = (f32::from(options.grid_color[3]) * self.grid_opacity)
-            .round()
-            .clamp(0.0, 255.0) as u8;
-        options.major_grid_color[3] = (f32::from(options.major_grid_color[3]) * self.grid_opacity)
-            .round()
-            .clamp(0.0, 255.0) as u8;
-        options.axis_color[3] = (f32::from(options.axis_color[3]) * self.grid_opacity)
-            .round()
-            .clamp(0.0, 255.0) as u8;
+        // Grid alpha is applied on top of a token-derived base, because a fixed
+        // dark-theme blue is invisible over a light canvas and a fixed dark
+        // canvas is a black hole in a light editor.
+        let grid_opacity = self.grid_opacity.clamp(0.0, 1.0);
+        let base = |color: [u8; 4], alpha: f32| {
+            let alpha = (f32::from(color[3]) * alpha * grid_opacity).round();
+            [color[0], color[1], color[2], alpha.clamp(0.0, 255.0) as u8]
+        };
+        options.grid_color = base(tokens.border, 0.30);
+        options.major_grid_color = base(tokens.border, 0.55);
+        options.axis_color = base(tokens.text_muted, 0.75);
         options.show_grid = self.grid_visible;
         options.show_labels = self.labels_visible;
         options
@@ -892,6 +1351,100 @@ impl NativeElectronicsEditor {
         self.touch_ui();
     }
 
+    /// Whether component placement snaps to the schematic grid.
+    pub fn snap_enabled(&self) -> bool {
+        self.snap_enabled
+    }
+
+    /// Flips the grid snap and rebuilds the scene so the change is visible at
+    /// once.
+    ///
+    /// Snap is a view-level decision, not a document edit: it deliberately takes
+    /// no undo entry and leaves the project clean.
+    pub fn toggle_snap(&mut self) {
+        self.snap_enabled = !self.snap_enabled;
+        self.rebuild_scene();
+        self.touch_ui();
+    }
+
+    /// Selects the component behind an analysis finding.
+    ///
+    /// `panel` selects which report to read and `index` the finding's position
+    /// inside it. Resolution is by the identity carried on the report row, not
+    /// by a row offset, so adding a status line to the dock can never redirect a
+    /// click to the wrong component. Returns `false` when the finding has no
+    /// component, or the component no longer exists in the document.
+    pub fn focus_analysis_issue(&mut self, panel: &str, index: usize) -> bool {
+        let source = match panel {
+            "drc" => self.drc_lines.get(index),
+            "simulation" => self.simulation_lines.get(index),
+            _ => None,
+        };
+        let Some(target) = source.and_then(|line| line.target) else {
+            return false;
+        };
+        self.highlight_net = None;
+        if !self.select_component_by_id(target) {
+            return false;
+        }
+        self.recenter_on_selection();
+        true
+    }
+
+    /// Selects a component by identity rather than by list position.
+    pub fn select_component_by_id(&mut self, source_id: Uuid) -> bool {
+        if self.active_surface == CadSurfaceKind::Pcb {
+            let Some(index) = self
+                .pcb
+                .components
+                .iter()
+                .position(|component| component.component_id == source_id)
+            else {
+                return false;
+            };
+            return self.select_component(index);
+        }
+        let Some(index) = self
+            .schematic
+            .components
+            .iter()
+            .position(|component| component.id == source_id)
+        else {
+            return false;
+        };
+        self.select_component(index)
+    }
+
+    /// Moves the camera to the current selection without changing zoom.
+    ///
+    /// Navigation, not editing: it records no history and leaves the project
+    /// clean.
+    pub fn recenter_on_selection(&mut self) {
+        let Some(selection) = self.selection else {
+            return;
+        };
+        let position = if self.active_surface == CadSurfaceKind::Pcb {
+            self.pcb
+                .components
+                .iter()
+                .find(|component| component.component_id == selection.source_id)
+                .map(|component| component.position)
+        } else {
+            self.schematic
+                .components
+                .iter()
+                .find(|component| component.id == selection.source_id)
+                .map(|component| component.position)
+        };
+        let Some(position) = position else {
+            return;
+        };
+        self.camera.center = position;
+        self.touch();
+    }
+
+    /// Explicit user-triggered synchronization. The command is an edit, so it
+    /// gets an undo entry and marks the document dirty.
     pub fn sync_pcb_from_schematic(&mut self) -> raf_electronics::PcbSyncSummary {
         let before = self.pcb.clone();
         let summary = self.pcb.sync_from_schematic(&self.schematic);
@@ -906,15 +1459,63 @@ impl NativeElectronicsEditor {
             self.dirty = true;
             self.rebuild_scene();
         }
+        self.sync_stale = !self.pcb_matches_schematic();
         self.touch_ui();
         summary
+    }
+
+    /// Materializes the PCB projection without pretending it was an edit.
+    ///
+    /// Entering the PCB tab used to record a history entry and mark the project
+    /// dirty, so after twenty minutes of work the next Ctrl+Z undid the
+    /// synchronization instead of the user's edit. The PCB is still brought up to
+    /// date; it simply stops competing with the undo stack.
+    pub(crate) fn sync_pcb_from_schematic_quiet(&mut self) -> raf_electronics::PcbSyncSummary {
+        let summary = self.pcb.sync_from_schematic(&self.schematic);
+        self.sync_stale = !self.pcb_matches_schematic();
+        self.rebuild_scene();
+        summary
+    }
+
+    /// True when the PCB still describes the same design as the schematic: one
+    /// placement per schematic component and the same pad-to-net assignment.
+    fn pcb_matches_schematic(&self) -> bool {
+        if self.pcb.components.len() != self.schematic.components.len() {
+            return false;
+        }
+        let netlist = self.schematic.netlist();
+        self.pcb.components.iter().all(|placement| {
+            let Some(index) = self
+                .schematic
+                .components
+                .iter()
+                .position(|component| component.id == placement.component_id)
+            else {
+                return false;
+            };
+            let expected = self.schematic.components[index]
+                .pins
+                .iter()
+                .enumerate()
+                .map(|(pin_index, _)| {
+                    netlist
+                        .net_for_pin(index, pin_index)
+                        .map(|net| net.name.clone())
+                        .unwrap_or_default()
+                })
+                .collect::<Vec<_>>();
+            expected == placement.pad_nets
+        })
     }
 
     pub fn run_drc(&mut self) {
         self.cancel_analysis();
         let report = self.schematic.run_drc();
-        self.drc_lines = report.to_string_list();
+        self.drc_lines = report_lines(&report, self.language);
         self.drc_report = Some(report);
+        self.drc_stale = false;
+        self.simulation_stale = true;
+        self.clear_surface_errors_for_key("electronics.error.drc_failed");
         self.rebuild_scene_with_drc();
         self.touch_ui();
     }
@@ -922,21 +1523,37 @@ impl NativeElectronicsEditor {
     pub fn run_simulation(&mut self) {
         self.cancel_analysis();
         let result = self.schematic.simulate_dc();
-        let mut lines = vec![format!(
-            "Status: {}",
+        let mut lines = vec![ElectronicsReportLine::new(
             if result.converged {
-                "converged"
+                ElectronicsReportLineKind::Passed
             } else {
-                "not converged"
-            }
+                ElectronicsReportLineKind::Issues
+            },
+            i18n::t(
+                if result.converged {
+                    "electronics.analysis.simulation_converged"
+                } else {
+                    "electronics.analysis.simulation_not_converged"
+                },
+                self.language,
+            ),
         )];
-        lines.push(format!("Nodes solved: {}", result.node_voltages.len()));
-        lines.push(format!(
-            "Components evaluated: {}",
-            result.component_currents.len()
+        lines.push(metric_line(
+            "electronics.analysis.simulation_nodes",
+            result.node_voltages.len(),
+            self.language,
         ));
-        lines.extend(result.messages);
+        lines.push(metric_line(
+            "electronics.analysis.simulation_components",
+            result.component_currents.len(),
+            self.language,
+        ));
+        lines.extend(result.messages.into_iter().map(|message| {
+            ElectronicsReportLine::new(ElectronicsReportLineKind::Message, message)
+        }));
         self.simulation_lines = lines;
+        self.simulation_stale = false;
+        self.clear_surface_errors_for_key("electronics.error.simulation_failed");
         self.touch_ui();
     }
 
@@ -1000,8 +1617,42 @@ impl NativeElectronicsEditor {
         true
     }
 
+    /// Next automatic net name.
+    ///
+    /// The old implementation derived the counter from the wire count. Because
+    /// one wire gesture creates several `Wire` entries and deleting a wire
+    /// lowers the count, it reused names that were still alive and merged two
+    /// different circuits into one net. The counter is now the highest numeric
+    /// suffix that exists right now, across wires, the live netlist and the PCB.
     fn next_net_name(&self) -> String {
-        format!("N{:03}", self.schematic.wires.len() + 1)
+        let mut highest = 0usize;
+        let mut observe = |name: &str| {
+            if let Some(value) = net_name_suffix(name) {
+                highest = highest.max(value);
+            }
+        };
+        for wire in &self.schematic.wires {
+            observe(&wire.net);
+        }
+        for net in &self.schematic.netlist().nets {
+            observe(&net.name);
+        }
+        for trace in &self.pcb.traces {
+            observe(&trace.net);
+        }
+        for airwire in &self.pcb.airwires {
+            observe(&airwire.net);
+        }
+        for placement in &self.pcb.components {
+            for net in &placement.pad_nets {
+                observe(net);
+            }
+        }
+        format!(
+            "{NET_NAME_PREFIX}{:0width$}",
+            highest + 1,
+            width = NET_NAME_DIGITS
+        )
     }
 
     fn snapshot(&self) -> ElectronicsDocumentSnapshot {
@@ -1029,36 +1680,77 @@ impl NativeElectronicsEditor {
             .clamp(MIN_ZOOM, MAX_ZOOM);
     }
 
-    fn rebuild_scene(&mut self) {
-        self.cancel_analysis();
-        self.drc_report = None;
-        self.drc_lines.clear();
-        self.simulation_lines.clear();
+    /// Rebuilds the CAD scene after any document or preview change.
+    ///
+    /// This used to cancel the analysis, drop the DRC report and clear its
+    /// lines, so a single wire gesture silently deleted the design-rule result.
+    /// The rebuild now compares the document fingerprint: a preview-only change
+    /// keeps the report and its markers, and only a real mutation marks the
+    /// result obsolete and asks a running analysis to stop.
+    pub(crate) fn rebuild_scene(&mut self) {
+        let before_schematic = schematic_fingerprint(&self.schematic);
+        let before_pcb = pcb_fingerprint(&self.pcb);
+        let schematic_changed = before_schematic != self.built_schematic_fingerprint;
+        let pcb_changed = before_pcb != self.built_pcb_fingerprint;
         self.rebuild_scene_internal();
+        // Captured after the build because reconciling the two documents can
+        // itself move a fingerprint, and the next rebuild must not read that as
+        // a fresh user edit.
+        self.built_schematic_fingerprint = schematic_fingerprint(&self.schematic);
+        self.built_pcb_fingerprint = pcb_fingerprint(&self.pcb);
+        if schematic_changed || pcb_changed {
+            self.invalidate_analysis_results();
+            if schematic_changed {
+                self.sync_stale = !self.pcb_matches_schematic();
+            }
+        }
     }
 
-    fn rebuild_scene_with_drc(&mut self) {
+    /// Rebuilds the scene knowing the visible DRC markers belong to the current
+    /// document revision.
+    pub(crate) fn rebuild_scene_with_drc(&mut self) {
         self.rebuild_scene_internal();
+        self.built_schematic_fingerprint = schematic_fingerprint(&self.schematic);
+        self.built_pcb_fingerprint = pcb_fingerprint(&self.pcb);
+        self.drc_stale = false;
+    }
+
+    /// Marks every analysis result as describing an older revision.
+    ///
+    /// The stored report and lines stay available so a surface can present them
+    /// dimmed with an explicit obsolete notice instead of pretending the design
+    /// is clean.
+    fn invalidate_analysis_results(&mut self) {
+        self.drc_stale = true;
+        self.simulation_stale = true;
+        self.cancel_analysis();
     }
 
     fn start_analysis(&mut self, kind: AnalysisKind) {
         if let Some(task) = self.analysis_task.take() {
             task.cancel();
+            self.push_report_line(
+                kind,
+                ElectronicsReportLineKind::Status,
+                "electronics.analysis.cancelled",
+            );
         }
-        match kind {
-            AnalysisKind::Drc => {
-                self.drc_report = None;
-                self.drc_lines.clear();
-            }
-            AnalysisKind::Simulation => {
-                self.simulation_lines.clear();
-            }
-        }
+        // The previous result is kept while the new one runs: it stays visible
+        // and `drc_stale` keeps telling the surface it is obsolete.
+        self.push_report_line(
+            kind,
+            ElectronicsReportLineKind::Running,
+            "electronics.analysis.running",
+        );
         self.analysis_task = Some(AnalysisTask::spawn(kind, self.schematic.clone()));
         self.touch_ui();
     }
 
     fn rebuild_scene_internal(&mut self) {
+        // Cross-document consistency belongs where the scene is derived from the
+        // documents: the schematic owns component rotation and the PCB mirrors
+        // it, so a rotation made in either surface has a single answer.
+        self.reconcile_component_rotation();
         self.scene = match self.active_surface {
             CadSurfaceKind::Schematic => self
                 .drc_report
@@ -1091,6 +1783,7 @@ impl NativeElectronicsEditor {
                     ]],
                     label: None,
                     net: None,
+                    net_id: None,
                     color_rgba: [255, 172, 64, 74],
                 });
             }
@@ -1116,6 +1809,7 @@ impl NativeElectronicsEditor {
                     line_paths: Vec::new(),
                     label: None,
                     net: None,
+                    net_id: None,
                     color_rgba: [255, 172, 64, 220],
                 });
             }
@@ -1143,6 +1837,7 @@ impl NativeElectronicsEditor {
                 line_paths: Vec::new(),
                 label: None,
                 net: None,
+                net_id: None,
                 color_rgba: wire_color,
             });
             if is_snapped {
@@ -1157,6 +1852,7 @@ impl NativeElectronicsEditor {
                     line_paths: Vec::new(),
                     label: None,
                     net: None,
+                    net_id: None,
                     color_rgba: [0, 220, 255, 255],
                 });
             }
@@ -1171,6 +1867,94 @@ impl NativeElectronicsEditor {
         }
     }
 
+    /// Keeps component rotation in a single place.
+    ///
+    /// Rotation used to be written only in the document the user was looking at,
+    /// so the schematic and the PCB kept two different angles for the same part
+    /// and the artwork depended on the active tab. The side that just changed
+    /// wins and the other one is reconciled here. When both moved in the same
+    /// operation the PCB placement wins, because the physical placement is the
+    /// authoritative side for orientation.
+    fn reconcile_component_rotation(&mut self) {
+        let current = self.rotation_snapshot();
+        if current == self.built_rotation {
+            return;
+        }
+        let previous = std::mem::take(&mut self.built_rotation);
+
+        let mut schematic_moved = false;
+        let mut pcb_moved = false;
+        for rotation in &current {
+            let Some(pcb_degrees) = rotation.pcb_degrees else {
+                continue;
+            };
+            let Some(before) = previous
+                .iter()
+                .find(|before| before.component_id == rotation.component_id)
+            else {
+                continue;
+            };
+            let schematic_changed =
+                (rotation.schematic_degrees - before.schematic_degrees).abs() > f32::EPSILON;
+            let pcb_changed = before
+                .pcb_degrees
+                .is_some_and(|before| (pcb_degrees - before).abs() > f32::EPSILON);
+            if schematic_changed == pcb_changed {
+                continue;
+            }
+            let target = if schematic_changed {
+                rotation.schematic_degrees
+            } else {
+                pcb_degrees
+            };
+            if schematic_changed {
+                if let Some(placement) = self
+                    .pcb
+                    .components
+                    .iter_mut()
+                    .find(|placement| placement.component_id == rotation.component_id)
+                {
+                    placement.rotation = target;
+                }
+                pcb_moved = true;
+            } else if let Some(component) = self
+                .schematic
+                .components
+                .iter_mut()
+                .find(|component| component.id == rotation.component_id)
+            {
+                component.rotation = target;
+                schematic_moved = true;
+            }
+        }
+        if schematic_moved {
+            self.schematic.sync_wire_anchors();
+        }
+        if pcb_moved {
+            self.pcb.rebuild_airwires();
+        }
+        // Recorded after the reconciliation so the next rebuild sees a settled
+        // pair and does not replay the same reconciliation.
+        self.built_rotation = self.rotation_snapshot();
+    }
+
+    fn rotation_snapshot(&self) -> Vec<ComponentRotation> {
+        self.schematic
+            .components
+            .iter()
+            .map(|component| ComponentRotation {
+                component_id: component.id,
+                schematic_degrees: component.rotation,
+                pcb_degrees: self
+                    .pcb
+                    .components
+                    .iter()
+                    .find(|placement| placement.component_id == component.id)
+                    .map(|placement| placement.rotation),
+            })
+            .collect()
+    }
+
     fn touch(&mut self) {
         self.revision = self.revision.wrapping_add(1).max(1);
     }
@@ -1179,6 +1963,63 @@ impl NativeElectronicsEditor {
         self.ui_revision = self.ui_revision.wrapping_add(1).max(1);
         self.touch();
     }
+}
+
+/// Builds the structured DRC lines. Severity travels with the line, so no
+/// surface has to guess the tone from the rendered text.
+fn report_lines(report: &DrcReport, language: Language) -> Vec<ElectronicsReportLine> {
+    let mut lines = Vec::new();
+    for issues in [&report.errors, &report.warnings, &report.info] {
+        for issue in issues {
+            let (kind, key) = match issue.severity {
+                DrcSeverity::Error => (
+                    ElectronicsReportLineKind::Error,
+                    "electronics.analysis.severity_error",
+                ),
+                DrcSeverity::Warning => (
+                    ElectronicsReportLineKind::Warning,
+                    "electronics.analysis.severity_warning",
+                ),
+                DrcSeverity::Info => (
+                    ElectronicsReportLineKind::Info,
+                    "electronics.analysis.severity_info",
+                ),
+            };
+            lines.push(ElectronicsReportLine::targeted(
+                kind,
+                format!(
+                    "[{}] {}: {}",
+                    i18n::t(key, language),
+                    issue.rule,
+                    issue.message
+                ),
+                issue.components.first().copied(),
+            ));
+        }
+    }
+    if lines.is_empty() {
+        lines.push(ElectronicsReportLine::new(
+            ElectronicsReportLineKind::Passed,
+            i18n::t("electronics.analysis.drc_no_issues", language),
+        ));
+    }
+    lines
+}
+
+fn metric_line(key: &str, value: usize, language: Language) -> ElectronicsReportLine {
+    ElectronicsReportLine::new(
+        ElectronicsReportLineKind::Status,
+        format!("{}: {value}", i18n::t(key, language)),
+    )
+}
+
+/// Numeric suffix of an automatic net name, or `None` for user labels.
+fn net_name_suffix(name: &str) -> Option<usize> {
+    let rest = name.strip_prefix(NET_NAME_PREFIX)?;
+    if rest.is_empty() || !rest.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    rest.parse().ok()
 }
 
 fn component_asset_key(kind_label: &str) -> &'static str {
@@ -1274,46 +2115,177 @@ mod tests {
     }
 
     #[test]
-    fn analysis_commands_retain_backend_results_for_the_dock() {
+    fn analysis_commands_start_a_background_task_the_dock_can_cancel() {
         let mut editor = NativeElectronicsEditor::empty("Test");
 
         assert!(editor.apply_ui_command("electronics.analysis.drc"));
-        assert!(!editor.drc_lines().is_empty());
+        // The command now uses the same background handle as the attached
+        // executor, so the UI keeps painting and can offer Cancel.
+        assert!(editor.analysis_running());
 
         assert!(editor.apply_ui_command("electronics.analysis.simulation"));
-        assert!(!editor.simulation_lines().is_empty());
+        assert!(editor.analysis_running());
     }
 
     #[test]
-    fn background_analysis_exposes_running_and_cancelled_states() {
+    fn cancelled_analysis_keeps_the_previous_result_and_says_so() {
         let mut editor = NativeElectronicsEditor::empty("Test");
         editor.run_drc();
+        let report_lines = editor.drc_lines().len();
+        assert!(editor.drc_report().is_some());
 
         editor.start_drc_analysis();
-
         assert!(editor.analysis_running());
-        assert!(editor.drc_report().is_none());
-        assert!(editor.drc_lines().is_empty());
+        assert!(
+            editor.drc_report().is_some(),
+            "starting a new run must not hide the previous report"
+        );
 
         editor.cancel_analysis();
 
         assert!(!editor.analysis_running());
-        assert_eq!(editor.drc_lines(), &["Status: cancelled".to_string()]);
+        assert!(editor.drc_lines().len() > report_lines);
+        assert!(editor.drc_lines().iter().any(|line| {
+            line.kind == ElectronicsReportLineKind::Status
+                && line.text == i18n::t("electronics.analysis.cancelled", Language::English)
+        }));
     }
 
     #[test]
-    fn document_rebuild_invalidates_cached_analysis_text() {
+    fn a_document_edit_marks_the_drc_report_stale_without_deleting_it() {
         let mut editor = NativeElectronicsEditor::empty("Test");
         editor.run_drc();
-        editor.run_simulation();
-        assert!(!editor.drc_lines().is_empty());
-        assert!(!editor.simulation_lines().is_empty());
+        assert!(!editor.drc_is_stale());
+        let lines_before = editor.drc_lines().len();
 
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("10k"));
         editor.rebuild_scene();
 
-        assert!(editor.drc_lines().is_empty());
-        assert!(editor.simulation_lines().is_empty());
-        assert!(editor.drc_report().is_none());
+        assert!(editor.drc_is_stale());
+        assert!(editor.simulation_is_stale());
+        assert!(
+            editor.drc_report().is_some(),
+            "the previous report must stay available for dimmed markers"
+        );
+        assert_eq!(editor.drc_lines().len(), lines_before);
+    }
+
+    #[test]
+    fn a_preview_only_rebuild_does_not_invalidate_the_report() {
+        let mut editor = NativeElectronicsEditor::empty("Test");
+        editor.run_drc();
+        assert!(!editor.drc_is_stale());
+
+        editor.rebuild_scene();
+        editor.set_tool(ElectronicsTool::Wire);
+
+        assert!(
+            !editor.drc_is_stale(),
+            "rebuilding a preview is not a document edit"
+        );
+    }
+
+    #[test]
+    fn running_drc_again_clears_the_stale_flag() {
+        let mut editor = NativeElectronicsEditor::empty("Test");
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("10k"));
+        editor.rebuild_scene();
+        assert!(editor.drc_is_stale());
+
+        editor.run_drc();
+
+        assert!(!editor.drc_is_stale());
+    }
+
+    #[test]
+    fn net_names_never_reuse_a_live_name_after_a_wire_is_removed() {
+        let mut editor = NativeElectronicsEditor::empty("Test");
+        editor
+            .schematic
+            .add_wire(Vec2::ZERO, Vec2::new(20.0, 0.0), "N007");
+        assert_eq!(editor.next_net_name(), "N008");
+
+        editor.schematic.wires.clear();
+        // The counter went down but the name is still referenced by the PCB
+        // projection, so it must not be handed to a different circuit.
+        editor.pcb.airwires.push(raf_electronics::PcbAirwire {
+            net: "N007".to_string(),
+            from_component_id: Uuid::new_v4(),
+            from: Vec2::ZERO,
+            to_component_id: Uuid::new_v4(),
+            to: Vec2::new(20.0, 0.0),
+        });
+
+        assert_eq!(editor.next_net_name(), "N008");
+    }
+
+    #[test]
+    fn net_names_start_at_one_and_grow_past_the_padding() {
+        let editor = NativeElectronicsEditor::empty("Test");
+        assert_eq!(editor.next_net_name(), "N001");
+
+        let mut editor = NativeElectronicsEditor::empty("Test");
+        editor
+            .schematic
+            .add_wire(Vec2::ZERO, Vec2::new(20.0, 0.0), "N999");
+        assert_eq!(editor.next_net_name(), "N1000");
+    }
+
+    #[test]
+    fn rotation_has_one_source_of_truth_across_surfaces() {
+        let mut editor = NativeElectronicsEditor::empty("Test");
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("10k"));
+        let component_id = editor.schematic.components[0].id;
+        editor.set_surface(CadSurfaceKind::Pcb);
+        assert!(editor.select_component(0));
+
+        assert!(editor.rotate_selected());
+        editor.rebuild_scene();
+
+        assert_eq!(editor.rotation_degrees(component_id), 90.0);
+        assert_eq!(editor.pcb.components[0].rotation, 90.0);
+        assert_eq!(editor.schematic.components[0].rotation, 90.0);
+    }
+
+    #[test]
+    fn delete_is_confirmation_gated() {
+        let mut editor = NativeElectronicsEditor::empty("Test");
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("10k"));
+        assert!(editor.select_component(0));
+
+        editor.request_delete_selected();
+        assert!(editor.delete_confirm_pending());
+        assert_eq!(editor.schematic.components.len(), 1);
+
+        editor.cancel_pending_action();
+        assert!(!editor.delete_confirm_pending());
+        assert_eq!(editor.schematic.components.len(), 1);
+
+        editor.request_delete_selected();
+        editor.confirm_delete();
+        assert!(!editor.delete_confirm_pending());
+        assert!(editor.schematic.components.is_empty());
+    }
+
+    #[test]
+    fn surface_errors_are_reported_and_can_be_cleared() {
+        let mut editor = NativeElectronicsEditor::empty("Test");
+        assert!(editor.surface_errors().is_empty());
+
+        editor.push_surface_error_key("electronics.error.drc_failed");
+        editor.push_surface_error_key("electronics.error.drc_failed");
+        assert_eq!(editor.surface_errors().len(), 1);
+
+        editor.clear_surface_errors();
+        assert!(editor.surface_errors().is_empty());
     }
 
     #[test]
@@ -1395,18 +2367,76 @@ mod tests {
     }
 
     #[test]
-    fn entering_pcb_syncs_an_empty_layout_from_the_schematic() {
+    fn entering_pcb_syncs_an_empty_layout_without_touching_the_undo_stack() {
         let mut editor = NativeElectronicsEditor::empty("Test");
         editor
             .schematic
             .add_component(ElectronicComponent::resistor("10k"));
+        assert!(editor.select_component(0));
+        assert!(editor.apply_ui_command("electronics.inspector.value.commit:22k"));
+        assert!(editor.can_undo());
 
+        // Both flags are already set by the edits above, so the invariant is
+        // that the tab switch does not change them.
+        let undo_before_switch = editor.history.len();
+        let dirty_before_switch = editor.is_dirty();
         editor.set_surface(CadSurfaceKind::Pcb);
 
         assert_eq!(editor.pcb.components.len(), 1);
         assert_eq!(editor.scene.surface, CadSurfaceKind::Pcb);
-        assert!(editor.is_dirty());
+        // Entering the PCB tab is navigation, not an edit. The previous behavior
+        // recorded a history entry and marked the project dirty, so the next
+        // Ctrl+Z undid the derived synchronization instead of the user's work.
+        assert_eq!(
+            editor.history.len(),
+            undo_before_switch,
+            "the tab switch must not consume an undo slot"
+        );
+        assert_eq!(editor.is_dirty(), dirty_before_switch);
+        assert!(!editor.sync_is_stale());
+
+        // And from a clean slate the switch leaves nothing dirty at all.
+        let mut fresh = NativeElectronicsEditor::empty("Test");
+        fresh
+            .schematic
+            .add_component(ElectronicComponent::resistor("10k"));
+        fresh.set_surface(CadSurfaceKind::Pcb);
+        assert!(!fresh.is_dirty());
+        assert!(!fresh.can_undo());
+    }
+
+    #[test]
+    fn an_explicit_pcb_sync_is_an_edit_and_reports_a_clean_projection() {
+        let mut editor = NativeElectronicsEditor::empty("Test");
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("10k"));
+        editor.rebuild_scene();
+        assert!(editor.sync_is_stale());
+
+        assert!(editor.apply_ui_command("electronics.pcb.sync"));
+
+        assert!(!editor.sync_is_stale());
         assert!(editor.can_undo());
+        assert!(editor.is_dirty());
+    }
+
+    #[test]
+    fn deleting_in_the_pcb_reports_that_schematic_and_board_diverged() {
+        let mut editor = NativeElectronicsEditor::empty("Test");
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("10k"));
+        editor.set_surface(CadSurfaceKind::Pcb);
+        assert!(editor.select_component(0));
+
+        assert!(editor.delete_selected());
+
+        // The PCB placement is removed but the schematic still owns the part, so
+        // the surfaces disagree and the user is told instead of silently losing
+        // the component when returning to the schematic.
+        assert!(editor.sync_is_stale());
+        assert_eq!(editor.schematic.components.len(), 1);
     }
 
     #[test]

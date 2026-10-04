@@ -21,9 +21,30 @@ fn apply_inspector_commit(
     target: SceneNodeId,
     field: &str,
     value: &str,
-) {
+) -> Option<CommandOutput> {
     if !scene.is_valid_node(target) {
-        return;
+        return None;
+    }
+    if let Some(field) = field.strip_prefix("camera.") {
+        let key = if field == "fov_degrees" { "fov" } else { field };
+        let Some(value) = value.trim().parse::<f32>().ok().filter(|v| v.is_finite()) else {
+            return Some(CommandOutput::error(
+                "Camera lens",
+                "Enter a finite numeric value.",
+            ));
+        };
+        let command = format!(
+            "/game.camera action=set target={} {key}={value}",
+            scene.get(target).expect("live node").uuid
+        );
+        let before = scene.clone();
+        let output = apply_console_command(runtime, scene, None, &command);
+        if matches!(output.level, CommandLevel::Error) {
+            return Some(output);
+        } else {
+            runtime.record_scene_change(before, scene);
+        }
+        return None;
     }
     let parsed = value.trim().parse::<f32>().ok();
     runtime.mutate_scene(scene, |scene| {
@@ -90,6 +111,7 @@ fn apply_inspector_commit(
             _ => {}
         }
     });
+    None
 }
 
 fn parse_node_color(value: &str) -> Option<raf_core::scene::NodeColor> {
@@ -155,7 +177,7 @@ fn parse_body_type(value: &str) -> Option<raf_core::scene::RigidBodyType> {
 fn apply_console_command(
     runtime: &mut NativeEditorRuntime,
     scene: &mut SceneGraph,
-    _project: Option<&Project>,
+    project: Option<&Project>,
     raw: &str,
 ) -> CommandOutput {
     let parsed = match parse_console_input(raw) {
@@ -176,6 +198,8 @@ fn apply_console_command(
             vec![
                 "/game.describe_scene".to_string(),
                 "/game.add primitive=cube".to_string(),
+                "/game.camera action=create".to_string(),
+                "/script.compile_nodes file=nodes.ron".to_string(),
                 "/game.select name=Player".to_string(),
                 "/undo".to_string(),
                 "/redo".to_string(),
@@ -196,6 +220,13 @@ fn apply_console_command(
             viewport: viewport as &mut dyn GameViewportPort,
         };
         crate::commands::game::execute(&parsed.name, &parsed, &mut context)
+    } else if parsed.name == "script.compile_nodes" {
+        let assets = project.map(|p| p.path.join("assets"));
+        let mut context = crate::commands::script::ScriptCommandContext {
+            scene,
+            assets_root: assets.as_deref(),
+        };
+        crate::commands::script::execute(&parsed.name, &parsed, &mut context)
     } else {
         CommandOutput::error(
             "Console command",
@@ -326,7 +357,12 @@ pub(crate) fn apply_workbench_intents(
                 target,
                 field,
                 value,
-            } => apply_inspector_commit(runtime, scene, target, &field, &value),
+            } => {
+                if let Some(output) = apply_inspector_commit(runtime, scene, target, &field, &value)
+                {
+                    console_outputs.push(output);
+                }
+            }
             NativeWorkbenchIntent::Command(command) => {
                 if let Some(target) =
                     crate::panels::viewport_compass::ViewportCompassTarget::from_command(&command)
@@ -466,6 +502,29 @@ pub(crate) fn apply_workbench_intents(
                             runtime.create_primitive_under(scene, SceneNodeId(id), primitive);
                         }
                     }
+                } else if let Some(parent) = command.strip_prefix("hierarchy.create-camera:") {
+                    let parent = if parent == "root" {
+                        Some("root".to_string())
+                    } else {
+                        parent
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|id| scene.get(SceneNodeId(id)))
+                            .map(|n| n.uuid.to_string())
+                    };
+                    if let Some(parent) = parent {
+                        let before = scene.clone();
+                        let output = apply_console_command(
+                            runtime,
+                            scene,
+                            project,
+                            &format!("/game.camera action=create parent={parent}"),
+                        );
+                        if output.changed {
+                            runtime.record_scene_change(before, scene);
+                        }
+                        console_outputs.push(output);
+                    }
                 } else if command == "hierarchy.create-entity:root" {
                     runtime.create_entity(scene);
                 } else if let Some(raw_id) = command.strip_prefix("hierarchy.create-entity:") {
@@ -552,6 +611,30 @@ pub(crate) fn apply_workbench_intents(
                     };
                     if let Ok(id) = raw_id.parse::<usize>() {
                         let id = SceneNodeId(id);
+                        if key.starts_with("inspector.camera.") {
+                            let Some(node) = scene.get(id) else {
+                                continue;
+                            };
+                            let command = if key == "inspector.camera.enabled" {
+                                format!(
+                                    "/game.camera target={} action={}",
+                                    node.uuid,
+                                    if value { "add" } else { "remove" }
+                                )
+                            } else {
+                                format!(
+                                    "/game.camera target={} action=set orthographic={value}",
+                                    node.uuid
+                                )
+                            };
+                            let before = scene.clone();
+                            let output = apply_console_command(runtime, scene, project, &command);
+                            if output.changed {
+                                runtime.record_scene_change(before, scene);
+                            }
+                            console_outputs.push(output);
+                            continue;
+                        }
                         runtime.mutate_scene(scene, |scene| {
                             let Some(node) = scene.get_mut(id) else {
                                 return;
@@ -763,7 +846,8 @@ pub(crate) fn apply_workbench_intents(
                             .and_then(|_| std::fs::write(&path, ""))
                         {
                             tracing::warn!(%error, path = %path.display(), "native asset file creation failed");
-                            console_outputs.push(CommandOutput::error("Create file", error.to_string()));
+                            console_outputs
+                                .push(CommandOutput::error("Create file", error.to_string()));
                         }
                     }
                 } else if let Some(raw) = command.strip_prefix("assets.rename:") {
@@ -792,7 +876,9 @@ pub(crate) fn apply_workbench_intents(
                         }
                     }
                 } else if let Some(row) = command.strip_prefix("assets.reveal:") {
-                    if let Some(path) = project.and_then(|project| asset_absolute_path_of(&project.path, row)) {
+                    if let Some(path) =
+                        project.and_then(|project| asset_absolute_path_of(&project.path, row))
+                    {
                         if !crate::script_support::open_path_in_file_manager(&path) {
                             console_outputs.push(CommandOutput::error(
                                 "Show in file manager",
@@ -801,7 +887,9 @@ pub(crate) fn apply_workbench_intents(
                         }
                     }
                 } else if let Some(row) = command.strip_prefix("assets.open.manager:") {
-                    if let Some(path) = project.and_then(|project| asset_absolute_path_of(&project.path, row)) {
+                    if let Some(path) =
+                        project.and_then(|project| asset_absolute_path_of(&project.path, row))
+                    {
                         if !crate::script_support::open_path_in_file_manager(&path) {
                             console_outputs.push(CommandOutput::error(
                                 "Show in file manager",
@@ -810,7 +898,9 @@ pub(crate) fn apply_workbench_intents(
                         }
                     }
                 } else if let Some(row) = command.strip_prefix("assets.open.with:") {
-                    if let Some(path) = project.and_then(|project| asset_absolute_path_of(&project.path, row)) {
+                    if let Some(path) =
+                        project.and_then(|project| asset_absolute_path_of(&project.path, row))
+                    {
                         if !crate::script_support::open_with_system_dialog(&path) {
                             console_outputs.push(CommandOutput::error(
                                 "Open with",
@@ -820,14 +910,16 @@ pub(crate) fn apply_workbench_intents(
                     }
                 } else if let Some(row) = command.strip_prefix("assets.open.editor:") {
                     match project.and_then(|project| asset_absolute_path_of(&project.path, row)) {
-                        Some(path) if crate::script_support::open_script_in_external_editor(&path) => {}
+                        Some(path)
+                            if crate::script_support::open_script_in_external_editor(&path) => {}
                         _ => console_outputs.push(CommandOutput::error(
                             "Open in editor",
                             "no external editor could be launched for this asset".to_string(),
                         )),
                     }
                 } else if let Some(row) = command.strip_prefix("assets.open.yoll:") {
-                    let path = project.and_then(|project| asset_absolute_path_of(&project.path, row));
+                    let path =
+                        project.and_then(|project| asset_absolute_path_of(&project.path, row));
                     if !crate::script_support::open_in_yoll_ide(path.as_deref()) {
                         console_outputs.push(CommandOutput::error(
                             "Open in Yoll IDE",
@@ -847,10 +939,7 @@ pub(crate) fn apply_workbench_intents(
                     };
                     if let (Some(mut node), (Ok(x), Ok(y))) = (
                         raf_nodes::catalog::create(slug),
-                        (
-                            raw_x.trim().parse::<f32>(),
-                            raw_y.trim().parse::<f32>(),
-                        ),
+                        (raw_x.trim().parse::<f32>(), raw_y.trim().parse::<f32>()),
                     ) {
                         if x.is_finite() && y.is_finite() {
                             node.position = [x, y];
@@ -978,6 +1067,31 @@ pub(crate) fn apply_workbench_intents(
                     runtime.clear_graph_selection();
                 } else if command == "nodes.compile" {
                     let success = runtime.validate_node_graph();
+                    if success {
+                        match raf_nodes::runtime_compiler::to_rhai(runtime.node_graph()).and_then(
+                            |source| {
+                                let engine =
+                                    raf_script::backends::rhai_backend::create_engine(100_000);
+                                raf_script::backends::rhai_backend::compile_source(
+                                    &engine,
+                                    "session:nodes",
+                                    &source,
+                                )
+                                .map(|_| source)
+                                .map_err(|e| e.to_string())
+                            },
+                        ) {
+                            Ok(source) => console_outputs.push(CommandOutput::info(
+                                "Nodes",
+                                vec!["Runtime graph compiled; Play will execute this snapshot."
+                                    .into()],
+                                serde_json::json!({"source":source}),
+                            )),
+                            Err(error) => {
+                                console_outputs.push(CommandOutput::error("Nodes runtime", error))
+                            }
+                        }
+                    }
                     tracing::info!(
                         nodes = runtime.node_graph().nodes.len(),
                         links = runtime.node_graph().connections.len(),
@@ -1219,7 +1333,9 @@ mod tests {
         assert!(asset_absolute_path_of(root, "builtin://primitive/cube").is_none());
         assert_eq!(
             asset_absolute_path_of(root, "scripts/player.rs"),
-            Some(std::path::PathBuf::from("C:/project/assets/scripts/player.rs"))
+            Some(std::path::PathBuf::from(
+                "C:/project/assets/scripts/player.rs"
+            ))
         );
     }
 }

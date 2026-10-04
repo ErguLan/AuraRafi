@@ -1,0 +1,16 @@
+[package]
+name = "raf_runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Window-independent local game runtime"
+
+[dependencies]
+raf_nodes = { workspace = true }
+raf_core.workspace = true
+raf_script.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ron.workspace = true
+glam.workspace = true
+uuid.workspace = true

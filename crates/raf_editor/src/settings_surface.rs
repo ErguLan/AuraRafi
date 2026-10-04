@@ -37,6 +37,7 @@ pub enum SettingsSection {
     Viewport,
     Electronics,
     Scripting,
+    Runtime,
     Ai,
     Platform,
 }
@@ -48,13 +49,14 @@ impl Default for SettingsSection {
 }
 
 impl SettingsSection {
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 9] = [
         Self::Appearance,
         Self::Performance,
         Self::Editor,
         Self::Viewport,
         Self::Electronics,
         Self::Scripting,
+        Self::Runtime,
         Self::Ai,
         Self::Platform,
     ];
@@ -77,6 +79,7 @@ impl SettingsSection {
             Self::Viewport => "settings.section.viewport",
             Self::Electronics => "settings.section.electronics",
             Self::Scripting => "settings.section.scripting",
+            Self::Runtime => "settings.section.runtime",
             Self::Ai => "settings.section.ai",
             Self::Platform => "settings.section.platform",
         }
@@ -90,6 +93,7 @@ impl SettingsSection {
             Self::Viewport => "settings.viewport",
             Self::Electronics => "settings.electronics",
             Self::Scripting => "settings.scripting",
+            Self::Runtime => "runtime.settings",
             Self::Ai => "settings.ai_providers",
             Self::Platform => "settings.target_platform",
         }
@@ -103,6 +107,7 @@ impl SettingsSection {
             Self::Viewport => "settings.surface.help.viewport",
             Self::Electronics => "settings.surface.help.electronics",
             Self::Scripting => "settings.surface.help.scripting",
+            Self::Runtime => "settings.surface.help.runtime",
             Self::Ai => "settings.surface.help.ai",
             Self::Platform => "settings.surface.help.platform",
         }
@@ -112,7 +117,7 @@ impl SettingsSection {
         match self {
             Self::Appearance | Self::Performance | Self::Editor => "settings.group.general",
             Self::Viewport | Self::Electronics => "settings.group.workspace",
-            Self::Scripting | Self::Ai => "settings.group.tools",
+            Self::Scripting | Self::Runtime | Self::Ai => "settings.group.tools",
             Self::Platform => "settings.group.system",
         }
     }
@@ -195,6 +200,16 @@ impl SettingsSection {
                 "cpp",
                 "editor externo",
                 "external editor",
+            ],
+            Self::Runtime => &[
+                "runtime",
+                "play",
+                "pause",
+                "ejecucion",
+                "ventana",
+                "compilacion",
+                "instances",
+                "instancias",
             ],
             Self::Ai => &[
                 "ai",
@@ -705,6 +720,7 @@ fn section_content(
         SettingsSection::Viewport => viewport(palette, settings, open_select),
         SettingsSection::Electronics => electronics(palette, settings),
         SettingsSection::Scripting => scripting(palette, settings, open_select),
+        SettingsSection::Runtime => runtime_preferences(palette, settings, open_select),
         SettingsSection::Ai => ai(palette, settings, open_select, revealed_api_keys),
         SettingsSection::Platform => platform(palette, settings, open_select),
     }
@@ -1250,12 +1266,6 @@ fn scripting(
     open_select: Option<&str>,
 ) -> UiNode {
     card(palette, "settings.scripting")
-        .with_child(toggle_row(
-            palette,
-            "settings.script-runtime",
-            "settings.script_runtime_enabled",
-            settings.script_runtime_enabled,
-        ))
         .with_child(select_row(
             palette,
             "settings.script-language",
@@ -1271,28 +1281,94 @@ fn scripting(
             },
             open_select,
         ))
-        .with_child(toggle_row_with_description(
-            palette,
-            "settings.script-hot-reload",
-            "settings.script_hot_reload",
-            settings.script_hot_reload,
-            "settings.script_hot_reload_desc",
-        ))
-        .with_child(range_row(
-            palette,
-            "settings.script-timeout",
-            "settings.script_timeout_ms",
-            settings.script_timeout_ms as f32,
-            10.0,
-            1000.0,
-            1.0,
-            format!("{} ms", settings.script_timeout_ms),
-        ))
         .with_child(text_row(
             palette,
             "settings.script-editor",
             "settings.script_external_editor",
         ))
+}
+
+fn runtime_preferences(
+    palette: StudioUiPalette,
+    settings: &EngineSettings,
+    open_select: Option<&str>,
+) -> UiNode {
+    use raf_core::runtime_config::{RuntimeErrorPolicy, RuntimeLaunchMode};
+    let runtime = settings.runtime.normalized();
+    let mut root = card(palette, "runtime.settings")
+        .with_child(select_row(
+            palette,
+            "settings.runtime.launch",
+            "settings.runtime.launch_mode",
+            "settings.runtime.launch_mode",
+            vec![
+                UiSelectOption::new("separate", "settings.runtime.separate"),
+                UiSelectOption::new("same", "settings.runtime.same"),
+            ],
+            usize::from(runtime.launch_mode == RuntimeLaunchMode::SameWindow),
+            open_select,
+        ))
+        .with_child(select_row(
+            palette,
+            "settings.runtime.error",
+            "settings.runtime.error_policy",
+            "settings.runtime.error_policy",
+            vec![
+                UiSelectOption::new("pause", "runtime.pause"),
+                UiSelectOption::new("disable", "settings.runtime.disable_script"),
+                UiSelectOption::new("stop", "runtime.stop"),
+            ],
+            match runtime.error_policy {
+                RuntimeErrorPolicy::Pause => 0,
+                RuntimeErrorPolicy::DisableScript => 1,
+                RuntimeErrorPolicy::Stop => 2,
+            },
+            open_select,
+        ));
+    for (field, value, min, max, step) in [
+        ("max_instances", runtime.max_instances as f32, 1.0, 4.0, 1.0),
+        ("width", runtime.window_size[0] as f32, 640.0, 1920.0, 16.0),
+        ("height", runtime.window_size[1] as f32, 360.0, 1080.0, 9.0),
+        ("fps_limit", runtime.fps_limit as f32, 15.0, 120.0, 1.0),
+        (
+            "script_budget_ms",
+            runtime.script_budget_ms as f32,
+            1.0,
+            100.0,
+            1.0,
+        ),
+        (
+            "script_operation_limit",
+            runtime.script_operation_limit as f32,
+            1000.0,
+            1_000_000.0,
+            1000.0,
+        ),
+    ] {
+        let key = format!("settings.runtime.{field}");
+        root = root.with_child(range_row(
+            palette,
+            key.clone(),
+            key,
+            value,
+            min,
+            max,
+            step,
+            format!("{value:.0}"),
+        ));
+    }
+    root.with_child(toggle_row(
+        palette,
+        "settings.runtime.hot-reload",
+        "settings.runtime.hot_reload",
+        runtime.hot_reload,
+    ))
+    .with_child(toggle_row(
+        palette,
+        "settings.runtime.diagnostics",
+        "settings.runtime.diagnostics",
+        runtime.diagnostics,
+    ))
 }
 
 fn platform(
@@ -2678,7 +2754,7 @@ mod tests {
 
     #[test]
     fn settings_surface_keeps_all_legacy_sections_in_a_single_navigation_contract() {
-        assert_eq!(SettingsSection::ALL.len(), 8);
+        assert_eq!(SettingsSection::ALL.len(), 9);
         assert_eq!(
             SettingsSection::from_command("settings.section.viewport"),
             Some(SettingsSection::Viewport)

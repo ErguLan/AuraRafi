@@ -70,6 +70,15 @@ impl Framebuffer {
     }
 
     /// Write a pixel bypassing the depth test entirely, without modifying the depth buffer.
+    ///
+    /// Alpha is composited source-over instead of replacing the destination, so a
+    /// semi-transparent stroke behaves like every other translucent write in this
+    /// file and like the GPU executors, which use `BlendState::ALPHA_BLENDING`.
+    /// Overwriting here made the CPU recovery path treat alpha as binary: a grid
+    /// guide, a pending airwire or a rubber-band preview painted an opaque patch
+    /// instead of a faint one, and the "same visual semantics on GPU and CPU"
+    /// contract only held for fully opaque sources. Opaque sources are unchanged,
+    /// because a source-over blend with `a == 255` resolves to the source color.
     #[inline]
     pub fn write_pixel_no_depth(&mut self, x: u32, y: u32, r: u8, g: u8, b: u8, a: u8) -> bool {
         if x >= self.width || y >= self.height {
@@ -77,7 +86,20 @@ impl Framebuffer {
         }
 
         let idx = (y * self.width + x) as usize;
-        self.color[idx] = pack_rgba(r, g, b, a);
+        if a == u8::MAX {
+            self.color[idx] = pack_rgba(r, g, b, a);
+            return true;
+        }
+
+        let alpha = a as f32 / 255.0;
+        let inv_alpha = 1.0 - alpha;
+        let [dst_r, dst_g, dst_b, _] = unpack_rgba(self.color[idx]);
+        self.color[idx] = pack_rgba(
+            (r as f32 * alpha + dst_r as f32 * inv_alpha) as u8,
+            (g as f32 * alpha + dst_g as f32 * inv_alpha) as u8,
+            (b as f32 * alpha + dst_b as f32 * inv_alpha) as u8,
+            255,
+        );
         true
     }
 
@@ -261,5 +283,33 @@ mod tests {
         assert_eq!(fb.width(), 4);
         assert_eq!(fb.height(), 4);
         assert_eq!(fb.pixels().len(), 4 * 4 * 4);
+    }
+
+    #[test]
+    fn no_depth_write_composites_translucent_strokes() {
+        let mut fb = Framebuffer::new(1, 1);
+        fb.clear(0, 0, 255, 255);
+
+        // Half-transparent red over opaque blue must land halfway between them
+        // and leave the pixel opaque, exactly like the GPU alpha-blend path and
+        // like `blend_pixel_no_depth`.
+        assert!(fb.write_pixel_no_depth(0, 0, 255, 0, 0, 128));
+        let pixel = &fb.pixels()[0..4];
+        assert_eq!(pixel[0], 128, "red channel must dominate");
+        assert_eq!(pixel[1], 0, "green stays untouched");
+        assert!(
+            (126..=128).contains(&pixel[2]),
+            "blue must survive at roughly half strength, got {}",
+            pixel[2]
+        );
+        assert_eq!(pixel[3], 255, "a composited pixel stays opaque");
+    }
+
+    #[test]
+    fn no_depth_write_keeps_opaque_strokes_replacing_the_destination() {
+        let mut fb = Framebuffer::new(1, 1);
+        fb.clear(0, 0, 255, 255);
+        assert!(fb.write_pixel_no_depth(0, 0, 255, 0, 0, 255));
+        assert_eq!(&fb.pixels()[0..4], &[255, 0, 0, 255]);
     }
 }

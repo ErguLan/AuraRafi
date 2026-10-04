@@ -274,6 +274,14 @@ fn empty_context_menu(
         ));
     menu = menu.with_child(menu_item(
         palette,
+        "hierarchy.empty-context-menu.camera",
+        "camera.create",
+        UiIconId::Camera,
+        "hierarchy.create-camera:root",
+        false,
+    ));
+    menu = menu.with_child(menu_item(
+        palette,
         "hierarchy.empty-context-menu.entity",
         "app.create_entity",
         UiIconId::Node,
@@ -1302,6 +1310,9 @@ fn compact_body_style(color: [u8; 4]) -> UiTextStyle {
 }
 
 fn row_icon(row: &HierarchyRow) -> UiIconId {
+    if row.is_camera {
+        return UiIconId::Camera;
+    }
     if row.is_folder {
         return UiIconId::Folder;
     }
@@ -1503,6 +1514,15 @@ fn context_menu(
     // Group 3: Structure and Hierarchy
     menu = menu.with_child(context_menu_item(
         palette,
+        "hierarchy.context-menu.camera",
+        "camera.create",
+        Some(UiIconId::Camera),
+        format!("hierarchy.create-camera:{id}"),
+        false,
+        false,
+    ));
+    menu = menu.with_child(context_menu_item(
+        palette,
         "hierarchy.context-menu.entity",
         "app.create_entity",
         Some(UiIconId::Entity),
@@ -1571,7 +1591,7 @@ const CONTEXT_MENU_PADDING: f32 = 6.0;
 const CONTEXT_MENU_GAP: f32 = 2.0;
 const CONTEXT_MENU_TITLE_HEIGHT: f32 = 26.0;
 const CONTEXT_MENU_BUTTON_HEIGHT: f32 = 26.0;
-const CONTEXT_MENU_BASE_BUTTON_COUNT: usize = 12;
+const CONTEXT_MENU_BASE_BUTTON_COUNT: usize = 13;
 const CONTEXT_MENU_SEPARATOR_COUNT: usize = 3;
 const CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 5.0;
 
@@ -1580,7 +1600,7 @@ pub(crate) fn empty_context_menu_rect(
     can_paste: bool,
     surface_size: [f32; 2],
 ) -> raf_ui::UiRect {
-    let button_count = 3 + usize::from(can_paste);
+    let button_count = 4 + usize::from(can_paste);
     let separator_height = if can_paste {
         CONTEXT_MENU_SEPARATOR_HEIGHT + CONTEXT_MENU_GAP
     } else {
@@ -2109,6 +2129,7 @@ mod tests {
             name: "node".to_string(),
             primitive,
             is_folder,
+            is_camera: false,
             visible: true,
             locked: false,
             has_children: false,
@@ -2134,6 +2155,9 @@ mod tests {
         );
         assert_eq!(row_icon(&row(Primitive::Empty, false)), UiIconId::Node);
         assert_eq!(row_icon(&row(Primitive::Cube, true)), UiIconId::Folder);
+        let mut camera_part = row(Primitive::Cube, false);
+        camera_part.is_camera = true;
+        assert_eq!(row_icon(&camera_part), UiIconId::Camera);
     }
 
     #[test]

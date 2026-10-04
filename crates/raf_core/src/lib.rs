@@ -24,6 +24,7 @@ pub mod i18n;
 pub mod input;
 pub mod ipc;
 pub mod project;
+pub mod runtime_config;
 pub mod save_system;
 pub mod scene;
 pub mod session;

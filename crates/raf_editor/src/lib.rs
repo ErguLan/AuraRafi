@@ -34,6 +34,7 @@ pub(crate) mod native_attached_executor;
 pub(crate) mod native_editor_commands;
 pub mod native_editor_runtime;
 pub mod native_electronics;
+pub mod native_game_runtime;
 pub mod native_input;
 pub(crate) mod native_project_controller;
 pub mod native_studio;

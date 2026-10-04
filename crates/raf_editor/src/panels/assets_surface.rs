@@ -9,9 +9,9 @@ use std::path::Path;
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAccessibilityRole, UiAction, UiAlign, UiCompactMode, UiEventBinding,
     UiEventKind, UiFlow, UiFontWeight, UiIcon, UiIconId, UiIconSize, UiJustify, UiLayout, UiNode,
-    UiNodeKind, UiOverflow, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle, UiStylePatch, UiStyleRule,
-    UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurface, UiSurfaceMaterial, UiTextOverflow,
-    UiTextRole, UiTextStyle,
+    UiNodeKind, UiOverflow, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle, UiStylePatch,
+    UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurface, UiSurfaceMaterial,
+    UiTextOverflow, UiTextRole, UiTextStyle,
 };
 
 use crate::panels::editor_bottom_dock_styles::bottom_style_sheet;
@@ -333,7 +333,13 @@ pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
         .with_class("bottom-panel")
         .with_layout(UiLayout::fill(UiFlow::Row))
         .with_style(palette.panel_style())
-        .with_child(asset_sidebar(palette, language, filter, script_extension, rows.len()))
+        .with_child(asset_sidebar(
+            palette,
+            language,
+            filter,
+            script_extension,
+            rows.len(),
+        ))
         .with_child(
             UiNode::new("assets.content", UiNodeKind::Panel)
                 .with_class("assets-content")
@@ -386,8 +392,7 @@ fn asset_toolbar(
             align_items: UiAlign::Center,
             gap: 6.0,
             padding: UiSpacing::xy(10.0, 3.0),
-            ..UiLayout::fixed(0.0, ASSET_TOOLBAR_HEIGHT)
-                .with_width_mode(UiSizeMode::Fill)
+            ..UiLayout::fixed(0.0, ASSET_TOOLBAR_HEIGHT).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
             UiNode::new("assets.create-trigger", UiNodeKind::Button)
@@ -425,7 +430,10 @@ fn asset_toolbar(
                 .with_accessibility_label_key("app.refresh_assets")
                 .with_layout(UiLayout::fixed(26.0, 26.0))
                 .focusable()
-                .with_event(UiEventBinding::command(UiEventKind::Click, "assets.refresh"))
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    "assets.refresh",
+                ))
                 .with_event(UiEventBinding::command(
                     UiEventKind::KeyPress("enter".to_string()),
                     "assets.refresh",
@@ -455,16 +463,22 @@ fn asset_toolbar(
                 .with_accessibility_label_key(sort.label_key())
                 .with_layout(UiLayout::fit_content().with_text_safe_area(true))
                 .focusable()
-                .with_event(UiEventBinding::command(UiEventKind::Click, "assets.sort.toggle")),
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    "assets.sort.toggle",
+                )),
         )
         .with_child(
             UiNode::new("assets.view", UiNodeKind::Button)
                 .with_class("asset-action")
-                .with_icon(UiIcon::new(if view == AssetViewMode::Grid {
-                    UiIconId::Menu
-                } else {
-                    UiIconId::Grid
-                }).with_size(UiIconSize::Small))
+                .with_icon(
+                    UiIcon::new(if view == AssetViewMode::Grid {
+                        UiIconId::Menu
+                    } else {
+                        UiIconId::Grid
+                    })
+                    .with_size(UiIconSize::Small),
+                )
                 .with_tooltip_key(if view == AssetViewMode::Grid {
                     "app.assets_view_list"
                 } else {
@@ -477,7 +491,10 @@ fn asset_toolbar(
                 })
                 .with_layout(UiLayout::fixed(26.0, 26.0))
                 .focusable()
-                .with_event(UiEventBinding::command(UiEventKind::Click, "assets.view.toggle")),
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    "assets.view.toggle",
+                )),
         )
         .with_child(
             UiNode::new("assets.open-folder", UiNodeKind::Button)
@@ -626,7 +643,12 @@ fn status_line(
     line
 }
 
-fn empty_state(palette: StudioUiPalette, no_rows: bool, query: &str, filter: AssetFilter) -> UiNode {
+fn empty_state(
+    palette: StudioUiPalette,
+    no_rows: bool,
+    query: &str,
+    filter: AssetFilter,
+) -> UiNode {
     let tokens = palette.tokens();
     let title_key = if !query.trim().is_empty() {
         "app.search_no_results"
@@ -645,13 +667,15 @@ fn empty_state(palette: StudioUiPalette, no_rows: bool, query: &str, filter: Ass
         })
         .with_child(
             UiNode::new("assets.empty.icon", UiNodeKind::Label)
-                .with_icon(UiIcon::new(if filter == AssetFilter::Scripts {
-                    UiIconId::Script
-                } else {
-                    UiIconId::Assets
-                })
-                .with_size(UiIconSize::Custom(28))
-                .with_tint(tokens.text_muted))
+                .with_icon(
+                    UiIcon::new(if filter == AssetFilter::Scripts {
+                        UiIconId::Script
+                    } else {
+                        UiIconId::Assets
+                    })
+                    .with_size(UiIconSize::Custom(28))
+                    .with_tint(tokens.text_muted),
+                )
                 .with_layout(UiLayout::fit_content()),
         )
         .with_child(
@@ -838,7 +862,11 @@ fn asset_category_row(
         .with_icon(
             UiIcon::new(icon)
                 .with_size(UiIconSize::Small)
-                .with_tint(if active { tokens.accent } else { tokens.text_muted }),
+                .with_tint(if active {
+                    tokens.accent
+                } else {
+                    tokens.text_muted
+                }),
         )
         .with_text_key(label_key)
         .with_text_overflow(UiTextOverflow::Ellipsis)
@@ -908,7 +936,10 @@ fn asset_card(
         .with_accessibility_selected(selected)
         .focusable()
         .with_event(UiEventBinding::command(UiEventKind::Click, select_command))
-        .with_event(UiEventBinding::command(UiEventKind::DoubleClick, open_command.clone()))
+        .with_event(UiEventBinding::command(
+            UiEventKind::DoubleClick,
+            open_command.clone(),
+        ))
         .with_event(UiEventBinding::command(
             UiEventKind::KeyPress("enter".to_string()),
             open_command.clone(),
@@ -1260,14 +1291,17 @@ fn selection_action_bar(palette: StudioUiPalette, row: &str, highlight: Option<&
     }
     for (index, (icon, label_key, command)) in actions.into_iter().enumerate() {
         bar = bar.with_child(
-            UiNode::new(format!("assets.selection.action.{index}"), UiNodeKind::Button)
-                .with_class("asset-card-action")
-                .with_layout(UiLayout::fixed(24.0, 24.0))
-                .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
-                .with_tooltip_key(label_key)
-                .with_accessibility_label_key(label_key)
-                .focusable()
-                .with_event(UiEventBinding::command(UiEventKind::Click, command)),
+            UiNode::new(
+                format!("assets.selection.action.{index}"),
+                UiNodeKind::Button,
+            )
+            .with_class("asset-card-action")
+            .with_layout(UiLayout::fixed(24.0, 24.0))
+            .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
+            .with_tooltip_key(label_key)
+            .with_accessibility_label_key(label_key)
+            .focusable()
+            .with_event(UiEventBinding::command(UiEventKind::Click, command)),
         );
     }
     bar
@@ -1283,7 +1317,10 @@ fn asset_meta(row: &str) -> (Option<String>, Option<String>) {
         .extension()
         .and_then(|extension| extension.to_str())
         .map(str::to_ascii_lowercase);
-    if extension.as_deref().is_some_and(|extension| is_script_file(&format!("asset.{extension}"))) {
+    if extension
+        .as_deref()
+        .is_some_and(|extension| is_script_file(&format!("asset.{extension}")))
+    {
         return (
             Some(
                 extension
@@ -1428,7 +1465,10 @@ pub fn build_assets_create_menu_surface(palette: StudioUiPalette) -> UiSurface {
     overlay_surface("editor.assets.create-menu", palette, root)
 }
 
-pub fn build_assets_script_popover_surface(palette: StudioUiPalette, script_name: &str) -> UiSurface {
+pub fn build_assets_script_popover_surface(
+    palette: StudioUiPalette,
+    script_name: &str,
+) -> UiSurface {
     let tokens = palette.tokens();
     let root = overlay_popover_root(palette, "assets.script-popover", "app.create_script")
         .with_child(
@@ -1566,7 +1606,8 @@ pub fn build_assets_file_popover_surface(palette: StudioUiPalette, file_name: &s
 
 pub fn build_assets_primitive_popover_surface(palette: StudioUiPalette) -> UiSurface {
     let tokens = palette.tokens();
-    let mut root = overlay_popover_root(palette, "assets.primitive-popover", "app.create_primitive");
+    let mut root =
+        overlay_popover_root(palette, "assets.primitive-popover", "app.create_primitive");
     let mut grid =
         UiNode::new("assets.primitive-popover.grid", UiNodeKind::Toolbar).with_layout(UiLayout {
             flow: UiFlow::Row,
@@ -1691,7 +1732,12 @@ pub fn build_assets_open_modal_surface(
     absolute_path: &str,
 ) -> UiSurface {
     let root = modal_root(palette, "assets.open-modal", "app.assets_open_title")
-        .with_child(asset_file_header(palette, "assets.open-modal", row, absolute_path))
+        .with_child(asset_file_header(
+            palette,
+            "assets.open-modal",
+            row,
+            absolute_path,
+        ))
         .with_child(modal_option(
             palette,
             "assets.open-modal.primary",
@@ -1788,10 +1834,7 @@ pub fn build_assets_rename_modal_surface(palette: StudioUiPalette, row: &str) ->
             palette,
             "assets.rename-modal",
             None,
-            Some((
-                &format!("assets.rename.confirm:{row}"),
-                "app.confirm",
-            )),
+            Some((&format!("assets.rename.confirm:{row}"), "app.confirm")),
         ));
     overlay_surface("editor.assets.rename-modal", palette, root)
 }
@@ -1832,12 +1875,7 @@ pub fn build_assets_delete_modal_surface(palette: StudioUiPalette, row: &str) ->
 
 /// File identity block at the top of the open modal: icon tile, name and the
 /// real path the action will use.
-fn asset_file_header(
-    palette: StudioUiPalette,
-    id: &str,
-    row: &str,
-    absolute_path: &str,
-) -> UiNode {
+fn asset_file_header(palette: StudioUiPalette, id: &str, row: &str, absolute_path: &str) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new(format!("{id}.file"), UiNodeKind::Panel)
         .with_class("assets-modal-file")
@@ -1913,8 +1951,7 @@ fn modal_option(
             // Explicit width: a Fill child inside a row has no assigned
             // main-axis extent to resolve against and would collapse,
             // ellipsizing both the label and its hint.
-            ..UiLayout::fixed(ASSETS_MODAL_TEXT_WIDTH, 0.0)
-                .with_height_mode(UiSizeMode::FitContent)
+            ..UiLayout::fixed(ASSETS_MODAL_TEXT_WIDTH, 0.0).with_height_mode(UiSizeMode::FitContent)
         })
         .with_child(
             UiNode::new(format!("{id}.label"), UiNodeKind::Label)
@@ -1995,7 +2032,10 @@ fn modal_option(
     option
         .with_accessibility_label_key(label_key)
         .focusable()
-        .with_event(UiEventBinding::command(UiEventKind::Click, command.to_string()))
+        .with_event(UiEventBinding::command(
+            UiEventKind::Click,
+            command.to_string(),
+        ))
         .with_event(UiEventBinding::command(
             UiEventKind::KeyPress("enter".to_string()),
             command.to_string(),
@@ -2004,12 +2044,7 @@ fn modal_option(
 
 /// Rounded icon plate. Icons live in child nodes because a node level icon is
 /// painted inside the node content box instead of the child flow.
-fn icon_tile(
-    palette: StudioUiPalette,
-    id: &str,
-    icon: UiIconId,
-    size: UiIconSize,
-) -> UiNode {
+fn icon_tile(palette: StudioUiPalette, id: &str, icon: UiIconId, size: UiIconSize) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new(id, UiNodeKind::Label)
         .with_class("assets-icon-tile")
@@ -2087,8 +2122,8 @@ fn modal_footer(
     clipboard: Option<(&str, &str)>,
     primary: Option<(&str, &str)>,
 ) -> UiNode {
-    let mut footer = UiNode::new(format!("{id}.footer"), UiNodeKind::Toolbar)
-        .with_layout(UiLayout {
+    let mut footer =
+        UiNode::new(format!("{id}.footer"), UiNodeKind::Toolbar).with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
             gap: 6.0,
@@ -2236,7 +2271,10 @@ fn menu_item(
     }
     item.focusable()
         .with_accessibility_label_key(label_key)
-        .with_event(UiEventBinding::command(UiEventKind::Click, command.to_string()))
+        .with_event(UiEventBinding::command(
+            UiEventKind::Click,
+            command.to_string(),
+        ))
         .with_event(UiEventBinding::command(
             UiEventKind::KeyPress("enter".to_string()),
             command.to_string(),
@@ -2333,133 +2371,133 @@ pub fn assets_overlay_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
     let hovered = UiStyleRuleState::Hovered;
     let mut rules = bottom_style_sheet(palette).rules;
     rules.extend([
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-backdrop".to_string()),
-                UiStylePatch {
-                    fill: Some([6, 10, 16, 140]),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-menu".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    text: Some(tokens.text),
-                    border_width: Some(1.0),
-                    radius: Some(6.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-menu-item".to_string()),
-                UiStylePatch {
-                    fill: Some([0, 0, 0, 0]),
-                    border: Some([0, 0, 0, 0]),
-                    border_width: Some(0.0),
-                    radius: Some(4.0),
-                    text: Some(tokens.text),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-menu-item".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.accent),
-                    border_width: Some(1.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-modal".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
-                    text: Some(tokens.text),
-                    border_width: Some(1.0),
-                    radius: Some(8.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-modal-file".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-modal-option".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface),
-                    border: Some(tokens.border),
-                    text: Some(tokens.text),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-modal-option".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.surface_alt),
-                    border: Some(tokens.accent),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-modal-option-primary".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent),
-                    border: Some(tokens.accent_hot),
-                    border_width: Some(1.0),
-                    radius: Some(4.0),
-                    text: Some([255, 255, 255, 255]),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-modal-option-primary".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent_hot),
-                    border: Some(tokens.accent_hot),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(hovered),
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-modal-confirm".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent),
-                    border: Some(tokens.accent_hot),
-                    border_width: Some(1.0),
-                    radius: Some(3.0),
-                    text: Some([255, 255, 255, 255]),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(always),
-            UiStyleRule::new(
-                UiStyleSelector::Class("assets-modal-confirm".to_string()),
-                UiStylePatch {
-                    fill: Some(tokens.accent_hot),
-                    ..UiStylePatch::default()
-                },
-            )
-            .when(hovered),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-backdrop".to_string()),
+            UiStylePatch {
+                fill: Some([6, 10, 16, 140]),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(always),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-menu".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface_raised),
+                border: Some(tokens.accent),
+                text: Some(tokens.text),
+                border_width: Some(1.0),
+                radius: Some(6.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(always),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-menu-item".to_string()),
+            UiStylePatch {
+                fill: Some([0, 0, 0, 0]),
+                border: Some([0, 0, 0, 0]),
+                border_width: Some(0.0),
+                radius: Some(4.0),
+                text: Some(tokens.text),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(always),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-menu-item".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface_alt),
+                border: Some(tokens.accent),
+                border_width: Some(1.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(hovered),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-modal".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface_raised),
+                border: Some(tokens.accent),
+                text: Some(tokens.text),
+                border_width: Some(1.0),
+                radius: Some(8.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(always),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-modal-file".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface),
+                border: Some(tokens.border),
+                border_width: Some(1.0),
+                radius: Some(4.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(always),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-modal-option".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface),
+                border: Some(tokens.border),
+                text: Some(tokens.text),
+                border_width: Some(1.0),
+                radius: Some(4.0),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(always),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-modal-option".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.surface_alt),
+                border: Some(tokens.accent),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(hovered),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-modal-option-primary".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.accent),
+                border: Some(tokens.accent_hot),
+                border_width: Some(1.0),
+                radius: Some(4.0),
+                text: Some([255, 255, 255, 255]),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(always),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-modal-option-primary".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.accent_hot),
+                border: Some(tokens.accent_hot),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(hovered),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-modal-confirm".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.accent),
+                border: Some(tokens.accent_hot),
+                border_width: Some(1.0),
+                radius: Some(3.0),
+                text: Some([255, 255, 255, 255]),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(always),
+        UiStyleRule::new(
+            UiStyleSelector::Class("assets-modal-confirm".to_string()),
+            UiStylePatch {
+                fill: Some(tokens.accent_hot),
+                ..UiStylePatch::default()
+            },
+        )
+        .when(hovered),
     ]);
     UiStyleSheet { rules }
 }
@@ -2584,9 +2622,7 @@ pub fn visible_asset_rows<'a>(
     let mut filtered: Vec<&String> = rows
         .iter()
         .filter(|row| asset_matches(row.as_str(), query, filter))
-        .filter(|row| {
-            asset_matches_script_extension(row.as_str(), filter, script_extension)
-        })
+        .filter(|row| asset_matches_script_extension(row.as_str(), filter, script_extension))
         .collect();
     sort_asset_rows(&mut filtered, sort);
     filtered
@@ -2775,7 +2811,10 @@ mod tests {
         sort_asset_rows(&mut rows, AssetSort::NameDesc);
         assert_eq!(rows[0], "builtin://primitive/cube");
         assert_eq!(rows[1], "scripts/zeta.rs");
-        assert_eq!(rows.last().map(|row| row.as_str()), Some("scripts/alpha.rs"));
+        assert_eq!(
+            rows.last().map(|row| row.as_str()),
+            Some("scripts/alpha.rs")
+        );
     }
 
     #[test]
@@ -2804,7 +2843,10 @@ mod tests {
             asset_meta("scripts/player.rs"),
             (Some("RS".to_string()), None)
         );
-        assert_eq!(asset_meta("models/tree.glb"), (None, Some("models".to_string())));
+        assert_eq!(
+            asset_meta("models/tree.glb"),
+            (None, Some("models".to_string()))
+        );
         // Built-in rows are authoring shortcuts, so they show no file meta.
         assert_eq!(asset_meta("builtin://primitive/cube"), (None, None));
     }
@@ -2915,21 +2957,34 @@ mod tests {
 
         let backdrop = build_assets_backdrop_surface(palette);
         assert_eq!(backdrop.id, "editor.assets.backdrop");
-        assert!(build_assets_open_modal_surface(palette, "scripts/player.rs", "assets/scripts/player.rs")
-            .style_sheet
-            .rules
-            .iter()
-            .any(|rule| rule.selector == UiStyleSelector::Class("assets-modal".to_string())));
-        assert!(build_assets_context_menu_surface(palette, "scripts/player.rs", false, "assets/scripts/player.rs")
-            .root
-            .find("assets.context.delete")
-            .is_some());
+        assert!(build_assets_open_modal_surface(
+            palette,
+            "scripts/player.rs",
+            "assets/scripts/player.rs"
+        )
+        .style_sheet
+        .rules
+        .iter()
+        .any(|rule| rule.selector == UiStyleSelector::Class("assets-modal".to_string())));
+        assert!(build_assets_context_menu_surface(
+            palette,
+            "scripts/player.rs",
+            false,
+            "assets/scripts/player.rs"
+        )
+        .root
+        .find("assets.context.delete")
+        .is_some());
     }
 
     #[test]
     fn the_open_modal_exposes_the_four_documented_ways_to_open_a_row() {
         let palette = StudioUiPalette::IndustrialDark;
-        let modal = build_assets_open_modal_surface(palette, "scripts/player.rs", "assets/scripts/player.rs");
+        let modal = build_assets_open_modal_surface(
+            palette,
+            "scripts/player.rs",
+            "assets/scripts/player.rs",
+        );
         for id in [
             "assets.open-modal.primary",
             "assets.open-modal.editor",
