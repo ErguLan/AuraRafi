@@ -39,7 +39,7 @@ impl AgentMode {
         match self {
             Self::Inspect => "Reads native project state without exposing mutation tools.",
             Self::Plan => "Reads normally and previews mutations without changing the project.",
-            Self::Active => "Executes commands immediately. Faster, but review the risk warning.",
+            Self::Active => "Executes commands immediately. Faster, but review the risk warning. (Inspect reads/verifies, Plan previews in a sandbox, and Active applies through the shared command gateway.)",
         }
     }
 
@@ -48,7 +48,7 @@ impl AgentMode {
             Self::Inspect => "Lee el estado nativo sin exponer herramientas de mutacion.",
             Self::Plan => "Lee normalmente y previsualiza cambios sin modificar el proyecto.",
             Self::Active => {
-                "Ejecuta comandos inmediatamente. Mas rapido, pero revisa la advertencia de riesgo."
+                "Ejecuta comandos inmediatamente. Mas rapido, pero revisa la advertencia de riesgo. (Inspeccionar lee/verifica, Plan previsualiza en sandbox y Activo aplica mediante el command gateway compartido.)"
             }
         }
     }
@@ -200,5 +200,27 @@ impl AiProviderConfig {
 impl Default for AiProviderConfig {
     fn default() -> Self {
         Self::for_provider(AiProvider::OpenRouter)
+    }
+}
+/// Optional, user-trusted external studio. No application is bundled or selected.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct ExternalAssetStudio {
+    pub enabled: bool,
+    pub repository_url: String,
+    pub directory: String,
+    pub program: String,
+    pub entry_point: String,
+}
+
+impl Default for ExternalAssetStudio {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            repository_url: String::new(),
+            directory: String::new(),
+            program: "node".to_string(),
+            entry_point: String::new(),
+        }
     }
 }

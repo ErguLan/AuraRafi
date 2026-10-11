@@ -1024,6 +1024,13 @@ fn editor(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
         ))
         .with_child(toggle_row_with_key(
             palette,
+            "settings.hierarchy-script-links",
+            "settings.hierarchy_script_links",
+            "settings.hierarchy_show_script_links",
+            settings.hierarchy_show_script_links,
+        ))
+        .with_child(toggle_row_with_key(
+            palette,
             "settings.hierarchy-visibility",
             "settings.hierarchy_visibility",
             "settings.hierarchy_show_visibility",
@@ -1520,6 +1527,17 @@ fn ai(
         );
     }
 
+    root = root
+        .with_child(group_label(palette, "settings.external_studio.title"))
+        .with_child(toggle_row_with_description(palette, "settings.external-studio.enabled",
+            "settings.external_studio.enabled", settings.external_asset_studio.enabled,
+            "settings.external_studio.description"));
+    for field in ["repository_url", "directory", "program", "entry_point"] {
+        if !settings.external_asset_studio.enabled { break; }
+        root = root.with_child(ai_provider_text_row(palette, &format!("settings.external-studio.{field}"),
+            &format!("settings.external_studio.{field}"), &format!("settings.external_studio.{field}"),
+            false, None, None));
+    }
     root = root
         .with_child(group_label(palette, "settings.group.agent"))
         .with_child(select_row(

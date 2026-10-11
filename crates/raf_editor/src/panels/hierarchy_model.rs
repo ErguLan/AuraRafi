@@ -3,6 +3,7 @@
 //! The scene graph remains the source of truth. This module only caches the
 //! ordered, filtered presentation rows needed by the Hierarchy surface.
 
+use crate::script_relationships::{ScriptLink, ScriptLinks};
 use raf_core::scene::{Primitive, SceneGraph, SceneNodeId};
 use raf_ui::UiVirtualRange;
 
@@ -21,11 +22,14 @@ pub struct HierarchyRow {
     pub locked: bool,
     pub has_children: bool,
     pub expanded: bool,
+    /// Presentation-only child; id is its owning entity, not a selectable scene id.
+    pub script_link: Option<(usize, ScriptLink)>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct HierarchyView {
     pub total_rows: usize,
+    pub entity_rows: usize,
     pub visible_start: usize,
     pub top_spacer: f32,
     pub bottom_spacer: f32,
@@ -39,6 +43,8 @@ pub struct HierarchyModel {
     query: String,
     show_hidden: bool,
     needs_rebuild: bool,
+    script_links: ScriptLinks,
+    entity_rows: usize,
 }
 
 impl Default for HierarchyModel {
@@ -49,6 +55,8 @@ impl Default for HierarchyModel {
             query: String::new(),
             show_hidden: false,
             needs_rebuild: true,
+            script_links: ScriptLinks::new(),
+            entity_rows: 0,
         }
     }
 }
@@ -100,6 +108,7 @@ impl HierarchyModel {
         let rows = self.rows[range.start..range.end].to_vec();
         HierarchyView {
             total_rows: self.rows.len(),
+            entity_rows: self.entity_rows,
             visible_start: range.start,
             top_spacer: range.start as f32 * row_height,
             bottom_spacer: self.rows.len().saturating_sub(range.end) as f32 * row_height,
@@ -108,7 +117,37 @@ impl HierarchyModel {
     }
 
     pub fn row_ids(&self) -> impl Iterator<Item = SceneNodeId> + '_ {
-        self.rows.iter().map(|row| row.id)
+        self.rows
+            .iter()
+            .filter(|row| row.script_link.is_none())
+            .map(|row| row.id)
+    }
+
+    pub fn row_position(&self, id: SceneNodeId) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| row.script_link.is_none() && row.id == id)
+    }
+
+    pub fn set_script_links(&mut self, links: ScriptLinks) -> bool {
+        if self.script_links == links {
+            return false;
+        }
+        self.script_links = links;
+        self.invalidate();
+        true
+    }
+
+    pub fn script_link(&self, owner: SceneNodeId, index: usize) -> Option<&ScriptLink> {
+        self.script_links.get(&owner)?.get(index)
+    }
+
+    fn script_matches(&self, id: SceneNodeId) -> bool {
+        self.script_links.get(&id).is_some_and(|links| {
+            links
+                .iter()
+                .any(|link| link.path.to_ascii_lowercase().contains(&self.query))
+        })
     }
 
     pub fn toggle_expanded(&mut self, id: SceneNodeId) {
@@ -157,6 +196,11 @@ impl HierarchyModel {
         for &root in scene.roots() {
             self.append_node(scene, root, 0, false);
         }
+        self.entity_rows = self
+            .rows
+            .iter()
+            .filter(|row| row.script_link.is_none())
+            .count();
         self.needs_rebuild = false;
     }
 
@@ -177,10 +221,11 @@ impl HierarchyModel {
         let name_matches =
             self.query.is_empty() || node.name.to_ascii_lowercase().contains(self.query.as_str());
         let descendant_matches = !self.query.is_empty()
-            && node
-                .children
-                .iter()
-                .any(|child| self.matches_descendant(scene, *child));
+            && (self.script_matches(id)
+                || node
+                    .children
+                    .iter()
+                    .any(|child| self.matches_descendant(scene, *child)));
         let visible_by_filter =
             self.query.is_empty() || name_matches || descendant_matches || ancestor_match;
         let visible_by_hidden =
@@ -199,11 +244,39 @@ impl HierarchyModel {
             is_camera: node.game_camera.is_some(),
             visible: node.visible,
             locked: node.locked,
-            has_children: !node.children.is_empty(),
+            has_children: !node.children.is_empty()
+                || self
+                    .script_links
+                    .get(&id)
+                    .is_some_and(|links| !links.is_empty()),
             expanded,
+            script_link: None,
         });
 
         if expanded || !self.query.is_empty() {
+            if let Some(links) = self.script_links.get(&id) {
+                for (index, link) in links.iter().enumerate() {
+                    if self.query.is_empty()
+                        || name_matches
+                        || ancestor_match
+                        || link.path.to_ascii_lowercase().contains(&self.query)
+                    {
+                        self.rows.push(HierarchyRow {
+                            id,
+                            depth: depth + 1,
+                            name: crate::script_support::script_file_name(&link.path),
+                            primitive: Primitive::Empty,
+                            is_folder: false,
+                            is_camera: false,
+                            visible: node.visible,
+                            locked: false,
+                            has_children: false,
+                            expanded: false,
+                            script_link: Some((index, link.clone())),
+                        });
+                    }
+                }
+            }
             for &child in &node.children {
                 self.append_node(scene, child, depth + 1, name_matches || ancestor_match);
             }
@@ -219,7 +292,9 @@ impl HierarchyModel {
             return false;
         }
         if self.show_hidden || node.visible {
-            if node.name.to_ascii_lowercase().contains(self.query.as_str()) {
+            if node.name.to_ascii_lowercase().contains(self.query.as_str())
+                || self.script_matches(id)
+            {
                 return true;
             }
         }
@@ -243,6 +318,47 @@ impl HierarchyModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn script_children_are_virtual_searchable_collapsible_and_excluded_from_selection() {
+        let mut scene = SceneGraph::new();
+        let first = scene.add_root("First");
+        let second = scene.add_root("Second");
+        let original = scene.document_revision();
+        let mut model = HierarchyModel::default();
+        let link = ScriptLink {
+            path: "scripts/power.rhai".into(),
+            kind: crate::script_relationships::ScriptLinkKind::Reference,
+        };
+        model.set_script_links([(first, vec![link.clone()])].into_iter().collect());
+        let view = model.refresh(&scene, "", false, 0.0, 200.0, 26.0);
+        assert_eq!(view.total_rows, 3);
+        assert_eq!(view.entity_rows, 2);
+        assert_eq!(model.row_ids().collect::<Vec<_>>(), vec![first, second]);
+        assert_eq!(model.row_position(second), Some(2));
+        assert!(scene.get(first).unwrap().children.is_empty());
+        assert_eq!(scene.document_revision(), original);
+        model.toggle_expanded(first);
+        assert_eq!(
+            model
+                .refresh(&scene, "", false, 0.0, 200.0, 26.0)
+                .total_rows,
+            2
+        );
+        assert_eq!(
+            model
+                .refresh(&scene, "power.rhai", false, 0.0, 200.0, 26.0)
+                .total_rows,
+            2
+        );
+        model.set_script_links(ScriptLinks::new());
+        assert_eq!(
+            model
+                .refresh(&scene, "", false, 0.0, 200.0, 26.0)
+                .total_rows,
+            2
+        );
+    }
 
     #[test]
     fn projection_keeps_hierarchy_order_and_virtualizes_rows() {

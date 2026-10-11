@@ -1,8 +1,8 @@
 //! Asset-generation commands backed by the isolated Python worker.
 
 use raf_ai::{
-    AssetImageGenerationMode, AssetImageGenerationQueue, AssetImageJobStatus, AssetImageRequest,
-    AssetImageSize, AssetLocalPngStyle,
+    AssetImageGenerationMode, AssetImageGenerationQueue, AssetImageJobStatus, AssetImageProvider,
+    AssetImageRequest, AssetImageSize, AssetLocalPngStyle,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -13,6 +13,7 @@ use crate::commands::parser::ParsedCommand;
 pub struct AssetCommandContext<'a> {
     pub project_root: Option<&'a std::path::Path>,
     pub image_queue: &'a mut AssetImageGenerationQueue,
+    pub provider: Option<&'a AssetImageProvider>,
 }
 
 pub fn execute(
@@ -125,7 +126,7 @@ fn start_generation(
         return CommandOutput::error(title, "No active project.");
     };
     let is_local = request.generation_mode == AssetImageGenerationMode::LocalPng;
-    match ctx.image_queue.start(project_root, request) {
+    match enqueue_image(project_root, ctx.image_queue, ctx.provider, request) {
         Ok(job_id) => CommandOutput::info(
             title,
             vec![
@@ -138,6 +139,21 @@ fn start_generation(
         ),
         Err(error) => CommandOutput::error(title, error),
     }
+}
+
+/// Shared image command boundary for the console and the native Agent.
+pub(crate) fn enqueue_image(
+    project_root: &std::path::Path,
+    queue: &mut AssetImageGenerationQueue,
+    provider: Option<&AssetImageProvider>,
+    request: AssetImageRequest,
+) -> Result<Uuid, String> {
+    if request.generation_mode == AssetImageGenerationMode::Remote {
+        if let Some(provider) = provider {
+            return queue.start_with_provider(project_root, request, provider);
+        }
+    }
+    queue.start(project_root, request)
 }
 
 fn image_status(command: &ParsedCommand, ctx: &mut AssetCommandContext<'_>) -> CommandOutput {
@@ -209,6 +225,7 @@ mod tests {
         let mut ctx = AssetCommandContext {
             project_root: None,
             image_queue: &mut queue,
+            provider: None,
         };
         assert_eq!(
             execute("asset.generate_image", &command, &mut ctx).changed,

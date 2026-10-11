@@ -35,6 +35,7 @@ struct NativeGameCommandExecutor<'a> {
     scene: &'a mut SceneGraph,
     selection: &'a mut SceneSelectionState,
     viewport: &'a mut crate::panels::viewport_controller::NativeGameViewportController,
+    assets_root: Option<std::path::PathBuf>,
 }
 
 struct NativeElectronicsCommandExecutor<'a> {
@@ -126,6 +127,13 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
     }
 
     fn execute_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
+        if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
+            let mut context = crate::commands::script::ScriptCommandContext {
+                scene: self.scene,
+                assets_root: self.assets_root.as_deref(),
+            };
+            return crate::commands::behavior::execute(command, &mut context, false);
+        }
         let mut context = GameCommandContext {
             scene: self.scene,
             selection: self.selection,
@@ -136,6 +144,13 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
 
     fn preview_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
         let mut scene = self.scene.clone();
+        if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
+            let mut context = crate::commands::script::ScriptCommandContext {
+                scene: &mut scene,
+                assets_root: self.assets_root.as_deref(),
+            };
+            return crate::commands::behavior::execute(command, &mut context, true);
+        }
         let mut selection = self.selection.clone();
         let mut viewport = HeadlessGameViewportPort::default();
         viewport.set_selected_ids(selection.selected_nodes.clone());
@@ -216,6 +231,14 @@ pub(crate) fn poll_attached_commands(
                 attached_ledger.revision(),
                 language,
             );
+            attached_host.respond(command, response);
+            continue;
+        }
+        if command.request.name.starts_with("asset.") {
+            let response = match workbench.as_deref_mut() {
+                Some(workbench) => workbench.execute_asset_command(&command.request, project, attached_ledger.revision()),
+                None => EngineCommandResponse::error(request_id, "Assets unavailable", "The native workbench is not ready"),
+            };
             attached_host.respond(command, response);
             continue;
         }
@@ -311,6 +334,7 @@ pub(crate) fn poll_attached_commands(
                 scene,
                 selection: &mut selection,
                 viewport: runtime.game_viewport_mut(),
+                assets_root: project.map(|p| p.path.join("assets")),
             };
             let mut gateway = CommandGateway {
                 executor,

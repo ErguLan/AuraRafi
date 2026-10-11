@@ -62,6 +62,23 @@ impl<E: ParsedCommandExecutor> CommandEndpoint for CommandGateway<E> {
             response.revision = self.ledger.revision();
             return response;
         }
+        let name = request.name.trim_start_matches('/').to_ascii_lowercase();
+        if (name.starts_with("behavior.") || name.starts_with("prefab."))
+            && !request.dry_run
+            && !request.confirm
+            && !matches!(
+                request.source,
+                CommandSource::RafUi | CommandSource::Console
+            )
+        {
+            let mut response = EngineCommandResponse::error(
+                id,
+                "Confirmation required",
+                "Behavior and prefab authoring requires confirm=true; use dry_run for preview.",
+            );
+            response.revision = self.ledger.revision();
+            return response;
+        }
         if let Err(error) = self.ledger.check_expected(request.expected_revision) {
             let mut response = EngineCommandResponse::error(id, "Revision conflict", error);
             response.revision = self.ledger.revision();
@@ -177,6 +194,10 @@ fn validate_execution_budget(
     let name = request.name.trim_start_matches('/').to_ascii_lowercase();
     if let Some(max_operations) = budget.max_scene_operations {
         let operations = match name.as_str() {
+            // The file is resolved by the domain executor. Reserve its hard cap
+            // rather than under-reporting an unknown subtree as one entity.
+            "prefab.instantiate" => raf_core::scene::prefab::MAX_PREFAB_NODES,
+            "behavior.parameter" | "behavior.attach" | "behavior.detach" | "prefab.capture" => 1,
             "game.batch" | "scene.batch" | "game.repair" | "scene.repair" => request
                 .params
                 .get("operations")
@@ -230,6 +251,7 @@ fn validate_execution_budget(
 
 fn requested_scene_entities(name: &str, params: &Value) -> usize {
     match name {
+        "prefab.instantiate" => raf_core::scene::prefab::MAX_PREFAB_NODES,
         "game.camera" => {
             usize::from(params.get("action").and_then(Value::as_str) == Some("create"))
         }

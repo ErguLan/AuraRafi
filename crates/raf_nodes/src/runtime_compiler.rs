@@ -6,6 +6,58 @@ use std::collections::HashSet;
 fn quote(value: &str) -> String {
     serde_json::to_string(value).expect("String serialization")
 }
+
+fn event_record(source: &str) -> Result<String, String> {
+    if source.len() > 8192 {
+        return Err("Event record exceeds 8192 bytes".into());
+    }
+    fn emit(value: serde_json::Value, depth: usize, count: &mut usize) -> Result<String, String> {
+        *count += 1;
+        if depth > 8 || *count > 256 {
+            return Err("Event record exceeds depth/item budget".into());
+        }
+        Ok(match value {
+            serde_json::Value::Null => "()".into(),
+            serde_json::Value::Bool(v) => v.to_string(),
+            serde_json::Value::Number(v) => {
+                if let Some(integer) = v.as_i64() {
+                    integer.to_string()
+                } else {
+                    number(&v.to_string())?
+                }
+            }
+            serde_json::Value::String(v) if v.len() <= 4096 => quote(&v),
+            serde_json::Value::Array(values) => format!(
+                "[{}]",
+                values
+                    .into_iter()
+                    .map(|v| emit(v, depth + 1, count))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(",")
+            ),
+            serde_json::Value::Object(values) => format!(
+                "#{{{}}}",
+                values
+                    .into_iter()
+                    .map(|(key, v)| {
+                        if key.is_empty() || key.len() > 128 {
+                            return Err("Invalid event record key".into());
+                        }
+                        Ok(format!("{}:{}", quote(&key), emit(v, depth + 1, count)?))
+                    })
+                    .collect::<Result<Vec<_>, String>>()?
+                    .join(",")
+            ),
+            _ => return Err("Event record string exceeds limit".into()),
+        })
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(source).map_err(|error| format!("Invalid event JSON: {error}"))?;
+    if !value.is_object() {
+        return Err("Event record requires a JSON object".into());
+    }
+    emit(value, 0, &mut 0)
+}
 fn number(value: &str) -> Result<String, String> {
     let n = value
         .trim()
@@ -117,6 +169,34 @@ impl Generator<'_> {
             .ok_or("Unknown node")?
             .slug;
         Ok(match slug {
+            "has-capability" => format!(
+                "has_capability({}, {})",
+                self.entity_input(index, "Entity", "entity", depth + 1)?,
+                self.input(index, "Capability", "capability", "", depth + 1)?
+            ),
+            "get-entity-property" => format!(
+                "get_property({}, {})",
+                self.entity_input(index, "Entity", "entity", depth + 1)?,
+                self.input(index, "Property", "property_name", "", depth + 1)?
+            ),
+            "entity-reference" => format!(
+                "get_entity_reference({}, {})",
+                self.entity_input(index, "Entity", "entity", depth + 1)?,
+                self.input(index, "Property", "property_name", "", depth + 1)?
+            ),
+            "query-capability" => format!(
+                "query_capability({}, {})",
+                self.input(index, "Capability", "capability", "", depth + 1)?,
+                self.input(index, "Limit", "query_limit", "32", depth + 1)?
+            ),
+            "query-nearby" => format!(
+                "query_nearby({}, {}, {}, {})",
+                self.input(index, "Capability", "capability", "", depth + 1)?,
+                self.input(index, "Position", "position", "0,0,0", depth + 1)?,
+                self.input(index, "Radius", "query_radius", "10", depth + 1)?,
+                self.input(index, "Limit", "query_limit", "32", depth + 1)?
+            ),
+            "event-record" => event_record(property(node, "event_data", "{}"))?,
             "get-entity" => format!(
                 "entity({})",
                 self.input(index, "Reference", "reference", "", depth + 1)?
@@ -139,6 +219,15 @@ impl Generator<'_> {
                 "get_position({})",
                 self.entity_input(index, "Entity", "entity", depth + 1)?
             ),
+            "get-velocity" => format!(
+                "get_velocity({})",
+                self.entity_input(index, "Entity", "entity", depth + 1)?
+            ),
+            slug if crate::physics_nodes::is_event(slug) => match pin {
+                "Entity" => "event_value.entity".into(),
+                "Other" => "event_value.other".into(),
+                _ => return Err(format!("Unknown physics output: {pin}")),
+            },
             "on-update" | "on-late-update" | "on-event" if pin == "Delta Time" => "dt".into(),
             "on-event" if pin == "Value" => "event_value".into(),
             "add" => format!(
@@ -225,22 +314,23 @@ impl Generator<'_> {
                 _ => "Out",
             },
         )?;
-        let entity = if matches!(
-            slug,
-            "on-start"
-                | "on-update"
-                | "on-late-update"
-                | "on-event"
-                | "if"
-                | "print"
-                | "spawn-entity"
-                | "for-loop"
-                | "while-loop"
-                | "delay"
-                | "key-press"
-                | "mouse-click"
-                | "clear-camera"
-        ) {
+        let entity = if crate::physics_nodes::is_event(slug)
+            || matches!(
+                slug,
+                "on-start"
+                    | "on-update"
+                    | "on-late-update"
+                    | "on-event"
+                    | "if"
+                    | "print"
+                    | "spawn-entity"
+                    | "for-loop"
+                    | "while-loop"
+                    | "delay"
+                    | "key-press"
+                    | "mouse-click"
+                    | "clear-camera"
+            ) {
             String::new()
         } else {
             let pin = if matches!(slug, "set-position" | "destroy-entity") {
@@ -252,6 +342,21 @@ impl Generator<'_> {
         };
         let mut code = String::new();
         match slug {
+            "set-capability" => code = format!("let h={entity}; h.set_capability({},{});", self.input(i,"Capability","capability","",0)?,self.input(i,"Enabled","enabled","true",0)?),
+            "set-entity-property" => code = format!("let h={entity}; h.set_property({},{});",self.input(i,"Property","property_name","",0)?,self.input(i,"Value","value","",0)?),
+            "has-capability"|"get-entity-property"|"query-capability"|"query-nearby"|"event-record"|"entity-reference" => return Err(format!("Data-only node {} cannot be in a flow chain", n.name)),
+            slug if crate::physics_nodes::is_event(slug) => {},
+            "set-velocity" | "add-velocity" | "apply-impulse" => {
+                let (pin, key) = if slug == "apply-impulse" { ("Impulse", "impulse") } else { ("Velocity", "velocity") };
+                code = format!("let h={entity}; h.{}({});", slug.replace('-', "_"), self.input(i, pin, key, "0,0,0", 0)?);
+            }
+            "configure-body" => code = format!("let h={entity}; h.configure_body({},{},{},{},{});",
+                self.input(i,"Body Type","body_type","dynamic",0)?, self.input(i,"Gravity","gravity","true",0)?,
+                self.input(i,"Trigger","trigger","false",0)?, self.input(i,"Mass","mass","1",0)?, self.input(i,"Damping","damping","0",0)?),
+            "set-physics-enabled" => code = format!("let h={entity}; h.set_physics_enabled({});", self.input(i,"Enabled","enabled","true",0)?),
+            "set-aabb-collider" => code = format!("let h={entity}; h.set_aabb_collider({},{});", self.input(i,"Min","collider_min","-0.5,-0.5,-0.5",0)?, self.input(i,"Max","collider_max","0.5,0.5,0.5",0)?),
+            "remove-collider" => code = format!("let h={entity}; h.remove_collider();"),
+            "get-velocity" => return Err("Get Velocity is data-only".into()),
             "on-start"|"on-update"|"on-late-update"|"on-event"=>{},
             "print"=>code=format!("print({});",self.input(i,"Message","message","",0)?),
             "if"=>return Ok(format!("next = if {} {{ {} }} else {{ {} }};",self.input(i,"Condition","condition","false",0)?,self.flow(i,"True")?,self.flow(i,"False")?)),
@@ -272,8 +377,8 @@ impl Generator<'_> {
             "set-parent"=>code=format!("set_parent({entity},{},{});",self.entity_input(i,"Target","target",0)?,boolean(property(n,"keep_world","true"))?),
             "detach-parent"=>code=format!("detach_parent({entity},{});",boolean(property(n,"keep_world","true"))?),
             "send-event"=>code=if boolean(property(n,"broadcast","false"))?=="true" {
-                format!("emit_event({},{});",quote(property(n,"event_name","")),quote(property(n,"value","")))
-            } else {format!("send_event({entity},{},{});",quote(property(n,"event_name","")),quote(property(n,"value","")))},
+                format!("emit_event({},{});",quote(property(n,"event_name","")),self.input(i,"Value","value","",0)?)
+            } else {format!("send_event({entity},{},{});",quote(property(n,"event_name","")),self.input(i,"Value","value","",0)?)},
             "key-press"|"mouse-click"=>return Ok(format!("next = if {} {{ {next} }} else {{ -1 }};",self.output(i,"",0)?)),
             "for-loop"=>return Ok(format!("let first={}; let last={}; if last-first>4096 || last<first {{ throw \"Invalid loop range\"; }} let saved=this.indices[{i}]; for index in first..last {{ this.indices[{i}]=index; this.run_flow({},dt,event_value); }} this.indices[{i}]=saved; next={};",self.input(i,"Start","start","0",0)?,self.input(i,"End","end","1",0)?,self.flow(i,"Loop Body")?,self.flow(i,"Completed")?)),
             "while-loop"=>return Ok(format!("let count=0; while {} {{ count+=1; if count>4096 {{ throw \"While budget exceeded\"; }} this.run_flow({},dt,event_value); }} next={};",self.input(i,"Condition","condition","false",0)?,self.flow(i,"Loop Body")?,self.flow(i,"Completed")?)),
@@ -374,6 +479,36 @@ pub fn to_rhai(graph: &NodeGraph) -> Result<String, String> {
         }
         source.push_str("}\n");
     }
+    let has_physics_events = graph.nodes.iter().any(|node| {
+        crate::catalog::descriptor_for_node(node)
+            .is_some_and(|descriptor| crate::physics_nodes::is_event(descriptor.slug))
+    });
+    if has_physics_events {
+        source.push_str(
+            "fn on_physics_event(event_value) { graph_state.steps=0; let dt=get_delta_time();",
+        );
+        for (i, node) in graph.nodes.iter().enumerate() {
+            let slug = crate::catalog::descriptor_for_node(node)
+                .ok_or("Unknown node")?
+                .slug;
+            if crate::physics_nodes::is_event(slug) {
+                source.push_str(&format!(
+                    "if event_value.kind=={} {{",
+                    quote(&slug.trim_start_matches("on-").replace('-', "_"))
+                ));
+                let reference = property(node, "entity", "");
+                if !reference.is_empty() {
+                    source.push_str(&format!("let filter=entity({}); if is_valid(filter) && node_uuid(filter)==event_value.entity_uuid {{", quote(reference)));
+                }
+                source.push_str(&format!("graph_state.run_flow({i},dt,event_value);"));
+                if !reference.is_empty() {
+                    source.push('}');
+                }
+                source.push('}');
+            }
+        }
+        source.push_str("}\n");
+    }
     if source.len() > 256 * 1024 {
         return Err("Generated script exceeds 256 KiB".into());
     }
@@ -383,6 +518,89 @@ pub fn to_rhai(graph: &NodeGraph) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn behavior_nodes_and_structured_payload_compile_through_host_api() {
+        for &(slug, _, _) in crate::scene_nodes::SCENE_NODES {
+            if crate::behavior_nodes::create(slug).is_none() {
+                continue;
+            }
+            let node = crate::catalog::create(slug).unwrap();
+            let descriptor = crate::catalog::descriptor_for_slug(slug).unwrap();
+            let mut keys = vec![
+                descriptor.label_key.to_owned(),
+                descriptor.description_key.to_owned(),
+            ];
+            keys.extend(node.pins.iter().map(|p| {
+                format!(
+                    "nodes.pin.{slug}.{}",
+                    p.name.to_lowercase().replace(' ', "_")
+                )
+            }));
+            keys.extend(node.properties.iter().map(|p| p.label_key.clone()));
+            for lang in [raf_core::Language::English, raf_core::Language::Spanish] {
+                for key in &keys {
+                    assert_ne!(raf_core::i18n::t(key, lang), *key);
+                }
+            }
+        }
+        let mut graph = NodeGraph::new("Behavior");
+        let start = crate::catalog::create("on-start").unwrap();
+        let mut send = crate::catalog::create("send-event").unwrap();
+        for property in &mut send.properties {
+            if property.key == "broadcast" {
+                property.value = "true".into();
+            }
+            if property.key == "event_name" {
+                property.value = "power.changed".into();
+            }
+        }
+        let mut data = crate::catalog::create("event-record").unwrap();
+        data.properties[0].value = r#"{"amount":2,"state":{"enabled":true}}"#.into();
+        let pin = |node: &Node, name: &str| node.pins.iter().find(|p| p.name == name).unwrap().id;
+        graph.connect(start.id, pin(&start, "Out"), send.id, pin(&send, "In"));
+        graph.connect(data.id, pin(&data, "Value"), send.id, pin(&send, "Value"));
+        graph.add_node(start);
+        graph.add_node(send);
+        graph.add_node(data);
+        let code = to_rhai(&graph).unwrap();
+        assert!(code.contains("emit_event(\"power.changed\",#{"));
+        assert!(code.contains("\"enabled\":true"));
+        assert!(event_record(r#"{"invalid":""}"#).is_ok());
+        assert!(event_record("[]").is_err());
+    }
+    #[test]
+    fn physics_catalog_compiles_all_operations_and_has_bilingual_labels() {
+        for &(slug, _, _) in crate::scene_nodes::SCENE_NODES {
+            if crate::physics_nodes::create(slug).is_none() {
+                continue;
+            }
+            let node = crate::catalog::create(slug).unwrap();
+            let descriptor = crate::catalog::descriptor_for_slug(slug).unwrap();
+            let mut keys = vec![
+                descriptor.label_key.to_string(),
+                descriptor.description_key.to_string(),
+            ];
+            keys.extend(node.pins.iter().map(|p| {
+                format!(
+                    "nodes.pin.{slug}.{}",
+                    p.name.to_lowercase().replace(' ', "_")
+                )
+            }));
+            keys.extend(node.properties.iter().map(|p| p.label_key.clone()));
+            for lang in [raf_core::Language::English, raf_core::Language::Spanish] {
+                for key in &keys {
+                    assert_ne!(raf_core::i18n::t(key, lang), *key, "{key}");
+                }
+            }
+            let mut graph = NodeGraph::new("Physics");
+            graph.add_node(node);
+            let code = to_rhai(&graph).unwrap();
+            assert_eq!(
+                code.contains("fn on_physics_event(event_value)"),
+                crate::physics_nodes::is_event(slug)
+            );
+        }
+    }
     #[test]
     fn rejects_duplicate_identity_and_invalid_property_before_execution() {
         let mut graph = NodeGraph::new("Invalid");

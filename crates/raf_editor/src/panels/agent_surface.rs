@@ -550,6 +550,8 @@ fn build_live_activity(
     let tokens = palette.tokens();
     let tool = activity.current_tool.as_deref();
     let activity_key = match tool {
+        Some("external_studio_install") => "app.agent_studio_installing",
+        Some("asset_generate_image" | "asset_generate_local_png" | "external_studio_generate") => "app.agent_asset_generating",
         Some(name) if name.starts_with("assets_") || name == "asset_inspect" => {
             "app.agent_activity_assets"
         }
@@ -573,6 +575,7 @@ fn build_live_activity(
         None => "app.agent_activity_thinking",
     };
     let icon = match tool {
+        Some(name) if name.starts_with("asset_generate_") || name.starts_with("external_studio_") => UiIconId::Assets,
         Some(name) if name.starts_with("assets_") || name == "asset_inspect" => UiIconId::Assets,
         Some("viewport_capture") => UiIconId::Eye,
         Some(name) if name.contains("verify") || name.contains("audit") => UiIconId::Success,

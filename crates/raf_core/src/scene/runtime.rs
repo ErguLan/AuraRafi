@@ -6,6 +6,8 @@ pub enum VariableValue {
     Bool(bool),
     Number(f32),
     Text(String),
+    /// Stable authoring reference. None is deliberately unassigned, never a name fallback.
+    Entity(Option<uuid::Uuid>),
 }
 
 impl Default for VariableValue {
@@ -20,6 +22,7 @@ impl VariableValue {
             Self::Bool(_) => "Bool",
             Self::Number(_) => "Number",
             Self::Text(_) => "Text",
+            Self::Entity(_) => "Entity",
         }
     }
 }

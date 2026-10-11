@@ -391,11 +391,25 @@ impl RuntimeWorld {
             return;
         }
         if self.settings.enable_physics {
-            if let Err(error) = self.physics.step(&mut self.scene, dt) {
+            let result = self.physics.step(&mut self.scene, dt);
+            if let Err(error) = result {
                 if !self.record(ScriptRuntimeReport {
                     errors: vec![error],
                     ..ScriptRuntimeReport::default()
                 }) {
+                    return;
+                }
+            }
+        }
+        if self.settings.enable_physics {
+            if let Some(scripts) = &mut self.scripts {
+                let report = scripts.dispatch_physics_events(
+                    &mut self.scene,
+                    &input,
+                    dt,
+                    self.physics.events(),
+                );
+                if !self.record(report) {
                     return;
                 }
             }
@@ -897,5 +911,95 @@ fn on_fixed_update(dt) { let me = self_node(); me.set_property("should_not_run",
         world.start();
         assert_eq!(world.status().phase, RuntimePhase::Paused);
         assert!(world.status().last_error.is_some());
+    }
+    #[test]
+    fn physics_rhai_and_nodes_use_shared_api_events_before_late_update() {
+        let fixture = Fixture::new(
+            r#"
+let enters=0; let stays=0;
+fn on_start() {
+    let me=self_node(); me.configure_body("dynamic",false,false,2.0,0.0);
+    me.set_aabb_collider([-0.5,-0.5,-0.5],[0.5,0.5,0.5]);
+    me.set_velocity([0.0,0.0,0.0]); me.apply_impulse([4.0,0.0,0.0]);
+    me.set_property("speed",me.get_velocity()[0]);
+    let rejected=false;
+    try { me.configure_body("dynamic",false,false,0.0,0.0); } catch(e) { rejected=true; }
+    if !rejected { throw "accepted invalid mass"; }
+}
+fn on_trigger_enter(other) { enters+=1; }
+fn on_trigger_stay(other) { stays+=1; }
+fn on_trigger_exit(other) { let me=self_node(); me.set_property("deleted_other",!is_valid(other)); }
+fn on_late_update(dt) { let me=self_node(); me.set_property("enters",enters); me.set_property("stays",stays); }
+"#,
+        );
+        let mut scene = SceneGraph::new();
+        let mover = scene.add_root("Mover");
+        scene
+            .get_mut(mover)
+            .unwrap()
+            .scripts
+            .push("scripts/main.rhai".into());
+        let zone = scene.add_root("Zone");
+        let original = scene.clone();
+        let mut graph = raf_nodes::NodeGraph::new("Physics");
+        let start = graph_node(&mut graph, "on-start", &[]);
+        let configure = graph_node(
+            &mut graph,
+            "configure-body",
+            &[
+                ("entity", "Zone"),
+                ("body_type", "static"),
+                ("gravity", "false"),
+                ("trigger", "true"),
+            ],
+        );
+        let shape = graph_node(&mut graph, "set-aabb-collider", &[("entity", "Zone")]);
+        let event = graph_node(&mut graph, "on-trigger-enter", &[("entity", "Mover")]);
+        let set = graph_node(&mut graph, "set-velocity", &[("velocity", "9,0,0")]);
+        graph_link(&mut graph, start, "Out", configure, "In");
+        graph_link(&mut graph, configure, "Out", shape, "In");
+        graph_link(&mut graph, event, "Out", set, "In");
+        graph_link(&mut graph, event, "Other", set, "Entity");
+        let mut world = fixture.world(scene);
+        world.settings.enable_physics = true;
+        world.attach_graph(&graph).unwrap();
+        world.start();
+        world.advance(0.02, &InputSnapshot::default());
+        assert_eq!(
+            world.status().phase,
+            RuntimePhase::Running,
+            "{:?}",
+            world.status().last_error
+        );
+        assert_eq!(
+            world.scene.get(mover).unwrap().get_variable("speed"),
+            Some(&VariableValue::Number(2.0))
+        );
+        assert_eq!(world.scene.get(mover).unwrap().rigid_body.mass, 2.0);
+        assert_eq!(
+            world.scene.get(mover).unwrap().get_variable("enters"),
+            Some(&VariableValue::Number(1.0))
+        );
+        assert_eq!(world.scene.get(zone).unwrap().rigid_body.velocity.x, 9.0);
+        world.control(RuntimeControl::Pause);
+        world.control(RuntimeControl::Step);
+        assert_eq!(
+            world.scene.get(mover).unwrap().get_variable("stays"),
+            Some(&VariableValue::Number(1.0))
+        );
+        world.scene.remove_node(zone);
+        world.control(RuntimeControl::Step);
+        assert_eq!(
+            world
+                .scene
+                .get(mover)
+                .unwrap()
+                .get_variable("deleted_other"),
+            Some(&VariableValue::Bool(true))
+        );
+        world.stop();
+        assert_eq!(original.get(mover).unwrap().position, Vec3::ZERO);
+        assert!(!original.get(mover).unwrap().rigid_body.enabled);
+        assert!(original.is_valid_node(zone));
     }
 }

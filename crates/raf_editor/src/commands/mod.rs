@@ -6,6 +6,7 @@
 //! documents.
 
 pub mod assets;
+pub mod behavior;
 pub mod catalog;
 pub mod electronics;
 pub mod game;

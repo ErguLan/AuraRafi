@@ -4,6 +4,7 @@ pub mod anim_collider;
 pub mod collider;
 pub mod graph;
 pub mod merge;
+pub mod prefab;
 pub mod runtime;
 pub mod transforms;
 

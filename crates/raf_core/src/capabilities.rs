@@ -53,7 +53,7 @@ impl CapabilityDefinition {
             || name.ends_with(".catalog")
             || name.ends_with(".health")
             || name.ends_with(".verify")
-            || name.ends_with(".capture")
+            || (name.ends_with(".capture") && name != "prefab.capture")
             || name == "scene.spatial_map"
             || name == "scene.design_audit"
             || name == "task.get"

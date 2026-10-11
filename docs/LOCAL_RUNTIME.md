@@ -3,6 +3,41 @@
 Status: local implementation present; native acceptance and measured
 performance remain separate gates.
 
+## Physics scripting checkpoint (2026-10-06)
+
+The composable behavior/reference checkpoint is documented in
+[Behavior Runtime](BEHAVIOR_RUNTIME.md): user parameters/capabilities,
+bounded queries, update intervals/subscriptions, structured events, seven
+new shared-API Nodes and opt-in Hierarchy script-link projection. None of
+these additions assert native acceptance or online support. No engine executable
+build/export or temporary Cargo target is authorized for this pass.
+
+Validation for this checkpoint: formatting completed; locale JSON parsing,
+48 relevant EN/ES keys and `git diff --check` passed. The focused command
+`cargo test --offline --locked -p raf_script -p raf_nodes --lib behavior_`
+failed before compilation because `target_gnu/debug/.cargo-lock` returned
+access denied (OS error 5). Eight focused regressions are present across
+behavior integration/examples/scheduling, reference analysis, Nodes and
+virtual Hierarchy rows, but none is reported executed in this checkpoint.
+No permission repair, alternate target, engine executable build or native
+Play activation was performed. A native save-to-link/row-activation smoke
+test and compilation remain required before acceptance.
+
+Shared physics controls and collision/trigger callbacks are implemented in
+focused Host API, adapter, integration, response and contact-history modules.
+The catalog adds 14 physics/control/event Nodes with bilingual labels, plus
+an optional `examples/runtime/physics_body.rhai` asset. Five focused regressions
+cover lifecycle/deletion, floors/parents/initial overlap, contact budgets,
+Rhai/Nodes dispatch and catalog translation/compilation.
+
+`cargo test --offline -p raf_runtime -p raf_nodes --lib physics_` was blocked
+before compilation by access denied (OS error 5) on
+`target_gnu/debug/.cargo-lock`. Tests are present but their execution is not
+claimed. No alternate target, permission change, engine executable build or
+native Play activation was performed. The user's report establishes that
+the runtime now displays the authored scene through its camera; physics,
+window-mode lifecycle, audio and resource acceptance remain separate.
+
 ## Verification checkpoint (2026-10-03)
 
 - `cargo test --offline -p raf_script -p raf_nodes -p raf_runtime --lib`:
@@ -118,11 +153,15 @@ Additions to global initialization require Stop/Play. Script-generated events
 and authored UI events use `on_event(name, value)`; they cannot execute editor
 commands. Event queues, logs, source size, operations and deadlines are bounded.
 
-Initial physics supports explicit translation, gravity/damping and swept AABB
-contacts only: no angular dynamics, mesh/hull narrow phase, impulse solver,
-automatic character controller or trigger event delivery. Unsupported collider
-types fail preparation when physics is enabled. The initial roster is limited
-to 64 dynamic bodies, 1024 colliders and 4096 body/collider pairs.
+Local physics includes shared velocity/impulse/body/collider scripting controls,
+dynamic and prescribed kinematic translation, swept AABB blocking, bounded
+initial-overlap correction and collision/trigger enter/stay/exit callbacks.
+Unsupported collider types fail explicitly. No angular dynamics, mesh/hull
+narrow phase, general impulse solver or automatic character controller exists.
+Budgets include 64 moving bodies, 1024 colliders, 4096 active/collider candidates,
+128 contact pairs and 256 directed events. See [Physics Runtime](PHYSICS_RUNTIME.md)
+for semantics, Nodes, optional examples and remaining limitations. Implementation
+does not by itself establish native acceptance or measured potato performance.
 Windows audio initially supports PCM 16-bit mono/stereo WAV files only, with
 four voices and 8 MiB per clip. Other formats/platforms report unsupported
 output. Stop/focus-pause release or pause the relevant playback resources.

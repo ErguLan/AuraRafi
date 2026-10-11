@@ -24,12 +24,18 @@ use raf_ui::{
 
 use crate::color_math::rgb_to_hsv;
 
+#[path = "inspector_behavior_surface.rs"]
+pub(crate) mod behavior_surface;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InspectorDropdown {
     Primitive,
     Collider,
     BodyType,
     Texture,
+    Parameter { source: Option<usize>, index: usize },
+    BehaviorSource,
+    PrefabSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -81,6 +87,7 @@ pub struct InspectorViewState {
     pub debug: bool,
     pub dropdown: Option<InspectorDropdown>,
     pub color_picker: bool,
+    pub behavior_parameters: Option<usize>,
 }
 
 impl Default for InspectorViewState {
@@ -98,6 +105,7 @@ impl Default for InspectorViewState {
             debug: false,
             dropdown: None,
             color_picker: false,
+            behavior_parameters: None,
         }
     }
 }
@@ -524,8 +532,23 @@ fn content(
             view.variables,
         ));
         if view.variables {
-            scroll = scroll.with_child(variables_section(palette, id, &node.variables));
+            scroll = scroll.with_child(behavior_surface::parameters(
+                palette,
+                scene,
+                id,
+                None,
+                &node.variables,
+                view.dropdown,
+            ));
         }
+        scroll = scroll.with_child(behavior_surface::behaviors(
+            palette,
+            scene,
+            id,
+            project_assets,
+            view.dropdown,
+            view.behavior_parameters,
+        ));
         scroll = scroll.with_child(section_title(
             palette,
             "app.audio_source",
@@ -1697,71 +1720,6 @@ fn color_picker_visual(palette: StudioUiPalette, hsv: crate::color_math::HsvColo
         )
 }
 
-fn variables_section(
-    palette: StudioUiPalette,
-    id: SceneNodeId,
-    variables: &[SceneVariable],
-) -> UiNode {
-    let mut section = UiNode::new("inspector.variables", UiNodeKind::Panel).with_layout(UiLayout {
-        flow: UiFlow::Column,
-        gap: 4.0,
-        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-    });
-    for (index, variable) in variables.iter().enumerate() {
-        let mut row = UiNode::new(format!("inspector.variable.{index}"), UiNodeKind::Toolbar)
-            .with_layout(UiLayout {
-                flow: UiFlow::Row,
-                gap: 3.0,
-                ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
-            });
-        row = row
-            .with_child(text_field(
-                &format!("inspector.variable.{index}.name"),
-                &format!("inspector.variable.{index}.name"),
-                &variable.name,
-                palette,
-                1.0,
-            ))
-            .with_child(text_field(
-                &format!("inspector.variable.{index}.value"),
-                &format!("inspector.variable.{index}.value"),
-                &variable_value_text(&variable.value),
-                palette,
-                1.0,
-            ))
-            .with_child(
-                action_button(
-                    palette,
-                    &format!("inspector.variable.{index}.type"),
-                    "app.variable_type",
-                    format!("inspector.variable.type:{}:{index}", id.0),
-                )
-                .with_text_value(variable.value.type_label()),
-            )
-            .with_child(action_button(
-                palette,
-                &format!("inspector.variable.{index}.remove"),
-                "app.remove",
-                format!("inspector.variable.remove:{}:{index}", id.0),
-            ));
-        section = section.with_child(row);
-    }
-    if variables.is_empty() {
-        section = section.with_child(
-            UiNode::new("inspector.variables.empty", UiNodeKind::Label)
-                .with_text_key("app.no_variables")
-                .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
-                .with_layout(UiLayout::fit_content()),
-        );
-    }
-    section.with_child(action_button(
-        palette,
-        "inspector.variable.add",
-        "app.add_variable",
-        format!("inspector.variable.add:{}", id.0),
-    ))
-}
-
 fn audio_section(
     palette: StudioUiPalette,
     id: SceneNodeId,
@@ -2093,11 +2051,12 @@ fn text_field(
     .with_text_style(UiTextStyle::body(palette.tokens().text))
 }
 
-fn variable_value_text(value: &VariableValue) -> String {
+pub(crate) fn variable_value_text(value: &VariableValue) -> String {
     match value {
         VariableValue::Bool(value) => value.to_string(),
         VariableValue::Number(value) => value.to_string(),
         VariableValue::Text(value) => value.clone(),
+        VariableValue::Entity(value) => value.map(|id| id.to_string()).unwrap_or_default(),
     }
 }
 

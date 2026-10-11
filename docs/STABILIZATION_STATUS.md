@@ -21,8 +21,10 @@ historial, selección y comandos conectados; la aceptación que falta es visual
 en el editor y la ampliación progresiva de authoring PCB/analysis.
 
 La prioridad actual sigue siendo estabilizar input/foco, comandos, historial,
-compositor, caches y consumo de recursos antes de activar Play/Runtime. En
-Electronics, la composición retained ya está separada de la lógica del shell:
+compositor, caches y consumo de recursos. El runtime local de Game ya está
+implementado y conectado a Play; la aceptación en ventana nativa y la medición
+de rendimiento siguen como gates separados ([Local Runtime](LOCAL_RUNTIME.md)).
+En Electronics, la composición retained ya está separada de la lógica del shell:
 `native_workbench_surface.rs` compone las superficies y
 `native_workbench_input.rs` enruta input, `native_workbench_surface.rs` compone
 las superficies y `native_workbench_electronics.rs` prepara proyecciones del

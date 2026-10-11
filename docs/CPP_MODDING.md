@@ -1,5 +1,11 @@
 # AuraRafi C++ FFI: Native Modding Guide
 
+Scope note (2026-10-10): native extension/plugin integration is a different
+boundary from isolated local Play behaviors. This guide does not mean that
+attaching a C++ source or WASM file runs it in Play: that adapter is not
+implemented. Use [Programming guide](SCRIPTING_GUIDE.md) for the executable
+Rhai workflow; the camera C++ example is only a future contract sketch.
+
 Welcome to the native modding documentation for AuraRafi. This guide explains how to write performant game logic, custom nodes, and engine extensions using native C++ code via Dynamic Link Libraries (`.dll` on Windows, `.so` on Linux).
 
 ## Why C++ Native Plugins?

@@ -72,6 +72,7 @@ pub struct AgentPanel {
     last_visual_elapsed_second: Option<u64>,
     loaded_project_path: Option<PathBuf>,
     runtime_key: Option<RuntimeKey>,
+    external_studio_enabled: bool,
     system_prompt: String,
     pending_submission: Option<String>,
     last_saved_message_count: usize,
@@ -106,6 +107,7 @@ impl Default for AgentPanel {
             last_visual_elapsed_second: None,
             loaded_project_path: None,
             runtime_key: None,
+            external_studio_enabled: false,
             system_prompt: String::new(),
             pending_submission: None,
             last_saved_message_count: 0,
@@ -116,6 +118,15 @@ impl Default for AgentPanel {
 
 #[allow(dead_code)]
 impl AgentPanel {
+    pub(crate) fn image_provider(&self, settings: &EngineSettings) -> Option<(raf_ai::AssetImageProvider, String)> {
+        let provider = self.effective_provider(settings)?;
+        Some((raf_ai::AssetImageProvider {
+            provider: match provider.provider { AiProvider::OpenRouter => "openrouter", AiProvider::OpenAI => "openai", _ => return None }.into(),
+            base_url: provider.base_url.clone(),
+            api_key: provider.api_key.clone(),
+        }, self.effective_model(provider)))
+    }
+
     /// Synchronise project-local state and return the actionable readiness
     /// state for the current provider/model selection.
     pub(crate) fn prepare(
@@ -125,6 +136,7 @@ impl AgentPanel {
         _catalog: &CommandCatalog,
     ) -> AgentReadiness {
         self.language = settings.language;
+        self.external_studio_enabled = settings.external_asset_studio.enabled;
         if self.model_registry.shortcuts != settings.agent_model_shortcuts {
             self.model_registry = AgentModelRegistry::new(settings.agent_model_shortcuts.clone());
         }
@@ -398,13 +410,22 @@ impl AgentPanel {
         let Some(content) = self.pending_submission.take() else {
             return;
         };
-        let pack = AgentToolExecutor::build_tool_pack(
+        let continuation = ["continue", "continua", "continúa", "sigue", "termina"]
+            .iter().any(|word| content.trim().to_lowercase().starts_with(word));
+        let asset_context = continuation && self.tools.iter().any(|tool|
+            tool.function.name.starts_with("asset_generate_") || tool.function.name.starts_with("external_studio_"));
+        let tool_prompt = if asset_context { format!("{content} assets image") } else { content.clone() };
+        let mut pack = AgentToolExecutor::build_tool_pack(
             catalog,
             self.language,
             project_type,
             mode,
-            &content,
+            &tool_prompt,
         );
+        if !self.external_studio_enabled {
+            pack.tools.retain(|tool| !tool.function.name.starts_with("external_studio_"));
+            pack.routes.retain(|name, _| !name.starts_with("external_studio_"));
+        }
         self.tools = pack.tools;
         self.tool_routes = pack.routes;
         self.system_prompt = build_agent_system_prompt(snapshot, mode.label(), self.language);

@@ -154,7 +154,7 @@ pub fn build_hierarchy_surface(
             tab_context_toolbar(palette, active_tab)
         })
         .with_child(if active_tab == "hierarchy" {
-            summary(palette, view.total_rows, selected.len())
+            summary(palette, view.entity_rows, selected.len())
         } else {
             tab_summary(palette, active_tab)
         })
@@ -1025,6 +1025,65 @@ fn row_node(
     drop_target: Option<raf_core::scene::SceneNodeId>,
 ) -> UiNode {
     let is_selected = selected.contains(&row.id);
+    if let Some((index, link)) = &row.script_link {
+        let tokens = palette.tokens();
+        let key = format!("hierarchy.script.{}.{}", row.id.0, index);
+        let status = match link.kind {
+            crate::script_relationships::ScriptLinkKind::Attached => {
+                "app.hierarchy_script_attached"
+            }
+            crate::script_relationships::ScriptLinkKind::Reference => {
+                "app.hierarchy_script_reference"
+            }
+        };
+        return UiNode::new(&key, UiNodeKind::Toolbar)
+            .with_class("hierarchy-row")
+            .with_layout(UiLayout {
+                flow: UiFlow::Row,
+                align_items: UiAlign::Center,
+                gap: 4.0,
+                padding: UiSpacing {
+                    left: row.depth as f32 * indent_width.max(8.0) + 24.0,
+                    right: 6.0,
+                    top: 1.0,
+                    bottom: 1.0,
+                },
+                ..UiLayout::fixed(0.0, row_height).with_width_mode(UiSizeMode::Fill)
+            })
+            .with_child(
+                UiNode::new(format!("{key}.open"), UiNodeKind::Button)
+                    .with_class("hierarchy-row-label")
+                    .with_layout(UiLayout {
+                        grow: 1.0,
+                        min_size: [24.0, row_height - 2.0],
+                        overflow: UiOverflow::Clip,
+                        ..UiLayout::fixed(0.0, row_height - 2.0)
+                    })
+                    .with_icon(
+                        UiIcon::new(UiIconId::Script)
+                            .with_size(UiIconSize::Small)
+                            .with_tint(tokens.text_muted),
+                    )
+                    .with_text_value(&row.name)
+                    .with_text_overflow(UiTextOverflow::Ellipsis)
+                    .with_text_style(compact_body_style(tokens.text_muted))
+                    .with_tooltip_value(&link.path)
+                    .with_accessibility_description_key(status)
+                    .focusable()
+                    .with_event(UiEventBinding::command(
+                        UiEventKind::Click,
+                        format!("hierarchy.script.open:{}:{index}", row.id.0),
+                    )),
+            )
+            .with_child(
+                UiNode::new(format!("{key}.kind"), UiNodeKind::Label)
+                    .with_layout(UiLayout::fixed(76.0, row_height - 2.0))
+                    .with_text_key(status)
+                    .with_tooltip_key(status)
+                    .with_text_overflow(UiTextOverflow::Ellipsis)
+                    .with_text_style(compact_body_style(tokens.text_muted)),
+            );
+    }
     let class = if drop_target == Some(row.id) {
         "hierarchy-row-drop-target"
     } else if is_selected {
@@ -2121,6 +2180,46 @@ fn class_rule(class: &str, fill: [u8; 4], border: [u8; 4], text: [u8; 4]) -> UiS
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn script_row_has_script_icon_and_open_action_but_no_scene_actions() {
+        let mut source = row(Primitive::Cube, false);
+        source.script_link = Some((
+            0,
+            crate::script_relationships::ScriptLink {
+                path: "scripts/power.rhai".into(),
+                kind: crate::script_relationships::ScriptLinkKind::Reference,
+            },
+        ));
+        source.name = "power.rhai".into();
+        let node = row_node(
+            StudioUiPalette::IndustrialDark,
+            &source,
+            &[source.id],
+            None,
+            26.0,
+            18.0,
+            true,
+            true,
+            true,
+            None,
+        );
+        let open = find_node(&node, "hierarchy.script.0.0.open").unwrap();
+        assert_eq!(
+            open.icon.as_ref().map(|icon| icon.id),
+            Some(UiIconId::Script)
+        );
+        let serialized = format!("{node:?}");
+        assert!(serialized.contains("hierarchy.script.open:0:0"));
+        for command in [
+            "hierarchy.select:",
+            "hierarchy.drag.",
+            "hierarchy.rename.",
+            "hierarchy.menu:",
+            "hierarchy.visibility",
+        ] {
+            assert!(!serialized.contains(command));
+        }
+    }
 
     fn row(primitive: Primitive, is_folder: bool) -> HierarchyRow {
         HierarchyRow {
@@ -2134,6 +2233,7 @@ mod tests {
             locked: false,
             has_children: false,
             expanded: false,
+            script_link: None,
         }
     }
 
@@ -2164,6 +2264,7 @@ mod tests {
     fn hierarchy_chrome_does_not_introduce_project_type_tabs_or_painted_drag_slots() {
         let view = HierarchyView {
             total_rows: 1,
+            entity_rows: 1,
             visible_start: 0,
             top_spacer: 0.0,
             bottom_spacer: 0.0,

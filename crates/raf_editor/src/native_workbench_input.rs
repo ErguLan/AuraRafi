@@ -255,7 +255,17 @@ impl NativeGameWorkbench {
                     value,
                     index: _,
                 } => {
-                    if key == "agent.model" {
+                    if let Some(command) =
+                        crate::native_behavior_authoring::select_action(scene, selected, key, value)
+                    {
+                        intents.push(NativeWorkbenchIntent::Command(command));
+                        self.inspector_view.dropdown = None;
+                        self.host
+                            .session_mut()
+                            .interaction
+                            .focus
+                            .request_focus(format!("{key}.trigger"));
+                    } else if key == "agent.model" {
                         let keep_open = self.agent_panel.model_menu_open;
                         self.apply_agent_action(
                             AgentAction::SelectModel(value.clone()),
@@ -1657,6 +1667,34 @@ impl NativeGameWorkbench {
                         intents.push(NativeWorkbenchIntent::OpenSettings { section });
                         continue;
                     }
+                    if let Some(link_id) = name.strip_prefix("hierarchy.script.open:") {
+                        if let Some((owner, index)) =
+                            link_id.split_once(':').and_then(|(owner, index)| {
+                                Some((owner.parse::<usize>().ok()?, index.parse::<usize>().ok()?))
+                            })
+                        {
+                            if let Some(link) =
+                                self.hierarchy_model.script_link(SceneNodeId(owner), index)
+                            {
+                                match self.script_relationships.resolve_open_path(&link.path) {
+                                    Ok(path) => {
+                                        if !crate::script_support::open_script_in_external_editor(
+                                            &path,
+                                        ) {
+                                            self.console.log(
+                                                crate::console::LogLevel::Warning,
+                                                "Unable to open linked script",
+                                            );
+                                        }
+                                    }
+                                    Err(error) => {
+                                        self.console.log(crate::console::LogLevel::Warning, error)
+                                    }
+                                }
+                            }
+                        }
+                        continue;
+                    }
                     if let Some(raw_id) = name.strip_prefix("hierarchy.expand:") {
                         if let Ok(id) = raw_id.parse::<usize>() {
                             self.hierarchy_model.toggle_expanded(SceneNodeId(id));
@@ -1877,6 +1915,63 @@ impl NativeGameWorkbench {
                     }
                     if let Some(intent) = self.process_session_command(&name, project) {
                         intents.push(intent);
+                        continue;
+                    }
+                    if let Some(index) = name
+                        .strip_prefix("inspector.behavior.parameters:")
+                        .and_then(|index| index.parse::<usize>().ok())
+                    {
+                        self.inspector_view.behavior_parameters =
+                            (self.inspector_view.behavior_parameters != Some(index))
+                                .then_some(index);
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
+                    if let Some(raw) = name.strip_prefix("inspector.parameter.") {
+                        if let Some(command) = crate::native_behavior_authoring::parameter_action(
+                            scene,
+                            selected,
+                            raw,
+                            |key| {
+                                self.host
+                                    .session()
+                                    .interaction
+                                    .controls
+                                    .text(key)
+                                    .to_string()
+                            },
+                        ) {
+                            intents.push(NativeWorkbenchIntent::Command(command));
+                        }
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
+                    if let Some(raw) = name.strip_prefix("inspector.behavior.detach:") {
+                        if let Some(command) =
+                            crate::native_behavior_authoring::detach_action(scene, selected, raw)
+                        {
+                            intents.push(NativeWorkbenchIntent::Command(command));
+                        }
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
+                    if let Some(raw) = name.strip_prefix("inspector.prefab.capture:") {
+                        if let Some(command) = crate::native_behavior_authoring::capture_action(
+                            scene,
+                            selected,
+                            raw,
+                            |key| {
+                                self.host
+                                    .session()
+                                    .interaction
+                                    .controls
+                                    .text(key)
+                                    .to_string()
+                            },
+                        ) {
+                            intents.push(NativeWorkbenchIntent::Command(command));
+                        }
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
                     if let Some(raw_id) = name.strip_prefix("inspector.rename.commit:") {
@@ -2578,6 +2673,11 @@ fn inspector_select_command_prefix(key: &str) -> Option<&'static str> {
 }
 
 fn inspector_dropdown_from_trigger(id: &str) -> Option<InspectorDropdown> {
+    if let Some(dropdown) =
+        crate::panels::inspector_surface::behavior_surface::dropdown_from_trigger(id)
+    {
+        return Some(dropdown);
+    }
     match id {
         "inspector.primitive.trigger" => Some(InspectorDropdown::Primitive),
         "inspector.collider.trigger" => Some(InspectorDropdown::Collider),

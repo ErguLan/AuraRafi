@@ -3,6 +3,14 @@ use crate::{Node, NodeCategory, NodeId, NodePin, NodeProperty, PinDataType as T,
 use uuid::Uuid;
 
 pub const SCENE_NODES: &[(&str, &str, bool)] = &[
+    ("has-capability", "Has Capability", false),
+    ("set-capability", "Set Capability", true),
+    ("query-capability", "Query Capability", false),
+    ("query-nearby", "Query Nearby", false),
+    ("get-entity-property", "Get Entity Property", false),
+    ("entity-reference", "Entity Reference", false),
+    ("set-entity-property", "Set Entity Property", true),
+    ("event-record", "Event Record", false),
     ("on-late-update", "On Late Update", false),
     ("on-event", "On Event", false),
     ("get-entity", "Get Entity", false),
@@ -25,9 +33,29 @@ pub const SCENE_NODES: &[(&str, &str, bool)] = &[
     ("set-parent", "Set Parent", true),
     ("detach-parent", "Detach Parent", true),
     ("send-event", "Send Event", true),
+    ("get-velocity", "Get Velocity", false),
+    ("set-velocity", "Set Velocity", true),
+    ("add-velocity", "Add Velocity", true),
+    ("apply-impulse", "Apply Impulse", true),
+    ("configure-body", "Configure Body", true),
+    ("set-physics-enabled", "Set Physics Enabled", true),
+    ("set-aabb-collider", "Set AABB Collider", true),
+    ("remove-collider", "Remove Collider", true),
+    ("on-collision-enter", "On Collision Enter", false),
+    ("on-collision-stay", "On Collision Stay", false),
+    ("on-collision-exit", "On Collision Exit", false),
+    ("on-trigger-enter", "On Trigger Enter", false),
+    ("on-trigger-stay", "On Trigger Stay", false),
+    ("on-trigger-exit", "On Trigger Exit", false),
 ];
 
 pub fn create(slug: &str) -> Option<Node> {
+    if let Some(node) = crate::behavior_nodes::create(slug) {
+        return Some(node);
+    }
+    if let Some(node) = crate::physics_nodes::create(slug) {
+        return Some(node);
+    }
     let (_, name, action) = SCENE_NODES.iter().find(|(s, _, _)| *s == slug)?;
     let mut node = Node {
         id: NodeId::new(),
@@ -62,6 +90,9 @@ pub fn create(slug: &str) -> Option<Node> {
     }
     if slug == "on-event" {
         pin("Value", K::Output, T::Any);
+    }
+    if slug == "send-event" {
+        pin("Value", K::Input, T::Any);
     }
     if !slug.starts_with("on-")
         && !matches!(slug, "get-entity" | "get-active-camera" | "clear-camera")

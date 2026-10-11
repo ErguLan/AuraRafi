@@ -24,6 +24,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
+notify = { workspace = true }
 dirs-next = "2"
 ron = { workspace = true }
 image = { workspace = true }

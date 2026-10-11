@@ -142,8 +142,9 @@ temporary document borrows.
 Every request has bounded editor-side limits: a turn limit, a tool-call limit,
 and a maximum tool-result size. Malformed tool arguments stay visible for
 review but are never passed to the command executor. These guardrails keep an
-ambitious generation request cooperative with the editor; they do not enable a
-game runtime or autonomous in-game agent.
+ambitious generation request cooperative with the editor; they do not give the
+Agent control of the separate local game runtime or create an autonomous
+in-game agent.
 
 ### 3. Native Agent perception and contextual tool packs
 

@@ -108,6 +108,14 @@ pub struct AssetImageWorkerConfig {
     pub script_path: PathBuf,
 }
 
+/// Per-request provider selection. Credentials only enter the child environment.
+#[derive(Clone)]
+pub struct AssetImageProvider {
+    pub provider: String,
+    pub base_url: String,
+    pub api_key: String,
+}
+
 impl Default for AssetImageWorkerConfig {
     fn default() -> Self {
         let python_executable = default_python_executable();
@@ -182,6 +190,64 @@ pub struct AssetImageGenerationQueue {
 }
 
 impl AssetImageGenerationQueue {
+    pub fn forget_completed(&mut self, id: Uuid) {
+        self.completed.remove(&id);
+    }
+    pub fn start_with_provider(
+        &mut self,
+        project_root: &Path,
+        request: AssetImageRequest,
+        provider: &AssetImageProvider,
+    ) -> Result<Uuid, String> {
+        let mut command = self.worker.python_command();
+        configure_provider(&mut command, provider);
+        self.start_command(project_root, request, command)
+    }
+
+    /// Launch a separately installed studio using the same small file contract.
+    pub fn start_external(
+        &mut self,
+        project_root: &Path,
+        request: AssetImageRequest,
+        provider: &AssetImageProvider,
+        studio: &raf_core::ai::ExternalAssetStudio,
+    ) -> Result<Uuid, String> {
+        if !studio.enabled {
+            return Err("External studio is disabled.".to_string());
+        }
+        let directory = Path::new(&studio.directory).canonicalize().map_err(|_| {
+            "External studio is not installed; use external_studio_install first.".to_string()
+        })?;
+        let entry = directory
+            .join(&studio.entry_point)
+            .canonicalize()
+            .map_err(|_| "External studio entry point was not found.".to_string())?;
+        if studio.entry_point.trim().is_empty()
+            || !entry.is_file()
+            || !entry.starts_with(&directory)
+        {
+            return Err(
+                "External studio entry point must be a file inside its installation.".to_string(),
+            );
+        }
+        let mut command = Command::new(&studio.program);
+        command.arg(entry).current_dir(directory);
+        configure_provider(&mut command, provider);
+        self.start_command(project_root, request, command)
+    }
+
+    fn start_command(
+        &mut self,
+        root: &Path,
+        request: AssetImageRequest,
+        command: Command,
+    ) -> Result<Uuid, String> {
+        let job = self.worker.start_command(root, request, command)?;
+        let id = job.id();
+        self.jobs.insert(id, job);
+        Ok(id)
+    }
+
     pub fn start(
         &mut self,
         project_root: &Path,
@@ -268,9 +334,17 @@ impl AssetImageJob {
                             "image worker failed without a result".to_string()
                         }));
                     }
-                    validate_png(&self.image_path)?;
                     ensure_inside_project(&self.project_root, &self.image_path)?;
                     ensure_inside_project(&self.project_root, &self.metadata_path)?;
+                    validate_png(&self.image_path)?;
+                    let metadata: serde_json::Value = serde_json::from_slice(
+                        &fs::read(&self.metadata_path)
+                            .map_err(|error| format!("generated metadata missing: {error}"))?,
+                    )
+                    .map_err(|error| format!("generated metadata JSON: {error}"))?;
+                    if !metadata.is_object() {
+                        return Err("generated metadata must be an object".into());
+                    }
                     Ok(GeneratedImageAsset {
                         job_id: self.id,
                         prompt: self.request.prompt.clone(),
@@ -323,13 +397,28 @@ impl AssetImageWorker {
         project_root: &Path,
         request: AssetImageRequest,
     ) -> Result<AssetImageJob, String> {
-        validate_request(&request)?;
         if !self.config.script_path.is_file() {
             return Err(format!(
                 "image worker script is missing: {}",
                 self.config.script_path.display()
             ));
         }
+        self.start_command(project_root, request, self.python_command())
+    }
+
+    fn python_command(&self) -> Command {
+        let mut command = Command::new(&self.config.python_executable);
+        command.arg(&self.config.script_path);
+        command
+    }
+
+    fn start_command(
+        &self,
+        project_root: &Path,
+        request: AssetImageRequest,
+        mut command: Command,
+    ) -> Result<AssetImageJob, String> {
+        validate_request(&request)?;
 
         let project_root = project_root
             .canonicalize()
@@ -337,9 +426,12 @@ impl AssetImageWorker {
         let job_id = Uuid::new_v4();
         let generated_dir = project_root.join("assets/generated");
         let staging_dir = generated_dir.join(".staging");
+        ensure_inside_project(&project_root, &staging_dir)?;
         fs::create_dir_all(&staging_dir).map_err(|error| format!("image staging: {error}"))?;
 
         let asset_stem = sanitize_asset_stem(&request.output_name)?;
+        // A generated result never overwrites an existing project image.
+        let asset_stem = format!("{asset_stem}_{}", &job_id.simple().to_string()[..8]);
         let image_path = generated_dir.join(format!("{asset_stem}.png"));
         let metadata_path = generated_dir.join(format!("{asset_stem}.asset.json"));
         ensure_inside_project(&project_root, &image_path)?;
@@ -359,8 +451,12 @@ impl AssetImageWorker {
         };
         write_json(&request_path, &payload)?;
 
-        let child = Command::new(&self.config.python_executable)
-            .arg(&self.config.script_path)
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        let child = command
             .arg("--request")
             .arg(&request_path)
             .arg("--result")
@@ -369,7 +465,10 @@ impl AssetImageWorker {
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
-            .map_err(|error| format!("image worker start: {error}"))?;
+            .map_err(|error| {
+                let _ = fs::remove_file(&request_path);
+                format!("image worker start: {error}")
+            })?;
 
         Ok(AssetImageJob {
             id: job_id,
@@ -381,6 +480,22 @@ impl AssetImageWorker {
             request_path,
             result_path,
         })
+    }
+}
+
+fn configure_provider(command: &mut Command, provider: &AssetImageProvider) {
+    command
+        .env("RAF_IMAGE_PROVIDER", &provider.provider)
+        .env("RAF_IMAGE_BASE_URL", &provider.base_url)
+        .env("RAF_IMAGE_API_KEY", &provider.api_key)
+        .env_remove("RAF_AI_IMAGE_ENDPOINT");
+}
+
+impl Drop for AssetImageGenerationQueue {
+    fn drop(&mut self) {
+        for job in self.jobs.values_mut() {
+            let _ = job.cancel();
+        }
     }
 }
 
@@ -450,19 +565,43 @@ fn read_worker_result(path: &Path) -> Result<PythonImageResult, String> {
 }
 
 fn validate_png(path: &Path) -> Result<(), String> {
+    let length = fs::metadata(path)
+        .map_err(|error| format!("generated image missing: {error}"))?
+        .len();
+    if length > 32 * 1024 * 1024 {
+        return Err("generated image exceeds 32 MiB".into());
+    }
     let bytes = fs::read(path).map_err(|error| format!("generated image missing: {error}"))?;
-    if bytes.len() < 24 || bytes[..8] != [137, 80, 78, 71, 13, 10, 26, 10] {
+    if bytes.len() < 45
+        || bytes[..8] != [137, 80, 78, 71, 13, 10, 26, 10]
+        || &bytes[12..16] != b"IHDR"
+        || &bytes[bytes.len() - 8..bytes.len() - 4] != b"IEND"
+    {
         return Err("generated image is not a PNG".to_string());
+    }
+    let width = u32::from_be_bytes(bytes[16..20].try_into().unwrap()) as u64;
+    let height = u32::from_be_bytes(bytes[20..24].try_into().unwrap()) as u64;
+    if width == 0
+        || height == 0
+        || width > 8192
+        || height > 8192
+        || width * height > 8 * 1024 * 1024
+    {
+        return Err("generated image exceeds import dimensions".into());
     }
     Ok(())
 }
 
 fn ensure_inside_project(project_root: &Path, path: &Path) -> Result<(), String> {
     if path.starts_with(project_root) {
-        Ok(())
-    } else {
-        Err("generated asset path escapes the project".to_string())
+        if let Some(existing) = path.ancestors().find(|ancestor| ancestor.exists()) {
+            let canonical = existing.canonicalize().map_err(|error| error.to_string())?;
+            if canonical.starts_with(project_root) {
+                return Ok(());
+            }
+        }
     }
+    Err("generated asset path escapes the project".to_string())
 }
 
 #[cfg(test)]

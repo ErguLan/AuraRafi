@@ -1,7 +1,7 @@
 // Attach to the authored camera entity (an Empty or a Part).
 // World-axis translation + local yaw/pitch. No required character or rig.
 fn on_start() {
-    let camera = self_node();
+    let camera = owner();
     if is_client() && is_valid(camera) {
         camera.add_camera();
         activate_camera(camera);
@@ -9,7 +9,7 @@ fn on_start() {
 }
 fn on_update(dt) {
     if !is_client() { return; }
-    let camera = self_node();
+    let camera = owner();
     if !is_valid(camera) { return; }
     let speed = 4.0 * dt;
     if is_key_pressed("w") { camera.move_by(0.0, 0.0, -speed); }

@@ -2507,6 +2507,7 @@ dependencies = [
  "dirs-next",
  "glam",
  "image",
+ "notify",
  "pollster",
  "raf_ai",
  "raf_assets",

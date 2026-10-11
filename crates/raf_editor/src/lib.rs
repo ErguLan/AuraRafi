@@ -8,6 +8,7 @@
 //! canvas hosts. The engine and renderer remain independent.
 
 pub(crate) mod agent_artifacts;
+mod agent_asset_tools;
 pub mod agent_context;
 pub mod agent_executor;
 pub mod application_bar_host;
@@ -31,6 +32,7 @@ pub mod folder_picker;
 pub mod game_runtime;
 pub mod native_application;
 pub(crate) mod native_attached_executor;
+pub(crate) mod native_behavior_authoring;
 pub(crate) mod native_editor_commands;
 pub mod native_editor_runtime;
 pub mod native_electronics;
@@ -47,6 +49,7 @@ pub mod project_catalog;
 pub mod project_settings_surface;
 pub mod scene_history;
 pub mod schematic_document;
+pub(crate) mod script_relationships;
 pub mod script_support;
 pub mod settings_surface;
 pub mod studio_surface;

@@ -20,6 +20,8 @@ use uuid::Uuid;
 
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(1);
 const REPORT_LIMIT: usize = 256;
+mod contacts;
+mod schedule;
 
 #[derive(Debug, Clone)]
 pub struct ScriptRuntimeOptions {
@@ -126,6 +128,7 @@ struct RhaiScriptBinding {
     started: bool,
     disabled: bool,
     destroyed: bool,
+    schedule: schedule::UpdateSchedule,
 }
 pub struct RhaiScriptRuntime {
     pub view: crate::view::RuntimeViewState,
@@ -259,6 +262,7 @@ impl RhaiScriptRuntime {
                             started: false,
                             disabled: false,
                             destroyed: false,
+                            schedule: schedule::UpdateSchedule::default(),
                         });
                         runtime.timestamps.insert(file.clone(), modified(&file));
                         report.loaded_scripts += 1;
@@ -305,6 +309,7 @@ impl RhaiScriptRuntime {
                     started: false,
                     disabled: false,
                     destroyed: false,
+                    schedule: schedule::UpdateSchedule::default(),
                 });
                 report.loaded_scripts = 1;
                 report.compiled_files = 1;
@@ -424,6 +429,19 @@ impl RhaiScriptRuntime {
                 binding.destroyed = true;
                 continue;
             }
+            let dt = if hook == "on_update" && binding.compiled.has_on_update {
+                match binding.schedule.due(&binding.scope, dt) {
+                    Ok(Some(dt)) => dt,
+                    Ok(None) => continue,
+                    Err(error) => {
+                        report.error(&binding.path, error);
+                        binding.disabled = true;
+                        continue;
+                    }
+                }
+            } else {
+                dt
+            };
             let mut ctx = ScriptContext {
                 view: &mut self.view,
                 scene,
@@ -436,6 +454,7 @@ impl RhaiScriptRuntime {
                 },
                 instance_id: self.instance_id,
                 owner: (!binding.global).then_some(binding.owner),
+                behavior_source: (!binding.global).then_some(binding.path.as_str()),
                 entity_limit: self.options.max_entities,
                 cancellation: if cleanup {
                     None
@@ -487,16 +506,9 @@ impl RhaiScriptRuntime {
         if self.events.events.len() >= 256 || name.is_empty() || name.len() > 128 {
             return Err("runtime event queue limit exceeded".into());
         }
-        if !matches!(
-            &value,
-            crate::value::ScriptValue::None
-                | crate::value::ScriptValue::Bool(_)
-                | crate::value::ScriptValue::Int(_)
-        ) && !matches!(&value, crate::value::ScriptValue::Float(v) if v.is_finite())
-            && !matches!(&value, crate::value::ScriptValue::String(v) if v.len() <= 4096)
-        {
-            return Err("runtime event payload requires a bounded scalar".into());
-        }
+        value
+            .validate_event_payload()
+            .map_err(|error| error.to_string())?;
         self.events.events.push(crate::host_api::ScriptEvent {
             name: name.into(),
             value,
@@ -521,9 +533,20 @@ impl RhaiScriptRuntime {
                     || !binding.started
                     || binding.disabled
                     || binding.destroyed
-                    || (!binding.global && !scene.is_valid_node(binding.owner))
+                    || (!binding.global
+                        && (!scene.is_valid_node(binding.owner)
+                            || scene.get(binding.owner).map(|n| n.uuid) != Some(binding.identity)))
                 {
                     continue;
+                }
+                match schedule::accepts_event(&binding.scope, &event.name) {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        report.error(&binding.path, error);
+                        binding.disabled = true;
+                        continue;
+                    }
                 }
                 let mut ctx = ScriptContext {
                     view: &mut self.view,
@@ -537,6 +560,7 @@ impl RhaiScriptRuntime {
                     },
                     instance_id: self.instance_id,
                     owner: (!binding.global).then_some(binding.owner),
+                    behavior_source: (!binding.global).then_some(binding.path.as_str()),
                     entity_limit: self.options.max_entities,
                     cancellation: Some(&self.options.cancellation),
                     deadline: Some(deadline),
@@ -621,7 +645,7 @@ fn read_source(path: &Path, limit: usize) -> Result<String, String> {
     }
     Ok(source)
 }
-fn resolve_script_path(base: Option<&Path>, script_path: &str) -> Result<PathBuf, String> {
+pub fn resolve_script_path(base: Option<&Path>, script_path: &str) -> Result<PathBuf, String> {
     let base = base.ok_or("project root is required")?;
     let root = base
         .canonicalize()
@@ -664,6 +688,217 @@ mod tests {
     use super::*;
     use raf_core::scene::Primitive;
     struct ProjectFixture(PathBuf);
+    #[test]
+    fn owner_and_scoped_parameters_keep_uuid_references_and_do_not_retarget_deleted_entities() {
+        use raf_core::scene::{SceneVariable, VariableValue};
+        let fixture = ProjectFixture::new(
+            r#"
+            fn on_start() { owner().set_property("speed_seen", parameter("speed", 1.0)); }
+            fn on_update(dt) {
+                let target = entity_parameter("target");
+                owner().set_property("target_valid", is_valid(target));
+                if is_valid(target) { target.move_by(parameter("speed", 1.0) * dt, 0.0, 0.0); }
+            }
+        "#,
+        );
+        let mut scene = fixture.scene();
+        let owners = scene.roots().to_vec();
+        let mut targets = Vec::new();
+        for (index, owner) in owners.iter().enumerate() {
+            let target = scene.add_child(*owner, "Target");
+            let uuid = scene.get(target).unwrap().uuid;
+            let node = scene.get_mut(*owner).unwrap();
+            node.set_variable("speed", VariableValue::Number(0.5));
+            node.behavior_parameters.insert(
+                "scripts/test.rhai".into(),
+                vec![
+                    SceneVariable {
+                        name: "speed".into(),
+                        value: VariableValue::Number((index + 1) as f32 * 2.0),
+                    },
+                    SceneVariable {
+                        name: "target".into(),
+                        value: VariableValue::Entity(Some(uuid)),
+                    },
+                ],
+            );
+            targets.push(target);
+        }
+        scene.get_mut(targets[0]).unwrap().name = "Renamed".into();
+        let (mut runtime, report) = RhaiScriptRuntime::load_from_scene(
+            &scene,
+            Some(&fixture.0),
+            ScriptRuntimeOptions::default(),
+        );
+        assert_eq!(report.compiled_files, 1);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(runtime.call_start(&mut scene).errors.is_empty());
+        assert!(runtime
+            .update(&mut scene, 0.5, &InputSnapshot::default())
+            .errors
+            .is_empty());
+        assert_eq!(scene.get(targets[0]).unwrap().position.x, 1.0);
+        assert_eq!(scene.get(targets[1]).unwrap().position.x, 2.0);
+        scene.remove_node(targets[0]);
+        let replacement = scene.add_child(owners[0], "Renamed");
+        assert!(runtime
+            .update(&mut scene, 0.5, &InputSnapshot::default())
+            .errors
+            .is_empty());
+        assert_eq!(scene.get(replacement).unwrap().position.x, 0.0);
+        assert_eq!(
+            scene.get(owners[0]).unwrap().get_variable("target_valid"),
+            Some(&VariableValue::Bool(false))
+        );
+        assert_eq!(scene.get(targets[1]).unwrap().position.x, 4.0);
+        let references =
+            crate::reference_analysis::analyze_rhai("entity_parameter(\"target\"); owner();");
+        assert!(references.contains(&crate::reference_analysis::SceneReference::Owner));
+        let lookup = crate::references::SceneLookup::new(&scene);
+        let reference = references
+            .iter()
+            .find(|r| matches!(r, crate::reference_analysis::SceneReference::Parameter(_)))
+            .unwrap();
+        assert_eq!(
+            reference.resolve_with_source(&lookup, owners[1], Some("scripts/test.rhai")),
+            Some(targets[1])
+        );
+        assert_eq!(
+            reference.resolve_with_source(&lookup, owners[0], Some("scripts/test.rhai")),
+            None
+        );
+    }
+    #[test]
+    fn behavior_optional_signal_examples_execute_without_injected_entities() {
+        let fixture = ProjectFixture::new(include_str!(
+            "../../../examples/runtime/signal_emitter.rhai"
+        ));
+        fs::write(
+            fixture.0.join("scripts/receiver.rhai"),
+            include_str!("../../../examples/runtime/signal_receiver.rhai"),
+        )
+        .unwrap();
+        let mut scene = SceneGraph::new();
+        let emitter = scene.add_root("Emitter");
+        let receiver = scene.add_root("Lamp");
+        let receiver_uuid = scene.get(receiver).unwrap().uuid;
+        scene.get_mut(emitter).unwrap().set_variable(
+            "receiver",
+            raf_core::scene::VariableValue::Entity(Some(receiver_uuid)),
+        );
+        scene
+            .get_mut(emitter)
+            .unwrap()
+            .scripts
+            .push("scripts/test.rhai".into());
+        scene
+            .get_mut(receiver)
+            .unwrap()
+            .scripts
+            .push("scripts/receiver.rhai".into());
+        let (mut runtime, loaded) = RhaiScriptRuntime::load_from_scene(
+            &scene,
+            Some(&fixture.0),
+            ScriptRuntimeOptions::default(),
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        let started = runtime.call_start(&mut scene);
+        assert!(started.errors.is_empty(), "{:?}", started.errors);
+        let report = runtime.update(&mut scene, 0.25, &InputSnapshot::default());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        let report = runtime.fixed_update(&mut scene, 0.016, &InputSnapshot::default());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert_eq!(
+            scene.get(receiver).unwrap().get_variable("signal"),
+            Some(&raf_core::scene::VariableValue::Number(1.0))
+        );
+        assert_eq!(scene.len(), 2);
+    }
+    #[test]
+    fn behavior_references_parameters_schedule_capabilities_and_structured_events() {
+        let fixture = ProjectFixture::new(
+            r#"
+            let owner = script.parent;
+            let behavior = #{ update_interval: 0.1, enabled: true, events: ["power.changed"] };
+            let energy = parameter("energy", 2.0);
+            let receiver = game["B"];
+            fn on_start() {
+                owner.set_capability("powered", true);
+                owner.set_property("updates", 0.0);
+                owner.set_property("received", 0.0);
+                let child = owner.child("Marker");
+                if is_valid(child) { child.set_property("bound", true); }
+            }
+            fn on_update(dt) {
+                owner.set_property("updates", owner.get_property("updates") + 1.0);
+                owner.set_property("elapsed_dt", dt);
+                let matches = query_nearby("powered", [0.0,0.0,0.0], 100.0, 16);
+                owner.set_property("matches", matches.len());
+                send_event(receiver, "power.changed", #{ amount: energy, origin: node_uuid(owner), details: [true, #{mode:"local"}] });
+            }
+            fn on_event(name, payload) {
+                owner.set_property("received", owner.get_property("received") + payload.amount);
+            }
+        "#,
+        );
+        let mut scene = fixture.scene();
+        let owners = scene.roots().to_vec();
+        for id in &owners {
+            scene.add_child(*id, "Marker");
+        }
+        scene
+            .get_mut(owners[0])
+            .unwrap()
+            .set_variable("energy", raf_core::scene::VariableValue::Number(3.0));
+        let original = scene.clone();
+        let (mut runtime, loaded) = RhaiScriptRuntime::load_from_scene(
+            &scene,
+            Some(&fixture.0),
+            ScriptRuntimeOptions::default(),
+        );
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        assert!(runtime.call_start(&mut scene).errors.is_empty());
+        for _ in 0..4 {
+            let report = runtime.update(&mut scene, 0.025, &InputSnapshot::default());
+            assert!(report.errors.is_empty(), "{:?}", report.errors);
+        }
+        runtime
+            .emit_event("unsubscribed", crate::ScriptValue::None)
+            .unwrap();
+        let report = runtime.fixed_update(&mut scene, 0.016, &InputSnapshot::default());
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        for owner in &owners {
+            assert_eq!(
+                scene.get(*owner).unwrap().get_variable("updates"),
+                Some(&raf_core::scene::VariableValue::Number(1.0))
+            );
+            assert_eq!(
+                scene.get(*owner).unwrap().get_variable("matches"),
+                Some(&raf_core::scene::VariableValue::Number(2.0))
+            );
+            assert!(original
+                .get(*owner)
+                .unwrap()
+                .get_variable("updates")
+                .is_none());
+        }
+        assert_eq!(
+            scene.get(owners[1]).unwrap().get_variable("received"),
+            Some(&raf_core::scene::VariableValue::Number(5.0))
+        );
+        assert_eq!(
+            scene.get(owners[0]).unwrap().get_variable("received"),
+            Some(&raf_core::scene::VariableValue::Number(0.0))
+        );
+        assert!(runtime
+            .emit_event("unsafe", crate::ScriptValue::Handle(0))
+            .is_err());
+        assert!(runtime.call_destroy(&mut scene).errors.is_empty());
+        assert!(runtime
+            .update(&mut scene, 1.0, &InputSnapshot::default())
+            .errors
+            .is_empty());
+    }
     #[test]
     fn exact_project_root_named_assets_cannot_escape_to_parent() {
         let fixture = ProjectFixture::new("fn on_update(dt) {}");
@@ -823,6 +1058,7 @@ fn on_destroy() { let me = self_node(); me.set_property("destroyed", true); }
             time: TimeInfo::default(),
             instance_id: 1,
             owner: Some(id),
+            behavior_source: None,
             entity_limit: 100,
             cancellation: None,
             deadline: None,

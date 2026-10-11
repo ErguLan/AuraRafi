@@ -150,13 +150,15 @@ For the smallest manual smoke test:
    transform/component unchanged. This is a manual acceptance checklist, not
    a claim that these native-window checks have already passed.
 
-For the follow example, explicitly author the named `/World/Camera` and
-optional `/World/Player` and `/World/Overview` entities. Attach the controller
-once to an ordinary Controller entity. The alternate view requires an authored
-camera component; no target or alternate view is created implicitly.
+For the follow example, attach the controller once to an authored entity.
+Assign its `camera` Entity parameter and optional `target` and `alternate`
+parameters in Inspector. Both camera references require authored camera
+components; no target or alternate view is created implicitly. See
+[Programming guide](SCRIPTING_GUIDE.md) for scalar parameters and setup.
 
-- `examples/runtime/camera_controller.rhai`: explicit /World/Camera,
-  optional /World/Player, WASD, post-physics follow, C -> /World/Overview.
+- `examples/runtime/camera_controller.rhai`: configured camera/target/alternate
+  references, post-physics follow and configurable switch key (default C).
+  It does not move the target or require hierarchy names.
 - `examples/runtime/free_camera.rhai`: attach to a camera entity, WASDQE
   world-axis movement and arrow-key local yaw/pitch; no required character.
 - `examples/runtime/camera_controller_contract.cpp`: a C++ contract sketch

@@ -4,6 +4,10 @@ This document describes the visual-node authoring path that is active in the
 native editor. Supported Game flows now compile to Rhai for isolated manual
 Play through the shared Host API. See CAMERA_RUNTIME.md for active capabilities,
 budgets and unsupported nodes; native visual acceptance remains separate.
+Physics controls/contact-event nodes use the same Host API as Rhai;
+[Physics Runtime](PHYSICS_RUNTIME.md) defines their pins, filters and limits.
+Behavior capability/property/query nodes and structured Event Record payloads
+also compile through that same Host API; see [Behavior Runtime](BEHAVIOR_RUNTIME.md).
 
 ## Ownership and modules
 

@@ -1165,7 +1165,7 @@
         {"name": "name", "kind": "string", "required": true, "description_key": "commands.param.name"},
         {"name": "size", "kind": "enum", "required": false, "default": "square", "description_key": "commands.param.image_size"},
         {"name": "transparent", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.transparent"},
-        {"name": "model", "kind": "string", "required": false, "default": "gpt-image-2", "description_key": "commands.param.model"}
+        {"name": "model", "kind": "string", "required": false, "description_key": "commands.param.model"}
       ],
       "examples": ["/asset.generate_image prompt=\"painted stone wall texture\" name=stone_wall size=square"]
     },
@@ -1185,6 +1185,30 @@
       "examples": ["/asset.generate_local_png prompt=\"orange electronics folder icon\" name=electronics_folder style=icon"]
     },
     {
+      "name": "asset.studio_install",
+      "aliases": [],
+      "domain": "shared",
+      "category": "asset",
+      "description_key": "commands.external_studio_install.desc",
+      "parameters": [],
+      "examples": ["/asset.studio_install"]
+    },
+    {
+      "name": "asset.studio_generate",
+      "aliases": [],
+      "domain": "shared",
+      "category": "asset",
+      "description_key": "commands.external_studio_generate.desc",
+      "parameters": [
+        {"name": "prompt", "kind": "string", "required": true, "description_key": "commands.param.prompt"},
+        {"name": "name", "kind": "string", "required": true, "description_key": "commands.param.name"},
+        {"name": "size", "kind": "enum", "required": false, "default": "square", "description_key": "commands.param.image_size"},
+        {"name": "transparent", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.transparent"},
+        {"name": "model", "kind": "string", "required": false, "description_key": "commands.param.model"}
+      ],
+      "examples": ["/asset.studio_generate prompt=\"detailed storefront sign\" name=store_sign"]
+    },
+    {
       "name": "asset.image_status",
       "aliases": [],
       "domain": "shared",
@@ -1194,6 +1218,61 @@
         {"name": "job", "kind": "string", "required": true, "description_key": "commands.param.job"}
       ],
       "examples": ["/asset.image_status job=<uuid>"]
+    },
+    {
+      "name": "behavior.parameter",
+      "aliases": [], "domain": "game", "category": "script",
+      "description_key": "commands.behavior_parameter.desc",
+      "parameters": [
+        {"name":"target","kind":"string","required":true,"description_key":"commands.param.target"},
+        {"name":"name","kind":"string","required":true,"description_key":"commands.param.name"},
+        {"name":"source","kind":"string","required":false,"description_key":"behavior.source_help"},
+        {"name":"action","kind":"string","required":false,"default":"set","description_key":"behavior.action_help"},
+        {"name":"type","kind":"string","required":false,"description_key":"behavior.type_help"},
+        {"name":"value","kind":"string","required":false,"description_key":"behavior.value_help"},
+        {"name":"new_name","kind":"string","required":false,"description_key":"commands.param.name"}
+      ],
+      "examples": ["/behavior.parameter target=/World/Controller source=scripts/camera_controller.rhai name=camera type=Entity value=/World/Camera"]
+    },
+    {
+      "name": "behavior.attach",
+      "aliases": [], "domain": "game", "category": "script",
+      "description_key": "commands.behavior_attach.desc",
+      "parameters": [
+        {"name":"target","kind":"string","required":true,"description_key":"commands.param.target"},
+        {"name":"source","kind":"string","required":true,"description_key":"behavior.source_help"}
+      ],
+      "examples": ["/behavior.attach target=/World/Controller source=scripts/camera_controller.rhai"]
+    },
+    {
+      "name": "behavior.detach",
+      "aliases": [], "domain": "game", "category": "script",
+      "description_key": "commands.behavior_detach.desc",
+      "parameters": [
+        {"name":"target","kind":"string","required":true,"description_key":"commands.param.target"},
+        {"name":"source","kind":"string","required":true,"description_key":"behavior.source_help"}
+      ],
+      "examples": ["/behavior.detach target=/World/Controller source=scripts/camera_controller.rhai"]
+    },
+    {
+      "name": "prefab.capture",
+      "aliases": [], "domain": "game", "category": "asset",
+      "description_key": "commands.prefab_capture.desc",
+      "parameters": [
+        {"name":"target","kind":"string","required":true,"description_key":"commands.param.target"},
+        {"name":"file","kind":"string","required":true,"description_key":"behavior.prefab_file_help"}
+      ],
+      "examples": ["/prefab.capture target=/World/Rig file=rig.prefab.ron"]
+    },
+    {
+      "name": "prefab.instantiate",
+      "aliases": [], "domain": "game", "category": "asset",
+      "description_key": "commands.prefab_instantiate.desc",
+      "parameters": [
+        {"name":"file","kind":"string","required":true,"description_key":"behavior.prefab_file_help"},
+        {"name":"parent","kind":"string","required":false,"description_key":"commands.param.target"}
+      ],
+      "examples": ["/prefab.instantiate file=rig.prefab.ron parent=/World"]
     },
     {
       "name": "asset.cancel_image",

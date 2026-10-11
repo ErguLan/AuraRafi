@@ -8,6 +8,8 @@
 
 pub mod node_backend;
 pub mod rhai_backend;
+mod rhai_behavior_api;
+mod rhai_physics_api;
 mod rhai_scene_api;
 pub mod wasm_backend;
 

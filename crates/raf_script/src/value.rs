@@ -20,6 +20,7 @@ pub enum ScriptValue {
     Color([u8; 4]),
     Handle(u64),
     List(Vec<ScriptValue>),
+    Record(std::collections::BTreeMap<String, ScriptValue>),
 }
 
 impl Default for ScriptValue {
@@ -29,6 +30,38 @@ impl Default for ScriptValue {
 }
 
 impl ScriptValue {
+    /// Transport-neutral event data, never raw entity handles or engine pointers.
+    pub fn validate_event_payload(&self) -> crate::ScriptResult<()> {
+        fn visit(value: &ScriptValue, depth: usize, items: &mut usize, bytes: &mut usize) -> bool {
+            *items += 1;
+            if depth > 8 || *items > 256 || *bytes > 8192 {
+                return false;
+            }
+            match value {
+                ScriptValue::None | ScriptValue::Bool(_) | ScriptValue::Int(_) => true,
+                ScriptValue::Float(v) => v.is_finite(),
+                ScriptValue::String(v) => {
+                    *bytes += v.len();
+                    v.len() <= 4096 && *bytes <= 8192
+                }
+                ScriptValue::Vec3(v) => v.iter().all(|v| v.is_finite()),
+                ScriptValue::Color(_) => true,
+                ScriptValue::List(values) => {
+                    values.iter().all(|v| visit(v, depth + 1, items, bytes))
+                }
+                ScriptValue::Record(values) => values.iter().all(|(key, v)| {
+                    *bytes += key.len();
+                    !key.is_empty() && key.len() <= 128 && visit(v, depth + 1, items, bytes)
+                }),
+                ScriptValue::Handle(_) => false,
+            }
+        }
+        if visit(self, 0, &mut 0, &mut 0) {
+            Ok(())
+        } else {
+            Err(crate::ScriptError::InvalidArgument("event data exceeds depth/item/byte limits or contains invalid values; use UUID strings for entities".into()))
+        }
+    }
     /// Coerce to bool. Non-empty strings and non-zero numbers are true.
     pub fn as_bool(&self) -> bool {
         match self {
@@ -83,6 +116,7 @@ impl ScriptValue {
             Self::Color(c) => format!("rgba({},{},{},{})", c[0], c[1], c[2], c[3]),
             Self::Handle(h) => format!("handle:{}", h),
             Self::List(items) => format!("[{} items]", items.len()),
+            Self::Record(items) => format!("{{{} fields}}", items.len()),
             Self::None => String::new(),
         }
     }

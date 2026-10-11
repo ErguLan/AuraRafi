@@ -8,6 +8,7 @@
 //!
 //! SISTEMA INSPIRADO DE YOLL AU de yoll.site
 
+pub mod behavior_nodes;
 pub mod catalog;
 pub mod compiler;
 pub mod entity_nodes;
@@ -18,6 +19,7 @@ pub mod hardware_nodes;
 pub mod input_nodes;
 pub mod math_nodes;
 pub mod node;
+mod physics_nodes;
 pub mod runtime_compiler;
 pub mod scene_nodes;
 

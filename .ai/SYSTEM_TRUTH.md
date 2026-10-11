@@ -38,6 +38,36 @@ The active session Nodes snapshot compiles through
 sandbox and Host API; the legacy executor is not the Play path. C++/WASM and
 server networking remain unimplemented adapters. See CAMERA_RUNTIME.md.
 
+Physics scripting: `raf_script::physics_api` owns explicit velocity, impulse,
+body and collider controls for Rhai/Nodes. `raf_runtime::physics` owns bounded
+integration, `physics_contacts` owns UUID contact history and
+`physics_response` owns bounded translation-only depenetration. Physics hooks
+dispatch under the existing script deadline before late-update. No gameplay
+controller or new physics dependency is injected. See PHYSICS_RUNTIME.md;
+native acceptance and resource measurement remain separate gates.
+
+Composable behavior checkpoint (2026-10-06): existing multi-script attachments
+remain the composition boundary, with per-attachment scope state and scalar
+Inspector parameters. `raf_script::behavior_api` supplies user capability tags
+and bounded queries; the lifecycle supplies opt-in update intervals/event
+subscriptions and structured, bounded local messages. Legacy `script.parent`
+is the attachment owner and `game["Name"]` is unambiguous root lookup. Seven
+behavior Nodes compile to the same Host API. No gameplay controller is injected.
+`raf_editor::script_relationships` owns an opt-in background source index;
+Hierarchy renders attached/reference rows as presentation only, never scene
+children. See BEHAVIOR_RUNTIME.md. Native acceptance, typed behavior manifests,
+live prefab inheritance/package authoring and online replication are not claimed complete.
+
+Owner and reuse update (2026-10-10, source implementation only): `owner()` is
+the canonical public attachment reference; hierarchy parent remains distinct.
+Typed Entity UUID parameters and per-source overrides are edited through the
+native Inspector and shared `behavior.*` commands. Entity Reference Nodes reuse
+the Host API. Versioned `.prefab.ron` subtree capture/instantiation creates
+independent copies, with fresh UUIDs and internal typed-reference remapping;
+ordinary duplication uses the same remapper. No live inheritance or automatic
+gameplay association is implied. This update has not been compiled, run or
+functionally accepted in this pass. See SCRIPTING_INTERNALS.md and SCRIPTING_GUIDE.md.
+
 This section is the active decision register. Historical ADR files are not a
 second authority. When an older note conflicts with this section or with the
 active code map below, this document and the live code win.

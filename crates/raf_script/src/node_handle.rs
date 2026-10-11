@@ -292,6 +292,10 @@ impl NodeHandle {
                 Some(VariableValue::Bool(value)) => ScriptValue::Bool(*value),
                 Some(VariableValue::Number(value)) => ScriptValue::Float(*value),
                 Some(VariableValue::Text(value)) => ScriptValue::String(value.clone()),
+                // Serialized UUIDs are data, never fabricated runtime handles.
+                Some(VariableValue::Entity(value)) => value
+                    .map(|id| ScriptValue::String(id.to_string()))
+                    .unwrap_or(ScriptValue::None),
                 None => ScriptValue::None,
             }),
         }

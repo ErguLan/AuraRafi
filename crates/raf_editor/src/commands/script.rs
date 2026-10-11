@@ -539,6 +539,9 @@ fn rhai_template(name: &str) -> String {
 //   fn on_destroy()      - called once when the scene unloads
 //
 // Available functions:
+//   owner() -> attachment entity; get_parent(owner()) -> real hierarchy parent
+//   parameter(name, default) -> typed scalar parameter
+//   entity_parameter(name) -> typed Entity parameter; always check is_valid
 //   get_node(name) -> Handle
 //   entity(uuid_or_path) -> Handle; check is_valid(handle) before use
 //   activate_camera(handle) -> select a camera for this runtime instance
@@ -563,13 +566,13 @@ fn rhai_template(name: &str) -> String {
 //   color_rgba(r, g, b, a) -> Value
 
 fn on_start() {{
-    let body = get_node("Body");
-    body.set_color_rgb(255, 80, 80);
+    // Initialize your authored behavior here; no scene object is assumed.
 }}
 
 fn on_update(dt) {{
-    let body = get_node("Body");
-    let speed = 5.0;
+    let body = owner();
+    if !is_valid(body) {{ return; }}
+    let speed = parameter("speed", 5.0);
 
     if is_key_pressed("w") {{
         body.move_by(0.0, 0.0, speed * dt);
@@ -593,7 +596,8 @@ fn cpp_template(name: &str) -> String {
 // Compile to .wasm:
 //   clang++ --target=wasm32 -O2 -nostdlib -o {name}.wasm {name}.cpp
 //
-// The engine loads the .wasm and calls on_start / on_update.
+// CONTRACT TEMPLATE ONLY: local Play does not load or execute C++/WASM yet.
+// The declarations below describe a proposed import ABI, not a shipping SDK.
 // Host API functions are imported from the "aurarafi" import module.
 
 extern "C" {{

@@ -83,7 +83,7 @@ fn check_audio_queue(ctx: &ScriptContext<'_>) -> ScriptResult<()> {
         Ok(())
     }
 }
-fn to_dynamic(value: ScriptValue) -> Dynamic {
+pub(super) fn to_dynamic(value: ScriptValue) -> Dynamic {
     match value {
         ScriptValue::None => Dynamic::UNIT,
         ScriptValue::Bool(v) => v.into(),
@@ -95,10 +95,35 @@ fn to_dynamic(value: ScriptValue) -> Dynamic {
                 .map(|v| Dynamic::from_float(v as f64))
                 .collect(),
         ),
+        ScriptValue::List(values) => {
+            Dynamic::from_array(values.into_iter().map(to_dynamic).collect())
+        }
+        ScriptValue::Record(values) => Dynamic::from_map(
+            values
+                .into_iter()
+                .map(|(key, value)| (key.into(), to_dynamic(value)))
+                .collect(),
+        ),
         value => Dynamic::from(value),
     }
 }
-fn from_dynamic(value: Dynamic) -> ScriptResult<ScriptValue> {
+pub(super) fn from_dynamic(value: Dynamic) -> ScriptResult<ScriptValue> {
+    let value = from_dynamic_inner(value, 0, &mut 0)?;
+    value.validate_event_payload()?;
+    Ok(value)
+}
+
+fn from_dynamic_inner(
+    value: Dynamic,
+    depth: usize,
+    count: &mut usize,
+) -> ScriptResult<ScriptValue> {
+    *count += 1;
+    if depth > 8 || *count > 256 {
+        return Err(ScriptError::InvalidArgument(
+            "structured value exceeds depth/item budget".into(),
+        ));
+    }
     if value.is_unit() {
         return Ok(ScriptValue::None);
     }
@@ -119,6 +144,22 @@ fn from_dynamic(value: Dynamic) -> ScriptResult<ScriptValue> {
         ));
     } else if value.is::<ScriptValue>() {
         return Ok(value.cast());
+    } else if value.is::<Array>() {
+        return Ok(ScriptValue::List(
+            value
+                .cast::<Array>()
+                .into_iter()
+                .map(|v| from_dynamic_inner(v, depth + 1, count))
+                .collect::<ScriptResult<_>>()?,
+        ));
+    } else if value.is::<rhai::Map>() {
+        return Ok(ScriptValue::Record(
+            value
+                .cast::<rhai::Map>()
+                .into_iter()
+                .map(|(key, v)| Ok((key.to_string(), from_dynamic_inner(v, depth + 1, count)?)))
+                .collect::<ScriptResult<_>>()?,
+        ));
     }
     Err(ScriptError::InvalidArgument(
         "unsupported property value".into(),
@@ -146,6 +187,7 @@ pub fn create_engine(max_operations: u64) -> Engine {
     engine.on_print(capture_log);
     engine.on_debug(|message, _, _| capture_log(message));
     engine.register_type_with_name::<NodeHandle>("Handle");
+    super::rhai_behavior_api::register(&mut engine);
     engine.register_type_with_name::<ScriptValue>("Value");
     engine.register_fn("vec3", |x: f64, y: f64, z: f64| {
         ScriptValue::vec3(x as f32, y as f32, z as f32)
@@ -385,6 +427,7 @@ pub fn create_engine(max_operations: u64) -> Engine {
         with_ctx(|ctx| Ok(ctx.get_elapsed_time() as f64))
     });
     super::rhai_scene_api::register(&mut engine);
+    super::rhai_physics_api::register(&mut engine);
     engine
 }
 
@@ -398,6 +441,8 @@ pub struct CompiledRhai {
     pub has_on_destroy: bool,
     pub has_on_event: bool,
     pub has_on_late_update: bool,
+    pub physics_hooks: [bool; 6],
+    pub has_on_physics_event: bool,
 }
 pub fn compile_source(engine: &Engine, path: &str, source: &str) -> ScriptResult<CompiledRhai> {
     let mut ast = engine
@@ -405,7 +450,29 @@ pub fn compile_source(engine: &Engine, path: &str, source: &str) -> ScriptResult
         .map_err(|e| ScriptError::RhaiCompile(e.to_string()))?;
     ast.set_source(path);
     let mut hooks = [false; 6];
+    let mut physics_hooks = [false; 6];
+    let mut has_on_physics_event = false;
     for function in ast.iter_functions() {
+        if let Some(index) = crate::physics_api::PhysicsEventKind::ALL
+            .iter()
+            .position(|kind| kind.hook() == function.name)
+        {
+            if function.params.len() != 1 || function.access != rhai::FnAccess::Public {
+                return Err(ScriptError::RhaiCompile(format!(
+                    "{path}: {} requires one parameter and public access",
+                    function.name
+                )));
+            }
+            physics_hooks[index] = true;
+        }
+        if function.name == "on_physics_event" {
+            if function.params.len() != 1 || function.access != rhai::FnAccess::Public {
+                return Err(ScriptError::RhaiCompile(format!(
+                    "{path}: on_physics_event requires one parameter and public access"
+                )));
+            }
+            has_on_physics_event = true;
+        }
         let hook = match function.name {
             "on_start" => Some((0, 0)),
             "on_update" => Some((1, 1)),
@@ -434,6 +501,28 @@ pub fn compile_source(engine: &Engine, path: &str, source: &str) -> ScriptResult
         has_on_destroy: hooks[3],
         has_on_event: hooks[4],
         has_on_late_update: hooks[5],
+        physics_hooks,
+        has_on_physics_event,
+    })
+}
+pub fn call_physics_event(
+    engine: &Engine,
+    script: &CompiledRhai,
+    ctx: &mut ScriptContext<'_>,
+    scope: &mut Scope<'static>,
+    hook: &str,
+    value: Dynamic,
+) -> ExecutionResult {
+    evaluate(ctx, || {
+        engine
+            .call_fn_with_options::<Dynamic>(
+                CallFnOptions::new().eval_ast(false),
+                scope,
+                &script.ast,
+                hook,
+                (value,),
+            )
+            .map(|_| ())
     })
 }
 pub fn call_event(
@@ -494,6 +583,7 @@ pub fn initialize_scope(
     ctx: &mut ScriptContext<'_>,
     scope: &mut Scope<'static>,
 ) -> ExecutionResult {
+    super::rhai_behavior_api::seed_scope(scope);
     evaluate(ctx, || {
         engine
             .eval_ast_with_scope::<Dynamic>(scope, &script.ast)

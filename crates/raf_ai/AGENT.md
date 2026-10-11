@@ -99,9 +99,18 @@ converted to CLI strings.
 - Use `asset.generate_local_png` for editor icons, badges, placeholders, simple
   sprites, and reference textures. It is deterministic, offline, and costs no
   provider request.
-- Use `asset.generate_image` only when the request needs genuine visual
-  interpretation or authored-looking art. It uses the configured remote image
-  provider and defaults to `gpt-image-2`.
+- Native `asset_generate_image` uses the conversation provider and model, with
+  provider-published image capabilities where available. An explicitly chosen
+  image-only generator may be supplied to the tool; never invent or silently
+  substitute an ID. This does not introduce separate model-role settings.
+- For complex images, use `external_studio_install` and
+  `external_studio_generate` only when the user enabled a trusted external
+  studio in AI Providers. The studio remains a separate CLI installation;
+  installation never overwrites a directory or runs package-install hooks.
+- These are alternative tools, not a mandatory sequence. Generation waits for
+  the real PNG, validates it, and refreshes the existing project Assets catalog.
+  Plan mode performs no downloads or paid generation; Inspect exposes no writes.
+  Generation does not assign textures or claim a scene Undo token.
 - State which route you selected and why. Never claim that a local procedural
   PNG is equivalent to a generated illustration.
 
@@ -117,7 +126,9 @@ converted to CLI strings.
 
 - `Inspect` exposes only read tools. `Plan` previews mutations without changing
   the project. `Active` applies mutations through the shared command gateway.
-- Never run commands that escape the active project folder or touch the host OS.
+- Keep project edits inside the active project. The sole external installation
+  exception is the separately configured, explicitly trusted studio directory;
+  tools cannot choose arbitrary repository URLs, executables or host paths.
 
 ## Native Agent perception and result contract
 

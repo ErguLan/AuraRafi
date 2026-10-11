@@ -122,6 +122,12 @@ impl AgentToolResult {
 
 /// Executor for tools invoked by the agent.
 pub trait ToolExecutor {
+    /// An asynchronous tool has started, but has not produced its final result.
+    fn is_pending(&self, _call_id: &str) -> bool { false }
+
+    /// Poll existing work without re-executing the tool or issuing another request.
+    fn poll_pending(&mut self, _call_id: &str) -> Option<Result<AgentToolResult, String>> { None }
+
     fn kind(&self, _name: &str) -> AgentToolKind {
         AgentToolKind::Mutation
     }
@@ -787,7 +793,7 @@ impl AgentRuntime {
             .pending_calls
             .iter_mut()
             .find(|call| call.result.is_none())
-            .map(|call| {
+            .and_then(|call| {
                 let result = if call.approved == Some(false) {
                     "Denied by user.".to_string()
                 } else if let Some(error) = call.argument_error.as_deref() {
@@ -810,24 +816,29 @@ impl AgentRuntime {
                             call.name
                         )
                     } else {
-                        match executor.execute(
-                            &call.id,
-                            &call.name,
-                            call.arguments.clone(),
-                            execution_mode,
-                        ) {
-                        Ok(output) => output.model_content(max_tool_result_chars),
-                        Err(error) => format!("Error: {}", error),
+                        let output = if executor.is_pending(&call.id) {
+                            executor.poll_pending(&call.id)?
+                        } else {
+                            let output = executor.execute(&call.id, &call.name, call.arguments.clone(), execution_mode);
+                            if executor.is_pending(&call.id) { return None; }
+                            output
+                        };
+                        match output {
+                            Ok(output) => output.model_content(max_tool_result_chars),
+                            Err(error) => format!("Error: {}", error),
                         }
                     }
                 };
                 let result = truncate_tool_result(result, max_tool_result_chars);
                 call.result = Some(result.clone());
-                (call.id.clone(), result)
+                Some((call.id.clone(), result))
             });
         if let Some((id, result)) = executed {
             self.tool_calls_executed = self.tool_calls_executed.saturating_add(1);
             self.emit(AgentEvent::ToolResult { id, result });
+            return AgentStatus::ExecutingTools;
+        }
+        if self.pending_calls.iter().any(|call| call.result.is_none()) {
             return AgentStatus::ExecutingTools;
         }
 
@@ -1353,6 +1364,40 @@ mod tests {
         );
         assert_eq!(executor.calls, vec!["game_add", "game_move"]);
         assert!(runtime.pending_calls[1].result.is_some());
+    }
+
+    #[test]
+    fn asynchronous_tool_is_started_once_and_only_completed_results_are_recorded() {
+        #[derive(Default)]
+        struct AsyncExecutor { starts: usize, polls: usize, pending: bool }
+        impl ToolExecutor for AsyncExecutor {
+            fn is_pending(&self, _: &str) -> bool { self.pending }
+            fn execute(&mut self, _: &str, _: &str, _: Value, _: ToolExecutionMode) -> Result<AgentToolResult, String> {
+                self.starts += 1;
+                self.pending = true;
+                Ok(AgentToolResult::success("queued", Value::Null))
+            }
+            fn poll_pending(&mut self, _: &str) -> Option<Result<AgentToolResult, String>> {
+                self.polls += 1;
+                if self.polls < 2 { return None; }
+                self.pending = false;
+                Some(Ok(AgentToolResult::success("real image ready", serde_json::json!({"image_path":"assets/generated/image.png"}))))
+            }
+        }
+        let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+        runtime.set_tool_execution_interval(Duration::ZERO);
+        runtime.pending_calls = vec![PendingToolCall::new("image", "asset_generate_image", serde_json::json!({}))];
+        runtime.pending_tool_execution = Some(PendingToolExecution { tools: vec![], execution_mode: ToolExecutionMode::Apply });
+        let mut executor = AsyncExecutor::default();
+        runtime.execute_next_tool(Some(&mut executor));
+        assert!(runtime.pending_calls[0].result.is_none());
+        assert_eq!(runtime.tool_calls_executed, 0);
+        runtime.execute_next_tool(Some(&mut executor));
+        assert!(runtime.pending_calls[0].result.is_none());
+        runtime.execute_next_tool(Some(&mut executor));
+        assert_eq!(executor.starts, 1);
+        assert_eq!(runtime.tool_calls_executed, 1);
+        assert!(runtime.pending_calls[0].result.as_ref().unwrap().contains("real image ready"));
     }
 
     #[test]

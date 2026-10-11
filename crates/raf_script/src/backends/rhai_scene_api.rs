@@ -4,7 +4,7 @@ use crate::{NodeHandle, ScriptError, ScriptResult};
 use glam::{EulerRot, Quat, Vec3};
 use rhai::{Array, Dynamic, Engine, ImmutableString, Map};
 
-fn vector(values: Array) -> ScriptResult<Vec3> {
+pub(super) fn vector(values: Array) -> ScriptResult<Vec3> {
     if values.len() != 3 {
         return Err(ScriptError::InvalidArgument(
             "Vector requires three finite numbers".into(),
@@ -28,7 +28,7 @@ fn vector(values: Array) -> ScriptResult<Vec3> {
     }
     Ok(value)
 }
-fn array(values: [f32; 3]) -> Array {
+pub(super) fn array(values: [f32; 3]) -> Array {
     values
         .into_iter()
         .map(|v| Dynamic::from_float(v as f64))

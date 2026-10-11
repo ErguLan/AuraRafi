@@ -3,7 +3,6 @@ use crate::view::ScriptRole;
 use crate::{NodeHandle, ScriptContext, ScriptError, ScriptResult};
 use glam::{EulerRot, Mat3, Mat4, Quat, Vec3};
 use raf_core::runtime_config::GameCamera;
-use uuid::Uuid;
 
 fn invalid(message: &str) -> ScriptError {
     ScriptError::InvalidArgument(message.into())
@@ -11,42 +10,7 @@ fn invalid(message: &str) -> ScriptError {
 
 impl ScriptContext<'_> {
     pub fn entity(&self, reference: &str) -> Option<NodeHandle> {
-        if let Ok(uuid) = Uuid::parse_str(reference) {
-            let mut matches = self
-                .scene
-                .iter()
-                .filter(|(id, n)| self.scene.is_valid_node(*id) && n.uuid == uuid);
-            let (id, _) = matches.next()?;
-            return matches
-                .next()
-                .is_none()
-                .then(|| NodeHandle::scoped(id, self));
-        }
-        if !reference.contains('/') {
-            return self.get_node(reference);
-        }
-        let mut current = None;
-        for part in reference.trim_start_matches('/').split('/') {
-            if part.is_empty() || part == "." || part == ".." {
-                return None;
-            }
-            current = match current {
-                Some(parent) => self.find_child(parent, part).ok().flatten(),
-                None => {
-                    let mut matches = self.scene.roots().iter().copied().filter(|id| {
-                        self.scene.is_valid_node(*id)
-                            && self.scene.get(*id).is_some_and(|n| n.name == part)
-                    });
-                    let id = matches.next()?;
-                    matches
-                        .next()
-                        .is_none()
-                        .then(|| NodeHandle::scoped(id, self))
-                }
-            };
-            current?;
-        }
-        current
+        crate::references::entity(self.scene, reference).map(|id| NodeHandle::scoped(id, self))
     }
     pub fn active_camera(&self) -> Option<NodeHandle> {
         let handle = self.entity(&self.view.active_camera?.to_string())?;
@@ -262,6 +226,7 @@ mod tests {
             time: TimeInfo::default(),
             instance_id: 7,
             owner: None,
+            behavior_source: None,
             entity_limit: 100,
             cancellation: None,
             deadline: None,

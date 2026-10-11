@@ -334,6 +334,9 @@ pub struct EngineSettings {
     /// Editor section because they affect the editor panel, not the runtime.
     #[serde(default = "default_true")]
     pub hierarchy_show_icons: bool,
+    /// Opt-in static script links, presented as virtual rows, never scene children.
+    #[serde(default)]
+    pub hierarchy_show_script_links: bool,
     #[serde(default = "default_true")]
     pub hierarchy_show_visibility: bool,
     #[serde(default = "default_true")]
@@ -479,6 +482,10 @@ pub struct EngineSettings {
     /// file. This is enabled by default so provider setup survives restarts.
     #[serde(default = "default_ai_persist_credentials")]
     pub ai_persist_credentials: bool,
+
+    /// Optional external image studio, installed independently of the engine.
+    #[serde(default)]
+    pub external_asset_studio: crate::ai::ExternalAssetStudio,
 
     /// Provider selected by default when starting a new conversation.
     #[serde(default)]
@@ -704,6 +711,7 @@ impl Default for EngineSettings {
             auto_save_interval_seconds: 120,
             display_unit: DisplayUnit::Metric,
             hierarchy_show_icons: true,
+            hierarchy_show_script_links: false,
             hierarchy_show_visibility: true,
             hierarchy_show_locked: true,
             hierarchy_show_hidden: false,
@@ -747,6 +755,7 @@ impl Default for EngineSettings {
             script_external_editor_cmd: "code".to_string(),
             ai_providers: default_ai_providers(),
             ai_persist_credentials: true,
+            external_asset_studio: crate::ai::ExternalAssetStudio::default(),
             default_ai_provider: AiProvider::OpenRouter,
             agent_mode: AgentMode::Plan,
             agent_model_shortcuts: default_agent_model_shortcuts(),
@@ -898,6 +907,19 @@ mod tests {
         let deserialized: EngineSettings = ron::from_str(&serialized).unwrap();
         assert_eq!(deserialized.theme, settings.theme);
         assert_eq!(deserialized.language, settings.language);
+    }
+
+    #[test]
+    fn external_studio_defaults_are_opt_in_and_configuration_round_trips() {
+        let mut settings = EngineSettings::default();
+        assert!(!settings.external_asset_studio.enabled);
+        assert!(settings.external_asset_studio.repository_url.is_empty());
+        settings.external_asset_studio.enabled = true;
+        settings.external_asset_studio.directory = "D:/Tools/Studio".into();
+        settings.external_asset_studio.entry_point = "cli/asset-worker.js".into();
+        let raw = ron::to_string(&settings).unwrap();
+        let restored: EngineSettings = ron::from_str(&raw).unwrap();
+        assert_eq!(restored.external_asset_studio, settings.external_asset_studio);
     }
 
     #[test]

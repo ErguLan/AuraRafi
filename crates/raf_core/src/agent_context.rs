@@ -200,6 +200,8 @@ pub fn scene_fingerprint(scene: &SceneGraph) -> BTreeMap<String, Value> {
                     "source_asset": node.source_asset,
                     "source_schema_version": node.source_schema_version,
                     "scripts": node.scripts,
+                    "variables": node.variables,
+                    "behavior_parameters": node.behavior_parameters,
                     "game_camera": node.game_camera,
                     "semantic_role": node.semantic_role,
                     "stable_key": node.stable_key,

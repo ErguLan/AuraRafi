@@ -453,9 +453,10 @@ pub fn build_agent_system_prompt(
     language: Language,
 ) -> String {
     format!(
-        "{} {}",
+        "{} {} {}",
         t("app.agent_system_prompt", language),
-        t("app.agent_design_rules", language)
+        t("app.agent_design_rules", language),
+        t("app.agent_asset_rules", language)
     )
     .replace("{mode}", mode)
 }

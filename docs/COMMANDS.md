@@ -97,8 +97,17 @@ history. `/` alone maps to `/help`.
 | `/ui.node.remove id=<id>` | Removes a non-root UI node. |
 | `/ui.document.set_space space=screen|world|camera` | Chooses where that user UI renders. |
 | `/ui.document.bind_camera camera=<key>` | Links a document to a camera by reference, not hierarchy ownership. |
-| `/asset.generate_image prompt="..." name=<asset> size=square|landscape|portrait transparent=true|false` | Starts the isolated remote image worker with `gpt-image-2` by default. |
+| `/asset.generate_image prompt="..." name=<asset> size=square|landscape|portrait transparent=true|false model=<optional-explicit-id>` | Starts an isolated image worker using the Agent's selected conversation provider/model unless explicitly overridden. No silent model fallback. |
 | `/asset.generate_local_png prompt="..." name=<asset> style=icon|badge|sprite|texture` | Starts the inexpensive local procedural PNG worker; no API key or network required. |
+| `/asset.studio_install` | Downloads the independently configured, trusted external studio; never overwrites an existing directory or installs dependencies. |
+| `/asset.studio_generate prompt="..." name=<asset> size=square|landscape|portrait` | Generates through that studio's standalone CLI and returns an image to the existing Assets catalog. |
+
+Native Console and attached CLI/MCP asset commands return a job handle. Poll
+`/asset.image_status job=<handle>` or stop with `/asset.cancel_image job=<handle>`.
+Attached generation, installation and cancellation require `confirm: true`;
+`dry_run: true` performs no download, generation or cancellation. Jobs are
+project-scoped file operations, not scene transactions or scene Undo entries.
+See [Agent image tools](AGENT_IMAGE_TOOLS.md) for configuration and trust limits.
 | `/asset.image_status job=<uuid>` | Reads an image generation job. |
 | `/asset.cancel_image job=<uuid>` | Stops a running image generation job. |
 
@@ -344,6 +353,38 @@ footprints, rotations, pin local/world positions and nets. PCB outputs include
 board size, placement, trace points, layers and airwire routing details.
 
 ## File Safety
+
+### Behavior parameters and reusable subtrees
+
+Source checkpoint (2026-10-10): these handlers are written, not compiled or
+functionally accepted in this pass. Inspector and the Game Agent/attached
+adapters share `commands/behavior.rs`:
+
+| Command | Parameters |
+| --- | --- |
+| `/behavior.attach` | `target`, assets-relative `.rhai` `source` |
+| `/behavior.detach` | `target`, exact attached `source` |
+| `/behavior.parameter` | `target`, `name`, optional `source`, `action=set|remove|rename`; set requires `type` and `value`, rename requires `new_name` |
+| `/prefab.capture` | subtree `target`, new assets-relative `.prefab.ron` `file` |
+| `/prefab.instantiate` | assets-relative `file`, optional `parent` |
+
+Targets accept a unique UUID/path/name. Parameter types are Bool, finite
+Number, Text (4096-byte maximum), and Entity (UUID/path/name or `none`). Entity
+assignments store UUIDs. Omit `source` for shared entity variables; specify the
+exact attached path for an attachment override. Limits: 256 parameters per
+scope, 64 attachments/scopes per entity. Detaching retains saved overrides.
+
+Prefabs are independent versioned snapshots, not live inherited instances.
+Instantiation remaps internal typed references and creates fresh UUIDs; external
+references remain external. Maximum 1024 nodes / 8MiB per file and 10000 flat
+scene slots. Gateway budgets conservatively reserve 1024 nodes for instantiation,
+even if the file is smaller. Capture requires an existing destination folder,
+refuses overwrites and is not undone by scene Undo. Instantiation is a scene edit.
+
+External requests require `confirm=true`; `dry_run=true` previews on disposable
+state and never writes the prefab file. Existing revision/idempotency handling
+applies. These commands do not enable scripting, start Play or save the project.
+See [Programming guide](SCRIPTING_GUIDE.md) for practical examples.
 
 `/workspace.read` and `/workspace.search` only read inside the active project
 folder. They do not read the whole AuraRafi repository unless the active project

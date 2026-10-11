@@ -212,7 +212,9 @@ fn apply_console_command(
         selected_node: runtime.game_viewport().selected.first().copied(),
         selected_nodes: runtime.game_viewport().selected.clone(),
     };
-    let output = if parsed.name.starts_with("game.") {
+    let output = if parsed.name.starts_with("behavior.") || parsed.name.starts_with("prefab.") {
+        apply_behavior_command(runtime, scene, project, &parsed)
+    } else if parsed.name.starts_with("game.") {
         let viewport = runtime.game_viewport_mut();
         let mut context = GameCommandContext {
             scene,
@@ -246,6 +248,26 @@ fn apply_console_command(
         } else {
             runtime.request_ui_frame();
         }
+    }
+    output
+}
+
+fn apply_behavior_command(
+    runtime: &mut NativeEditorRuntime,
+    scene: &mut SceneGraph,
+    project: Option<&Project>,
+    command: &crate::commands::ParsedCommand,
+) -> CommandOutput {
+    let before = scene.clone();
+    let assets = project.map(|p| p.path.join("assets"));
+    let mut context = crate::commands::script::ScriptCommandContext {
+        scene,
+        assets_root: assets.as_deref(),
+    };
+    let output = crate::commands::behavior::execute(command, &mut context, false);
+    if output.changed {
+        runtime.record_scene_change(before, scene);
+        runtime.request_canvas_frame();
     }
     output
 }

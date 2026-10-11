@@ -1,42 +1,41 @@
-// Attach to an explicit Controller entity, not to every object.
-// Author /World/Camera (Empty or Part); /World/Player is optional.
-// Units: meters, seconds, radians. No automatic player or camera creation.
+// Optional user-authored behavior. Attach to a Controller, then assign
+// Entity parameters: camera, target (optional), alternate (optional).
+// No names, objects, camera components or characters are injected.
 fn on_start() {
     if !is_client() { return; }
-    let camera = entity("/World/Camera");
-    if !is_valid(camera) { return; }
-    camera.add_camera();
-    camera.set_fov(65.0);
-    camera.set_clip(0.1, 1000.0);
+    let camera = entity_parameter("camera");
+    if !is_valid(camera) || !has_camera(camera) { return; }
+    camera.set_fov(parameter("fov", 65.0));
     activate_camera(camera);
 }
 
 fn on_update(dt) {
     if !is_client() { return; }
-    // C switches to an explicitly authored alternative camera.
-    if was_key_just_pressed("c") {
-        let alternate = entity("/World/Overview");
+    // The user's parameter chooses the key and both view targets.
+    if was_key_just_pressed(parameter("switch_key", "c")) {
+        let primary = entity_parameter("camera");
+        let alternate = entity_parameter("alternate");
+        let active = get_active_camera();
+        if is_valid(active) && is_valid(alternate) && node_uuid(active) == node_uuid(alternate) {
+            if is_valid(primary) && has_camera(primary) { activate_camera(primary); }
+            return;
+        }
         if is_valid(alternate) && has_camera(alternate) {
             activate_camera(alternate);
         }
     }
-    let target = entity("/World/Player");
-    if !is_valid(target) { return; }
-    let speed = 3.0 * dt;
-    if is_key_pressed("w") { target.move_by(0.0, 0.0, -speed); }
-    if is_key_pressed("s") { target.move_by(0.0, 0.0, speed); }
-    if is_key_pressed("a") { target.move_by(-speed, 0.0, 0.0); }
-    if is_key_pressed("d") { target.move_by(speed, 0.0, 0.0); }
 }
 
 fn on_late_update(dt) {
     if !is_client() { return; }
     let camera = get_active_camera();
-    let target = entity("/World/Player");
+    let target = entity_parameter("target");
     if !is_valid(camera) || !is_valid(target) { return; }
     // Leave the alternate camera fixed. Missing/deleted target freezes the view.
-    let follow_camera = entity("/World/Camera");
+    let follow_camera = entity_parameter("camera");
     if is_valid(follow_camera) && node_uuid(camera) == node_uuid(follow_camera) {
-        camera.follow(target, [0.0, 2.0, 8.0], [0.0, 1.0, 0.0], 8.0, dt);
+        camera.follow(target,
+            [parameter("offset_x", 0.0), parameter("offset_y", 2.0), parameter("offset_z", 8.0)],
+            [0.0, parameter("aim_height", 1.0), 0.0], parameter("sharpness", 8.0), dt);
     }
 }

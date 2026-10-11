@@ -564,6 +564,14 @@ impl SettingsSurfaceHost {
         for (key, value) in ai_values {
             controls.set_text(key, value, 512);
         }
+        for (field, value) in [
+            ("repository_url", &self.draft.external_asset_studio.repository_url),
+            ("directory", &self.draft.external_asset_studio.directory),
+            ("program", &self.draft.external_asset_studio.program),
+            ("entry_point", &self.draft.external_asset_studio.entry_point),
+        ] {
+            controls.set_text(format!("settings.external_studio.{field}"), value.clone(), 512);
+        }
     }
 
     pub fn process_input(

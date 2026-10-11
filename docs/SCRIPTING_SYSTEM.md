@@ -1,5 +1,10 @@
 # AuraRafi Scripting System
 
+Reading routes: [Programming guide](SCRIPTING_GUIDE.md) for game authors;
+[Scripting internals](SCRIPTING_INTERNALS.md) for the current code map.
+This document retains the architecture and staged roadmap; planned ABI
+examples below are not executable C++/WASM support in local Play.
+
 This document defines the canonical scripting architecture for AuraRafi. It
 covers the three scripting tiers, the shared Host API, how visual nodes
 execute, how commands create scripts, the security model, configuration
@@ -14,6 +19,16 @@ scope/owner state; shared files compile once. Public hooks are `on_start()`,
 fixed simulation frequency, independently of display pacing; late-update
 follows physics. Supported Nodes compile to Rhai in the local runtime.
 WASM remains reserved. See [Camera Runtime](CAMERA_RUNTIME.md).
+Physics scripting uses the shared `physics_api` for velocity, impulse, explicit
+body/collider configuration and identity-safe collision/trigger hooks. Rhai
+and Nodes delegate to that same API. See [Physics Runtime](PHYSICS_RUNTIME.md)
+for units, hook signatures, budgets and explicit limitations.
+
+Composable behavior APIs, owner/root hierarchy navigation, bounded capability
+queries, update intervals, structured event data and optional authoring-time
+Hierarchy script links are defined in [Behavior Runtime](BEHAVIOR_RUNTIME.md).
+They extend the same Host API/lifecycle; C++/WASM and online replication remain
+future adapters, not active support.
 
 ---
 
@@ -447,7 +462,7 @@ New fields with `#[serde(default)]`:
 
 | Field | Type | Default | Purpose |
 |-------|------|---------|---------|
-| `script_runtime_enabled` | `bool` | `false` | Master switch for the prepared script lifecycle harness. Keep off until Play/runtime is connected. |
+| `script_runtime_enabled` | `bool` | `false` | Legacy lifecycle-harness setting. Manual Game Play uses the local runtime and project-level scripting settings; see [Local Runtime](LOCAL_RUNTIME.md). |
 | `default_script_language` | `ScriptLanguage` | `Rhai` | Template language for "New Script". |
 | `script_hot_reload` | `bool` | `true` | Reload scripts on file change. |
 | `script_timeout_ms` | `u32` | `100` | Max execution time per frame (Rhai `set_max_operations`). |
@@ -560,16 +575,13 @@ The crate compiles and tests the Rhai backend plus the first runtime session.
 - i18n keys for all new strings.
 - This document.
 
-### Phase B: Prepared script lifecycle harness (in progress)
-- `raf_script::runtime::RhaiScriptRuntime` loads attached scripts, calls
-  `on_start`, and calls `on_update(dt)` on a cloned scene.
-- `GameRuntimeState` owns the editor preparation facade and consumes the
-  engine-agnostic `InputSnapshot` produced by the native input contract.
-- Keep the top-level Play button guarded until runtime state, console logs,
-  physics, nodes, and scene locking are validated together.
-- Console output for script logs and errors.
-- Hot-reload via `notify` watcher.
-- `/script.run` command for one-shot testing through the same runtime session.
+### Phase B: Isolated local scripting runtime (implemented; acceptance tracked separately)
+- Manual Play connects `raf_runtime` and `raf_player` to an isolated scene
+  snapshot, with Play/Pause/Step/Stop controls.
+- Rhai and supported Nodes execute through the shared Host API; `/script.run`
+  remains available for one-shot validation.
+- Native-window acceptance and measured performance are separate gates. See
+  [Local Runtime](LOCAL_RUNTIME.md) for verified coverage and limits.
 
 ### Phase C: Visual node runtime wiring (implemented locally)
 - Supported graphs compile through `runtime_compiler.rs` and attach as Rhai
@@ -579,7 +591,7 @@ The crate compiles and tests the Rhai backend plus the first runtime session.
 - Keep scene mutation, logs, locking, and runtime ownership outside the RafUI
   authoring surface.
 
-### Phase D: WASM Native Modules (when runtime is built)
+### Phase D: WASM Native Modules (when an approved WASM runtime is selected)
 - Choose WASM runtime (wasmtime or lightweight alternative).
 - Implement `wasm_backend.rs` for real.
 - Write `aurarafi.h` C++ header and build instructions.

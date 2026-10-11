@@ -84,15 +84,19 @@ The central viewport shows your game scene in 2D or 3D:
 
 ### Play Mode
 
-Game runtime is currently prepared, not product-active. The engine already has
-pieces for cloned-scene execution, input snapshots, and an isolated Rhai
-lifecycle harness, but the top-level Play flow stays guarded while the renderer
-and editor surface architecture are stabilized.
+The local game runtime is implemented and connected to manual Play. Play starts
+an isolated scene snapshot in the same or a separate window; Pause and Step
+control simulation, and Stop discards runtime changes without modifying the
+authoring document. Rhai scripts and supported Nodes graphs run through the
+runtime Host API. Native-window acceptance and measured performance remain
+separate verification gates; see [Local Runtime](LOCAL_RUNTIME.md) for current
+coverage and limits.
 
 - Attached `.rhai` scripts can be checked with `/script.run`; this executes
   `on_start` once against a cloned scene and does not mutate the edit document.
-- Full Play mode, physics, audio playback, node execution, and scene locking
-  are planned to reconnect after the viewport and surface migration is stable.
+- Physics, audio formats, and runtime scripting APIs have documented limits;
+  this is an implemented local runtime, not a claim that every engine feature
+  or acceptance gate is complete.
 
 ### Schematic View (Electronics Projects)
 
@@ -180,9 +184,10 @@ The visual scripting system allows logic creation without code:
 - **Math**: Add, Greater Than, Less Than, Equals, Not Equals
 - **Electronics**: Serial Read, Serial Write, Read Sensor, Write Actuator
 
-The native Nodes surface currently authors, validates, saves, and restores
-`nodes.ron`. It is not wired into editor Play mode yet; node execution remains
-behind the separate scripting/runtime integration boundary.
+The native Nodes surface authors, validates, saves, and restores `nodes.ron`.
+Supported graphs compile to Rhai and run in the isolated local Play runtime;
+unsupported nodes are reported during preparation. See
+[Scripting System](SCRIPTING_SYSTEM.md) for the execution boundary.
 
 ## Script Behaviors
 

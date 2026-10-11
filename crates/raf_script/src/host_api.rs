@@ -134,6 +134,8 @@ pub struct ScriptContext<'a> {
     /// Namespace shared by scripts within one runtime, never across players.
     pub instance_id: u64,
     pub owner: Option<SceneNodeId>,
+    /// Source attachment key for per-behavior parameter overrides; global graphs have none.
+    pub behavior_source: Option<&'a str>,
     /// Includes tombstones so repeated spawn/destroy cannot grow without bound.
     pub entity_limit: usize,
     pub cancellation: Option<&'a AtomicBool>,
@@ -156,16 +158,7 @@ impl<'a> ScriptContext<'a> {
         if let Some(target) = target {
             target.resolve(self)?;
         }
-        match &value {
-            ScriptValue::None | ScriptValue::Bool(_) | ScriptValue::Int(_) => {}
-            ScriptValue::Float(v) if v.is_finite() => {}
-            ScriptValue::String(v) if v.len() <= 4096 => {}
-            _ => {
-                return Err(crate::ScriptError::InvalidArgument(
-                    "event payload requires a bounded scalar value".into(),
-                ))
-            }
-        }
+        value.validate_event_payload()?;
         self.events.events.push(ScriptEvent {
             name: name.into(),
             target,
@@ -202,21 +195,9 @@ impl<'a> ScriptContext<'a> {
     // Scene operations (host::scene_ops)
     // -----------------------------------------------------------------------
 
-    /// Find a root-level entity by name.
+    /// Resolve an unambiguous global name, UUID or explicit root path.
     pub fn get_node(&self, name: &str) -> Option<NodeHandle> {
-        if name.is_empty() {
-            return None;
-        }
-        let mut matches = self
-            .scene
-            .iter()
-            .filter(|(id, node)| self.scene.is_valid_node(*id) && node.name == name);
-        let (id, _) = matches.next()?;
-        // Ambiguous names are not an implicit association either.
-        if matches.next().is_some() {
-            return None;
-        }
-        Some(NodeHandle::scoped(id, self))
+        crate::references::entity(self.scene, name).map(|id| NodeHandle::scoped(id, self))
     }
 
     pub fn self_node(&self) -> Option<NodeHandle> {
@@ -226,23 +207,14 @@ impl<'a> ScriptContext<'a> {
             .then(|| NodeHandle::scoped(id, self))
     }
 
+    /// Canonical attachment owner; unrelated to the owner's hierarchy parent.
+    pub fn owner(&self) -> Option<NodeHandle> {
+        self.self_node()
+    }
+
     pub fn find_child(&self, parent: NodeHandle, name: &str) -> ScriptResult<Option<NodeHandle>> {
         let id = parent.resolve(self)?;
-        let node = self
-            .scene
-            .get(id)
-            .ok_or(crate::ScriptError::InvalidHandle(parent.raw()))?;
-        let mut matches = node.children.iter().filter(|id| {
-            self.scene.is_valid_node(**id)
-                && self.scene.get(**id).is_some_and(|node| node.name == name)
-        });
-        let Some(&child) = matches.next() else {
-            return Ok(None);
-        };
-        if matches.next().is_some() {
-            return Ok(None);
-        }
-        Ok(Some(NodeHandle::scoped(child, self)))
+        Ok(crate::references::child(self.scene, id, name).map(|id| NodeHandle::scoped(id, self)))
     }
 
     pub fn get_parent(&self, child: NodeHandle) -> ScriptResult<Option<NodeHandle>> {

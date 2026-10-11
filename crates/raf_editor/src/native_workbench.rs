@@ -226,6 +226,7 @@ pub struct NativeGameWorkbench {
     agent_panel: AgentPanel,
     agent_settings: EngineSettings,
     agent_catalog: CommandCatalog,
+    agent_asset_tools: crate::agent_asset_tools::AgentAssetTools,
     agent_readiness: AgentReadiness,
     pending_agent_decision: Option<bool>,
     agent_canvas_changed: bool,
@@ -244,6 +245,7 @@ pub struct NativeGameWorkbench {
     project_name: String,
     project_type: ProjectType,
     hierarchy_model: HierarchyModel,
+    script_relationships: crate::script_relationships::ScriptRelationshipIndex,
     hierarchy_folder_ids: HashSet<SceneNodeId>,
     hierarchy_query: String,
     hierarchy_scroll_offset: f32,
@@ -377,6 +379,7 @@ impl NativeGameWorkbench {
             agent_panel: AgentPanel::default(),
             agent_settings: EngineSettings::default(),
             agent_catalog: CommandCatalog::builtin(),
+            agent_asset_tools: crate::agent_asset_tools::AgentAssetTools::default(),
             agent_readiness: AgentReadiness::ProviderDisabled,
             pending_agent_decision: None,
             agent_canvas_changed: false,
@@ -395,6 +398,7 @@ impl NativeGameWorkbench {
             project_name: DEFAULT_PROJECT_NAME.to_string(),
             project_type: ProjectType::Game,
             hierarchy_model: HierarchyModel::default(),
+            script_relationships: crate::script_relationships::ScriptRelationshipIndex::default(),
             hierarchy_folder_ids: HashSet::new(),
             hierarchy_query: String::new(),
             hierarchy_scroll_offset: 0.0,
@@ -621,6 +625,16 @@ impl NativeGameWorkbench {
     pub fn log_console_output(&mut self, output: crate::commands::CommandOutput) {
         self.console.log_command_output(output);
         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+    }
+
+    pub(crate) fn execute_asset_command(&mut self, request: &raf_core::EngineCommandRequest,
+        project: Option<&Project>, revision: u64,
+    ) -> raf_core::EngineCommandResponse {
+        let selected = self.agent_panel.image_provider(&self.agent_settings);
+        let (provider, model) = selected.map(|(provider, model)| (Some(provider), model)).unwrap_or_default();
+        self.agent_asset_tools.command(request, project.map(|project| project.path.as_path()),
+            &self.agent_settings.external_asset_studio, provider.as_ref(), &model,
+            revision, self.agent_panel.language)
     }
     pub fn set_runtime_toolbar(&mut self, state: raf_player::surface::RuntimeToolbarState) -> bool {
         if self.runtime_toolbar == state {
@@ -857,6 +871,16 @@ impl NativeGameWorkbench {
         self.agent_readiness =
             self.agent_panel
                 .prepare(&self.agent_settings, project, &self.agent_catalog);
+        self.agent_asset_tools
+            .cancel_abandoned(&self.agent_panel.runtime.pending_calls);
+        for result in self.agent_asset_tools.poll_commands(project.map(|project| project.path.as_path()), self.agent_panel.language) {
+            let output = match result {
+                Ok(result) => crate::commands::CommandOutput::info(result.summary, Vec::new(), result.data),
+                Err(error) => crate::commands::CommandOutput::error(raf_core::i18n::t("app.agent_asset_failed", self.agent_panel.language), error),
+            };
+            self.log_console_output(output);
+        }
+        if self.agent_asset_tools.take_catalog_dirty() { self.project_catalog.refresh(); }
         if self
             .inspector_name_editing
             .as_ref()
@@ -901,6 +925,20 @@ impl NativeGameWorkbench {
         self.project_catalog
             .sync_project(project.map(|project| project.path.as_path()));
         self.assets_project_root = project.map(|project| project.path.clone());
+        if let Some(links) = self.script_relationships.sync(
+            self.agent_settings.hierarchy_show_script_links
+                && self.project_type == ProjectType::Game,
+            project.map(|p| p.path.as_path()),
+            scene,
+        ) {
+            if self.hierarchy_model.set_script_links(links) {
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
+            for diagnostic in std::mem::take(&mut self.script_relationships.diagnostics) {
+                self.console
+                    .log(crate::console::LogLevel::Warning, diagnostic);
+            }
+        }
         let session_key = project.map(|project| (project.path.clone(), project.project_type));
         if self.inspector_sessions_key != session_key {
             self.inspector_sessions = project
@@ -1181,11 +1219,7 @@ impl NativeGameWorkbench {
             viewport_height,
             row_height,
         );
-        let Some(index) = self
-            .hierarchy_model
-            .row_ids()
-            .position(|id| id == selected_id)
-        else {
+        let Some(index) = self.hierarchy_model.row_position(selected_id) else {
             return;
         };
         let selected_top = index as f32 * row_height;
@@ -1685,6 +1719,13 @@ impl NativeGameWorkbench {
             || self.viewport_compass.has_active_text_repeat()
             || self.search_surface.has_active_text_repeat()
     }
+
+    pub fn set_script_relationship_wakeup(
+        &mut self,
+        wakeup: Option<winit::event_loop::EventLoopProxy<()>>,
+    ) {
+        self.script_relationships.set_wakeup(wakeup);
+    }
     pub fn needs_ui_frame(&self) -> bool {
         self.toolbar_revision != self.last_toolbar_revision
             || self.agent_panel.has_live_output()
@@ -1781,7 +1822,16 @@ impl NativeGameWorkbench {
         let mut editor_actions = Vec::new();
         let mut canvas_changed = false;
         let language = self.agent_panel.language;
+        let (image_provider, image_model) = self
+            .agent_panel
+            .image_provider(&self.agent_settings)
+            .map(|(provider, model)| (Some(provider), model))
+            .unwrap_or_default();
         let mut executor = AgentToolExecutor {
+            asset_tools: &mut self.agent_asset_tools,
+            asset_studio: &self.agent_settings.external_asset_studio,
+            image_provider,
+            image_model,
             scene,
             selection: &mut selection,
             viewport,
@@ -1808,6 +1858,9 @@ impl NativeGameWorkbench {
             }
         }
         self.agent_panel.poll(&mut executor);
+        if self.agent_asset_tools.take_catalog_dirty() {
+            self.project_catalog.refresh();
+        }
         self.agent_canvas_changed |= canvas_changed;
         viewport.selected = selection.selected_nodes;
         if viewport.selected.is_empty() {
@@ -1915,6 +1968,13 @@ impl NativeGameWorkbench {
         };
         let focused = self.host.session().interaction.focus.focused.clone();
         let controls = &mut self.host.session_mut().interaction.controls;
+        crate::native_behavior_authoring::seed_parameters(
+            node,
+            controls,
+            focused.as_deref(),
+            self.inspector_view.variables && self.inspector_view.components,
+            self.inspector_view.behavior_parameters,
+        );
         if let Some(lens) = &node.game_camera {
             for (field, value) in [
                 ("fov_degrees", lens.fov_degrees),

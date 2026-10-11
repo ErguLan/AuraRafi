@@ -135,6 +135,9 @@ pub struct SceneNode {
     /// Script-facing custom variables for this entity.
     #[serde(default)]
     pub variables: Vec<SceneVariable>,
+    /// Optional parameters scoped to an attached source, separate from shared entity state.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub behavior_parameters: std::collections::BTreeMap<String, Vec<SceneVariable>>,
     /// Runtime audio source settings.
     #[serde(default)]
     pub audio_source: AudioSource,
@@ -190,6 +193,7 @@ impl SceneNode {
             entity_index: None,
             scripts: Vec::new(),
             variables: Vec::new(),
+            behavior_parameters: Default::default(),
             audio_source: AudioSource::default(),
             collider: Collider::default(),
             rigid_body: RigidBody::default(),
@@ -222,6 +226,7 @@ impl SceneNode {
             entity_index: None,
             scripts: Vec::new(),
             variables: Vec::new(),
+            behavior_parameters: Default::default(),
             audio_source: AudioSource::default(),
             collider: Collider::default(),
             rigid_body: RigidBody::default(),
@@ -801,7 +806,7 @@ impl SceneGraph {
         }
 
         let parent = self.nodes[id.0].parent;
-        self.duplicate_subtree_internal(id, parent, true)
+        self.duplicate_with_references(id, parent)
     }
 
     /// Duplicate a node and its subtree directly under a requested parent.
@@ -822,7 +827,7 @@ impl SceneGraph {
                 return None;
             }
         }
-        self.duplicate_subtree_internal(id, parent, true)
+        self.duplicate_with_references(id, parent)
     }
 
     /// Ungroup a folder by moving its children to its parent (or root).
@@ -928,17 +933,34 @@ impl SceneGraph {
         false
     }
 
+    fn duplicate_with_references(
+        &mut self,
+        source: SceneNodeId,
+        parent: Option<SceneNodeId>,
+    ) -> Option<SceneNodeId> {
+        let start = self.nodes.len();
+        let mut identities = std::collections::HashMap::new();
+        let root = self.duplicate_subtree_internal(source, parent, true, &mut identities)?;
+        for node in &mut self.nodes[start..] {
+            super::prefab::remap_entity_references(node, &identities);
+        }
+        Some(root)
+    }
+
     fn duplicate_subtree_internal(
         &mut self,
         source_id: SceneNodeId,
         parent: Option<SceneNodeId>,
         offset_root: bool,
+        identities: &mut std::collections::HashMap<Uuid, Uuid>,
     ) -> Option<SceneNodeId> {
         let source = self.nodes.get(source_id.0)?.clone();
         self.invalidate();
         let new_id = SceneNodeId(self.nodes.len());
         let mut copy = source.clone();
         copy.uuid = Uuid::new_v4();
+        identities.insert(source.uuid, copy.uuid);
+        copy.entity_index = None;
         copy.name = format!("{} (copy)", source.name);
         // Stable reconciliation keys must remain unique. The semantic role
         // and tags describe what the copy is, but a duplicate receives a new
@@ -958,7 +980,7 @@ impl SceneGraph {
         }
 
         for child_id in source.children {
-            let _ = self.duplicate_subtree_internal(child_id, Some(new_id), false);
+            let _ = self.duplicate_subtree_internal(child_id, Some(new_id), false, identities);
         }
 
         Some(new_id)

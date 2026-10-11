@@ -125,6 +125,10 @@ fn order_contextual_tools(tools: &mut Vec<OpenAiTool>) {
         "selection_get",
         "viewport_capture",
         "assets_catalog",
+        "asset_generate_local_png",
+        "asset_generate_image",
+        "external_studio_install",
+        "external_studio_generate",
         "assets_recommend",
         "asset_inspect",
         "scripts_catalog",
@@ -165,6 +169,10 @@ struct PromptIntent {
 }
 
 pub struct AgentToolExecutor<'a> {
+    pub(crate) asset_tools: &'a mut crate::agent_asset_tools::AgentAssetTools,
+    pub(crate) asset_studio: &'a raf_core::ai::ExternalAssetStudio,
+    pub(crate) image_provider: Option<raf_ai::AssetImageProvider>,
+    pub(crate) image_model: String,
     pub scene: &'a mut SceneGraph,
     pub selection: &'a mut SceneSelectionState,
     pub viewport: &'a mut NativeGameViewportController,
@@ -198,6 +206,12 @@ impl AgentToolExecutor<'_> {
             ..AgentToolPack::default()
         };
         add_project_read_tools(&mut pack, intent, project_type);
+        if project_type.is_some()
+            && mode != AgentMode::Inspect
+            && intent.assets
+        {
+            add_asset_generation_tools(&mut pack);
+        }
 
         match project_type {
             Some(ProjectType::Game) => {
@@ -210,6 +224,11 @@ impl AgentToolExecutor<'_> {
                         "script.attach",
                         "script.detach",
                         "script.validate",
+                        "behavior.attach",
+                        "behavior.detach",
+                        "behavior.parameter",
+                        "prefab.capture",
+                        "prefab.instantiate",
                     ] {
                         if let Some(command) = catalog.find(name) {
                             let kind = if name == "script.validate" {
@@ -358,7 +377,9 @@ impl AgentToolExecutor<'_> {
         let observed_scene_change = scene_diff.is_some();
         let mut result = response_to_tool_result(response, request_preview(mode, kind), scene_diff);
         if result.ok && kind == AgentToolKind::Mutation {
-            let is_game_mutation = command_name.starts_with("game.");
+            let is_game_mutation = command_name.starts_with("game.")
+                || command_name.starts_with("behavior.")
+                || command_name == "prefab.instantiate";
             let scene_changed =
                 observed_scene_change && is_game_mutation && mode == ToolExecutionMode::Apply;
             if is_game_mutation {
@@ -461,6 +482,14 @@ fn native_agent_budget() -> ExecutionBudget {
 }
 
 impl ToolExecutor for AgentToolExecutor<'_> {
+    fn is_pending(&self, call_id: &str) -> bool {
+        self.asset_tools.is_pending(call_id)
+    }
+
+    fn poll_pending(&mut self, call_id: &str) -> Option<Result<AgentToolResult, String>> {
+        self.asset_tools.poll(call_id, self.language)
+    }
+
     fn kind(&self, name: &str) -> AgentToolKind {
         self.routes
             .get(name)
@@ -482,6 +511,26 @@ impl ToolExecutor for AgentToolExecutor<'_> {
             .ok_or_else(|| format!("Unknown Agent tool: {name}"))?;
         if route.kind == AgentToolKind::Mutation && mode == ToolExecutionMode::Inspect {
             return Err(format!("Tool '{name}' is unavailable in Inspect mode."));
+        }
+
+        if matches!(
+            name,
+            "asset_generate_local_png"
+                | "asset_generate_image"
+                | "external_studio_install"
+                | "external_studio_generate"
+        ) {
+            return self.asset_tools.execute(
+                call_id,
+                name,
+                &arguments,
+                mode,
+                self.project.as_ref().map(|project| project.root.as_path()),
+                self.asset_studio,
+                self.image_provider.as_ref(),
+                &self.image_model,
+                self.language,
+            );
         }
 
         if name == "viewport_capture" {
@@ -662,6 +711,13 @@ impl AgentParsedExecutor<'_> {
                         "The native Electronics document is not mounted for this session.",
                     )
                 })
+        } else if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
+            let assets_root = self.project.map(|project| project.root.join("assets"));
+            let mut context = ScriptCommandContext {
+                scene: self.scene,
+                assets_root: assets_root.as_deref(),
+            };
+            crate::commands::behavior::execute(command, &mut context, false)
         } else if command.name.starts_with("script.") {
             let assets_root = self.project.map(|project| project.root.join("assets"));
             let mut context = ScriptCommandContext {
@@ -706,6 +762,15 @@ impl ParsedCommandExecutor for AgentParsedExecutor<'_> {
     }
 
     fn preview_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
+        if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
+            let mut scene = self.scene.clone();
+            let assets_root = self.project.map(|project| project.root.join("assets"));
+            let mut context = ScriptCommandContext {
+                scene: &mut scene,
+                assets_root: assets_root.as_deref(),
+            };
+            return crate::commands::behavior::execute(command, &mut context, true);
+        }
         if command.name.starts_with("game.") {
             let mut scene = self.scene.clone();
             let mut selection = self.selection.clone();
@@ -729,6 +794,27 @@ impl ParsedCommandExecutor for AgentParsedExecutor<'_> {
             )
         }
     }
+}
+
+fn add_asset_generation_tools(pack: &mut AgentToolPack) {
+    let image_schema = object_schema(Map::from_iter([
+        ("prompt", string_schema("Describe the image to generate.")),
+        ("name", string_schema("Project image name; never a host path.")),
+        ("size", enum_schema("Image proportions.", &["square", "landscape", "portrait"])),
+        ("transparent", serde_json::json!({"type": "boolean"})),
+        ("model", string_schema("Optional explicitly chosen native image generator ID. Omit to use the current conversation model; never invent or silently replace it.")),
+    ].map(|(key, value)| (key.to_string(), value))), &["prompt", "name"]);
+    pack.push_native("asset_generate_image", "Generate an image with the current conversation provider/model. Output capabilities are discovered, not guessed. Waits for real PNG output in assets/generated. If unsupported, choose local PNG or a configured external studio.", image_schema.clone(), AgentToolKind::Mutation, Some("asset.generate_image"));
+    pack.push_native("external_studio_generate", "Generate a complex image in the separately installed, user-configured studio using its CLI. Waits for the result in project Assets. Does not bundle an application or change model settings.", image_schema, AgentToolKind::Mutation, None);
+    pack.push_native("asset_generate_local_png", "Generate a usable local procedural PNG with the existing icon/badge/sprite/texture presets. No provider request or cost.",
+        object_schema(Map::from_iter([
+            ("prompt", string_schema("Local image description.")),
+            ("name", string_schema("Project image name.")),
+            ("size", enum_schema("Image proportions.", &["square", "landscape", "portrait"])),
+            ("style", enum_schema("Existing local preset.", &["icon", "badge", "sprite", "texture"])),
+            ("transparent", serde_json::json!({"type": "boolean"})),
+        ].map(|(key, value)| (key.to_string(), value))), &["prompt", "name"]), AgentToolKind::Mutation, Some("asset.generate_local_png"));
+    pack.push_native("external_studio_install", "Download the public Git repository configured by the user in AI Providers into its separate installation directory. Never overwrites a directory or installs dependencies/runs package hooks. Use before external generation when not installed.", object_schema(Map::new(), &[]), AgentToolKind::Mutation, None);
 }
 
 fn add_project_read_tools(
@@ -2431,6 +2517,19 @@ fn classify_prompt(prompt: &str) -> PromptIntent {
             "preset",
         ]),
         assets: contains_any(&[
+            "imagen",
+            "image",
+            "sprite",
+            "icon",
+            "studio",
+            "estudio",
+            "png",
+            "logo",
+            "extern",
+            "install",
+            "instala",
+            "download",
+            "descarga",
             "asset",
             "assets",
             "modelo",
@@ -2588,6 +2687,10 @@ fn localized_tool_description(command: &CommandDefinition, language: Language) -
 
 fn localized_native_tool_description(name: &str, fallback: &str, language: Language) -> String {
     let key = match name {
+        "asset_generate_local_png" => Some("commands.asset_generate_local_png.desc"),
+        "asset_generate_image" => Some("commands.asset_generate_image_native.desc"),
+        "external_studio_install" => Some("commands.external_studio_install.desc"),
+        "external_studio_generate" => Some("commands.external_studio_generate.desc"),
         "project_summary" => Some("commands.project_summary.desc"),
         "scene_outline" => Some("commands.scene_outline.desc"),
         "scene_query" => Some("commands.scene_query.desc"),
@@ -3034,6 +3137,20 @@ fn enum_schema(description: &str, values: &[&str]) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_intent_exposes_real_generation_choices_without_separate_model_roles() {
+        let catalog = CommandCatalog::builtin();
+        let active = AgentToolExecutor::build_tool_pack(&catalog, Language::English,
+            Some(ProjectType::Game), AgentMode::Active, "Genera una imagen en el estudio externo");
+        for name in ["asset_generate_local_png", "asset_generate_image", "external_studio_install", "external_studio_generate"] {
+            assert!(active.tools.iter().any(|tool| tool.function.name == name), "missing {name}");
+        }
+        assert!(active.tools.len() <= 26);
+        let inspect = AgentToolExecutor::build_tool_pack(&catalog, Language::English,
+            Some(ProjectType::Game), AgentMode::Inspect, "Genera una imagen en el estudio externo");
+        assert!(!inspect.tools.iter().any(|tool| tool.function.name.starts_with("asset_generate") || tool.function.name.starts_with("external_studio")));
+    }
 
     #[test]
     fn game_tool_pack_is_contextual_and_never_exposes_electronics() {

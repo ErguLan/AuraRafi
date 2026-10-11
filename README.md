@@ -10,18 +10,18 @@ Built in Rust for maximum performance and safety. Designed to run on low-end
 hardware while scaling up to high-end systems.
 
 This repository is in active development. Some systems are production-usable
-inside the editor today, while others are intentionally marked as prepared,
-experimental, or pending end-to-end runtime connection.
+inside the editor today, while others are experimental or still have feature,
+acceptance, or performance work pending.
 
 ## Features
 
 - **Hybrid Engine**: Game development (2D/3D) and electronic design in one tool
 - **Performance Focused**: shared graphics runtime for Scene, Schematic, and PCB surfaces, using GPU hardware first when available and CPU software fallback for potato PCs
 - **Visual Scripting**: No-code node editor with graph validation and basic executor
-- **Runtime Foundations**: scene/runtime data, node persistence, and script-facing groundwork exist in the repo, while live game Play mode is currently staged during renderer/runtime consolidation
+- **Local Game Runtime**: manual Play/Pause/Step/Stop runs an isolated local game runtime with Rhai and supported Nodes flows; native-window acceptance and performance measurement remain separate gates. See [Local Runtime](docs/LOCAL_RUNTIME.md).
 - **Electronics Design**: Schematic editor, simulation, DRC, exports, and synchronized PCB 2D workspace, unified under the same shared graphics runtime
 - **Modern Editor**: Dark/light themes, modular panels, intuitive layout
-- **AI-Ready**: Architecture prepared for AI agent integration via tool-calling when the runtime side matures
+- **AI Agent**: integrated contextual tool-calling with Inspect, Plan (sandboxed preview), and Active (apply) modes, plus structured verification
 - **Modular**: 9 workspace crates plus the main editor binary, with clean domain boundaries
 - **Multilingual**: English and Spanish support
 - **Tested Modules**: Inline Rust tests are distributed across core, render, electronics, nodes, and AI crates
@@ -73,11 +73,16 @@ What works today after launch:
 Current implementation profile:
 
 - The active editor surfaces use a shared graphics runtime: GPU hardware first when available, CPU software fallback retained for low-end compatibility.
-- The game runtime is currently staged rather than fully active: the repository keeps scene/runtime foundations, but live Play mode is temporarily disconnected while renderer and runtime truth are consolidated.
+- The local game runtime is implemented and connected to manual Play. It runs from an isolated scene snapshot; native-window acceptance and measured performance are tracked separately in [Local Runtime](docs/LOCAL_RUNTIME.md).
 - Electronics is currently the most end-to-end vertical: schematic, checks, simulation, export, and PCB 2D sync already live in the editor, unified under the same shared graphics runtime.
 - The repository favors modular staging: some systems are usable now, others are intentionally prepared without being wired into final runtime flows yet.
 
 ## Documentation
+
+- [Programming in AuraRafi](docs/SCRIPTING_GUIDE.md) - Rhai, Inspector references,
+  cameras, reactions and reusable subtrees; explicit verification limits
+- [Scripting internals](docs/SCRIPTING_INTERNALS.md) - Runtime lifecycle, Host API,
+  source ownership and extension points for engine contributors
 
 - [Architecture](docs/ARCHITECTURE.md) - System design and crate overview
 - [Getting Started](docs/GETTING_STARTED.md) - Installation and first steps

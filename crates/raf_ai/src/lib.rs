@@ -37,7 +37,7 @@ pub use chat::{ChatMessage, ChatPanel, MessageRole};
 pub use director::{DirectorAction, DirectorConfig, DirectorMode, DirectorState};
 pub use image_worker::{
     AssetImageGenerationMode, AssetImageGenerationQueue, AssetImageJob, AssetImageJobSnapshot,
-    AssetImageJobStatus, AssetImageRequest, AssetImageSize, AssetImageWorker,
+    AssetImageJobStatus, AssetImageProvider, AssetImageRequest, AssetImageSize, AssetImageWorker,
     AssetImageWorkerConfig, AssetLocalPngStyle, GeneratedImageAsset,
 };
 pub use mesh_provider::{MeshChunk, MeshProviderConfig, MeshProviderState, MeshProviderType};

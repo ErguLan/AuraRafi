@@ -19,6 +19,9 @@ import urllib.request
 import zlib
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urlparse
+
+MAX_IMAGE_BYTES = 32 * 1024 * 1024
 
 
 def write_result(path, ok, error=None):
@@ -32,16 +35,31 @@ def write_result(path, ok, error=None):
 def fetch_image_bytes(response_data: dict) -> bytes:
     entries = response_data.get("data") or []
     if not entries:
+        message = (response_data.get("choices") or [{}])[0].get("message") or {}
+        entries = message.get("images") or []
+        if not entries and isinstance(message.get("content"), list):
+            entries = [part for part in message["content"] if part.get("type") == "image_url"]
+    if not entries:
         raise RuntimeError("provider response has no image data")
     entry = entries[0]
     encoded = entry.get("b64_json")
     if encoded:
-        return base64.b64decode(encoded)
-    url = entry.get("url")
+        image = base64.b64decode(encoded, validate=True)
+        if len(image) > MAX_IMAGE_BYTES:
+            raise RuntimeError("generated image exceeds 32 MiB")
+        return image
+    url = entry.get("url") or (entry.get("image_url") or {}).get("url")
     if not url:
         raise RuntimeError("provider response has no image payload")
+    if url.startswith("data:image/"):
+        return fetch_image_bytes({"data": [{"b64_json": url.split(",", 1)[1]}]})
+    if urlparse(url).scheme != "https":
+        raise RuntimeError("image download URL must use HTTPS")
     with urllib.request.urlopen(url, timeout=180) as response:
-        return response.read()
+        data = response.read(MAX_IMAGE_BYTES + 1)
+        if len(data) > MAX_IMAGE_BYTES:
+            raise RuntimeError("generated image exceeds 32 MiB")
+        return data
 
 
 def atomic_write(path: Path, payload: bytes) -> None:
@@ -369,13 +387,43 @@ def generate_local_png(request: dict) -> None:
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
 
 
-def generate_remote_image(request: dict) -> None:
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is required for image generation")
+def provider_json(url: str, api_key: str, payload=None):
+    body = None if payload is None else json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(url, data=body, headers={
+        "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
+    }, method="GET" if payload is None else "POST")
+    try:
+        with urllib.request.urlopen(request, timeout=240) as response:
+            return json.loads(response.read(64 * 1024 * 1024).decode("utf-8"))
+    except urllib.error.HTTPError as error:
+        detail = error.read(2048).decode("utf-8", errors="replace").replace(api_key, "[redacted]")
+        raise RuntimeError(f"image provider HTTP {error.code}: {detail[:400]}") from error
 
-    base_url = os.environ.get("RAF_AI_IMAGE_BASE_URL", "https://api.openai.com/v1").rstrip("/")
+
+def openrouter_image_contract(base_url: str, api_key: str, model: str):
+    # Discovery is authoritative: never infer modalities from a model's name.
+    catalog = provider_json(f"{base_url}/models", api_key)
+    general = next((entry for entry in catalog.get("data", []) if entry.get("id") == model), None)
+    images = provider_json(f"{base_url}/images/models", api_key)
+    dedicated = next((entry for entry in images.get("data", []) if entry.get("id") == model), None)
+    selected = dedicated or general
+    if not selected or "image" not in selected.get("architecture", {}).get("output_modalities", []):
+        raise RuntimeError("Selected model does not advertise image output. Use local PNG or the external studio; an image-only model may be explicitly supplied to this tool.")
+    return ("images" if dedicated else "chat/completions"), selected
+
+
+def generate_remote_image(request: dict) -> None:
+    api_key = os.environ.get("RAF_IMAGE_API_KEY", os.environ.get("OPENAI_API_KEY", "")).strip()
+    if not api_key:
+        raise RuntimeError("An enabled provider with an API key is required for image generation")
+
+    base_url = os.environ.get("RAF_IMAGE_BASE_URL", os.environ.get("RAF_AI_IMAGE_BASE_URL", "https://api.openai.com/v1")).rstrip("/")
+    parsed = urlparse(base_url)
+    if parsed.scheme != "https" and not (parsed.scheme == "http" and parsed.hostname in ("localhost", "127.0.0.1", "::1")):
+        raise RuntimeError("Provider endpoint must use HTTPS or local HTTP")
     endpoint = os.environ.get("RAF_AI_IMAGE_ENDPOINT", f"{base_url}/images/generations")
+    provider = os.environ.get("RAF_IMAGE_PROVIDER", "openai")
+    capabilities = {"status": "unknown", "reason": "Provider does not publish output modalities via its models API"}
     payload = {
         "model": request["model"],
         "prompt": request["prompt"],
@@ -384,23 +432,23 @@ def generate_remote_image(request: dict) -> None:
     }
     if request.get("transparent"):
         payload["background"] = "transparent"
+    if provider == "openrouter":
+        protocol, model_info = openrouter_image_contract(base_url, api_key, request["model"])
+        capabilities = model_info.get("architecture", {})
+        endpoint = f"{base_url}/{protocol}"
+        if protocol == "chat/completions":
+            payload = {"model": request["model"], "messages": [{"role": "user", "content": request["prompt"]}],
+                       "modalities": [modality for modality in ("text", "image") if modality in capabilities.get("output_modalities", [])]}
+        else:
+            supported = model_info.get("supported_parameters", {})
+            payload = {"model": request["model"], "prompt": request["prompt"]}
+            for key, value in (("size", request["size"]), ("output_format", "png"), ("background", "transparent" if request.get("transparent") else "opaque")):
+                if key in supported:
+                    descriptor = supported[key]
+                    if descriptor.get("type") != "enum" or value in descriptor.get("values", []):
+                        payload[key] = value
 
-    body = json.dumps(payload).encode("utf-8")
-    http_request = urllib.request.Request(
-        endpoint,
-        data=body,
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(http_request, timeout=240) as response:
-            response_data = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as error:
-        detail = error.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"image provider HTTP {error.code}: {detail[:400]}") from error
+    response_data = provider_json(endpoint, api_key, payload)
 
     image_bytes = fetch_image_bytes(response_data)
     if not image_bytes.startswith(b"\x89PNG\r\n\x1a\n"):
@@ -411,7 +459,8 @@ def generate_remote_image(request: dict) -> None:
     atomic_write(output_path, image_bytes)
     metadata = {
         "kind": "generated_image",
-        "provider": "openai_compatible_images",
+        "provider": provider,
+        "capabilities": capabilities,
         "model": request["model"],
         "generation_mode": "remote",
         "prompt": request["prompt"],

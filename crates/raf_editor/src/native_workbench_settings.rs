@@ -24,7 +24,9 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         }
         "settings.command_console_enabled" => settings.command_console_enabled = value,
         "settings.ai_persist_credentials" => settings.ai_persist_credentials = value,
+        "settings.external_studio.enabled" => settings.external_asset_studio.enabled = value,
         "settings.hierarchy_show_icons" => settings.hierarchy_show_icons = value,
+        "settings.hierarchy_show_script_links" => settings.hierarchy_show_script_links = value,
         "settings.hierarchy_show_visibility" => settings.hierarchy_show_visibility = value,
         "settings.hierarchy_show_locked" => settings.hierarchy_show_locked = value,
         "settings.hierarchy_show_hidden" => settings.hierarchy_show_hidden = value,
@@ -422,6 +424,16 @@ pub(crate) fn is_settings_numeric_text_key(key: &str) -> bool {
 }
 
 pub(crate) fn apply_settings_text(settings: &mut EngineSettings, key: &str, value: &str) -> bool {
+    if let Some(field) = key.strip_prefix("settings.external_studio.") {
+        match field {
+            "repository_url" => settings.external_asset_studio.repository_url = value.to_string(),
+            "directory" => settings.external_asset_studio.directory = value.to_string(),
+            "program" => settings.external_asset_studio.program = value.to_string(),
+            "entry_point" => settings.external_asset_studio.entry_point = value.to_string(),
+            _ => return false,
+        }
+        return true;
+    }
     if key == "settings.script_external_editor" {
         settings.script_external_editor_cmd = value.to_string();
         return true;
@@ -592,6 +604,18 @@ mod tests {
             id
         ));
         assert_eq!(settings.default_ai_provider, provider);
+    }
+
+    #[test]
+    fn external_studio_settings_do_not_change_the_conversation_model() {
+        let mut settings = EngineSettings::default();
+        let providers = settings.ai_providers.clone();
+        assert!(apply_settings_toggle(&mut settings, "settings.external_studio.enabled", true));
+        assert!(apply_settings_text(&mut settings, "settings.external_studio.directory", "D:/Tools/Studio"));
+        assert!(apply_settings_text(&mut settings, "settings.external_studio.entry_point", "cli/asset-worker.js"));
+        assert!(settings.external_asset_studio.enabled);
+        assert_eq!(settings.external_asset_studio.directory, "D:/Tools/Studio");
+        assert_eq!(settings.ai_providers, providers);
     }
 
     #[test]

@@ -2,6 +2,11 @@
 
 Fecha: 2026-05-27
 
+> Documento histórico de propuesta: las afirmaciones de estado describen el
+> checkout de mayo de 2026, antes de conectar el runtime local a Play. Para el
+> estado vigente, consulta [Local Runtime](../LOCAL_RUNTIME.md) y
+> [Roadmap](../ROADMAP.md).
+
 Este documento NO implementa runtime. Este documento define la verdad actual del runtime, responde dudas de producto/arquitectura y deja una base tecnica para decidir cuando construirlo, rebotearlo o reformularlo.
 
 La intencion de Fase 6A es simple:

@@ -844,6 +844,7 @@ impl NativeEditorApplication {
             return;
         };
         let mut workbench = NativeGameWorkbench::new(&host.graphics_context(), palette, rect);
+        workbench.set_script_relationship_wakeup(self.event_loop_proxy.clone());
         workbench.set_engine_settings(self.settings_state.clone());
         if let Some(project) = self.project.as_ref() {
             workbench.set_project_info(project.name.clone(), project.project_type);
@@ -2155,6 +2156,29 @@ impl NativeEditorApplication {
                                     } else {
                                         self.pending_runtime_command = Some(raw.trim().trim_start_matches('/').to_string());
                                     }
+                                } else if let Some(raw) = command.strip_prefix("console.submit:").filter(|raw| raw.trim().starts_with("/asset.")) {
+                                    let allowed = self.settings_state.command_console_enabled && self.project.as_ref().is_some_and(|project| project.settings.enable_console_commands);
+                                    let output = if !allowed {
+                                        crate::commands::CommandOutput::error("Assets", "Manual console commands are disabled")
+                                    } else if let Ok(crate::commands::ParsedInput::Command(parsed)) = crate::commands::parse_console_input(raw) {
+                                        let name = match parsed.name.as_str() {
+                                            "asset.image" => "asset.generate_image",
+                                            "asset.local_png" | "asset.icon" => "asset.generate_local_png",
+                                            name => name,
+                                        };
+                                        let params: serde_json::Map<String, serde_json::Value> = parsed.args.iter().map(|(key, value)| {
+                                            let value = if key == "transparent" { serde_json::json!(matches!(value.as_str(), "true" | "1" | "yes" | "on")) } else { serde_json::json!(value) };
+                                            (key.clone(), value)
+                                        }).collect();
+                                        let mut request = raf_core::EngineCommandRequest::new(name, serde_json::Value::Object(params), raf_core::CommandSource::Console);
+                                        request.confirm = true;
+                                        let response = workbench.execute_asset_command(&request, self.project.as_ref(), self.attached_ledger.revision());
+                                        crate::commands::CommandOutput {
+                                            level: if response.ok { crate::commands::CommandLevel::Info } else { crate::commands::CommandLevel::Error },
+                                            title: response.title, lines: response.lines, json: response.data, changed: false,
+                                        }
+                                    } else { crate::commands::CommandOutput::error("Assets", "Invalid asset command") };
+                                    workbench.log_console_output(output);
                                 } else if command.starts_with("runtime.") {
                                     self.pending_runtime_command = Some(command);
                                 } else if command == "sessions.reload" {

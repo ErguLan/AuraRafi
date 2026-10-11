@@ -177,9 +177,10 @@ low-spec performance. See LOCAL_RUNTIME.md and CAMERA_RUNTIME.md for evidence.
 - [x] Keyboard input snapshot shape for future runtime scripts
 - [x] External `.rhai` lifecycle harness for prepared runtime tests
 - [ ] Script-facing access to `self`, `parent`, entity paths, variables, movement, velocity, and audio triggers
-      (self, hierarchy, stable references, movement, camera/lens and basic audio exist; velocity API remains)
+      (self, hierarchy, stable references, movement, camera/lens, basic audio and shared velocity/impulse API exist; focused validation and acceptance remain separate)
 - [ ] Basic collision detection through scene colliders
 - [ ] Simple physics (gravity, damping, velocity, trigger-only bodies)
+      (bounded AABB integration, initial-overlap correction and collision/trigger enter/stay/exit are implemented; see PHYSICS_RUNTIME.md for limits and acceptance)
 - [ ] Audio playback for entity audio sources inside Play mode
 - [x] Properties inspector support for runtime variables, audio sources, rigid bodies, and colliders
 - [x] Animation-aware collision structure (raf_core/scene/anim_collider.rs): AnimCollider per bone, 5 response types (Stop/Blend/Slide/Recoil/Ignore), auto-generate for hands/feet, enabled by DEFAULT (marketing differentiator)

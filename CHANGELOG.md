@@ -138,7 +138,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Release labeling**: the git/changelog release was labeled `0.8.9.1` while Cargo workspace packages remained on `0.8.9`.
 - **CPU scene renderer path**: simplified the software scene renderer toward direct framebuffer rasterization, direct grid/line submission, and less command-list indirection in the active CPU fallback path.
-- **Renderer truth docs**: aligned `README.md`, `docs/ARCHITECTURE.md`, `docs/RENDERER.md`, and stabilization notes around one canonical graphics story: shared graphics runtime for Scene/Schematic/PCB, GPU hardware first when available, CPU fallback retained, and game runtime still staged separately.
+- **Renderer truth docs**: aligned `README.md`, `docs/ARCHITECTURE.md`, `docs/RENDERER.md`, and stabilization notes around one canonical graphics story: shared graphics runtime for Scene/Schematic/PCB, GPU hardware first when available, CPU fallback retained, and the game runtime documented as a separate subsystem from that shared renderer.
 - **GPU hot path consolidation**: `ApiGraphicBasic` now reuses shared-mesh GPU buffers, grows reusable per-draw uniform and line slots, and exposes backend frame metrics through the runtime snapshot and viewport HUD instead of paying fresh buffer creation cost every draw.
 - **Roadmap framing**: updated `docs/ROADMAP.md` so the `0.9.0` target is described as an agentic workspace/editor direction.
 - **Project temp hygiene**: root debug/temp artifacts are now ignored by git to keep the repo cleaner during stabilization work.

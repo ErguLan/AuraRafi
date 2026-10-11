@@ -110,7 +110,7 @@ AuraRafi is designed to run on low-end hardware. Keep these principles in mind:
 
 ### High Priority
 
-- **Runtime Connection**: Connect scene editing and node execution to a real game runtime/play loop
+- **Runtime Acceptance and Gaps**: Continue validating native Play/Stop, runtime limits, supported scripts and Nodes, and measured performance; the local runtime is already implemented. See [Local Runtime](LOCAL_RUNTIME.md).
 - **Rendering Pipeline**: Keep improving the GPU-first viewport under ApiGraphicBasic while preserving the CPU recovery path
 - **PCB Workflow**: Continue PCB routing, DRC, footprint coverage, and real Gerber layer emission
 - **Asset Pipeline**: Keep polishing thumbnails, import flows, and project-level asset feedback
@@ -120,7 +120,7 @@ AuraRafi is designed to run on low-end hardware. Keep these principles in mind:
 
 - **Hot Reload**: Expand from core watcher infrastructure into clearer editor-facing flows
 - **Keyboard Shortcuts**: Grow customization beyond the current experimental surface
-- **Runtime/Editor Bridge**: Define how project settings, render presets, and node graphs enter execution mode
+- **Runtime/Editor Bridge**: Keep project settings, render profiles, and supported node graphs consistent across the editor and local player.
 - **Testing Expansion**: Add more behavior-focused tests for editor-adjacent logic where practical
 - **Repository Hygiene**: Keep temporary scripts and debug artifacts out of tracked source state
 
