@@ -23,7 +23,8 @@ struct HistorySaveRequest {
 /// render/input loop without sharing mutable editor state across threads.
 pub struct AgentHistoryWriter {
     sender: Option<Sender<HistorySaveRequest>>,
-    handle: Option<JoinHandle<()>>,
+    handle: Option<JoinHandle<Option<String>>>,
+    finish_error: Option<String>,
 }
 
 impl Default for AgentHistoryWriter {
@@ -38,6 +39,7 @@ impl AgentHistoryWriter {
         let handle = thread::Builder::new()
             .name("agent-history-writer".to_string())
             .spawn(move || {
+                let mut failures = HashMap::new();
                 while let Ok(request) = receiver.recv() {
                     let mut latest_by_project = HashMap::new();
                     latest_by_project.insert(request.project_root, request.history);
@@ -46,20 +48,26 @@ impl AgentHistoryWriter {
                     }
                     for (project_root, history) in latest_by_project {
                         if let Err(error) = history.save(&project_root) {
+                            failures.insert(project_root.clone(), error.to_string());
                             tracing::warn!(
                                 project = %project_root.display(),
                                 %error,
                                 "failed to persist Agent history"
                             );
+                        } else {
+                            failures.remove(&project_root);
                         }
                     }
                 }
+                (!failures.is_empty())
+                    .then(|| failures.into_values().collect::<Vec<_>>().join("\n"))
             })
             .expect("failed to spawn Agent history writer");
 
         Self {
             sender: Some(sender),
             handle: Some(handle),
+            finish_error: None,
         }
     }
 
@@ -71,6 +79,24 @@ impl AgentHistoryWriter {
             project_root: project_root.to_path_buf(),
             history: history.clone(),
         });
+    }
+
+    /// Stop accepting snapshots and let the worker drain without blocking UI.
+    pub fn finish_if_idle(&mut self) -> Result<bool, String> {
+        self.sender.take();
+        if self
+            .handle
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished())
+        {
+            return Ok(false);
+        }
+        if let Some(handle) = self.handle.take() {
+            self.finish_error = handle
+                .join()
+                .unwrap_or_else(|_| Some("agent_workspace.history_save_failed".into()));
+        }
+        self.finish_error.clone().map_or(Ok(true), Err)
     }
 }
 
@@ -94,6 +120,17 @@ pub struct AgentSession {
     pub messages: Vec<ChatMessage>,
     /// UTC timestamp of the last message.
     pub updated_at: String,
+    /// Immutable world/design target, independent of the selected editor tab.
+    #[serde(default)]
+    pub document_id: Option<uuid::Uuid>,
+    #[serde(default)]
+    pub last_task: Option<raf_core::AgentTaskSnapshot>,
+    #[serde(default)]
+    pub task_events: Vec<raf_core::AgentTaskEvent>,
+    #[serde(default)]
+    pub saved_revision: Option<u64>,
+    #[serde(default)]
+    pub draft: String,
 }
 
 impl AgentSession {
@@ -103,6 +140,11 @@ impl AgentSession {
             title: title.into(),
             messages: Vec::new(),
             updated_at: chrono::Utc::now().to_rfc3339(),
+            document_id: None,
+            last_task: None,
+            task_events: Vec::new(),
+            saved_revision: None,
+            draft: String::new(),
         }
     }
 
@@ -133,21 +175,31 @@ impl AgentHistory {
 
     /// Load history from disk, returning an empty one if the file does not exist.
     pub fn load(project_root: &Path) -> Self {
-        let path = Self::path_for(project_root);
-        match std::fs::read_to_string(&path) {
-            Ok(text) => ron::from_str(&text).unwrap_or_default(),
-            Err(_) => Self::default(),
-        }
+        Self::load_checked(project_root).unwrap_or_default()
+    }
+
+    pub fn load_checked(project_root: &Path) -> Result<Self, String> {
+        let path = raf_core::project_store::confined_path(
+            project_root,
+            &PathBuf::from(Self::FOLDER).join(Self::FILE_NAME),
+        )?;
+        let Some(bytes) = raf_core::project_store::read_recoverable(&path)? else {
+            return Ok(Self::default());
+        };
+        ron::de::from_bytes(&bytes).map_err(|e| e.to_string())
     }
 
     /// Save history to disk. Creates the `.ai` folder if needed.
     pub fn save(&self, project_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-        let folder = project_root.join(Self::FOLDER);
-        std::fs::create_dir_all(&folder)?;
-        let path = folder.join(Self::FILE_NAME);
+        let path = raf_core::project_store::confined_path(
+            project_root,
+            &PathBuf::from(Self::FOLDER).join(Self::FILE_NAME),
+        )
+        .map_err(std::io::Error::other)?;
         let pretty = ron::ser::PrettyConfig::default();
         let text = ron::ser::to_string_pretty(self, pretty)?;
-        std::fs::write(path, text)?;
+        raf_core::project_store::write_atomic(&path, text.as_bytes())
+            .map_err(std::io::Error::other)?;
         Ok(())
     }
 

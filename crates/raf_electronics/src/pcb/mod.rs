@@ -1,3 +1,4 @@
+pub mod drc;
 pub mod footprint;
 pub mod layout;
 
@@ -5,3 +6,4 @@ pub use footprint::{footprint_definition, FootprintDefinition, FootprintPadDefin
 pub use layout::{
     BoardOutline, PcbAirwire, PcbComponentPlacement, PcbLayer, PcbLayout, PcbSyncSummary, PcbTrace,
 };
+pub(crate) mod geometry;

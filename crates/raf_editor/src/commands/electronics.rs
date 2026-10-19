@@ -66,6 +66,20 @@ pub fn execute(
     command: &ParsedCommand,
     ctx: &mut ElectronicsCommandContext<'_>,
 ) -> CommandOutput {
+    for name in [
+        "x", "y", "dx", "dy", "x1", "y1", "x2", "y2", "degrees", "rotation", "width", "height",
+        "spacing", "columns",
+    ] {
+        if command
+            .arg(name)
+            .is_some_and(|value| parse_f32(value).is_none())
+        {
+            return CommandOutput::error(
+                "Electronics command",
+                format!("{name} must be a finite number."),
+            );
+        }
+    }
     match command_name {
         "electronics.add_part" => add_part(command, ctx),
         "electronics.wire" => add_wire(command, ctx),
@@ -168,6 +182,9 @@ fn set_value(command: &ParsedCommand, ctx: &mut ElectronicsCommandContext<'_>) -
     let Some(index) = resolve_component(command, ctx) else {
         return CommandOutput::error("Set value", "Component target not found.");
     };
+    if ctx.schematic_view.schematic.components[index].locked {
+        return CommandOutput::error("Set value", "Component is locked.");
+    }
     let Some(value) = command.arg("value") else {
         return CommandOutput::error("Set value", "Missing value=<new value>.");
     };
@@ -191,6 +208,9 @@ fn rotate_component(
     let Some(index) = resolve_component(command, ctx) else {
         return CommandOutput::error("Rotate component", "Component target not found.");
     };
+    if ctx.schematic_view.schematic.components[index].locked {
+        return CommandOutput::error("Rotate component", "Component is locked.");
+    }
     let degrees = f32_arg(command, "degrees", 90.0);
     if let Some(component) = ctx.schematic_view.schematic.components.get_mut(index) {
         component.rotation = (component.rotation + degrees).rem_euclid(360.0);
@@ -212,6 +232,9 @@ fn delete_component(
     let Some(index) = resolve_component(command, ctx) else {
         return CommandOutput::error("Delete component", "Component target not found.");
     };
+    if ctx.schematic_view.schematic.components[index].locked {
+        return CommandOutput::error("Delete component", "Component is locked.");
+    }
     let component = ctx.schematic_view.schematic.components.remove(index);
     ctx.schematic_view.schematic.wires.retain(|wire| {
         !wire
@@ -359,7 +382,9 @@ fn autolayout(command: &ParsedCommand, ctx: &mut ElectronicsCommandContext<'_>) 
     {
         let col = index % columns;
         let row = index / columns;
-        component.position = Vec2::new(col as f32 * spacing, row as f32 * spacing);
+        if !component.locked {
+            component.position = Vec2::new(col as f32 * spacing, row as f32 * spacing);
+        }
     }
     ctx.schematic_view.schematic.sync_wire_anchors();
     CommandOutput::changed(
@@ -383,6 +408,10 @@ fn autolayout(command: &ParsedCommand, ctx: &mut ElectronicsCommandContext<'_>) 
 
 fn run_drc(ctx: &mut ElectronicsCommandContext<'_>) -> CommandOutput {
     let report = ctx.schematic_view.schematic.run_drc();
+    drc_output(&report)
+}
+
+pub(crate) fn drc_output(report: &raf_electronics::DrcReport) -> CommandOutput {
     let mut lines = vec![
         format!("passed: {}", report.passed()),
         format!("errors: {}", report.errors.len()),
@@ -535,20 +564,24 @@ fn diagnose(ctx: &mut ElectronicsCommandContext<'_>) -> CommandOutput {
 
 fn simulate(ctx: &mut ElectronicsCommandContext<'_>) -> CommandOutput {
     let results = ctx.schematic_view.schematic.simulate_dc();
+    simulation_output(ctx.schematic_view.schematic, &results)
+}
+
+pub(crate) fn simulation_output(
+    schematic: &Schematic,
+    results: &raf_electronics::SimulationResults,
+) -> CommandOutput {
     let mut lines = vec![format!("converged: {}", results.converged)];
     for message in &results.messages {
         lines.push(format!("message: {message}"));
     }
-    for (net, voltage) in &results.node_voltages {
-        lines.push(format!("net N{net:03}: {:.5} V", voltage));
+    for net in schematic.netlist().nets {
+        if let Some(voltage) = results.node_voltages.get(&net.id) {
+            lines.push(format!("net {}: {:.5} V", net.name, voltage));
+        }
     }
     for (component_index, current) in &results.component_currents {
-        if let Some(component) = ctx
-            .schematic_view
-            .schematic
-            .components
-            .get(*component_index)
-        {
+        if let Some(component) = schematic.components.get(*component_index) {
             lines.push(format!(
                 "{} current: {:.8} A",
                 component.designator, current
@@ -666,8 +699,8 @@ fn pcb_route_airwire(
     ctx: &mut ElectronicsCommandContext<'_>,
 ) -> CommandOutput {
     let index = usize_arg(command, "index", 0);
-    if !ctx.pcb_view.layout.route_airwire(index) {
-        return CommandOutput::error("Route airwire", "Airwire index not found.");
+    if let Err(error) = ctx.pcb_view.layout.try_route_airwire(index) {
+        return CommandOutput::error("Route airwire", error);
     }
     ctx.pcb_view
         .select_trace(ctx.pcb_view.layout.traces.len().saturating_sub(1));
@@ -714,6 +747,9 @@ fn pcb_move(command: &ParsedCommand, ctx: &mut ElectronicsCommandContext<'_>) ->
     let Some(index) = resolve_pcb_component(command, ctx) else {
         return CommandOutput::error("PCB move", "PCB component target not found.");
     };
+    if ctx.pcb_view.layout.components[index].locked {
+        return CommandOutput::error("PCB move", "Component is locked.");
+    }
     if let Some(component) = ctx.pcb_view.layout.components.get_mut(index) {
         if let Some(x) = command.arg("x").and_then(parse_f32) {
             component.position.x = x;
@@ -737,6 +773,9 @@ fn pcb_rotate(command: &ParsedCommand, ctx: &mut ElectronicsCommandContext<'_>) 
     let Some(index) = resolve_pcb_component(command, ctx) else {
         return CommandOutput::error("PCB rotate", "PCB component target not found.");
     };
+    if ctx.pcb_view.layout.components[index].locked {
+        return CommandOutput::error("PCB rotate", "Component is locked.");
+    }
     let degrees = f32_arg(command, "degrees", 90.0);
     if let Some(component) = ctx.pcb_view.layout.components.get_mut(index) {
         component.rotation = (component.rotation + degrees).rem_euclid(360.0);
@@ -981,7 +1020,11 @@ fn usize_arg(command: &ParsedCommand, name: &str, default: usize) -> usize {
 }
 
 fn parse_f32(value: &str) -> Option<f32> {
-    value.trim().parse::<f32>().ok()
+    value
+        .trim()
+        .parse::<f32>()
+        .ok()
+        .filter(|value| value.is_finite())
 }
 
 fn parse_f64(value: &str) -> Option<f64> {
@@ -990,6 +1033,7 @@ fn parse_f64(value: &str) -> Option<f64> {
         .trim_end_matches(['V', 'v'])
         .parse::<f64>()
         .ok()
+        .filter(|value| value.is_finite())
 }
 
 fn format_vec2(label: &str, value: Vec2) -> String {

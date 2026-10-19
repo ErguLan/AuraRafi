@@ -217,6 +217,8 @@ struct MeshUniforms {
     color: vec4<f32>,
     light_dir: vec4<f32>,
     params: vec4<f32>,
+    sun: vec4<f32>,
+    ambient: vec4<f32>,
 };
 
 struct MeshVertexInput {
@@ -230,7 +232,16 @@ struct MeshVertexOutput {
     @location(0) world_normal: vec3<f32>,
     @location(1) color: vec4<f32>,
     @location(2) uv: vec2<f32>,
+    @location(3) world_position: vec3<f32>,
 };
+
+// SHADOW_DECLARATIONS
+fn sun_visibility(world: vec3<f32>, ndotl: f32) -> f32 { return 1.0; }
+fn sun_shade(ndotl: f32) -> f32 {
+    let steps = mesh_uniforms.sun.w;
+    if steps < 2.0 { return ndotl; }
+    return floor(ndotl*steps+0.5)/steps;
+}
 
 @group(0) @binding(0) var<uniform> mesh_uniforms: MeshUniforms;
 @group(1) @binding(0) var base_color_texture: texture_2d<f32>;
@@ -263,6 +274,7 @@ fn mesh_vs(input: MeshVertexInput) -> MeshVertexOutput {
     output.world_normal = normalize((mesh_uniforms.normal_matrix * vec4<f32>(input.normal, 0.0)).xyz);
     output.color = mesh_uniforms.color;
     output.uv = input.uv;
+    output.world_position = (mesh_uniforms.model * vec4<f32>(input.position, 1.0)).xyz;
     return output;
 }
 
@@ -275,6 +287,12 @@ fn mesh_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
     }
 
     let light_dir = normalize(mesh_uniforms.light_dir.xyz);
+    if (mesh_uniforms.params.z > 0.5) {
+        let ndotl = max(dot(normalize(input.world_normal), light_dir), 0.0);
+        let visibility = select(1.0, sun_visibility(input.world_position, ndotl), mesh_uniforms.params.w > 0.5);
+        let lighting = mesh_uniforms.ambient.rgb + mesh_uniforms.sun.rgb * sun_shade(ndotl) * visibility;
+        return vec4<f32>(base_color.rgb * lighting, base_color.a);
+    }
     let lambert = 0.3 + 0.7 * max(dot(normalize(input.world_normal), light_dir), 0.0);
     return vec4<f32>(base_color.rgb * lambert, base_color.a);
 }
@@ -298,6 +316,7 @@ fn mesh_instanced_vs(input: MeshInstancedVertexInput) -> MeshVertexOutput {
     output.world_normal = normalize((model * vec4<f32>(input.normal, 0.0)).xyz);
     output.color = input.color;
     output.uv = input.uv;
+    output.world_position = (model * vec4<f32>(input.position, 1.0)).xyz;
     return output;
 }
 
@@ -309,6 +328,13 @@ fn mesh_instanced_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
     }
 
     let light_dir = normalize(mesh_uniforms.light_dir.xyz);
+    if (mesh_uniforms.params.z > 0.5) {
+        let base = sample_base_color(input.uv, input.color);
+        let ndotl = max(dot(normalize(input.world_normal), light_dir), 0.0);
+        let visibility = select(1.0, sun_visibility(input.world_position, ndotl), mesh_uniforms.params.w > 0.5);
+        let lighting = mesh_uniforms.ambient.rgb + mesh_uniforms.sun.rgb * sun_shade(ndotl) * visibility;
+        return vec4<f32>(base.rgb * lighting, base.a);
+    }
     let lambert = 0.3 + 0.7 * max(dot(normalize(input.world_normal), light_dir), 0.0);
     let base_color = sample_base_color(input.uv, input.color);
     return vec4<f32>(base_color.rgb * lambert, base_color.a);
@@ -345,7 +371,7 @@ fn line_vs(input: LineVertexInput, @builtin(vertex_index) vertex_index: u32) -> 
     let direction_px = (end_ndc - start_ndc) * line_uniforms.viewport * 0.5;
     let direction_length = max(length(direction_px), 0.0001);
     let perpendicular = vec2<f32>(-direction_px.y, direction_px.x) / direction_length;
-    let half_width_ndc = perpendicular * (2.0 * max(input.width, 1.0) / max(line_uniforms.viewport, vec2<f32>(1.0)));
+    let half_width_ndc = perpendicular * (max(input.width, 1.0) / max(line_uniforms.viewport, vec2<f32>(1.0)));
     let at_end = vertex_index == 2u || vertex_index == 4u || vertex_index == 5u;
     let positive_side = vertex_index == 1u || vertex_index == 2u || vertex_index == 4u;
     let base_clip = select(start_clip, end_clip, at_end);
@@ -356,7 +382,7 @@ fn line_vs(input: LineVertexInput, @builtin(vertex_index) vertex_index: u32) -> 
     let clip = vec4<f32>(
         base_clip.x + offset_xy.x,
         base_clip.y + offset_xy.y,
-        base_clip.z + input.depth_bias * base_clip.w,
+        clamp(base_clip.z + input.depth_bias * base_clip.w, 0.0, base_clip.w),
         base_clip.w,
     );
     output.clip_position = clip;

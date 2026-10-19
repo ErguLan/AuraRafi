@@ -181,6 +181,12 @@ shows the intended neutral ownership/parameter contract. It is not a shipping
 SDK, a working native behavior or a file you can attach to local Play today.
 The existing native-mod/plugin discussion is a different integration boundary.
 
+Rust currently implements the engine and its Host API; `.rs` gameplay files
+are not executable attachments. Optional C++/Rust-to-WASM compiler/executor
+interfaces are prepared without installing any tools. A compiler alone cannot
+enable these languages: a concrete executor, guest ABI and Play loader
+integration are still required. Keep using Rhai and Nodes for authored behavior.
+
 ## Troubleshooting and boundaries
 
 - Nothing happens: confirm the file is saved, attached, Rhai enabled, and inspect

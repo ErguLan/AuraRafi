@@ -30,19 +30,23 @@ pub fn runtime_controls(palette: StudioUiPalette, state: &RuntimeToolbarState) -
             flow: UiFlow::Row,
             gap: 2.0,
             align_items: raf_ui::UiAlign::Center,
-            ..UiLayout::fixed(
-                130.0
-                    + if state.instances > 0 { 80.0 } else { 0.0 }
-                    + if state.instances > 1 { 34.0 } else { 0.0 },
-                28.0,
-            )
+            padding: UiSpacing::xy(4.0, 1.0),
+            ..UiLayout::fixed(0.0, 28.0).with_width_mode(raf_ui::UiSizeMode::FitContent)
         })
-        .with_style(UiStyle::transparent());
+        .with_style(UiStyle {
+            fill: tokens.surface_raised,
+            radius: 6.0,
+            ..UiStyle::transparent()
+        });
     for (id, icon, key, command, enabled) in [
         (
             "play",
             UiIconId::Play,
-            "runtime.play",
+            if paused {
+                "runtime.resume"
+            } else {
+                "runtime.play"
+            },
             if paused {
                 "runtime.resume"
             } else {
@@ -72,9 +76,31 @@ pub fn runtime_controls(palette: StudioUiPalette, state: &RuntimeToolbarState) -
             active,
         ),
     ] {
+        if id == "stop" {
+            root = root.with_child(
+                UiNode::new("runtime.control.separator", UiNodeKind::Panel)
+                    .with_layout(UiLayout::fixed(1.0, 16.0))
+                    .with_style(UiStyle {
+                        fill: tokens.border,
+                        ..UiStyle::transparent()
+                    }),
+            );
+        }
+        let highlighted = (id == "pause" && paused) || (id == "play" && running);
         root = root.with_child(
             UiNode::new(format!("runtime.control.{id}"), UiNodeKind::Button)
-                .with_layout(UiLayout::fixed(30.0, 26.0))
+                .with_class("runtime-transport")
+                .with_layout(UiLayout::fixed(26.0, 26.0))
+                .with_style(UiStyle {
+                    fill: if highlighted {
+                        tokens.selection
+                    } else {
+                        [0; 4]
+                    },
+                    radius: 4.0,
+                    ..UiStyle::transparent()
+                })
+                .with_accessibility_selected(highlighted)
                 .with_icon(UiIcon::new(icon).with_tint(if id == "play" {
                     tokens.accent
                 } else {
@@ -92,7 +118,10 @@ pub fn runtime_controls(palette: StudioUiPalette, state: &RuntimeToolbarState) -
         root = root.with_child(
             UiNode::new("runtime.control.phase", UiNodeKind::Label)
                 .with_text_key(phase_key(state.phase))
-                .with_layout(UiLayout::fixed(78.0, 24.0))
+                .with_layout(UiLayout {
+                    padding: UiSpacing::xy(6.0, 0.0),
+                    ..UiLayout::fixed(0.0, 24.0).with_width_mode(raf_ui::UiSizeMode::FitContent)
+                })
                 .with_text_style(UiTextStyle::body(tokens.text_muted)),
         );
     }
@@ -108,6 +137,39 @@ pub fn runtime_controls(palette: StudioUiPalette, state: &RuntimeToolbarState) -
         );
     }
     root
+}
+
+pub fn runtime_control_styles(palette: StudioUiPalette) -> raf_ui::UiStyleSheet {
+    use raf_ui::{UiStylePatch, UiStyleRule, UiStyleRuleState as State, UiStyleSelector};
+    let rule = |state, patch| {
+        UiStyleRule::new(UiStyleSelector::Class("runtime-transport".into()), patch).when(state)
+    };
+    raf_ui::UiStyleSheet {
+        rules: vec![
+            rule(
+                State::Hovered,
+                UiStylePatch {
+                    fill: Some(palette.tokens().selection),
+                    ..Default::default()
+                },
+            ),
+            rule(
+                State::Focused,
+                UiStylePatch {
+                    border: Some(palette.tokens().focus),
+                    border_width: Some(1.0),
+                    ..Default::default()
+                },
+            ),
+            rule(
+                State::Active,
+                UiStylePatch {
+                    fill: Some(palette.tokens().selection),
+                    ..Default::default()
+                },
+            ),
+        ],
+    }
 }
 pub fn phase_key(phase: Option<RuntimePhase>) -> &'static str {
     match phase {
@@ -191,7 +253,9 @@ pub fn player_surface(
             );
         }
     }
-    UiSurface::new("runtime.player", palette, root)
+    let mut surface = UiSurface::new("runtime.player", palette, root);
+    surface.style_sheet = runtime_control_styles(palette);
+    surface
 }
 
 #[cfg(test)]

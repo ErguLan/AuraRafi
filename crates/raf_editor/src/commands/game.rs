@@ -2191,6 +2191,16 @@ fn update_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> C
         Ok(value) => value,
         Err(error) => return CommandOutput::error("Update entity", error),
     };
+    let shadow_flags = ["casts_shadows", "receives_shadows"].map(|key| {
+        command
+            .arg(key)
+            .map(|value| parse_bool_literal(value, key))
+            .transpose()
+    });
+    let [casts_shadows, receives_shadows] = match shadow_flags {
+        [Ok(casts), Ok(receives)] => [casts, receives],
+        [Err(error), _] | [_, Err(error)] => return CommandOutput::error("Update entity", error),
+    };
     let metadata = match parse_semantic_metadata(command) {
         Ok(metadata) => metadata,
         Err(error) => return CommandOutput::error("Update entity", error),
@@ -2217,6 +2227,12 @@ fn update_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> C
     }
     if let Some(locked) = locked {
         node.locked = locked;
+    }
+    if let Some(value) = casts_shadows {
+        node.casts_shadows = value;
+    }
+    if let Some(value) = receives_shadows {
+        node.receives_shadows = value;
     }
     apply_semantic_metadata(node, &metadata);
     select_ids(ctx, vec![id]);
@@ -2735,6 +2751,8 @@ fn node_json(
             "world_position": vec3_json(world_position),
             "color_rgba": [node.color.r, node.color.g, node.color.b, node.color.a],
             "visible": node.visible,
+            "casts_shadows": node.casts_shadows,
+            "receives_shadows": node.receives_shadows,
             "locked": node.locked,
             "semantic_role": node.semantic_role,
             "stable_key": node.stable_key,
@@ -3262,6 +3280,34 @@ mod tests {
     use super::*;
     use crate::commands::output::CommandLevel;
     use crate::commands::parser::{parse_console_input, ParsedInput};
+
+    #[test]
+    fn shadows_entity_authoring_validates_both_flags_before_mutation() {
+        let mut scene = SceneGraph::new();
+        let id = scene.add_root_with_primitive("Caster", Primitive::Cube);
+        let mut selection = SceneSelectionState::default();
+        let mut viewport = HeadlessGameViewportPort::default();
+        let mut ctx = GameCommandContext {
+            scene: &mut scene,
+            selection: &mut selection,
+            viewport: &mut viewport,
+        };
+        let invalid = parsed_command(
+            "game.update",
+            serde_json::json!({"target":"Caster","casts_shadows":false,"receives_shadows":"invalid"}),
+        );
+        assert!(!execute("game.update", &invalid, &mut ctx).changed);
+        assert!(ctx.scene.get(id).unwrap().casts_shadows);
+        let command = parsed_command(
+            "game.update",
+            serde_json::json!({"target":"Caster","casts_shadows":false,"receives_shadows":false}),
+        );
+        let output = execute("game.update", &command, &mut ctx);
+        assert!(output.changed);
+        assert_eq!(output.json["entity"]["casts_shadows"], false);
+        let node = ctx.scene.get(id).unwrap();
+        assert!(!node.casts_shadows && !node.receives_shadows);
+    }
 
     #[test]
     fn add_primitive_uses_builtin_asset_manifest() {

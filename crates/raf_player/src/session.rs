@@ -583,7 +583,7 @@ impl PlayerSession {
             (target.height as f32 * scale).max(1.0) as u32,
         ];
         let cache_size = [size[0], size[1], source_size[0], source_size[1]];
-        let revision = world.scene.document_revision();
+        let revision = world.presentation_revision();
         if let Some((cached_revision, cached_size, cached_pose, canvas)) = &self.cached_canvas {
             if *cached_revision == revision && *cached_size == cache_size && *cached_pose == pose {
                 return Some(canvas.clone());
@@ -604,6 +604,7 @@ impl PlayerSession {
             ortho_scale: pose.projection.ortho_scale,
         };
         let options = RenderOptions {
+            environment_override: Some(world.presentation_environment()),
             show_grid_3d: false,
             selection_outline: false,
             geometry_detail: world_render_options(world).0,

@@ -8,6 +8,7 @@ use crate::extensions::run_registered_drc_rules;
 use crate::netlist::Netlist;
 use crate::schematic::{Schematic, WireAnchor};
 use glam::Vec2;
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 /// Severity level of a DRC issue.
@@ -82,38 +83,95 @@ impl DrcReport {
 
 /// Run all DRC checks on a schematic.
 pub fn run_drc(schematic: &Schematic) -> DrcReport {
-    let netlist = Netlist::from_schematic(schematic);
+    run_drc_cancellable(schematic, &AtomicBool::new(false)).expect("an uncancelled DRC completes")
+}
+
+pub fn run_drc_cancellable(schematic: &Schematic, cancel: &AtomicBool) -> Option<DrcReport> {
+    let netlist = Netlist::from_schematic_cancellable(schematic, cancel)?;
     let mut errors: Vec<DrcIssue> = Vec::new();
     let mut warnings: Vec<DrcIssue> = Vec::new();
     let mut info: Vec<DrcIssue> = Vec::new();
 
     // Rule 1: Floating pins (pin not connected to any net with other pins).
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     check_floating_pins(schematic, &netlist, &mut warnings);
 
     // Rule 2: Component without value.
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     check_missing_values(schematic, &mut warnings);
 
     // Rule 3: Isolated component (no pin in any shared net).
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     check_isolated_components(schematic, &netlist, &mut errors);
 
     // Rule 4: Unnamed nets (wires without net label).
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     check_unnamed_nets(schematic, &mut info);
 
     // Rule 5: Short circuit (basic detection).
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     check_short_circuit(schematic, &netlist, &mut errors);
 
     // Rule 6: LED without current-limiting resistor.
-    check_led_without_resistor(schematic, &netlist, &mut warnings);
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    check_led_without_resistor(schematic, &netlist, &mut warnings, cancel);
 
     // Rule 7: A wire endpoint must terminate at a pin, a valid pin anchor,
     // or another wire endpoint. This exposes visually close but electrically
     // disconnected drawing mistakes to the Agent and the CAD canvas.
-    check_wire_endpoints(schematic, &mut errors, &mut warnings);
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
+    check_wire_endpoints(schematic, &mut errors, &mut warnings, cancel);
 
     // Rule 8: A wire must not bypass a multi-pin component by placing two of
     // its pins on the same electrical net.
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     check_component_pin_shorts(schematic, &netlist, &mut errors);
 
+    // Drawing the same label on disconnected islands must never silently
+    // imply a connection. The netlist keeps them separate and ERC explains it.
+    let mut labeled_nets = std::collections::HashMap::new();
+    for wire in &schematic.wires {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let label = wire.net.trim();
+        if label.is_empty() {
+            continue;
+        }
+        let Some(net) = netlist.net_for_wire(wire.id) else {
+            continue;
+        };
+        if labeled_nets
+            .insert(label, net.id)
+            .is_some_and(|previous| previous != net.id)
+        {
+            warnings.push(DrcIssue {
+                severity:DrcSeverity::Warning,rule:"ambiguous_net_label".into(),
+                message:format!("Label '{label}' occurs on disconnected nets; this island is '{}'. Connect the wires or give the nets distinct labels.",net.name),
+                components:Vec::new(),location:Some(wire.start),
+            });
+        }
+    }
+
+    if cancel.load(Ordering::Relaxed) {
+        return None;
+    }
     for issue in run_registered_drc_rules(schematic) {
         match issue.severity {
             DrcSeverity::Error => errors.push(issue),
@@ -122,11 +180,11 @@ pub fn run_drc(schematic: &Schematic) -> DrcReport {
         }
     }
 
-    DrcReport {
+    Some(DrcReport {
         errors,
         warnings,
         info,
-    }
+    })
 }
 
 /// Rule 1: Find pins that are alone in their net (not connected to anything).
@@ -232,42 +290,38 @@ fn check_unnamed_nets(schematic: &Schematic, issues: &mut Vec<DrcIssue>) {
 /// Looks for nets where multiple voltage sources or power pins are
 /// connected without any load between them.
 fn check_short_circuit(schematic: &Schematic, netlist: &Netlist, issues: &mut Vec<DrcIssue>) {
-    use crate::component::PinDirection;
-    use std::collections::HashSet;
-
-    for net in &netlist.nets {
-        let mut power_components = HashSet::new();
-        let mut power_comps: Vec<Uuid> = Vec::new();
-
-        for &(ci, pi) in &net.pins {
-            if ci >= schematic.components.len() {
-                continue;
+    // Sharing a return (or a positive rail) alone is legitimate. Conflicting
+    // voltage constraints exist only when both terminals share the same nets.
+    let mut constraints = std::collections::HashMap::<(usize, usize), (f64, Uuid)>::new();
+    for (ci, comp) in schematic.components.iter().enumerate() {
+        let SimModel::DcSource { voltage } = comp.sim_model else {
+            continue;
+        };
+        let (Some(plus), Some(minus)) = (netlist.net_for_pin(ci, 0), netlist.net_for_pin(ci, 1))
+        else {
+            continue;
+        };
+        let key = (plus.id.min(minus.id), plus.id.max(minus.id));
+        let signed_voltage = if plus.id <= minus.id {
+            voltage
+        } else {
+            -voltage
+        };
+        if let Some(&(other_voltage, other_id)) = constraints.get(&key) {
+            if (other_voltage - signed_voltage).abs() > 1e-9 {
+                issues.push(DrcIssue {
+                    severity: DrcSeverity::Error,
+                    rule: "short_circuit".to_string(),
+                    message: format!(
+                        "Conflicting voltage sources across nets '{}' and '{}'",
+                        plus.name, minus.name
+                    ),
+                    components: vec![other_id, comp.id],
+                    location: Some(comp.position),
+                });
             }
-            let comp = &schematic.components[ci];
-            if pi >= comp.pins.len() {
-                continue;
-            }
-            let pin = &comp.pins[pi];
-
-            let is_power_source = pin.direction == PinDirection::Power
-                || matches!(comp.sim_model, SimModel::DcSource { .. });
-            if is_power_source && power_components.insert(comp.id) {
-                power_comps.push(comp.id);
-            }
-        }
-
-        if power_comps.len() > 1 {
-            issues.push(DrcIssue {
-                severity: DrcSeverity::Error,
-                rule: "short_circuit".to_string(),
-                message: format!(
-                    "Potential short circuit: {} power sources on net '{}'",
-                    power_comps.len(),
-                    net.name
-                ),
-                components: power_comps,
-                location: None,
-            });
+        } else {
+            constraints.insert(key, (signed_voltage, comp.id));
         }
     }
 }
@@ -276,12 +330,35 @@ fn check_wire_endpoints(
     schematic: &Schematic,
     errors: &mut Vec<DrcIssue>,
     warnings: &mut Vec<DrcIssue>,
+    cancel: &AtomicBool,
 ) {
-    // Five percent of the 20-unit schematic grid. Anything beyond that and
-    // the visual is unmistakably detached from a pin or junction.
-    const ENDPOINT_TOLERANCE: f32 = 1.0;
+    let pins: Vec<_> = schematic
+        .components
+        .iter()
+        .flat_map(|component| {
+            component
+                .pins
+                .iter()
+                .map(move |pin| crate::schematic::component_pin_world_position(component, pin))
+        })
+        .collect();
+    let pin_grid = crate::netlist::PinGrid::new(&pins);
+    let endpoints: Vec<_> = schematic
+        .wires
+        .iter()
+        .flat_map(|wire| {
+            [
+                crate::netlist::resolve_wire_point(schematic, wire, true),
+                crate::netlist::resolve_wire_point(schematic, wire, false),
+            ]
+        })
+        .collect();
+    let wire_grid = crate::netlist::PinGrid::new(&endpoints);
 
     for (wire_index, wire) in schematic.wires.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return;
+        }
         for (endpoint_name, point, anchor) in [
             ("start", wire.start, wire.start_anchor),
             ("end", wire.end, wire.end_anchor),
@@ -310,21 +387,11 @@ fn check_wire_endpoints(
                 continue;
             }
 
-            let touches_pin = schematic.components.iter().any(|component| {
-                component.pins.iter().any(|pin| {
-                    crate::schematic::component_pin_world_position(component, pin).distance(point)
-                        < ENDPOINT_TOLERANCE
-                })
-            });
-            let touches_wire = schematic
-                .wires
+            let touches_pin = !pin_grid.near(point).is_empty();
+            let touches_wire = wire_grid
+                .near(point)
                 .iter()
-                .enumerate()
-                .any(|(other_index, other)| {
-                    other_index != wire_index
-                        && (other.start.distance(point) < ENDPOINT_TOLERANCE
-                            || other.end.distance(point) < ENDPOINT_TOLERANCE)
-                });
+                .any(|index| index / 2 != wire_index);
 
             if !touches_pin && !touches_wire {
                 warnings.push(DrcIssue {
@@ -386,42 +453,65 @@ fn check_led_without_resistor(
     schematic: &Schematic,
     netlist: &Netlist,
     issues: &mut Vec<DrcIssue>,
+    cancel: &AtomicBool,
 ) {
+    // A limiter must be unavoidable on the return path around the LED.
+    // A resistor merely sharing a rail, or placed in parallel, proves nothing.
+    let mut edges = vec![Vec::<(usize, usize, bool)>::new(); netlist.nets.len()];
+    for (ci, comp) in schematic.components.iter().enumerate() {
+        if matches!(
+            comp.sim_model,
+            SimModel::Capacitor { .. } | SimModel::Magnet { .. }
+        ) {
+            continue;
+        }
+        let (Some(a), Some(b)) = (netlist.net_for_pin(ci, 0), netlist.net_for_pin(ci, 1)) else {
+            continue;
+        };
+        let limiter =
+            matches!(comp.sim_model, SimModel::Resistor { ohms } if ohms.is_finite() && ohms > 0.0);
+        edges[a.id].push((b.id, ci, limiter));
+        edges[b.id].push((a.id, ci, limiter));
+    }
+    let reachable = |start: usize, end: usize, excluded: usize, allow_resistors: bool| {
+        let mut seen = vec![false; edges.len()];
+        let mut pending = vec![start];
+        seen[start] = true;
+        while let Some(node) = pending.pop() {
+            if cancel.load(Ordering::Relaxed) {
+                return false;
+            }
+            if node == end {
+                return true;
+            }
+            for &(next, component, resistor) in &edges[node] {
+                if component != excluded && (allow_resistors || !resistor) && !seen[next] {
+                    seen[next] = true;
+                    pending.push(next);
+                }
+            }
+        }
+        false
+    };
     for (ci, comp) in schematic.components.iter().enumerate() {
         if !matches!(comp.sim_model, SimModel::Led { .. }) {
             continue;
         }
-
-        // Check each pin of the LED for a resistor on the same net.
-        let mut has_resistor = false;
-        for (pi, _pin) in comp.pins.iter().enumerate() {
-            if let Some(net) = netlist.net_for_pin(ci, pi) {
-                for &(other_ci, _other_pi) in &net.pins {
-                    if other_ci == ci {
-                        continue;
-                    }
-                    if other_ci < schematic.components.len() {
-                        if matches!(
-                            schematic.components[other_ci].sim_model,
-                            SimModel::Resistor { .. }
-                        ) {
-                            has_resistor = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if has_resistor {
-                break;
-            }
+        if cancel.load(Ordering::Relaxed) {
+            return;
         }
-
-        if !has_resistor && !schematic.wires.is_empty() {
+        let protected = match (netlist.net_for_pin(ci, 0), netlist.net_for_pin(ci, 1)) {
+            (Some(a), Some(b)) => {
+                reachable(a.id, b.id, ci, true) && !reachable(a.id, b.id, ci, false)
+            }
+            _ => false,
+        };
+        if !protected && !schematic.wires.is_empty() {
             issues.push(DrcIssue {
                 severity: DrcSeverity::Warning,
                 rule: "led_no_resistor".to_string(),
                 message: format!(
-                    "LED {} has no current-limiting resistor in its circuit",
+                    "LED {} has no verified series current-limiting resistor",
                     comp.designator
                 ),
                 components: vec![comp.id],

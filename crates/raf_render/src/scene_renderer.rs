@@ -65,6 +65,7 @@ pub struct FrameStats {
 /// xray opacity, and selection highlighting.
 #[derive(Debug, Clone, Copy)]
 pub struct RenderOptions {
+    pub environment_override: Option<raf_core::environment::EnvironmentSettings>,
     pub show_grid_3d: bool,
     pub grid_spacing: f32,
     pub grid_load_distance: f32,
@@ -97,6 +98,7 @@ pub struct RenderOptions {
 impl Default for RenderOptions {
     fn default() -> Self {
         Self {
+            environment_override: None,
             show_grid_3d: true,
             grid_spacing: 1.0,
             grid_load_distance: 15.0,
@@ -189,6 +191,9 @@ pub struct SceneRenderer {
     geometry_lod_history_revision: u64,
     asset_root: Option<PathBuf>,
     texture_cache: TextureCache,
+    shadow_geometry: Option<Arc<crate::shadow_frame::ShadowGeometry>>,
+    shadow_budget_exceeded: bool,
+    shadow_geometry_revision: u64,
     /// Stats from the last frame.
     pub stats: FrameStats,
 }
@@ -210,8 +215,8 @@ pub struct SceneRenderFrame {
 /// rides along an object being dragged. It stays flat and quiet.
 pub const GRID_Y: f32 = -0.02;
 
-/// Current scene environment shared by the editor and local Play, independent
-/// of the chrome theme. Gradient/skybox environment data is not active yet.
+/// Legacy neutral environment shared by the editor and local Play.
+/// Scene-authored lighting overrides it only in explicit Scene mode.
 pub const SCENE_BACKGROUND: [u8; 4] = [240, 240, 242, 255];
 pub const SCENE_LIGHT_DIRECTION: Vec3 = Vec3::new(0.4, 0.8, 0.6);
 
@@ -258,6 +263,9 @@ impl SceneRenderer {
             geometry_lod_history_revision: 0,
             asset_root: None,
             texture_cache: TextureCache::default(),
+            shadow_geometry: None,
+            shadow_budget_exceeded: false,
+            shadow_geometry_revision: 0,
             stats: FrameStats::default(),
         }
     }
@@ -311,7 +319,7 @@ impl SceneRenderer {
     ) -> (Vec<RenderJob>, FrameStats) {
         self.selected_ids.clear();
         self.selected_ids.extend(selected.iter().copied());
-        let scene_revision = scene.document_revision();
+        let scene_revision = scene.geometry_revision();
         if self
             .world_transforms
             .as_ref()
@@ -497,6 +505,149 @@ impl SceneRenderer {
         (jobs, stats)
     }
 
+    fn build_shadows(
+        &mut self,
+        scene: &SceneGraph,
+        camera: Vec3,
+        environment: Option<crate::environment_frame::EnvironmentFrame>,
+        mesh_override: Option<(SceneNodeId, &MeshData)>,
+    ) -> Option<crate::shadow_frame::ShadowFrame> {
+        use crate::shadow_frame::*;
+        self.shadow_budget_exceeded = false;
+        let Some(env) = environment.filter(|e| {
+            e.settings.shadows.enabled
+                && e.settings.shadows.strength > 0.0
+                && e.sun.max_element() > 0.0
+        }) else {
+            self.shadow_geometry = None;
+            return None;
+        };
+        let settings = env.settings.shadows;
+        let resolution = settings.resolution as u32;
+        let vp = directional_projection(env.sun_direction, camera, settings.distance, resolution);
+        if mesh_override.is_none() && self.shadow_geometry_revision == scene.geometry_revision() {
+            if let Some(geometry) = self
+                .shadow_geometry
+                .as_ref()
+                .filter(|g| g.view_projection == vp && g.resolution == resolution)
+            {
+                return Some(ShadowFrame {
+                    geometry: Arc::clone(geometry),
+                    settings,
+                    camera,
+                });
+            }
+        }
+        let transforms = &self
+            .world_transforms
+            .as_ref()
+            .expect("collected scene transforms")
+            .1;
+        let mut casters = Vec::new();
+        let mut triangles: usize = 0;
+        let mut unique_meshes = HashSet::new();
+        let mut mesh_bytes = 0;
+        for (id, node) in scene.iter() {
+            if !node.visible
+                || !node.casts_shadows
+                || node.color.a < 255
+                || node.primitive == Primitive::Empty
+            {
+                continue;
+            }
+            let model = transforms
+                .world_matrix(id)
+                .unwrap_or_else(|| node.local_matrix());
+            if !model.is_finite() {
+                continue;
+            }
+            let bounds = mesh_override
+                .filter(|(i, _)| *i == id)
+                .map(|(_, m)| m.aabb())
+                .unwrap_or_else(|| self.local_bounds_for_primitive(node.primitive));
+            let mut min = Vec3::splat(f32::INFINITY);
+            let mut max = Vec3::splat(f32::NEG_INFINITY);
+            for x in [bounds.0.x, bounds.1.x] {
+                for y in [bounds.0.y, bounds.1.y] {
+                    for z in [bounds.0.z, bounds.1.z] {
+                        let p = (vp * model).transform_point3(Vec3::new(x, y, z));
+                        min = min.min(p);
+                        max = max.max(p);
+                    }
+                }
+            }
+            // Deliberately not camera-frustum culled: offscreen geometry casts visible shadows.
+            if min.x > 1.0
+                || max.x < -1.0
+                || min.y > 1.0
+                || max.y < -1.0
+                || min.z > 1.0
+                || max.z < 0.0
+            {
+                continue;
+            }
+            let mesh = if let Some((_, m)) = mesh_override.filter(|(i, _)| *i == id) {
+                // Admission precedes copying editable geometry into a second frame mesh.
+                let bytes = m
+                    .positions
+                    .len()
+                    .saturating_mul(32)
+                    .saturating_add(m.indices.len().saturating_mul(4));
+                if bytes.saturating_add(mesh_bytes) > MAX_SHADOW_MESH_BYTES
+                    || triangles.saturating_add(m.indices.len() / 3) > MAX_SHADOW_TRIANGLES
+                {
+                    self.shadow_geometry = None;
+                    self.shadow_budget_exceeded = true;
+                    return None;
+                }
+                Arc::new(mesh_to_basic(m))
+            } else {
+                match node.primitive {
+                    Primitive::Plane => Arc::clone(&self.plane_basic_mesh),
+                    Primitive::Cylinder => Arc::clone(&self.cylinder_detail.level(1).basic_mesh),
+                    Primitive::Sphere => Arc::clone(&self.sphere_detail.level(1).basic_mesh),
+                    _ => Arc::clone(&self.cube_basic_mesh),
+                }
+            };
+            triangles += mesh.indices.len() / 3;
+            if unique_meshes.insert(Arc::as_ptr(&mesh) as usize) {
+                mesh_bytes += mesh.vertices.len() * 32 + mesh.indices.len() * 4;
+            }
+            if casters.len() >= MAX_SHADOW_CASTERS
+                || triangles > MAX_SHADOW_TRIANGLES
+                || mesh_bytes > MAX_SHADOW_MESH_BYTES
+            {
+                // Never silently render a partial set, which would make shadows disappear arbitrarily.
+                self.shadow_geometry = None;
+                self.shadow_budget_exceeded = true;
+                return None;
+            }
+            casters.push(ShadowCaster { mesh, model });
+        }
+        if casters.is_empty() {
+            self.shadow_geometry = None;
+            return None;
+        }
+        let geometry = ShadowGeometry::new(vp, resolution, casters);
+        if self
+            .shadow_geometry
+            .as_ref()
+            .is_none_or(|old| old.key != geometry.key)
+        {
+            self.shadow_geometry = Some(Arc::new(geometry));
+        }
+        self.shadow_geometry_revision = if mesh_override.is_none() {
+            scene.geometry_revision()
+        } else {
+            0
+        };
+        Some(ShadowFrame {
+            geometry: Arc::clone(self.shadow_geometry.as_ref().unwrap()),
+            settings,
+            camera,
+        })
+    }
+
     /// Render the scene and return the pixel buffer.
     ///
     /// This is the main entry point. Call once per frame.
@@ -512,192 +663,19 @@ impl SceneRenderer {
         options: RenderOptions,
         mesh_override: Option<(SceneNodeId, &MeshData)>,
     ) -> &[u8] {
-        let w = (vp_w as u32).max(1);
-        let h = (vp_h as u32).max(1);
-
-        self.framebuffer.resize(w, h);
-        self.framebuffer
-            .clear(bg_color[0], bg_color[1], bg_color[2], bg_color[3]);
-
-        let view = camera.view_matrix();
-        let proj = camera.projection_matrix(vp_w, vp_h);
-        let vp = proj * view;
-        let frustum = Frustum::from_matrix(&vp);
-        let light_dir = light_dir.normalize();
-        let cam_eye = camera.eye();
-        let (jobs, mut stats) = self.collect_render_jobs(
+        let frame = self.build_frame(
             scene,
-            &frustum,
-            cam_eye,
-            camera.mode,
-            view,
-            proj.y_axis.y,
-            h as f32,
+            camera,
+            vp_w,
+            vp_h,
             selected,
+            bg_color,
+            light_dir,
             options,
             mesh_override,
         );
-        self.texture_cache.set_limits(
-            options.texture_quality.cache_budget_bytes() as usize,
-            options.texture_quality.max_dimension(),
-        );
-
-        let cube_mesh = &self.cube_mesh;
-        let cube_edges = self.cube_edges.as_slice();
-        let cylinder_detail = &self.cylinder_detail;
-        let sphere_detail = &self.sphere_detail;
-        let plane_mesh = &self.plane_mesh;
-        let plane_edges = self.plane_edges.as_slice();
-        if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
-            draw_world_grid(
-                &mut self.framebuffer,
-                camera,
-                vp_w,
-                vp_h,
-                options.grid_spacing,
-                options.grid_load_distance,
-                options.grid_y,
-            );
-        }
-
-        // Execute render jobs (now we can borrow framebuffer mutably)
-        let use_tonality = options.solid_face_tonality;
-        for job in &jobs {
-            let texture = job
-                .base_color_texture
-                .as_deref()
-                .and_then(|path| self.resolve_texture_path(path))
-                .and_then(|path| self.texture_cache.get_or_load(&path));
-            let override_mesh = mesh_override.and_then(|(override_id, override_mesh)| {
-                (override_id == job.id).then_some(override_mesh)
-            });
-            let override_edges = override_mesh.map(primitives::extract_edges);
-
-            let (mesh, edges): (&MeshData, &[[Vec3; 2]]) =
-                if let Some(override_mesh) = override_mesh {
-                    (override_mesh, override_edges.as_deref().unwrap_or(&[]))
-                } else {
-                    match job.primitive {
-                        Primitive::Cube => (cube_mesh, cube_edges),
-                        Primitive::Cylinder => {
-                            let detail = cylinder_detail.level(job.geometry_lod);
-                            (&detail.mesh, detail.edges.as_slice())
-                        }
-                        Primitive::Sphere => {
-                            let detail = sphere_detail.level(job.geometry_lod);
-                            (&detail.mesh, detail.edges.as_slice())
-                        }
-                        Primitive::Plane => (plane_mesh, plane_edges),
-                        _ => (cube_mesh, cube_edges),
-                    }
-                };
-
-            let mvp = vp * job.model;
-            let normal_mat = transform::normal_matrix(&job.model);
-
-            let color = if job.is_selected {
-                [
-                    job.base_color[0].saturating_add(30),
-                    job.base_color[1].saturating_add(30),
-                    job.base_color[2].saturating_add(30),
-                    job.base_color[3],
-                ]
-            } else {
-                job.base_color
-            };
-
-            // Process each triangle
-            for tri_idx in (0..mesh.indices.len()).step_by(3) {
-                let i0 = mesh.indices[tri_idx] as usize;
-                let i1 = mesh.indices[tri_idx + 1] as usize;
-                let i2 = mesh.indices[tri_idx + 2] as usize;
-
-                let p0 = mesh.positions[i0];
-                let p1 = mesh.positions[i1];
-                let p2 = mesh.positions[i2];
-
-                // Transform to clip space
-                let c0 = mvp * Vec4::new(p0.x, p0.y, p0.z, 1.0);
-                let c1 = mvp * Vec4::new(p1.x, p1.y, p1.z, 1.0);
-                let c2 = mvp * Vec4::new(p2.x, p2.y, p2.z, 1.0);
-                let shade0 = if use_tonality {
-                    0.3 + 0.7
-                        * transform::transform_normal(mesh.normals[i0], &normal_mat)
-                            .dot(light_dir)
-                            .max(0.0)
-                } else {
-                    1.0
-                };
-                let shade1 = if use_tonality {
-                    0.3 + 0.7
-                        * transform::transform_normal(mesh.normals[i1], &normal_mat)
-                            .dot(light_dir)
-                            .max(0.0)
-                } else {
-                    1.0
-                };
-                let shade2 = if use_tonality {
-                    0.3 + 0.7
-                        * transform::transform_normal(mesh.normals[i2], &normal_mat)
-                            .dot(light_dir)
-                            .max(0.0)
-                } else {
-                    1.0
-                };
-                let rendered = rasterize_clipped_triangle(
-                    &mut self.framebuffer,
-                    [
-                        ClipVertex {
-                            position: c0,
-                            shade: shade0,
-                            uv: mesh.uvs.get(i0).copied().unwrap_or([0.0, 0.0]),
-                        },
-                        ClipVertex {
-                            position: c1,
-                            shade: shade1,
-                            uv: mesh.uvs.get(i1).copied().unwrap_or([0.0, 0.0]),
-                        },
-                        ClipVertex {
-                            position: c2,
-                            shade: shade2,
-                            uv: mesh.uvs.get(i2).copied().unwrap_or([0.0, 0.0]),
-                        },
-                    ],
-                    color,
-                    texture.as_deref(),
-                    job.primitive == Primitive::Plane,
-                    vp_w,
-                    vp_h,
-                );
-                if rendered == 0 {
-                    stats.triangles_culled += 1;
-                } else {
-                    stats.triangles_rendered += rendered;
-                }
-            }
-
-            let draw_surface_edges = options.solid_show_surface_edges;
-
-            if draw_surface_edges || (options.selection_outline && job.is_selected) {
-                let edge_color = if job.is_selected && options.selection_outline {
-                    // Distinguish primary from secondary selection when
-                    // multiple entities are selected (Unity/Blender style).
-                    let is_primary = options.primary_selected == Some(job.id.0 as u64);
-                    if is_primary {
-                        options.selection_outline_color
-                    } else {
-                        options.secondary_selection_outline_color
-                    }
-                } else {
-                    surface_edge_color(job.base_color)
-                };
-                draw_wireframe_overlay(&mut self.framebuffer, edges, &mvp, vp_w, vp_h, edge_color);
-            }
-        }
-
-        self.render_jobs = jobs;
-        self.render_jobs.clear();
-        self.stats = stats;
+        self.stats = frame.stats.clone();
+        rasterize_basic_scene_frame(&frame, &mut self.framebuffer);
         self.framebuffer.pixels()
     }
 
@@ -720,7 +698,13 @@ impl SceneRenderer {
         let proj = camera.projection_matrix(vp_w, vp_h);
         let vp = proj * view;
         let frustum = Frustum::from_matrix(&vp);
-        let light_dir = light_dir.normalize();
+        let environment = crate::environment_frame::EnvironmentFrame::new(
+            options.environment_override.unwrap_or(*scene.environment()),
+            vp,
+        );
+        let light_dir = environment
+            .map(|env| env.sun_direction)
+            .unwrap_or_else(|| light_dir.normalize());
         let cam_eye = camera.eye();
         let (jobs, mut stats) = self.collect_render_jobs(
             scene,
@@ -734,6 +718,7 @@ impl SceneRenderer {
             options,
             mesh_override,
         );
+        let shadows = self.build_shadows(scene, cam_eye, environment, mesh_override);
         self.texture_cache.set_limits(
             (options.texture_quality.cache_budget_bytes() / 2) as usize,
             options.texture_quality.max_dimension(),
@@ -754,6 +739,9 @@ impl SceneRenderer {
             4 + usize::from(override_basic_mesh.is_some()),
         );
         commands.clear(bg_color);
+        commands.environment = environment;
+        commands.shadows = shadows;
+        commands.shadow_budget_exceeded = self.shadow_budget_exceeded;
 
         let use_tonality = options.solid_face_tonality;
         let mut grid_drawn = false;
@@ -860,6 +848,9 @@ impl SceneRenderer {
             } else {
                 commands.register_mesh(basic_mesh)
             };
+            if commands.shadows.is_some() {
+                commands.set_shadow_receiver(scene.get(job.id).is_some_and(|n| n.receives_shadows));
+            }
             commands.draw_mesh_with_texture(mesh_id, job.model, color, texture_id);
             stats.triangles_rendered += mesh.triangle_count() as u32;
         }
@@ -932,16 +923,27 @@ impl SceneRenderer {
 
 pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer: &mut Framebuffer) {
     framebuffer.resize(frame.width, frame.height);
+    let shadows = frame.commands.shadows.as_ref().filter(|s| {
+        s.geometry.cpu_depth();
+        !s.geometry.cpu_budget_exceeded()
+    });
     let vp_w = frame.width as f32;
     let vp_h = frame.height as f32;
     let mut current_pipeline = BasicPipelineKind::FlatColor;
+    let mut receives_shadows = true;
 
     // Keep the frame command list borrowed; cloning a line batch here would
     // allocate on every CPU fallback frame.
     for command in frame.commands.commands() {
         match command {
-            GraphicCommand::Clear { r, g, b, a } => framebuffer.clear(*r, *g, *b, *a),
+            GraphicCommand::Clear { r, g, b, a } => {
+                framebuffer.clear(*r, *g, *b, *a);
+                if let Some(env) = frame.commands.environment {
+                    env.rasterize_sky(framebuffer);
+                }
+            }
             GraphicCommand::SetPipeline(pipeline) => current_pipeline = *pipeline,
+            GraphicCommand::SetShadowReceiver(value) => receives_shadows = *value,
             GraphicCommand::DrawMesh {
                 mesh_id,
                 transform,
@@ -965,6 +967,8 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
                     vp_w,
                     vp_h,
                     texture,
+                    frame.commands.environment,
+                    shadows.filter(|_| receives_shadows),
                 );
             }
             GraphicCommand::DrawMeshBatch { mesh_id, instances } => {
@@ -983,6 +987,8 @@ pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer:
                         vp_w,
                         vp_h,
                         None,
+                        frame.commands.environment,
+                        shadows.filter(|_| receives_shadows),
                     );
                 }
             }
@@ -1204,6 +1210,8 @@ fn rasterize_clipped_triangle(
     two_sided: bool,
     vp_w: f32,
     vp_h: f32,
+    environment: Option<crate::environment_frame::EnvironmentFrame>,
+    shadows: Option<&crate::shadow_frame::ShadowFrame>,
 ) -> u32 {
     let clipped = clip_triangle_to_near(triangle);
     let vertices = clipped.vertices();
@@ -1222,7 +1230,7 @@ fn rasterize_clipped_triangle(
         Some(ScreenVertex {
             x: (ndc_x + 1.0) * 0.5 * vp_w,
             y: (1.0 - ndc_y) * 0.5 * vp_h,
-            z: (ndc_z + 1.0) * 0.5,
+            z: ndc_z,
             shade: vertex.shade,
         })
     };
@@ -1241,7 +1249,7 @@ fn rasterize_clipped_triangle(
         Some(rasterizer::TexturedScreenVertex {
             x: (ndc_x + 1.0) * 0.5 * vp_w,
             y: (1.0 - ndc_y) * 0.5 * vp_h,
-            z: (ndc_z + 1.0) * 0.5,
+            z: ndc_z,
             shade: vertex.shade,
             uv_over_w: [vertex.uv[0] * inv_w, vertex.uv[1] * inv_w],
             inv_w,
@@ -1254,7 +1262,7 @@ fn rasterize_clipped_triangle(
         else {
             continue;
         };
-        if let Some(texture) = texture {
+        if texture.is_some() || environment.is_some() {
             let (Some(textured_first), Some(mut textured_second), Some(mut textured_third)) = (
                 to_textured_screen(vertices[0]),
                 to_textured_screen(vertices[index]),
@@ -1268,11 +1276,15 @@ fn rasterize_clipped_triangle(
             if two_sided && textured_area >= 0.0 {
                 std::mem::swap(&mut textured_second, &mut textured_third);
             }
-            rasterizer::rasterize_triangle_textured(
+            rasterizer::rasterize_triangle_lighting_shadowed(
                 framebuffer,
                 [textured_first, textured_second, textured_third],
                 texture,
                 color,
+                environment.map(|env| (env.ambient, env.sun, env.settings.sun.shading_steps())),
+                shadows
+                    .zip(environment)
+                    .map(|(shadow, env)| (shadow, env.inverse_view_projection)),
             );
         } else if color[3] < u8::MAX {
             let area = (second.x - first.x) * (third.y - first.y)
@@ -1323,6 +1335,8 @@ fn rasterize_mesh_command(
     vp_w: f32,
     vp_h: f32,
     texture: Option<&crate::texture::CpuTexture>,
+    environment: Option<crate::environment_frame::EnvironmentFrame>,
+    shadows: Option<&crate::shadow_frame::ShadowFrame>,
 ) {
     let mvp = *view_proj * *model;
     let normal_mat = transform::normal_matrix(model);
@@ -1366,6 +1380,17 @@ fn rasterize_mesh_command(
             1.0
         };
 
+        let (shade0, shade1, shade2) = if environment.is_some() && shaded {
+            // Reuse the Gouraud interpolator for N dot L; RGB light is applied in linear space.
+            let dot = |i: usize| {
+                transform::transform_normal(mesh.vertices[i].normal, &normal_mat)
+                    .dot(light_dir)
+                    .max(0.0)
+            };
+            (dot(i0), dot(i1), dot(i2))
+        } else {
+            (shade0, shade1, shade2)
+        };
         rasterize_clipped_triangle(
             fb,
             [
@@ -1390,6 +1415,8 @@ fn rasterize_mesh_command(
             pipeline.is_two_sided(),
             vp_w,
             vp_h,
+            environment.filter(|_| shaded),
+            shadows.filter(|_| shaded),
         );
     }
 }
@@ -1406,25 +1433,28 @@ fn rasterize_world_line_command(
     depth_bias: f32,
     no_depth_test: bool,
 ) {
-    let c0 = *view_proj * start.extend(1.0);
-    let c1 = *view_proj * end.extend(1.0);
-
-    if line_outside_clip(c0, c1) {
-        return;
-    }
-
-    let (c0, c1) = match clip_line_near(c0, c1) {
-        Some(clipped) => clipped,
-        None => return,
+    let line = crate::api_graphic_basic::command_list::BasicLine {
+        start,
+        end,
+        color,
+        width,
+        depth_bias,
     };
+    let Some(line) =
+        crate::api_graphic_basic::line_projection::prepare_line(&line, view_proj, [vp_w, vp_h])
+    else {
+        return;
+    };
+    let c0 = *view_proj * line.start.extend(1.0);
+    let c1 = *view_proj * line.end.extend(1.0);
 
     let x0 = (c0.x / c0.w + 1.0) * 0.5 * vp_w;
     let y0 = (1.0 - c0.y / c0.w) * 0.5 * vp_h;
-    let z0 = ((c0.z / c0.w + 1.0) * 0.5 + depth_bias).min(0.9995);
+    let z0 = crate::api_graphic_basic::line_projection::biased_depth(c0.z / c0.w, depth_bias);
 
     let x1 = (c1.x / c1.w + 1.0) * 0.5 * vp_w;
     let y1 = (1.0 - c1.y / c1.w) * 0.5 * vp_h;
-    let z1 = ((c1.z / c1.w + 1.0) * 0.5 + depth_bias).min(0.9995);
+    let z1 = crate::api_graphic_basic::line_projection::biased_depth(c1.z / c1.w, depth_bias);
 
     if no_depth_test {
         rasterizer::rasterize_line_no_depth_width(
@@ -1495,42 +1525,6 @@ fn rasterize_screen_triangle_no_depth(fb: &mut Framebuffer, points: [[f32; 2]; 3
     }
 }
 
-/// Draw wireframe edges for a selected object (free function to avoid borrow conflict).
-fn draw_wireframe_overlay(
-    fb: &mut Framebuffer,
-    edges: &[[Vec3; 2]],
-    mvp: &Mat4,
-    vp_w: f32,
-    vp_h: f32,
-    color: [u8; 4],
-) {
-    for edge in edges {
-        let c0_raw = *mvp * Vec4::new(edge[0].x, edge[0].y, edge[0].z, 1.0);
-        let c1_raw = *mvp * Vec4::new(edge[1].x, edge[1].y, edge[1].z, 1.0);
-
-        if line_outside_clip(c0_raw, c1_raw) {
-            continue;
-        }
-
-        let (c0, c1) = match clip_line_near(c0_raw, c1_raw) {
-            Some(clipped) => clipped,
-            None => continue,
-        };
-
-        let x0 = (c0.x / c0.w + 1.0) * 0.5 * vp_w;
-        let y0 = (1.0 - c0.y / c0.w) * 0.5 * vp_h;
-        let z0 = (c0.z / c0.w + 1.0) * 0.5 - 0.001;
-
-        let x1 = (c1.x / c1.w + 1.0) * 0.5 * vp_w;
-        let y1 = (1.0 - c1.y / c1.w) * 0.5 * vp_h;
-        let z1 = (c1.z / c1.w + 1.0) * 0.5 - 0.001;
-
-        rasterizer::rasterize_line(
-            fb, x0, y0, z0, x1, y1, z1, color[0], color[1], color[2], color[3],
-        );
-    }
-}
-
 fn surface_edge_color(base_color: [u8; 4]) -> [u8; 4] {
     [
         base_color[0].saturating_sub(70),
@@ -1538,114 +1532,6 @@ fn surface_edge_color(base_color: [u8; 4]) -> [u8; 4] {
         base_color[2].saturating_sub(70),
         255,
     ]
-}
-
-fn draw_world_grid(
-    fb: &mut Framebuffer,
-    camera: &Camera,
-    vp_w: f32,
-    vp_h: f32,
-    spacing: f32,
-    load_distance: f32,
-    grid_y: f32,
-) {
-    const DEPTH_BIAS: f32 = 0.002;
-
-    let base_spacing = spacing.max(0.25);
-    let margin = load_distance.max(base_spacing);
-    let min_x = (-margin / base_spacing).floor() * base_spacing;
-    let max_x = (margin / base_spacing).ceil() * base_spacing;
-    let min_z = (-margin / base_spacing).floor() * base_spacing;
-    let max_z = (margin / base_spacing).ceil() * base_spacing;
-    let bounds_min = Vec3::new(min_x, 0.0, min_z);
-    let bounds_max = Vec3::new(max_x, 0.0, max_z);
-    let view_proj = camera.view_projection(vp_w, vp_h);
-
-    for line in build_3d_grid(bounds_min, bounds_max, base_spacing) {
-        let color = match line.kind {
-            GridLineKind::Axis => [240, 146, 36, 255],
-            GridLineKind::Major => [200, 200, 206, 255],
-            GridLineKind::Minor => [224, 224, 228, 255],
-        };
-
-        let start = Vec3::new(line.start.x, grid_y, line.start.z);
-        let end = Vec3::new(line.end.x, grid_y, line.end.z);
-        draw_world_line(fb, &view_proj, start, end, vp_w, vp_h, color, DEPTH_BIAS);
-    }
-}
-
-#[inline]
-fn clip_line_near(c0: Vec4, c1: Vec4) -> Option<(Vec4, Vec4)> {
-    const NEAR_W: f32 = 0.001;
-
-    let behind0 = c0.w < NEAR_W;
-    let behind1 = c1.w < NEAR_W;
-
-    if behind0 && behind1 {
-        return None;
-    }
-
-    if !behind0 && !behind1 {
-        return Some((c0, c1));
-    }
-
-    let denom = c1.w - c0.w;
-    if denom.abs() <= f32::EPSILON {
-        return None;
-    }
-
-    let t = ((NEAR_W - c0.w) / denom).clamp(0.0, 1.0);
-    let clipped = c0 + (c1 - c0) * t;
-
-    if behind0 {
-        Some((clipped, c1))
-    } else {
-        Some((c0, clipped))
-    }
-}
-
-fn draw_world_line(
-    fb: &mut Framebuffer,
-    view_proj: &Mat4,
-    start: Vec3,
-    end: Vec3,
-    vp_w: f32,
-    vp_h: f32,
-    color: [u8; 4],
-    depth_bias: f32,
-) {
-    let c0 = *view_proj * start.extend(1.0);
-    let c1 = *view_proj * end.extend(1.0);
-
-    if line_outside_clip(c0, c1) {
-        return;
-    }
-
-    let (c0, c1) = match clip_line_near(c0, c1) {
-        Some(clipped) => clipped,
-        None => return,
-    };
-
-    let x0 = (c0.x / c0.w + 1.0) * 0.5 * vp_w;
-    let y0 = (1.0 - c0.y / c0.w) * 0.5 * vp_h;
-    let z0 = ((c0.z / c0.w + 1.0) * 0.5 + depth_bias).min(0.9995);
-
-    let x1 = (c1.x / c1.w + 1.0) * 0.5 * vp_w;
-    let y1 = (1.0 - c1.y / c1.w) * 0.5 * vp_h;
-    let z1 = ((c1.z / c1.w + 1.0) * 0.5 + depth_bias).min(0.9995);
-
-    rasterizer::rasterize_line(
-        fb, x0, y0, z0, x1, y1, z1, color[0], color[1], color[2], color[3],
-    );
-}
-
-fn line_outside_clip(c0: Vec4, c1: Vec4) -> bool {
-    (c0.x < -c0.w && c1.x < -c1.w)
-        || (c0.x > c0.w && c1.x > c1.w)
-        || (c0.y < -c0.w && c1.y < -c1.w)
-        || (c0.y > c0.w && c1.y > c1.w)
-        || (c0.z < -c0.w && c1.z < -c1.w)
-        || (c0.z > c0.w && c1.z > c1.w)
 }
 
 #[cfg(test)]
@@ -1684,6 +1570,8 @@ mod tests {
             false,
             32.0,
             32.0,
+            None,
+            None,
         );
         assert!(!culled_framebuffer
             .pixels()
@@ -1701,6 +1589,8 @@ mod tests {
                 true,
                 32.0,
                 32.0,
+                None,
+                None,
             );
 
             assert!(framebuffer

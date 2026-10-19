@@ -1,5 +1,43 @@
 # AuraRafi — System Truth (Source of Truth)
 
+## Camera helper and instrument presentation (2026-10-16)
+
+Camera is a virtual Assets shortcut (`builtin://camera`) using existing camera
+creation/history, not a file or implicit startup reassignment. The camera guide
+no longer depends on billboard-origin visibility or a -0.99 x-ray depth offset.
+`ApiGraphicBasic::line_projection` owns allocation-free homogeneous clipping
+shared by GPU and CPU line execution. Biased depth is clamped inside 0..1;
+CPU mesh/line/shadow reconstruction uses the same normalized depth convention.
+WGPU remains the private executor, not the owner of editor helper policy.
+
+Lighting and Runtime presentation follow the explicitly requested Creative
+Instrument Craftsmanship guide, with generated semantic SVG/PNG icons and
+retained interaction states. No new backend, dependency or idle animation loop
+is introduced. Source/regression fixtures are written; compiled/native-window
+acceptance and performance measurements have not been rerun for this pass.
+
+## World Lighting deliveries 1–2 (2026-10-12)
+
+`raf_core::environment` owns versioned world lighting in `SceneGraph`; old scenes
+default to Neutral. `panels/lighting_surface.rs` and
+`native_workbench_lighting.rs` integrate the Hierarchy Lighting tab and Inspector.
+Sun, colored ambient, solid/gradient sky and solar disk are connected through
+`raf_render::environment_frame` and the existing ApiGraphicBasic GPU/CPU executor.
+Geometry revisions stay independent of clock changes. The Play snapshot owns
+runtime lighting; transient view overrides live in `raf_script::view`.
+`environment_api` is the shared Rhai/Nodes Host contract. Canonical
+`lighting.inspect/set/reset` authoring commands are connected to native UI,
+Console, Agent and attached CLI/MCP. Delivery 2 adds opt-in directional shadows:
+`shadow_frame.rs` owns coverage, caster keys and capped CPU recovery;
+`ApiGraphicBasic/shadow_gpu.rs` privately owns the retained GPU depth pass and
+receiver pipelines. One 256/512/1024 map, hard/four-tap filtering, distance fade,
+bounded work/memory, cast/receive flags and shared scripting properties. The CPU
+map is capped at 256; overflow omits the entire effect and reports a metric.
+Imported skyboxes, contact shadows, cascades, GI, volumetrics, network replication
+and WASM environment imports are not implemented by this delivery.
+See `docs/LIGHTING.md`; native visual/performance acceptance is distinct
+from automated checks.
+
 This file contains the definitive technical registry of AuraRafi. AI agents must rely on this file as the primary architectural mapping of the codebase.
 
 ## Current native migration truth (2026-08-24)
@@ -67,6 +105,17 @@ independent copies, with fresh UUIDs and internal typed-reference remapping;
 ordinary duplication uses the same remapper. No live inheritance or automatic
 gameplay association is implied. This update has not been compiled, run or
 functionally accepted in this pass. See SCRIPTING_INTERNALS.md and SCRIPTING_GUIDE.md.
+
+Optional compiled-language preparation (2026-10-10): `raf_script::backends`
+separates dependency-free `WasmToolchain` build inputs from `WasmExecutor`,
+shared compiled modules and per-attachment instances. `wasm_host` owns a
+bounded guest-token table and typed imports delegating to the shared Host API.
+`wasm_backend` is explicitly unavailable by default; no tool download,
+dependency, provider registration or automatic process launch is added.
+The Play loader remains Rhai-only. Rust is the motor's implementation language,
+not direct `.rs` attachment support. Concrete VM/toolchain adapters, finalized
+guest ABI/SDK and scheduler/reload/contact integration are future work. No
+compiled-language execution, sandbox acceptance or tests are claimed here.
 
 This section is the active decision register. Historical ADR files are not a
 second authority. When an older note conflicts with this section or with the
@@ -160,6 +209,16 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
   the last ApiGraphicBasic Game frame; no renderer or scene ownership.
 * `src/agent_executor.rs`: Native Agent tool layer and direct typed gateway
   routing, including the visual observation tool.
+* `src/agent_service.rs`: Project-scoped native Agent supervision outside redraw,
+  optional headless document hosts, and attached/editor execution handoffs.
+  Hub startup is lazy. Explicit bulk loading uses one project worker; confirmed
+  project closure cancels Agent work and waits for document/history saves before
+  releasing hosts and authoring leases. Failures retain the project for retry.
+* `src/agent_project_store.rs`: Worker save receipts and recoverable multi-file
+  document journals; applied tool results wait for successful publication.
+* `src/agent_workspace_surface.rs` and `src/agent_workspace_surface_host.rs`:
+  Hub-linked project/conversation/evidence UI and its native input adapter.
+* `src/native_agents.rs`: Hub/editor navigation and single-owner document handoffs.
 * `src/native_workbench.rs`: Native Agent lifecycle projection, including the
   bounded task snapshots/events exposed to attached CLI and MCP clients.
 * `src/native_attached_executor.rs`: CLI/MCP attached command boundary.

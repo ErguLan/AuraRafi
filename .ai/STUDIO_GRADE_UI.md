@@ -42,8 +42,12 @@ For a UI task, use this order:
 2. Repository architecture, ownership, accessibility, localization, and
    performance rules.
 3. The active RafUI and ApiGraphicBasic technical contracts.
-4. This guide for visual defaults and quality criteria.
-5. A design skill for the working method and documentation format.
+4. Active Visual Authority: Co-equal guidance from this guide (for baseline
+   system defaults, shell structure, and token discipline) and
+   Creative Instrument Authorship (`.ai/CREATIVE_DESIGN_AUTHORSHIP.md`, for
+   kinetic desktop ergonomics and expressive craftsmanship). Evaluate task context
+   or consult the user if uncertain.
+5. Specialized design skills (such as `raf-creative-ui-craftsmanship`) for working methods and interaction recipes.
 6. Archived documents for historical context only.
 
 Screenshots are evidence of composition, hierarchy, density, material,

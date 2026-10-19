@@ -3,15 +3,20 @@
 //! Each backend bridges a different scripting language/paradigm to the
 //! shared Host API:
 //! - `rhai_backend`: Tier 1, primary scripting language (sandboxed, pure Rust).
-//! - `wasm_backend`: Tier 2, native-performance modules via WASM (stub for now).
+//! - `wasm_backend`: optional Tier 2 provider boundary, disabled by default.
+//! - `wasm_contract`: compiler/executor contracts, without implementations.
+//! - `wasm_host`: scoped typed imports delegating to the shared Host API.
 //! - `node_backend`: Tier 3, visual node graph executor wired to Host API.
 
 pub mod node_backend;
 pub mod rhai_backend;
 mod rhai_behavior_api;
+mod rhai_environment_api;
 mod rhai_physics_api;
 mod rhai_scene_api;
 pub mod wasm_backend;
+pub mod wasm_contract;
+pub mod wasm_host;
 
 use crate::errors::ScriptError;
 use crate::value::ScriptValue;

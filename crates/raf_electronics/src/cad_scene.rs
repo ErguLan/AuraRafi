@@ -240,7 +240,11 @@ impl CadScene {
         }
 
         for wire in &schematic.wires {
-            let net_id = net_ids.get(&wire.net);
+            let net_name = netlist
+                .net_for_wire(wire.id)
+                .map(|net| net.name.as_str())
+                .unwrap_or(&wire.net);
+            let net_id = net_ids.get(net_name);
             let mut object = CadObject::polyline(
                 format!("wire:{}", wire.id),
                 Some(wire.id),
@@ -250,7 +254,7 @@ impl CadScene {
                 orthogonal_wire_points(wire.start, wire.end),
                 [216, 221, 227, 255],
             );
-            object.net = Some(wire.net.clone());
+            object.net = Some(net_name.to_string());
             object.net_id = net_id;
             scene.objects.push(object);
 
@@ -264,8 +268,8 @@ impl CadScene {
                     CadRect::new((wire.start + wire.end) * 0.5, Vec2::new(48.0, 16.0)),
                     [245, 245, 246, 220],
                 );
-                label.label = Some(wire.net.clone());
-                label.net = Some(wire.net.clone());
+                label.label = Some(net_name.to_string());
+                label.net = Some(net_name.to_string());
                 label.net_id = net_id;
                 scene.objects.push(label);
             }

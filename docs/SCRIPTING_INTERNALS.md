@@ -36,7 +36,10 @@ history are a separate boundary.
 | Public neutral operations and identity validation | `crates/raf_script/src/host_api.rs`, `node_handle.rs` |
 | Parameters, tags, bounded queries | `crates/raf_script/src/behavior_api.rs` |
 | Rhai vocabulary, not domain rules | `crates/raf_script/src/backends/rhai_behavior_api.rs` |
-| Camera and hierarchy operations | `crates/raf_script/src/camera_api.rs`, `host_api.rs`; thin wrappers in `backends/rhai_scene_api.rs` |
+| Camera and hierarchy operations, including shared follow | `crates/raf_script/src/camera_api.rs`, `host_api.rs`; thin wrappers in `backends/rhai_scene_api.rs` |
+| Optional compiler and executor interfaces | `crates/raf_script/src/backends/wasm_contract.rs` |
+| Optional module preparation and lifecycle boundary | `crates/raf_script/src/backends/wasm_backend.rs` |
+| Typed imports and per-attachment guest token table | `crates/raf_script/src/backends/wasm_host.rs` |
 | Graph compilation to the same Rhai lifecycle | `crates/raf_nodes/src/runtime_compiler.rs` |
 | Serialized values and per-source overrides | `crates/raf_core/src/scene/runtime.rs`, `graph.rs` |
 | Prefab validation, fresh identities, reference remapping | `crates/raf_core/src/scene/prefab.rs` |
@@ -145,4 +148,67 @@ and compile Nodes to the same operation. Add authoring actions to the canonical
 command catalog and all relevant adapters, not a panel-only mutation path.
 Keep examples opt-in. Document units, limits, missing-reference behavior and
 verification status. A future C++ adapter must reuse this boundary; the current
-WASM backend returns `WasmNotImplemented`.
+default WASM backend returns `WasmNotImplemented`.
+
+## Future compiled languages: prepared seams, no installed executor
+
+Decision (2026-10-10): do not download, install, compile or test a WASM engine
+or C++ toolchain now. Rhai remains the local Play executor; Rust is the engine
+implementation language. Attaching a `.rs` file is not Rust scripting support.
+C++ and Rust guest sources can later target the same optional WASM boundary.
+
+Three separate responsibilities are implemented as dependency-free contracts:
+
+1. `WasmToolchain` accepts bounded in-memory `WasmBuildRequest` sources tagged
+   Cpp or Rust and produces bytes. `build_with` validates input and the bounded
+   artifact header. No concrete compiler/process adapter ships. Build input
+   paths reject traversal, absolute paths and case-insensitive duplicates.
+2. `WasmExecutor` validates/compiles a module; its immutable code can be shared.
+   `WasmCompiledModule` creates independent `WasmInstance` objects. Register an
+   engine-owned provider explicitly through `WasmBackend::with_executor`.
+   `WasmBackend::default()` is unavailable and does no filesystem/PATH probing.
+3. `GuestImports` exposes typed `HostOperation` requests through `HostBridge`.
+   Owner, parameters, hierarchy, transforms, camera/follow, scalar properties,
+   input/time and local events delegate to existing Host API operations.
+   Rhai follow also delegates to `NodeHandle::follow`; there is one behavior
+   implementation, not separate language-specific follow algorithms.
+
+The module wrapper checks the actual provider-reported API version, known
+optional lifecycle exports, hook arguments, one-time Start, Stop/failure state
+and attachment identity (runtime + owner UUID + source). Missing exports are
+no-ops. Guest entity zero means unassigned. Other guest values index a bounded
+per-attachment table of scoped handles; never decode them via
+`NodeHandle::from_raw`. Tokens remain local and are not event/network identities.
+
+Default limits: 4MiB module, 256 memory pages, 100000 instructions per call and
+1024 entity tokens. Provider-side enforcement is mandatory; these Rust values
+do not themselves implement a VM sandbox. The provider must fully validate
+modules/imports/signatures, check linear-memory ranges/UTF-8, deny ambient
+WASI/filesystem/network access, bound compilation/instantiation/stack/tables,
+and enforce fuel and cancellation/deadline checks even in loops with no imports.
+Header validation alone is not proof that bytes are a valid or safe module.
+
+Future registration sequence (engine integration, not a runnable game script):
+
+```text
+explicit request.build_with(optional toolchain) -> bounded WASM bytes
+registered WasmExecutor -> WasmBackend.compile -> shared CompiledWasm
+per-attachment ScriptContext -> CompiledWasm.instantiate -> WasmModuleHandle
+existing lifecycle scheduler -> handle.invoke(hook, args, context)
+typed guest imports -> existing Host API -> isolated runtime snapshot
+```
+
+The live Play attachment loader still accepts Rhai only and explicitly rejects
+compiled-language sources/modules. Installing a compiler or toggling Allow WASM
+does not register a provider or change that loader. Remaining integration:
+choose/implement the provider and wire module bindings into the existing single
+runtime scheduler, contact/event routing and reload/preparation flow. Do not
+create another simulation loop or let authoring Agent/CLI/MCP start Play.
+
+`HostOperation` and the traits are an internal Rust integration contract, not a
+stable serialized WASM ABI or a shipping C++/Rust guest SDK. Final import/export
+signatures, memory encoding and guest declarations must be specified with the
+chosen provider; the historical raw-slot ABI sketches are not safe to implement
+literally. Physics, audio and additional operations must extend the same Host
+API bridge rather than bypass it. Native-window/security/performance acceptance
+and executable guest examples remain future checks. This pass runs no tests.

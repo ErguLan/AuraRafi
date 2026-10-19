@@ -4,8 +4,7 @@
 //! is a cheap, `Copy` ID. Every method takes a `&mut ScriptContext` which
 //! validates the ID before touching the scene graph.
 //!
-//! This is the Roblox `Part` equivalent: `script.Parent.Part1` becomes
-//! `get_node("Part1")`.
+//! Attachment ownership and hierarchy parenting are distinct Host API concepts.
 
 use crate::errors::ScriptError;
 use crate::host_api::ScriptContext;
@@ -21,8 +20,8 @@ pub const HOST_API_VERSION: u32 = 1;
 
 /// An opaque reference to a scene entity, safe to store in scripts.
 ///
-/// Internally this is just a `SceneNodeId` packed into a `u64`. If the
-/// entity is destroyed, the next Host API call returns `InvalidHandle`.
+/// Internal references validate the runtime instance, slot and entity UUID.
+/// WASM guests use a separate bounded token table, never these raw indices.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeHandle {
     id: u64,
@@ -40,7 +39,7 @@ impl NodeHandle {
         }
     }
 
-    /// Create a handle from a raw u64 (used by Rhai/WASM interop).
+    /// Legacy engine-only constructor. Never use to decode a WASM guest token.
     pub fn from_raw(raw: u64) -> Self {
         Self {
             id: raw,
@@ -81,7 +80,7 @@ impl NodeHandle {
         SceneNodeId(self.id as usize)
     }
 
-    /// Raw id for serialization across the WASM boundary.
+    /// Internal slot identifier, NOT a safe serialized WASM guest reference.
     pub fn raw(&self) -> u64 {
         self.id
     }
@@ -281,6 +280,8 @@ impl NodeHandle {
         match key {
             "name" => Ok(ScriptValue::String(node.name.clone())),
             "visible" => Ok(ScriptValue::Bool(node.visible)),
+            "casts_shadows" => Ok(ScriptValue::Bool(node.casts_shadows)),
+            "receives_shadows" => Ok(ScriptValue::Bool(node.receives_shadows)),
             "position" => Ok(ScriptValue::Vec3(self.get_position(ctx)?)),
             "rotation" => Ok(ScriptValue::Vec3(self.get_rotation(ctx)?)),
             "scale" => Ok(ScriptValue::Vec3(node.scale.to_array())),
@@ -309,6 +310,23 @@ impl NodeHandle {
         value: ScriptValue,
     ) -> ScriptResult<()> {
         let id = self.resolve(ctx)?;
+        if matches!(key, "casts_shadows" | "receives_shadows") {
+            let ScriptValue::Bool(value) = value else {
+                return Err(ScriptError::InvalidArgument(
+                    "Shadow participation requires Bool".into(),
+                ));
+            };
+            let node = ctx
+                .scene
+                .get_mut(id)
+                .ok_or(ScriptError::InvalidHandle(self.id))?;
+            if key == "casts_shadows" {
+                node.casts_shadows = value;
+            } else {
+                node.receives_shadows = value;
+            }
+            return Ok(());
+        }
         if key.is_empty()
             || key.len() > 128
             || matches!(

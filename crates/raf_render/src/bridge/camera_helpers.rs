@@ -101,6 +101,11 @@ impl CameraHelperCache {
         let pixel_scale = pixel_scale.clamp(0.1, 8.0);
         for (id, world, lens) in &self.cameras {
             let world = *world;
+            let chosen = selected.contains(id);
+            let color = if chosen { SELECTED } else { NORMAL };
+            // The world-space guide may intersect the view even when its origin
+            // is behind the viewer or offscreen. Clip segments, not the whole rig.
+            append_direction(frame, world, lens, chosen, color, pixel_scale);
             let Some((screen, _)) = center(world, &frame.view_proj, size) else {
                 continue;
             };
@@ -112,9 +117,6 @@ impl CameraHelperCache {
             {
                 continue;
             }
-            let chosen = selected.contains(id);
-            let color = if chosen { SELECTED } else { NORMAL };
-            append_direction(frame, world, lens, chosen, color, pixel_scale);
             // Both passes use the same vector source. A dark rim remains legible
             // over the bright scene; the glyph always faces the editor camera.
             for (width, tint) in [(4.0, OUTLINE), (1.8, color)] {
@@ -162,7 +164,7 @@ fn append_direction(
     ];
     for (width, tint) in [(4.0 * scale, OUTLINE), (1.8 * scale, color)] {
         for (a, b) in segments {
-            frame.commands.draw_line(a, b, tint, width, true, -0.99);
+            frame.commands.draw_line(a, b, tint, width, true, 0.0);
         }
     }
     if !selected || lens.validate().is_err() {
@@ -192,14 +194,14 @@ fn append_direction(
         };
         frame
             .commands
-            .draw_line(start, corners[index], SELECTED, scale, true, -0.99);
+            .draw_line(start, corners[index], SELECTED, scale, true, 0.0);
         frame.commands.draw_line(
             corners[index],
             corners[(index + 1) % 4],
             SELECTED,
             scale,
             true,
-            -0.99,
+            0.0,
         );
     }
 }
@@ -209,6 +211,39 @@ mod tests {
     use super::*;
     use crate::api_graphic_basic::command_list::{BasicCommandList, GraphicCommand};
     use crate::scene_renderer::FrameStats;
+
+    #[test]
+    fn selected_guide_survives_when_billboard_origin_is_behind_the_viewer() {
+        let mut scene = SceneGraph::new();
+        let id = scene.add_root("Camera");
+        scene.get_mut(id).unwrap().game_camera = Some(GameCamera::default());
+        scene.get_mut(id).unwrap().position.z = 0.05;
+        let mut frame = SceneRenderFrame {
+            commands: BasicCommandList::new(),
+            view_proj: Mat4::perspective_rh(1.0, 800.0 / 600.0, 0.1, 100.0),
+            light_dir: Vec3::Y,
+            width: 800,
+            height: 600,
+            texture_cache_budget_bytes: 0,
+            stats: FrameStats::default(),
+        };
+        CameraHelperCache::default().append_to(&scene, &mut frame, &[id], 1.0);
+        assert!(frame
+            .commands
+            .commands()
+            .iter()
+            .any(|command| match command {
+                GraphicCommand::DrawLineBatch { lines, .. } => lines.iter().any(|line| {
+                    crate::api_graphic_basic::line_projection::prepare_line(
+                        line,
+                        &frame.view_proj,
+                        [800.0, 600.0],
+                    )
+                    .is_some()
+                }),
+                _ => false,
+            }));
+    }
 
     #[test]
     fn camera_svg_billboard_is_pickable_and_direction_uses_the_parent_transform() {

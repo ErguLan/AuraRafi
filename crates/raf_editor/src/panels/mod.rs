@@ -28,6 +28,7 @@ pub mod hub_surface_host;
 pub mod inspector_surface;
 pub mod inspector_surface_host;
 pub mod loading_surface;
+pub mod lighting_surface;
 pub mod new_project_surface;
 pub mod nodes_canvas;
 pub mod nodes_catalog;

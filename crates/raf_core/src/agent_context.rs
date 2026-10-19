@@ -178,7 +178,7 @@ pub fn scene_context(scene: &SceneGraph, selected: &[SceneNodeId]) -> Value {
 /// and keeps only fields that matter to authoring, references and verification.
 /// Renderer caches and mesh payloads never participate in this fingerprint.
 pub fn scene_fingerprint(scene: &SceneGraph) -> BTreeMap<String, Value> {
-    scene
+    let mut fingerprint: BTreeMap<String, Value> = scene
         .iter()
         .filter(|(id, _)| scene.is_valid_node(*id))
         .map(|(id, node)| {
@@ -194,6 +194,8 @@ pub fn scene_fingerprint(scene: &SceneGraph) -> BTreeMap<String, Value> {
                     "primitive": node.primitive.label(),
                     "color_rgba": [node.color.r, node.color.g, node.color.b, node.color.a],
                     "visible": node.visible,
+                    "casts_shadows": node.casts_shadows,
+                    "receives_shadows": node.receives_shadows,
                     "locked": node.locked,
                     "is_folder": node.is_folder,
                     "parent": node.parent.map(|parent| parent.0),
@@ -210,7 +212,9 @@ pub fn scene_fingerprint(scene: &SceneGraph) -> BTreeMap<String, Value> {
                 }),
             )
         })
-        .collect()
+        .collect();
+    fingerprint.insert("$environment".into(), json!(scene.environment()));
+    fingerprint
 }
 
 /// Compare two semantic scene fingerprints and return a compact document diff.
@@ -220,28 +224,35 @@ pub fn scene_diff(
     before: &BTreeMap<String, Value>,
     after: &BTreeMap<String, Value>,
 ) -> Option<Value> {
+    let environment_changed = before.get("$environment") != after.get("$environment");
     let created = after
         .keys()
-        .filter(|key| !before.contains_key(*key))
+        .filter(|key| key.as_str() != "$environment" && !before.contains_key(*key))
         .cloned()
         .collect::<Vec<_>>();
     let deleted = before
         .keys()
-        .filter(|key| !after.contains_key(*key))
+        .filter(|key| key.as_str() != "$environment" && !after.contains_key(*key))
         .cloned()
         .collect::<Vec<_>>();
     let updated = after
         .iter()
-        .filter(|(key, value)| before.get(*key).is_some_and(|before| before != *value))
+        .filter(|(key, value)| {
+            key.as_str() != "$environment"
+                && before.get(*key).is_some_and(|before| before != *value)
+        })
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
-    (!created.is_empty() || !deleted.is_empty() || !updated.is_empty()).then(|| {
-        json!({
-            "created": created,
-            "deleted": deleted,
-            "updated": updated
-        })
-    })
+    (environment_changed || !created.is_empty() || !deleted.is_empty() || !updated.is_empty()).then(
+        || {
+            json!({
+                "created": created,
+                "deleted": deleted,
+                "updated": updated,
+                "environment_changed": environment_changed
+            })
+        },
+    )
 }
 
 pub fn scene_outline(
@@ -1472,7 +1483,9 @@ pub fn project_health_scoped(
         scoped_ids(scene, root)
     };
     let live_set = live.iter().copied().collect::<HashSet<_>>();
-    let mut duplicate_names = BTreeMap::<String, Vec<Value>>::new();
+    // Duplicates only matter within the same parent: unique full paths still
+    // resolve unambiguously, matching the behavior of Unity/Unreal/Godot.
+    let mut duplicate_names = BTreeMap::<(Option<SceneNodeId>, String), Vec<Value>>::new();
     let mut missing_assets = Vec::new();
     let mut missing_scripts = Vec::new();
     let mut sanitized_names = Vec::new();
@@ -1487,7 +1500,7 @@ pub fn project_health_scoped(
             sanitized_names.push(scene_item_reference(scene, *id).unwrap_or(Value::Null));
         }
         duplicate_names
-            .entry(presentation.to_ascii_lowercase())
+            .entry((node.parent, presentation.to_ascii_lowercase()))
             .or_default()
             .push(scene_item_reference(scene, *id).unwrap_or(Value::Null));
         if let Some(source) = &node.source_asset {
@@ -1518,7 +1531,15 @@ pub fn project_health_scoped(
     let duplicate_names = duplicate_names
         .into_iter()
         .filter(|(_, entities)| entities.len() > 1)
-        .map(|(name, entities)| json!({"name": name, "entities": entities}))
+        .map(|((parent, name), entities)| {
+            json!({
+                "name": name,
+                "parent": parent
+                    .and_then(|parent_id| scene_item_reference(scene, parent_id))
+                    .unwrap_or(Value::Null),
+                "entities": entities
+            })
+        })
         .collect::<Vec<_>>();
     let orphaned = if root_target.is_some() {
         orphaned_entities_in_scope(scene, &live_set)
@@ -2126,6 +2147,8 @@ fn scene_item(scene: &SceneGraph, id: SceneNodeId, include_details: bool) -> Opt
     item.insert("has_camera".to_string(), json!(node.game_camera.is_some()));
     item.insert("is_folder".to_string(), json!(node.is_folder));
     item.insert("visible".to_string(), json!(node.visible));
+    item.insert("casts_shadows".to_string(), json!(node.casts_shadows));
+    item.insert("receives_shadows".to_string(), json!(node.receives_shadows));
     item.insert("locked".to_string(), json!(node.locked));
     item.insert("semantic_role".to_string(), json!(node.semantic_role));
     item.insert("stable_key".to_string(), json!(node.stable_key));

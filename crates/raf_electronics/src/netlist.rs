@@ -6,11 +6,11 @@
 
 use crate::schematic::{Schematic, Wire};
 use glam::Vec2;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
-const _GRID_STEP: f32 = 20.0;
 /// Tolerance for matching pin positions to wire endpoints (in grid units).
-const POSITION_TOLERANCE: f32 = 2.0;
+pub(crate) const POSITION_TOLERANCE: f32 = 2.0;
 
 /// A single net: a named group of electrically connected pins.
 #[derive(Debug, Clone)]
@@ -38,6 +38,8 @@ pub struct NetlistComponent {
 pub struct Netlist {
     pub nets: Vec<Net>,
     pub components: Vec<NetlistComponent>,
+    wire_nets: HashMap<Uuid, usize>,
+    pin_nets: HashMap<(usize, usize), usize>,
 }
 
 impl Netlist {
@@ -45,14 +47,23 @@ impl Netlist {
     ///
     /// Algorithm:
     /// 1. Compute the world position of every pin once.
-    /// 2. For each wire, find which pins are within tolerance of each endpoint.
-    /// 3. Use union-find to group pins connected through wires.
+    /// 2. Add resolved wire endpoints and join each segment.
+    /// 3. Spatially join touching endpoints/pins, then group their roots.
     /// 4. Assign net names (from wire labels or auto N001, N002, ...).
     ///
     /// Pin lookups go through a spatial hash instead of scanning every pin, and
     /// wire endpoints are resolved once instead of once per wire pair, so the
     /// junction pass no longer costs O(wires^2 * pins).
     pub fn from_schematic(schematic: &Schematic) -> Self {
+        Self::from_schematic_cancellable(schematic, &AtomicBool::new(false))
+            .expect("an uncancelled netlist completes")
+    }
+
+    /// Returns no partial netlist when a background analysis is cancelled.
+    pub fn from_schematic_cancellable(schematic: &Schematic, cancel: &AtomicBool) -> Option<Self> {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let components: Vec<NetlistComponent> = schematic
             .components
             .iter()
@@ -78,9 +89,44 @@ impl Netlist {
         }
 
         let pin_count = pin_positions.len();
+        // Pin anchors are indexed once. Moving a large schematic must not pay
+        // a component scan for every wire endpoint.
+        let anchors: HashMap<_, _> = pin_index
+            .iter()
+            .zip(&pin_positions)
+            .map(|(&(ci, pi), &point)| {
+                (
+                    (
+                        schematic.components[ci].id,
+                        schematic.components[ci].pins[pi].id,
+                    ),
+                    point,
+                )
+            })
+            .collect();
+        let mut points = pin_positions;
+        for wire in &schematic.wires {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            for (anchor, fallback) in [(wire.start_anchor, wire.start), (wire.end_anchor, wire.end)]
+            {
+                points.push(match anchor {
+                    Some(crate::schematic::WireAnchor::Pin {
+                        component_id,
+                        pin_id,
+                    }) => anchors
+                        .get(&(component_id, pin_id))
+                        .copied()
+                        .unwrap_or(fallback),
+                    Some(crate::schematic::WireAnchor::Point(point)) => point,
+                    None => fallback,
+                });
+            }
+        }
 
         // Union-Find.
-        let mut parent: Vec<usize> = (0..pin_count).collect();
+        let mut parent: Vec<usize> = (0..points.len()).collect();
 
         // Find root with path compression.
         fn find(parent: &mut Vec<usize>, mut x: usize) -> usize {
@@ -96,70 +142,38 @@ impl Netlist {
             let ra = find(parent, a);
             let rb = find(parent, b);
             if ra != rb {
-                parent[rb] = ra;
+                // The lowest vertex is the stable representative independent
+                // of wire traversal order, and keeps parent chains shallow.
+                parent[ra.max(rb)] = ra.min(rb);
             }
         }
 
         // Wire endpoints are resolved once here. Anchor resolution walks the
         // component list, so repeating it inside the wire-pair loop was the
         // dominant cost of netlist extraction on dense schematics.
-        let grid = PinGrid::new(&pin_positions);
-        let wire_endpoints: Vec<[Vec2; 2]> = schematic
-            .wires
-            .iter()
-            .map(|wire| {
-                [
-                    resolve_wire_point(schematic, wire, true),
-                    resolve_wire_point(schematic, wire, false),
-                ]
-            })
-            .collect();
-
-        // For each wire, find pins near its endpoints and union them.
-        for endpoints in &wire_endpoints {
-            let start_pins = grid.near(endpoints[0]);
-            let end_pins = grid.near(endpoints[1]);
-
-            // Union all start-side pins together.
-            for i in 1..start_pins.len() {
-                union(&mut parent, start_pins[0], start_pins[i]);
-            }
-            // Union all end-side pins together.
-            for i in 1..end_pins.len() {
-                union(&mut parent, end_pins[0], end_pins[i]);
-            }
-            // Union start with end (the wire connects them).
-            if !start_pins.is_empty() && !end_pins.is_empty() {
-                union(&mut parent, start_pins[0], end_pins[0]);
-            }
+        let grid = PinGrid::new(&points);
+        // Every segment carries continuity even when neither endpoint is a
+        // component pin. Junctions are shared vertices, not a wire-pair scan.
+        for index in 0..schematic.wires.len() {
+            union(
+                &mut parent,
+                pin_count + index * 2,
+                pin_count + index * 2 + 1,
+            );
         }
-
-        // Also union wires that share endpoints (wire junctions).
-        // For each pair of wires sharing an endpoint, union any pins near them.
-        // Nothing can share an endpoint with a single wire, so skip the pass.
-        if wire_endpoints.len() >= 2 {
-            for i in 0..wire_endpoints.len() {
-                for j in (i + 1)..wire_endpoints.len() {
-                    for pi in &wire_endpoints[i] {
-                        let shares_endpoint = wire_endpoints[j]
-                            .iter()
-                            .any(|pj| pi.distance(*pj) < POSITION_TOLERANCE);
-                        if !shares_endpoint {
-                            continue;
-                        }
-                        // These two wire endpoints meet; union any pins near them.
-                        let nearby = grid.near(*pi);
-                        for k in 1..nearby.len() {
-                            union(&mut parent, nearby[0], nearby[k]);
-                        }
-                    }
+        for (index, point) in points.iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            for nearby in grid.near(*point) {
+                if nearby < index {
+                    union(&mut parent, index, nearby);
                 }
             }
         }
 
         // Group pins by root into nets.
-        let mut net_map: std::collections::HashMap<usize, Vec<(usize, usize)>> =
-            std::collections::HashMap::new();
+        let mut net_map: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
 
         for (idx, key) in pin_index.iter().enumerate() {
             let root = find(&mut parent, idx);
@@ -167,39 +181,60 @@ impl Netlist {
         }
 
         // Determine net names from wire labels.
-        let mut net_names: std::collections::HashMap<usize, String> =
-            std::collections::HashMap::new();
+        let mut net_names: HashMap<usize, String> = HashMap::new();
 
         for (index, wire) in schematic.wires.iter().enumerate() {
-            if wire.net.is_empty() {
+            if wire.net.trim().is_empty() {
                 continue;
             }
-            let wire_start = wire_endpoints[index][0];
-            // Find the first pin near this wire's start to get its root.
-            if let Some(&pin) = grid.near(wire_start).first() {
-                let root = find(&mut parent, pin);
-                net_names.entry(root).or_insert_with(|| wire.net.clone());
-            }
+            let root = find(&mut parent, pin_count + index * 2);
+            net_names
+                .entry(root)
+                .or_insert_with(|| wire.net.trim().to_string());
         }
 
         // Build final net list.
         let mut nets: Vec<Net> = Vec::new();
         let mut auto_id = 1usize;
-        let mut sorted_roots: Vec<usize> = net_map.keys().cloned().collect();
-        sorted_roots.sort();
-
-        for root in sorted_roots {
-            let pins = net_map.remove(&root).unwrap_or_default();
-            if pins.is_empty() {
-                continue;
-            }
-            let name = if let Some(n) = net_names.get(&root) {
-                n.clone()
+        let mut reserved: HashSet<String> = schematic
+            .wires
+            .iter()
+            .filter(|wire| !wire.net.trim().is_empty())
+            .map(|wire| wire.net.trim().to_string())
+            .collect();
+        let mut used = HashSet::new();
+        let mut root_nets = HashMap::new();
+        let mut pin_nets = HashMap::new();
+        for (root, pins) in net_map {
+            let name = if let Some(label) = net_names.get(&root) {
+                if !used.contains(label) {
+                    label.clone()
+                } else {
+                    let mut suffix = 2;
+                    loop {
+                        let name = format!("{label}_{suffix}");
+                        suffix += 1;
+                        if !reserved.contains(&name) && !used.contains(&name) {
+                            break name;
+                        }
+                    }
+                }
             } else {
-                let n = format!("N{:03}", auto_id);
-                auto_id += 1;
-                n
+                loop {
+                    let name = format!("N{:03}", auto_id);
+                    auto_id += 1;
+                    if !reserved.contains(&name) && !used.contains(&name) {
+                        break name;
+                    }
+                }
             };
+            reserved.insert(name.clone());
+            used.insert(name.clone());
+            let id = nets.len();
+            root_nets.insert(root, id);
+            for &pin in &pins {
+                pin_nets.insert(pin, id);
+            }
             nets.push(Net {
                 id: nets.len(),
                 name,
@@ -207,21 +242,38 @@ impl Netlist {
             });
         }
 
-        Netlist { nets, components }
+        let wire_nets = schematic
+            .wires
+            .iter()
+            .enumerate()
+            .filter_map(|(index, wire)| {
+                root_nets
+                    .get(&find(&mut parent, pin_count + index * 2))
+                    .map(|&id| (wire.id, id))
+            })
+            .collect();
+        Some(Netlist {
+            nets,
+            components,
+            wire_nets,
+            pin_nets,
+        })
     }
 
     /// Find which net a specific pin belongs to.
     pub fn net_for_pin(&self, comp_index: usize, pin_index: usize) -> Option<&Net> {
-        self.nets.iter().find(|n| {
-            n.pins
-                .iter()
-                .any(|&(ci, pi)| ci == comp_index && pi == pin_index)
-        })
+        self.pin_nets
+            .get(&(comp_index, pin_index))
+            .and_then(|&id| self.nets.get(id))
+    }
+
+    pub fn net_for_wire(&self, wire: Uuid) -> Option<&Net> {
+        self.wire_nets.get(&wire).and_then(|&id| self.nets.get(id))
     }
 }
 
 /// Resolves a wire endpoint, preferring the persisted anchor when it is set.
-fn resolve_wire_point(schematic: &Schematic, wire: &Wire, start: bool) -> Vec2 {
+pub(crate) fn resolve_wire_point(schematic: &Schematic, wire: &Wire, start: bool) -> Vec2 {
     let (anchor, point) = if start {
         (wire.start_anchor, wire.start)
     } else {
@@ -240,14 +292,14 @@ fn resolve_wire_point(schematic: &Schematic, wire: &Wire, start: bool) -> Vec2 {
 /// the pins once makes each lookup cheap without changing which pins match: the
 /// cell size equals the match radius, so any pin closer than the radius is always
 /// inside the 3x3 cell block around the query point.
-struct PinGrid {
+pub(crate) struct PinGrid {
     cell_size: f32,
     points: Vec<Vec2>,
     buckets: HashMap<(i64, i64), Vec<usize>>,
 }
 
 impl PinGrid {
-    fn new(points: &[Vec2]) -> Self {
+    pub(crate) fn new(points: &[Vec2]) -> Self {
         let cell_size = POSITION_TOLERANCE;
         let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
         for (index, point) in points.iter().enumerate() {
@@ -273,13 +325,16 @@ impl PinGrid {
 
     /// Indices of the pins strictly within `POSITION_TOLERANCE` of `point`,
     /// ascending so callers see a stable order.
-    fn near(&self, point: Vec2) -> Vec<usize> {
+    pub(crate) fn near(&self, point: Vec2) -> Vec<usize> {
         let (cell_x, cell_y) = Self::cell_of(point, self.cell_size);
         let mut matches = Vec::new();
 
         for offset_x in -1..=1 {
             for offset_y in -1..=1 {
-                let Some(bucket) = self.buckets.get(&(cell_x + offset_x, cell_y + offset_y)) else {
+                let Some(bucket) = self.buckets.get(&(
+                    cell_x.saturating_add(offset_x),
+                    cell_y.saturating_add(offset_y),
+                )) else {
                     continue;
                 };
                 for &index in bucket {

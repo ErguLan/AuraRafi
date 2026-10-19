@@ -40,6 +40,17 @@ pub(crate) fn game_capabilities(project_type: ProjectType) -> Vec<String> {
         "game.build",
         "game.reconcile",
         "game.repair",
+        "lighting.inspect",
+        "lighting.set",
+        "lighting.reset",
+        "behavior.attach",
+        "behavior.detach",
+        "behavior.parameter",
+        "prefab.capture",
+        "prefab.instantiate",
+        "script.list",
+        "script.validate",
+        "script.compile_nodes",
     ]
     .into_iter()
     .map(str::to_string)

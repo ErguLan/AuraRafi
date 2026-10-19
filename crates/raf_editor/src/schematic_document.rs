@@ -98,23 +98,7 @@ where
 
 /// Replaces the target file through a sibling temporary file.
 pub(crate) fn write_atomically(path: &Path, contents: &str) -> std::io::Result<()> {
-    let parent = path.parent().filter(|parent| !parent.as_os_str().is_empty());
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("document.ron");
-    let temporary = match parent {
-        Some(parent) => parent.join(format!(".{file_name}.tmp")),
-        None => PathBuf::from(format!(".{file_name}.tmp")),
-    };
-    std::fs::write(&temporary, contents)?;
-    match std::fs::rename(&temporary, path) {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            let _ = std::fs::remove_file(&temporary);
-            Err(error)
-        }
-    }
+    raf_electronics::storage::write_atomic(path, contents)
 }
 
 /// Refuses to write over a document that exists but cannot be parsed.
@@ -132,9 +116,7 @@ where
     if !path.exists() {
         return Ok(());
     }
-    let Ok(raw) = std::fs::read_to_string(path) else {
-        return Ok(());
-    };
+    let raw = std::fs::read_to_string(path)?;
     if parse(&raw).is_ok() {
         return Ok(());
     }
@@ -193,7 +175,9 @@ mod tests {
         let dir = temp_dir("truncated");
         let path = dir.join("schematic.ron");
         let mut schematic = Schematic::new("Truncated");
-        schematic.add_component(raf_electronics::component::ElectronicComponent::resistor("10k"));
+        schematic.add_component(raf_electronics::component::ElectronicComponent::resistor(
+            "10k",
+        ));
         save_schematic_document(&path, &schematic).expect("save");
         let good = std::fs::read_to_string(&path).expect("read");
         std::fs::write(&path, &good[..good.len() / 2]).expect("truncate");
@@ -235,7 +219,13 @@ mod tests {
 
         let entries = std::fs::read_dir(&dir)
             .expect("read dir")
-            .map(|entry| entry.expect("entry").file_name().to_string_lossy().to_string())
+            .map(|entry| {
+                entry
+                    .expect("entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .to_string()
+            })
             .collect::<Vec<_>>();
         assert_eq!(entries, vec!["schematic.ron".to_string()]);
         let _ = std::fs::remove_dir_all(&dir);

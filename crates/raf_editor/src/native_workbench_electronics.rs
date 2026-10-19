@@ -69,6 +69,80 @@ pub(crate) struct ElectronicsInspectorData {
     pub pins: Vec<(String, String)>,
 }
 
+pub(crate) enum InspectorValueEditEnd {
+    Apply {
+        source_id: uuid::Uuid,
+        value: String,
+    },
+    Cancel,
+}
+
+pub(crate) struct InspectorValueDraft {
+    pub source_id: uuid::Uuid,
+    pub value: String,
+    original: String,
+}
+
+impl InspectorValueDraft {
+    pub(crate) fn new(source_id: uuid::Uuid, value: String) -> Self {
+        Self {
+            source_id,
+            original: value.clone(),
+            value,
+        }
+    }
+
+    pub(crate) fn finish(self) -> InspectorValueEditEnd {
+        if self.value == self.original {
+            InspectorValueEditEnd::Cancel
+        } else {
+            InspectorValueEditEnd::Apply {
+                source_id: self.source_id,
+                value: self.value,
+            }
+        }
+    }
+}
+
+/// Resolve focus loss without depending on the GPU host. Only this inspector
+/// opts in: other RafUI text fields retain their existing submit behavior.
+pub(crate) fn finish_inspector_value_edit(
+    had_focus: bool,
+    focus: &mut raf_ui::UiFocusState,
+    input: &raf_core::InputSnapshot,
+    draft: &mut Option<InspectorValueDraft>,
+) -> Option<InspectorValueEditEnd> {
+    const FIELD: &str = "electronics.inspector.value";
+    if !had_focus {
+        return None;
+    }
+    if input.key_pressed(raf_core::InputKey::Escape) {
+        *draft = None;
+        focus.clear_focus();
+        return Some(InspectorValueEditEnd::Cancel);
+    }
+    let clicked_away = [
+        raf_core::PointerButton::Primary,
+        raf_core::PointerButton::Secondary,
+        raf_core::PointerButton::Middle,
+    ]
+    .iter()
+    .any(|button| input.button_pressed(*button))
+        && focus.hovered.as_deref() != Some(FIELD);
+    if focus.has_focus(FIELD) && !clicked_away {
+        return None;
+    }
+    if focus.has_focus(FIELD) {
+        focus.clear_focus();
+    }
+    Some(
+        draft
+            .take()
+            .map(InspectorValueDraft::finish)
+            .unwrap_or(InspectorValueEditEnd::Cancel),
+    )
+}
+
 pub(crate) fn inspector_data(editor: &NativeElectronicsEditor) -> Option<ElectronicsInspectorData> {
     let selection = editor.selection()?;
 
@@ -179,6 +253,7 @@ pub(crate) fn inspector_data(editor: &NativeElectronicsEditor) -> Option<Electro
                 format!("{:.0} deg", component.rotation),
             ),
             ("Footprint".to_string(), component.footprint.clone()),
+            ("Editable".to_string(), (!component.locked).to_string()),
         ],
         pins: component
             .pins
@@ -550,6 +625,146 @@ fn electronics_icon_for_category(category: &str) -> UiIconId {
 mod tests {
     use super::*;
     use crate::electronics_controller::{ElectronicsReportLine, NativeElectronicsEditor};
+
+    #[test]
+    fn electronics_schematic_selection_exposes_a_real_editable_value_field() {
+        use crate::panels::electronics_inspector_surface::build_electronics_inspector_surface;
+        use crate::panels::inspector_surface::InspectorTab;
+        use raf_core::session::ProjectSessionRegistry;
+        use raf_render::api_graphic_basic::ui_surface::StudioUiPalette;
+        let mut editor = NativeElectronicsEditor::empty("editable");
+        editor
+            .schematic
+            .add_component(raf_electronics::ElectronicComponent::resistor("1k"));
+        editor.select_component(0);
+        for locked in [false, true] {
+            editor.schematic.components[0].locked = locked;
+            let data = inspector_data(&editor).unwrap();
+            let surface = build_electronics_inspector_surface(
+                StudioUiPalette::IndustrialDark,
+                &data.title,
+                &data.fields,
+                &data.pins,
+                &ProjectSessionRegistry::new(raf_core::project::ProjectType::Electronics),
+                InspectorTab::Properties,
+            );
+            assert_eq!(
+                surface.root.find("electronics.inspector.value").is_some(),
+                !locked
+            );
+        }
+    }
+
+    #[test]
+    fn electronics_blur_applies_to_the_original_component_after_selection_changes() {
+        use crate::electronics_action::ElectronicsAction;
+        use raf_core::{InputSnapshot, PointerButton};
+        let mut editor = NativeElectronicsEditor::empty("identity");
+        editor
+            .schematic
+            .add_component(raf_electronics::ElectronicComponent::resistor("1k"));
+        let mut second = raf_electronics::ElectronicComponent::resistor("2k");
+        second.position = glam::Vec2::new(200., 0.);
+        editor.schematic.add_component(second);
+        editor.rebuild_scene();
+        editor.select_component(0);
+        let id = editor.schematic.components[0].id;
+        let mut draft = Some(InspectorValueDraft::new(id, "1k".into()));
+        draft.as_mut().unwrap().value = "22K".into();
+        let mut focus = raf_ui::UiFocusState::default();
+        focus.request_focus("electronics.inspector.value");
+        let mut input = InputSnapshot::default();
+        input.pointer_pressed_buttons.insert(PointerButton::Primary);
+        let Some(InspectorValueEditEnd::Apply { source_id, value }) =
+            finish_inspector_value_edit(true, &mut focus, &input, &mut draft)
+        else {
+            panic!("blur should commit")
+        };
+        editor.select_component(1);
+        let selection = editor.selection();
+        let action = ElectronicsAction::CommitInspectorValueFor { source_id, value };
+        let response = crate::native_attached_executor::execute_native_ui_intent(
+            &mut editor,
+            &mut raf_core::TransactionLedger::default(),
+            &action.to_command_string(),
+        );
+        assert!(response.ok, "{:?}", response);
+        assert_eq!(editor.schematic.components[0].value, "22K");
+        assert_eq!(editor.schematic.components[1].value, "2k");
+        assert_eq!(editor.selection(), selection);
+        assert!(draft.is_none());
+        assert!(finish_inspector_value_edit(false, &mut focus, &input, &mut draft).is_none());
+        assert!(editor.undo());
+        assert_eq!(editor.schematic.components[0].value, "1k");
+        assert!(editor.redo());
+        assert_eq!(editor.schematic.components[0].value, "22K");
+    }
+
+    #[test]
+    fn electronics_escape_discards_the_draft_and_tab_applies_once() {
+        use raf_core::{InputKey, InputSnapshot};
+        let id = uuid::Uuid::new_v4();
+        let mut draft = Some(InspectorValueDraft::new(id, "1k".into()));
+        draft.as_mut().unwrap().value = "22k".into();
+        let mut focus = raf_ui::UiFocusState::default();
+        focus.request_focus("electronics.inspector.value");
+        let mut escape = InputSnapshot::default();
+        escape.keys_pressed.insert(InputKey::Escape);
+        assert!(matches!(
+            finish_inspector_value_edit(true, &mut focus, &escape, &mut draft),
+            Some(InspectorValueEditEnd::Cancel)
+        ));
+        assert!(draft.is_none());
+        assert!(focus.focused.is_none());
+        draft = Some(InspectorValueDraft::new(id, "1k".into()));
+        draft.as_mut().unwrap().value = "47k".into();
+        focus.request_focus("another.control");
+        assert!(
+            matches!(finish_inspector_value_edit(true,&mut focus,&InputSnapshot::default(),&mut draft),Some(InspectorValueEditEnd::Apply {value,..}) if value=="47k")
+        );
+        assert!(draft.is_none());
+        assert!(focus.has_focus("another.control"));
+    }
+
+    #[test]
+    fn electronics_clicking_inside_the_field_keeps_the_draft() {
+        let id = uuid::Uuid::new_v4();
+        let mut draft = Some(InspectorValueDraft::new(id, "1k".into()));
+        draft.as_mut().unwrap().value = "22k".into();
+        let mut focus = raf_ui::UiFocusState::default();
+        focus.request_focus("electronics.inspector.value");
+        focus.set_hovered(Some("electronics.inspector.value".into()));
+        let mut input = raf_core::InputSnapshot::default();
+        input
+            .pointer_pressed_buttons
+            .insert(raf_core::PointerButton::Primary);
+        assert!(finish_inspector_value_edit(true, &mut focus, &input, &mut draft).is_none());
+        assert_eq!(draft.unwrap().value, "22k");
+        assert!(focus.has_focus("electronics.inspector.value"));
+    }
+
+    #[test]
+    fn electronics_leaving_an_unchanged_field_is_a_noop() {
+        let id = uuid::Uuid::new_v4();
+        let mut draft = Some(InspectorValueDraft::new(id, "1k".into()));
+        let mut focus = raf_ui::UiFocusState::default();
+        focus.request_focus("other.control");
+        assert!(matches!(
+            finish_inspector_value_edit(
+                true,
+                &mut focus,
+                &raf_core::InputSnapshot::default(),
+                &mut draft
+            ),
+            Some(InspectorValueEditEnd::Cancel)
+        ));
+        assert!(draft.is_none());
+        assert!(focus.has_focus("other.control"));
+        assert!(matches!(
+            InspectorValueDraft::new(id, "1k".into()).finish(),
+            InspectorValueEditEnd::Cancel
+        ));
+    }
 
     #[test]
     fn analysis_metrics_follow_the_requested_locale() {

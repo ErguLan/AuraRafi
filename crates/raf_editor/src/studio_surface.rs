@@ -60,6 +60,11 @@ pub struct HubSurfaceModel {
     pub create_error: Option<HubProjectCreateError>,
     pub create_active: bool,
     pub create_type_menu_open: bool,
+    pub create_with_agent: bool,
+    pub opening_project: Option<String>,
+    pub opening_error: Option<String>,
+    pub opening_step: u8,
+    pub opening_size: [f32; 2],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -128,6 +133,11 @@ impl Default for HubSurfaceModel {
             create_error: None,
             create_active: false,
             create_type_menu_open: false,
+            create_with_agent: false,
+            opening_project: None,
+            opening_error: None,
+            opening_step: 0,
+            opening_size: [1280.0, 900.0],
         }
     }
 }
@@ -213,6 +223,9 @@ pub fn build_hub_surface_with_model(
         root = root.with_child(hub_context_menu_surface(palette, project, position));
     }
 
+    if model.opening_project.is_some() {
+        root = root.with_child(hub_project_opening(palette, model));
+    }
     let mut surface = UiSurface::new("studio.hub", palette, root);
     surface.style_sheet = UiStyleSheet {
         rules: vec![
@@ -986,6 +999,13 @@ fn hub_topbar_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
             palette,
         ))
         .with_child(hub_top_nav_button(
+            "hub.agents",
+            "agent_workspace.title",
+            "hub.agents",
+            false,
+            palette,
+        ))
+        .with_child(hub_top_nav_button(
             "hub.settings",
             "app.settings_menu",
             "hub.settings",
@@ -1179,7 +1199,7 @@ fn hub_create_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
                 .with_child(hub_create_name_input(palette))
                 .with_child(hub_create_type_picker(palette, model))
                 .with_child(hub_create_location_input(palette))
-                .with_child(hub_agent_placeholder(palette))
+                .with_child(hub_agent_toggle(palette, model.create_with_agent))
                 .with_child(hub_create_submit(palette)),
         );
 
@@ -1411,9 +1431,9 @@ fn hub_create_location_input(_palette: StudioUiPalette) -> UiNode {
         )
 }
 
-fn hub_agent_placeholder(palette: StudioUiPalette) -> UiNode {
+fn hub_agent_toggle(palette: StudioUiPalette, enabled: bool) -> UiNode {
     let tokens = hub_tokens(palette);
-    UiNode::new("hub.create.agent", UiNodeKind::Panel)
+    UiNode::new("hub.create.agent", UiNodeKind::Button)
         .with_class("hub-agent-placeholder")
         .with_layout(UiLayout {
             flow: UiFlow::Row,
@@ -1428,13 +1448,24 @@ fn hub_agent_placeholder(palette: StudioUiPalette) -> UiNode {
             text: tokens.text_muted,
             border_width: 1.0,
             radius: 5.0,
-            opacity: 0.8,
+            opacity: 1.0,
         })
+        .focusable()
+        .with_accessibility_checked(enabled)
+        .with_accessibility_label_key("agent_workspace.create_with_agent")
+        .with_event(UiEventBinding::command(
+            UiEventKind::Click,
+            "hub.create.agent-toggle",
+        ))
         .with_child(
             UiNode::new("hub.create.agent-toggle", UiNodeKind::Panel)
                 .with_layout(UiLayout::fixed(28.0, 16.0))
                 .with_style(UiStyle {
-                    fill: tokens.surface_alt,
+                    fill: if enabled {
+                        tokens.accent_hot
+                    } else {
+                        tokens.surface_alt
+                    },
                     border: tokens.border,
                     text: tokens.text_muted,
                     border_width: 1.0,
@@ -1445,7 +1476,10 @@ fn hub_agent_placeholder(palette: StudioUiPalette) -> UiNode {
                     UiNode::new("hub.create.agent-toggle-knob", UiNodeKind::Panel)
                         .with_layout(UiLayout::absolute(
                             raf_render::api_graphic_basic::ui_surface::UiRect::new(
-                                2.0, 2.0, 12.0, 12.0,
+                                if enabled { 14.0 } else { 2.0 },
+                                2.0,
+                                12.0,
+                                12.0,
                             ),
                         ))
                         .with_style(UiStyle {
@@ -2148,7 +2182,7 @@ fn hub_context_menu_surface(
                     position[0],
                     position[1],
                     224.0,
-                    178.0,
+                    216.0,
                 ))
             }
             .with_z_index(100),
@@ -2164,6 +2198,15 @@ fn hub_context_menu_surface(
             "app.hub_open",
             project,
             "open",
+            198.0,
+            32.0,
+            "hub-button",
+        ))
+        .with_child(hub_project_command_button(
+            "hub.context-agent",
+            "agent_workspace.work_with_ai",
+            project,
+            "agent",
             198.0,
             32.0,
             "hub-button",
@@ -2504,6 +2547,148 @@ fn project_hover_event(project: &HubSurfaceProject, event: UiEventKind) -> UiEve
                 "path": project.path.to_string_lossy(),
             }),
         },
+    }
+}
+
+fn hub_project_opening(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNode {
+    let tokens = hub_tokens(palette);
+    let failed = model.opening_error.is_some();
+    let mut card = UiNode::new("hub.open.card", UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 14.0,
+            padding: UiSpacing::same(24.0),
+            basis: [440.0, 0.0],
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fixed)
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface,
+            border: tokens.border,
+            border_width: 1.0,
+            radius: 10.0,
+            ..UiStyle::transparent()
+        })
+        .with_accessibility_role(raf_ui::UiAccessibilityRole::Dialog)
+        .with_accessibility_label_key(if failed {
+            "agent_workspace.load_failed"
+        } else {
+            "agent_workspace.loading"
+        });
+    if !failed {
+        card = card.with_child(crate::agent_workspace_surface::loading_ring(
+            palette,
+            model.opening_step,
+        ));
+    }
+    card = card
+        .with_child(
+            UiNode::new("hub.open.title", UiNodeKind::Label)
+                .with_text_key(if failed {
+                    "agent_workspace.load_failed"
+                } else {
+                    "agent_workspace.loading"
+                })
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(
+            UiNode::new("hub.open.project", UiNodeKind::Label)
+                .with_text_value(model.opening_project.clone().unwrap_or_default())
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        );
+    if failed {
+        card = card.with_child(
+            UiNode::new("hub.open.error", UiNodeKind::Label)
+                .with_text_key("hub.open.error")
+                .with_text_overflow(raf_ui::UiTextOverflow::Wrap)
+                .with_text_style(UiTextStyle::body(tokens.warning))
+                .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+        );
+    }
+    let mut actions = UiNode::new("hub.open.actions", UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            gap: 8.0,
+            ..UiLayout::fit_content()
+        })
+        .with_child(hub_command_button(
+            "hub.open.cancel",
+            "app.cancel",
+            "hub.open.cancel",
+            110.0,
+            32.0,
+            "hub-project-menu",
+        ));
+    if failed {
+        actions = actions.with_child(hub_command_button(
+            "hub.open.retry",
+            "agent_workspace.retry",
+            "hub.open.retry",
+            110.0,
+            32.0,
+            "hub-secondary-button",
+        ));
+    }
+    UiNode::new("hub.open.overlay", UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            align_items: UiAlign::Center,
+            justify_content: UiJustify::Center,
+            ..UiLayout::absolute(raf_ui::UiRect::new(
+                0.0,
+                0.0,
+                model.opening_size[0],
+                model.opening_size[1],
+            ))
+            .with_z_index(100)
+        })
+        .with_style(UiStyle {
+            fill: [0, 0, 0, 180],
+            ..UiStyle::transparent()
+        })
+        .with_child(card.with_child(actions))
+}
+
+#[cfg(test)]
+mod project_opening_tests {
+    use super::*;
+    #[test]
+    fn agent_workspace_hub_loading_is_not_an_agents_surface() {
+        let mut model = HubSurfaceModel {
+            opening_project: Some("Game".into()),
+            opening_size: [900.0, 700.0],
+            ..Default::default()
+        };
+        for failed in [false, true] {
+            model.opening_error = failed.then(|| "agent_workspace.project_busy".into());
+            let surface = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model);
+            let mut session =
+                raf_render::api_graphic_basic::ui_surface::UiSurfaceSession::default();
+            let frame =
+                session.build_frame_with_resolved_text(&surface, 900, 700, [0, 0, 0, 255], |key| {
+                    crate::native_studio::resolve_hub_text(key, &model, raf_core::Language::Spanish)
+                });
+            assert!(frame
+                .layout_boxes
+                .iter()
+                .any(|item| item.id == "hub.open.overlay"));
+            assert!(frame
+                .layout_boxes
+                .iter()
+                .any(|item| item.id == "hub.open.cancel"));
+            assert_eq!(
+                frame
+                    .layout_boxes
+                    .iter()
+                    .any(|item| item.id == "hub.open.retry"),
+                failed
+            );
+            assert!(!frame
+                .layout_boxes
+                .iter()
+                .any(|item| item.id == "agent.workspace.root"));
+        }
     }
 }
 

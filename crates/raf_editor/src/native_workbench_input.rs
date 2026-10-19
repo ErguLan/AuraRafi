@@ -27,6 +27,12 @@ impl NativeGameWorkbench {
     where
         F: FnMut(&str) -> String,
     {
+        let electronics_value_had_focus = self
+            .host
+            .session()
+            .interaction
+            .focus
+            .has_focus("electronics.inspector.value");
         let search_open = self.search_surface.is_open();
         let mut intents = Vec::new();
         if search_open {
@@ -124,7 +130,44 @@ impl NativeGameWorkbench {
             self.bottom_dock.close_context_menu();
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
+        // Finish the previous field before canvas/toolbar commands change the
+        // selection. The edit carries the UUID of the original component.
+        if electronics_value_had_focus {
+            let current_text = self
+                .host
+                .session()
+                .interaction
+                .controls
+                .text("electronics.inspector.value")
+                .to_string();
+            if let Some(draft) = self.electronics_value_draft.as_mut() {
+                draft.value = current_text;
+            }
+        }
+        if let Some(finished) = electronics_model::finish_inspector_value_edit(
+            electronics_value_had_focus,
+            &mut self.host.session_mut().interaction.focus,
+            native_input.snapshot(),
+            &mut self.electronics_value_draft,
+        ) {
+            if let electronics_model::InspectorValueEditEnd::Apply { source_id, value } = finished {
+                intents.insert(
+                    0,
+                    NativeWorkbenchIntent::Command(
+                        crate::electronics_action::ElectronicsAction::CommitInspectorValueFor {
+                            source_id,
+                            value,
+                        }
+                        .to_command_string(),
+                    ),
+                );
+            }
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
         for dispatched in &actions {
+            if self.handle_lighting_action(&dispatched.action, scene, &mut intents) {
+                continue;
+            }
             match &dispatched.action {
                 UiAction::SetText { key, value } => match key.as_str() {
                     "application-bar.command-search.value" => {
@@ -157,8 +200,8 @@ impl NativeGameWorkbench {
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     "electronics.inspector.value" => {
-                        if let Some((_id, draft)) = self.electronics_value_draft.as_mut() {
-                            *draft = value.clone();
+                        if let Some(draft) = self.electronics_value_draft.as_mut() {
+                            draft.value = value.clone();
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         }
                     }
@@ -183,21 +226,21 @@ impl NativeGameWorkbench {
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     "agent.input" => {
-                        self.agent_panel.apply_action(
+                        self.agent_panel.borrow_mut().apply_action(
                             AgentAction::SetInput(value.clone()),
                             &mut self.agent_settings,
                         );
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     "agent.new-model.label" => {
-                        self.agent_panel.apply_action(
+                        self.agent_panel.borrow_mut().apply_action(
                             AgentAction::SetNewModelLabel(value.clone()),
                             &mut self.agent_settings,
                         );
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     "agent.new-model.id" => {
-                        self.agent_panel.apply_action(
+                        self.agent_panel.borrow_mut().apply_action(
                             AgentAction::SetNewModelId(value.clone()),
                             &mut self.agent_settings,
                         );
@@ -266,14 +309,14 @@ impl NativeGameWorkbench {
                             .focus
                             .request_focus(format!("{key}.trigger"));
                     } else if key == "agent.model" {
-                        let keep_open = self.agent_panel.model_menu_open;
+                        let keep_open = self.agent_panel.borrow_mut().model_menu_open;
                         self.apply_agent_action(
                             AgentAction::SelectModel(value.clone()),
                             &mut intents,
                             false,
                         );
                         if keep_open {
-                            self.agent_panel.model_menu_open = true;
+                            self.agent_panel.borrow_mut().model_menu_open = true;
                         }
                     } else if key == "agent.mode" {
                         let mode = match value.as_str() {
@@ -283,14 +326,14 @@ impl NativeGameWorkbench {
                             _ => None,
                         };
                         if let Some(mode) = mode {
-                            let keep_open = self.agent_panel.mode_menu_open;
+                            let keep_open = self.agent_panel.borrow_mut().mode_menu_open;
                             self.apply_agent_action(
                                 AgentAction::SetMode(mode),
                                 &mut intents,
                                 false,
                             );
                             if keep_open {
-                                self.agent_panel.mode_menu_open = true;
+                                self.agent_panel.borrow_mut().mode_menu_open = true;
                             }
                         }
                     } else if let (Some(target), Some(command_prefix)) = (
@@ -341,17 +384,17 @@ impl NativeGameWorkbench {
                     }
                     match id.as_str() {
                         "agent.model.trigger" => {
-                            self.agent_panel.model_menu_open = open;
+                            self.agent_panel.borrow_mut().model_menu_open = open;
                             if open {
-                                self.agent_panel.mode_menu_open = false;
-                                self.agent_panel.add_model_open = false;
+                                self.agent_panel.borrow_mut().mode_menu_open = false;
+                                self.agent_panel.borrow_mut().add_model_open = false;
                             }
                         }
                         "agent.mode.trigger" => {
-                            self.agent_panel.mode_menu_open = open;
+                            self.agent_panel.borrow_mut().mode_menu_open = open;
                             if open {
-                                self.agent_panel.model_menu_open = false;
-                                self.agent_panel.add_model_open = false;
+                                self.agent_panel.borrow_mut().model_menu_open = false;
+                                self.agent_panel.borrow_mut().add_model_open = false;
                             }
                         }
                         "viewport.toolbar.view-mode.trigger" => {
@@ -460,6 +503,11 @@ impl NativeGameWorkbench {
                     if name == crate::application_menu::command::SEARCH_OPEN {
                         self.open_search();
                         self.open_menu = None;
+                        continue;
+                    }
+                    if name == "agent.workspace.save.retry" {
+                        self.agent_save.borrow_mut().retry();
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1);
                         continue;
                     }
                     if let Some(action) = parse_agent_action(name, self.agent_settings.language) {
@@ -1026,7 +1074,7 @@ impl NativeGameWorkbench {
                     if let Some(tab) = name.strip_prefix("hierarchy.tab:") {
                         if matches!(
                             tab,
-                            "hierarchy" | "assets" | "world" | "bookmarks" | "search"
+                            "hierarchy" | "assets" | "world" | "lighting" | "bookmarks" | "search"
                         ) {
                             self.hierarchy_active_tab = tab.to_string();
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -1165,10 +1213,18 @@ impl NativeGameWorkbench {
                                 .controls
                                 .text("electronics.inspector.value")
                                 .to_string();
-                            self.electronics_value_draft = None;
-                            intents.push(NativeWorkbenchIntent::Command(format!(
-                                "electronics.inspector.value.commit:{value}"
-                            )));
+                            if let Some(mut draft) = self.electronics_value_draft.take() {
+                                draft.value = value;
+                                if let electronics_model::InspectorValueEditEnd::Apply { source_id, value } = draft.finish() {
+                                    intents.push(NativeWorkbenchIntent::Command(
+                                        crate::electronics_action::ElectronicsAction::CommitInspectorValueFor {
+                                            source_id,
+                                            value,
+                                        }
+                                        .to_command_string(),
+                                    ));
+                                }
+                            }
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                             continue;
                         }
@@ -1505,7 +1561,13 @@ impl NativeGameWorkbench {
                         continue;
                     }
                     if let Some(row) = name.strip_prefix("assets.open:") {
-                        if let Some(slug) = row.strip_prefix("builtin://primitive/") {
+                        if row == "builtin://camera" {
+                            self.assets_surface.close_menus();
+                            intents.push(NativeWorkbenchIntent::Command(
+                                "hierarchy.create-camera:root".into(),
+                            ));
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        } else if let Some(slug) = row.strip_prefix("builtin://primitive/") {
                             intents.push(NativeWorkbenchIntent::Command(format!(
                                 "assets.create-primitive:{slug}"
                             )));
@@ -2302,13 +2364,13 @@ impl NativeGameWorkbench {
             self.toolbar_state.building_menu_open = false;
             self.inspector_view.dropdown = None;
             self.inspector_view.color_picker = false;
-            if self.agent_panel.has_open_menu() {
-                self.agent_panel.close_menus();
+            if self.agent_panel.borrow_mut().has_open_menu() {
+                self.agent_panel.borrow_mut().close_menus();
             }
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
         if snapshot.button_pressed(raf_core::PointerButton::Primary) {
-            if self.agent_panel.has_open_menu()
+            if self.agent_panel.borrow_mut().has_open_menu()
                 && !actions.iter().any(|action| {
                     action.target_id.starts_with("agent.model")
                         || action.target_id.starts_with("agent.mode")
@@ -2316,7 +2378,7 @@ impl NativeGameWorkbench {
                         || action.target_id.starts_with("agent.new-model")
                 })
             {
-                self.agent_panel.close_menus();
+                self.agent_panel.borrow_mut().close_menus();
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
             let hovered = self.host.session().interaction.focus.hovered.clone();
@@ -2591,12 +2653,8 @@ impl NativeGameWorkbench {
         reset_history: bool,
     ) {
         let focus_new_model_label = matches!(&action, AgentAction::OpenAddModel);
-        if matches!(&action, AgentAction::Approve) {
-            self.pending_agent_decision = Some(true);
-        } else if matches!(&action, AgentAction::Deny) {
-            self.pending_agent_decision = Some(false);
-        }
         self.agent_panel
+            .borrow_mut()
             .apply_action(action, &mut self.agent_settings);
         if focus_new_model_label {
             self.host
@@ -2611,13 +2669,13 @@ impl NativeGameWorkbench {
                 .session_mut()
                 .reset_interaction_for_surface_change(Some("agent.history"));
         }
-        if self.agent_panel.take_open_settings_request() {
+        if self.agent_panel.borrow_mut().take_open_settings_request() {
             self.settings_section = SettingsSection::Ai;
             intents.push(NativeWorkbenchIntent::OpenSettings {
                 section: SettingsSection::Ai,
             });
         }
-        if self.agent_panel.take_settings_changed() {
+        if self.agent_panel.borrow_mut().take_settings_changed() {
             intents.push(NativeWorkbenchIntent::AgentSettingsChanged(
                 self.agent_settings.clone(),
             ));
@@ -2626,7 +2684,7 @@ impl NativeGameWorkbench {
     }
 }
 
-fn parse_agent_action(name: &str, language: raf_core::Language) -> Option<AgentAction> {
+pub(crate) fn parse_agent_action(name: &str, language: raf_core::Language) -> Option<AgentAction> {
     let action = match name {
         "agent.sidebar.toggle" => AgentAction::ToggleSidebar,
         "agent.sidebar.close" => AgentAction::CloseSidebar,
@@ -2639,14 +2697,22 @@ fn parse_agent_action(name: &str, language: raf_core::Language) -> Option<AgentA
         "agent.open-settings" => AgentAction::OpenSettings,
         "agent.tool-warning.dismiss" => AgentAction::DismissToolCallWarning,
         "agent.submit" => AgentAction::Submit,
+        "agent.resume" => AgentAction::Resume,
         "agent.stop" => AgentAction::Stop,
         "agent.approve" => AgentAction::Approve,
         "agent.deny" => AgentAction::Deny,
+        "agent.review.toggle" => AgentAction::ToggleReview,
         "agent.mode.inspect" => AgentAction::SetMode(AgentMode::Inspect),
         "agent.mode.passive" | "agent.mode.plan" => AgentAction::SetMode(AgentMode::Plan),
         "agent.mode.active" => AgentAction::SetMode(AgentMode::Active),
         _ => {
-            if let Some(raw) = name.strip_prefix("agent.session.select:") {
+            if let Some(id) = name.strip_prefix("agent.call.approve:") {
+                AgentAction::ApproveCall(id.to_string())
+            } else if let Some(id) = name.strip_prefix("agent.call.deny:") {
+                AgentAction::DenyCall(id.to_string())
+            } else if let Some(id) = name.strip_prefix("agent.tool.toggle:") {
+                AgentAction::ToggleTool(id.to_string())
+            } else if let Some(raw) = name.strip_prefix("agent.session.select:") {
                 AgentAction::SelectSession(raw.parse().ok()?)
             } else if let Some(raw) = name.strip_prefix("agent.session.delete:") {
                 AgentAction::DeleteSession(raw.parse().ok()?)

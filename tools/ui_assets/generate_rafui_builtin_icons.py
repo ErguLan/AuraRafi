@@ -8,6 +8,7 @@ the WGPU and CPU paths without making surfaces depend on file paths.
 from __future__ import annotations
 
 import math
+import argparse
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -251,9 +252,32 @@ def draw_icon(name: str) -> Icon:
         L([(17, 17), (47, 47)])
         L([(47, 17), (17, 47)])
     elif name == "play":
-        P([(24, 15), (49, 32), (24, 49)])
+        P([(23, 14), (49, 32), (23, 50)])
+    elif name == "pause":
+        P([(18, 15), (26, 15), (26, 49), (18, 49)])
+        P([(38, 15), (46, 15), (46, 49), (38, 49)])
+    elif name == "step-forward":
+        P([(15, 16), (39, 32), (15, 48)])
+        L([(47, 16), (47, 48)], 5)
     elif name == "stop":
-        R(17, 17, 47, 47, 3)
+        P([(19, 18), (45, 18), (46, 19), (46, 45), (45, 46), (19, 46), (18, 45), (18, 19)])
+    elif name == "sun":
+        C(32, 32, 10)
+        for angle in range(0, 360, 45):
+            a = math.radians(angle)
+            L([(32 + math.cos(a) * 17, 32 + math.sin(a) * 17),
+               (32 + math.cos(a) * 23, 32 + math.sin(a) * 23)], 3.5)
+    elif name == "sky":
+        C(39, 23, 10)
+        L([(10, 39), (16, 33), (24, 33), (29, 26), (38, 26), (45, 34), (51, 34), (55, 40)])
+        L([(10, 47), (54, 47)], 3)
+    elif name == "shadows":
+        L([(14, 20), (32, 10), (49, 20), (49, 39), (32, 50), (14, 39), (14, 20), (32, 30), (49, 20)])
+        L([(32, 30), (32, 50)])
+        L([(39, 48), (55, 48), (58, 43), (49, 39)], 3)
+    elif name == "clock":
+        C(32, 32, 21)
+        L([(32, 18), (32, 32), (43, 39)])
     elif name == "console":
         R(10, 13, 54, 51, 4)
         L([(19, 25), (29, 32), (19, 39)])
@@ -382,7 +406,7 @@ ICON_NAMES = [
     "view-2d", "view-3d", "shaded", "wireframe", "folder", "scene", "entity",
     "cube", "sphere", "plane", "cylinder", "eye", "eye-off", "lock", "unlock",
     "chevron-left", "chevron-right", "chevron-down", "more", "search", "filter",
-    "add", "close", "play", "stop", "console", "assets", "project", "node",
+    "add", "close", "play", "pause", "step-forward", "stop", "sun", "sky", "shadows", "clock", "console", "assets", "project", "node",
     "agent", "schematic", "pcb", "settings", "menu", "warning", "error", "success",
     "refresh", "trash", "wire", "route", "board-outline", "zoom-in", "zoom-out",
     "script", "file", "external-link", "pencil", "copy",
@@ -422,6 +446,32 @@ def raster_image(icon: Icon) -> Image.Image:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--only", nargs="+", choices=ICON_NAMES,
+                        help="Generate only named runtime assets; leave unrelated masters untouched.")
+    parser.add_argument("--preview", type=Path, help="Optional development contact sheet, never loaded by the engine.")
+    args = parser.parse_args()
+    if args.only:
+        for name in args.only:
+            write_icon(name, RUNTIME_PNG_DIR, RUNTIME_SVG_DIR)
+        if args.preview:
+            preview = Image.new("RGB", (640, len(args.only) * 72), (16, 20, 28))
+            draw = ImageDraw.Draw(preview)
+            draw.rectangle((320, 0, 640, preview.height), fill=(240, 242, 245))
+            for index, name in enumerate(args.only):
+                for column, tint in [(0, (243,245,247)), (320, (35,40,48))]:
+                    # Tint without changing the original antialiased alpha mask.
+                    alpha = raster_image(draw_icon(name)).getchannel("A")
+                    source = Image.new("RGBA", (SIZE,SIZE), (*tint,255))
+                    source.putalpha(alpha)
+                    for x, size in [(12,48), (80,24), (126,16)]:
+                        icon = source.resize((size,size), Image.Resampling.LANCZOS)
+                        preview.paste(icon, (column + x, index*72 + (72-size)//2), icon)
+                    draw.text((column+170, index*72+30), name, fill=tint)
+            args.preview.parent.mkdir(parents=True, exist_ok=True)
+            preview.save(args.preview)
+        print(f"Generated {len(args.only)} selected runtime SVG/PNG icons.")
+        return
     for name in ICON_NAMES:
         write_icon(name, RUNTIME_PNG_DIR, RUNTIME_SVG_DIR)
     for top_name, source_name in TOP_ICONS.items():

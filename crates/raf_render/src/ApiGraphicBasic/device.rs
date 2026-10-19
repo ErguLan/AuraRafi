@@ -104,6 +104,16 @@ pub struct SceneFrameMetrics {
     pub mesh_draw_calls: u32,
     pub line_draw_calls: u32,
     pub overlay_draw_calls: u32,
+    pub environment_draw_calls: u32,
+    pub shadow_active: bool,
+    pub shadow_budget_exceeded: bool,
+    pub shadow_resolution: u32,
+    pub shadow_casters: u32,
+    pub shadow_draw_calls: u32,
+    pub shadow_map_rebuilds: u32,
+    pub shadow_cache_hits: u32,
+    pub shadow_resident_bytes: u64,
+    pub shadow_prepare_cpu_ms: f32,
     pub mesh_cache_hits: u32,
     pub mesh_cache_misses: u32,
     pub mesh_uniform_slot_creations: u32,
@@ -133,6 +143,8 @@ impl SceneFrameMetrics {
         self.mesh_draw_calls
             .saturating_add(self.line_draw_calls)
             .saturating_add(self.overlay_draw_calls)
+            .saturating_add(self.environment_draw_calls)
+            .saturating_add(self.shadow_draw_calls)
     }
 
     pub const fn total_upload_bytes(self) -> u64 {
@@ -557,6 +569,16 @@ impl BasicDevice {
 
     fn execute_cpu_scene_frame(&mut self, frame: &SceneRenderFrame) -> SceneFrameOutput {
         let frame_start = Instant::now();
+        let shadow_start = Instant::now();
+        let shadow_reused = frame
+            .commands
+            .shadows
+            .as_ref()
+            .is_some_and(|s| s.geometry.cpu_ready());
+        if let Some(shadow) = frame.commands.shadows.as_ref() {
+            shadow.geometry.cpu_depth();
+        }
+        let shadow_prepare_cpu_ms = shadow_start.elapsed().as_secs_f32() * 1000.0;
         rasterize_basic_scene_frame(frame, &mut self.framebuffer);
         let command_stats = frame.commands.stats();
         self.last_frame_metrics = SceneFrameMetrics {
@@ -565,6 +587,38 @@ impl BasicDevice {
             mesh_instances: command_stats.mesh_instances,
             line_instances: command_stats.line_instances,
             overlay_triangles: command_stats.overlay_triangles,
+            shadow_active: frame
+                .commands
+                .shadows
+                .as_ref()
+                .is_some_and(|s| !s.geometry.cpu_budget_exceeded()),
+            shadow_budget_exceeded: frame.commands.shadow_budget_exceeded
+                || frame
+                    .commands
+                    .shadows
+                    .as_ref()
+                    .is_some_and(|s| s.geometry.cpu_budget_exceeded()),
+            shadow_resolution: frame
+                .commands
+                .shadows
+                .as_ref()
+                .map(|s| s.geometry.cpu_resolution())
+                .unwrap_or(0),
+            shadow_casters: frame
+                .commands
+                .shadows
+                .as_ref()
+                .map(|s| s.geometry.casters.len() as u32)
+                .unwrap_or(0),
+            shadow_map_rebuilds: u32::from(frame.commands.shadows.is_some() && !shadow_reused),
+            shadow_cache_hits: u32::from(shadow_reused),
+            shadow_resident_bytes: frame
+                .commands
+                .shadows
+                .as_ref()
+                .map(|s| (s.geometry.cpu_resolution() as u64).pow(2) * 4)
+                .unwrap_or(0),
+            shadow_prepare_cpu_ms,
             ..SceneFrameMetrics::default()
         };
         SceneFrameOutput::CpuPixels(self.framebuffer.pixels().to_vec())
@@ -874,6 +928,8 @@ struct MeshUniforms {
     color: [f32; 4],
     light_dir: [f32; 4],
     params: [f32; 4],
+    sun: [f32; 4],
+    ambient: [f32; 4],
 }
 
 #[derive(Debug)]
@@ -1079,7 +1135,14 @@ impl GpuTimestampState {
     }
 }
 
+#[path = "shadow_gpu.rs"]
+mod shadow_gpu;
+
 struct GpuSceneState {
+    shadows: Option<shadow_gpu::ShadowGpuState>,
+    shadow_receiver: bool,
+    shadow_memory_budget: u64,
+    environment: Option<super::environment_gpu::EnvironmentGpuState>,
     color_format: wgpu::TextureFormat,
     mesh_bind_group_layout: wgpu::BindGroupLayout,
     scene_texture_bind_group_layout: wgpu::BindGroupLayout,
@@ -1457,6 +1520,10 @@ impl GpuSceneState {
 
         Self {
             color_format,
+            environment: None,
+            shadows: None,
+            shadow_receiver: true,
+            shadow_memory_budget: (memory_budget.gpu_bytes / 16).min(16 * 1024 * 1024),
             mesh_bind_group_layout,
             scene_texture_bind_group_layout,
             scene_texture_sampler,
@@ -1646,6 +1713,13 @@ impl GpuSceneState {
         let depth_view = Arc::clone(&target.depth_view);
         let clear_color = extract_clear_color(frame.commands.commands());
         let texture_upload_bytes = self.prepare_scene_textures(device, queue, frame);
+        let environment = super::environment_gpu::prepare(
+            &mut self.environment,
+            device,
+            queue,
+            self.color_format,
+            frame.commands.environment,
+        );
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("ApiGraphicBasic.SceneEncoder"),
         });
@@ -1671,11 +1745,67 @@ impl GpuSceneState {
             ..SceneFrameMetrics::default()
         };
         let mut mesh_draw_index = 0usize;
+        metrics.uniform_upload_bytes += environment.as_ref().map(|(_, bytes)| *bytes).unwrap_or(0);
+        metrics.environment_draw_calls = u32::from(environment.is_some());
         let mut line_draw_index = 0usize;
         let mut overlay_draw_index = 0usize;
 
         if let Some((_, query_set, _, _)) = timestamp_plan.as_ref() {
             encoder.write_timestamp(query_set.as_ref(), 0);
+        }
+        metrics.shadow_budget_exceeded = frame.commands.shadow_budget_exceeded;
+        self.shadow_receiver = true;
+        if let Some(shadow) = frame.commands.shadows.as_ref() {
+            let already_admitted = self
+                .shadows
+                .as_ref()
+                .is_some_and(|s| s.matches_geometry(shadow.geometry.key));
+            let mut unique = std::collections::HashSet::new();
+            let mesh_bytes: u64 = shadow
+                .geometry
+                .casters
+                .iter()
+                .filter(|c| !already_admitted && unique.insert(Arc::as_ptr(&c.mesh) as usize))
+                .map(|c| {
+                    (c.mesh.vertices.len() * std::mem::size_of::<GpuMeshVertex>()
+                        + c.mesh.indices.len() * 4) as u64
+                })
+                .sum();
+            let required = mesh_bytes
+                + (shadow.geometry.resolution as u64).pow(2) * 4
+                + shadow.geometry.casters.len().next_power_of_two() as u64
+                    * std::mem::size_of::<GpuMeshInstance>() as u64
+                + 112;
+            if !already_admitted && required > self.shadow_memory_budget {
+                self.shadows = None;
+                metrics.shadow_budget_exceeded = true;
+            } else {
+                let start = Instant::now();
+                if self
+                    .shadows
+                    .as_ref()
+                    .is_none_or(|s| s.resolution != shadow.geometry.resolution)
+                {
+                    self.shadows = None;
+                    self.shadows = Some(shadow_gpu::ShadowGpuState::new(
+                        device,
+                        shadow,
+                        &self.mesh_bind_group_layout,
+                        &self.scene_texture_bind_group_layout,
+                        self.color_format,
+                    ));
+                }
+                self.shadows.as_mut().unwrap().prepare(
+                    device,
+                    queue,
+                    &mut encoder,
+                    shadow,
+                    &mut metrics,
+                );
+                metrics.shadow_prepare_cpu_ms = start.elapsed().as_secs_f32() * 1000.0;
+            }
+        } else {
+            self.shadows = None;
         }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1700,6 +1830,11 @@ impl GpuSceneState {
                 occlusion_query_set: None,
             });
 
+            if let Some((environment, _)) = environment.as_ref() {
+                pass.set_pipeline(&environment.pipeline);
+                pass.set_bind_group(0, &environment.binding, &[]);
+                pass.draw(0..3, 0..1);
+            }
             let mut current_pipeline = BasicPipelineKind::FlatColor;
             // Borrow commands for the duration of the pass. This avoids
             // cloning every line batch's Vec on potato machines.
@@ -1707,6 +1842,7 @@ impl GpuSceneState {
                 match command {
                     GraphicCommand::Clear { .. } => {}
                     GraphicCommand::SetPipeline(pipeline) => current_pipeline = *pipeline,
+                    GraphicCommand::SetShadowReceiver(value) => self.shadow_receiver = *value,
                     GraphicCommand::DrawMesh {
                         mesh_id,
                         transform,
@@ -1924,6 +2060,27 @@ impl GpuSceneState {
         true
     }
 
+    fn bind_mesh_pipeline(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        instanced: bool,
+        two_sided: bool,
+    ) {
+        if let Some(shadows) = self.shadows.as_ref() {
+            pass.set_pipeline(
+                &shadows.pipelines[usize::from(instanced) * 2 + usize::from(two_sided)],
+            );
+            pass.set_bind_group(2, &shadows.binding, &[]);
+        } else {
+            pass.set_pipeline(match (instanced, two_sided) {
+                (false, false) => &self.mesh_pipeline,
+                (false, true) => &self.mesh_two_sided_pipeline,
+                (true, false) => &self.mesh_instanced_pipeline,
+                (true, true) => &self.mesh_instanced_two_sided_pipeline,
+            });
+        }
+    }
+
     fn draw_mesh(
         &mut self,
         device: &wgpu::Device,
@@ -2017,11 +2174,21 @@ impl GpuSceneState {
             normal_matrix: gpu_normal_matrix(transform),
             color: rgba8_to_f32(color),
             light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
+            sun: frame
+                .commands
+                .environment
+                .map(|env| env.sun.extend(env.settings.sun.shading_steps()).to_array())
+                .unwrap_or([0.0; 4]),
+            ambient: frame
+                .commands
+                .environment
+                .map(|env| env.ambient.extend(1.0).to_array())
+                .unwrap_or([0.0; 4]),
             params: [
                 if lit { 1.0 } else { 0.0 },
                 if texture_enabled { 1.0 } else { 0.0 },
-                0.0,
-                0.0,
+                f32::from(frame.commands.environment.is_some()),
+                f32::from(self.shadows.is_some() && self.shadow_receiver),
             ],
         };
         write_uniform_if_changed(
@@ -2034,11 +2201,7 @@ impl GpuSceneState {
         );
         metrics.mesh_draw_calls += 1;
 
-        pass.set_pipeline(if two_sided {
-            &self.mesh_two_sided_pipeline
-        } else {
-            &self.mesh_pipeline
-        });
+        self.bind_mesh_pipeline(pass, false, two_sided);
         pass.set_bind_group(0, uniform_slot.bind_group.as_ref(), &[]);
         pass.set_bind_group(1, texture_bind_group, &[]);
         pass.set_vertex_buffer(0, cached_buffers.vertex_buffer.slice(..));
@@ -2202,7 +2365,22 @@ impl GpuSceneState {
             normal_matrix: glam::Mat4::IDENTITY.to_cols_array_2d(),
             color: [1.0; 4],
             light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
-            params: [if lit { 1.0 } else { 0.0 }, 0.0, 0.0, 0.0],
+            sun: frame
+                .commands
+                .environment
+                .map(|env| env.sun.extend(env.settings.sun.shading_steps()).to_array())
+                .unwrap_or([0.0; 4]),
+            ambient: frame
+                .commands
+                .environment
+                .map(|env| env.ambient.extend(1.0).to_array())
+                .unwrap_or([0.0; 4]),
+            params: [
+                if lit { 1.0 } else { 0.0 },
+                0.0,
+                f32::from(frame.commands.environment.is_some()),
+                f32::from(self.shadows.is_some() && self.shadow_receiver),
+            ],
         };
         write_uniform_if_changed(
             queue,
@@ -2216,11 +2394,7 @@ impl GpuSceneState {
             std::mem::size_of_val(self.mesh_instance_scratch.as_slice()) as u64;
         metrics.mesh_draw_calls += 1;
 
-        pass.set_pipeline(if two_sided {
-            &self.mesh_instanced_two_sided_pipeline
-        } else {
-            &self.mesh_instanced_pipeline
-        });
+        self.bind_mesh_pipeline(pass, true, two_sided);
         pass.set_bind_group(0, uniform_slot.bind_group.as_ref(), &[]);
         pass.set_bind_group(1, texture_bind_group, &[]);
         pass.set_vertex_buffer(0, cached_buffers.vertex_buffer.slice(..));
@@ -2251,7 +2425,13 @@ impl GpuSceneState {
         self.line_vertex_scratch.extend(
             lines
                 .iter()
-                .filter(|line| line.start.distance_squared(line.end) > f32::EPSILON)
+                .filter_map(|line| {
+                    super::line_projection::prepare_line(
+                        line,
+                        &frame.view_proj,
+                        [frame.width as f32, frame.height as f32],
+                    )
+                })
                 .map(|line| GpuLineVertex {
                     start: line.start.to_array(),
                     _start_padding: 0.0,
@@ -2397,11 +2577,21 @@ impl GpuSceneState {
             normal_matrix: gpu_normal_matrix(transform),
             color: rgba8_to_f32(color),
             light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
+            sun: frame
+                .commands
+                .environment
+                .map(|env| env.sun.extend(env.settings.sun.shading_steps()).to_array())
+                .unwrap_or([0.0; 4]),
+            ambient: frame
+                .commands
+                .environment
+                .map(|env| env.ambient.extend(1.0).to_array())
+                .unwrap_or([0.0; 4]),
             params: [
                 if lit { 1.0 } else { 0.0 },
                 if texture_enabled { 1.0 } else { 0.0 },
-                0.0,
-                0.0,
+                f32::from(frame.commands.environment.is_some()),
+                f32::from(self.shadows.is_some() && self.shadow_receiver),
             ],
         };
         write_uniform_if_changed(
@@ -2415,11 +2605,7 @@ impl GpuSceneState {
         metrics.mesh_upload_bytes += vertex_bytes + index_bytes;
         metrics.mesh_draw_calls += 1;
 
-        pass.set_pipeline(if two_sided {
-            &self.mesh_two_sided_pipeline
-        } else {
-            &self.mesh_pipeline
-        });
+        self.bind_mesh_pipeline(pass, false, two_sided);
         pass.set_bind_group(0, uniform_slot.bind_group.as_ref(), &[]);
         pass.set_bind_group(1, texture_bind_group, &[]);
         pass.set_vertex_buffer(0, transient.vertex_buffer.slice(..vertex_bytes));
@@ -2712,6 +2898,8 @@ mod uniform_reuse_tests {
             color: [value + 3.0; 4],
             light_dir: [value + 4.0; 4],
             params: [value + 5.0; 4],
+            sun: [value + 6.0; 4],
+            ambient: [value + 7.0; 4],
         }
     }
 
@@ -2835,6 +3023,271 @@ mod tests {
     use crate::api_graphic_basic::command_list::BasicCommandList;
     use crate::scene_renderer::FrameStats;
     use glam::{Mat4, Vec3};
+
+    #[test]
+    fn stylized_stars_and_toon_change_real_pixels_on_cpu_and_gpu() {
+        use crate::{
+            camera::Camera,
+            scene_renderer::{
+                RenderOptions, SceneRenderer, SCENE_BACKGROUND, SCENE_LIGHT_DIRECTION,
+            },
+        };
+        let options = RenderOptions {
+            show_grid_3d: false,
+            selection_outline: false,
+            ..Default::default()
+        };
+        for gpu in [false, true] {
+            let mut device = BasicDevice::new(BasicDeviceConfig {
+                allow_gpu: gpu,
+                force_cpu: !gpu,
+                ..Default::default()
+            });
+            if gpu && device.capabilities().backend != GraphicsBackendId::Wgpu {
+                eprintln!("Stylized GPU acceptance SKIPPED: no GPU adapter");
+                continue;
+            }
+            let mut scene = raf_core::SceneGraph::new();
+            let mut env = *scene.environment();
+            env.mode = raf_core::environment::EnvironmentMode::Scene;
+            env.sun.disk_visible = false;
+            env.sky.stars_density = 1.0;
+            let mut renderer = SceneRenderer::new(192, 192);
+            let sky_camera = Camera {
+                position: Vec3::ZERO,
+                target: Vec3::Y,
+                up: Vec3::Z,
+                ..Default::default()
+            };
+            let mut render =
+                |device: &mut BasicDevice, scene: &raf_core::SceneGraph, camera: &Camera| {
+                    let frame = renderer.build_frame(
+                        scene,
+                        camera,
+                        192.0,
+                        192.0,
+                        &[],
+                        SCENE_BACKGROUND,
+                        SCENE_LIGHT_DIRECTION,
+                        options,
+                        None,
+                    );
+                    device.execute_scene_frame(&frame);
+                    device.capture_last_scene_rgba().unwrap().rgba8
+                };
+            scene.set_environment(env);
+            let no_stars = render(&mut device, &scene, &sky_camera);
+            env.sky.stars_enabled = true;
+            scene.set_environment(env);
+            let stars = render(&mut device, &scene, &sky_camera);
+            let count = no_stars
+                .chunks_exact(4)
+                .zip(stars.chunks_exact(4))
+                .filter(|(a, b)| b[0] > a[0].saturating_add(10))
+                .count();
+            assert!(count > 20, "GPU={gpu}: star pixels={count}");
+            assert_eq!(device.last_frame_metrics().shadow_resident_bytes, 0);
+            assert_eq!(stars, render(&mut device, &scene, &sky_camera));
+            if gpu {
+                assert_eq!(device.last_frame_metrics().uniform_upload_bytes, 0);
+                assert_eq!(device.last_frame_metrics().environment_draw_calls, 1);
+            }
+            env.sky.stars_enabled = false;
+            scene.set_environment(env);
+            assert_eq!(no_stars, render(&mut device, &scene, &sky_camera));
+            scene.add_root_with_primitive("Sphere", raf_core::scene::Primitive::Sphere);
+            let camera = Camera {
+                position: Vec3::new(1.3, 1.0, 1.7),
+                ..Default::default()
+            };
+            let smooth = render(&mut device, &scene, &camera);
+            env.sun.toon_enabled = true;
+            env.sun.toon_steps = 2.0;
+            scene.set_environment(env);
+            let toon = render(&mut device, &scene, &camera);
+            assert!(
+                smooth
+                    .chunks_exact(4)
+                    .zip(toon.chunks_exact(4))
+                    .filter(|(a, b)| a != b)
+                    .count()
+                    > 20,
+                "GPU={gpu}: toon must affect actual geometry"
+            );
+            env.sun.toon_enabled = false;
+            scene.set_environment(env);
+            assert_eq!(smooth, render(&mut device, &scene, &camera));
+            eprintln!("Stylized {} acceptance: {count} star pixels, toon changes geometry, disabled restores pixels, uniform reuse checked.", if gpu { "GPU" } else { "CPU" });
+        }
+    }
+
+    #[test]
+    fn shadows_render_real_pixels_reuse_depth_and_respect_receiver_flags_on_both_backends() {
+        for gpu in [false, true] {
+            let mut device = BasicDevice::new(BasicDeviceConfig {
+                allow_gpu: gpu,
+                force_cpu: !gpu,
+                ..Default::default()
+            });
+            if gpu && device.capabilities().backend != GraphicsBackendId::Wgpu {
+                eprintln!("Shadows GPU acceptance SKIPPED: no GPU adapter");
+                continue;
+            }
+            let (mut scene, floor, cube) = crate::shadow_frame::tests::fixture();
+            let mut renderer = crate::scene_renderer::SceneRenderer::new(128, 128);
+            let f = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+            device.execute_scene_frame(&f);
+            let shadowed = device.capture_last_scene_rgba().unwrap().rgba8;
+            let first = device.last_frame_metrics();
+            assert!(first.shadow_active);
+            assert_eq!(first.shadow_map_rebuilds, 1);
+            assert!(first.shadow_resident_bytes > 0);
+            device.execute_scene_frame(&f);
+            let second = device.last_frame_metrics();
+            assert_eq!(second.shadow_map_rebuilds, 0);
+            assert_eq!(second.shadow_cache_hits, 1);
+            assert_eq!(second.shadow_draw_calls, 0);
+            let mut env = *scene.environment();
+            env.shadows.enabled = false;
+            scene.set_environment(env);
+            let disabled = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+            device.execute_scene_frame(&disabled);
+            let lit = device.capture_last_scene_rgba().unwrap().rgba8;
+            let darker = lit
+                .chunks_exact(4)
+                .zip(shadowed.chunks_exact(4))
+                .filter(|(a, b)| {
+                    a[0].abs_diff(a[1]) < 3
+                        && a[1].abs_diff(a[2]) < 3
+                        && a[0] > b[0].saturating_add(15)
+                })
+                .count();
+            assert!(
+                darker > 10,
+                "backend GPU={gpu}, changed shadow pixels={darker}"
+            );
+            let acne = lit
+                .chunks_exact(4)
+                .zip(shadowed.chunks_exact(4))
+                .filter(|(a, b)| a[0] > a[1].saturating_add(20) && a[0] > b[0].saturating_add(10))
+                .count();
+            assert!(acne < 10,"Convex caster must not acquire self-shadow speckles; GPU={gpu}, acne pixels={acne}");
+            assert_eq!(device.last_frame_metrics().shadow_resident_bytes, 0);
+            scene.get_mut(floor).unwrap().receives_shadows = false;
+            scene.get_mut(cube).unwrap().receives_shadows = false;
+            env.shadows.enabled = true;
+            scene.set_environment(env);
+            let non_receivers = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+            device.execute_scene_frame(&non_receivers);
+            assert_eq!(lit, device.capture_last_scene_rgba().unwrap().rgba8);
+            scene.get_mut(floor).unwrap().receives_shadows = true;
+            env.shadows.soft_filter = true;
+            env.shadows.bias = 0.03;
+            scene.set_environment(env);
+            let filtered = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+            device.execute_scene_frame(&filtered);
+            assert_eq!(device.last_frame_metrics().shadow_map_rebuilds, 0);
+            assert_eq!(device.last_frame_metrics().shadow_cache_hits, 1);
+            scene.get_mut(cube).unwrap().position.x += 0.5;
+            let moved = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+            device.execute_scene_frame(&moved);
+            assert_eq!(device.last_frame_metrics().shadow_map_rebuilds, 1);
+            eprintln!("Shadows {} acceptance: {} shadow pixels, {} bytes resident, first prep {:.3} ms, reuse {:.3} ms; GPU timestamp supported={}",if gpu {"GPU"} else {"CPU"},darker,first.shadow_resident_bytes,first.shadow_prepare_cpu_ms,second.shadow_prepare_cpu_ms,first.gpu_timing_supported);
+            if let Some(dir) = std::env::var_os("RAF_LIGHTING_QA_DIR") {
+                let dir = std::path::PathBuf::from(dir);
+                std::fs::create_dir_all(&dir).unwrap();
+                for (name, pixels) in [
+                    ("shadows", shadowed),
+                    ("unshadowed", lit),
+                    ("filtered", device.capture_last_scene_rgba().unwrap().rgba8),
+                ] {
+                    image::save_buffer(
+                        dir.join(format!("{name}-{}.png", if gpu { "gpu" } else { "cpu" })),
+                        &pixels,
+                        128,
+                        128,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+            }
+            if gpu {
+                device.gpu_scene.as_mut().unwrap().shadow_memory_budget = 1;
+                env.shadows.resolution = 1024.0;
+                scene.set_environment(env);
+                let capped = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+                device.execute_scene_frame(&capped);
+                assert!(device.last_frame_metrics().shadow_budget_exceeded);
+                assert!(!device.last_frame_metrics().shadow_active);
+                assert_eq!(device.last_frame_metrics().shadow_resident_bytes, 0);
+            }
+        }
+    }
+
+    #[test]
+    fn lighting_gpu_pipeline_renders_and_reuses_unchanged_environment_uniforms() {
+        let mut device = BasicDevice::new(BasicDeviceConfig::default());
+        if device.capabilities().backend != GraphicsBackendId::Wgpu {
+            eprintln!(
+                "Lighting GPU acceptance skipped: no GPU adapter; CPU coverage runs separately."
+            );
+            return;
+        }
+        let mut scene = raf_core::SceneGraph::new();
+        scene.add_root_with_primitive("Cube", raf_core::scene::Primitive::Cube);
+        let mut env = *scene.environment();
+        env.mode = raf_core::environment::EnvironmentMode::Scene;
+        env.sun.color = [255, 20, 20];
+        env.ambient_intensity = 0.1;
+        scene.set_environment(env);
+        let mut renderer = crate::scene_renderer::SceneRenderer::new(64, 64);
+        let options = crate::scene_renderer::RenderOptions {
+            show_grid_3d: false,
+            selection_outline: false,
+            ..Default::default()
+        };
+        let frame = renderer.build_frame(
+            &scene,
+            &crate::camera::Camera::default(),
+            64.0,
+            64.0,
+            &[],
+            crate::scene_renderer::SCENE_BACKGROUND,
+            crate::scene_renderer::SCENE_LIGHT_DIRECTION,
+            options,
+            None,
+        );
+        assert!(matches!(
+            device.execute_scene_frame(&frame),
+            SceneFrameOutput::GpuTexture { .. }
+        ));
+        let capture = device.capture_last_scene_rgba().unwrap();
+        assert!(capture
+            .rgba8
+            .chunks_exact(4)
+            .any(|p| p[0] > p[1].saturating_add(20)));
+        assert_eq!(device.last_frame_metrics().environment_draw_calls, 1);
+        device.execute_scene_frame(&frame);
+        assert_eq!(device.last_frame_metrics().uniform_upload_bytes, 0);
+        let neutral_options = crate::scene_renderer::RenderOptions {
+            environment_override: Some(Default::default()),
+            ..options
+        };
+        let frame = renderer.build_frame(
+            &scene,
+            &crate::camera::Camera::default(),
+            64.0,
+            64.0,
+            &[],
+            crate::scene_renderer::SCENE_BACKGROUND,
+            crate::scene_renderer::SCENE_LIGHT_DIRECTION,
+            neutral_options,
+            None,
+        );
+        device.execute_scene_frame(&frame);
+        assert_eq!(device.last_frame_metrics().environment_draw_calls, 0);
+        eprintln!("Lighting GPU acceptance passed: hardware frame + readback + uniform reuse + neutral bypass.");
+    }
 
     #[test]
     fn cpu_scene_frame_returns_rgba_pixels() {

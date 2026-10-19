@@ -215,6 +215,12 @@ impl RhaiScriptRuntime {
                         path,
                         if extension == "rhai" {
                             "Rhai is disabled"
+                        } else if extension == "wasm" && !runtime.options.allow_wasm {
+                            "WASM is disabled; its permission does not install or register an executor"
+                        } else if extension == "wasm" {
+                            "WASM adapter contracts exist, but no executor is connected to local Play; installing a compiler alone is insufficient"
+                        } else if matches!(extension.as_str(), "cpp" | "cc" | "cxx" | "rs") {
+                            "compiled-language source is not directly executable; a future toolchain must produce WASM and an executor must be connected to local Play"
                         } else {
                             "only Rhai attachments are executable; session Nodes use the graph compiler, native attachments are unsupported"
                         },

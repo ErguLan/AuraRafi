@@ -68,6 +68,35 @@ pub fn rasterize_triangle_textured(
     texture: &CpuTexture,
     tint: [u8; 4],
 ) {
+    rasterize_triangle_lighting(fb, vertices, Some(texture), tint, None);
+}
+
+/// Shared scanline path for colored directional/ambient light, with optional base texture.
+pub fn rasterize_triangle_lighting(
+    fb: &mut Framebuffer,
+    vertices: [TexturedScreenVertex; 3],
+    texture: Option<&CpuTexture>,
+    tint: [u8; 4],
+    lighting: Option<(glam::Vec3, glam::Vec3)>,
+) {
+    rasterize_triangle_lighting_shadowed(
+        fb,
+        vertices,
+        texture,
+        tint,
+        lighting.map(|(a, s)| (a, s, 0.0)),
+        None,
+    )
+}
+
+pub fn rasterize_triangle_lighting_shadowed(
+    fb: &mut Framebuffer,
+    vertices: [TexturedScreenVertex; 3],
+    texture: Option<&CpuTexture>,
+    tint: [u8; 4],
+    lighting: Option<(glam::Vec3, glam::Vec3, f32)>,
+    shadows: Option<(&crate::shadow_frame::ShadowFrame, glam::Mat4)>,
+) {
     let [v0, v1, v2] = vertices;
     let area = (v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y);
     if area >= 0.0 {
@@ -137,11 +166,34 @@ pub fn rasterize_triangle_textured(
             let v = (left.uv_over_w[1] + (right.uv_over_w[1] - left.uv_over_w[1]) * t) / inv_w;
             let z = left.z + (right.z - left.z) * t;
             let shade = (left.shade + (right.shade - left.shade) * t).clamp(0.0, 1.0);
-            let sampled = texture.sample_uv_linear(u, v);
+            let sampled = texture
+                .map(|texture| texture.sample_uv_linear(u, v))
+                .unwrap_or([1.0; 4]);
+            let light = lighting
+                .map(|(ambient, sun, steps)| {
+                    let visibility = shadows
+                        .map(|(shadow, inverse)| {
+                            // CPU and GPU depth both use the zero-to-one NDC convention.
+                            let world = inverse.project_point3(glam::Vec3::new(
+                                (x as f32 + 0.5) / fb.width() as f32 * 2.0 - 1.0,
+                                1.0 - (y as f32 + 0.5) / fb.height() as f32 * 2.0,
+                                z,
+                            ));
+                            shadow.visibility(world, shade)
+                        })
+                        .unwrap_or(1.0);
+                    let direct = if steps >= 2.0 {
+                        (shade * steps + 0.5).floor() / steps
+                    } else {
+                        shade
+                    };
+                    (ambient + sun * (direct * visibility)).to_array()
+                })
+                .unwrap_or([shade; 3]);
             let alpha = (sampled[3] * alpha_tint * 255.0).round().clamp(0.0, 255.0) as u8;
-            let red = linear_to_srgb(sampled[0] * tint_linear[0] * shade);
-            let green = linear_to_srgb(sampled[1] * tint_linear[1] * shade);
-            let blue = linear_to_srgb(sampled[2] * tint_linear[2] * shade);
+            let red = linear_to_srgb(sampled[0] * tint_linear[0] * light[0]);
+            let green = linear_to_srgb(sampled[1] * tint_linear[1] * light[1]);
+            let blue = linear_to_srgb(sampled[2] * tint_linear[2] * light[2]);
             fb.blend_pixel(x, y, z, red, green, blue, alpha);
         }
     }

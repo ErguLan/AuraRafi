@@ -5,6 +5,15 @@ Reading routes: [Programming guide](SCRIPTING_GUIDE.md) for game authors;
 This document retains the architecture and staged roadmap; planned ABI
 examples below are not executable C++/WASM support in local Play.
 
+Prepared adapter boundary (2026-10-10): `backends/wasm_contract.rs` separates
+optional C++/Rust compilation from optional WASM execution;
+`wasm_backend.rs` owns provider injection and attachment lifecycle wrappers;
+`wasm_host.rs` delegates typed imports to the shared Host API. No concrete
+compiler/executor dependency is installed or registered, and the Play loader
+still runs Rhai only. See [Scripting internals](SCRIPTING_INTERNALS.md#future-compiled-languages-prepared-seams-no-installed-executor)
+for the current contract, limits and remaining integration. Old ABI sketches
+below are proposals, not stable guest SDK declarations.
+
 This document defines the canonical scripting architecture for AuraRafi. It
 covers the three scripting tiers, the shared Host API, how visual nodes
 execute, how commands create scripts, the security model, configuration

@@ -3,7 +3,10 @@
 //! This module owns runtime/history/provider orchestration only. A future UI
 //! may consume its state and typed actions without moving the AI backend.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use raf_ai::agent_history::{AgentHistory, AgentHistoryWriter};
@@ -24,6 +27,36 @@ use crate::agent_executor::{AgentToolExecutor, AgentToolRoute};
 use crate::commands::catalog::CommandCatalog;
 
 const MIN_AGENT_STREAM_PRESENTATION: Duration = Duration::from_millis(33);
+
+pub(crate) type SharedAgentPanel = Rc<RefCell<AgentPanel>>;
+
+struct ConversationRun {
+    runtime: AgentRuntime,
+    tools: Vec<OpenAiTool>,
+    routes: HashMap<String, AgentToolRoute>,
+    prompt: String,
+    draft: String,
+    submission: Option<String>,
+    runtime_key: Option<RuntimeKey>,
+    selected_model: String,
+    decision: Option<AgentDecision>,
+    status: AgentStatus,
+    review_writes: bool,
+    opening: bool,
+    context_requested: bool,
+    document_name: String,
+    saved_revision: Option<u64>,
+    save_error: Option<String>,
+    saving: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum AgentDecision {
+    ApproveAll,
+    DenyAll,
+    Approve(String),
+    Deny(String),
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AgentReadiness {
@@ -77,6 +110,21 @@ pub struct AgentPanel {
     pending_submission: Option<String>,
     last_saved_message_count: usize,
     history_writer: AgentHistoryWriter,
+    parked_runs: HashMap<String, ConversationRun>,
+    loaded_conversation: Option<String>,
+    last_history_write: Instant,
+    last_history_message_revision: u64,
+    visiting_selected: Option<usize>,
+    pub(crate) decision: Option<AgentDecision>,
+    pub(crate) opening: bool,
+    pub(crate) review_writes: bool,
+    pub(crate) saved_revision: Option<u64>,
+    pub(crate) save_error: Option<String>,
+    pub(crate) saving: bool,
+    pub(crate) document_name: String,
+    pub(crate) expanded_tools: std::collections::HashSet<String>,
+    pub(crate) spinner_step: u8,
+    context_requested: bool,
 }
 
 impl Default for AgentPanel {
@@ -112,19 +160,45 @@ impl Default for AgentPanel {
             pending_submission: None,
             last_saved_message_count: 0,
             history_writer: AgentHistoryWriter::new(),
+            parked_runs: HashMap::new(),
+            loaded_conversation: None,
+            last_history_write: Instant::now(),
+            last_history_message_revision: 0,
+            visiting_selected: None,
+            decision: None,
+            opening: false,
+            review_writes: true,
+            saved_revision: None,
+            save_error: None,
+            saving: false,
+            document_name: String::new(),
+            expanded_tools: std::collections::HashSet::new(),
+            spinner_step: 0,
+            context_requested: false,
         }
     }
 }
 
 #[allow(dead_code)]
 impl AgentPanel {
-    pub(crate) fn image_provider(&self, settings: &EngineSettings) -> Option<(raf_ai::AssetImageProvider, String)> {
+    pub(crate) fn image_provider(
+        &self,
+        settings: &EngineSettings,
+    ) -> Option<(raf_ai::AssetImageProvider, String)> {
         let provider = self.effective_provider(settings)?;
-        Some((raf_ai::AssetImageProvider {
-            provider: match provider.provider { AiProvider::OpenRouter => "openrouter", AiProvider::OpenAI => "openai", _ => return None }.into(),
-            base_url: provider.base_url.clone(),
-            api_key: provider.api_key.clone(),
-        }, self.effective_model(provider)))
+        Some((
+            raf_ai::AssetImageProvider {
+                provider: match provider.provider {
+                    AiProvider::OpenRouter => "openrouter",
+                    AiProvider::OpenAI => "openai",
+                    _ => return None,
+                }
+                .into(),
+                base_url: provider.base_url.clone(),
+                api_key: provider.api_key.clone(),
+            },
+            self.effective_model(provider),
+        ))
     }
 
     /// Synchronise project-local state and return the actionable readiness
@@ -181,7 +255,10 @@ impl AgentPanel {
         if status != self.last_status {
             self.last_status = status;
             self.persist_history();
-        } else if self.runtime.messages.len() != self.last_saved_message_count {
+        } else if self.runtime.messages.len() != self.last_saved_message_count
+            || (message_revision != self.last_history_message_revision
+                && self.last_history_write.elapsed() >= Duration::from_secs(1))
+        {
             self.persist_history();
         }
     }
@@ -191,7 +268,27 @@ impl AgentPanel {
     }
 
     pub(crate) fn has_live_output(&self) -> bool {
-        self.runtime.status.needs_continuous_frame()
+        self.opening
+            || self.pending_submission.is_some()
+            || self.decision.is_some()
+            || (self.save_error.is_none() && self.runtime.status.needs_continuous_frame())
+            || self.parked_runs.values().any(|run| {
+                run.opening
+                    || run.submission.is_some()
+                    || run.decision.is_some()
+                    || (run.save_error.is_none() && run.runtime.status.needs_continuous_frame())
+            })
+    }
+
+    pub(crate) fn has_pending_submission(&self) -> bool {
+        self.pending_submission.is_some()
+    }
+
+    pub(crate) fn current_needs_poll(&self) -> bool {
+        self.opening
+            || self.pending_submission.is_some()
+            || self.decision.is_some()
+            || (self.save_error.is_none() && self.runtime.status.needs_continuous_frame())
     }
 
     pub(crate) fn should_show_tool_call_warning(&self) -> bool {
@@ -214,11 +311,7 @@ impl AgentPanel {
     }
 
     pub(crate) fn readiness(&self, settings: &EngineSettings) -> AgentReadiness {
-        let Some(provider) = settings
-            .ai_providers
-            .iter()
-            .find(|config| config.provider == settings.default_ai_provider)
-        else {
+        let Some(provider) = self.effective_provider(settings) else {
             return AgentReadiness::ProviderDisabled;
         };
         if !provider.enabled {
@@ -238,10 +331,15 @@ impl AgentPanel {
         &self,
         settings: &'a EngineSettings,
     ) -> Option<&'a AiProviderConfig> {
+        let selected_provider = self
+            .model_registry
+            .get(&self.selected_model)
+            .map(|shortcut| shortcut.provider)
+            .unwrap_or(settings.default_ai_provider);
         settings
             .ai_providers
             .iter()
-            .find(|config| config.provider == settings.default_ai_provider)
+            .find(|config| config.provider == selected_provider)
     }
 
     pub(crate) fn effective_model(&self, provider: &AiProviderConfig) -> String {
@@ -340,18 +438,28 @@ impl AgentPanel {
             AgentAction::OpenSettings => self.open_settings_requested = true,
             AgentAction::DismissToolCallWarning => self.dismiss_tool_call_warning(),
             AgentAction::Submit => self.queue_submission(),
+            AgentAction::Resume => {
+                self.input_text = t("agent_workspace.resume_prompt", self.language);
+                self.queue_submission();
+            }
             AgentAction::Stop => {
                 self.runtime.cancel();
                 self.last_status = AgentStatus::Done;
                 self.persist_history();
             }
             AgentAction::Approve => {
-                // Approval needs the live executor and is applied in
-                // `approve_with_executor` from the application boundary.
+                self.decision = Some(AgentDecision::ApproveAll);
             }
             AgentAction::Deny => {
-                // Same as approval: the controller keeps the typed action and
-                // the host supplies the live editor executor.
+                self.decision = Some(AgentDecision::DenyAll);
+            }
+            AgentAction::ApproveCall(id) => self.decision = Some(AgentDecision::Approve(id)),
+            AgentAction::DenyCall(id) => self.decision = Some(AgentDecision::Deny(id)),
+            AgentAction::ToggleReview => self.review_writes = !self.review_writes,
+            AgentAction::ToggleTool(id) => {
+                if !self.expanded_tools.remove(&id) {
+                    self.expanded_tools.insert(id);
+                }
             }
             AgentAction::UseSuggestion(value) => self.input_text = value,
         }
@@ -406,15 +514,24 @@ impl AgentPanel {
         catalog: &CommandCatalog,
         project_type: Option<ProjectType>,
         mode: AgentMode,
+        viewport_available: bool,
     ) {
         let Some(content) = self.pending_submission.take() else {
             return;
         };
         let continuation = ["continue", "continua", "continúa", "sigue", "termina"]
-            .iter().any(|word| content.trim().to_lowercase().starts_with(word));
-        let asset_context = continuation && self.tools.iter().any(|tool|
-            tool.function.name.starts_with("asset_generate_") || tool.function.name.starts_with("external_studio_"));
-        let tool_prompt = if asset_context { format!("{content} assets image") } else { content.clone() };
+            .iter()
+            .any(|word| content.trim().to_lowercase().starts_with(word));
+        let asset_context = continuation
+            && self.tools.iter().any(|tool| {
+                tool.function.name.starts_with("asset_generate_")
+                    || tool.function.name.starts_with("external_studio_")
+            });
+        let tool_prompt = if asset_context {
+            format!("{content} assets image")
+        } else {
+            content.clone()
+        };
         let mut pack = AgentToolExecutor::build_tool_pack(
             catalog,
             self.language,
@@ -423,8 +540,15 @@ impl AgentPanel {
             &tool_prompt,
         );
         if !self.external_studio_enabled {
-            pack.tools.retain(|tool| !tool.function.name.starts_with("external_studio_"));
-            pack.routes.retain(|name, _| !name.starts_with("external_studio_"));
+            pack.tools
+                .retain(|tool| !tool.function.name.starts_with("external_studio_"));
+            pack.routes
+                .retain(|name, _| !name.starts_with("external_studio_"));
+        }
+        if !viewport_available {
+            pack.tools
+                .retain(|tool| tool.function.name != "viewport_capture");
+            pack.routes.remove("viewport_capture");
         }
         self.tools = pack.tools;
         self.tool_routes = pack.routes;
@@ -445,6 +569,7 @@ impl AgentPanel {
         };
         self.runtime
             .start_run(&content, &self.tools, execution_mode);
+        self.runtime.set_review_mutations(self.review_writes);
         self.tool_call_warning_dismissed = false;
         self.last_status = AgentStatus::Thinking;
         self.persist_history();
@@ -482,6 +607,10 @@ impl AgentPanel {
     }
 
     fn ensure_runtime_config(&mut self, settings: &EngineSettings) {
+        // A settings change applies to the next turn, never interrupts work.
+        if self.runtime.status.blocks_input() {
+            return;
+        }
         let Some(provider) = self.effective_provider(settings).cloned() else {
             return;
         };
@@ -521,13 +650,22 @@ impl AgentPanel {
     }
 
     fn start_new_chat(&mut self) {
-        self.runtime.clear();
+        self.park_current_run();
         self.tool_call_warning_dismissed = false;
         let default_title = t("app.agent_new_chat_default", self.language);
-        self.history.start_session(&default_title);
+        let index = self.history.start_session(&default_title);
+        self.loaded_conversation = Some(self.history.sessions[index].id.clone());
         self.runtime.set_system_prompt(self.system_prompt.clone());
         self.input_text.clear();
         self.last_saved_message_count = 0;
+        self.opening = true;
+        self.context_requested = false;
+        self.document_name.clear();
+        self.saved_revision = None;
+        self.save_error = None;
+        self.close_menus();
+        self.saving = false;
+        self.last_status = AgentStatus::Done;
         self.enqueue_history_snapshot();
     }
 
@@ -535,32 +673,77 @@ impl AgentPanel {
         if index >= self.history.sessions.len() {
             return;
         }
+        self.park_current_run();
         self.history.active_index = Some(index);
         self.load_session_into_runtime(index);
         self.enqueue_history_snapshot();
     }
 
     fn load_session_into_runtime(&mut self, index: usize) {
+        let Some(id) = self
+            .history
+            .sessions
+            .get(index)
+            .map(|session| session.id.clone())
+        else {
+            return;
+        };
+        if let Some(run) = self.parked_runs.remove(&id) {
+            self.runtime = run.runtime;
+            self.tools = run.tools;
+            self.tool_routes = run.routes;
+            self.system_prompt = run.prompt;
+            self.input_text = run.draft;
+            self.pending_submission = run.submission;
+            self.runtime_key = run.runtime_key;
+            self.selected_model = run.selected_model;
+            self.decision = run.decision;
+            self.last_status = run.status;
+            self.review_writes = run.review_writes;
+            self.opening = run.opening;
+            self.context_requested = run.context_requested;
+            self.document_name = run.document_name;
+            self.saved_revision = run.saved_revision;
+            self.save_error = run.save_error;
+            self.saving = run.saving;
+            self.loaded_conversation = Some(id);
+            self.visual_revision = self.visual_revision.wrapping_add(1);
+            return;
+        }
         let messages = self
             .history
             .sessions
             .get(index)
             .map(|session| session.messages.clone())
             .unwrap_or_default();
-        self.runtime.cancel();
+        self.runtime = AgentRuntime::new(self.runtime.client.config.clone());
         self.tool_call_warning_dismissed = false;
         self.runtime.messages = messages;
         self.runtime.set_system_prompt(self.system_prompt.clone());
-        self.input_text.clear();
+        self.input_text = self.history.sessions[index].draft.clone();
         self.last_status = AgentStatus::Done;
         self.last_saved_message_count = self.runtime.messages.len();
         self.visual_revision = self.visual_revision.wrapping_add(1);
+        self.loaded_conversation = Some(id);
+        self.opening = true;
+        self.context_requested = false;
+        self.runtime_key = None;
+        self.document_name.clear();
+        self.saved_revision = self.history.sessions[index].saved_revision;
+        self.save_error = None;
+        self.close_menus();
+        self.saving = false;
     }
 
     fn delete_session(&mut self, index: usize) {
         if index >= self.history.sessions.len() {
             return;
         }
+        if self.session_is_running(index) {
+            return;
+        }
+        self.park_current_run();
+        self.parked_runs.remove(&self.history.sessions[index].id);
         self.history.sessions.remove(index);
         self.history.active_index = self.history.active_index.and_then(|active| {
             if active == index {
@@ -583,7 +766,7 @@ impl AgentPanel {
         self.enqueue_history_snapshot();
     }
 
-    fn persist_history(&mut self) {
+    pub(crate) fn persist_history(&mut self) {
         let Some(index) = self.history.active_index else {
             return;
         };
@@ -605,29 +788,231 @@ impl AgentPanel {
             }
         }
         let messages_changed = !messages_equal(&session.messages, &self.runtime.messages);
-        if !messages_changed && !title_changed {
+        let task = self
+            .runtime
+            .task_snapshot()
+            .or_else(|| session.last_task.clone());
+        let task_changed = task != session.last_task;
+        let receipt_changed = session.saved_revision != self.saved_revision;
+        let draft_changed = session.draft != self.input_text;
+        if !messages_changed
+            && !title_changed
+            && !task_changed
+            && !receipt_changed
+            && !draft_changed
+        {
             return;
+        }
+        if draft_changed {
+            session.draft = self.input_text.clone();
+        }
+        session.saved_revision = self.saved_revision;
+        if task_changed {
+            session.last_task = task;
+            session.task_events = self.runtime.task_events_since(0);
+            session.saved_revision = self.saved_revision;
         }
         if messages_changed {
             session.messages = self.runtime.messages.clone();
             session.touch();
         }
         self.last_saved_message_count = self.runtime.messages.len();
-        if let Some(project_path) = self.loaded_project_path.as_deref() {
-            self.history_writer.enqueue(project_path, &self.history);
-        }
+        self.last_history_write = Instant::now();
+        self.last_history_message_revision = self.runtime.message_revision();
+        self.enqueue_history_snapshot();
     }
 
     fn enqueue_history_snapshot(&self) {
         if let Some(project_path) = self.loaded_project_path.as_deref() {
-            self.history_writer.enqueue(project_path, &self.history);
+            if let Some(index) = self.visiting_selected {
+                let mut snapshot = self.history.clone();
+                snapshot.active_index = Some(index);
+                self.history_writer.enqueue(project_path, &snapshot);
+            } else {
+                self.history_writer.enqueue(project_path, &self.history);
+            }
         }
+    }
+
+    fn park_current_run(&mut self) {
+        self.persist_history();
+        let Some(id) = self.loaded_conversation.take() else {
+            return;
+        };
+        let config = self.runtime.client.config.clone();
+        let run = ConversationRun {
+            runtime: std::mem::replace(&mut self.runtime, AgentRuntime::new(config)),
+            tools: std::mem::take(&mut self.tools),
+            routes: std::mem::take(&mut self.tool_routes),
+            prompt: self.system_prompt.clone(),
+            draft: std::mem::take(&mut self.input_text),
+            submission: self.pending_submission.take(),
+            runtime_key: self.runtime_key.take(),
+            selected_model: self.selected_model.clone(),
+            decision: self.decision.take(),
+            status: self.last_status.clone(),
+            review_writes: self.review_writes,
+            opening: self.opening,
+            context_requested: self.context_requested,
+            document_name: self.document_name.clone(),
+            saved_revision: self.saved_revision,
+            save_error: self.save_error.clone(),
+            saving: self.saving,
+        };
+        self.parked_runs.insert(id, run);
+    }
+
+    /// Visit live conversations without changing the user's selected chat.
+    pub(crate) fn visit_runs(&mut self, mut poll: impl FnMut(&mut Self)) {
+        let selected = self.history.active_index;
+        self.visiting_selected = selected;
+        let indices: Vec<_> = self
+            .history
+            .sessions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, session)| {
+                let running = self.parked_runs.get(&session.id).is_some_and(|run| {
+                    run.opening
+                        || run.runtime.status.blocks_input()
+                        || run.submission.is_some()
+                        || run.decision.is_some()
+                });
+                (selected == Some(index) || running).then_some(index)
+            })
+            .collect();
+        for index in indices {
+            if self.history.active_index != Some(index) {
+                self.park_current_run();
+                self.history.active_index = Some(index);
+                self.load_session_into_runtime(index);
+            }
+            poll(self);
+        }
+        if let Some(index) = selected {
+            if self.history.active_index != Some(index) {
+                self.park_current_run();
+                self.history.active_index = Some(index);
+                self.load_session_into_runtime(index);
+            }
+        }
+        self.visiting_selected = None;
+    }
+
+    pub(crate) fn pending_calls(&self) -> Vec<raf_ai::agent_runtime::PendingToolCall> {
+        self.runtime
+            .pending_calls
+            .iter()
+            .chain(
+                self.parked_runs
+                    .values()
+                    .flat_map(|run| run.runtime.pending_calls.iter()),
+            )
+            .cloned()
+            .collect()
+    }
+
+    pub(crate) fn session_is_running(&self, index: usize) -> bool {
+        if self.history.active_index == Some(index) {
+            return self.runtime.status.blocks_input();
+        }
+        self.history
+            .sessions
+            .get(index)
+            .and_then(|s| self.parked_runs.get(&s.id))
+            .is_some_and(|run| run.runtime.status.blocks_input())
+    }
+
+    pub(crate) fn initialize(&mut self, project: &Project, history: AgentHistory) {
+        self.loaded_project_path = Some(project.path.clone());
+        self.history = history;
+        let index = self
+            .history
+            .ensure_active_session(t("app.agent_new_chat_default", self.language));
+        self.load_session_into_runtime(index);
+    }
+
+    pub(crate) fn has_pending_review(&self) -> bool {
+        self.runtime.status == AgentStatus::AwaitingApproval
+            || self
+                .parked_runs
+                .values()
+                .any(|run| run.runtime.status == AgentStatus::AwaitingApproval)
+    }
+
+    pub(crate) fn document_id(&self) -> Option<raf_core::session::SessionId> {
+        self.history
+            .active_session()
+            .and_then(|s| s.document_id)
+            .map(raf_core::session::SessionId)
+    }
+
+    pub(crate) fn bind_document(&mut self, id: raf_core::session::SessionId, name: &str) {
+        if let Some(session) = self.history.active_session_mut() {
+            if session.document_id.is_none() {
+                session.document_id = Some(id.0);
+                self.enqueue_history_snapshot();
+            }
+        }
+        if self.opening || self.document_name != name {
+            self.visual_revision = self.visual_revision.wrapping_add(1);
+        }
+        self.document_name = name.to_string();
+        self.opening = false;
+    }
+
+    pub(crate) fn set_save_state(
+        &mut self,
+        revision: Option<u64>,
+        error: Option<String>,
+        saving: bool,
+    ) {
+        if self.saved_revision != revision || self.save_error != error || self.saving != saving {
+            self.visual_revision = self.visual_revision.wrapping_add(1);
+            self.saved_revision = revision;
+            self.save_error = error;
+            self.saving = saving;
+        }
+    }
+
+    pub(crate) fn defer_context_open(&mut self) -> bool {
+        if self.opening && !self.context_requested {
+            self.context_requested = true;
+            return true;
+        }
+        false
+    }
+
+    pub(crate) fn cancel_all(&mut self) {
+        self.visit_runs(|panel| {
+            panel.pending_submission = None;
+            panel.decision = None;
+            panel.opening = false;
+            panel.runtime.cancel();
+            panel.persist_history();
+        });
+    }
+
+    pub(crate) fn finish_history_writes(&mut self) -> Result<bool, String> {
+        self.history_writer.finish_if_idle()
+    }
+
+    pub(crate) fn retry_history_writes(&mut self) {
+        self.history_writer = AgentHistoryWriter::new();
+        self.enqueue_history_snapshot();
     }
 }
 
 fn is_default_session_title(title: &str) -> bool {
     let normalized = title.trim().to_ascii_lowercase();
-    normalized.is_empty() || normalized == "new chat" || normalized == "nueva conversacion"
+    normalized.is_empty()
+        || normalized == "new chat"
+        || normalized == "nueva conversacion"
+        || [Language::English, Language::Spanish]
+            .iter()
+            .any(|language| {
+                t("app.agent_new_chat_default", *language).to_ascii_lowercase() == normalized
+            })
 }
 
 fn fallback_session_title(content: &str) -> String {
@@ -666,9 +1051,14 @@ pub(crate) enum AgentAction {
     OpenSettings,
     DismissToolCallWarning,
     Submit,
+    Resume,
     Stop,
     Approve,
     Deny,
+    ApproveCall(String),
+    DenyCall(String),
+    ToggleReview,
+    ToggleTool(String),
     UseSuggestion(String),
 }
 
@@ -686,6 +1076,46 @@ fn messages_equal(left: &[ChatMessage], right: &[ChatMessage]) -> bool {
 mod tests {
     use super::*;
     use raf_ai::chat::MessageRole;
+
+    #[test]
+    fn agent_workspace_navigation_preserves_runs_drafts_and_document_binding() {
+        let mut panel = AgentPanel::default();
+        let first = panel.history.start_session("First");
+        panel.load_session_into_runtime(first);
+        let first_document = raf_core::session::SessionId::new();
+        panel.bind_document(first_document, "World A");
+        panel
+            .runtime
+            .messages
+            .push(ChatMessage::user("Create a cube"));
+        panel.runtime.status = AgentStatus::ExecutingTools;
+        panel
+            .runtime
+            .pending_calls
+            .push(raf_ai::agent_runtime::PendingToolCall::new(
+                "operation",
+                "scene_build",
+                serde_json::json!({}),
+            ));
+        panel.start_new_chat();
+        let second = panel.history.active_index.unwrap();
+        let second_document = raf_core::session::SessionId::new();
+        panel.bind_document(second_document, "World B");
+        panel.input_text = "draft in B".into();
+        assert!(panel.session_is_running(first));
+        panel.select_session(first);
+        assert_eq!(panel.document_id(), Some(first_document));
+        assert_eq!(panel.runtime.status, AgentStatus::ExecutingTools);
+        assert_eq!(panel.runtime.pending_calls[0].id, "operation");
+        panel.select_session(second);
+        let mut visited = Vec::new();
+        panel.visit_runs(|run| visited.push(run.document_id().unwrap()));
+        assert!(visited.contains(&first_document));
+        assert!(visited.contains(&second_document));
+        assert_eq!(panel.history.active_index, Some(second));
+        assert_eq!(panel.input_text, "draft in B");
+        assert_eq!(panel.document_id(), Some(second_document));
+    }
 
     #[test]
     fn new_panel_starts_with_a_collapsible_chat_rail() {

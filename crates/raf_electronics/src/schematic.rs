@@ -51,13 +51,7 @@ impl Schematic {
     pub fn add_component(&mut self, mut component: ElectronicComponent) -> Uuid {
         let id = component.id;
         // Auto-assign designator number.
-        let prefix = component.designator.replace('?', "");
-        let count = self
-            .components
-            .iter()
-            .filter(|c| c.designator.starts_with(&prefix))
-            .count();
-        component.designator = format!("{}{}", prefix, count + 1);
+        component.designator = self.next_designator(&component.designator);
         self.components.push(component);
         id
     }
@@ -241,17 +235,7 @@ impl Schematic {
             // Offset so it does not overlap.
             dup.position += Vec2::new(40.0, 20.0);
             // Re-assign designator.
-            let prefix = dup
-                .designator
-                .chars()
-                .take_while(|c| c.is_alphabetic())
-                .collect::<String>();
-            let count = self
-                .components
-                .iter()
-                .filter(|c| c.designator.starts_with(&prefix))
-                .count();
-            dup.designator = format!("{}{}", prefix, count + 1);
+            dup.designator = self.next_designator(&dup.designator);
             // Give pins new IDs.
             for pin in &mut dup.pins {
                 pin.id = Uuid::new_v4();
@@ -262,6 +246,21 @@ impl Schematic {
         } else {
             None
         }
+    }
+
+    /// Allocate the first unused reference within this component family.
+    fn next_designator(&self, template: &str) -> String {
+        let prefix: String = template.chars().take_while(|c| c.is_alphabetic()).collect();
+        let prefix = if prefix.is_empty() { "U" } else { &prefix };
+        let used: std::collections::HashSet<_> = self
+            .components
+            .iter()
+            .map(|component| component.designator.as_str())
+            .collect();
+        (1..)
+            .map(|number| format!("{prefix}{number}"))
+            .find(|candidate| !used.contains(candidate.as_str()))
+            .expect("a free designator")
     }
 
     /// Run a full electrical / design rule check.

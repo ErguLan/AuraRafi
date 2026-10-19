@@ -19,9 +19,9 @@ use raf_render::api_graphic_basic::EditorUiLayer;
 
 const CLEAR: [u8; 4] = [8, 11, 15, 255];
 const LOADING_MESSAGES: [&str; 3] = [
-    "Even the IDE we used to build this engine is heavier than the engine itself.",
-    "Work in progress.",
-    "World and UI design matter just as much as gameplay.",
+    "agent_workspace.loading_tip_1",
+    "agent_workspace.loading_tip_2",
+    "agent_workspace.loading_tip_3",
 ];
 
 pub struct LoadingSurfaceHost {
@@ -50,7 +50,7 @@ impl LoadingSurfaceHost {
             palette,
             0.0,
             Language::English,
-            loading_message,
+            &t(loading_message, Language::English),
             &t("app.loading_workspace", Language::English),
             "0%",
         );
@@ -85,7 +85,7 @@ impl LoadingSurfaceHost {
             palette,
             progress,
             language,
-            self.loading_message,
+            &t(self.loading_message, language),
             &t("app.loading_workspace", language),
             &format!("{:.0}%", progress.clamp(0.0, 1.0) * 100.0),
         ));

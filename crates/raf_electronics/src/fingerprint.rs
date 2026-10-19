@@ -127,6 +127,18 @@ pub fn pcb_fingerprint(layout: &PcbLayout) -> u64 {
     for trace in &layout.traces {
         write_pcb_trace(&mut hasher, trace);
     }
+    hasher.write_usize(layout.removed_traces.len());
+    for trace in &layout.removed_traces {
+        write_pcb_trace(&mut hasher, trace);
+    }
+    hasher.write_usize(layout.net_pins.len());
+    for (name, pins) in &layout.net_pins {
+        hasher.write_str(name);
+        hasher.write_usize(pins.len());
+        for &pin in pins {
+            hasher.write_uuid(pin);
+        }
+    }
     hasher.write_usize(layout.airwires.len());
     for airwire in &layout.airwires {
         write_pcb_airwire(&mut hasher, airwire);

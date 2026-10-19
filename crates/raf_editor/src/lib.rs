@@ -9,6 +9,10 @@
 
 pub(crate) mod agent_artifacts;
 mod agent_asset_tools;
+mod agent_project_store;
+mod agent_service;
+mod agent_workspace_surface;
+mod agent_workspace_surface_host;
 pub mod agent_context;
 pub mod agent_executor;
 pub mod application_bar_host;

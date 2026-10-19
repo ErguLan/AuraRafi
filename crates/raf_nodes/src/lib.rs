@@ -12,6 +12,7 @@ pub mod behavior_nodes;
 pub mod catalog;
 pub mod compiler;
 pub mod entity_nodes;
+pub mod environment_nodes;
 pub mod executor;
 pub mod flow_nodes;
 pub mod graph;

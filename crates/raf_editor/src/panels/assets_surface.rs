@@ -187,11 +187,12 @@ pub enum AssetsIntent {
 /// Virtual assets that are always available in a Game project. They are
 /// authoring shortcuts, not files on disk; opening or dropping one still
 /// executes the real scene-creation path in the application boundary.
-pub const BUILTIN_ASSET_ROWS: [&str; 4] = [
+pub const BUILTIN_ASSET_ROWS: [&str; 5] = [
     "builtin://primitive/cube",
     "builtin://primitive/sphere",
     "builtin://primitive/cylinder",
     "builtin://primitive/plane",
+    "builtin://camera",
 ];
 
 pub fn asset_rows_with_builtins(asset_rows: &[String]) -> Vec<String> {
@@ -1310,7 +1311,7 @@ fn selection_action_bar(palette: StudioUiPalette, row: &str, highlight: Option<&
 /// Extension chip for scripts and the parent folder for everything else.
 /// Built-in rows have no file, so they get no secondary line at all.
 fn asset_meta(row: &str) -> (Option<String>, Option<String>) {
-    if row.starts_with("builtin://primitive/") {
+    if is_builtin_row(row) {
         return (None, None);
     }
     let extension = Path::new(row)
@@ -1352,6 +1353,9 @@ fn extension_label(extension: &str) -> String {
 }
 
 pub fn asset_file_name(row: &str) -> String {
+    if row == "builtin://camera" {
+        return "Camera".into();
+    }
     if let Some(slug) = row.strip_prefix("builtin://primitive/") {
         return crate::panels::primitive_create::parse_primitive_slug(slug)
             .map(|primitive| primitive_name(primitive).to_string())
@@ -1365,6 +1369,9 @@ pub fn asset_file_name(row: &str) -> String {
 }
 
 pub fn asset_display_name(row: &str) -> String {
+    if row == "builtin://camera" {
+        return "Built-in / Camera".into();
+    }
     row.strip_prefix("builtin://primitive/")
         .and_then(crate::panels::primitive_create::parse_primitive_slug)
         .map(|primitive| format!("Built-in / {}", primitive_name(primitive)))
@@ -2719,6 +2726,9 @@ fn asset_matches(row: &str, query: &str, filter: AssetFilter) -> bool {
 }
 
 fn asset_icon(name: &str) -> UiIconId {
+    if name == "builtin://camera" {
+        return UiIconId::Camera;
+    }
     if let Some(slug) = name.strip_prefix("builtin://primitive/") {
         return match crate::panels::primitive_create::parse_primitive_slug(slug) {
             Some(raf_core::scene::Primitive::Cube) => UiIconId::Cube,
@@ -2790,6 +2800,9 @@ mod tests {
         assert_eq!(rows.len(), BUILTIN_ASSET_ROWS.len() + 1);
         assert_eq!(asset_display_name(&rows[0]), "Built-in / Cube");
         assert_eq!(asset_icon(&rows[1]), UiIconId::Sphere);
+        assert!(rows.iter().any(|r| r == "builtin://camera"));
+        assert_eq!(asset_icon("builtin://camera"), UiIconId::Camera);
+        assert_eq!(asset_meta("builtin://camera"), (None, None));
         assert_eq!(rows.last().map(String::as_str), Some("models/tree.glb"));
     }
 

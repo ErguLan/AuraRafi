@@ -12,9 +12,8 @@ use std::path::{Path, PathBuf};
 /// flushed and then renamed over the destination so a crash mid-write can never
 /// leave a truncated document behind.
 ///
-/// The parent directory is created when missing. On Windows `fs::rename` refuses
-/// to replace an existing file, so the destination is removed only after the
-/// direct rename failed, and the rename is retried once.
+/// The parent directory is created when missing. Each writer owns a unique
+/// temporary file. A failed replacement always preserves the old destination.
 pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -23,13 +22,17 @@ pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     }
 
     let temporary = temporary_path(path);
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
     let write_result = (|| -> std::io::Result<()> {
-        let mut file = fs::File::create(&temporary)?;
         file.write_all(contents.as_bytes())?;
         file.flush()?;
         file.sync_all()?;
         Ok(())
     })();
+    drop(file);
 
     if let Err(error) = write_result {
         let _ = fs::remove_file(&temporary);
@@ -39,16 +42,8 @@ pub fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     match fs::rename(&temporary, path) {
         Ok(()) => Ok(()),
         Err(rename_error) => {
-            // Windows cannot rename over an existing destination. Only now that
-            // the direct rename is known to fail is the previous file replaced.
-            let retry = fs::remove_file(path).and_then(|()| fs::rename(&temporary, path));
-            match retry {
-                Ok(()) => Ok(()),
-                Err(_) => {
-                    let _ = fs::remove_file(&temporary);
-                    Err(rename_error)
-                }
-            }
+            let _ = fs::remove_file(&temporary);
+            Err(rename_error)
         }
     }
 }
@@ -60,7 +55,7 @@ fn temporary_path(path: &Path) -> PathBuf {
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_else(|| "document".to_string());
-    name.push_str(".tmp");
+    name.push_str(&format!(".{}.tmp", uuid::Uuid::new_v4()));
     path.with_file_name(name)
 }
 
@@ -103,5 +98,38 @@ mod tests {
         );
 
         fs::remove_dir_all(&root).expect("scratch cleanup");
+    }
+
+    #[test]
+    fn concurrent_writers_never_share_or_delete_a_temporary_file() {
+        let root = scratch_dir();
+        let path = root.join("shared.ron");
+        write_atomic(&path, "original").unwrap();
+        let writers: Vec<_> = (0..8)
+            .map(|i| {
+                let path = path.clone();
+                std::thread::spawn(move || {
+                    let contents = i.to_string().repeat(65536);
+                    write_atomic(&path, &contents).unwrap();
+                    contents
+                })
+            })
+            .collect();
+        let complete: Vec<_> = writers.into_iter().map(|t| t.join().unwrap()).collect();
+        assert!(complete.contains(&fs::read_to_string(path).unwrap()));
+        assert!(leftover_temp_files(&root).is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_replacement_keeps_destination_and_cleans_own_temporary_file() {
+        let root = scratch_dir();
+        let path = root.join("existing-directory");
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("keep"), "original").unwrap();
+        assert!(write_atomic(&path, "replacement").is_err());
+        assert_eq!(fs::read_to_string(path.join("keep")).unwrap(), "original");
+        assert!(leftover_temp_files(&root).is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
 }

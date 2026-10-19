@@ -113,6 +113,7 @@ pub struct NativeGameViewportController {
     pub solid_show_surface_edges: bool,
     pub solid_xray_mode: bool,
     pub solid_face_tonality: bool,
+    pub lighting_preview_neutral: bool,
     pub invert_mouse_x: bool,
     pub invert_mouse_y: bool,
     pub invert_ws: bool,
@@ -165,6 +166,7 @@ impl Default for NativeGameViewportController {
             solid_show_surface_edges: false,
             solid_xray_mode: false,
             solid_face_tonality: true,
+            lighting_preview_neutral: false,
             invert_mouse_x: false,
             invert_mouse_y: true,
             invert_ws: false,
@@ -1245,6 +1247,9 @@ impl NativeGameViewportController {
             && self.gesture_active()
             && self.mode == NativeViewportMode::View3d;
         RenderOptions {
+            environment_override: self
+                .lighting_preview_neutral
+                .then_some(raf_core::environment::EnvironmentSettings::default()),
             show_grid_3d: (self.grid_visible || organized_gesture_grid)
                 && self.mode == NativeViewportMode::View3d,
             grid_spacing: self.grid_spacing,

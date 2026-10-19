@@ -1,4 +1,4 @@
-//! DC circuit simulation engine using Modified Nodal Analysis (MNA).
+//! DC circuit simulation using nodal analysis and Norton source equivalents.
 //!
 //! Pure Rust, no external dependencies. Solves `Gv = i` using
 //! Gaussian elimination for resistive DC circuits with LEDs.
@@ -9,6 +9,7 @@ use crate::component::SimModel;
 use crate::netlist::Netlist;
 use crate::schematic::Schematic;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Results of a DC simulation.
 #[derive(Debug, Clone)]
@@ -18,7 +19,7 @@ pub struct SimulationResults {
     /// Current through each component (component_index -> amps).
     /// Positive = conventional current direction (pin 0 -> pin 1).
     pub component_currents: HashMap<usize, f64>,
-    /// Power dissipated by each component (component_index -> watts).
+    /// Signed power (component_index -> watts): positive absorbed, negative delivered.
     pub component_power: HashMap<usize, f64>,
     /// Whether the simulation converged successfully.
     pub converged: bool,
@@ -40,242 +41,202 @@ impl Default for SimulationResults {
 
 /// Run a DC simulation on a schematic.
 ///
-/// Uses Modified Nodal Analysis (MNA):
+/// Uses nodal analysis with finite source resistance:
 /// 1. Build netlist to identify nodes.
 /// 2. Set up conductance matrix G and current vector I.
 /// 3. Stamp each component into G and I.
 /// 4. Solve Gv = I with Gaussian elimination.
 /// 5. Compute branch currents and power.
 pub fn simulate_dc(schematic: &Schematic) -> SimulationResults {
-    let netlist = Netlist::from_schematic(schematic);
-    let mut results = SimulationResults::default();
+    simulate_dc_cancellable(schematic, &AtomicBool::new(false)).unwrap_or_default()
+}
 
+/// Piecewise-linear LED DC analysis with cooperative cancellation. No partial
+/// results are presented as converged, and the reported branch law is exactly
+/// the one used to assemble the matrix.
+pub fn simulate_dc_cancellable(
+    schematic: &Schematic,
+    cancel: &AtomicBool,
+) -> Option<SimulationResults> {
+    const LED_R: f64 = 100.0;
+    const LED_OFF_G: f64 = 1e-12;
+    const SOURCE_R: f64 = 0.01;
+    let netlist = Netlist::from_schematic_cancellable(schematic, cancel)?;
+    let mut results = SimulationResults::default();
     if netlist.nets.is_empty() || schematic.components.is_empty() {
         results
             .messages
-            .push("Empty circuit - nothing to simulate.".to_string());
-        return results;
+            .push("Empty circuit - nothing to simulate.".into());
+        return Some(results);
     }
-
-    let net_count = netlist.nets.len();
-
-    // We need a ground reference. Use the node with the most connections
-    // to pins marked as Ground, or node 0 as fallback.
-    let ground_node = find_ground_node(schematic, &netlist).unwrap_or(0);
-
-    // MNA matrix dimension: (net_count - 1) since ground is removed.
-    // But if there's only one net, nothing to solve.
-    if net_count <= 1 {
-        results.converged = true;
-        results.messages.push("Single node circuit.".to_string());
-        return results;
-    }
-
-    // Map net IDs to matrix indices (skipping ground).
-    let mut net_to_idx: HashMap<usize, usize> = HashMap::new();
-    let mut idx = 0;
-    for net in &netlist.nets {
-        if net.id == ground_node {
-            continue;
+    for comp in &schematic.components {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
         }
-        net_to_idx.insert(net.id, idx);
-        idx += 1;
-    }
-
-    let dim = net_to_idx.len();
-    if dim == 0 {
-        results.converged = true;
-        return results;
-    }
-
-    // Conductance matrix G and current vector I.
-    let mut g_matrix: Vec<Vec<f64>> = vec![vec![0.0; dim]; dim];
-    let mut i_vector: Vec<f64> = vec![0.0; dim];
-
-    // Stamp each component into the MNA system.
-    for (ci, comp) in schematic.components.iter().enumerate() {
-        // Find net IDs for each pin.
-        let pin_nets: Vec<Option<usize>> = comp
-            .pins
-            .iter()
-            .enumerate()
-            .map(|(pi, _)| netlist.net_for_pin(ci, pi).map(|n| n.id))
-            .collect();
-
-        match &comp.sim_model {
-            SimModel::Resistor { ohms } => {
-                if *ohms <= 0.0 {
-                    continue;
-                }
-                let conductance = 1.0 / ohms;
-                stamp_resistor(
-                    &mut g_matrix,
-                    pin_nets.get(0).copied().flatten(),
-                    pin_nets.get(1).copied().flatten(),
-                    conductance,
-                    ground_node,
-                    &net_to_idx,
-                );
-            }
-            SimModel::Capacitor { .. } => {
-                // DC steady-state: capacitor = open circuit. No stamp.
-            }
+        let valid = match comp.sim_model {
+            SimModel::Resistor { ohms } => ohms.is_finite() && ohms > 0.0,
+            SimModel::Capacitor { farads } => farads.is_finite() && farads >= 0.0,
             SimModel::Led { forward_voltage } => {
-                // Model LED as a voltage source in series with small resistance.
-                // Simplified: treat as resistor with voltage drop.
-                // In DC, LED conducts if voltage across > Vf.
-                // Approximate with small resistance (100 ohms) when forward biased.
-                let led_resistance = 100.0;
-                let conductance = 1.0 / led_resistance;
-                stamp_resistor(
-                    &mut g_matrix,
-                    pin_nets.get(0).copied().flatten(),
-                    pin_nets.get(1).copied().flatten(),
-                    conductance,
-                    ground_node,
-                    &net_to_idx,
-                );
-                // Stamp the forward voltage as a current source.
-                let i_led = *forward_voltage / led_resistance;
-                stamp_current_source(
-                    &mut i_vector,
-                    pin_nets.get(0).copied().flatten(),
-                    pin_nets.get(1).copied().flatten(),
-                    i_led,
-                    ground_node,
-                    &net_to_idx,
-                );
+                forward_voltage.is_finite() && forward_voltage >= 0.0
             }
-            SimModel::Wire => {
-                // Wire = very low resistance (0.001 ohm).
-                let conductance = 1000.0;
-                stamp_resistor(
-                    &mut g_matrix,
-                    pin_nets.get(0).copied().flatten(),
-                    pin_nets.get(1).copied().flatten(),
-                    conductance,
-                    ground_node,
-                    &net_to_idx,
-                );
-            }
-            SimModel::DcSource { voltage } => {
-                // Model as a voltage source with very small internal resistance (0.01 ohms)
-                // Norton equivalent: I = V / R, parallel with R
-                let r_internal = 0.01;
-                let conductance = 1.0 / r_internal;
-                stamp_resistor(
-                    &mut g_matrix,
-                    pin_nets.get(0).copied().flatten(),
-                    pin_nets.get(1).copied().flatten(),
-                    conductance,
-                    ground_node,
-                    &net_to_idx,
-                );
-                let i_src = *voltage / r_internal;
-                stamp_current_source(
-                    &mut i_vector,
-                    pin_nets.get(0).copied().flatten(),
-                    pin_nets.get(1).copied().flatten(),
-                    i_src,
-                    ground_node,
-                    &net_to_idx,
-                );
-            }
-            SimModel::Magnet { .. } => {
-                // Magnets are passive - no electrical stamp in DC.
-            }
-        }
-    }
-
-    // Solve Gv = I using Gaussian elimination with partial pivoting.
-    let voltages = gaussian_solve(&mut g_matrix, &mut i_vector);
-
-    match voltages {
-        Some(v) => {
-            results.converged = true;
-
-            // Map voltages back to net IDs.
-            results.node_voltages.insert(ground_node, 0.0);
-            for (net_id, idx) in &net_to_idx {
-                results.node_voltages.insert(*net_id, v[*idx]);
-            }
-
-            // Compute branch currents and power.
-            for (ci, comp) in schematic.components.iter().enumerate() {
-                let pin_nets: Vec<Option<usize>> = comp
-                    .pins
-                    .iter()
-                    .enumerate()
-                    .map(|(pi, _)| netlist.net_for_pin(ci, pi).map(|n| n.id))
-                    .collect();
-
-                let v0 = pin_nets
-                    .get(0)
-                    .copied()
-                    .flatten()
-                    .and_then(|n| results.node_voltages.get(&n))
-                    .copied()
-                    .unwrap_or(0.0);
-                let v1 = pin_nets
-                    .get(1)
-                    .copied()
-                    .flatten()
-                    .and_then(|n| results.node_voltages.get(&n))
-                    .copied()
-                    .unwrap_or(0.0);
-
-                let (current, power) = match &comp.sim_model {
-                    SimModel::Resistor { ohms } => {
-                        if *ohms > 0.0 {
-                            let i = (v0 - v1) / ohms;
-                            let p = i * i * ohms;
-                            (i, p)
-                        } else {
-                            (0.0, 0.0)
-                        }
-                    }
-                    SimModel::Led { forward_voltage } => {
-                        let led_r = 100.0;
-                        let vdrop = v0 - v1;
-                        let i = if vdrop > *forward_voltage {
-                            (vdrop - forward_voltage) / led_r
-                        } else {
-                            0.0
-                        };
-                        let p = i * vdrop;
-                        (i, p)
-                    }
-                    SimModel::Capacitor { .. } => (0.0, 0.0),
-                    SimModel::Wire => {
-                        let i = (v0 - v1) * 1000.0;
-                        (i, 0.0)
-                    }
-                    SimModel::DcSource { voltage } => {
-                        let r_internal = 0.01;
-                        let i = (*voltage - (v0 - v1)) / r_internal; // Current delivered by source
-                        let p = i * (v0 - v1); // Power delivered
-                        (i, p)
-                    }
-                    SimModel::Magnet { .. } => (0.0, 0.0),
-                };
-
-                results.component_currents.insert(ci, current);
-                results.component_power.insert(ci, power);
-            }
-
+            SimModel::DcSource { voltage } => voltage.is_finite(),
+            _ => true,
+        };
+        if !valid {
             results
                 .messages
-                .push("DC simulation completed successfully.".to_string());
+                .push(format!("Invalid simulation value on {}", comp.designator));
+            return Some(results);
         }
-        None => {
-            results.converged = false;
-            results.messages.push(
-                "Simulation failed: singular matrix (check circuit connectivity).".to_string(),
-            );
+        if matches!(comp.sim_model, SimModel::Magnet { .. }) {
+            results.messages.push(format!(
+                "{}: magnetic induction is not simulated by this DC solver.",
+                comp.designator
+            ));
         }
     }
-
-    results
+    let ground_node = find_ground_node(schematic, &netlist).unwrap_or(0);
+    if find_ground_node(schematic, &netlist).is_none() {
+        results.messages.push(format!(
+            "No explicit ground; using '{}' as voltage reference.",
+            netlist.nets[ground_node].name
+        ));
+    }
+    let pin_nets: Vec<Vec<Option<usize>>> = schematic
+        .components
+        .iter()
+        .enumerate()
+        .map(|(ci, comp)| {
+            comp.pins
+                .iter()
+                .enumerate()
+                .map(|(pi, _)| netlist.net_for_pin(ci, pi).map(|n| n.id))
+                .collect()
+        })
+        .collect();
+    for (ci, comp) in schematic.components.iter().enumerate() {
+        if matches!(comp.sim_model, SimModel::DcSource { voltage } if voltage.abs() > 1e-12)
+            && pin_nets[ci].first() == pin_nets[ci].get(1)
+        {
+            results.messages.push(format!(
+                "Voltage source {} has shorted terminals.",
+                comp.designator
+            ));
+            return Some(results);
+        }
+    }
+    let net_to_idx: HashMap<usize, usize> = netlist
+        .nets
+        .iter()
+        .filter(|net| net.id != ground_node)
+        .enumerate()
+        .map(|(idx, net)| (net.id, idx))
+        .collect();
+    let dim = net_to_idx.len();
+    // Keep the existing dense solver bounded instead of allocating gigabytes
+    // for a document it cannot solve interactively. Cancellation remains live.
+    if dim > 4096 {
+        results
+            .messages
+            .push("DC analysis exceeds the dense solver limit of 4096 nodes.".into());
+        return Some(results);
+    }
+    let mut active_leds = vec![false; schematic.components.len()];
+    let mut solved = None;
+    for _ in 0..64 {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let mut matrix = vec![vec![0.0; dim]; dim];
+        let mut rhs = vec![0.0; dim];
+        for (ci, comp) in schematic.components.iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            let a = pin_nets[ci].first().copied().flatten();
+            let b = pin_nets[ci].get(1).copied().flatten();
+            let (conductance, injection) = match comp.sim_model {
+                SimModel::Resistor { ohms } => (1.0 / ohms, 0.0),
+                SimModel::Wire if comp.pins.len() >= 2 => (1000.0, 0.0),
+                SimModel::DcSource { voltage } => (1.0 / SOURCE_R, voltage / SOURCE_R),
+                SimModel::Led { forward_voltage } if active_leds[ci] => {
+                    (LED_OFF_G + 1.0 / LED_R, forward_voltage / LED_R)
+                }
+                SimModel::Led { .. } => (LED_OFF_G, 0.0),
+                _ => continue,
+            };
+            stamp_resistor(&mut matrix, a, b, conductance, ground_node, &net_to_idx);
+            stamp_current_source(&mut rhs, a, b, injection, ground_node, &net_to_idx);
+        }
+        let Some(voltages) = gaussian_solve_cancellable(&mut matrix, &mut rhs, cancel) else {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            results.messages.push("Simulation failed: singular or non-finite matrix (check floating circuit islands).".into());
+            return Some(results);
+        };
+        let voltage = |net: Option<usize>| {
+            net.and_then(|id| net_to_idx.get(&id))
+                .map(|&idx| voltages[idx])
+                .unwrap_or(0.0)
+        };
+        let mut changed = false;
+        for (ci, comp) in schematic.components.iter().enumerate() {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
+            if let SimModel::Led { forward_voltage } = comp.sim_model {
+                let drop = voltage(pin_nets[ci].first().copied().flatten())
+                    - voltage(pin_nets[ci].get(1).copied().flatten());
+                let active = drop > forward_voltage;
+                changed |= active != active_leds[ci];
+                active_leds[ci] = active;
+            }
+        }
+        if !changed {
+            solved = Some(voltages);
+            break;
+        }
+    }
+    let Some(voltages) = solved else {
+        results
+            .messages
+            .push("LED DC analysis did not converge within 64 iterations.".into());
+        return Some(results);
+    };
+    results.node_voltages.insert(ground_node, 0.0);
+    for (&net, &idx) in &net_to_idx {
+        results.node_voltages.insert(net, voltages[idx]);
+    }
+    for (ci, comp) in schematic.components.iter().enumerate() {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let voltage = |index| {
+            pin_nets[ci]
+                .get(index)
+                .copied()
+                .flatten()
+                .and_then(|id| results.node_voltages.get(&id))
+                .copied()
+                .unwrap_or(0.0)
+        };
+        let drop = voltage(0) - voltage(1);
+        let current = match comp.sim_model {
+            SimModel::Resistor { ohms } => drop / ohms,
+            SimModel::Led { forward_voltage } => {
+                LED_OFF_G * drop + (drop - forward_voltage).max(0.0) / LED_R
+            }
+            SimModel::Wire if comp.pins.len() >= 2 => drop * 1000.0,
+            SimModel::DcSource { voltage } => (drop - voltage) / SOURCE_R,
+            _ => 0.0,
+        };
+        results.component_currents.insert(ci, current);
+        results.component_power.insert(ci, current * drop);
+    }
+    results.converged = true;
+    results.messages.push("DC simulation completed successfully. LEDs use a piecewise-linear 100 ohm forward model; sources have 0.01 ohm internal resistance.".into());
+    Some(results)
 }
 
 /// Find the ground reference node from GND-direction pins.
@@ -364,7 +325,16 @@ fn stamp_current_source(
 
 /// Solve Ax = b using Gaussian elimination with partial pivoting.
 /// Returns None if matrix is singular.
+#[cfg(test)]
 fn gaussian_solve(a: &mut Vec<Vec<f64>>, b: &mut Vec<f64>) -> Option<Vec<f64>> {
+    gaussian_solve_cancellable(a, b, &AtomicBool::new(false))
+}
+
+fn gaussian_solve_cancellable(
+    a: &mut Vec<Vec<f64>>,
+    b: &mut Vec<f64>,
+    cancel: &AtomicBool,
+) -> Option<Vec<f64>> {
     let n = b.len();
     if n == 0 {
         return Some(Vec::new());
@@ -372,6 +342,9 @@ fn gaussian_solve(a: &mut Vec<Vec<f64>>, b: &mut Vec<f64>) -> Option<Vec<f64>> {
 
     // Forward elimination with partial pivoting.
     for col in 0..n {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         // Find pivot.
         let mut max_row = col;
         let mut max_val = a[col][col].abs();
@@ -383,7 +356,7 @@ fn gaussian_solve(a: &mut Vec<Vec<f64>>, b: &mut Vec<f64>) -> Option<Vec<f64>> {
             }
         }
 
-        if max_val < 1e-15 {
+        if !max_val.is_finite() || max_val < 1e-15 {
             return None; // Singular matrix.
         }
 
@@ -396,6 +369,9 @@ fn gaussian_solve(a: &mut Vec<Vec<f64>>, b: &mut Vec<f64>) -> Option<Vec<f64>> {
         // Eliminate below.
         let pivot = a[col][col];
         for row in (col + 1)..n {
+            if cancel.load(Ordering::Relaxed) {
+                return None;
+            }
             let factor = a[row][col] / pivot;
             for j in col..n {
                 a[row][j] -= factor * a[col][j];
@@ -407,6 +383,9 @@ fn gaussian_solve(a: &mut Vec<Vec<f64>>, b: &mut Vec<f64>) -> Option<Vec<f64>> {
     // Back substitution.
     let mut x = vec![0.0; n];
     for i in (0..n).rev() {
+        if cancel.load(Ordering::Relaxed) {
+            return None;
+        }
         let mut sum = b[i];
         for j in (i + 1)..n {
             sum -= a[i][j] * x[j];
@@ -415,6 +394,9 @@ fn gaussian_solve(a: &mut Vec<Vec<f64>>, b: &mut Vec<f64>) -> Option<Vec<f64>> {
             return None;
         }
         x[i] = sum / a[i][i];
+        if !x[i].is_finite() {
+            return None;
+        }
     }
 
     Some(x)

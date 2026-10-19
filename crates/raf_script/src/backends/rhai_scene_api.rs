@@ -185,36 +185,7 @@ pub(super) fn register(engine: &mut Engine) {
          sharpness: f64,
          dt: f64|
          -> RhaiResult<()> {
-            with_ctx(|ctx| {
-                if !sharpness.is_finite()
-                    || sharpness < 0.0
-                    || !dt.is_finite()
-                    || dt < 0.0
-                    || dt > 1.0
-                {
-                    return Err(ScriptError::InvalidArgument(
-                        "Follow requires sharpness >= 0 and dt in 0..1".into(),
-                    ));
-                }
-                let point = Vec3::from_array(target.get_position(ctx)?);
-                let desired = point + vector(offset)?;
-                let aim = point + vector(aim)?;
-                let current = Vec3::from_array(h.get_position(ctx)?);
-                let alpha = if sharpness == 0.0 {
-                    1.0
-                } else {
-                    (1.0 - (-sharpness * dt).exp()) as f32
-                };
-                let position = current.lerp(desired, alpha);
-                // Validate orientation before changing position; no half-applied pose.
-                if (aim - position).length_squared() < 1e-8
-                    || (aim - position).cross(Vec3::Y).length_squared() < 1e-8
-                {
-                    return Err(ScriptError::InvalidArgument("Invalid follow aim".into()));
-                }
-                h.look_at(ctx, aim - (position - current), Vec3::Y)?;
-                h.set_position(ctx, position.x, position.y, position.z)
-            })
+            with_ctx(|ctx| h.follow(ctx, target, vector(offset)?, vector(aim)?, sharpness, dt))
         },
     );
     engine.register_fn("get_local_position", |h: NodeHandle| -> RhaiResult<Array> {

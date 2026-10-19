@@ -32,7 +32,6 @@ use crate::commands::{
     script::{self, ScriptCommandContext},
 };
 use crate::electronics_controller::NativeElectronicsEditor;
-use crate::panels::viewport_controller::NativeGameViewportController;
 use raf_render::bridge::RenderRuntime;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -159,6 +158,7 @@ fn order_contextual_tools(tools: &mut Vec<OpenAiTool>) {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct PromptIntent {
+    lighting: bool,
     authoring: bool,
     scripting: bool,
     pcb: bool,
@@ -175,8 +175,8 @@ pub struct AgentToolExecutor<'a> {
     pub(crate) image_model: String,
     pub scene: &'a mut SceneGraph,
     pub selection: &'a mut SceneSelectionState,
-    pub viewport: &'a mut NativeGameViewportController,
-    pub graphics: &'a mut RenderRuntime,
+    pub viewport: &'a mut dyn GameViewportPort,
+    pub graphics: Option<&'a mut RenderRuntime>,
     pub electronics: Option<&'a mut NativeElectronicsEditor>,
     pub project: Option<AgentProjectContext>,
     pub project_info: Option<&'a Project>,
@@ -206,15 +206,30 @@ impl AgentToolExecutor<'_> {
             ..AgentToolPack::default()
         };
         add_project_read_tools(&mut pack, intent, project_type);
-        if project_type.is_some()
-            && mode != AgentMode::Inspect
-            && intent.assets
-        {
+        if project_type.is_some() && mode != AgentMode::Inspect && intent.assets {
             add_asset_generation_tools(&mut pack);
         }
 
         match project_type {
             Some(ProjectType::Game) => {
+                for &name in if intent.lighting {
+                    &["lighting.inspect", "lighting.set", "lighting.reset"][..]
+                } else {
+                    &[][..]
+                } {
+                    let kind = if name == "lighting.inspect" {
+                        AgentToolKind::Read
+                    } else {
+                        AgentToolKind::Mutation
+                    };
+                    if kind == AgentToolKind::Read
+                        || (mode != AgentMode::Inspect && intent.authoring)
+                    {
+                        if let Some(command) = catalog.find(name) {
+                            pack.push_catalog(command, language, kind);
+                        }
+                    }
+                }
                 if mode != AgentMode::Inspect && intent.authoring {
                     add_game_mutation_tools(&mut pack, intent);
                 }
@@ -379,6 +394,7 @@ impl AgentToolExecutor<'_> {
         if result.ok && kind == AgentToolKind::Mutation {
             let is_game_mutation = command_name.starts_with("game.")
                 || command_name.starts_with("behavior.")
+                || matches!(command_name, "lighting.set" | "lighting.reset")
                 || command_name == "prefab.instantiate";
             let scene_changed =
                 observed_scene_change && is_game_mutation && mode == ToolExecutionMode::Apply;
@@ -482,6 +498,25 @@ fn native_agent_budget() -> ExecutionBudget {
 }
 
 impl ToolExecutor for AgentToolExecutor<'_> {
+    fn revision(&self) -> Option<u64> {
+        Some(self.ledger.revision())
+    }
+    fn preview_for_review(
+        &mut self,
+        id: &str,
+        name: &str,
+        arguments: Value,
+    ) -> Option<AgentToolResult> {
+        let route = self.routes.get(name)?;
+        let command = route.command_name.as_deref()?;
+        // Gateway previews use the existing disposable-document contract.
+        // Queued undo/redo and external provider jobs cannot be previewed here.
+        if matches!(command, "undo" | "redo") {
+            return None;
+        }
+        self.execute(id, name, arguments, ToolExecutionMode::Preview)
+            .ok()
+    }
     fn is_pending(&self, call_id: &str) -> bool {
         self.asset_tools.is_pending(call_id)
     }
@@ -534,18 +569,26 @@ impl ToolExecutor for AgentToolExecutor<'_> {
         }
 
         if name == "viewport_capture" {
+            let Some(graphics) = self.graphics.as_deref_mut() else {
+                let mut result = AgentToolResult::success(
+                    t("agent_workspace.no_viewport", self.language),
+                    serde_json::json!({"available": false, "reason": "viewport_not_mounted"}),
+                );
+                result.ok = false;
+                result.revision = Some(self.ledger.revision());
+                return Ok(result);
+            };
             let refresh_requested = arguments
                 .get("refresh")
                 .and_then(Value::as_bool)
                 .unwrap_or(true);
             if refresh_requested {
-                self.graphics.request_frame(
+                graphics.request_frame(
                     raf_render::api_graphic_basic::FrameInvalidation::DOCUMENT
                         | raf_render::api_graphic_basic::FrameInvalidation::UI,
                 );
             }
-            let mut result =
-                capture_viewport_artifact(self.graphics, self.project_info, self.language);
+            let mut result = capture_viewport_artifact(graphics, self.project_info, self.language);
             result.revision = Some(self.ledger.revision());
             result.data["refresh_requested"] = Value::Bool(refresh_requested);
             result.data["capture_is_last_completed_frame"] = Value::Bool(refresh_requested);
@@ -686,7 +729,7 @@ impl ToolExecutor for AgentToolExecutor<'_> {
 struct AgentParsedExecutor<'a> {
     scene: &'a mut SceneGraph,
     selection: &'a mut SceneSelectionState,
-    viewport: &'a mut NativeGameViewportController,
+    viewport: &'a mut dyn GameViewportPort,
     electronics: Option<&'a mut NativeElectronicsEditor>,
     project: Option<&'a AgentProjectContext>,
     editor_actions: &'a mut Vec<AgentEditorAction>,
@@ -694,6 +737,9 @@ struct AgentParsedExecutor<'a> {
 
 impl AgentParsedExecutor<'_> {
     fn execute_live(&mut self, command: &ParsedCommand) -> CommandOutput {
+        if command.name.starts_with("lighting.") {
+            return crate::commands::lighting::execute(command, self.scene);
+        }
         if command.name.starts_with("game.") {
             let mut context = GameCommandContext {
                 scene: self.scene,
@@ -762,6 +808,9 @@ impl ParsedCommandExecutor for AgentParsedExecutor<'_> {
     }
 
     fn preview_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
+        if command.name.starts_with("lighting.") {
+            return crate::commands::lighting::execute(command, &mut self.scene.clone());
+        }
         if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
             let mut scene = self.scene.clone();
             let assets_root = self.project.map(|project| project.root.join("assets"));
@@ -1571,6 +1620,9 @@ fn response_to_tool_result(
     preview: bool,
     scene_diff: Option<Value>,
 ) -> AgentToolResult {
+    let receipt = serde_json::json!({"transaction_id": response.transaction_id, "undo_token": response.undo_token,
+        "undo_available": response.undo_available, "artifacts": response.artifacts, "metrics": response.metrics,
+        "revision": response.revision});
     let references = collect_references(&response.data);
     let details = compact_response_lines(&response.lines);
     let summary = if details.is_empty() {
@@ -1578,21 +1630,26 @@ fn response_to_tool_result(
     } else {
         format!("{}: {}", response.title, details[0])
     };
-    AgentToolResult {
+    let mut result = AgentToolResult {
         ok: response.ok,
         summary,
         data: compact_command_data(response.data),
         references,
         changed: response.changed,
         revision: Some(response.revision),
-        diff: response.diff.or(scene_diff),
+        diff: scene_diff.or(response.diff),
         verification: response
             .verification
             .and_then(|verification| serde_json::to_value(verification).ok()),
         warnings: response.warnings,
         details,
         preview,
+    };
+    if !result.data.is_object() {
+        result.data = serde_json::json!({"value": result.data});
     }
+    result.data["receipt"] = receipt;
+    result
 }
 
 fn compact_response_lines(lines: &[String]) -> Vec<String> {
@@ -2412,7 +2469,27 @@ fn classify_prompt(prompt: &str) -> PromptIntent {
     let prompt = prompt.to_lowercase();
     let contains_any = |terms: &[&str]| terms.iter().any(|term| prompt.contains(term));
     PromptIntent {
+        lighting: contains_any(&[
+            "lighting",
+            "sun",
+            "sky",
+            "iluminación",
+            "iluminacion",
+            "cielo",
+            "luz",
+            "sol ",
+            "sombras",
+            "shadow",
+        ]),
         authoring: contains_any(&[
+            "ajusta",
+            "mejora",
+            "aumenta",
+            "reduce",
+            "adjust",
+            "set ",
+            "increase",
+            "decrease",
             "crea",
             "crear",
             "constru",
@@ -2661,6 +2738,16 @@ fn command_to_openai_tool(
             }
             _ => string_schema(&description),
         };
+        if command.name == "lighting.set" && parameter.name == "value" {
+            schema = serde_json::json!({"description":description,"anyOf":[
+                {"type":"number"},{"type":"boolean"},{"type":"string","maxLength":32},
+                {"type":"array","items":{"type":"integer","minimum":0,"maximum":255},"minItems":3,"maxItems":3}
+            ]});
+        }
+        if command.name == "lighting.set" && parameter.name == "patch" {
+            schema =
+                serde_json::json!({"type":"object","description":description,"maxProperties":20});
+        }
         if let Some(default) = &parameter.default {
             schema["default"] = parse_default(default, &parameter.kind);
         }
@@ -3141,15 +3228,37 @@ mod tests {
     #[test]
     fn image_intent_exposes_real_generation_choices_without_separate_model_roles() {
         let catalog = CommandCatalog::builtin();
-        let active = AgentToolExecutor::build_tool_pack(&catalog, Language::English,
-            Some(ProjectType::Game), AgentMode::Active, "Genera una imagen en el estudio externo");
-        for name in ["asset_generate_local_png", "asset_generate_image", "external_studio_install", "external_studio_generate"] {
-            assert!(active.tools.iter().any(|tool| tool.function.name == name), "missing {name}");
+        let active = AgentToolExecutor::build_tool_pack(
+            &catalog,
+            Language::English,
+            Some(ProjectType::Game),
+            AgentMode::Active,
+            "Genera una imagen en el estudio externo",
+        );
+        for name in [
+            "asset_generate_local_png",
+            "asset_generate_image",
+            "external_studio_install",
+            "external_studio_generate",
+        ] {
+            assert!(
+                active.tools.iter().any(|tool| tool.function.name == name),
+                "missing {name}"
+            );
         }
         assert!(active.tools.len() <= 26);
-        let inspect = AgentToolExecutor::build_tool_pack(&catalog, Language::English,
-            Some(ProjectType::Game), AgentMode::Inspect, "Genera una imagen en el estudio externo");
-        assert!(!inspect.tools.iter().any(|tool| tool.function.name.starts_with("asset_generate") || tool.function.name.starts_with("external_studio")));
+        let inspect = AgentToolExecutor::build_tool_pack(
+            &catalog,
+            Language::English,
+            Some(ProjectType::Game),
+            AgentMode::Inspect,
+            "Genera una imagen en el estudio externo",
+        );
+        assert!(!inspect
+            .tools
+            .iter()
+            .any(|tool| tool.function.name.starts_with("asset_generate")
+                || tool.function.name.starts_with("external_studio")));
     }
 
     #[test]

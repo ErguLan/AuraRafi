@@ -122,11 +122,26 @@ impl AgentToolResult {
 
 /// Executor for tools invoked by the agent.
 pub trait ToolExecutor {
+    fn revision(&self) -> Option<u64> {
+        None
+    }
+    fn preview_for_review(
+        &mut self,
+        _id: &str,
+        _name: &str,
+        _arguments: Value,
+    ) -> Option<AgentToolResult> {
+        None
+    }
     /// An asynchronous tool has started, but has not produced its final result.
-    fn is_pending(&self, _call_id: &str) -> bool { false }
+    fn is_pending(&self, _call_id: &str) -> bool {
+        false
+    }
 
     /// Poll existing work without re-executing the tool or issuing another request.
-    fn poll_pending(&mut self, _call_id: &str) -> Option<Result<AgentToolResult, String>> { None }
+    fn poll_pending(&mut self, _call_id: &str) -> Option<Result<AgentToolResult, String>> {
+        None
+    }
 
     fn kind(&self, _name: &str) -> AgentToolKind {
         AgentToolKind::Mutation
@@ -156,6 +171,8 @@ pub struct PendingToolCall {
     pub argument_error: Option<String>,
     pub approved: Option<bool>,
     pub result: Option<String>,
+    pub expected_revision: Option<u64>,
+    pub review_preview: Option<AgentToolResult>,
 }
 
 impl PendingToolCall {
@@ -167,6 +184,8 @@ impl PendingToolCall {
             argument_error: None,
             approved: None,
             result: None,
+            expected_revision: None,
+            review_preview: None,
         }
     }
 }
@@ -272,6 +291,7 @@ pub struct AgentRuntime {
     task_manager: AgentTaskManager,
     task_id: Option<AgentTaskId>,
     task_event_cursor: u64,
+    review_mutations: bool,
 }
 
 impl AgentRuntime {
@@ -301,6 +321,7 @@ impl AgentRuntime {
             task_manager: AgentTaskManager::new(),
             task_id: None,
             task_event_cursor: 0,
+            review_mutations: false,
         }
     }
 
@@ -704,6 +725,25 @@ impl AgentRuntime {
         self.sync_task_events();
     }
 
+    pub fn set_review_mutations(&mut self, required: bool) {
+        self.review_mutations = required;
+    }
+
+    /// Resume the retained operation queue after one scoped decision.
+    pub fn decide_call(&mut self, id: &str, approved: bool) {
+        if let Some(call) = self
+            .pending_calls
+            .iter_mut()
+            .find(|call| call.id == id && call.result.is_none())
+        {
+            call.approved = Some(approved);
+            if self.status == AgentStatus::AwaitingApproval {
+                self.status = AgentStatus::ExecutingTools;
+                self.emit(AgentEvent::StatusChanged(AgentStatus::ExecutingTools, None));
+            }
+        }
+    }
+
     fn append_stream_delta(&mut self, delta: &str) {
         if delta.is_empty() {
             return;
@@ -788,6 +828,34 @@ impl AgentRuntime {
             .as_ref()
             .map(|pending| pending.execution_mode)
             .unwrap_or(ToolExecutionMode::Inspect);
+        if self.review_mutations && execution_mode == ToolExecutionMode::Apply {
+            if self
+                .pending_calls
+                .iter()
+                .find(|call| call.result.is_none())
+                .is_some_and(|call| {
+                    call.argument_error.is_none()
+                        && call.approved.is_none()
+                        && executor.kind(&call.name) == AgentToolKind::Mutation
+                })
+            {
+                if let Some(call) = self
+                    .pending_calls
+                    .iter_mut()
+                    .find(|call| call.result.is_none())
+                {
+                    call.expected_revision = executor.revision();
+                    call.review_preview =
+                        executor.preview_for_review(&call.id, &call.name, call.arguments.clone());
+                }
+                self.status = AgentStatus::AwaitingApproval;
+                self.emit(AgentEvent::StatusChanged(
+                    AgentStatus::AwaitingApproval,
+                    None,
+                ));
+                return AgentStatus::AwaitingApproval;
+            }
+        }
         self.last_tool_execution = Some(Instant::now());
         let executed = self
             .pending_calls
@@ -818,6 +886,12 @@ impl AgentRuntime {
                     } else {
                         let output = if executor.is_pending(&call.id) {
                             executor.poll_pending(&call.id)?
+                        } else if call.expected_revision.is_some() && call.expected_revision != executor.revision() {
+                            Ok(AgentToolResult { ok: false,
+                                summary: "The document changed after review. Inspect the current revision before proposing another operation.".into(),
+                                data: serde_json::json!({"error": {"code": "revision_conflict"}, "expected_revision": call.expected_revision, "current_revision": executor.revision()}),
+                                references: Vec::new(), changed: false, revision: executor.revision(), diff: None,
+                                verification: None, warnings: Vec::new(), details: Vec::new(), preview: false })
                         } else {
                             let output = executor.execute(&call.id, &call.name, call.arguments.clone(), execution_mode);
                             if executor.is_pending(&call.id) { return None; }
@@ -1336,6 +1410,65 @@ mod tests {
     }
 
     #[test]
+    fn agent_workspace_scoped_review_rejects_a_stale_revision() {
+        struct ReviewedExecutor {
+            revision: u64,
+            executions: usize,
+        }
+        impl ToolExecutor for ReviewedExecutor {
+            fn revision(&self) -> Option<u64> {
+                Some(self.revision)
+            }
+            fn execute(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: Value,
+                _: ToolExecutionMode,
+            ) -> Result<AgentToolResult, String> {
+                self.executions += 1;
+                self.revision += 1;
+                Ok(AgentToolResult::success("applied", Value::Null))
+            }
+        }
+        let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+        runtime.set_tool_execution_interval(Duration::ZERO);
+        runtime.set_review_mutations(true);
+        runtime.pending_calls = vec![
+            PendingToolCall::new("first", "game_add", serde_json::json!({})),
+            PendingToolCall::new("second", "game_move", serde_json::json!({})),
+        ];
+        runtime.begin_tool_execution(&[], ToolExecutionMode::Apply);
+        let mut executor = ReviewedExecutor {
+            revision: 4,
+            executions: 0,
+        };
+        assert_eq!(
+            runtime.poll(Some(&mut executor)),
+            AgentStatus::AwaitingApproval
+        );
+        assert_eq!(runtime.pending_calls[0].expected_revision, Some(4));
+        assert_eq!(executor.executions, 0);
+        runtime.decide_call("first", true);
+        runtime.poll(Some(&mut executor));
+        assert_eq!(executor.executions, 1);
+        assert_eq!(
+            runtime.poll(Some(&mut executor)),
+            AgentStatus::AwaitingApproval
+        );
+        assert_eq!(runtime.pending_calls[1].expected_revision, Some(5));
+        executor.revision = 6;
+        runtime.decide_call("second", true);
+        runtime.poll(Some(&mut executor));
+        assert_eq!(executor.executions, 1);
+        assert!(runtime.pending_calls[1]
+            .result
+            .as_deref()
+            .unwrap()
+            .contains("revision_conflict"));
+    }
+
+    #[test]
     fn queued_tools_execute_one_call_per_poll() {
         let mut runtime = AgentRuntime::new(OpenAiConfig::default());
         runtime.set_tool_execution_interval(Duration::ZERO);
@@ -1369,25 +1502,49 @@ mod tests {
     #[test]
     fn asynchronous_tool_is_started_once_and_only_completed_results_are_recorded() {
         #[derive(Default)]
-        struct AsyncExecutor { starts: usize, polls: usize, pending: bool }
+        struct AsyncExecutor {
+            starts: usize,
+            polls: usize,
+            pending: bool,
+        }
         impl ToolExecutor for AsyncExecutor {
-            fn is_pending(&self, _: &str) -> bool { self.pending }
-            fn execute(&mut self, _: &str, _: &str, _: Value, _: ToolExecutionMode) -> Result<AgentToolResult, String> {
+            fn is_pending(&self, _: &str) -> bool {
+                self.pending
+            }
+            fn execute(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: Value,
+                _: ToolExecutionMode,
+            ) -> Result<AgentToolResult, String> {
                 self.starts += 1;
                 self.pending = true;
                 Ok(AgentToolResult::success("queued", Value::Null))
             }
             fn poll_pending(&mut self, _: &str) -> Option<Result<AgentToolResult, String>> {
                 self.polls += 1;
-                if self.polls < 2 { return None; }
+                if self.polls < 2 {
+                    return None;
+                }
                 self.pending = false;
-                Some(Ok(AgentToolResult::success("real image ready", serde_json::json!({"image_path":"assets/generated/image.png"}))))
+                Some(Ok(AgentToolResult::success(
+                    "real image ready",
+                    serde_json::json!({"image_path":"assets/generated/image.png"}),
+                )))
             }
         }
         let mut runtime = AgentRuntime::new(OpenAiConfig::default());
         runtime.set_tool_execution_interval(Duration::ZERO);
-        runtime.pending_calls = vec![PendingToolCall::new("image", "asset_generate_image", serde_json::json!({}))];
-        runtime.pending_tool_execution = Some(PendingToolExecution { tools: vec![], execution_mode: ToolExecutionMode::Apply });
+        runtime.pending_calls = vec![PendingToolCall::new(
+            "image",
+            "asset_generate_image",
+            serde_json::json!({}),
+        )];
+        runtime.pending_tool_execution = Some(PendingToolExecution {
+            tools: vec![],
+            execution_mode: ToolExecutionMode::Apply,
+        });
         let mut executor = AsyncExecutor::default();
         runtime.execute_next_tool(Some(&mut executor));
         assert!(runtime.pending_calls[0].result.is_none());
@@ -1397,7 +1554,11 @@ mod tests {
         runtime.execute_next_tool(Some(&mut executor));
         assert_eq!(executor.starts, 1);
         assert_eq!(runtime.tool_calls_executed, 1);
-        assert!(runtime.pending_calls[0].result.as_ref().unwrap().contains("real image ready"));
+        assert!(runtime.pending_calls[0]
+            .result
+            .as_ref()
+            .unwrap()
+            .contains("real image ready"));
     }
 
     #[test]

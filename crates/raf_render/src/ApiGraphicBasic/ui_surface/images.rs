@@ -321,7 +321,15 @@ fn builtin_icon_png(id: UiIconId) -> Option<&'static [u8]> {
         UiIconId::Add => Some(include_bytes!("../../../assets/ui_icons/png/add.png")),
         UiIconId::Close => Some(include_bytes!("../../../assets/ui_icons/png/close.png")),
         UiIconId::Play => Some(include_bytes!("../../../assets/ui_icons/png/play.png")),
-        UiIconId::Pause | UiIconId::StepForward | UiIconId::Camera => None,
+        UiIconId::Pause => Some(include_bytes!("../../../assets/ui_icons/png/pause.png")),
+        UiIconId::StepForward => Some(include_bytes!(
+            "../../../assets/ui_icons/png/step-forward.png"
+        )),
+        UiIconId::Sun => Some(include_bytes!("../../../assets/ui_icons/png/sun.png")),
+        UiIconId::Sky => Some(include_bytes!("../../../assets/ui_icons/png/sky.png")),
+        UiIconId::Shadows => Some(include_bytes!("../../../assets/ui_icons/png/shadows.png")),
+        UiIconId::Clock => Some(include_bytes!("../../../assets/ui_icons/png/clock.png")),
+        UiIconId::Camera => None,
         UiIconId::Stop => Some(include_bytes!("../../../assets/ui_icons/png/stop.png")),
         UiIconId::Console => Some(include_bytes!("../../../assets/ui_icons/png/console.png")),
         UiIconId::Assets => Some(include_bytes!("../../../assets/ui_icons/png/assets.png")),
@@ -373,6 +381,10 @@ fn icon_id_from_key(key: &str) -> Option<UiIconId> {
         UiIconId::Scene,
         UiIconId::Entity,
         UiIconId::Camera,
+        UiIconId::Sun,
+        UiIconId::Sky,
+        UiIconId::Shadows,
+        UiIconId::Clock,
         UiIconId::Cube,
         UiIconId::Sphere,
         UiIconId::Plane,
@@ -746,6 +758,12 @@ fn builtin_icon_pixels(id: UiIconId) -> Vec<u8> {
         }
         UiIconId::Play => {
             filled_triangle(&mut pixels, [[20.0, 12.0], [50.0, 32.0], [20.0, 52.0]]);
+        }
+        UiIconId::Sun | UiIconId::Sky | UiIconId::Shadows | UiIconId::Clock => {
+            // Embedded assets are the active source; retain a legible recovery glyph.
+            circle(&mut pixels, [32.0, 32.0], 18.0, stroke);
+            line(&mut pixels, [32.0, 32.0], [32.0, 18.0], stroke);
+            line(&mut pixels, [32.0, 32.0], [43.0, 38.0], stroke);
         }
         UiIconId::Stop => filled_rect(&mut pixels, 15, 15, 49, 49),
         UiIconId::Pause => {

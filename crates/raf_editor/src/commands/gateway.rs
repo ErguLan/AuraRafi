@@ -63,7 +63,9 @@ impl<E: ParsedCommandExecutor> CommandEndpoint for CommandGateway<E> {
             return response;
         }
         let name = request.name.trim_start_matches('/').to_ascii_lowercase();
-        if (name.starts_with("behavior.") || name.starts_with("prefab."))
+        if (name.starts_with("behavior.")
+            || name.starts_with("prefab.")
+            || matches!(name.as_str(), "lighting.set" | "lighting.reset"))
             && !request.dry_run
             && !request.confirm
             && !matches!(
@@ -74,7 +76,7 @@ impl<E: ParsedCommandExecutor> CommandEndpoint for CommandGateway<E> {
             let mut response = EngineCommandResponse::error(
                 id,
                 "Confirmation required",
-                "Behavior and prefab authoring requires confirm=true; use dry_run for preview.",
+                "World authoring requires confirm=true; use dry_run for preview.",
             );
             response.revision = self.ledger.revision();
             return response;
@@ -197,7 +199,8 @@ fn validate_execution_budget(
             // The file is resolved by the domain executor. Reserve its hard cap
             // rather than under-reporting an unknown subtree as one entity.
             "prefab.instantiate" => raf_core::scene::prefab::MAX_PREFAB_NODES,
-            "behavior.parameter" | "behavior.attach" | "behavior.detach" | "prefab.capture" => 1,
+            "behavior.parameter" | "behavior.attach" | "behavior.detach" | "prefab.capture"
+            | "lighting.set" | "lighting.reset" => 1,
             "game.batch" | "scene.batch" | "game.repair" | "scene.repair" => request
                 .params
                 .get("operations")

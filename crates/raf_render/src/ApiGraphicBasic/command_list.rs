@@ -17,6 +17,8 @@ pub struct BasicLine {
     pub end: Vec3,
     pub color: [u8; 4],
     pub width: f32,
+    /// Offset in normalized 0..1 depth, clamped after geometric clipping.
+    /// X-ray helpers should use zero; disabling depth test does not disable clipping.
     pub depth_bias: f32,
 }
 
@@ -51,6 +53,8 @@ pub enum GraphicCommand {
     Clear { r: u8, g: u8, b: u8, a: u8 },
     /// Bind a specific rendering pipeline.
     SetPipeline(BasicPipelineKind),
+    /// Receiver state separates incompatible batches without modifying their instances.
+    SetShadowReceiver(bool),
     /// Draw a 3D indexed mesh.
     DrawMesh {
         /// ID of the registered mesh to draw.
@@ -114,8 +118,12 @@ pub struct BasicCommandStats {
 }
 
 /// Accumulator of drawing commands that represents a single frame's rendering pipeline instructions.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct BasicCommandList {
+    /// Small frame state shared by GPU and CPU executors; absent in neutral mode.
+    pub environment: Option<crate::environment_frame::EnvironmentFrame>,
+    pub shadows: Option<crate::shadow_frame::ShadowFrame>,
+    pub shadow_budget_exceeded: bool,
     commands: Vec<GraphicCommand>,
     meshes: Vec<Arc<BasicMesh>>,
     textures: Vec<Arc<CpuTexture>>,
@@ -123,6 +131,13 @@ pub struct BasicCommandList {
     mesh_ids: std::collections::HashMap<usize, usize>,
     mesh_cacheable: Vec<bool>,
     current_pipeline: BasicPipelineKind,
+    shadow_receiver: bool,
+}
+
+impl Default for BasicCommandList {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl BasicCommandList {
@@ -135,6 +150,9 @@ impl BasicCommandList {
     /// renderer's visible-set projection.
     pub fn with_capacity(command_capacity: usize, mesh_capacity: usize) -> Self {
         Self {
+            environment: None,
+            shadows: None,
+            shadow_budget_exceeded: false,
             commands: Vec::with_capacity(command_capacity),
             meshes: Vec::with_capacity(mesh_capacity),
             textures: Vec::new(),
@@ -142,6 +160,7 @@ impl BasicCommandList {
             mesh_ids: std::collections::HashMap::with_capacity(mesh_capacity),
             mesh_cacheable: Vec::with_capacity(mesh_capacity),
             current_pipeline: BasicPipelineKind::FlatColor,
+            shadow_receiver: true,
         }
     }
 
@@ -198,6 +217,15 @@ impl BasicCommandList {
         }
         self.current_pipeline = pipeline;
         self.commands.push(GraphicCommand::SetPipeline(pipeline));
+    }
+
+    /// Add a mesh drawing command.
+    pub fn set_shadow_receiver(&mut self, enabled: bool) {
+        if self.shadow_receiver != enabled {
+            self.shadow_receiver = enabled;
+            self.commands
+                .push(GraphicCommand::SetShadowReceiver(enabled));
+        }
     }
 
     /// Add a mesh drawing command.
@@ -426,6 +454,7 @@ impl BasicCommandList {
                 }
                 GraphicCommand::Clear { .. }
                 | GraphicCommand::SetPipeline(_)
+                | GraphicCommand::SetShadowReceiver(_)
                 | GraphicCommand::DrawGrid { .. } => {}
             }
         }
@@ -459,6 +488,10 @@ impl BasicCommandList {
         self.mesh_ids.clear();
         self.mesh_cacheable.clear();
         self.current_pipeline = BasicPipelineKind::FlatColor;
+        self.shadow_receiver = true;
+        self.shadows = None;
+        self.shadow_budget_exceeded = false;
+        self.environment = None;
     }
 }
 
@@ -466,6 +499,22 @@ impl BasicCommandList {
 mod tests {
     use super::*;
     use crate::api_graphic_basic::mesh::{BasicMesh, BasicVertex};
+
+    #[test]
+    fn shadows_default_and_cleared_lists_preserve_receiver_state_boundaries() {
+        let mut commands = BasicCommandList::default();
+        commands.set_shadow_receiver(false);
+        assert!(matches!(
+            commands.commands().last(),
+            Some(GraphicCommand::SetShadowReceiver(false))
+        ));
+        commands.clear_commands();
+        commands.set_shadow_receiver(false);
+        assert!(matches!(
+            commands.commands().last(),
+            Some(GraphicCommand::SetShadowReceiver(false))
+        ));
+    }
 
     #[test]
     fn register_mesh_and_lookup() {

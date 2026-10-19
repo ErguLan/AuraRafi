@@ -5,7 +5,7 @@
 //! become a second state/controller implementation.
 
 use super::*;
-use crate::panels::agent_surface::build_agent_surface;
+use crate::panels::agent_surface::build_dock_agent_surface;
 use crate::panels::console_surface::build_console_surface;
 use crate::panels::electronics_context_menu_surface::{
     build_electronics_context_menu_surface, ELECTRONICS_CONTEXT_MENU_HEIGHT,
@@ -69,6 +69,10 @@ impl NativeGameWorkbench {
             self.project_type,
             self.open_menu.as_deref(),
         );
+        if let Some(index) = application_bar.root.children.iter().position(|node| node.id == "application-bar.drag-region") {
+            application_bar.root.children.insert(index,
+                crate::agent_workspace_surface::button("application-bar.agents", "agent_workspace.title", "agent.workspace", &self.palette.tokens()));
+        }
         if self.project_type == ProjectType::Game {
             let children = &mut application_bar.root.children;
             let index = children
@@ -192,36 +196,43 @@ impl NativeGameWorkbench {
                     hierarchy_row_height,
                 );
                 append(
-                    build_hierarchy_surface(
-                        self.palette,
-                        &view,
-                        selected,
-                        self.hierarchy_renaming
-                            .as_ref()
-                            .map(|(id, value)| (*id, value.as_str())),
-                        hierarchy_menu_target,
-                        self.hierarchy_empty_menu_open,
-                        self.hierarchy_primitive_menu_open,
-                        hierarchy_menu_label,
-                        self.hierarchy_menu_position,
-                        [left.width, left.height],
-                        hierarchy_row_height,
-                        self.agent_settings.hierarchy_indent_width,
-                        self.agent_settings.hierarchy_show_icons,
-                        self.agent_settings.hierarchy_show_visibility,
-                        self.agent_settings.hierarchy_show_locked,
-                        1.0,
-                        self.hierarchy_drag
-                            .as_ref()
-                            .map(|drag| (drag.label.as_str(), drag.pointer)),
-                        self.hierarchy_drag.as_ref().and_then(|drag| drag.target),
-                        None,
-                        can_paste,
-                        left.width < 444.0,
-                        &self.hierarchy_active_tab,
-                        self.hierarchy_bookmarks,
-                        Some(&search_results),
-                    ),
+                    if self.hierarchy_active_tab == "lighting" {
+                        crate::panels::lighting_surface::navigation(
+                            self.palette,
+                            &self.lighting_section,
+                        )
+                    } else {
+                        build_hierarchy_surface(
+                            self.palette,
+                            &view,
+                            selected,
+                            self.hierarchy_renaming
+                                .as_ref()
+                                .map(|(id, value)| (*id, value.as_str())),
+                            hierarchy_menu_target,
+                            self.hierarchy_empty_menu_open,
+                            self.hierarchy_primitive_menu_open,
+                            hierarchy_menu_label,
+                            self.hierarchy_menu_position,
+                            [left.width, left.height],
+                            hierarchy_row_height,
+                            self.agent_settings.hierarchy_indent_width,
+                            self.agent_settings.hierarchy_show_icons,
+                            self.agent_settings.hierarchy_show_visibility,
+                            self.agent_settings.hierarchy_show_locked,
+                            1.0,
+                            self.hierarchy_drag
+                                .as_ref()
+                                .map(|drag| (drag.label.as_str(), drag.pointer)),
+                            self.hierarchy_drag.as_ref().and_then(|drag| drag.target),
+                            None,
+                            can_paste,
+                            left.width < 540.0,
+                            &self.hierarchy_active_tab,
+                            self.hierarchy_bookmarks,
+                            Some(&search_results),
+                        )
+                    },
                     left,
                 );
                 append(
@@ -344,7 +355,7 @@ impl NativeGameWorkbench {
                     .unwrap_or(electronics_model::ElectronicsInspectorData {
                         title: raf_core::i18n::t(
                             "app.electronics_no_selection",
-                            self.agent_panel.language,
+                            self.agent_panel.borrow_mut().language,
                         ),
                         fields: Vec::new(),
                         pins: Vec::new(),
@@ -362,16 +373,26 @@ impl NativeGameWorkbench {
                 );
             } else {
                 append(
-                    build_inspector_surface_with_assets(
-                        self.palette,
-                        scene,
-                        selected.first().copied(),
-                        &self.inspector_sessions,
-                        1.0,
-                        self.inspector_view,
-                        self.agent_settings.display_unit,
-                        self.project_catalog.assets(),
-                    ),
+                    if self.hierarchy_active_tab == "lighting" {
+                        crate::panels::lighting_surface::inspector(
+                            self.palette,
+                            scene.environment(),
+                            &self.lighting_section,
+                            self.lighting_preview_neutral,
+                            self.lighting_error,
+                        )
+                    } else {
+                        build_inspector_surface_with_assets(
+                            self.palette,
+                            scene,
+                            selected.first().copied(),
+                            &self.inspector_sessions,
+                            1.0,
+                            self.inspector_view,
+                            self.agent_settings.display_unit,
+                            self.project_catalog.assets(),
+                        )
+                    },
                     right,
                 );
             }
@@ -503,14 +524,14 @@ impl NativeGameWorkbench {
                         node_can_undo,
                         node_can_redo,
                         node_validation,
-                        self.agent_panel.language,
+                        self.agent_panel.borrow_mut().language,
                     ),
                     content_rect,
                 ),
                 "agent" => append(
-                    build_agent_surface(
+                    build_dock_agent_surface(
                         self.palette,
-                        &self.agent_panel,
+                        &self.agent_panel.borrow_mut(),
                         &self.agent_settings,
                         self.agent_readiness,
                         self.project_type,
@@ -527,7 +548,7 @@ impl NativeGameWorkbench {
                         &electronics_analysis_lines(
                             electronics,
                             electronics_model::ElectronicsAnalysisPanel::Drc,
-                            self.agent_panel.language,
+                            self.agent_panel.borrow_mut().language,
                         ),
                         ElectronicsAnalysisMotion::new(
                             crossfade,
@@ -543,7 +564,7 @@ impl NativeGameWorkbench {
                         &electronics_analysis_lines(
                             electronics,
                             electronics_model::ElectronicsAnalysisPanel::Simulation,
-                            self.agent_panel.language,
+                            self.agent_panel.borrow_mut().language,
                         ),
                         ElectronicsAnalysisMotion::new(
                             crossfade,
@@ -571,7 +592,7 @@ impl NativeGameWorkbench {
                         build_assets_surface(AssetsSurfaceParams {
                             palette: self.palette,
                             rows: &assets,
-                            language: self.agent_panel.language,
+                            language: self.agent_panel.borrow_mut().language,
                             query: &self.assets_surface.query,
                             filter: self.assets_surface.filter,
                             script_extension: &self.assets_surface.script_extension,
@@ -695,7 +716,7 @@ impl NativeGameWorkbench {
                 self.palette,
                 node_graph,
                 menu.node_id,
-                self.agent_panel.language,
+                self.agent_panel.borrow_mut().language,
             ) {
                 // Window-level overlay: clamped against the window and nudged
                 // by the entrance tween so the menu settles into place.
@@ -840,7 +861,7 @@ impl NativeGameWorkbench {
             if let Some(surface) = build_nodes_palette_popup_surface(
                 self.palette,
                 &self.nodes_host,
-                self.agent_panel.language,
+                self.agent_panel.borrow_mut().language,
             ) {
                 let entrance = (1.0 - self.nodes_host.menu_motion()) * 6.0;
                 append(
@@ -946,7 +967,7 @@ fn status_items(
     electronics: Option<&NativeElectronicsEditor>,
 ) -> Vec<String> {
     if workbench.project_type == ProjectType::Electronics {
-        let language = workbench.agent_panel.language;
+        let language = workbench.agent_panel.borrow_mut().language;
         let translate = |key: &str| raf_core::i18n::t(key, language);
         let (components, connections, nets) = electronics
             .map(|editor| {

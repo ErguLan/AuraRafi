@@ -1,5 +1,17 @@
 # AuraRafi Active Scene Viewport Renderer - Technical Reference
 
+## Lighting deliveries 1–2 (2026-10-12)
+
+World-scoped Sun, ambient light, solid/gradient sky and solar disk are connected
+through `environment_frame.rs` to the active GPU/CPU command executor. Neutral
+mode preserves the old output. The separate `lighting.rs`/advanced complement
+exports below remain prepared infrastructure, not the implementation of this
+delivery. Opt-in directional shadows use `shadow_frame.rs` and the private
+`ApiGraphicBasic/shadow_gpu.rs` depth pass. One bounded map, retained depth,
+hard/four-tap filtering, world-unit bias/distance, distance fade and independent
+cast/receive flags; CPU recovery caps the map at 256. Neutral bypasses all shadow
+work. See [LIGHTING.md](LIGHTING.md) for scope, units, metrics and remaining gates.
+
 ## Module classification — 2026-08-20
 
 The active native editor path is intentionally narrow:
@@ -100,7 +112,7 @@ count, and the effective presentation mode. GPU `--` means the adapter has not
 provided a valid asynchronous timestamp sample; it does not mean zero GPU cost.
 
 Game 2D is an orthographic 3D scene. `Sprite2D` is no longer an active
-primitive; old serialized/command spellings are accepted as `Plane`. Shadows,
+primitive; old serialized/command spellings are accepted as `Plane`. Advanced shadows,
 post-processing, PBR, particles, and skeletal animation remain future,
 budget-gated work and are not part of this stabilization change.
 

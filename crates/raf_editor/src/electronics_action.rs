@@ -60,6 +60,10 @@ pub enum ElectronicsAction {
 
     // Parameterized Actions
     CommitInspectorValue(String),
+    CommitInspectorValueFor {
+        source_id: uuid::Uuid,
+        value: String,
+    },
     SelectNavigator(usize),
     InspectNavigator(usize),
     SelectTab(String),
@@ -105,6 +109,24 @@ impl ElectronicsAction {
             _ => {
                 if let Some(val) = command.strip_prefix("electronics.inspector.value.commit:") {
                     Some(Self::CommitInspectorValue(val.to_string()))
+                } else if let Some(target) =
+                    command.strip_prefix("electronics.inspector.value.commit_for:")
+                {
+                    let (id, value) = target.split_once(':')?;
+                    // The command gateway normalizes names to lowercase.
+                    // Encode the UTF-8 payload so units and user text survive.
+                    if value.len() % 2 != 0 {
+                        return None;
+                    }
+                    let bytes = value
+                        .as_bytes()
+                        .chunks_exact(2)
+                        .map(|pair| u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok())
+                        .collect::<Option<Vec<_>>>()?;
+                    Some(Self::CommitInspectorValueFor {
+                        source_id: uuid::Uuid::parse_str(id).ok()?,
+                        value: String::from_utf8(bytes).ok()?,
+                    })
                 } else if let Some(target) =
                     command.strip_prefix("electronics.analysis.focus_line:")
                 {
@@ -176,6 +198,14 @@ impl ElectronicsAction {
             Self::CommitInspectorValue(val) => {
                 format!("electronics.inspector.value.commit:{val}")
             }
+            Self::CommitInspectorValueFor { source_id, value } => {
+                let encoded: String = value
+                    .as_bytes()
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect();
+                format!("electronics.inspector.value.commit_for:{source_id}:{encoded}")
+            }
             Self::SelectNavigator(idx) => format!("electronics.navigator.select.{idx}"),
             Self::InspectNavigator(idx) => format!("electronics.navigator.inspect.{idx}"),
             Self::SelectTab(tab) => format!("electronics.tab.{tab}"),
@@ -210,6 +240,22 @@ mod tests {
         let cmd = action.to_command_string();
         assert_eq!(cmd, "electronics.inspector.value.commit:4.7uF");
         assert_eq!(ElectronicsAction::parse(&cmd), Some(action));
+    }
+
+    #[test]
+    fn targeted_inspector_edits_keep_identity_and_colons_in_the_value() {
+        let action = ElectronicsAction::CommitInspectorValueFor {
+            source_id: uuid::Uuid::new_v4(),
+            value: "model: ÁMBAR".into(),
+        };
+        assert_eq!(
+            ElectronicsAction::parse(&action.to_command_string().to_ascii_lowercase()),
+            Some(action)
+        );
+        assert_eq!(
+            ElectronicsAction::parse("electronics.inspector.value.commit_for:invalid:22k"),
+            None
+        );
     }
 
     #[test]

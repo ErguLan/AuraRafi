@@ -1,4 +1,5 @@
-use std::collections::{BTreeSet, HashMap};
+use super::geometry::{copper_items, CONTACT_EPSILON};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use glam::Vec2;
 use serde::{Deserialize, Serialize};
@@ -8,7 +9,6 @@ use crate::pcb::footprint::footprint_definition;
 use crate::schematic::Schematic;
 
 const BOARD_EDGE_EPSILON: f32 = 0.5;
-const CONNECT_EPSILON: f32 = 6.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PcbLayer {
@@ -120,6 +120,10 @@ pub struct PcbLayout {
     /// instead of being deleted without notice.
     #[serde(default)]
     pub removed_traces: Vec<PcbTrace>,
+    /// Stable pin identities keep routing attached to the same electrical
+    /// network when automatic names or component ordering change.
+    #[serde(default)]
+    pub net_pins: BTreeMap<String, Vec<Uuid>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -139,6 +143,7 @@ impl PcbLayout {
             traces: Vec::new(),
             airwires: Vec::new(),
             removed_traces: Vec::new(),
+            net_pins: BTreeMap::new(),
         }
     }
 
@@ -173,6 +178,59 @@ impl PcbLayout {
             .map(|placement| (placement.component_id, placement))
             .collect();
 
+        let mut old_net_pins = self.net_pins.clone();
+        if old_net_pins.is_empty() {
+            // Upgrade old documents without throwing away their routing. A
+            // missing old component supplies an unmatched identity, so those
+            // traces are reviewed rather than assigned to a recycled net name.
+            for placement in &self.components {
+                for (pi, name) in placement.pad_nets.iter().enumerate() {
+                    let pin_id = schematic
+                        .components
+                        .iter()
+                        .find(|c| c.id == placement.component_id)
+                        .and_then(|c| c.pins.get(pi))
+                        .map(|p| p.id)
+                        .unwrap_or(placement.component_id);
+                    old_net_pins.entry(name.clone()).or_default().push(pin_id);
+                }
+            }
+        }
+        let pin_names: HashMap<_, _> = netlist
+            .nets
+            .iter()
+            .flat_map(|net| {
+                net.pins
+                    .iter()
+                    .map(move |&(ci, pi)| (schematic.components[ci].pins[pi].id, net.name.clone()))
+            })
+            .collect();
+        self.net_pins = netlist
+            .nets
+            .iter()
+            .map(|net| {
+                let mut ids: Vec<_> = net
+                    .pins
+                    .iter()
+                    .map(|&(ci, pi)| schematic.components[ci].pins[pi].id)
+                    .collect();
+                ids.sort();
+                (net.name.clone(), ids)
+            })
+            .collect();
+        let renamed: HashMap<String, Option<String>> = old_net_pins
+            .iter()
+            .map(|(old_name, pins)| {
+                let candidate = pins.first().and_then(|pin| pin_names.get(pin)).cloned();
+                let same_network = candidate
+                    .as_ref()
+                    .is_some_and(|name| pins.iter().all(|pin| pin_names.get(pin) == Some(name)));
+                (
+                    old_name.clone(),
+                    if same_network { candidate } else { None },
+                )
+            })
+            .collect();
         let mut summary = PcbSyncSummary::default();
         let mut synced = Vec::with_capacity(schematic.components.len());
 
@@ -224,7 +282,10 @@ impl PcbLayout {
             }
         }
 
-        summary.removed_components = existing.len().saturating_sub(schematic.components.len());
+        summary.removed_components = existing
+            .keys()
+            .filter(|id| !schematic.components.iter().any(|c| c.id == **id))
+            .count();
         summary.nets = net_names.len();
 
         self.components = synced;
@@ -234,15 +295,23 @@ impl PcbLayout {
         // review and let the user re-apply or discard explicitly.
         let mut orphaned = Vec::new();
         let mut retained = Vec::with_capacity(self.traces.len());
-        for trace in self.traces.drain(..) {
-            if net_names.contains(&trace.net) {
+        for mut trace in self.traces.drain(..) {
+            let remapped = renamed.get(&trace.net);
+            if let Some(Some(name)) = remapped {
+                trace.net = name.clone();
+            }
+            if matches!(remapped, Some(Some(_))) && net_names.contains(&trace.net) {
                 retained.push(trace);
             } else {
                 orphaned.push(trace);
             }
         }
         self.traces = retained;
-        self.removed_traces = orphaned;
+        for trace in orphaned {
+            if !self.removed_traces.iter().any(|old| old.id == trace.id) {
+                self.removed_traces.push(trace);
+            }
+        }
         self.rebuild_airwires();
         summary
     }
@@ -272,144 +341,82 @@ impl PcbLayout {
     }
 
     pub fn route_airwire(&mut self, index: usize) -> bool {
-        let Some(airwire) = self.airwires.get(index).cloned() else {
-            return false;
-        };
-
-        let mut points = vec![airwire.from];
-        let corner = Vec2::new(airwire.to.x, airwire.from.y);
-        if airwire.from.distance(corner) > 0.1 && airwire.to.distance(corner) > 0.1 {
-            points.push(corner);
-        }
-        points.push(airwire.to);
-
-        self.traces.push(PcbTrace {
-            id: Uuid::new_v4(),
-            net: airwire.net,
-            layer: PcbLayer::TopCopper,
-            width: 6.0,
-            points,
-        });
-
-        self.rebuild_airwires();
-        true
+        self.try_route_airwire(index).is_ok()
     }
 
     pub fn rebuild_airwires(&mut self) {
+        self.rebuild_airwires_cancellable(&std::sync::atomic::AtomicBool::new(false));
+    }
+
+    pub(crate) fn rebuild_airwires_cancellable(
+        &mut self,
+        cancel: &std::sync::atomic::AtomicBool,
+    ) -> bool {
         self.airwires.clear();
-
-        let mut net_to_pads: HashMap<String, Vec<(Uuid, Vec2)>> = HashMap::new();
-        for (component_index, component) in self.components.iter().enumerate() {
-            for (pad_index, net_name) in component.pad_nets.iter().enumerate() {
-                if net_name.trim().is_empty() {
-                    continue;
-                }
-
-                if let Some(position) = self.pad_world_position(component_index, pad_index) {
-                    net_to_pads
-                        .entry(net_name.clone())
-                        .or_default()
-                        .push((component.component_id, position));
-                }
+        let items = copper_items(self);
+        let mut dsu = DisjointSet::new(items.len());
+        super::geometry::nearby_pairs_cancellable(&items, CONTACT_EPSILON, cancel, |a, b| {
+            if !items[a].net.is_empty()
+                && items[a].net == items[b].net
+                && items[a].shape.distance(&items[b].shape) <= CONTACT_EPSILON
+            {
+                dsu.union(a, b);
             }
+        });
+        if cancel.load(std::sync::atomic::Ordering::Acquire) {
+            return false;
         }
-
-        for (net_name, pads) in net_to_pads {
-            if pads.len() < 2 {
+        let mut nets = BTreeMap::<String, BTreeMap<usize, Vec<(Uuid, Vec2)>>>::new();
+        for (index, item) in items.iter().enumerate() {
+            let Some((ci, pi)) = item.pad else {
+                continue;
+            };
+            if item.net.is_empty() {
                 continue;
             }
-
-            let mut nodes: Vec<Vec2> = pads.iter().map(|(_, point)| *point).collect();
-            let pad_node_count = nodes.len();
-            let trace_ranges = self
-                .traces
-                .iter()
-                .filter(|trace| trace.net == net_name)
-                .map(|trace| {
-                    let start = nodes.len();
-                    nodes.extend(trace.points.iter().copied());
-                    (start, nodes.len())
-                })
-                .collect::<Vec<_>>();
-
-            let mut dsu = DisjointSet::new(nodes.len());
-
-            for (start, end) in trace_ranges {
-                for node_index in start..end.saturating_sub(1) {
-                    dsu.union(node_index, node_index + 1);
-                }
-            }
-
-            connect_close_nodes(&nodes, &mut dsu);
-
-            let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
-            for pad_index in 0..pad_node_count {
-                groups
-                    .entry(dsu.find(pad_index))
+            if let Some(position) = self.pad_world_position(ci, pi) {
+                nets.entry(item.net.clone())
                     .or_default()
-                    .push(pad_index);
+                    .entry(dsu.find(index))
+                    .or_default()
+                    .push((item.source, position));
             }
-
-            let mut roots = groups.into_values().collect::<Vec<_>>();
-            if roots.len() <= 1 {
+        }
+        for (net, groups) in nets {
+            let mut groups: Vec<_> = groups.into_values().collect();
+            if groups.len() < 2 {
                 continue;
             }
-
-            roots.sort_by_key(|group| group[0]);
-            let anchor_index = roots[0][0];
-            for group in roots.iter().skip(1) {
-                let target_index = group[0];
-                self.airwires.push(PcbAirwire {
-                    net: net_name.clone(),
-                    from_component_id: pads[anchor_index].0,
-                    from: pads[anchor_index].1,
-                    to_component_id: pads[target_index].0,
-                    to: pads[target_index].1,
-                });
-            }
-        }
-    }
-}
-
-/// Buckets node indices by position rounded to `CONNECT_EPSILON`.
-///
-/// `rebuild_airwires` used to test every pair of nodes of a net, which is
-/// quadratic and dominates the sync once a net carries routed traces. Two nodes
-/// within `CONNECT_EPSILON` can differ by at most one cell on each axis, so
-/// scanning the 3x3 cell block finds exactly the same pairs the quadratic sweep
-/// did while visiting each candidate a constant number of times.
-fn connect_close_nodes(nodes: &[Vec2], dsu: &mut DisjointSet) {
-    let mut buckets: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
-    for (index, node) in nodes.iter().enumerate() {
-        buckets.entry(node_cell(*node)).or_default().push(index);
-    }
-
-    for (index, node) in nodes.iter().enumerate() {
-        let (cell_x, cell_y) = node_cell(*node);
-        for offset_x in -1..=1 {
-            for offset_y in -1..=1 {
-                let Some(bucket) = buckets.get(&(cell_x + offset_x, cell_y + offset_y)) else {
-                    continue;
-                };
-                for &other in bucket {
-                    // Only look forward so every close pair is visited once.
-                    if other <= index {
-                        continue;
-                    }
-                    if node.distance(nodes[other]) <= CONNECT_EPSILON {
-                        dsu.union(index, other);
+            // Connect each island to its closest already-connected island. This
+            // keeps the ratsnest deterministic without an arbitrary long star.
+            let mut connected = groups.remove(0);
+            while !groups.is_empty() {
+                let mut best = (f32::INFINITY, 0, connected[0], groups[0][0]);
+                for (gi, group) in groups.iter().enumerate() {
+                    for &from in &connected {
+                        for &to in group {
+                            if cancel.load(std::sync::atomic::Ordering::Acquire) {
+                                return false;
+                            }
+                            let distance = from.1.distance_squared(to.1);
+                            if distance < best.0 {
+                                best = (distance, gi, from, to);
+                            }
+                        }
                     }
                 }
+                self.airwires.push(PcbAirwire {
+                    net: net.clone(),
+                    from_component_id: best.2 .0,
+                    from: best.2 .1,
+                    to_component_id: best.3 .0,
+                    to: best.3 .1,
+                });
+                connected.extend(groups.remove(best.1));
             }
         }
+        true
     }
-}
-
-fn node_cell(node: Vec2) -> (i64, i64) {
-    (
-        (node.x / CONNECT_EPSILON).floor() as i64,
-        (node.y / CONNECT_EPSILON).floor() as i64,
-    )
 }
 
 struct DisjointSet {
@@ -423,19 +430,19 @@ impl DisjointSet {
         }
     }
 
-    fn find(&mut self, node: usize) -> usize {
-        if self.parent[node] != node {
-            let root = self.find(self.parent[node]);
-            self.parent[node] = root;
+    fn find(&mut self, mut node: usize) -> usize {
+        while self.parent[node] != node {
+            self.parent[node] = self.parent[self.parent[node]];
+            node = self.parent[node];
         }
-        self.parent[node]
+        node
     }
 
     fn union(&mut self, a: usize, b: usize) {
         let root_a = self.find(a);
         let root_b = self.find(b);
         if root_a != root_b {
-            self.parent[root_b] = root_a;
+            self.parent[root_a.max(root_b)] = root_a.min(root_b);
         }
     }
 }
@@ -496,49 +503,5 @@ mod tests {
         );
         assert!(layout.traces.iter().any(|trace| trace.net == live_net));
         assert_eq!(layout.removed_traces, vec![orphaned]);
-    }
-
-    /// Maps every node to the lowest index of its group so two disjoint sets can
-    /// be compared by partition instead of by the arbitrary root they picked.
-    fn canonical_groups(dsu: &mut DisjointSet, count: usize) -> Vec<usize> {
-        let roots: Vec<usize> = (0..count).map(|index| dsu.find(index)).collect();
-        (0..count)
-            .map(|index| {
-                let root = roots[index];
-                roots
-                    .iter()
-                    .position(|other| *other == root)
-                    .expect("root belongs to at least one node")
-            })
-            .collect()
-    }
-
-    #[test]
-    fn close_node_search_matches_a_quadratic_sweep() {
-        let nodes = vec![
-            Vec2::new(0.0, 0.0),
-            Vec2::new(6.0, 0.0),
-            Vec2::new(0.0, 5.9),
-            Vec2::new(6.1, 0.0),
-            Vec2::new(40.0, 40.0),
-            Vec2::new(40.0, 46.0),
-        ];
-
-        let mut grid_set = DisjointSet::new(nodes.len());
-        connect_close_nodes(&nodes, &mut grid_set);
-
-        let mut sweep_set = DisjointSet::new(nodes.len());
-        for a in 0..nodes.len() {
-            for b in (a + 1)..nodes.len() {
-                if nodes[a].distance(nodes[b]) <= CONNECT_EPSILON {
-                    sweep_set.union(a, b);
-                }
-            }
-        }
-
-        assert_eq!(
-            canonical_groups(&mut grid_set, nodes.len()),
-            canonical_groups(&mut sweep_set, nodes.len())
-        );
     }
 }

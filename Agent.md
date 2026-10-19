@@ -28,20 +28,29 @@ surfaces, RafUI presentation, shaders, GPU assets, or native backends must load
 controlled compatibility backend under ApiGraphicBasic, never the public owner.
 
 Any task touching a retained surface, editor chrome, menus, docks, scroll,
-inspector, hub, settings, or CAD/viewport overlays must load
-`docs/RAF_UI.md`, `docs/EDITOR_RAFUI.md`, and `.ai/STUDIO_GRADE_UI.md` first.
-Feature-specific briefs under `.ulpi/design/` are useful context when they are
-current, but they are not a second product-wide visual authority. RafUI
-documents are presentation data; they never become a second scene, CAD, asset,
+inspector, hub, settings, or CAD/viewport overlays should consult the dual visual
+authorities:
+* `.ai/STUDIO_GRADE_UI.md` (System defaults, token contracts, and shell coherence)
+* `.ai/CREATIVE_DESIGN_AUTHORSHIP.md` and `.agents/skills/raf-creative-ui-craftsmanship/SKILL.md` (Tactile instrument craftsmanship, kinetic ergonomics, and creative freedom)
+* Along with technical contracts in `docs/RAF_UI.md` and `docs/EDITOR_RAFUI.md`.
+RafUI documents are presentation data; they never become a second scene, CAD, asset,
 or application-state model.
 
-## Visual design governance
+## Visual Design Governance: Dual Authority Framework
 
-`.ai/STUDIO_GRADE_UI.md` defines product-wide visual defaults and the quality
-bar. A current user brief or supplied screenshot may intentionally override a
-visual default. It may not override architecture, ownership, accessibility,
-localization, or measured performance contracts. Historical documents under
-`.ai/archive/`, `docs/archive/`, and `.ulpi/design/archive/` are evidence only.
+Interface craftsmanship and visual architecture in AuraRafi are governed by two co-equal authoritative pillars. Neither is relegated or subordinate:
+
+1. **Studio Grade UI Foundation** ([.ai/STUDIO_GRADE_UI.md](.ai/STUDIO_GRADE_UI.md)):
+   * **Domain**: Product-wide baseline visual language, token contracts, restrained warm-orange active signature, accessibility, and shell consistency across Game and Electronics.
+   * **When to prioritize**: Standard chrome, global settings, docks, system panels, token alignment, and uniform workbench scaffolding.
+
+2. **Creative Instrument Craftsmanship** ([.ai/CREATIVE_DESIGN_AUTHORSHIP.md](.ai/CREATIVE_DESIGN_AUTHORSHIP.md) & Skill: [.agents/skills/raf-creative-ui-craftsmanship/SKILL.md](.agents/skills/raf-creative-ui-craftsmanship/SKILL.md)):
+   * **Domain**: Living desktop-grade instruments, tactile kinetic ergonomics (elastic Bezier cables, magnetic snapping, proximity halos), continuous surfaces (anti-spreadsheet borderless rows), 4-island modular toolbars, and expressive canvas environments.
+   * **When to prioritize**: Authoring **new interfaces**, creating **new features**, designing interactive workbenches, visual node scripting, schematic/PCB drafting, deep hierarchy navigators, and dynamic creative manipulation tools where innovation and tactile feedback are essential.
+
+### Agent Selection Protocol & User Alignment
+* **Autonomous Context Evaluation**: The AI agent must evaluate the nature of the task. When implementing **new interfaces, new features**, interactive workbenches, node graphs, or CAD surfaces, leverage *Creative Instrument Craftsmanship* to explore expressive, fluid, and tactile solutions. When refining existing general editor chrome, dialogs, or enforcing global token consistency, leverage *Studio Grade UI*.
+* **User Agency First**: Both paradigms have full authority. If an interface challenge can be solved through either paradigm, or if the agent is uncertain which style best serves the user's vision, **the AI must ask the user which approach they prefer** rather than making arbitrary assumptions. Historical documents under `.ai/archive/` and `docs/archive/` remain reference-only.
 
 ## RafUI Failure Guardrails
 

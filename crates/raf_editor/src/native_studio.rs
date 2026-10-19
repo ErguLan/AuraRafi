@@ -33,6 +33,9 @@ const MAX_TEXT_LENGTH: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NativeStudioIntent {
+    RetryOpen,
+    CancelOpen,
+    OpenAgents(Option<PathBuf>),
     Window(UiWindowCommand),
     OpenSettings {
         section: SettingsSection,
@@ -44,6 +47,7 @@ pub enum NativeStudioIntent {
         name: String,
         parent: PathBuf,
         project_type: ProjectType,
+        with_agent: bool,
     },
 }
 
@@ -57,6 +61,8 @@ pub struct NativeStudioSurface {
     palette: raf_render::api_graphic_basic::ui_surface::StudioUiPalette,
     language: Language,
     discovery: Option<Receiver<HubSurfaceModel>>,
+    reduced_motion: bool,
+    motion_started: std::time::Instant,
 }
 
 impl NativeStudioSurface {
@@ -92,6 +98,8 @@ impl NativeStudioSurface {
             palette,
             language: Language::English,
             discovery: Some(discovery),
+            reduced_motion: false,
+            motion_started: std::time::Instant::now(),
         }
     }
 
@@ -105,6 +113,15 @@ impl NativeStudioSurface {
         palette: raf_render::api_graphic_basic::ui_surface::StudioUiPalette,
     ) {
         self.poll_discovery();
+        if self.model.opening_project.is_some() {
+            self.model.opening_size = [layout.window.width, layout.window.height];
+            self.model.opening_step = if self.model.opening_error.is_none() && !self.reduced_motion
+            {
+                (self.motion_started.elapsed().as_millis() / 80 % 12) as u8
+            } else {
+                0
+            };
+        }
         self.rect = layout.window;
         let palette_changed = self.palette != palette;
         self.palette = palette;
@@ -132,6 +149,7 @@ impl NativeStudioSurface {
     }
 
     pub fn set_environment(&mut self, environment: raf_ui::UiEnvironment) {
+        self.reduced_motion = environment.prefers_reduced_motion;
         self.host.set_environment(environment);
     }
 
@@ -149,6 +167,17 @@ impl NativeStudioSurface {
             return;
         }
         self.model.create_error = error;
+        self.last_model = None;
+    }
+
+    pub fn set_project_opening(&mut self, project: Option<String>, error: Option<String>) {
+        if self.model.opening_project != project {
+            self.host
+                .session_mut()
+                .reset_interaction_for_surface_change(None);
+        }
+        self.model.opening_project = project;
+        self.model.opening_error = error;
         self.last_model = None;
     }
 
@@ -182,6 +211,9 @@ impl NativeStudioSurface {
 
     pub fn has_active_motion(&self) -> bool {
         self.host.has_active_motion()
+            || (self.model.opening_project.is_some()
+                && self.model.opening_error.is_none()
+                && !self.reduced_motion)
     }
 
     fn poll_discovery(&mut self) {
@@ -231,6 +263,9 @@ impl NativeStudioSurface {
             self.handle_action(action, &mut intents);
         }
         if input.snapshot().key_pressed(raf_core::InputKey::Escape) {
+            if self.model.opening_project.is_some() {
+                intents.push(NativeStudioIntent::CancelOpen);
+            }
             self.model.create_type_menu_open = false;
             self.model.context_project = None;
             self.model.context_menu_position = None;
@@ -260,6 +295,18 @@ impl NativeStudioSurface {
         dispatched: UiDispatchedAction,
         intents: &mut Vec<NativeStudioIntent>,
     ) {
+        if self.model.opening_project.is_some() {
+            match &dispatched.action {
+                UiAction::Command { name } if name == "hub.open.retry" => {
+                    intents.push(NativeStudioIntent::RetryOpen)
+                }
+                UiAction::Command { name } if name == "hub.open.cancel" => {
+                    intents.push(NativeStudioIntent::CancelOpen)
+                }
+                _ => {}
+            }
+            return;
+        }
         match dispatched.action {
             UiAction::SetText { key, value } => match key.as_str() {
                 "hub.create.name" => {
@@ -287,6 +334,10 @@ impl NativeStudioSurface {
                 "hub.settings" => intents.push(NativeStudioIntent::OpenSettings {
                     section: SettingsSection::Appearance,
                 }),
+                "hub.agents" => intents.push(NativeStudioIntent::OpenAgents(None)),
+                "hub.create.agent-toggle" => {
+                    self.model.create_with_agent = !self.model.create_with_agent
+                }
                 "hub.new" => {
                     self.model.create_active = true;
                     self.model.create_error = None;
@@ -395,6 +446,7 @@ impl NativeStudioSurface {
                             name,
                             parent,
                             project_type: self.model.create_project_type,
+                            with_agent: self.model.create_with_agent,
                         });
                     }
                 }
@@ -407,6 +459,7 @@ impl NativeStudioSurface {
                 let path = PathBuf::from(path);
                 match payload.get("action").and_then(|value| value.as_str()) {
                     Some("open") => intents.push(NativeStudioIntent::Open(path)),
+                    Some("agent") => intents.push(NativeStudioIntent::OpenAgents(Some(path))),
                     Some("duplicate") => intents.push(NativeStudioIntent::Duplicate(path)),
                     Some("forget") => intents.push(NativeStudioIntent::Forget(path)),
                     Some("hover") => {
@@ -704,6 +757,11 @@ fn load_hub_images(store: &mut UiSurfaceImageStore) {
 
 pub fn resolve_hub_text(key: &str, model: &HubSurfaceModel, language: Language) -> String {
     match key {
+        "hub.open.error" => model
+            .opening_error
+            .as_deref()
+            .map(|error| crate::agent_workspace_surface::localized_error(error, language))
+            .unwrap_or_default(),
         "hub.brand" => "AuraRafi".to_string(),
         "hub.version" => format!("v{}", env!("CARGO_PKG_VERSION")),
         "hub.stats" => format!(

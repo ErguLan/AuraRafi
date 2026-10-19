@@ -10,6 +10,7 @@ pub mod behavior;
 pub mod catalog;
 pub mod electronics;
 pub mod game;
+pub mod lighting;
 pub mod gateway;
 pub mod output;
 pub mod parser;

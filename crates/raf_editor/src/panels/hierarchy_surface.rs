@@ -518,7 +518,7 @@ fn primitive_menu_item(
     .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
-fn header(palette: StudioUiPalette) -> UiNode {
+pub(crate) fn header(palette: StudioUiPalette) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new("hierarchy.header", UiNodeKind::Toolbar)
         .with_class("hierarchy-header")
@@ -545,7 +545,7 @@ fn header(palette: StudioUiPalette) -> UiNode {
         )
 }
 
-fn tabs(palette: StudioUiPalette, compact_tabs: bool, active_tab: &str) -> UiNode {
+pub(crate) fn tabs(palette: StudioUiPalette, compact_tabs: bool, active_tab: &str) -> UiNode {
     let tokens = palette.tokens();
     let mut row = UiNode::new("hierarchy.tabs", UiNodeKind::Toolbar)
         .with_class("hierarchy-tabs")
@@ -561,6 +561,7 @@ fn tabs(palette: StudioUiPalette, compact_tabs: bool, active_tab: &str) -> UiNod
         ("hierarchy", "app.hierarchy", UiIconId::Scene),
         ("assets", "app.assets", UiIconId::Assets),
         ("world", "app.world", UiIconId::View3d),
+        ("lighting", "lighting.title", UiIconId::Shaded),
         ("bookmarks", "app.bookmarks", UiIconId::Folder),
         ("search", "app.search", UiIconId::Search),
     ] {
@@ -1850,7 +1851,7 @@ fn icon_button(
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
-fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
+pub(crate) fn hierarchy_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
     let tokens = palette.tokens();
     let selection_fill = match palette {
         StudioUiPalette::IndustrialDark => [116, 67, 24, 62],
@@ -2321,9 +2322,9 @@ mod tests {
         let row = tabs(StudioUiPalette::IndustrialDark, false, "hierarchy");
         let total_width: f32 = row.children.iter().map(|tab| tab.layout.basis[0]).sum();
 
-        assert_eq!(row.children.len(), 5);
+        assert_eq!(row.children.len(), 6);
         assert!(row.children.iter().all(|tab| tab.text_key.is_some()));
-        assert!(total_width + row.layout.padding.left + row.layout.padding.right <= 414.0);
+        assert!(total_width + row.layout.padding.left + row.layout.padding.right <= 530.0);
     }
 
     #[test]

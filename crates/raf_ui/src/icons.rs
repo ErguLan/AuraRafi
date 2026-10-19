@@ -25,6 +25,10 @@ pub enum UiIconId {
     Scene,
     Entity,
     Camera,
+    Sun,
+    Sky,
+    Shadows,
+    Clock,
     Cube,
     Sphere,
     Plane,
@@ -73,7 +77,7 @@ pub enum UiIconId {
 impl UiIconId {
     /// Every semantic icon in the family. Coverage tests and tooling iterate
     /// this instead of mirroring the enum by hand.
-    pub const ALL: [Self; 60] = [
+    pub const ALL: [Self; 64] = [
         Self::Select,
         Self::Move,
         Self::Rotate,
@@ -91,6 +95,10 @@ impl UiIconId {
         Self::Scene,
         Self::Entity,
         Self::Camera,
+        Self::Sun,
+        Self::Sky,
+        Self::Shadows,
+        Self::Clock,
         Self::Cube,
         Self::Sphere,
         Self::Plane,
@@ -155,6 +163,10 @@ impl UiIconId {
             Self::Scene => "scene",
             Self::Entity => "entity",
             Self::Camera => "camera",
+            Self::Sun => "sun",
+            Self::Sky => "sky",
+            Self::Shadows => "shadows",
+            Self::Clock => "clock",
             Self::Cube => "cube",
             Self::Sphere => "sphere",
             Self::Plane => "plane",
@@ -293,6 +305,6 @@ mod tests {
         keys.dedup();
 
         assert_eq!(keys.len(), UiIconId::ALL.len(), "icon keys must be unique");
-        assert_eq!(UiIconId::ALL.len(), 60);
+        assert_eq!(UiIconId::ALL.len(), 64);
     }
 }

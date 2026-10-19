@@ -27,8 +27,7 @@ use raf_render::api_graphic_basic::{EditorUiLayer, SceneFrameMetrics};
 use raf_render::bridge::RenderRuntime;
 use raf_ui::{UiColorMode, UiEnvironment, UiMotionSpec, UiRect, UiTween, UiWindowCommand};
 
-use crate::agent_context::AgentObservationContext;
-use crate::agent_executor::{AgentEditorAction, AgentProjectContext, AgentToolExecutor};
+use crate::agent_executor::AgentEditorAction;
 use crate::application_bar_host::{register_bar_images, register_electronics_images};
 use crate::application_bar_surface::{
     application_menu_popup_height, build_application_bar_surface,
@@ -37,13 +36,12 @@ use crate::application_bar_surface::{
 };
 use crate::application_menu::{build_application_menu, ApplicationMenuState, ApplicationView};
 use crate::commands::catalog::CommandCatalog;
-use crate::commands::game::SceneSelectionState;
 use crate::commands::parser::ParsedCommand;
 use crate::console::ConsolePanel;
 use crate::editor_layout::{EditorFrameLayout, EditorRect};
 use crate::electronics_controller::{ElectronicsTool, NativeElectronicsEditor};
 use crate::electronics_minimap;
-use crate::panels::ai_chat::{AgentAction, AgentPanel, AgentReadiness};
+use crate::panels::ai_chat::{AgentAction, AgentPanel, AgentReadiness, SharedAgentPanel};
 use crate::panels::assets_surface::{
     asset_absolute_path, asset_rows_with_builtins, asset_visible_range,
     build_assets_backdrop_surface, build_assets_context_menu_surface,
@@ -95,7 +93,6 @@ use crate::panels::viewport_toolbar_surface::{
 use crate::project_catalog::ProjectCatalog;
 use crate::settings_surface::SettingsSection;
 use raf_core::project::BuildingStyle;
-use uuid::Uuid;
 
 #[path = "native_workbench_electronics.rs"]
 mod electronics_model;
@@ -103,6 +100,9 @@ mod electronics_model;
 mod helpers;
 #[path = "native_workbench_input.rs"]
 mod input;
+pub(crate) use input::parse_agent_action;
+#[path = "native_workbench_lighting.rs"]
+mod lighting;
 #[path = "native_workbench_settings.rs"]
 mod settings;
 #[path = "native_workbench_surface.rs"]
@@ -223,12 +223,12 @@ pub struct NativeGameWorkbench {
     electronics_overlay_active: bool,
     search_surface: SearchSurfaceHost,
     viewport_compass: ViewportCompassHost,
-    agent_panel: AgentPanel,
+    agent_panel: SharedAgentPanel,
     agent_settings: EngineSettings,
     agent_catalog: CommandCatalog,
-    agent_asset_tools: crate::agent_asset_tools::AgentAssetTools,
+    agent_asset_tools: std::rc::Rc<std::cell::RefCell<crate::agent_asset_tools::AgentAssetTools>>,
+    agent_save: std::rc::Rc<std::cell::RefCell<crate::agent_project_store::ProjectSaveQueue>>,
     agent_readiness: AgentReadiness,
-    pending_agent_decision: Option<bool>,
     agent_canvas_changed: bool,
     settings_section: SettingsSection,
     project_catalog: ProjectCatalog,
@@ -250,6 +250,9 @@ pub struct NativeGameWorkbench {
     hierarchy_query: String,
     hierarchy_scroll_offset: f32,
     hierarchy_active_tab: String,
+    lighting_section: String,
+    lighting_preview_neutral: bool,
+    lighting_error: bool,
     electronics_navigator_tab: String,
     electronics_library_query: String,
     /// Entrance sample for Electronics menus and the canvas-local overlay.
@@ -271,7 +274,7 @@ pub struct NativeGameWorkbench {
     /// Opacity of the canvas tool hint. Recedes while a floating menu owns the
     /// pointer so the hint never competes with the menu it would sit under.
     electronics_hint_motion: UiTween,
-    electronics_value_draft: Option<(Uuid, String)>,
+    electronics_value_draft: Option<electronics_model::InspectorValueDraft>,
     inspector_session_name: String,
     hierarchy_bookmarks: [bool; 3],
     hierarchy_renaming: Option<(SceneNodeId, String)>,
@@ -307,6 +310,7 @@ pub struct NativeGameWorkbench {
     scene_draw_calls: u32,
     scene_upload_bytes: u64,
     scene_upload_budget_exceeded: bool,
+    shadow_metrics: SceneFrameMetrics,
     frame_activity_label: &'static str,
     redraw_reason_label: &'static str,
     canvas_status_label: &'static str,
@@ -376,12 +380,12 @@ impl NativeGameWorkbench {
             electronics_overlay_active: false,
             search_surface: SearchSurfaceHost::new(graphics, rect, palette),
             viewport_compass: ViewportCompassHost::new(graphics, palette),
-            agent_panel: AgentPanel::default(),
+            agent_panel: std::rc::Rc::new(std::cell::RefCell::new(AgentPanel::default())),
             agent_settings: EngineSettings::default(),
             agent_catalog: CommandCatalog::builtin(),
-            agent_asset_tools: crate::agent_asset_tools::AgentAssetTools::default(),
+            agent_asset_tools: std::rc::Rc::new(std::cell::RefCell::new(crate::agent_asset_tools::AgentAssetTools::default())),
+            agent_save: Default::default(),
             agent_readiness: AgentReadiness::ProviderDisabled,
-            pending_agent_decision: None,
             agent_canvas_changed: false,
             settings_section: SettingsSection::Appearance,
             project_catalog: ProjectCatalog::default(),
@@ -403,6 +407,9 @@ impl NativeGameWorkbench {
             hierarchy_query: String::new(),
             hierarchy_scroll_offset: 0.0,
             hierarchy_active_tab: "hierarchy".to_string(),
+            lighting_section: "overview".into(),
+            lighting_preview_neutral: false,
+            lighting_error: false,
             electronics_navigator_tab: "library".to_string(),
             electronics_library_query: String::new(),
             electronics_menu_motion: UiTween::new(1.0, UiMotionSpec::dock()),
@@ -448,6 +455,7 @@ impl NativeGameWorkbench {
             scene_draw_calls: 0,
             scene_upload_bytes: 0,
             scene_upload_budget_exceeded: false,
+            shadow_metrics: SceneFrameMetrics::default(),
             frame_activity_label: "Idle",
             redraw_reason_label: "Idle",
             canvas_status_label: "Idle",
@@ -578,7 +586,7 @@ impl NativeGameWorkbench {
         self.search_restore_focus = None;
         self.open_menu = None;
         self.open_submenu = None;
-        self.agent_panel.close_menus();
+        self.agent_panel.borrow_mut().close_menus();
         self.host
             .session_mut()
             .reset_interaction_for_surface_change(None);
@@ -627,14 +635,25 @@ impl NativeGameWorkbench {
         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
     }
 
-    pub(crate) fn execute_asset_command(&mut self, request: &raf_core::EngineCommandRequest,
-        project: Option<&Project>, revision: u64,
+    pub(crate) fn execute_asset_command(
+        &mut self,
+        request: &raf_core::EngineCommandRequest,
+        project: Option<&Project>,
+        revision: u64,
     ) -> raf_core::EngineCommandResponse {
-        let selected = self.agent_panel.image_provider(&self.agent_settings);
-        let (provider, model) = selected.map(|(provider, model)| (Some(provider), model)).unwrap_or_default();
-        self.agent_asset_tools.command(request, project.map(|project| project.path.as_path()),
-            &self.agent_settings.external_asset_studio, provider.as_ref(), &model,
-            revision, self.agent_panel.language)
+        let selected = self.agent_panel.borrow_mut().image_provider(&self.agent_settings);
+        let (provider, model) = selected
+            .map(|(provider, model)| (Some(provider), model))
+            .unwrap_or_default();
+        self.agent_asset_tools.borrow_mut().command(
+            request,
+            project.map(|project| project.path.as_path()),
+            &self.agent_settings.external_asset_studio,
+            provider.as_ref(),
+            &model,
+            revision,
+            self.agent_panel.borrow_mut().language,
+        )
     }
     pub fn set_runtime_toolbar(&mut self, state: raf_player::surface::RuntimeToolbarState) -> bool {
         if self.runtime_toolbar == state {
@@ -675,6 +694,11 @@ impl NativeGameWorkbench {
 
     pub(crate) fn active_session_id(&self) -> SessionId {
         self.inspector_sessions.active_session
+    }
+    pub(crate) fn agent_sessions(&self) -> ProjectSessionRegistry { self.inspector_sessions.clone() }
+    pub(crate) fn set_agent_sessions(&mut self, project: &Project, registry: ProjectSessionRegistry) {
+        self.inspector_sessions = registry;
+        self.inspector_sessions_key = Some((project.path.clone(), project.project_type));
     }
 
     pub fn set_engine_settings(&mut self, mut settings: EngineSettings) {
@@ -766,6 +790,8 @@ impl NativeGameWorkbench {
         self.hierarchy_query.clear();
         self.hierarchy_scroll_offset = 0.0;
         self.hierarchy_active_tab = "hierarchy".to_string();
+        self.lighting_section = "overview".into();
+        self.lighting_error = false;
         self.hierarchy_bookmarks = [false; 3];
         self.hierarchy_renaming = None;
         self.hierarchy_drag = None;
@@ -809,7 +835,7 @@ impl NativeGameWorkbench {
             canvas.logical_size(),
             editor.labels_visible(),
             self.palette,
-            self.agent_panel.language,
+            self.agent_panel.borrow_mut().language,
             self.electronics_hint_fade(),
         );
         if self.electronics_overlay_key == Some(key) {
@@ -835,7 +861,7 @@ impl NativeGameWorkbench {
                 canvas,
                 ElectronicsCanvasOverlayParams::new(
                     self.electronics_hint_fade(),
-                    self.agent_panel.language,
+                    self.agent_panel.borrow_mut().language,
                 ),
             ));
         self.electronics_overlay_key = Some(key);
@@ -862,6 +888,9 @@ impl NativeGameWorkbench {
         electronics: Option<&NativeElectronicsEditor>,
     ) {
         self.rect = layout.window;
+        if self.agent_panel.borrow().opening && !self.agent_settings.prefers_reduced_motion {
+            self.agent_panel.borrow_mut().spinner_step = ((now_seconds / 0.08) as u64 % 12) as u8;
+        }
         self.viewport_compass.sync(
             self.palette,
             layout.canvas,
@@ -869,18 +898,27 @@ impl NativeGameWorkbench {
             self.project_type == ProjectType::Game,
         );
         self.agent_readiness =
-            self.agent_panel
+            self.agent_panel.borrow_mut()
                 .prepare(&self.agent_settings, project, &self.agent_catalog);
-        self.agent_asset_tools
-            .cancel_abandoned(&self.agent_panel.runtime.pending_calls);
-        for result in self.agent_asset_tools.poll_commands(project.map(|project| project.path.as_path()), self.agent_panel.language) {
+        let asset_results = self.agent_asset_tools.borrow_mut().poll_commands(
+            project.map(|project| project.path.as_path()),
+            self.agent_panel.borrow_mut().language,
+        );
+        for result in asset_results {
             let output = match result {
-                Ok(result) => crate::commands::CommandOutput::info(result.summary, Vec::new(), result.data),
-                Err(error) => crate::commands::CommandOutput::error(raf_core::i18n::t("app.agent_asset_failed", self.agent_panel.language), error),
+                Ok(result) => {
+                    crate::commands::CommandOutput::info(result.summary, Vec::new(), result.data)
+                }
+                Err(error) => crate::commands::CommandOutput::error(
+                    raf_core::i18n::t("app.agent_asset_failed", self.agent_panel.borrow_mut().language),
+                    error,
+                ),
             };
             self.log_console_output(output);
         }
-        if self.agent_asset_tools.take_catalog_dirty() { self.project_catalog.refresh(); }
+        if self.agent_asset_tools.borrow_mut().take_catalog_dirty() {
+            self.project_catalog.refresh();
+        }
         if self
             .inspector_name_editing
             .as_ref()
@@ -897,7 +935,7 @@ impl NativeGameWorkbench {
         self.menu_motion.advance(delta, hierarchy_motion_disabled);
         self.drag_motion.advance(delta, hierarchy_motion_disabled);
         self.agent_motion
-            .set_target(self.agent_panel.sidebar_open.then_some(1.0).unwrap_or(0.0));
+            .set_target(self.agent_panel.borrow_mut().sidebar_open.then_some(1.0).unwrap_or(0.0));
         self.agent_motion
             .advance(delta as f32, self.agent_settings.prefers_reduced_motion);
         self.sync_assets_motion(delta, hierarchy_motion_disabled);
@@ -988,7 +1026,7 @@ impl NativeGameWorkbench {
             .as_ref()
             .is_some_and(|status_text| status_text != &self.last_status_text);
         let electronics_revision = electronics.map_or(0, NativeElectronicsEditor::ui_revision);
-        let agent_revision = self.agent_panel.visual_revision();
+        let agent_revision = self.agent_panel.borrow_mut().visual_revision();
         let surface_changed = selection_changed
             || layout_changed
             || self.toolbar_revision != self.last_toolbar_revision
@@ -1096,13 +1134,23 @@ impl NativeGameWorkbench {
                 .iter()
                 .find(|component| component.id == selection.source_id)
         });
+        let electronics_value_focused = self
+            .host
+            .session()
+            .interaction
+            .focus
+            .has_focus("electronics.inspector.value");
         if let Some(component) = electronics_component {
             if self
                 .electronics_value_draft
                 .as_ref()
-                .is_none_or(|(id, _)| *id != component.id)
+                .is_none_or(|draft| draft.source_id != component.id)
+                || !electronics_value_focused
             {
-                self.electronics_value_draft = Some((component.id, component.value.clone()));
+                self.electronics_value_draft = Some(electronics_model::InspectorValueDraft::new(
+                    component.id,
+                    component.value.clone(),
+                ));
             }
         } else {
             self.electronics_value_draft = None;
@@ -1110,7 +1158,7 @@ impl NativeGameWorkbench {
         let electronics_value = self
             .electronics_value_draft
             .as_ref()
-            .map(|(_, value)| value.as_str());
+            .map(|draft| draft.value.as_str());
         self.host.session_mut().interaction.controls.set_text(
             "electronics.inspector.value",
             electronics_value.unwrap_or_default(),
@@ -1143,17 +1191,17 @@ impl NativeGameWorkbench {
         );
         self.host.session_mut().interaction.controls.set_text(
             "agent.input",
-            &self.agent_panel.input_text,
+            &self.agent_panel.borrow_mut().input_text,
             16_384,
         );
         self.host.session_mut().interaction.controls.set_text(
             "agent.new-model.label",
-            &self.agent_panel.new_model_label,
+            &self.agent_panel.borrow_mut().new_model_label,
             256,
         );
         self.host.session_mut().interaction.controls.set_text(
             "agent.new-model.id",
-            &self.agent_panel.new_model_id,
+            &self.agent_panel.borrow_mut().new_model_id,
             256,
         );
         if let Some(project) = project {
@@ -1346,6 +1394,7 @@ impl NativeGameWorkbench {
         self.scene_draw_calls = scene_metrics.total_draw_calls();
         self.scene_upload_bytes = scene_metrics.frame_upload_bytes;
         self.scene_upload_budget_exceeded = scene_metrics.upload_budget_exceeded;
+        self.shadow_metrics = scene_metrics;
         self.presentation_label = presentation_label;
         self.frame_activity_label = frame_activity_label;
         self.redraw_reason_label = redraw_reason_label;
@@ -1392,8 +1441,24 @@ impl NativeGameWorkbench {
         } else {
             "--".to_string()
         };
+        let shadow = if self.shadow_metrics.shadow_budget_exceeded {
+            " | SH:budget!".to_string()
+        } else if self.shadow_metrics.shadow_active {
+            format!(
+                " | SH:{}{} {:.1}M",
+                self.shadow_metrics.shadow_resolution,
+                if self.shadow_metrics.shadow_map_rebuilds > 0 {
+                    "R"
+                } else {
+                    "C"
+                },
+                self.shadow_metrics.shadow_resident_bytes as f32 / 1048576.0
+            )
+        } else {
+            String::new()
+        };
         format!(
-            "CAP:{capacity} FPS | FPS:{presented_fps:.0}/{target} | VP:{viewport} | CPU:{frame_cpu_ms:.1}ms | GPU:{gpu} | P95:{p95_frame_time_ms:.1}ms | D{scene_draw_calls} | U{upload_kib:.0}K{upload_warning} | H{hitch_count} | {frame_activity_label} | {redraw_reason_label} | {canvas_status_label} | {presentation_label}",
+            "CAP:{capacity} FPS | FPS:{presented_fps:.0}/{target} | VP:{viewport} | CPU:{frame_cpu_ms:.1}ms | GPU:{gpu} | P95:{p95_frame_time_ms:.1}ms | D{scene_draw_calls} | U{upload_kib:.0}K{upload_warning}{shadow} | H{hitch_count} | {frame_activity_label} | {redraw_reason_label} | {canvas_status_label} | {presentation_label}",
             capacity = capacity,
             presented_fps = self.presented_fps,
             target = target,
@@ -1677,7 +1742,7 @@ impl NativeGameWorkbench {
         self.assets_surface.refresh_requested = true;
         self.assets_surface.status = Some(AssetsStatus::pending(raf_core::i18n::t(
             "app.assets_status_working",
-            self.agent_panel.language,
+            self.agent_panel.borrow_mut().language,
         )));
     }
 
@@ -1687,7 +1752,7 @@ impl NativeGameWorkbench {
         let Some(operation) = self.assets_surface.operation.clone() else {
             return;
         };
-        let language = self.agent_panel.language;
+        let language = self.agent_panel.borrow_mut().language;
         let revision_changed = self.project_catalog.revision() != operation.catalog_revision;
         let observed = revision_changed
             && (self
@@ -1728,7 +1793,7 @@ impl NativeGameWorkbench {
     }
     pub fn needs_ui_frame(&self) -> bool {
         self.toolbar_revision != self.last_toolbar_revision
-            || self.agent_panel.has_live_output()
+            || self.agent_panel.borrow_mut().has_live_output()
             || self.has_active_ui_motion()
             || self.has_active_text_repeat()
             || self.bottom_dock.drag().is_some()
@@ -1753,25 +1818,25 @@ impl NativeGameWorkbench {
     }
 
     pub(crate) fn agent_task_snapshot_by_id(&self, id: AgentTaskId) -> Option<AgentTaskSnapshot> {
-        self.agent_panel.runtime.task_snapshot_by_id(id)
+        self.agent_panel.borrow_mut().runtime.task_snapshot_by_id(id)
     }
 
     pub(crate) fn agent_task_snapshots(&self) -> Vec<AgentTaskSnapshot> {
-        self.agent_panel.runtime.task_snapshots()
+        self.agent_panel.borrow_mut().runtime.task_snapshots()
     }
 
     pub(crate) fn agent_task_events_since(&self, sequence: u64) -> Vec<AgentTaskEvent> {
-        self.agent_panel.runtime.task_events_since(sequence)
+        self.agent_panel.borrow_mut().runtime.task_events_since(sequence)
     }
 
     pub(crate) fn cancel_agent_task(&mut self, id: AgentTaskId) -> bool {
-        let Some(snapshot) = self.agent_panel.runtime.task_snapshot() else {
+        let Some(snapshot) = self.agent_panel.borrow_mut().runtime.task_snapshot() else {
             return false;
         };
         if snapshot.id != id || snapshot.status.is_terminal() || !snapshot.cancellable {
             return false;
         }
-        self.agent_panel.runtime.cancel();
+        self.agent_panel.borrow_mut().runtime.cancel();
         true
     }
 
@@ -1781,95 +1846,51 @@ impl NativeGameWorkbench {
     pub fn poll_agent(
         &mut self,
         scene: &mut SceneGraph,
+        nodes: &NodeGraph,
+        session: &raf_core::session::ProjectSession,
         viewport: &mut crate::panels::viewport_controller::NativeGameViewportController,
-        graphics: &mut RenderRuntime,
-        electronics: Option<&mut NativeElectronicsEditor>,
+        mut graphics: Option<&mut RenderRuntime>,
+        mut electronics: Option<&mut NativeElectronicsEditor>,
         project: Option<&Project>,
         ledger: &mut TransactionLedger,
+        history: &mut crate::scene_history::SceneHistory,
     ) -> Vec<AgentEditorAction> {
-        self.agent_readiness =
-            self.agent_panel
-                .prepare(&self.agent_settings, project, &self.agent_catalog);
-        if !matches!(self.agent_readiness, AgentReadiness::Ready) {
-            return Vec::new();
-        }
-        let mut selection = SceneSelectionState {
-            selected_node: viewport.selected.first().copied(),
-            selected_nodes: viewport.selected.clone(),
-        };
-        let active_session = self
-            .inspector_sessions
-            .active()
-            .map(|session| session.name.clone())
-            .unwrap_or_else(|| "Main".to_string());
-        let snapshot = AgentObservationContext {
-            scene,
-            selection: &selection,
-            project,
-            assets: self.project_catalog.assets(),
-            active_session: &active_session,
-            revision: ledger.revision(),
-            catalog_pending: self.project_catalog.is_pending(),
-            catalog_error: self.project_catalog.error(),
-        }
-        .snapshot();
-        self.agent_panel.start_pending_run(
-            &snapshot,
-            &self.agent_catalog,
-            project.map(|project| project.project_type),
-            self.agent_settings.agent_mode,
-        );
-        let mut editor_actions = Vec::new();
-        let mut canvas_changed = false;
-        let language = self.agent_panel.language;
-        let (image_provider, image_model) = self
-            .agent_panel
-            .image_provider(&self.agent_settings)
-            .map(|(provider, model)| (Some(provider), model))
-            .unwrap_or_default();
-        let mut executor = AgentToolExecutor {
-            asset_tools: &mut self.agent_asset_tools,
-            asset_studio: &self.agent_settings.external_asset_studio,
-            image_provider,
-            image_model,
-            scene,
-            selection: &mut selection,
-            viewport,
-            graphics,
-            electronics,
-            project: AgentProjectContext::from_project(project),
-            project_info: project,
-            project_assets: self.project_catalog.assets(),
-            active_session: &active_session,
-            catalog_pending: self.project_catalog.is_pending(),
-            catalog_error: self.project_catalog.error(),
-            catalog: &self.agent_catalog,
-            language,
-            routes: self.agent_panel.tool_routes.clone(),
-            ledger,
-            editor_actions: &mut editor_actions,
-            canvas_changed: &mut canvas_changed,
-        };
-        if let Some(approve) = self.pending_agent_decision.take() {
-            if approve {
-                self.agent_panel.approve_with_executor(&mut executor);
-            } else {
-                self.agent_panel.deny_with_executor(&mut executor);
-            }
-        }
-        self.agent_panel.poll(&mut executor);
-        if self.agent_asset_tools.take_catalog_dirty() {
-            self.project_catalog.refresh();
-        }
-        self.agent_canvas_changed |= canvas_changed;
-        viewport.selected = selection.selected_nodes;
-        if viewport.selected.is_empty() {
-            if let Some(id) = selection.selected_node {
-                viewport.selected.push(id);
-            }
-        }
-        editor_actions
+        let Some(project) = project else { return Vec::new(); };
+        let before = scene.document_revision();
+        let mut panel = self.agent_panel.borrow_mut();
+        self.agent_readiness = panel.prepare(&self.agent_settings, Some(project), &self.agent_catalog);
+        let mut actions = Vec::new();
+        panel.visit_runs(|panel| {
+            if panel.document_id().is_some_and(|id| id != session.id) { return; }
+            actions.extend(crate::agent_service::poll_conversation(
+                panel, &mut self.agent_asset_tools.borrow_mut(), &mut self.agent_save.borrow_mut(),
+                &self.agent_settings, &self.agent_catalog, project, session, scene, nodes,
+                viewport, graphics.as_deref_mut(), electronics.as_deref_mut(), ledger,
+                self.project_catalog.assets(), self.project_catalog.is_pending(), self.project_catalog.error(), history,
+            ));
+        });
+        self.agent_canvas_changed |= before != scene.document_revision();
+        if self.agent_asset_tools.borrow_mut().take_catalog_dirty() { self.project_catalog.refresh(); }
+        actions
     }
+
+    pub(crate) fn bind_agent_workspace(
+        &mut self, panel: SharedAgentPanel, assets: crate::agent_service::SharedAssetTools,
+        save: crate::agent_service::SharedSave,
+    ) {
+        self.agent_panel = panel;
+        self.agent_asset_tools = assets;
+        self.agent_save = save;
+        self.agent_scroll_projection_offset = 0.0;
+        self.host.session_mut().reset_interaction_for_surface_change(None);
+        self.toolbar_revision = self.toolbar_revision.wrapping_add(1);
+    }
+
+    pub(crate) fn has_agent_work(&self) -> bool {
+        self.agent_panel.borrow().has_live_output() || self.agent_save.borrow().is_running()
+    }
+    pub(crate) fn agent_visual_revision(&self) -> u64 { self.agent_panel.borrow().visual_revision() }
+    pub(crate) fn agent_save_queue(&self) -> crate::agent_service::SharedSave { self.agent_save.clone() }
 
     pub fn take_agent_canvas_changed(&mut self) -> bool {
         std::mem::take(&mut self.agent_canvas_changed)
@@ -1960,6 +1981,10 @@ impl NativeGameWorkbench {
     }
 
     fn seed_inspector_values(&mut self, scene: &SceneGraph, selected: &[SceneNodeId]) {
+        if self.hierarchy_active_tab == "lighting" {
+            self.seed_lighting_values(scene);
+            return;
+        }
         let Some(id) = selected.first().copied() else {
             return;
         };

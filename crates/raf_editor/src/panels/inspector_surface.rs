@@ -514,6 +514,18 @@ fn content(
                 0.0,
                 100.0,
                 1.0,
+            ))
+            .with_child(toggle_row(
+                palette,
+                "lighting.cast_shadows",
+                "inspector.shadows.casts",
+                node.casts_shadows,
+            ))
+            .with_child(toggle_row(
+                palette,
+                "lighting.receive_shadows",
+                "inspector.shadows.receives",
+                node.receives_shadows,
             ));
     }
 

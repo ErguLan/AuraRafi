@@ -1,6 +1,7 @@
 use raf_core::SceneGraph;
 use std::collections::HashSet;
 pub fn validate_scene(scene: &SceneGraph) -> Result<(), String> {
+    scene.environment().validate()?;
     let mut identities = HashSet::new();
     for (id, node) in scene.iter().filter(|(id, _)| scene.is_valid_node(*id)) {
         if !identities.insert(node.uuid) {

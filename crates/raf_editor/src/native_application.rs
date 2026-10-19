@@ -39,7 +39,7 @@ use crate::native_editor_commands::apply_workbench_intents;
 use crate::native_editor_runtime::NativeEditorRuntime;
 use crate::native_electronics::NativeElectronicsCanvas;
 use crate::native_project_controller::{
-    initial_node_graph, initial_node_graph_for_session, initial_project, initial_scene,
+    initial_node_graph, initial_node_graph_for_session, initial_project,
     initial_scene_for_session, project_capabilities, save_project_document,
     save_project_document_for_session,
 };
@@ -55,6 +55,10 @@ use crate::panels::settings_surface_host::SettingsSurfaceHost;
 use crate::panels::viewport_compass::ViewportCompassState;
 use crate::panels::viewport_controller::NativeViewportMode;
 use crate::settings_surface::SettingsSection;
+use crate::commands::game::GameViewportPort;
+
+#[path = "native_agents.rs"]
+mod agents;
 
 const NATIVE_EDITOR_SIZE: [f64; 2] = [1440.0, 900.0];
 const NATIVE_EDITOR_MIN_SIZE: [f64; 2] = [900.0, 600.0];
@@ -553,6 +557,14 @@ pub struct NativeEditorApplication {
     pending_runtime_command: Option<String>,
     next_runtime_frame: Instant,
     workbench: Option<NativeGameWorkbench>,
+    agents: crate::agent_service::AgentService,
+    agent_surface: Option<crate::agent_workspace_surface_host::AgentWorkspaceSurfaceHost>,
+    agents_open: bool,
+    pending_editor_project: Option<std::path::PathBuf>,
+    pending_editor_document: Option<SessionId>,
+    editor_project_error: Option<String>,
+    pending_agents_open: bool,
+    last_live_agent_poll: Instant,
     studio: Option<NativeStudioSurface>,
     settings_surface: Option<SettingsSurfaceHost>,
     exit_confirmation_surface: Option<ExitConfirmationSurfaceHost>,
@@ -614,6 +626,14 @@ impl Default for NativeEditorApplication {
             pending_runtime_command: None,
             next_runtime_frame: Instant::now(),
             workbench: None,
+            agents: Default::default(),
+            agent_surface: None,
+            agents_open: false,
+            pending_editor_project: None,
+            pending_editor_document: None,
+            editor_project_error: None,
+            pending_agents_open: false,
+            last_live_agent_poll: Instant::now(),
             studio: None,
             settings_surface: None,
             exit_confirmation_surface: None,
@@ -924,40 +944,8 @@ impl NativeEditorApplication {
     }
 
     fn initialize_startup_project(&mut self) {
-        if self.project.is_some() {
-            return;
-        }
-        let started_at = Instant::now();
-        let project = initial_project();
-        let scene = initial_scene(project.as_ref());
-        let attached_ledger = project
-            .as_ref()
-            .map(|project| {
-                let ledger = TransactionLedger::load_for_project(
-                    &project.path,
-                    crate::scene_history::scene_fingerprint(&scene),
-                );
-                if let Err(error) = ledger.persist_for_project(&project.path) {
-                    tracing::warn!(
-                        %error,
-                        path = %project.path.display(),
-                        "initial attached agent state persistence failed"
-                    );
-                }
-                ledger
-            })
-            .unwrap_or_default();
-        let project_open = project.is_some();
-        self.scene = scene;
-        self.project = project;
-        self.attached_ledger = attached_ledger;
-        self.observed_scene_revision = self.scene.document_revision();
-        self.observed_scene_render_fingerprint = self.scene.render_fingerprint();
-        tracing::info!(
-            startup_project_load_ms = started_at.elapsed().as_secs_f32() * 1000.0,
-            project_open,
-            "native startup project state ready"
-        );
+        if self.project.is_some() { return; }
+        if let Some(project) = initial_project() { self.request_editor_project(project.path); }
     }
 
     fn finish_startup_loading(&mut self) {
@@ -1122,33 +1110,6 @@ impl NativeEditorApplication {
             .is_some_and(|project| project.project_type == ProjectType::Electronics)
     }
 
-    /// Saves both documents and only reports success when every write landed.
-    ///
-    /// `editor.save` writes the schematic and the PCB. A partial success used to
-    /// still clear the dirty marker, so the editor claimed to be saved while one
-    /// of the two documents was missing from disk.
-    fn save_electronics_documents(&mut self) -> bool {
-        let Some(project) = self.project.as_ref() else {
-            return false;
-        };
-        let Some(editor) = self.electronics_editor.as_mut() else {
-            return false;
-        };
-        match editor.save(project) {
-            Ok(()) => {
-                editor.clear_surface_errors_for_key("electronics.error.save_failed");
-                true
-            }
-            Err(error) => {
-                tracing::error!(%error, "native electronics document save failed");
-                let language = self.settings_state.language;
-                let message = raf_core::i18n::t("electronics.error.save_failed", language);
-                editor.push_surface_error(message);
-                false
-            }
-        }
-    }
-
     /// Pushes a localized failure into the live Electronics surface so nothing
     /// depends on the log alone.
     fn push_electronics_error(&mut self, key: &str) {
@@ -1247,6 +1208,7 @@ impl NativeEditorApplication {
     }
 
     fn save_current_documents(&mut self) -> Result<(), String> {
+        if let Some(result) = self.save_agent_document() { return result; }
         let Some(project) = self.project.as_ref() else {
             return Ok(());
         };
@@ -1897,6 +1859,32 @@ impl NativeEditorApplication {
             if let Some(runtime) = self.runtime.as_mut() {
                 runtime.set_continuous_ui_motion(false);
             }
+        } else if self.agents_open {
+            if self.settings_open && !self.exit_confirmation_open && !exit_confirmation_was_open {
+                let settings_actions = self.process_settings_input();
+                self.apply_settings_actions(settings_actions);
+            }
+            self.ensure_agent_surface();
+            let projects = self.agent_projects();
+            let mut intents = Vec::new();
+            if let (Some(runtime), Some(surface)) = (self.runtime.as_mut(), self.agent_surface.as_mut()) {
+                surface.sync(runtime.layout().window, native_palette(self.settings_state.theme), &self.agents, &projects, &self.settings_state);
+                if !self.settings_open && !self.exit_confirmation_open {
+                    intents = surface.process_input(&self.input, runtime.input_router_mut(), &mut self.agents, &mut self.settings_state);
+                }
+                runtime.set_continuous_ui_motion(self.agents.loading());
+                if !intents.is_empty() { runtime.request_ui_frame(); }
+            }
+            self.apply_agent_workspace_intents(intents);
+            if let Some(workspace) = self.agents.selected_workspace() {
+                let settings_changed = workspace.panel.borrow_mut().take_settings_changed();
+                if settings_changed { self.persist_settings(); }
+            }
+            if !self.settings_open {
+                if let (Some(window), Some(surface)) = (self.window.as_ref(), self.agent_surface.as_ref()) {
+                    window.set_cursor(native_cursor_icon(surface.cursor_hint()));
+                }
+            }
         } else if self.project.is_none() {
             if self.settings_open && !self.exit_confirmation_open && !exit_confirmation_was_open {
                 let settings_actions = self.process_settings_input();
@@ -2147,7 +2135,9 @@ impl NativeEditorApplication {
                                 }
                             }
                             crate::native_workbench::NativeWorkbenchIntent::Command(command) => {
-                                if let Some(raw) = command.strip_prefix("console.submit:").filter(|raw| raw.trim().starts_with("/runtime.")) {
+                                if command == "agent.workspace" {
+                                    self.pending_agents_open = true;
+                                } else if let Some(raw) = command.strip_prefix("console.submit:").filter(|raw| raw.trim().starts_with("/runtime.")) {
                                     let allowed = self.settings_state.command_console_enabled && self.project.as_ref().is_some_and(|project| project.settings.enable_console_commands);
                                     if !allowed {
                                         workbench.log_console_output(crate::commands::CommandOutput::error("Runtime", "manual console commands are disabled"));
@@ -2185,6 +2175,15 @@ impl NativeEditorApplication {
                                     let next_session_id = workbench.active_session_id();
                                     if next_session_id != previous_session_id {
                                         if let Some(project) = self.project.as_ref() {
+                                            if let Err(error) = agents::park_live_session(&mut self.agents, project, previous_session_id,
+                                                &self.scene, runtime, self.electronics_editor.as_ref()) {
+                                                let mut registry = ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
+                                                registry.active_session = previous_session_id;
+                                                let _ = registry.save(&project.path);
+                                                workbench.log_console_output(crate::commands::CommandOutput::error(
+                                                    raf_core::i18n::t("agent_workspace.operation_failed", self.settings_state.language), error));
+                                                continue;
+                                            }
                                             match switch_session_documents(
                                                 project,
                                                 previous_session_id,
@@ -2197,6 +2196,11 @@ impl NativeEditorApplication {
                                                 &mut self.observed_scene_render_fingerprint,
                                             ) {
                                                 Ok(()) => {
+                                                    if let Err(error) = agents::mount_live_session(&mut self.agents, project, previous_session_id,
+                                                        next_session_id, &mut self.scene, runtime, &mut self.electronics_editor, workbench) {
+                                                        workbench.log_console_output(crate::commands::CommandOutput::error(
+                                                            raf_core::i18n::t("agent_workspace.operation_failed", self.settings_state.language), error));
+                                                    }
                                                     let registry =
                                                         ProjectSessionRegistry::load_or_legacy(
                                                             &project.path,
@@ -2395,55 +2399,6 @@ impl NativeEditorApplication {
                             }
                         }
                     }
-                    let agent_project_path =
-                        self.project.as_ref().map(|project| project.path.clone());
-                    let agent_revision_before = self.attached_ledger.revision();
-                    let (viewport, graphics) = runtime.game_viewport_and_graphics_mut();
-                    let agent_actions = workbench.poll_agent(
-                        &mut self.scene,
-                        viewport,
-                        graphics,
-                        self.electronics_editor.as_mut(),
-                        self.project.as_ref(),
-                        &mut self.attached_ledger,
-                    );
-                    let agent_changed = workbench.take_agent_canvas_changed();
-                    let agent_ledger_changed =
-                        self.attached_ledger.revision() != agent_revision_before;
-                    if agent_changed || agent_ledger_changed {
-                        runtime.request_canvas_frame();
-                        // Agent mutations already advanced the shared ledger.
-                        // Mark the observed document here so the next redraw
-                        // does not count the same mutation a second time, and
-                        // persist the clock for attached clients after a
-                        // native Agent run as well.
-                        if agent_changed {
-                            self.attached_ledger.mark_document(
-                                crate::scene_history::scene_fingerprint(&self.scene),
-                            );
-                        }
-                        if let Some(project_path) = agent_project_path {
-                            if let Err(error) =
-                                self.attached_ledger.persist_for_project(&project_path)
-                            {
-                                tracing::warn!(
-                                    %error,
-                                    path = %project_path.display(),
-                                    "native Agent state persistence failed"
-                                );
-                            }
-                        }
-                    }
-                    for action in agent_actions {
-                        match action {
-                            crate::agent_executor::AgentEditorAction::Undo => {
-                                runtime.undo(&mut self.scene)
-                            }
-                            crate::agent_executor::AgentEditorAction::Redo => {
-                                runtime.redo(&mut self.scene)
-                            }
-                        }
-                    }
                     let has_active_motion = workbench.has_active_ui_motion();
                     let has_active_text_repeat = workbench.has_active_text_repeat();
                     if had_ui_activity || workbench.needs_ui_frame() {
@@ -2601,17 +2556,7 @@ impl NativeEditorApplication {
         }
 
         if project_save_requested {
-            let is_electronics = self
-                .runtime
-                .as_ref()
-                .is_some_and(|runtime| runtime.project_type() == ProjectType::Electronics);
-            let node_graph = self.runtime.as_ref().map(|runtime| runtime.node_graph());
-            let project_result = match (self.project.as_ref(), node_graph) {
-                (Some(project), Some(node_graph)) => {
-                    save_project_document(project, &self.scene, node_graph)
-                }
-                _ => Ok(()),
-            };
+            let project_result = self.save_current_documents();
             let project_saved = match project_result {
                 Ok(()) => {
                     if let Some(project) = self.project.as_ref() {
@@ -2627,14 +2572,7 @@ impl NativeEditorApplication {
             if !project_saved {
                 self.push_electronics_error("electronics.error.project_save_failed");
             }
-            // The Electronics documents must land too, and a partial save must
-            // not be reported as a successful one.
-            let documents_saved = if is_electronics {
-                self.save_electronics_documents()
-            } else {
-                true
-            };
-            if project_saved && documents_saved {
+            if project_saved {
                 self.pending_document_saved = true;
             } else {
                 self.pending_document_save_failed = true;
@@ -2684,6 +2622,8 @@ impl NativeEditorApplication {
                 self.settings_surface
                     .as_ref()
                     .is_some_and(SettingsSurfaceHost::has_active_text_repeat)
+            } else if self.agents_open {
+                self.agent_surface.as_ref().is_some_and(|surface| surface.has_active_text_repeat())
             } else if self.project.is_some() {
                 self.workbench
                     .as_ref()
@@ -2714,7 +2654,7 @@ impl NativeEditorApplication {
             return;
         };
         let target_size = [host.width(), host.height()];
-        let project_open = self.project.is_some();
+        let project_open = self.project.is_some() && !self.agents_open;
         let studio_model = (!project_open)
             .then(|| {
                 self.studio
@@ -2785,6 +2725,16 @@ impl NativeEditorApplication {
                 std::slice::from_mut(&mut layer),
                 |key| raf_core::i18n::t(key, self.settings_state.language),
             );
+        } else if self.agents_open {
+            let Some(surface) = self.agent_surface.as_mut() else { runtime.cancel_frame(); return; };
+            let mut layers = vec![surface.compositor_layer(self.input.scale_factor() as f32, target_size)];
+            if self.settings_open { if let Some(settings) = self.settings_surface.as_mut() {
+                layers.push(settings.compositor_layer(self.input.scale_factor() as f32, target_size));
+            } }
+            if self.exit_confirmation_open { if let Some(confirmation) = self.exit_confirmation_surface.as_mut() {
+                layers.push(confirmation.compositor_layer(self.input.scale_factor() as f32, target_size));
+            } }
+            let _ = host.render_editor_layers(compositor, None, &mut layers, |key| raf_core::i18n::t(key, ui_language));
         } else if project_open {
             let Some(workbench) = self.workbench.as_mut() else {
                 runtime.cancel_frame();
@@ -2887,12 +2837,19 @@ impl NativeEditorApplication {
     fn apply_studio_intents(&mut self, intents: Vec<NativeStudioIntent>) {
         for intent in intents {
             match intent {
+                NativeStudioIntent::RetryOpen => self.retry_editor_project(),
+                NativeStudioIntent::CancelOpen => { self.cancel_editor_project(); if let Some(runtime) = self.runtime.as_mut() { runtime.request_ui_frame(); } }
                 NativeStudioIntent::Create {
                     name,
                     parent,
                     project_type,
+                    with_agent,
                 } => match Project::create(&name, project_type, &parent) {
-                    Ok(project) => self.activate_project(project),
+                    Ok(project) => {
+                        remember_project(&project);
+                        if with_agent { self.open_agents(Some(project.path)); }
+                        else { self.request_editor_project(project.path); }
+                    }
                     Err(error) => {
                         tracing::warn!(%error, "native project creation failed");
                         if let Some(studio) = self.studio.as_mut() {
@@ -2904,12 +2861,8 @@ impl NativeEditorApplication {
                     self.pending_settings_open = Some(section);
                 }
                 NativeStudioIntent::Window(command) => self.execute_window_command(command),
-                NativeStudioIntent::Open(path) => match Project::load(&path) {
-                    Ok(project) => self.activate_project(project),
-                    Err(error) => {
-                        tracing::warn!(%error, path = %path.display(), "native project open failed")
-                    }
-                },
+                NativeStudioIntent::OpenAgents(path) => self.open_agents(path),
+                NativeStudioIntent::Open(path) => self.request_editor_project(path),
                 NativeStudioIntent::Duplicate(path) => {
                     if let Err(error) = self.duplicate_project(&path) {
                         tracing::warn!(%error, path = %path.display(), "native Hub project duplicate failed");
@@ -2927,7 +2880,25 @@ impl NativeEditorApplication {
         }
     }
 
-    fn activate_project(&mut self, project: Project) {
+    fn activate_project(&mut self, project: Project) -> Result<(), String> {
+        let workspace = self.agents.workspace(&project.path).ok_or("agent_workspace.load_failed")?;
+        if !workspace.documents.contains_key(&workspace.registry.active_session.0.to_string()) {
+            return Err("agent_workspace.document_missing".into());
+        }
+        self.detach_agent_document()?;
+        let workspace = self.agents.workspace_mut(&project.path).ok_or("agent_workspace.load_failed")?;
+        let session_id = workspace.registry.active_session;
+        let document = workspace.documents.get_mut(&session_id.0.to_string()).ok_or("agent_workspace.document_missing")?;
+        let mounted_scene = std::mem::take(&mut document.scene);
+        let mounted_nodes = std::mem::replace(&mut document.nodes, raf_nodes::NodeGraph::new("Main"));
+        let mounted_history = std::mem::take(&mut document.history);
+        let mounted_electronics = document.electronics.take();
+        let panel = workspace.panel.clone();
+        let asset_tools = workspace.assets.clone();
+        let save = document.save.clone();
+        let sessions = workspace.registry.clone();
+        let mounted_ledger = std::mem::take(&mut workspace.ledger);
+        self.agents_open = false;
         let project_type = project.project_type;
         self.exit_confirmation_open = false;
         self.pending_return_to_hub = None;
@@ -2946,22 +2917,23 @@ impl NativeEditorApplication {
         if let (Some(workbench), Some(runtime)) = (self.workbench.as_mut(), self.runtime.as_mut()) {
             workbench.reset_input_state(runtime.input_router_mut());
         }
-        remember_project(&project);
-        self.scene = initial_scene(Some(&project));
-        self.attached_ledger = TransactionLedger::load_for_project(
-            &project.path,
-            crate::scene_history::scene_fingerprint(&self.scene),
-        );
+        // Headless domain tests/preparation are not user-visible editor opens.
+        if self.window.is_some() { remember_project(&project); }
+        self.scene = mounted_scene;
+        self.attached_ledger = mounted_ledger;
         self.observed_scene_revision = self.scene.document_revision();
         self.observed_scene_render_fingerprint = self.scene.render_fingerprint();
         self.persist_attached_ledger_for(&project);
         if let Some(runtime) = self.runtime.as_mut() {
             runtime.reset_document();
             runtime.set_project_type(project_type);
-            runtime.set_node_graph(initial_node_graph(Some(&project)));
+            runtime.set_node_graph(mounted_nodes);
+            runtime.install_agent_history(mounted_history);
         }
         self.ensure_workbench();
         if let Some(workbench) = self.workbench.as_mut() {
+            workbench.bind_agent_workspace(panel, asset_tools, save);
+            workbench.set_agent_sessions(&project, sessions);
             workbench.set_engine_settings(self.settings_state.clone());
             workbench.set_project_info(project.name.clone(), project.project_type);
         }
@@ -2982,10 +2954,7 @@ impl NativeEditorApplication {
                 runtime.set_project_asset_root(Some(project.path.as_path()));
             }
         }
-        self.electronics_editor = self
-            .project
-            .as_ref()
-            .map(NativeElectronicsEditor::from_project);
+        self.electronics_editor = mounted_electronics;
         if let Some(editor) = self.electronics_editor.as_mut() {
             editor.apply_engine_settings(&self.settings_state);
             if let Some(project) = self.project.as_ref() {
@@ -3012,6 +2981,13 @@ impl NativeEditorApplication {
             );
         }
         self.mark_document_saved();
+        if let Some(runtime) = self.runtime.as_mut() {
+            runtime.input_router_mut().cancel_all();
+            runtime.request_canvas_frame();
+            runtime.request_ui_frame();
+        }
+        if let Some(window) = self.window.as_ref() { window.request_redraw(); }
+        Ok(())
     }
 
     fn duplicate_project(&self, path: &Path) -> Result<(), String> {
@@ -3038,6 +3014,7 @@ impl NativeEditorApplication {
                 raf_render::api_graphic_basic::ui_surface::NativeWindowCommandResult::RequestClose,
             ) => {
                 self.close_requested = true;
+                self.game_runtime.stop_all();
             }
             Ok(_) => {
                 if let Some(window) = self.window.as_ref() {
@@ -3050,7 +3027,7 @@ impl NativeEditorApplication {
 
     fn window_event_native(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
@@ -3060,9 +3037,8 @@ impl NativeEditorApplication {
 
         match event {
             WindowEvent::CloseRequested => {
+                self.close_requested = true;
                 self.game_runtime.stop_all();
-                self.persist_settings();
-                event_loop.exit();
             }
             WindowEvent::Resized(size) => {
                 if let Some(host) = self.window_host.as_mut() {
@@ -3159,6 +3135,8 @@ impl NativeEditorApplication {
     }
 
     fn about_to_wait_native(&mut self, event_loop: &ActiveEventLoop) {
+        if std::mem::take(&mut self.pending_agents_open) { self.open_agents(None); }
+        self.poll_agent_service();
         if let Some(command) = self.pending_runtime_command.take() {
             self.apply_runtime_command(&command);
         }
@@ -3247,6 +3225,7 @@ impl NativeEditorApplication {
             // then claim everything is on disk while a document is missing.
             if !self.pending_document_save_failed {
                 self.mark_document_saved();
+                self.refresh_agent_save_receipt();
             }
             self.pending_document_save_failed = false;
         }
@@ -3287,6 +3266,14 @@ impl NativeEditorApplication {
             self.execute_window_command(command);
         }
         if self.close_requested {
+            let save = if self.project.is_some() { self.save_current_documents() } else { Ok(()) };
+            if let Err(error) = save.and_then(|_| self.agents.shutdown()) {
+                self.close_requested = false;
+                self.open_agents(None);
+                if let Some(workspace) = self.agents.selected_workspace() { workspace.panel.borrow_mut().save_error = Some(error); }
+                return;
+            }
+            self.game_runtime.stop_all();
             self.persist_settings();
             event_loop.exit();
             return;
@@ -3330,9 +3317,20 @@ impl NativeEditorApplication {
             };
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
+        if self.agents.has_work() || (self.project.is_some() && self.workbench.as_ref().is_some_and(NativeGameWorkbench::has_agent_work)) {
+            let agent_deadline = Instant::now() + Duration::from_millis(40);
+            let deadline = match event_loop.control_flow() { ControlFlow::WaitUntil(existing) => existing.min(agent_deadline), _ => agent_deadline };
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        }
     }
 
     fn return_to_hub(&mut self, open_create: bool) {
+        if let Err(error) = self.detach_agent_document() {
+            if let Some(workspace) = self.agents.selected_workspace() { workspace.panel.borrow_mut().save_error = Some(error); }
+            self.open_agents(None);
+            return;
+        }
+        self.agents_open = false;
         self.game_runtime.stop_all();
         self.settings_open = false;
         self.settings_restore_focus = None;

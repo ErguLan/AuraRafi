@@ -324,7 +324,22 @@ impl RuntimeWorld {
                 .scripts
                 .as_ref()
                 .is_some_and(|s| s.active_script_count() > 0)
-                || self.physics.has_dynamic_bodies())
+                || self.physics.has_dynamic_bodies()
+                || self.scene.environment().advanced(1.0) != *self.scene.environment())
+    }
+    pub fn presentation_environment(&self) -> raf_core::environment::EnvironmentSettings {
+        self.scripts
+            .as_ref()
+            .map(|scripts| scripts.view.environment(*self.scene.environment()))
+            .unwrap_or(*self.scene.environment())
+    }
+    pub fn presentation_revision(&self) -> u64 {
+        self.scene.document_revision()
+            ^ self
+                .scripts
+                .as_ref()
+                .map(|scripts| scripts.view.environment_revision().rotate_left(17))
+                .unwrap_or(0)
     }
     fn fixed_step(&self) -> f64 {
         1.0 / self.settings.runtime.fixed_hz.clamp(15, 120) as f64
@@ -337,6 +352,8 @@ impl RuntimeWorld {
             return;
         }
         let dt = self.fixed_step() as f32;
+        self.scene
+            .set_environment(self.scene.environment().advanced(dt));
         self.previous_camera = self
             .camera_pose()
             .map(|pose| (self.active_camera_uuid(), pose));
@@ -539,6 +556,28 @@ impl Drop for RuntimeWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lighting_clock_respects_pause_step_and_does_not_invent_a_camera() {
+        let fixture = Fixture::new("");
+        let mut scene = SceneGraph::new();
+        let mut env = *scene.environment();
+        env.mode = raf_core::environment::EnvironmentMode::Scene;
+        env.sun.control = raf_core::environment::SunControl::Clock;
+        env.clock.running = true;
+        scene.set_environment(env);
+        let source = scene.clone();
+        let mut world = fixture.world(scene);
+        world.start();
+        assert!(world.has_active_simulation());
+        assert!(world.camera_pose().is_none());
+        world.control(RuntimeControl::Pause);
+        world.advance(1.0, &InputSnapshot::default());
+        assert_eq!(*world.scene.environment(), env);
+        world.control(RuntimeControl::Step);
+        assert_ne!(*world.scene.environment(), env);
+        assert_eq!(*source.environment(), env);
+        assert_eq!(world.scene.geometry_revision(), source.geometry_revision());
+    }
     use raf_core::scene::{Primitive, VariableValue};
     struct Fixture(std::path::PathBuf);
     impl Fixture {

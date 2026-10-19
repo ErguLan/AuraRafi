@@ -456,9 +456,8 @@ fn editable_identity(palette: StudioUiPalette, model: &ElectronicsInspectorModel
             .with_class("electronics-inspector-input")
             .with_accessibility_role(UiAccessibilityRole::Textbox)
             .with_accessibility_label_key(identity_field_key(&model.identity_label))
-            // RafUI has no focus-lost event, so the field cannot commit on blur
-            // without host support. The description states the one gesture that
-            // applies the value instead of leaving the user to guess it.
+            // The native host applies Enter or focus-loss to the original
+            // component identity; Escape restores the document's value.
             .with_accessibility_description_key("electronics.tooltip.inspector.value_commit")
             .with_tooltip_key("electronics.tooltip.inspector.value_commit")
             .with_layout(
@@ -783,7 +782,7 @@ mod tests {
     }
 
     #[test]
-    fn the_value_field_states_the_only_gesture_that_applies_it() {
+    fn the_value_field_describes_apply_and_cancel_gestures() {
         let surface = surface(InspectorTab::Properties);
         let input = surface
             .root

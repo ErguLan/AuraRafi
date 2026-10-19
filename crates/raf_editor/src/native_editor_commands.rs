@@ -212,7 +212,14 @@ fn apply_console_command(
         selected_node: runtime.game_viewport().selected.first().copied(),
         selected_nodes: runtime.game_viewport().selected.clone(),
     };
-    let output = if parsed.name.starts_with("behavior.") || parsed.name.starts_with("prefab.") {
+    let output = if parsed.name.starts_with("lighting.") {
+        let before = scene.clone();
+        let output = crate::commands::lighting::execute(&parsed, scene);
+        if output.changed {
+            runtime.record_scene_change(before, scene);
+        }
+        output
+    } else if parsed.name.starts_with("behavior.") || parsed.name.starts_with("prefab.") {
         apply_behavior_command(runtime, scene, project, &parsed)
     } else if parsed.name.starts_with("game.") {
         let viewport = runtime.game_viewport_mut();
@@ -402,6 +409,9 @@ pub(crate) fn apply_workbench_intents(
                             }
                         }
                     }
+                } else if let Some(value) = command.strip_prefix("viewport.lighting-neutral:") {
+                    runtime.game_viewport_mut().lighting_preview_neutral = value == "true";
+                    runtime.request_canvas_frame();
                 } else if let Some(raw_command) = command.strip_prefix("console.submit:") {
                     console_outputs.push(apply_console_command(
                         runtime,
@@ -633,6 +643,28 @@ pub(crate) fn apply_workbench_intents(
                     };
                     if let Ok(id) = raw_id.parse::<usize>() {
                         let id = SceneNodeId(id);
+                        if matches!(
+                            key,
+                            "inspector.shadows.casts" | "inspector.shadows.receives"
+                        ) {
+                            let Some(node) = scene.get(id) else {
+                                continue;
+                            };
+                            let property = if key.ends_with("casts") {
+                                "casts_shadows"
+                            } else {
+                                "receives_shadows"
+                            };
+                            let command =
+                                format!("/game.update target={} {property}={value}", node.uuid);
+                            let before = scene.clone();
+                            let output = apply_console_command(runtime, scene, project, &command);
+                            if output.changed {
+                                runtime.record_scene_change(before, scene);
+                            }
+                            console_outputs.push(output);
+                            continue;
+                        }
                         if key.starts_with("inspector.camera.") {
                             let Some(node) = scene.get(id) else {
                                 continue;

@@ -1090,13 +1090,12 @@ impl NativeElectronicsEditor {
         session
             .ensure_storage(&project.path)
             .map_err(|error| format!("session storage: {error}"))?;
-        save_schematic_document(
+        documents::save(
             &session.path(&project.path, &session.schematic_file),
+            &session.path(&project.path, &session.pcb_file),
             &self.schematic,
-        )
-        .map_err(|error| format!("schematic save: {error}"))?;
-        save_pcb_document(&session.path(&project.path, &session.pcb_file), &self.pcb)
-            .map_err(|error| format!("pcb save: {error}"))?;
+            &self.pcb,
+        )?;
         self.dirty = false;
         Ok(())
     }
@@ -1779,7 +1778,9 @@ impl NativeElectronicsEditor {
             return false;
         };
         let before = self.snapshot();
-        if !self.pcb.route_airwire(index) {
+        if let Err(error) = self.pcb.try_route_airwire(index) {
+            self.push_surface_error(error);
+            self.touch_ui();
             return false;
         }
         let Some(trace) = self.pcb.traces.last() else {
@@ -1793,7 +1794,10 @@ impl NativeElectronicsEditor {
             object_id: format!("trace:{}", trace.id),
             source_id: Some(trace.id),
             kind: CadObjectKind::Trace,
-            layer: CadLayerKind::PcbTopCopper,
+            layer: match trace.layer {
+                raf_electronics::PcbLayer::TopCopper => CadLayerKind::PcbTopCopper,
+                raf_electronics::PcbLayer::BottomCopper => CadLayerKind::PcbBottomCopper,
+            },
         });
         self.history.record(before, &self.snapshot());
         self.dirty = true;

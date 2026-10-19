@@ -127,6 +127,19 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
     }
 
     fn execute_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
+        if command.name.starts_with("lighting.") {
+            return crate::commands::lighting::execute(command, self.scene);
+        }
+        if matches!(
+            command.name.as_str(),
+            "script.list" | "script.validate" | "script.compile_nodes"
+        ) {
+            let mut context = crate::commands::script::ScriptCommandContext {
+                scene: self.scene,
+                assets_root: self.assets_root.as_deref(),
+            };
+            return crate::commands::script::execute(&command.name, command, &mut context);
+        }
         if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
             let mut context = crate::commands::script::ScriptCommandContext {
                 scene: self.scene,
@@ -144,6 +157,19 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
 
     fn preview_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
         let mut scene = self.scene.clone();
+        if command.name.starts_with("lighting.") {
+            return crate::commands::lighting::execute(command, &mut scene);
+        }
+        if matches!(
+            command.name.as_str(),
+            "script.list" | "script.validate" | "script.compile_nodes"
+        ) {
+            let mut context = crate::commands::script::ScriptCommandContext {
+                scene: &mut scene,
+                assets_root: self.assets_root.as_deref(),
+            };
+            return crate::commands::script::execute(&command.name, command, &mut context);
+        }
         if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
             let mut context = crate::commands::script::ScriptCommandContext {
                 scene: &mut scene,
@@ -183,6 +209,7 @@ pub(crate) fn poll_attached_commands(
     let mut any_changed = false;
     let mut document_saved = false;
     let mut runtime = runtime;
+    let save_queue = workbench.as_deref().map(NativeGameWorkbench::agent_save_queue);
     for command in pending {
         let request_id = command.request.id;
         if command.request.name.starts_with("runtime.") {
@@ -203,6 +230,7 @@ pub(crate) fn poll_attached_commands(
                 electronics.as_deref_mut(),
                 attached_ledger,
                 language,
+                save_queue.as_ref(),
             );
             document_saved |= response.ok
                 && response
@@ -236,8 +264,16 @@ pub(crate) fn poll_attached_commands(
         }
         if command.request.name.starts_with("asset.") {
             let response = match workbench.as_deref_mut() {
-                Some(workbench) => workbench.execute_asset_command(&command.request, project, attached_ledger.revision()),
-                None => EngineCommandResponse::error(request_id, "Assets unavailable", "The native workbench is not ready"),
+                Some(workbench) => workbench.execute_asset_command(
+                    &command.request,
+                    project,
+                    attached_ledger.revision(),
+                ),
+                None => EngineCommandResponse::error(
+                    request_id,
+                    "Assets unavailable",
+                    "The native workbench is not ready",
+                ),
             };
             attached_host.respond(command, response);
             continue;
@@ -651,6 +687,7 @@ fn execute_attached_project_save(
     mut electronics: Option<&mut NativeElectronicsEditor>,
     ledger: &mut TransactionLedger,
     language: Language,
+    save_queue: Option<&crate::agent_service::SharedSave>,
 ) -> EngineCommandResponse {
     if let Err(error) = ledger.check_expected(request.expected_revision) {
         let mut response = EngineCommandResponse::error(
@@ -730,7 +767,21 @@ fn execute_attached_project_save(
         return response;
     }
 
-    if let Err(error) = save_project_document(project, scene, runtime.node_graph()) {
+    let save_result = if let Some(save_queue) = save_queue {
+        let registry = raf_core::session::ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
+        registry.active().ok_or_else(|| "agent_workspace.document_missing".to_string()).and_then(|session| {
+            let mut queue = save_queue.borrow_mut();
+            queue.wait_for_save()?;
+            queue.submit(crate::agent_project_store::DocumentSave::capture(project, session, scene,
+                runtime.node_graph(), electronics.as_deref(), ledger));
+            queue.wait_for_save()
+        })
+    } else {
+        save_project_document(project, scene, runtime.node_graph()).and_then(|_| {
+            if let Some(editor) = electronics.as_deref_mut() { editor.save(project) } else { Ok(()) }
+        })
+    };
+    if let Err(error) = save_result {
         let mut response = EngineCommandResponse::error(
             request.id,
             t("agent.project_save.title", language),
@@ -738,19 +789,6 @@ fn execute_attached_project_save(
         );
         response.revision = ledger.revision();
         return response;
-    }
-    if project.project_type == ProjectType::Electronics {
-        if let Some(editor) = electronics.as_deref_mut() {
-            if let Err(error) = editor.save(project) {
-                let mut response = EngineCommandResponse::error(
-                    request.id,
-                    t("agent.project_save.title", language),
-                    format!("{}: {error}", t("agent.project_save.failure", language)),
-                );
-                response.revision = ledger.revision();
-                return response;
-            }
-        }
     }
 
     // Saving writes the current document but does not create a new scene

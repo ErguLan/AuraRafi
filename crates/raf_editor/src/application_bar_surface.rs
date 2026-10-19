@@ -209,6 +209,10 @@ pub fn build_application_bar_surface(
     let mut surface = UiSurface::new("editor.application-bar", palette, root);
     surface.style_sheet = application_bar_style_sheet(palette);
     surface
+        .style_sheet
+        .rules
+        .extend(raf_player::surface::runtime_control_styles(palette).rules);
+    surface
 }
 
 /// Builds the retained popup for one application menu. The menu model is

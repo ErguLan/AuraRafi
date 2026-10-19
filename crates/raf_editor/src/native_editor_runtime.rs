@@ -134,6 +134,13 @@ impl NativeEditorRuntime {
         &self.node_graph
     }
 
+    pub(crate) fn take_agent_node_graph(&mut self) -> raf_nodes::NodeGraph {
+        std::mem::replace(&mut self.node_graph, raf_nodes::NodeGraph::new("Main"))
+    }
+
+    pub(crate) fn take_agent_history(&mut self) -> SceneHistory { std::mem::take(&mut self.history) }
+    pub(crate) fn install_agent_history(&mut self, history: SceneHistory) { self.history = history; }
+
     pub fn selected_graph_node(&self) -> Option<raf_nodes::NodeId> {
         self.selected_graph_node
     }
@@ -871,6 +878,10 @@ impl NativeEditorRuntime {
         (&mut self.game_viewport, &mut self.graphics)
     }
 
+    pub(crate) fn agent_document_ports_mut(&mut self) -> (&mut NativeGameViewportController, &mut RenderRuntime, &mut SceneHistory, &raf_nodes::NodeGraph) {
+        (&mut self.game_viewport, &mut self.graphics, &mut self.history, &self.node_graph)
+    }
+
     pub fn capture_last_viewport_rgba(&self) -> Result<SceneFrameCapture, String> {
         self.graphics.capture_last_scene_rgba()
     }
@@ -1060,7 +1071,7 @@ impl NativeEditorRuntime {
         update
     }
 
-    fn request_document_frame(&mut self) {
+    pub(crate) fn request_document_frame(&mut self) {
         self.cached_game_canvas = None;
         self.graphics
             .request_frame(FrameInvalidation::DOCUMENT | FrameInvalidation::UI);

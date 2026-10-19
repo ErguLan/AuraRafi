@@ -19,24 +19,26 @@ use raf_electronics::schematic::{component_pin_world_position, WireAnchor};
 use raf_electronics::{
     orthogonal_wire_points, pcb_fingerprint, schematic_fingerprint, CadLayerKind, CadObject,
     CadObjectKind, CadPickPriority, CadScene, CadSurfaceKind, DrcReport, DrcSeverity, PcbLayout,
-    Schematic,
+    Schematic, SimulationResults,
 };
 use raf_render::api_graphic_basic::cad_surface::CadSurfaceOptions;
 use uuid::Uuid;
 
 use crate::editor_layout::EditorRect;
 use crate::electronics_history::{ElectronicsDocumentSnapshot, ElectronicsHistory};
-use crate::pcb_document::{load_pcb_document, save_pcb_document};
-use crate::schematic_document::{load_schematic_document, save_schematic_document, DocumentLoad};
+use crate::pcb_document::load_pcb_document;
+use crate::schematic_document::{load_schematic_document, DocumentLoad};
 
 #[path = "electronics_analysis.rs"]
 mod analysis;
 #[path = "electronics_command_adapter.rs"]
 mod command_adapter;
+#[path = "electronics_document.rs"]
+mod documents;
 #[path = "electronics_controller_interaction.rs"]
 mod interaction;
 
-use analysis::{AnalysisKind, AnalysisResult, AnalysisTask};
+use analysis::{AnalysisKind, AnalysisResult, AnalysisTask, AnalysisWorker};
 
 const MIN_ZOOM: f32 = 0.15;
 const MAX_ZOOM: f32 = 12.0;
@@ -197,15 +199,6 @@ impl ElectronicsReportLine {
     }
 }
 
-/// Last known rotation per component, used to reconcile the schematic and the
-/// PCB into a single source of truth for orientation.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct ComponentRotation {
-    component_id: Uuid,
-    schematic_degrees: f32,
-    pcb_degrees: Option<f32>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ElectronicsInputResult {
     pub changed: bool,
@@ -251,9 +244,11 @@ pub struct NativeElectronicsEditor {
     labels_visible: bool,
     drc_lines: Vec<ElectronicsReportLine>,
     drc_report: Option<DrcReport>,
+    drc_report_surface: Option<CadSurfaceKind>,
     /// True when the document changed after the current DRC result was produced.
     drc_stale: bool,
     simulation_lines: Vec<ElectronicsReportLine>,
+    simulation_results: Option<SimulationResults>,
     /// True when the document changed after the current simulation result.
     simulation_stale: bool,
     /// True when the schematic and the PCB no longer describe the same design.
@@ -264,6 +259,7 @@ pub struct NativeElectronicsEditor {
     /// A destructive action is armed and waiting for an explicit confirmation.
     pending_delete: bool,
     analysis_task: Option<AnalysisTask>,
+    analysis_worker: Option<AnalysisWorker>,
     wire_start: Option<WireStart>,
     board_outline_start: Option<Vec2>,
     pointer_world: Option<Vec2>,
@@ -281,7 +277,8 @@ pub struct NativeElectronicsEditor {
     /// built from. A rebuild only invalidates analysis when this actually moved.
     built_schematic_fingerprint: u64,
     built_pcb_fingerprint: u64,
-    built_rotation: Vec<ComponentRotation>,
+    base_scene_fingerprint: Option<(CadSurfaceKind, u64)>,
+    base_scene_object_count: usize,
     language: Language,
 }
 
@@ -315,13 +312,16 @@ impl NativeElectronicsEditor {
             labels_visible: true,
             drc_lines: Vec::new(),
             drc_report: None,
+            drc_report_surface: None,
             drc_stale: false,
             simulation_lines: Vec::new(),
+            simulation_results: None,
             simulation_stale: false,
             sync_stale: false,
             surface_errors: Vec::new(),
             pending_delete: false,
             analysis_task: None,
+            analysis_worker: None,
             wire_start: None,
             board_outline_start: None,
             pointer_world: None,
@@ -337,7 +337,8 @@ impl NativeElectronicsEditor {
             dirty: false,
             built_schematic_fingerprint: 0,
             built_pcb_fingerprint: 0,
-            built_rotation: Vec::new(),
+            base_scene_fingerprint: None,
+            base_scene_object_count: 0,
             language: Language::English,
         }
     }
@@ -352,6 +353,9 @@ impl NativeElectronicsEditor {
         if let Some(session) = registry.active() {
             let schematic_path = session.path(&project.path, &session.schematic_file);
             let pcb_path = session.path(&project.path, &session.pcb_file);
+            if let Err(error) = documents::recover(&schematic_path, &pcb_path) {
+                editor.push_surface_error(error);
+            }
             // A document that cannot be read is not an empty document. The file
             // is backed up, the failure reaches the surface and the save path
             // refuses to overwrite it, instead of replacing the user's work.
@@ -397,6 +401,18 @@ impl NativeElectronicsEditor {
 
     pub fn schematic(&self) -> &Schematic {
         &self.schematic
+    }
+
+    /// Mount validated project documents without a canvas or disk side effects.
+    pub(crate) fn from_documents(project: &Project, schematic: Schematic, pcb: PcbLayout) -> Self {
+        let mut editor = Self::empty(&project.name);
+        editor.schematic = schematic;
+        editor.pcb = pcb;
+        editor.library.load_external_assets_from(&project.path);
+        editor.sync_stale = !editor.pcb_matches_schematic();
+        editor.rebuild_scene_with_drc();
+        editor.dirty = false;
+        editor
     }
 
     pub fn pcb(&self) -> &PcbLayout {
@@ -545,6 +561,9 @@ impl NativeElectronicsEditor {
     /// that they describe an older revision.
     pub fn drc_is_stale(&self) -> bool {
         self.drc_stale
+            || self
+                .drc_report_surface
+                .is_some_and(|surface| surface != self.active_surface)
     }
 
     /// True when the simulation result no longer matches the document.
@@ -621,31 +640,32 @@ impl NativeElectronicsEditor {
         self.touch_ui();
     }
 
-    /// Single source of truth for component orientation. Surfaces read this
-    /// instead of the per-document rotation so the artwork matches the model.
+    /// Orientation belongs to the document currently being edited.
     pub fn rotation_degrees(&self, source_id: Uuid) -> f32 {
-        self.schematic
-            .components
-            .iter()
-            .find(|component| component.id == source_id)
-            .map(|component| component.rotation)
-            .or_else(|| {
-                self.pcb
-                    .components
-                    .iter()
-                    .find(|component| component.component_id == source_id)
-                    .map(|component| component.rotation)
-            })
-            .unwrap_or(0.0)
+        match self.active_surface {
+            CadSurfaceKind::Schematic => self
+                .schematic
+                .components
+                .iter()
+                .find(|c| c.id == source_id)
+                .map(|c| c.rotation),
+            CadSurfaceKind::Pcb => self
+                .pcb
+                .components
+                .iter()
+                .find(|c| c.component_id == source_id)
+                .map(|c| c.rotation),
+        }
+        .unwrap_or(0.0)
     }
 
-    /// Traces dropped from the layout by the last schematic synchronization.
-    ///
-    /// Requires the `PcbLayout::removed_traces` field owned by the electronics
-    /// domain module. Until that field exists the editor cannot observe removed
-    /// traces, so it reports zero instead of inventing a count.
+    /// Routing preserved for explicit review after a net was split or removed.
     pub fn removed_trace_count(&self) -> usize {
-        0
+        self.pcb.removed_traces.len()
+    }
+
+    pub fn simulation_results(&self) -> Option<&SimulationResults> {
+        self.simulation_results.as_ref()
     }
 
     /// Records the hover target from the CAD input layer. The input layer owns the
@@ -707,6 +727,7 @@ impl NativeElectronicsEditor {
             Ok(Some(AnalysisResult::Drc(report))) => {
                 let lines = report_lines(&report, self.language);
                 self.drc_report = Some(report);
+                self.drc_report_surface = Some(task.surface);
                 self.drc_lines = lines;
                 self.drc_stale = false;
                 self.simulation_stale = true;
@@ -716,38 +737,7 @@ impl NativeElectronicsEditor {
                 true
             }
             Ok(Some(AnalysisResult::Simulation(result))) => {
-                let mut lines = vec![ElectronicsReportLine::new(
-                    if result.converged {
-                        ElectronicsReportLineKind::Passed
-                    } else {
-                        ElectronicsReportLineKind::Issues
-                    },
-                    i18n::t(
-                        if result.converged {
-                            "electronics.analysis.simulation_converged"
-                        } else {
-                            "electronics.analysis.simulation_not_converged"
-                        },
-                        self.language,
-                    ),
-                )];
-                lines.push(metric_line(
-                    "electronics.analysis.simulation_nodes",
-                    result.node_voltages.len(),
-                    self.language,
-                ));
-                lines.push(metric_line(
-                    "electronics.analysis.simulation_components",
-                    result.component_currents.len(),
-                    self.language,
-                ));
-                lines.extend(result.messages.into_iter().map(|message| {
-                    ElectronicsReportLine::new(ElectronicsReportLineKind::Message, message)
-                }));
-                self.simulation_lines = lines;
-                self.simulation_stale = false;
-                self.clear_surface_errors_for_key("electronics.error.simulation_failed");
-                self.touch_ui();
+                self.accept_simulation_result(result);
                 true
             }
             Ok(None) => {
@@ -1095,6 +1085,9 @@ impl NativeElectronicsEditor {
                 true
             }
             ElectronicsAction::CommitInspectorValue(val) => self.set_selected_value(&val),
+            ElectronicsAction::CommitInspectorValueFor { source_id, value } => {
+                self.set_component_value(source_id, &value)
+            }
             ElectronicsAction::SelectNavigator(idx) => self.select_component(idx),
             ElectronicsAction::InspectNavigator(idx) => {
                 let selected = self.select_component(idx);
@@ -1510,9 +1503,13 @@ impl NativeElectronicsEditor {
 
     pub fn run_drc(&mut self) {
         self.cancel_analysis();
-        let report = self.schematic.run_drc();
+        let report = match self.active_surface {
+            CadSurfaceKind::Schematic => self.schematic.run_drc(),
+            CadSurfaceKind::Pcb => self.pcb.run_drc(),
+        };
         self.drc_lines = report_lines(&report, self.language);
         self.drc_report = Some(report);
+        self.drc_report_surface = Some(self.active_surface);
         self.drc_stale = false;
         self.simulation_stale = true;
         self.clear_surface_errors_for_key("electronics.error.drc_failed");
@@ -1522,7 +1519,10 @@ impl NativeElectronicsEditor {
 
     pub fn run_simulation(&mut self) {
         self.cancel_analysis();
-        let result = self.schematic.simulate_dc();
+        self.accept_simulation_result(self.schematic.simulate_dc());
+    }
+
+    fn accept_simulation_result(&mut self, result: SimulationResults) {
         let mut lines = vec![ElectronicsReportLine::new(
             if result.converged {
                 ElectronicsReportLineKind::Passed
@@ -1548,10 +1548,50 @@ impl NativeElectronicsEditor {
             result.component_currents.len(),
             self.language,
         ));
-        lines.extend(result.messages.into_iter().map(|message| {
-            ElectronicsReportLine::new(ElectronicsReportLineKind::Message, message)
+        lines.extend(result.messages.iter().map(|message| {
+            ElectronicsReportLine::new(ElectronicsReportLineKind::Message, message.clone())
         }));
+        let netlist = self.schematic.netlist();
+        for net in &netlist.nets {
+            if let Some(voltage) = result.node_voltages.get(&net.id) {
+                let target = net
+                    .pins
+                    .first()
+                    .map(|&(ci, _)| self.schematic.components[ci].id);
+                lines.push(ElectronicsReportLine::targeted(
+                    ElectronicsReportLineKind::Info,
+                    format!("{}: {:.6} V", net.name, voltage),
+                    target,
+                ));
+            }
+        }
+        for (ci, component) in self.schematic.components.iter().enumerate() {
+            if let (Some(current), Some(power)) = (
+                result.component_currents.get(&ci),
+                result.component_power.get(&ci),
+            ) {
+                let voltage = netlist
+                    .net_for_pin(ci, 0)
+                    .and_then(|n| result.node_voltages.get(&n.id))
+                    .zip(
+                        netlist
+                            .net_for_pin(ci, 1)
+                            .and_then(|n| result.node_voltages.get(&n.id)),
+                    )
+                    .map(|(a, b)| a - b)
+                    .unwrap_or(0.0);
+                lines.push(ElectronicsReportLine::targeted(
+                    ElectronicsReportLineKind::Info,
+                    format!(
+                        "{}: {:.6} V | {:.6} A | {:.6} W",
+                        component.designator, voltage, current, power
+                    ),
+                    Some(component.id),
+                ));
+            }
+        }
         self.simulation_lines = lines;
+        self.simulation_results = Some(result);
         self.simulation_stale = false;
         self.clear_surface_errors_for_key("electronics.error.simulation_failed");
         self.touch_ui();
@@ -1567,13 +1607,19 @@ impl NativeElectronicsEditor {
         ) {
             return false;
         }
+        self.set_component_value(selection.source_id, value)
+    }
+
+    /// A deferred inspector commit belongs to the edited component, even if
+    /// the same pointer press selected another object before it was applied.
+    fn set_component_value(&mut self, source_id: Uuid, value: &str) -> bool {
         if self.active_surface == CadSurfaceKind::Pcb {
             let before = self.snapshot();
             let Some(component) = self
                 .pcb
                 .components
                 .iter_mut()
-                .find(|component| component.component_id == selection.source_id)
+                .find(|component| component.component_id == source_id)
             else {
                 return false;
             };
@@ -1585,7 +1631,7 @@ impl NativeElectronicsEditor {
                 .schematic
                 .components
                 .iter_mut()
-                .find(|component| component.id == selection.source_id)
+                .find(|component| component.id == source_id)
             {
                 schematic_component.value = value.to_string();
                 schematic_component.sync_sim_model_from_value();
@@ -1601,7 +1647,7 @@ impl NativeElectronicsEditor {
             .schematic
             .components
             .iter_mut()
-            .find(|component| component.id == selection.source_id)
+            .find(|component| component.id == source_id)
         else {
             return false;
         };
@@ -1693,11 +1739,8 @@ impl NativeElectronicsEditor {
         let schematic_changed = before_schematic != self.built_schematic_fingerprint;
         let pcb_changed = before_pcb != self.built_pcb_fingerprint;
         self.rebuild_scene_internal();
-        // Captured after the build because reconciling the two documents can
-        // itself move a fingerprint, and the next rebuild must not read that as
-        // a fresh user edit.
-        self.built_schematic_fingerprint = schematic_fingerprint(&self.schematic);
-        self.built_pcb_fingerprint = pcb_fingerprint(&self.pcb);
+        self.built_schematic_fingerprint = before_schematic;
+        self.built_pcb_fingerprint = before_pcb;
         if schematic_changed || pcb_changed {
             self.invalidate_analysis_results();
             if schematic_changed {
@@ -1742,23 +1785,33 @@ impl NativeElectronicsEditor {
             ElectronicsReportLineKind::Running,
             "electronics.analysis.running",
         );
-        self.analysis_task = Some(AnalysisTask::spawn(kind, self.schematic.clone()));
+        let pcb = (kind == AnalysisKind::Drc && self.active_surface == CadSurfaceKind::Pcb)
+            .then(|| self.pcb.clone());
+        let worker = self.analysis_worker.get_or_insert_with(AnalysisWorker::new);
+        self.analysis_task = Some(worker.submit(kind, self.schematic.clone(), pcb));
         self.touch_ui();
     }
 
     fn rebuild_scene_internal(&mut self) {
-        // Cross-document consistency belongs where the scene is derived from the
-        // documents: the schematic owns component rotation and the PCB mirrors
-        // it, so a rotation made in either surface has a single answer.
-        self.reconcile_component_rotation();
-        self.scene = match self.active_surface {
-            CadSurfaceKind::Schematic => self
-                .drc_report
-                .as_ref()
-                .map(|report| CadScene::from_schematic_with_drc(&self.schematic, report))
-                .unwrap_or_else(|| CadScene::from_schematic(&self.schematic)),
-            CadSurfaceKind::Pcb => CadScene::from_pcb(&self.pcb),
+        let fingerprint = match self.active_surface {
+            CadSurfaceKind::Schematic => schematic_fingerprint(&self.schematic),
+            CadSurfaceKind::Pcb => pcb_fingerprint(&self.pcb),
         };
+        if self.base_scene_fingerprint != Some((self.active_surface, fingerprint)) {
+            self.scene = match self.active_surface {
+                CadSurfaceKind::Schematic => CadScene::from_schematic(&self.schematic),
+                CadSurfaceKind::Pcb => CadScene::from_pcb(&self.pcb),
+            };
+            self.base_scene_object_count = self.scene.objects.len();
+            self.base_scene_fingerprint = Some((self.active_surface, fingerprint));
+        } else {
+            self.scene.objects.truncate(self.base_scene_object_count);
+        }
+        if self.drc_report_surface == Some(self.active_surface) {
+            if let Some(report) = &self.drc_report {
+                self.scene.push_drc_report(report);
+            }
+        }
         if let (Some(template_index), Some(position)) =
             (self.placement_template, self.placement_preview)
         {
@@ -1865,94 +1918,6 @@ impl NativeElectronicsEditor {
         } else {
             value
         }
-    }
-
-    /// Keeps component rotation in a single place.
-    ///
-    /// Rotation used to be written only in the document the user was looking at,
-    /// so the schematic and the PCB kept two different angles for the same part
-    /// and the artwork depended on the active tab. The side that just changed
-    /// wins and the other one is reconciled here. When both moved in the same
-    /// operation the PCB placement wins, because the physical placement is the
-    /// authoritative side for orientation.
-    fn reconcile_component_rotation(&mut self) {
-        let current = self.rotation_snapshot();
-        if current == self.built_rotation {
-            return;
-        }
-        let previous = std::mem::take(&mut self.built_rotation);
-
-        let mut schematic_moved = false;
-        let mut pcb_moved = false;
-        for rotation in &current {
-            let Some(pcb_degrees) = rotation.pcb_degrees else {
-                continue;
-            };
-            let Some(before) = previous
-                .iter()
-                .find(|before| before.component_id == rotation.component_id)
-            else {
-                continue;
-            };
-            let schematic_changed =
-                (rotation.schematic_degrees - before.schematic_degrees).abs() > f32::EPSILON;
-            let pcb_changed = before
-                .pcb_degrees
-                .is_some_and(|before| (pcb_degrees - before).abs() > f32::EPSILON);
-            if schematic_changed == pcb_changed {
-                continue;
-            }
-            let target = if schematic_changed {
-                rotation.schematic_degrees
-            } else {
-                pcb_degrees
-            };
-            if schematic_changed {
-                if let Some(placement) = self
-                    .pcb
-                    .components
-                    .iter_mut()
-                    .find(|placement| placement.component_id == rotation.component_id)
-                {
-                    placement.rotation = target;
-                }
-                pcb_moved = true;
-            } else if let Some(component) = self
-                .schematic
-                .components
-                .iter_mut()
-                .find(|component| component.id == rotation.component_id)
-            {
-                component.rotation = target;
-                schematic_moved = true;
-            }
-        }
-        if schematic_moved {
-            self.schematic.sync_wire_anchors();
-        }
-        if pcb_moved {
-            self.pcb.rebuild_airwires();
-        }
-        // Recorded after the reconciliation so the next rebuild sees a settled
-        // pair and does not replay the same reconciliation.
-        self.built_rotation = self.rotation_snapshot();
-    }
-
-    fn rotation_snapshot(&self) -> Vec<ComponentRotation> {
-        self.schematic
-            .components
-            .iter()
-            .map(|component| ComponentRotation {
-                component_id: component.id,
-                schematic_degrees: component.rotation,
-                pcb_degrees: self
-                    .pcb
-                    .components
-                    .iter()
-                    .find(|placement| placement.component_id == component.id)
-                    .map(|placement| placement.rotation),
-            })
-            .collect()
     }
 
     fn touch(&mut self) {
@@ -2103,6 +2068,170 @@ mod tests {
     }
 
     #[test]
+    fn simulation_values_are_visible_targeted_and_retained_as_stale() {
+        let mut editor = NativeElectronicsEditor::empty("measurements");
+        let mut source = ElectronicComponent::dc_source(5.0);
+        source.position = Vec2::ZERO;
+        let mut load = ElectronicComponent::resistor("1k");
+        load.position = Vec2::new(200., 100.);
+        editor.schematic.add_component(source);
+        editor.schematic.add_component(load);
+        for pin in 0..2 {
+            let a = component_pin_world_position(
+                &editor.schematic.components[0],
+                &editor.schematic.components[0].pins[pin],
+            );
+            let b = component_pin_world_position(
+                &editor.schematic.components[1],
+                &editor.schematic.components[1].pins[pin],
+            );
+            editor
+                .schematic
+                .add_wire(a, b, if pin == 0 { "VCC" } else { "GND" });
+        }
+        editor.rebuild_scene();
+        editor.run_simulation();
+        assert!(editor.simulation_results().unwrap().converged);
+        let row = editor
+            .simulation_lines
+            .iter()
+            .position(|line| line.text.contains(" A | ") && line.text.contains("R1"))
+            .unwrap();
+        assert!(editor.focus_analysis_issue("simulation", row));
+        assert_eq!(
+            editor.selection.unwrap().source_id,
+            editor.schematic.components[1].id
+        );
+        editor.schematic.components[1].value = "2k".into();
+        editor.rebuild_scene();
+        assert!(editor.simulation_is_stale());
+        assert!(editor.simulation_results().is_some());
+    }
+
+    #[test]
+    fn pcb_drc_report_and_markers_belong_to_the_pcb() {
+        let mut editor = NativeElectronicsEditor::empty("DRC");
+        editor.set_surface(CadSurfaceKind::Pcb);
+        editor.pcb.board_outline.points.clear();
+        editor.rebuild_scene();
+        editor.run_drc();
+        assert!(editor
+            .drc_report()
+            .unwrap()
+            .errors
+            .iter()
+            .any(|issue| issue.rule == "invalid_board_outline"));
+        assert!(!editor.drc_is_stale());
+        editor.set_surface(CadSurfaceKind::Schematic);
+        assert!(editor.drc_is_stale());
+        assert!(!editor
+            .scene
+            .objects
+            .iter()
+            .any(|object| object.kind == CadObjectKind::DrcMarker));
+    }
+
+    fn parsed_electronics_command(
+        name: &str,
+        args: &[(&str, &str)],
+    ) -> crate::commands::parser::ParsedCommand {
+        crate::commands::parser::ParsedCommand {
+            raw: name.into(),
+            name: name.into(),
+            args: args
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            positional: Vec::new(),
+            structured_args: None,
+        }
+    }
+
+    #[test]
+    fn catalog_drc_matches_the_active_pcb_report() {
+        let mut editor = NativeElectronicsEditor::empty("command DRC");
+        editor.set_surface(CadSurfaceKind::Pcb);
+        editor.pcb.board_outline.points.clear();
+        let output = editor.execute_catalog_command(
+            "electronics.drc",
+            &parsed_electronics_command("electronics.drc", &[]),
+        );
+        assert_eq!(output.json["passed"], false);
+        assert_eq!(
+            output.json["errors"].as_u64(),
+            Some(editor.drc_report().unwrap().errors.len() as u64)
+        );
+    }
+
+    #[test]
+    fn catalog_mutations_respect_locks_and_reject_nonfinite_geometry() {
+        let mut editor = NativeElectronicsEditor::empty("locked");
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("1k"));
+        editor.schematic.components[0].locked = true;
+        editor.select_component(0);
+        editor.rebuild_scene();
+        for name in [
+            "electronics.rotate",
+            "electronics.set_value",
+            "electronics.delete",
+        ] {
+            let output = editor.execute_catalog_command(
+                name,
+                &parsed_electronics_command(name, &[("value", "2k")]),
+            );
+            assert!(!output.changed);
+            assert_eq!(output.json["ok"], false);
+        }
+        assert_eq!(editor.schematic.components.len(), 1);
+        assert_eq!(editor.schematic.components[0].value, "1k");
+        editor.set_surface(CadSurfaceKind::Pcb);
+        editor.pcb.components[0].locked = true;
+        editor.select_component(0);
+        let position = editor.pcb.components[0].position;
+        for name in ["pcb.move", "pcb.rotate"] {
+            let output = editor
+                .execute_catalog_command(name, &parsed_electronics_command(name, &[("dx", "10")]));
+            assert_eq!(output.json["ok"], false);
+            assert_eq!(editor.pcb.components[0].position, position);
+        }
+        editor.pcb.components[0].locked = false;
+        let output = editor.execute_catalog_command(
+            "pcb.move",
+            &parsed_electronics_command("pcb.move", &[("x", "NaN")]),
+        );
+        assert_eq!(output.json["ok"], false);
+        assert_eq!(editor.pcb.components[0].position, position);
+        assert!(!editor.can_undo());
+    }
+
+    #[test]
+    fn preview_rebuild_reuses_geometry_without_growing_overlays() {
+        let mut editor = NativeElectronicsEditor::empty("preview");
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("1k"));
+        editor.rebuild_scene();
+        let base = editor.base_scene_object_count;
+        editor.placement_template = Some(0);
+        editor.placement_preview = Some(Vec2::new(100., 100.));
+        editor.rebuild_scene();
+        let count = editor.scene.objects.len();
+        assert!(count > base);
+        let fingerprint = editor.base_scene_fingerprint;
+        for i in 0..10 {
+            editor.placement_preview = Some(Vec2::new(i as f32 * 20., 100.));
+            editor.rebuild_scene();
+        }
+        assert_eq!(editor.scene.objects.len(), count);
+        assert_eq!(editor.base_scene_fingerprint, fingerprint);
+        editor.placement_preview = None;
+        editor.rebuild_scene();
+        assert_eq!(editor.scene.objects.len(), base);
+    }
+
+    #[test]
     fn camera_motion_does_not_invalidate_retained_ui() {
         let mut editor = NativeElectronicsEditor::empty("Test");
         let ui_revision = editor.ui_revision();
@@ -2236,7 +2365,7 @@ mod tests {
     }
 
     #[test]
-    fn rotation_has_one_source_of_truth_across_surfaces() {
+    fn pcb_rotation_is_independent_and_undoable() {
         let mut editor = NativeElectronicsEditor::empty("Test");
         editor
             .schematic
@@ -2250,7 +2379,14 @@ mod tests {
 
         assert_eq!(editor.rotation_degrees(component_id), 90.0);
         assert_eq!(editor.pcb.components[0].rotation, 90.0);
-        assert_eq!(editor.schematic.components[0].rotation, 90.0);
+        assert_eq!(editor.schematic.components[0].rotation, 0.0);
+        assert!(editor.undo());
+        assert_eq!(editor.pcb.components[0].rotation, 0.0);
+        assert_eq!(editor.schematic.components[0].rotation, 0.0);
+        assert!(editor.redo());
+        assert_eq!(editor.pcb.components[0].rotation, 90.0);
+        editor.set_surface(CadSurfaceKind::Schematic);
+        assert_eq!(editor.rotation_degrees(component_id), 0.0);
     }
 
     #[test]
@@ -2459,14 +2595,23 @@ mod tests {
     #[test]
     fn pcb_route_tool_turns_selected_airwire_into_a_trace() {
         let mut editor = NativeElectronicsEditor::empty("Test");
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("1k"));
+        let mut second = ElectronicComponent::resistor("1k");
+        second.position = Vec2::new(200., 100.);
+        editor.schematic.add_component(second);
+        let a = component_pin_world_position(
+            &editor.schematic.components[0],
+            &editor.schematic.components[0].pins[1],
+        );
+        let b = component_pin_world_position(
+            &editor.schematic.components[1],
+            &editor.schematic.components[1].pins[0],
+        );
+        editor.schematic.add_wire(a, b, "SIGNAL");
         editor.set_surface(CadSurfaceKind::Pcb);
-        editor.pcb.airwires.push(raf_electronics::PcbAirwire {
-            net: "N001".to_string(),
-            from_component_id: Uuid::new_v4(),
-            from: Vec2::new(20.0, 20.0),
-            to_component_id: Uuid::new_v4(),
-            to: Vec2::new(80.0, 60.0),
-        });
+        assert_eq!(editor.pcb.airwires.len(), 1);
         editor.rebuild_scene();
         editor.interaction.selected = Some(raf_electronics::cad_interaction::CadSelection {
             object_id: "airwire:0".to_string(),
@@ -2501,5 +2646,30 @@ mod tests {
             other => panic!("expected resistor model, got {other:?}"),
         }
         assert!(editor.can_undo());
+    }
+
+    #[test]
+    fn targeted_inspector_commit_respects_locks_and_never_retargets_a_replacement() {
+        use crate::electronics_action::ElectronicsAction;
+        let mut editor = NativeElectronicsEditor::empty("stable edits");
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("1k"));
+        let id = editor.schematic.components[0].id;
+        let command = ElectronicsAction::CommitInspectorValueFor {
+            source_id: id,
+            value: "22k".into(),
+        }
+        .to_command_string();
+        editor.schematic.components[0].locked = true;
+        assert!(!editor.apply_ui_command(&command));
+        assert_eq!(editor.schematic.components[0].value, "1k");
+        editor.schematic.components.clear();
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("2k"));
+        assert!(!editor.apply_ui_command(&command));
+        assert_eq!(editor.schematic.components[0].value, "2k");
+        assert!(!editor.can_undo());
     }
 }

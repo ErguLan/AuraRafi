@@ -125,6 +125,10 @@ pub struct SceneNode {
     pub children: Vec<SceneNodeId>,
     /// Whether this node is visible.
     pub visible: bool,
+    #[serde(default = "default_shadow_participation")]
+    pub casts_shadows: bool,
+    #[serde(default = "default_shadow_participation")]
+    pub receives_shadows: bool,
     /// Prevents viewport transforms while keeping the node selectable.
     #[serde(default)]
     pub locked: bool,
@@ -189,6 +193,8 @@ impl SceneNode {
             parent: None,
             children: Vec::new(),
             visible: true,
+            casts_shadows: true,
+            receives_shadows: true,
             locked: false,
             entity_index: None,
             scripts: Vec::new(),
@@ -222,6 +228,8 @@ impl SceneNode {
             parent: None,
             children: Vec::new(),
             visible: true,
+            casts_shadows: true,
+            receives_shadows: true,
             locked: false,
             entity_index: None,
             scripts: Vec::new(),
@@ -287,6 +295,10 @@ impl SceneNode {
 /// cache-friendly iteration.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SceneGraph {
+    #[serde(default)]
+    environment: crate::environment::EnvironmentSettings,
+    #[serde(skip, default = "initial_document_revision")]
+    environment_revision: Cell<u64>,
     nodes: Vec<SceneNode>,
     /// Indices of root-level nodes (no parent).
     roots: Vec<SceneNodeId>,
@@ -319,6 +331,8 @@ impl SceneGraph {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
+            environment: Default::default(),
+            environment_revision: Cell::new(next_document_revision()),
             roots: Vec::new(),
             render_cache: Cell::new(None),
             document_revision: Cell::new(next_document_revision()),
@@ -337,7 +351,27 @@ impl SceneGraph {
     /// so consumers can compare revisions in O(1) instead of walking the
     /// hierarchy every frame.
     pub fn document_revision(&self) -> u64 {
+        self.document_revision
+            .get()
+            .max(self.environment_revision.get())
+    }
+
+    pub fn geometry_revision(&self) -> u64 {
         self.document_revision.get()
+    }
+    pub fn environment(&self) -> &crate::environment::EnvironmentSettings {
+        &self.environment
+    }
+    pub fn set_environment(
+        &mut self,
+        environment: crate::environment::EnvironmentSettings,
+    ) -> bool {
+        if self.environment == environment {
+            return false;
+        }
+        self.environment = environment;
+        self.environment_revision.set(next_document_revision());
+        true
     }
 
     /// Add a root node and return its id.
@@ -513,6 +547,11 @@ impl SceneGraph {
     /// its retained frame without treating unrelated authoring changes as
     /// renderer invalidations.
     pub fn render_fingerprint(&self) -> u64 {
+        // Geometry caching is independent of the small, frequently changing environment.
+        self.geometry_render_fingerprint() ^ self.environment.render_fingerprint().rotate_left(17)
+    }
+
+    fn geometry_render_fingerprint(&self) -> u64 {
         if let Some(cached) = self.render_cache.get() {
             return cached;
         }
@@ -527,6 +566,8 @@ impl SceneGraph {
             mix_render_fingerprint(&mut hash, index as u64);
             mix_render_fingerprint(&mut hash, (!node.name.is_empty()) as u64);
             mix_render_fingerprint(&mut hash, node.visible as u64);
+            mix_render_fingerprint(&mut hash, node.casts_shadows as u64);
+            mix_render_fingerprint(&mut hash, node.receives_shadows as u64);
             mix_render_fingerprint(&mut hash, node.is_folder as u64);
             mix_render_fingerprint(&mut hash, primitive_fingerprint(node.primitive));
             mix_render_fingerprint(
@@ -991,10 +1032,15 @@ impl fmt::Debug for SceneGraph {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SceneGraph")
+            .field("environment", &self.environment)
             .field("nodes", &self.nodes)
             .field("roots", &self.roots)
             .finish()
     }
+}
+
+fn default_shadow_participation() -> bool {
+    true
 }
 
 fn mix_render_fingerprint(hash: &mut u64, value: u64) {

@@ -3,6 +3,12 @@ use crate::{Node, NodeCategory, NodeId, NodePin, NodeProperty, PinDataType as T,
 use uuid::Uuid;
 
 pub const SCENE_NODES: &[(&str, &str, bool)] = &[
+    ("environment-get", "Get Environment", false),
+    ("environment-set-number", "Set Environment Number", true),
+    ("environment-set-bool", "Set Environment Bool", true),
+    ("environment-set-choice", "Set Environment Choice", true),
+    ("environment-set-color", "Set Environment Color", true),
+    ("environment-clear-view", "Clear View Environment", true),
     ("has-capability", "Has Capability", false),
     ("set-capability", "Set Capability", true),
     ("query-capability", "Query Capability", false),
@@ -50,6 +56,9 @@ pub const SCENE_NODES: &[(&str, &str, bool)] = &[
 ];
 
 pub fn create(slug: &str) -> Option<Node> {
+    if let Some(node) = crate::environment_nodes::create(slug) {
+        return Some(node);
+    }
     if let Some(node) = crate::behavior_nodes::create(slug) {
         return Some(node);
     }

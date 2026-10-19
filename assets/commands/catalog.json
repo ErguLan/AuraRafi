@@ -1,6 +1,9 @@
 {
   "version": 1,
   "commands": [
+    {"name":"lighting.inspect","aliases":[],"domain":"game","category":"lighting","description_key":"commands.lighting.inspect.desc","parameters":[],"examples":["/lighting.inspect"]},
+    {"name":"lighting.set","aliases":[],"domain":"game","category":"lighting","description_key":"commands.lighting.set.desc","parameters":[{"name":"patch","kind":"json","required":false,"description_key":"commands.lighting.patch"},{"name":"property","kind":"string","required":false,"description_key":"commands.lighting.property"},{"name":"value","kind":"json","required":false,"description_key":"commands.lighting.value"}],"examples":["/lighting.set patch='{\"mode\":\"scene\",\"sun.intensity\":1.0}'"]},
+    {"name":"lighting.reset","aliases":[],"domain":"game","category":"lighting","description_key":"commands.lighting.reset.desc","parameters":[{"name":"property","kind":"string","required":false,"description_key":"commands.lighting.property"}],"examples":["/lighting.reset property=sun.intensity"]},
     {"name":"runtime.play","aliases":[],"domain":"game","category":"local_runtime","description_key":"commands.runtime.play.desc","parameters":[],"examples":["/runtime.play"]},
     {"name":"runtime.pause","aliases":[],"domain":"game","category":"local_runtime","description_key":"commands.runtime.pause.desc","parameters":[],"examples":["/runtime.pause"]},
     {"name":"runtime.resume","aliases":[],"domain":"game","category":"local_runtime","description_key":"commands.runtime.resume.desc","parameters":[],"examples":["/runtime.resume"]},
@@ -677,6 +680,8 @@
       "category": "scene",
       "description_key": "commands.game_update.desc",
       "parameters": [
+        {"name": "casts_shadows", "kind": "bool", "required": false},
+        {"name": "receives_shadows", "kind": "bool", "required": false},
         {"name": "target", "kind": "string", "required": true, "description_key": "commands.param.target"},
         {"name": "name", "kind": "string", "required": false},
         {"name": "transform", "kind": "object", "required": false, "description_key": "commands.param.transform"},
@@ -698,7 +703,7 @@
         {"name": "tags", "kind": "array", "required": false, "description_key": "commands.param.tags"},
         {"name": "agent_origin", "kind": "string", "required": false, "description_key": "commands.param.agent_origin"}
       ],
-      "examples": ["/game.update target=Player x=1 y=2 z=0"]
+      "examples": ["/game.update target=Player x=1 y=2 z=0", "/game.update target=Player casts_shadows=true receives_shadows=false"]
     },
     {
       "name": "game.batch",

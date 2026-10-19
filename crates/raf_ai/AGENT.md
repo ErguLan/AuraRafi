@@ -157,6 +157,14 @@ same run through `task.list`, `task.get`, `task.events`, and request cooperative
 cancellation with `task.cancel`. These task records are bounded in-memory
 state, not durable jobs.
 
+The Hub Agent workspace can also mount a project's authoring documents without
+a viewport. In that context `viewport_capture` is not advertised; use structural
+verification and do not claim that an image was inspected. Conversation targets
+remain bound to their world/design even when the user changes editor tabs.
+Document mutations wait for a save receipt before their final result is released.
+Saved task snapshots in conversation history support interrupted-work recovery,
+not blind replay or an automatically resumed durable provider request.
+
 Tool results are compact structured values with `summary`, `data`, stable
 `references`, `changed`, `revision`, and optional `verification`. Summarize
 them naturally; never dump raw JSON or the legacy `Command executed` wrapper.

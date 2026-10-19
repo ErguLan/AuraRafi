@@ -16,6 +16,27 @@ impl NativeElectronicsEditor {
         command_name: &str,
         command: &crate::commands::parser::ParsedCommand,
     ) -> crate::commands::output::CommandOutput {
+        // Reuse the displayed result: a transport request must not run the
+        // solver twice or return schematic ERC while the PCB displays DRC.
+        if command_name == "electronics.drc" {
+            self.run_drc();
+            let mut output = crate::commands::electronics::drc_output(
+                self.drc_report.as_ref().expect("DRC completed"),
+            );
+            output.changed = true;
+            return output;
+        }
+        if command_name == "electronics.simulate" {
+            self.run_simulation();
+            let mut output = crate::commands::electronics::simulation_output(
+                &self.schematic,
+                self.simulation_results
+                    .as_ref()
+                    .expect("simulation completed"),
+            );
+            output.changed = true;
+            return output;
+        }
         let before = self.snapshot();
         let selected_component = self.selection.and_then(|selection| {
             matches!(

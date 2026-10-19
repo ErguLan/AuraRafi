@@ -5,7 +5,7 @@
 //! Three tiers of scripting share one Host API:
 //! - **Tier 1 (Rhai)**: sandboxed, pure Rust, beginner-friendly. Primary language.
 //! - **Tier 2 (WASM)**: native-performance modules compiled from C++/Rust/Zig.
-//!   Sandboxed via WASM. Stub for now (Phase D).
+//!   Dependency-free adapter contracts exist; no WASM executor ships in Play.
 //! - **Tier 3 (Visual Nodes)**: no-code node graphs from `raf_nodes`.
 //!   Supported Game graphs compile to Rhai and call the same Host API.
 //!
@@ -18,6 +18,7 @@ pub mod backends;
 pub mod behavior_api;
 pub mod camera_api;
 pub mod errors;
+pub mod environment_api;
 pub mod host;
 pub mod host_api;
 pub mod lifetime;

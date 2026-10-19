@@ -188,6 +188,7 @@ pub fn create_engine(max_operations: u64) -> Engine {
     engine.on_debug(|message, _, _| capture_log(message));
     engine.register_type_with_name::<NodeHandle>("Handle");
     super::rhai_behavior_api::register(&mut engine);
+    super::rhai_environment_api::register(&mut engine);
     engine.register_type_with_name::<ScriptValue>("Value");
     engine.register_fn("vec3", |x: f64, y: f64, z: f64| {
         ScriptValue::vec3(x as f32, y as f32, z as f32)

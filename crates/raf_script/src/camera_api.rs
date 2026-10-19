@@ -47,6 +47,48 @@ impl ScriptContext<'_> {
 }
 
 impl NodeHandle {
+    /// Shared follow semantics for language adapters. No implicit target or rig.
+    pub fn follow(
+        &self,
+        ctx: &mut ScriptContext<'_>,
+        target: NodeHandle,
+        offset: Vec3,
+        aim_offset: Vec3,
+        sharpness: f64,
+        dt: f64,
+    ) -> ScriptResult<()> {
+        if !sharpness.is_finite()
+            || sharpness < 0.0
+            || !dt.is_finite()
+            || !(0.0..=1.0).contains(&dt)
+            || !offset.is_finite()
+            || !aim_offset.is_finite()
+        {
+            return Err(invalid(
+                "Follow requires finite offsets, sharpness >= 0 and dt in 0..1",
+            ));
+        }
+        let point = Vec3::from_array(target.get_position(ctx)?);
+        let desired = point + offset;
+        let aim = point + aim_offset;
+        let current = Vec3::from_array(self.get_position(ctx)?);
+        let alpha = if sharpness == 0.0 {
+            1.0
+        } else {
+            (1.0 - (-sharpness * dt).exp()) as f32
+        };
+        let position = current.lerp(desired, alpha);
+        if !position.is_finite()
+            || !aim.is_finite()
+            || (aim - position).length_squared() < 1e-8
+            || (aim - position).cross(Vec3::Y).length_squared() < 1e-8
+        {
+            return Err(invalid("Invalid follow aim"));
+        }
+        self.look_at(ctx, aim - (position - current), Vec3::Y)?;
+        self.set_position(ctx, position.x, position.y, position.z)
+    }
+
     pub fn add_camera(&self, ctx: &mut ScriptContext<'_>) -> ScriptResult<()> {
         let id = self.resolve(ctx)?;
         ctx.scene

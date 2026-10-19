@@ -1,5 +1,30 @@
 # AuraRafi Manual Commands
 
+## Native Agent workspace
+
+The Hub and editor expose an **Agents / Agentes** section backed by the native
+command kernel, not a CLI/MCP subprocess. Project/document targets survive chat
+navigation; confirmed document writes are autosaved before their final tool
+results are released. UI-only `agent.workspace` intents are not public engine
+commands. See [AGENT_WORKSPACE.md](AGENT_WORKSPACE.md) for ownership, save recovery,
+operation review and current capability boundaries.
+
+The project rail's loaded indicators and confirmed **Start all / Close all**
+are native workspace lifecycle controls, not scene commands or model prompts.
+Closing waits for saves and cancels Agent work; it does not delete projects.
+
+## World lighting
+
+`lighting.inspect`, `lighting.set` and `lighting.reset` share the native Lighting
+handler. Writes validate atomically; attached Agent/CLI/MCP writes require
+confirmation and support dry-run, revision checks and Undo. Angles use radians,
+time uses seconds, and colors use RGB bytes. See [LIGHTING.md](LIGHTING.md).
+
+Delivery 2 supports `shadows.enabled/resolution/distance/soft_filter/bias/strength`.
+Resolution is exactly 256, 512 or 1024 (CPU recovery at most 256).
+`game.update target=Cube casts_shadows=true receives_shadows=false` uses the
+same authoring, confirmation, diff and history boundaries as other entity edits.
+
 The command handlers remain documented as domain infrastructure. The editor
 Console is now mounted through the retained RafUI downbar; the former RafUI
 Studio authoring surface remains removed and is not a hidden dependency.

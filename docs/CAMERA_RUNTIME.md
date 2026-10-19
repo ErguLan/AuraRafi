@@ -167,3 +167,29 @@ components; no target or alternate view is created implicitly. See
 
 Stop discards runtime state. It never saves script-generated camera changes,
 parenting or graph execution into the source project.
+
+## Helper clipping correction (2026-10-16)
+
+Camera is now a built-in Assets entry (`builtin://camera`), routed to the same
+explicit camera creation command and scene history as Hierarchy. It does not
+replace startup-camera project selection or inject a controller.
+
+The helper previously applied a -0.99 normalized depth offset even to x-ray
+lines. Disabling the depth test does not disable GPU clipping: that offset
+could push visible segments in front of the near clip plane. The whole guide
+was also omitted when its billboard origin was offscreen/behind the viewer.
+The guide is now submitted independently of its billboard with zero depth bias.
+
+ApiGraphicBasic's `line_projection::prepare_line` clips segments before pixel
+expansion in both GPU and CPU paths, using the same homogeneous 0..1 depth
+volume and bounded screen margins. Depth bias is clamped after geometry
+clipping. CPU mesh/line depth and shadow world reconstruction now use that same
+0..1 convention; GPU line width expansion matches the recorded full pixel
+width rather than doubling it. No editor-side WGPU type or alternate backend
+was introduced, and WGPU remains the private GPU executor.
+
+Source and regression fixtures are written; no Cargo execution, native-window
+orbit/DPI QA or performance acceptance was performed in this pass. These fixes
+do not prove that every possible disappearance of other geometry has the same
+cause. Inspect culling, winding, clipping and transparency separately when a
+different scene still reproduces an artifact.

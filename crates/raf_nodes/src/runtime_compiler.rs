@@ -6,6 +6,15 @@ use std::collections::HashSet;
 fn quote(value: &str) -> String {
     serde_json::to_string(value).expect("String serialization")
 }
+fn environment_function(node: &Node, write: bool) -> Result<&'static str, String> {
+    match (property(node, "environment_scope", "world"), write) {
+        ("world", false) => Ok("get_environment"),
+        ("world", true) => Ok("set_environment"),
+        ("view", false) => Ok("get_view_environment"),
+        ("view", true) => Ok("set_view_environment"),
+        _ => Err("Environment scope must be world or view".into()),
+    }
+}
 
 fn event_record(source: &str) -> Result<String, String> {
     if source.len() > 8192 {
@@ -169,6 +178,11 @@ impl Generator<'_> {
             .ok_or("Unknown node")?
             .slug;
         Ok(match slug {
+            "environment-get" => format!(
+                "{}({})",
+                environment_function(node, false)?,
+                quote(property(node, "environment_property", "sun.intensity"))
+            ),
             "has-capability" => format!(
                 "has_capability({}, {})",
                 self.entity_input(index, "Entity", "entity", depth + 1)?,
@@ -314,7 +328,8 @@ impl Generator<'_> {
                 _ => "Out",
             },
         )?;
-        let entity = if crate::physics_nodes::is_event(slug)
+        let entity = if slug.starts_with("environment-")
+            || crate::physics_nodes::is_event(slug)
             || matches!(
                 slug,
                 "on-start"
@@ -342,6 +357,12 @@ impl Generator<'_> {
         };
         let mut code = String::new();
         match slug {
+            "environment-get" => return Err("Get Environment is data-only".into()),
+            "environment-clear-view" => code = "clear_view_environment();".into(),
+            "environment-set-number" | "environment-set-bool" | "environment-set-choice" | "environment-set-color" => {
+                let default = match slug { "environment-set-bool" => "true", "environment-set-choice" => "scene", "environment-set-color" => "255,250,242", _ => "1.0" };
+                code = format!("{}({},{});", environment_function(n,true)?, quote(property(n,"environment_property","sun.intensity")), self.input(i,"Value","value",default,0)?);
+            }
             "set-capability" => code = format!("let h={entity}; h.set_capability({},{});", self.input(i,"Capability","capability","",0)?,self.input(i,"Enabled","enabled","true",0)?),
             "set-entity-property" => code = format!("let h={entity}; h.set_property({},{});",self.input(i,"Property","property_name","",0)?,self.input(i,"Value","value","",0)?),
             "has-capability"|"get-entity-property"|"query-capability"|"query-nearby"|"event-record"|"entity-reference" => return Err(format!("Data-only node {} cannot be in a flow chain", n.name)),

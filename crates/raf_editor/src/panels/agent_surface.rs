@@ -33,6 +33,27 @@ const HISTORY_OVERSCAN: usize = 3;
 const HISTORY_VIEWPORT_ESTIMATE: f32 = 460.0;
 const MESSAGE_WIDTH_RATIO: f32 = 0.78;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AgentSurfaceVariant {
+    Embedded,
+    Dock,
+}
+
+const DOCK_TOOL_ROW_HEIGHT: f32 = 34.0;
+const DOCK_TOOL_ROW_GAP: f32 = 4.0;
+const DOCK_MESSAGE_CHROME_HEIGHT: f32 = 50.0;
+const DOCK_COMPOSER_HEIGHT: f32 = 108.0;
+const APPROVAL_COMPOSER_HEIGHT: f32 = 208.0;
+const REVIEW_CHIP_WIDTH: f32 = 148.0;
+const SESSION_DOT_SIZE: f32 = 7.0;
+
+fn message_chrome_height(variant: AgentSurfaceVariant) -> f32 {
+    match variant {
+        AgentSurfaceVariant::Embedded => MESSAGE_CARD_CHROME_HEIGHT,
+        AgentSurfaceVariant::Dock => DOCK_MESSAGE_CHROME_HEIGHT,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct MessageViewport {
     top: f32,
@@ -58,12 +79,59 @@ pub(crate) fn build_agent_surface(
     scroll_offset: f32,
     sidebar_progress: f32,
 ) -> UiSurface {
+    build_agent_surface_with_variant(
+        palette,
+        panel,
+        settings,
+        readiness,
+        project_type,
+        size,
+        scroll_offset,
+        sidebar_progress,
+        AgentSurfaceVariant::Embedded,
+    )
+}
+
+pub(crate) fn build_dock_agent_surface(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    settings: &EngineSettings,
+    readiness: AgentReadiness,
+    project_type: ProjectType,
+    size: [f32; 2],
+    scroll_offset: f32,
+    sidebar_progress: f32,
+) -> UiSurface {
+    build_agent_surface_with_variant(
+        palette,
+        panel,
+        settings,
+        readiness,
+        project_type,
+        size,
+        scroll_offset,
+        sidebar_progress,
+        AgentSurfaceVariant::Dock,
+    )
+}
+
+fn build_agent_surface_with_variant(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    settings: &EngineSettings,
+    readiness: AgentReadiness,
+    project_type: ProjectType,
+    size: [f32; 2],
+    scroll_offset: f32,
+    sidebar_progress: f32,
+    variant: AgentSurfaceVariant,
+) -> UiSurface {
     let width = size[0].max(1.0);
     let height = size[1].max(1.0);
     let requested_sidebar_width = (width * 0.30).clamp(184.0, 236.0).min(width * 0.52);
     let sidebar_width = requested_sidebar_width * sidebar_progress.clamp(0.0, 1.0);
     let main_width = (width - sidebar_width).max(1.0);
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
 
     let root = UiNode::new("agent.surface.root", UiNodeKind::Root)
         .with_class("agent-root")
@@ -76,7 +144,7 @@ pub(crate) fn build_agent_surface(
             radius: 0.0,
             opacity: 1.0,
         })
-        .with_child(build_sidebar(palette, panel, sidebar_width, height))
+        .with_child(build_sidebar(palette, panel, sidebar_width, height, variant))
         .with_child(build_main(
             palette,
             panel,
@@ -87,6 +155,7 @@ pub(crate) fn build_agent_surface(
             height,
             sidebar_width,
             scroll_offset,
+            variant,
         ));
 
     let mut surface = UiSurface::new("editor.bottom.agent", palette, root);
@@ -94,8 +163,14 @@ pub(crate) fn build_agent_surface(
     surface
 }
 
-fn build_sidebar(palette: StudioUiPalette, panel: &AgentPanel, width: f32, height: f32) -> UiNode {
-    let tokens = palette.tokens();
+fn build_sidebar(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    width: f32,
+    height: f32,
+    variant: AgentSurfaceVariant,
+) -> UiNode {
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let active = panel.history.active_index;
     let mut sessions = UiNode::scroll_view("agent.sessions.scroll", UiScrollAxis::Vertical)
         .with_class("agent-sessions-scroll")
@@ -118,27 +193,74 @@ fn build_sidebar(palette: StudioUiPalette, panel: &AgentPanel, width: f32, heigh
     } else {
         for (index, session) in panel.history.sessions.iter().enumerate() {
             let is_active = active == Some(index);
-            let select = UiNode::new(format!("agent.session.{index}"), UiNodeKind::Button)
+            let running = panel.session_is_running(index);
+            let mut select = UiNode::new(format!("agent.session.{index}"), UiNodeKind::Button)
                 .with_class(if is_active {
                     "agent-session-active"
                 } else {
                     "agent-session"
                 })
-                .with_layout(UiLayout {
-                    grow: 1.0,
-                    width_mode: UiSizeMode::Fill,
-                    height_mode: UiSizeMode::Fixed,
-                    basis: [0.0, 40.0],
-                    padding: UiSpacing::xy(10.0, 8.0),
-                    ..UiLayout::default()
-                })
-                .with_text_value(short_text(&session.title, 72))
-                .with_text_overflow(UiTextOverflow::Ellipsis)
-                .with_text_style(UiTextStyle::button(if is_active {
-                    tokens.text
+                .with_layout(if running && variant == AgentSurfaceVariant::Dock {
+                    UiLayout {
+                        flow: UiFlow::Row,
+                        align_items: UiAlign::Center,
+                        gap: 6.0,
+                        grow: 1.0,
+                        width_mode: UiSizeMode::Fill,
+                        height_mode: UiSizeMode::Fixed,
+                        basis: [0.0, 36.0],
+                        padding: UiSpacing::xy(10.0, 8.0),
+                        ..UiLayout::default()
+                    }
                 } else {
-                    tokens.text_muted
-                }))
+                    UiLayout {
+                        grow: 1.0,
+                        width_mode: UiSizeMode::Fill,
+                        height_mode: UiSizeMode::Fixed,
+                        basis: [0.0, 36.0],
+                        padding: UiSpacing::xy(10.0, 8.0),
+                        ..UiLayout::default()
+                    }
+                });
+            if running && variant == AgentSurfaceVariant::Dock {
+                select = select
+                    .with_child(
+                        UiNode::new(format!("agent.session.dot.{index}"), UiNodeKind::Panel)
+                            .with_layout(UiLayout::fixed(SESSION_DOT_SIZE, SESSION_DOT_SIZE))
+                            .with_style(UiStyle {
+                                fill: tokens.accent_hot,
+                                radius: 3.5,
+                                ..UiStyle::transparent()
+                            })
+                            .with_accessibility_role(UiAccessibilityRole::Status)
+                            .with_tooltip_key("agent_workspace.running"),
+                    )
+                    .with_child(
+                        UiNode::new(format!("agent.session.name.{index}"), UiNodeKind::Label)
+                            .with_text_value(short_text(&session.title, 72))
+                            .with_text_overflow(UiTextOverflow::Ellipsis)
+                            .with_text_style(UiTextStyle::button(if is_active {
+                                tokens.text
+                            } else {
+                                tokens.text_muted
+                            }))
+                            .with_layout(UiLayout {
+                                grow: 1.0,
+                                width_mode: UiSizeMode::Fill,
+                                ..UiLayout::fit_content()
+                            }),
+                    );
+            } else {
+                select = select
+                    .with_text_value(short_text(&session.title, 72))
+                    .with_text_overflow(UiTextOverflow::Ellipsis)
+                    .with_text_style(UiTextStyle::button(if is_active {
+                        tokens.text
+                    } else {
+                        tokens.text_muted
+                    }));
+            }
+            let select = select
                 .with_accessibility_role(UiAccessibilityRole::Button)
                 .with_accessibility_selected(is_active)
                 .focusable()
@@ -154,6 +276,7 @@ fn build_sidebar(palette: StudioUiPalette, panel: &AgentPanel, width: f32, heigh
                 .with_accessibility_label_key("app.agent_delete")
                 .with_accessibility_role(UiAccessibilityRole::Button)
                 .focusable()
+                .disabled(panel.session_is_running(index))
                 .with_event(UiEventBinding::command(
                     UiEventKind::Click,
                     format!("agent.session.delete:{index}"),
@@ -163,7 +286,7 @@ fn build_sidebar(palette: StudioUiPalette, panel: &AgentPanel, width: f32, heigh
                     .with_class("agent-session-row")
                     .with_layout({
                         let mut layout =
-                            UiLayout::fixed(0.0, 40.0).with_width_mode(UiSizeMode::Fill);
+                            UiLayout::fixed(0.0, 36.0).with_width_mode(UiSizeMode::Fill);
                         layout.flow = UiFlow::Row;
                         layout.gap = 4.0;
                         layout.align_items = UiAlign::Center;
@@ -217,6 +340,7 @@ fn build_main(
     height: f32,
     x: f32,
     scroll_offset: f32,
+    variant: AgentSurfaceVariant,
 ) -> UiNode {
     let provider_label = panel
         .effective_provider(settings)
@@ -247,6 +371,7 @@ fn build_main(
             model_label,
             mode_key,
             width,
+            variant,
         ));
 
     let mut content_layout = UiLayout::default();
@@ -258,7 +383,7 @@ fn build_main(
     let mut content = UiNode::new("agent.content", UiNodeKind::Panel)
         .with_class("agent-content")
         .with_layout(content_layout)
-        .with_child(build_status_strip(palette, panel, settings, readiness));
+        .with_child(build_status_strip(palette, panel, settings, readiness, variant));
 
     let visible_messages = panel
         .runtime
@@ -272,6 +397,9 @@ fn build_main(
         })
         .collect::<Vec<_>>();
     let history_width = (width - 22.0).max(180.0);
+    let tool_expansion = |message: &ChatMessage| {
+        panel.expanded_tools.contains(&message.id.to_string())
+    };
     content = content.with_child(build_history(
         palette,
         panel,
@@ -279,6 +407,8 @@ fn build_main(
         &visible_messages,
         history_width,
         scroll_offset,
+        variant,
+        tool_expansion,
     ));
     if visible_messages.is_empty() && matches!(readiness, AgentReadiness::Ready) {
         content = content.with_child(build_suggestions(palette, project_type));
@@ -290,15 +420,16 @@ fn build_main(
         readiness,
         width,
         visible_messages.len(),
+        variant,
     ));
     main = main.with_child(content);
 
     if panel.model_menu_open {
-        main = main.with_child(build_model_menu(palette, panel, settings, width));
+        main = main.with_child(build_model_menu(palette, panel, settings, width, variant));
     }
-    if panel.mode_menu_open {
-        main = main.with_child(build_mode_menu(palette, settings, width));
-    }
+            if panel.mode_menu_open {
+            main = main.with_child(build_mode_menu(palette, settings, width, variant));
+        }
     if panel.add_model_open {
         main = main.with_child(build_add_model_menu(
             palette, panel, settings, width, height,
@@ -315,15 +446,16 @@ fn build_header(
     model_label: String,
     mode_key: &str,
     width: f32,
+    variant: AgentSurfaceVariant,
 ) -> UiNode {
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let title = panel
         .history
         .active_index
         .and_then(|index| panel.history.sessions.get(index))
         .map(|session| short_text(&session.title, 54))
         .unwrap_or_else(|| t("app.agent_title", settings.language));
-    let (model_width, mode_width) = selector_widths(width);
+    let (model_width, mode_width) = selector_widths_with_variant(width, variant);
     let mut header = UiNode::new("agent.header", UiNodeKind::Toolbar)
         .with_class("agent-header")
         .with_layout(UiLayout {
@@ -379,13 +511,16 @@ fn build_header(
             mode_key,
             panel.mode_menu_open,
             mode_width,
-        ))
-        .with_child(icon_button(
-            "agent.settings",
-            UiIconId::Settings,
-            "app.agent_settings",
-            "agent.open-settings",
         ));
+    if variant == AgentSurfaceVariant::Dock && width >= 560.0 {
+        header = header.with_child(review_chip(palette, panel, REVIEW_CHIP_WIDTH));
+    }
+    header = header.with_child(icon_button(
+        "agent.settings",
+        UiIconId::Settings,
+        "app.agent_settings",
+        "agent.open-settings",
+    ));
 
     if width < 620.0 {
         header = header.with_class("agent-header-compact");
@@ -393,13 +528,71 @@ fn build_header(
     header
 }
 
+fn review_chip(palette: StudioUiPalette, panel: &AgentPanel, width: f32) -> UiNode {
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
+    let (class, text_key, tooltip_key, accent) = if panel.review_writes {
+        (
+            "agent-review-on",
+            "agent_workspace.review",
+            "agent_workspace.review_enabled",
+            tokens.positive,
+        )
+    } else {
+        (
+            "agent-review-off",
+            "agent_workspace.review",
+            "agent_workspace.review_disabled",
+            tokens.warning,
+        )
+    };
+    UiNode::new("agent.review.chip", UiNodeKind::Button)
+        .with_class(class)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 6.0,
+            padding: UiSpacing::xy(10.0, 5.0),
+            width_mode: UiSizeMode::Fixed,
+            height_mode: UiSizeMode::Fixed,
+            basis: [width, 32.0],
+            ..UiLayout::default()
+        })
+        .with_child(
+            UiNode::new("agent.review.dot", UiNodeKind::Panel)
+                .with_layout(UiLayout::fixed(8.0, 8.0))
+                .with_style(UiStyle {
+                    fill: accent,
+                    radius: 4.0,
+                    ..UiStyle::transparent()
+                }),
+        )
+        .with_child(
+            UiNode::new("agent.review.label", UiNodeKind::Label)
+                .with_text_key(text_key)
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_text_style(UiTextStyle::button(tokens.text))
+                .with_layout(UiLayout {
+                    width_mode: UiSizeMode::Fill,
+                    ..UiLayout::fit_content()
+                }),
+        )
+        .with_tooltip_key(tooltip_key)
+        .with_accessibility_role(UiAccessibilityRole::Button)
+        .focusable()
+        .with_event(UiEventBinding::command(
+            UiEventKind::Click,
+            "agent.review.toggle",
+        ))
+}
+
 fn build_status_strip(
     palette: StudioUiPalette,
     panel: &AgentPanel,
     settings: &EngineSettings,
     readiness: AgentReadiness,
+    variant: AgentSurfaceVariant,
 ) -> UiNode {
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let mut strip = UiNode::new("agent.status.strip", UiNodeKind::Panel)
         .with_class("agent-status-strip")
         .with_layout(UiLayout {
@@ -408,6 +601,75 @@ fn build_status_strip(
             padding: UiSpacing::xy(12.0, 6.0),
             ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         });
+
+    if panel.opening {
+        return strip.with_child(
+            UiNode::new("agent.context.loading", UiNodeKind::Toolbar)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Row,
+                    align_items: UiAlign::Center,
+                    gap: 10.0,
+                    ..UiLayout::fixed(0.0, 38.0).with_width_mode(UiSizeMode::Fill)
+                })
+                .with_child(crate::agent_workspace_surface::loading_ring(
+                    palette,
+                    panel.spinner_step,
+                ))
+                .with_child(
+                    UiNode::new("agent.context.loading.label", UiNodeKind::Label)
+                        .with_text_key("agent_workspace.preparing_chat")
+                        .with_text_style(UiTextStyle::body(tokens.text_muted))
+                        .with_layout(UiLayout::fit_content()),
+                ),
+        );
+    }
+    if !panel.document_name.is_empty() {
+        strip = strip.with_child(
+            UiNode::new("agent.context.document", UiNodeKind::Label)
+                .with_text_value(format!(
+                    "{} Â· {}",
+                    panel.document_name,
+                    if panel.saving {
+                        Some(t("agent_workspace.saving", settings.language))
+                    } else {
+                        panel.saved_revision.map(|revision| {
+                            format!(
+                                "{} {revision}",
+                                t("agent_workspace.saved", settings.language)
+                            )
+                        })
+                    }
+                    .unwrap_or_else(|| t("agent_workspace.autosave", settings.language))
+                ))
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        );
+    }
+    if let Some(error) = &panel.save_error {
+        strip = strip.with_child(
+            UiNode::new("agent.save.error", UiNodeKind::Panel)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Column,
+                    gap: 6.0,
+                    ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                })
+                .with_child(
+                    UiNode::new("agent.save.error.text", UiNodeKind::Label)
+                        .with_text_value(crate::agent_workspace_surface::localized_error(
+                            error,
+                            settings.language,
+                        ))
+                        .with_text_style(UiTextStyle::body(tokens.warning))
+                        .with_layout(UiLayout::fit_content()),
+                )
+                .with_child(action_button(
+                    "agent.save.retry",
+                    "agent_workspace.retry_save",
+                    "agent.workspace.save.retry",
+                    true,
+                )),
+        );
+    }
 
     match readiness {
         AgentReadiness::Ready => {}
@@ -438,22 +700,59 @@ fn build_status_strip(
     }
 
     if settings.agent_mode == AgentMode::Active {
-        strip = strip.with_child(
+        let mut warning =
             UiNode::new("agent.active-warning", UiNodeKind::Label)
                 .with_class("agent-active-warning")
                 .with_text_key("app.agent_active_mode_warning")
                 .with_text_style(UiTextStyle::body(tokens.warning))
-                .with_text_overflow(UiTextOverflow::Wrap)
                 .with_icon(UiIcon::new(UiIconId::Warning).with_size(UiIconSize::Small))
                 .with_layout(UiLayout {
                     padding: UiSpacing::xy(8.0, 6.0),
                     ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-                }),
-        );
+                });
+        if variant == AgentSurfaceVariant::Dock {
+            warning = warning
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_tooltip_key("app.agent_active_mode_warning");
+        } else {
+            warning = warning.with_text_overflow(UiTextOverflow::Wrap);
+        }
+        strip = strip.with_child(warning);
     }
 
     match panel.runtime.status {
-        AgentStatus::Done => {}
+        AgentStatus::Done => {
+            if panel.runtime.task_snapshot().is_none()
+                && panel
+                    .history
+                    .active_session()
+                    .and_then(|session| session.last_task.as_ref())
+                    .is_some_and(|task| !task.status.is_terminal())
+            {
+                strip = strip.with_child(
+                    UiNode::new("agent.interrupted", UiNodeKind::Toolbar)
+                        .with_layout(UiLayout {
+                            flow: UiFlow::RowWrap,
+                            gap: 8.0,
+                            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                        })
+                        .with_child(
+                            UiNode::new("agent.interrupted.label", UiNodeKind::Label)
+                                .with_text_key("agent_workspace.interrupted")
+                                .with_text_style(UiTextStyle::body(tokens.warning))
+                                .with_layout(
+                                    UiLayout::fit_content().with_width_mode(UiSizeMode::Fill),
+                                ),
+                        )
+                        .with_child(action_button(
+                            "agent.interrupted.resume",
+                            "agent_workspace.resume",
+                            "agent.resume",
+                            true,
+                        )),
+                );
+            }
+        }
         AgentStatus::Thinking | AgentStatus::ExecutingTools => {
             if let Some(activity) = panel.runtime.activity_snapshot() {
                 strip =
@@ -467,7 +766,129 @@ fn build_status_strip(
                 }
             }
         }
+        AgentStatus::AwaitingApproval if variant == AgentSurfaceVariant::Dock => {
+        }
         AgentStatus::AwaitingApproval => {
+            if let Some(call) = panel
+                .runtime
+                .pending_calls
+                .iter()
+                .find(|call| call.result.is_none())
+            {
+                let target = ["target", "root", "id", "parent", "name"]
+                    .iter()
+                    .find_map(|key| call.arguments.get(*key))
+                    .map(|v| {
+                        v.as_str()
+                            .map(str::to_string)
+                            .unwrap_or_else(|| v.to_string())
+                    })
+                    .unwrap_or_else(|| panel.document_name.clone());
+                let operation_count = call
+                    .arguments
+                    .get("operations")
+                    .and_then(|v| v.as_array())
+                    .map_or(1, Vec::len);
+                strip = strip.with_child(
+                    UiNode::new("agent.approval.operation", UiNodeKind::Panel)
+                        .with_layout(UiLayout {
+                            flow: UiFlow::Column,
+                            gap: 6.0,
+                            padding: UiSpacing::same(10.0),
+                            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                        })
+                        .with_style(UiStyle {
+                            fill: tokens.surface_raised,
+                            radius: 8.0,
+                            ..UiStyle::transparent()
+                        })
+                        .with_child(
+                            UiNode::new("agent.approval.operation.title", UiNodeKind::Label)
+                                .with_text_value(call.name.clone())
+                                .with_text_style(UiTextStyle::button(tokens.text))
+                                .with_layout(UiLayout::fit_content()),
+                        )
+                        .with_child(
+                            UiNode::new("agent.approval.operation.target", UiNodeKind::Label)
+                                .with_text_value(format!(
+                                    "{}: {} Â· {operation_count} {}",
+                                    t("agent_workspace.target", settings.language),
+                                    short_text(&target, 180),
+                                    t("agent_workspace.operations", settings.language)
+                                ))
+                                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                                .with_layout(
+                                    UiLayout::fit_content().with_width_mode(UiSizeMode::Fill),
+                                ),
+                        )
+                        .with_child(
+                            UiNode::new("agent.approval.operation.revision", UiNodeKind::Label)
+                                .with_text_value(format!(
+                                    "{} {}",
+                                    t("agent_workspace.revision", settings.language),
+                                    call.expected_revision
+                                        .map(|r| r.to_string())
+                                        .unwrap_or_else(|| "â€”".into())
+                                ))
+                                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                                .with_layout(UiLayout::fit_content()),
+                        )
+                        .with_child(
+                            UiNode::new("agent.approval.operation.preview", UiNodeKind::Label)
+                                .with_text_value(
+                                    call.review_preview
+                                        .as_ref()
+                                        .map(|preview| {
+                                            format!(
+                                                "{}\n{}",
+                                                preview.summary,
+                                                short_text(
+                                                    &preview
+                                                        .diff
+                                                        .as_ref()
+                                                        .unwrap_or(&preview.data)
+                                                        .to_string(),
+                                                    1200
+                                                )
+                                            )
+                                        })
+                                        .unwrap_or_else(|| {
+                                            short_text(
+                                                &serde_json::to_string_pretty(&call.arguments)
+                                                    .unwrap_or_default(),
+                                                1200,
+                                            )
+                                        }),
+                                )
+                                .with_text_overflow(UiTextOverflow::Wrap)
+                                .selectable_text()
+                                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                                .with_layout(
+                                    UiLayout::fit_content().with_width_mode(UiSizeMode::Fill),
+                                ),
+                        )
+                        .with_child(
+                            UiNode::new("agent.approval.operation.actions", UiNodeKind::Toolbar)
+                                .with_layout(UiLayout {
+                                    flow: UiFlow::Row,
+                                    gap: 8.0,
+                                    ..UiLayout::fit_content()
+                                })
+                                .with_child(action_button(
+                                    "agent.approval.once",
+                                    "agent_workspace.approve_once",
+                                    &format!("agent.call.approve:{}", call.id),
+                                    true,
+                                ))
+                                .with_child(action_button(
+                                    "agent.approval.skip",
+                                    "agent_workspace.reject_operation",
+                                    &format!("agent.call.deny:{}", call.id),
+                                    false,
+                                )),
+                        ),
+                );
+            }
             let count = panel.runtime.pending_calls.len();
             strip = strip.with_child(
                 UiNode::new("agent.approval", UiNodeKind::Panel)
@@ -547,11 +968,13 @@ fn build_live_activity(
     language: Language,
     activity: &raf_ai::agent_runtime::AgentActivitySnapshot,
 ) -> UiNode {
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let tool = activity.current_tool.as_deref();
     let activity_key = match tool {
         Some("external_studio_install") => "app.agent_studio_installing",
-        Some("asset_generate_image" | "asset_generate_local_png" | "external_studio_generate") => "app.agent_asset_generating",
+        Some("asset_generate_image" | "asset_generate_local_png" | "external_studio_generate") => {
+            "app.agent_asset_generating"
+        }
         Some(name) if name.starts_with("assets_") || name == "asset_inspect" => {
             "app.agent_activity_assets"
         }
@@ -575,7 +998,11 @@ fn build_live_activity(
         None => "app.agent_activity_thinking",
     };
     let icon = match tool {
-        Some(name) if name.starts_with("asset_generate_") || name.starts_with("external_studio_") => UiIconId::Assets,
+        Some(name)
+            if name.starts_with("asset_generate_") || name.starts_with("external_studio_") =>
+        {
+            UiIconId::Assets
+        }
         Some(name) if name.starts_with("assets_") || name == "asset_inspect" => UiIconId::Assets,
         Some("viewport_capture") => UiIconId::Eye,
         Some(name) if name.contains("verify") || name.contains("audit") => UiIconId::Success,
@@ -662,7 +1089,7 @@ fn build_tool_call_warning(
     language: Language,
     completed_tools: usize,
 ) -> UiNode {
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     UiNode::new("agent.tool-call-warning", UiNodeKind::Panel)
         .with_class("agent-tool-call-warning")
         .with_accessibility_role(UiAccessibilityRole::Status)
@@ -764,11 +1191,20 @@ fn build_history(
     messages: &[&ChatMessage],
     width: f32,
     scroll_offset: f32,
+    variant: AgentSurfaceVariant,
+    tool_expansion: impl Fn(&ChatMessage) -> bool,
 ) -> UiNode {
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let message_heights = messages
         .iter()
-        .map(|message| estimated_message_height(message, width))
+        .map(|message| {
+            estimated_message_height_with_variant(
+                message,
+                width,
+                variant,
+                tool_expansion(message),
+            )
+        })
         .collect::<Vec<_>>();
     let range = visible_message_range(&message_heights, scroll_offset, HISTORY_VIEWPORT_ESTIMATE);
     let mut scroll = UiNode::scroll_view("agent.history", UiScrollAxis::Vertical)
@@ -798,10 +1234,14 @@ fn build_history(
                     ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
                 })
                 .with_child(
-                    UiNode::new("agent.empty.title", UiNodeKind::Label)
-                        .with_text_key("app.agent_empty_title")
-                        .with_text_style(UiTextStyle::panel_title(tokens.text))
-                        .with_layout(UiLayout::fit_content()),
+                    if variant == AgentSurfaceVariant::Embedded {
+                        UiNode::new("agent.composer.hint", UiNodeKind::Label)
+                            .with_text_key("app.agent_enter_to_send")
+                            .with_text_style(UiTextStyle::body(tokens.text_muted))
+                            .with_layout(UiLayout::fit_content())
+                    } else {
+                        spacer("agent.composer.hint.hidden", 0.0)
+                    },
                 )
                 .with_child(
                     UiNode::new("agent.empty.subtitle", UiNodeKind::Label)
@@ -826,7 +1266,15 @@ fn build_history(
         {
             let viewport =
                 MessageViewport::for_message(scroll_offset, HISTORY_VIEWPORT_ESTIMATE, message_top);
-            scroll = scroll.with_child(message_card(palette, message, width, index, viewport));
+            scroll = scroll.with_child(message_card_with_variant(
+                palette,
+                message,
+                width,
+                index,
+                viewport,
+                variant,
+                tool_expansion(message),
+            ));
             message_top += message_heights[index] + 8.0;
         }
     }
@@ -840,7 +1288,7 @@ fn build_history(
 }
 
 fn build_suggestions(palette: StudioUiPalette, project_type: ProjectType) -> UiNode {
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let keys: &[&str] = match project_type {
         ProjectType::Electronics => &[
             "app.agent_hint_resistor",
@@ -896,20 +1344,35 @@ fn build_composer(
     readiness: AgentReadiness,
     width: f32,
     message_count: usize,
+    variant: AgentSurfaceVariant,
 ) -> UiNode {
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
+    if variant == AgentSurfaceVariant::Dock
+        && panel.runtime.status == AgentStatus::AwaitingApproval
+        && !panel.runtime.pending_calls.is_empty()
+    {
+        return dock_approval_composer(palette, panel, settings, width);
+    }
     let running = matches!(
         panel.runtime.status,
         AgentStatus::Thinking | AgentStatus::ExecutingTools | AgentStatus::AwaitingApproval
     );
+    let narrow = variant == AgentSurfaceVariant::Dock && width < 560.0;
     let composer = UiNode::new("agent.composer", UiNodeKind::Toolbar)
         .with_class("agent-composer")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 5.0,
             padding: UiSpacing::xy(12.0, 8.0),
-            ..UiLayout::fixed(0.0, if width < 500.0 { 112.0 } else { 96.0 })
-                .with_width_mode(UiSizeMode::Fill)
+            ..UiLayout::fixed(
+                0.0,
+                if variant == AgentSurfaceVariant::Dock && !narrow {
+                    DOCK_COMPOSER_HEIGHT
+                } else {
+                    if width < 500.0 { 164.0 } else { 152.0 }
+                },
+            )
+            .with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
             UiNode::new("agent.composer.row", UiNodeKind::Toolbar)
@@ -957,15 +1420,10 @@ fn build_composer(
                 .with_layout(UiLayout {
                     flow: UiFlow::Row,
                     align_items: UiAlign::Center,
+                    gap: 8.0,
                     justify_content: UiJustify::SpaceBetween,
                     ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
                 })
-                .with_child(
-                    UiNode::new("agent.composer.hint", UiNodeKind::Label)
-                        .with_text_key("app.agent_enter_to_send")
-                        .with_text_style(UiTextStyle::body(tokens.text_muted))
-                        .with_layout(UiLayout::fit_content()),
-                )
                 .with_child(
                     UiNode::new("agent.composer.metrics", UiNodeKind::Label)
                         .with_class("agent-metrics")
@@ -978,8 +1436,231 @@ fn build_composer(
                         .with_text_style(UiTextStyle::body(tokens.text_muted))
                         .with_layout(UiLayout::fit_content()),
                 ),
-        );
+        )
+        .with_child({
+            if variant == AgentSurfaceVariant::Dock && !narrow {
+                UiNode::new("agent.composer.review.hidden", UiNodeKind::Panel)
+                    .with_style(UiStyle::transparent())
+                    .with_layout(UiLayout::fixed(0.0, 0.0))
+            } else {
+                action_button(
+                    "agent.review",
+                    if panel.review_writes {
+                        "agent_workspace.review_enabled"
+                    } else {
+                        "agent_workspace.review_disabled"
+                    },
+                    "agent.review.toggle",
+                    false,
+                )
+            }
+        });
     composer
+}
+
+fn dock_approval_composer(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    settings: &EngineSettings,
+    width: f32,
+) -> UiNode {
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
+    let count = panel.runtime.pending_calls.len();
+    let call = panel
+        .runtime
+        .pending_calls
+        .iter()
+        .find(|call| call.result.is_none());
+    let target = call
+        .map(|call| {
+            ["target", "root", "id", "parent", "name"]
+                .iter()
+                .find_map(|key| call.arguments.get(*key))
+                .map(|v| {
+                    v.as_str()
+                        .map(str::to_string)
+                        .unwrap_or_else(|| v.to_string())
+                })
+                .unwrap_or_else(|| panel.document_name.clone())
+        })
+        .unwrap_or_else(|| panel.document_name.clone());
+    let operation_count = call
+        .and_then(|call| call.arguments.get("operations"))
+        .and_then(|v| v.as_array())
+        .map_or(1, Vec::len);
+    let preview_chars = (((width - 40.0).max(80.0) / 7.4) * 4.3) as usize;
+    let preview = call
+        .map(|call| {
+            call.review_preview
+                .as_ref()
+                .map(|preview| {
+                    format!(
+                        "{}\n{}",
+                        preview.summary,
+                        short_text(
+                            &preview
+                                .diff
+                                .as_ref()
+                                .unwrap_or(&preview.data)
+                                .to_string(),
+                            preview_chars,
+                        )
+                    )
+                })
+                .unwrap_or_else(|| {
+                    short_text(
+                        &serde_json::to_string_pretty(&call.arguments).unwrap_or_default(),
+                        preview_chars,
+                    )
+                })
+        })
+        .unwrap_or_default();
+    let mut composer = UiNode::new("agent.composer", UiNodeKind::Toolbar)
+        .with_class("agent-composer")
+        .with_class("agent-approval")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 4.0,
+            padding: UiSpacing::xy(12.0, 8.0),
+            ..UiLayout::fixed(0.0, APPROVAL_COMPOSER_HEIGHT).with_width_mode(UiSizeMode::Fill)
+        });
+    let mut header = UiNode::new("agent.approval.header", UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 8.0,
+            width_mode: UiSizeMode::Fill,
+            height_mode: UiSizeMode::Fixed,
+            basis: [0.0, 26.0],
+            ..UiLayout::default()
+        })
+        .with_child(
+            UiNode::new("agent.approval.label", UiNodeKind::Label)
+                .with_text_value(format!(
+                    "{} ({count})",
+                    t("app.agent_pending_tools", settings.language)
+                ))
+                .with_text_style(UiTextStyle::button(tokens.warning))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    width_mode: UiSizeMode::Fill,
+                    height_mode: UiSizeMode::Fixed,
+                    basis: [0.0, 20.0],
+                    ..UiLayout::fit_content()
+                })
+                .with_text_overflow(UiTextOverflow::Ellipsis),
+        );
+    header = header
+        .with_child(action_button(
+            "agent.approval.deny",
+            "app.agent_deny",
+            "agent.deny",
+            false,
+        ))
+        .with_child(action_button(
+            "agent.approval.approve",
+            "app.agent_approve",
+            "agent.approve",
+            true,
+        ));
+    composer = composer.with_child(header);
+    if let Some(call) = call {
+        composer = composer
+            .with_child(
+                UiNode::new("agent.approval.operation.title", UiNodeKind::Label)
+                    .with_text_value(call.name.clone())
+                    .with_text_style(UiTextStyle::button(tokens.text))
+                    .with_text_overflow(UiTextOverflow::Ellipsis)
+                    .with_layout(UiLayout {
+                        width_mode: UiSizeMode::Fill,
+                        height_mode: UiSizeMode::Fixed,
+                        basis: [0.0, 20.0],
+                        ..UiLayout::fit_content()
+                    }),
+            )
+            .with_child(
+                UiNode::new("agent.approval.operation.target", UiNodeKind::Label)
+                    .with_text_value(format!(
+                        "{}: {} Â· {operation_count} {} Â· {} {}",
+                        t("agent_workspace.target", settings.language),
+                        short_text(&target, 120),
+                        t("agent_workspace.operations", settings.language),
+                        t("agent_workspace.revision", settings.language),
+                        call.expected_revision
+                            .map(|r| r.to_string())
+                            .unwrap_or_else(|| "â€”".into())
+                    ))
+                    .with_text_style(UiTextStyle::body(tokens.text_muted))
+                    .with_text_overflow(UiTextOverflow::Ellipsis)
+                    .with_tooltip_value(format!(
+                        "{}: {} Â· {operation_count} {} Â· {} {}",
+                        t("agent_workspace.target", settings.language),
+                        target,
+                        t("agent_workspace.operations", settings.language),
+                        t("agent_workspace.revision", settings.language),
+                        call.expected_revision
+                            .map(|r| r.to_string())
+                            .unwrap_or_else(|| "â€”".into())
+                    ))
+                    .with_layout(UiLayout {
+                        width_mode: UiSizeMode::Fill,
+                        height_mode: UiSizeMode::Fixed,
+                        basis: [0.0, 18.0],
+                        ..UiLayout::fit_content()
+                    }),
+            )
+            .with_child(
+                UiNode::new("agent.approval.operation.preview", UiNodeKind::Label)
+                    .with_text_value(preview)
+                    .with_text_overflow(UiTextOverflow::Wrap)
+                    .selectable_text()
+                    .with_text_style(UiTextStyle::body(tokens.text_muted))
+                    .with_layout(UiLayout {
+                        width_mode: UiSizeMode::Fill,
+                        height_mode: UiSizeMode::Fixed,
+                        basis: [0.0, 84.0],
+                        max_size: [width.max(1.0), 84.0],
+                        overflow: UiOverflow::Clip,
+                        ..UiLayout::default()
+                    }),
+            );
+    }
+    composer.with_child(
+        UiNode::new("agent.approval.actions", UiNodeKind::Toolbar)
+            .with_layout(UiLayout {
+                flow: UiFlow::Row,
+                align_items: UiAlign::Center,
+                gap: 8.0,
+                width_mode: UiSizeMode::Fill,
+                height_mode: UiSizeMode::Fixed,
+                basis: [0.0, 30.0],
+                ..UiLayout::default()
+            })
+            .with_child(
+                match call {
+                    Some(call) => action_button(
+                        "agent.approval.once",
+                        "agent_workspace.approve_once",
+                        &format!("agent.call.approve:{}", call.id),
+                        false,
+                    ),
+                    None => UiNode::new("agent.approval.once", UiNodeKind::Panel)
+                        .with_style(UiStyle::transparent())
+                        .with_layout(UiLayout::fixed(0.0, 0.0)),
+                },
+            )
+            .with_child(match call {
+                Some(call) => action_button(
+                    "agent.approval.skip",
+                    "agent_workspace.reject_operation",
+                    &format!("agent.call.deny:{}", call.id),
+                    false,
+                ),
+                None => UiNode::new("agent.approval.skip", UiNodeKind::Panel)
+                    .with_style(UiStyle::transparent())
+                    .with_layout(UiLayout::fixed(0.0, 0.0)),
+            }),
+    )
 }
 
 fn build_model_menu(
@@ -987,18 +1668,24 @@ fn build_model_menu(
     panel: &AgentPanel,
     settings: &EngineSettings,
     width: f32,
+    variant: AgentSurfaceVariant,
 ) -> UiNode {
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let labels = panel.model_registry.selector_labels();
     let options = labels
         .iter()
         .cloned()
         .map(|label| UiSelectOption::new(label.clone(), label))
         .collect::<Vec<_>>();
-    let (model_width, mode_width) = selector_widths(width);
+    let (model_width, mode_width) = selector_widths_with_variant(width, variant);
     let menu_height = (labels.len().saturating_add(1) as f32 * 34.0).clamp(68.0, 300.0);
+    let right_reserved = if variant == AgentSurfaceVariant::Dock && width >= 560.0 {
+        50.0 + REVIEW_CHIP_WIDTH + 8.0
+    } else {
+        50.0
+    };
     let mut menu_layout = UiLayout::absolute(UiRect::new(
-        (width - 50.0 - mode_width - 8.0 - model_width).max(8.0),
+        (width - right_reserved - mode_width - 8.0 - model_width).max(8.0),
         48.0,
         model_width,
         menu_height,
@@ -1019,7 +1706,7 @@ fn build_model_menu(
                 .get(&label)
                 .map(|shortcut| {
                     format!(
-                        "{}  |  {}  ·  {}",
+                        "{}  |  {}  Â·  {}",
                         shortcut.label,
                         shortcut.model_id,
                         shortcut.provider.display_name()
@@ -1079,11 +1766,21 @@ fn build_model_menu(
     )
 }
 
-fn build_mode_menu(palette: StudioUiPalette, settings: &EngineSettings, width: f32) -> UiNode {
-    let tokens = palette.tokens();
-    let (_, mode_width) = selector_widths(width);
+fn build_mode_menu(
+    palette: StudioUiPalette,
+    settings: &EngineSettings,
+    width: f32,
+    variant: AgentSurfaceVariant,
+) -> UiNode {
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
+    let (_, mode_width) = selector_widths_with_variant(width, variant);
+    let right_reserved = if variant == AgentSurfaceVariant::Dock && width >= 560.0 {
+        50.0 + REVIEW_CHIP_WIDTH + 8.0
+    } else {
+        50.0
+    };
     let mut menu_layout = UiLayout::absolute(UiRect::new(
-        (width - 50.0 - mode_width).max(8.0),
+        (width - right_reserved - mode_width).max(8.0),
         48.0,
         mode_width,
         102.0,
@@ -1125,7 +1822,7 @@ fn build_add_model_menu(
     width: f32,
     height: f32,
 ) -> UiNode {
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let provider_name = panel
         .effective_provider(settings)
         .map(|provider| provider.provider.display_name().to_string())
@@ -1213,14 +1910,19 @@ fn build_add_model_menu(
     )
 }
 
-fn message_card(
+fn message_card_with_variant(
     palette: StudioUiPalette,
     message: &ChatMessage,
     width: f32,
     index: usize,
     viewport: MessageViewport,
+    variant: AgentSurfaceVariant,
+    tool_expanded: bool,
 ) -> UiNode {
-    let tokens = palette.tokens();
+    if variant == AgentSurfaceVariant::Dock && message.role == MessageRole::Tool {
+        return dock_tool_entry(palette, message, width, index, viewport, tool_expanded);
+    }
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let content = bounded_text(&display_message_content(message), MAX_VISIBLE_MESSAGE_CHARS);
     let (class, label_key, label_color, card_alignment) = match message.role {
         MessageRole::User => (
@@ -1269,7 +1971,10 @@ fn message_card(
         })
         .sum::<f32>()
         .max(1.0);
-    let card_height = MESSAGE_CARD_CHROME_HEIGHT + body_height;
+    let chrome = message_chrome_height(variant);
+    let card_height = chrome + body_height;
+    let dock_head = variant == AgentSurfaceVariant::Dock
+        && matches!(message.role, MessageRole::Assistant | MessageRole::Tool);
     let mut card = UiNode::new(format!("agent.message.{index}.card"), UiNodeKind::Panel)
         .with_class(class)
         .with_layout(UiLayout {
@@ -1280,26 +1985,67 @@ fn message_card(
             height_mode: UiSizeMode::Fixed,
             basis: [card_width, card_height],
             ..UiLayout::default()
-        })
-        .with_child(
-            UiNode::new(format!("agent.message.{index}.label"), UiNodeKind::Label)
-                .with_text_key(label_key)
-                .with_text_style(UiTextStyle::button(label_color))
-                .with_layout(UiLayout::fit_content()),
-        )
-        .with_child(message_body(
-            format!("agent.message.{index}.body"),
-            &content,
-            body_style,
-            message.role,
-            card_width - 24.0,
-            viewport,
-        ));
-    if matches!(message.role, MessageRole::Assistant | MessageRole::Tool) {
-        card = card.with_child(copy_message_button(
-            format!("agent.message.{index}.copy"),
-            &message.content,
-        ));
+        });
+    if dock_head {
+        card = card
+            .with_child(
+                UiNode::new(format!("agent.message.{index}.head"), UiNodeKind::Toolbar)
+                    .with_layout(UiLayout {
+                        flow: UiFlow::Row,
+                        align_items: UiAlign::Center,
+                        gap: 6.0,
+                        width_mode: UiSizeMode::Fill,
+                        height_mode: UiSizeMode::Fixed,
+                        basis: [0.0, 28.0],
+                        ..UiLayout::default()
+                    })
+                    .with_child(
+                        UiNode::new(format!("agent.message.{index}.label"), UiNodeKind::Label)
+                            .with_text_key(label_key)
+                            .with_text_style(UiTextStyle::button(label_color))
+                            .with_layout(UiLayout {
+                                grow: 1.0,
+                                width_mode: UiSizeMode::Fill,
+                                ..UiLayout::fit_content()
+                            }),
+                    )
+                    .with_child(copy_message_button(
+                        format!("agent.message.{index}.copy"),
+                        &message.content,
+                    )),
+            )
+            .with_child(message_body_with_chrome(
+                format!("agent.message.{index}.body"),
+                &content,
+                body_style,
+                message.role,
+                card_width - 24.0,
+                viewport,
+                chrome,
+            ));
+    } else {
+        card = card
+            .with_child(
+                UiNode::new(format!("agent.message.{index}.label"), UiNodeKind::Label)
+                    .with_text_key(label_key)
+                    .with_text_style(UiTextStyle::button(label_color))
+                    .with_layout(UiLayout::fit_content()),
+            )
+            .with_child(message_body_with_chrome(
+                format!("agent.message.{index}.body"),
+                &content,
+                body_style,
+                message.role,
+                card_width - 24.0,
+                viewport,
+                chrome,
+            ));
+        if matches!(message.role, MessageRole::Assistant | MessageRole::Tool) {
+            card = card.with_child(copy_message_button(
+                format!("agent.message.{index}.copy"),
+                &message.content,
+            ));
+        }
     }
     UiNode::new(format!("agent.message.{index}.row"), UiNodeKind::Toolbar)
         .with_layout(UiLayout {
@@ -1312,13 +2058,210 @@ fn message_card(
         .with_child(card)
 }
 
-fn message_body(
+fn dock_tool_entry(
+    palette: StudioUiPalette,
+    message: &ChatMessage,
+    width: f32,
+    index: usize,
+    viewport: MessageViewport,
+    tool_expanded: bool,
+) -> UiNode {
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
+    let content = bounded_text(&display_message_content(message), MAX_VISIBLE_MESSAGE_CHARS);
+    let (status_fill, status_key) = tool_status(palette, message);
+    let title = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string);
+    let title_node = UiNode::new(format!("agent.message.{index}.row.title"), UiNodeKind::Label)
+        .with_text_overflow(UiTextOverflow::Ellipsis)
+        .with_text_style(UiTextStyle::button(tokens.text_muted))
+        .with_layout(UiLayout {
+            grow: 1.0,
+            width_mode: UiSizeMode::Fill,
+            ..UiLayout::fit_content()
+        });
+    let title_node = if let Some(title) = title {
+        title_node.with_text_value(title)
+    } else {
+        title_node.with_text_key("app.agent_tool_result")
+    };
+    let mut toggle_row = UiNode::new(format!("agent.message.{index}.row"), UiNodeKind::Toolbar)
+        .with_class("agent-tool-row")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 8.0,
+            padding: UiSpacing::xy(8.0, 4.0),
+            width_mode: UiSizeMode::Fill,
+            height_mode: UiSizeMode::Fixed,
+            basis: [0.0, DOCK_TOOL_ROW_HEIGHT],
+            ..UiLayout::default()
+        })
+        .with_child(
+            UiNode::new(format!("agent.message.{index}.row.toggle"), UiNodeKind::Button)
+                .with_class("agent-icon-button")
+                .with_layout(UiLayout::fixed(24.0, 24.0))
+                .with_icon(UiIcon::new(if tool_expanded {
+                    UiIconId::ChevronDown
+                } else {
+                    UiIconId::ChevronRight
+                })
+                .with_size(UiIconSize::Small))
+                .with_tooltip_key("app.agent_tool_result")
+                .with_accessibility_label_key("app.agent_tool_result")
+                .with_accessibility_role(UiAccessibilityRole::Button)
+                .with_accessibility_expanded(tool_expanded)
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    format!("agent.tool.toggle:{}", message.id),
+                )),
+        )
+        .with_child(
+            UiNode::new(format!("agent.message.{index}.row.status"), UiNodeKind::Panel)
+                .with_layout(UiLayout::fixed(8.0, 8.0))
+                .with_style(UiStyle {
+                    fill: status_fill,
+                    radius: 4.0,
+                    ..UiStyle::transparent()
+                })
+                .with_accessibility_role(UiAccessibilityRole::Status)
+                .with_tooltip_key(status_key),
+        )
+        .with_child(title_node);
+    if let Some(result) = message
+        .role
+        .eq(&MessageRole::Tool)
+        .then_some(())
+        .and_then(|()| serde_json::from_str::<AgentToolResult>(&message.content).ok())
+        .and_then(|result| result.revision.map(|revision| (result, revision)))
+    {
+        let (_result, revision) = result;
+        toggle_row = toggle_row.with_child(
+            UiNode::new(
+                format!("agent.message.{index}.row.revision"),
+                UiNodeKind::Label,
+            )
+            .with_class("agent-tool-chip")
+            .with_text_value(format!("Rev {revision}"))
+            .with_text_style(UiTextStyle::button(tokens.text_muted))
+            .with_layout(UiLayout::fit_content()),
+        );
+    }
+    if !tool_expanded {
+        return toggle_row;
+    }
+    let body_style = UiTextStyle::body(tokens.text);
+    let display_text = lightweight_markdown_text(&content);
+    let display_chunks = message_text_chunks(&display_text);
+    let card_width = (width * MESSAGE_WIDTH_RATIO).clamp(220.0, 760.0);
+    let body_height = display_chunks
+        .iter()
+        .enumerate()
+        .map(|(chunk_index, chunk)| {
+            estimated_text_tile_height(chunk, card_width - 24.0, body_style.line_height_px)
+                + if chunk_index + 1 < display_chunks.len() {
+                    MESSAGE_TEXT_TILE_GAP
+                } else {
+                    0.0
+                }
+        })
+        .sum::<f32>()
+        .max(1.0);
+    let chrome = message_chrome_height(AgentSurfaceVariant::Dock);
+    let card_height = chrome + body_height;
+    let card = UiNode::new(format!("agent.message.{index}.card"), UiNodeKind::Panel)
+        .with_class("agent-message-tool")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 4.0,
+            padding: UiSpacing::xy(12.0, 9.0),
+            width_mode: UiSizeMode::Fixed,
+            height_mode: UiSizeMode::Fixed,
+            basis: [card_width, card_height],
+            ..UiLayout::default()
+        })
+        .with_child(
+            UiNode::new(format!("agent.message.{index}.head"), UiNodeKind::Toolbar)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Row,
+                    align_items: UiAlign::Center,
+                    gap: 6.0,
+                    width_mode: UiSizeMode::Fill,
+                    height_mode: UiSizeMode::Fixed,
+                    basis: [0.0, 28.0],
+                    ..UiLayout::default()
+                })
+                .with_child(
+                    UiNode::new(format!("agent.message.{index}.label"), UiNodeKind::Label)
+                        .with_text_key("app.agent_tool_result")
+                        .with_text_style(UiTextStyle::button(tokens.positive))
+                        .with_layout(UiLayout {
+                            grow: 1.0,
+                            width_mode: UiSizeMode::Fill,
+                            ..UiLayout::fit_content()
+                        }),
+                )
+                .with_child(copy_message_button(
+                    format!("agent.message.{index}.copy"),
+                    &message.content,
+                )),
+        )
+        .with_child(message_body_with_chrome(
+            format!("agent.message.{index}.body"),
+            &content,
+            body_style,
+            message.role,
+            card_width - 24.0,
+            viewport,
+            chrome,
+        ));
+    UiNode::new(format!("agent.message.{index}.wrap"), UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            align_items: UiAlign::Start,
+            gap: DOCK_TOOL_ROW_GAP,
+            height_mode: UiSizeMode::Fixed,
+            basis: [
+                0.0,
+                DOCK_TOOL_ROW_HEIGHT + DOCK_TOOL_ROW_GAP + card_height,
+            ],
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(toggle_row)
+        .with_child(card)
+}
+
+fn tool_status(palette: StudioUiPalette, message: &ChatMessage) -> ([u8; 4], &'static str) {
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
+    let Ok(result) = serde_json::from_str::<AgentToolResult>(&message.content) else {
+        return (tokens.text_muted, "app.agent_tool_result");
+    };
+    let verification_status = result
+        .verification
+        .as_ref()
+        .and_then(|verification| verification.get("status"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_ascii_lowercase);
+    match verification_status.as_deref() {
+        Some("ok") | Some("passed") | Some("success") => (tokens.positive, "app.agent_tool_result"),
+        Some("failed") | Some("error") | Some("errors") => (tokens.danger, "app.agent_tool_result"),
+        _ if !result.warnings.is_empty() => (tokens.warning, "app.agent_tool_result"),
+        _ if result.changed => (tokens.positive, "app.agent_tool_result"),
+        _ => (tokens.text_muted, "app.agent_tool_result"),
+    }
+}
+
+fn message_body_with_chrome(
     id: String,
     content: &str,
     body_style: UiTextStyle,
     role: MessageRole,
     width: f32,
     viewport: MessageViewport,
+    chrome_height: f32,
 ) -> UiNode {
     let body_id = id;
     let display_text = if matches!(role, MessageRole::Assistant | MessageRole::Tool) {
@@ -1340,8 +2283,8 @@ fn message_body(
         })
         .collect::<Vec<_>>();
     let body_height = chunk_heights.iter().sum::<f32>().max(1.0);
-    let visible_top = viewport.top - MESSAGE_CARD_CHROME_HEIGHT - MESSAGE_TEXT_TILE_OVERSCAN;
-    let visible_bottom = viewport.bottom - MESSAGE_CARD_CHROME_HEIGHT + MESSAGE_TEXT_TILE_OVERSCAN;
+    let visible_top = viewport.top - chrome_height - MESSAGE_TEXT_TILE_OVERSCAN;
+    let visible_bottom = viewport.bottom - chrome_height + MESSAGE_TEXT_TILE_OVERSCAN;
     let visible_range = visible_text_tile_range(&chunk_heights, visible_top, visible_bottom);
     let top_spacer = chunk_heights.iter().take(visible_range.start).sum::<f32>();
     let bottom_spacer = chunk_heights.iter().skip(visible_range.end).sum::<f32>();
@@ -1479,7 +2422,7 @@ fn strip_inline_markdown(value: &str) -> String {
 }
 
 fn status_label(palette: StudioUiPalette, id: &str, key: &str, icon: UiIconId) -> UiNode {
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     UiNode::new(id, UiNodeKind::Label)
         .with_class("agent-status")
         .with_text_key(key)
@@ -1562,8 +2505,16 @@ fn model_text_input(id: &str, label_key: &str, value: String) -> UiNode {
         )
 }
 
-fn selector_widths(width: f32) -> (f32, f32) {
-    if width < 360.0 {
+fn selector_widths_with_variant(width: f32, variant: AgentSurfaceVariant) -> (f32, f32) {
+    if variant == AgentSurfaceVariant::Dock {
+        if width < 360.0 {
+            (108.0, 112.0)
+        } else if width < 560.0 {
+            (116.0, 104.0)
+        } else {
+            (118.0, 102.0)
+        }
+    } else if width < 360.0 {
         (108.0, 112.0)
     } else if width < 560.0 {
         (132.0, 116.0)
@@ -1600,6 +2551,7 @@ fn model_selector_button(
         open,
         width,
         "agent.model.menu",
+        None,
     )
 }
 
@@ -1615,10 +2567,10 @@ fn mode_selector_button(
         UiSelectOption::new("plan", "app.agent_mode_plan"),
         UiSelectOption::new("active", "app.agent_mode_active"),
     ];
-    let selected_index = match settings.agent_mode {
-        AgentMode::Inspect => 0,
-        AgentMode::Plan => 1,
-        AgentMode::Active => 2,
+    let (selected_index, mode_class) = match settings.agent_mode {
+        AgentMode::Inspect => (0, "agent-mode-inspect"),
+        AgentMode::Plan => (1, "agent-mode-plan"),
+        AgentMode::Active => (2, "agent-mode-active"),
     };
     let value = t(mode_key, settings.language);
     let tooltip = t("app.agent_mode", settings.language);
@@ -1632,6 +2584,7 @@ fn mode_selector_button(
         open,
         width,
         "agent.mode.menu",
+        Some(mode_class),
     )
 }
 
@@ -1645,12 +2598,17 @@ fn agent_select_trigger(
     open: bool,
     width: f32,
     popup_id: &str,
+    extra_class: Option<&str>,
 ) -> UiNode {
     let mut select = UiSelect::new(value_key, options, selected_index).with_popup_id(popup_id);
     select.open = open;
-    UiNode::select(id, select)
-        .with_class("agent-selector")
-        .with_layout(UiLayout {
+    let node = UiNode::select(id, select).with_class("agent-selector");
+    let node = if let Some(extra_class) = extra_class {
+        node.with_class(extra_class)
+    } else {
+        node
+    };
+    node.with_layout(UiLayout {
             flow: UiFlow::Row,
             gap: 4.0,
             padding: UiSpacing::xy(8.0, 5.0),
@@ -1806,7 +2764,12 @@ fn estimated_suffix_height(message_heights: &[f32], start: usize) -> f32 {
     }
 }
 
-fn estimated_message_height(message: &ChatMessage, width: f32) -> f32 {
+fn estimated_message_height_with_variant(
+    message: &ChatMessage,
+    width: f32,
+    variant: AgentSurfaceVariant,
+    tool_expanded: bool,
+) -> f32 {
     let content = bounded_text(&display_message_content(message), MAX_VISIBLE_MESSAGE_CHARS);
     let display_text = if matches!(message.role, MessageRole::Assistant | MessageRole::Tool) {
         lightweight_markdown_text(&content)
@@ -1828,7 +2791,15 @@ fn estimated_message_height(message: &ChatMessage, width: f32) -> f32 {
                 }
         })
         .sum::<f32>();
-    (MESSAGE_CARD_CHROME_HEIGHT + body_height).max(70.0)
+    let chrome = message_chrome_height(variant);
+    if variant == AgentSurfaceVariant::Dock && message.role == MessageRole::Tool {
+        let summary = DOCK_TOOL_ROW_HEIGHT + DOCK_TOOL_ROW_GAP;
+        if !tool_expanded {
+            return summary.max(1.0);
+        }
+        return (summary + chrome + body_height).max(summary + 70.0);
+    }
+    (chrome + body_height).max(70.0)
 }
 
 fn display_message_content(message: &ChatMessage) -> String {
@@ -1872,7 +2843,7 @@ fn short_text(value: &str, max_chars: usize) -> String {
 }
 
 fn agent_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
-    let tokens = palette.tokens();
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     UiStyleSheet {
         rules: vec![
             style(
@@ -1981,10 +2952,10 @@ fn agent_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             ),
             style(
                 "agent-message-assistant",
-                tokens.surface,
+                [0; 4],
                 tokens.border,
                 tokens.text,
-                1.0,
+                0.0,
                 6.0,
             ),
             style(
@@ -1992,7 +2963,7 @@ fn agent_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 tokens.surface_raised,
                 tokens.accent,
                 tokens.text,
-                1.0,
+                0.0,
                 6.0,
             ),
             style(
@@ -2000,7 +2971,7 @@ fn agent_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 tokens.surface_alt,
                 tokens.positive,
                 tokens.text,
-                1.0,
+                0.0,
                 4.0,
             ),
             style(
@@ -2008,7 +2979,7 @@ fn agent_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 tokens.surface_alt,
                 tokens.border,
                 tokens.text_muted,
-                1.0,
+                0.0,
                 4.0,
             ),
             style(
@@ -2085,10 +3056,10 @@ fn agent_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             ),
             style(
                 "agent-session-active",
-                tokens.selection,
+                tokens.surface_raised,
                 tokens.accent,
                 tokens.text,
-                1.0,
+                0.0,
                 4.0,
             ),
             style(
@@ -2122,6 +3093,62 @@ fn agent_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 tokens.text_muted,
                 0.0,
                 0.0,
+            ),
+            style(
+                "agent-tool-row",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text,
+                0.0,
+                6.0,
+            ),
+            style(
+                "agent-tool-chip",
+                tokens.surface_raised,
+                tokens.border,
+                tokens.text_muted,
+                0.0,
+                8.0,
+            ),
+            style(
+                "agent-review-on",
+                tokens.surface_raised,
+                tokens.positive,
+                tokens.text,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-review-off",
+                tokens.surface_raised,
+                tokens.warning,
+                tokens.warning,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-mode-inspect",
+                tokens.surface_alt,
+                tokens.border,
+                tokens.text_muted,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-mode-plan",
+                tokens.surface_alt,
+                tokens.warning,
+                tokens.warning,
+                1.0,
+                4.0,
+            ),
+            style(
+                "agent-mode-active",
+                tokens.surface_alt,
+                tokens.accent_hot,
+                tokens.accent_hot,
+                1.0,
+                4.0,
             ),
             state_patch(
                 "agent-button",
@@ -2268,7 +3295,9 @@ fn state_patch(
 mod tests {
     use super::*;
     use chrono::Utc;
-    use raf_render::api_graphic_basic::ui_surface::{UiInputState, UiSurfaceSession};
+    use raf_render::api_graphic_basic::ui_surface::{
+        CpuUiSurfaceHost, UiInputState, UiSurfaceSession,
+    };
     use uuid::Uuid;
 
     fn message(content: &str) -> ChatMessage {
@@ -2291,12 +3320,14 @@ mod tests {
     #[test]
     fn assistant_messages_expose_selectable_text_and_a_copy_action() {
         let message = message("response from the agent");
-        let card = message_card(
+        let card = message_card_with_variant(
             StudioUiPalette::IndustrialDark,
             &message,
             700.0,
             0,
             MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+            AgentSurfaceVariant::Embedded,
+            false,
         );
         let text = node(&card, "agent.message.0.body.text").expect("message text");
         let copy = node(&card, "agent.message.0.copy").expect("copy button");
@@ -2317,7 +3348,9 @@ mod tests {
             .collect::<Vec<_>>();
         let heights = messages
             .iter()
-            .map(|message| estimated_message_height(message, 700.0))
+            .map(|message| {
+                estimated_message_height_with_variant(message, 700.0, AgentSurfaceVariant::Embedded, false)
+            })
             .collect::<Vec<_>>();
         let range = visible_message_range(&heights, 5_000.0, 360.0);
         assert!(range.end - range.start < 30);
@@ -2335,14 +3368,19 @@ mod tests {
     #[test]
     fn long_message_height_estimate_preserves_its_full_scroll_extent() {
         let message = message(&"Long Agent line ".repeat(1_000));
-        let height = estimated_message_height(&message, 700.0);
+        let height = estimated_message_height_with_variant(
+            &message,
+            700.0,
+            AgentSurfaceVariant::Embedded,
+            false,
+        );
 
         assert!(height > 1_000.0);
     }
 
     #[test]
     fn message_text_is_bounded_without_splitting_unicode() {
-        let source = "é".repeat(MAX_VISIBLE_MESSAGE_CHARS + 10);
+        let source = "Ã©".repeat(MAX_VISIBLE_MESSAGE_CHARS + 10);
         let bounded = bounded_text(&source, MAX_VISIBLE_MESSAGE_CHARS);
         assert_eq!(bounded.chars().count(), MAX_VISIBLE_MESSAGE_CHARS + 1);
         assert!(bounded.ends_with('\u{2026}'));
@@ -2377,12 +3415,14 @@ mod tests {
             StudioUiPalette::IndustrialDark,
             UiNode::new("root", UiNodeKind::Root)
                 .with_layout(UiLayout::fill(UiFlow::Column))
-                .with_child(message_card(
+                .with_child(message_card_with_variant(
                     StudioUiPalette::IndustrialDark,
                     &message,
                     700.0,
                     0,
                     MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+                    AgentSurfaceVariant::Embedded,
+                    false,
                 ))
                 .with_child(
                     UiNode::new("status.fps", UiNodeKind::Label)
@@ -2431,7 +3471,7 @@ mod tests {
             StudioUiPalette::IndustrialDark,
             UiNode::new("root", UiNodeKind::Root)
                 .with_layout(UiLayout::fill(UiFlow::Column))
-                .with_child(message_card(
+                .with_child(message_card_with_variant(
                     StudioUiPalette::IndustrialDark,
                     &message,
                     700.0,
@@ -2440,6 +3480,8 @@ mod tests {
                         top: 2_500.0,
                         bottom: 2_960.0,
                     },
+                    AgentSurfaceVariant::Embedded,
+                    false,
                 )),
         );
         let mut session = UiSurfaceSession::default();
@@ -2485,6 +3527,7 @@ mod tests {
                     &panel,
                     280.0,
                     180.0,
+                    AgentSurfaceVariant::Embedded,
                 )),
         );
         let mut session = UiSurfaceSession::default();
@@ -2503,8 +3546,8 @@ mod tests {
             .find(|layout| layout.id == "agent.session.row.1")
             .expect("second session row");
 
-        assert_eq!(first.rect.height, 40.0);
-        assert_eq!(second.rect.height, 40.0);
+        assert_eq!(first.rect.height, 36.0);
+        assert_eq!(second.rect.height, 36.0);
         assert!(second.rect.y >= first.rect.bottom());
     }
 
@@ -2517,19 +3560,23 @@ mod tests {
             StudioUiPalette::IndustrialDark,
             UiNode::new("root", UiNodeKind::Root)
                 .with_layout(UiLayout::fill(UiFlow::Column))
-                .with_child(message_card(
+                .with_child(message_card_with_variant(
                     StudioUiPalette::IndustrialDark,
                     &first,
                     360.0,
                     0,
                     MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+                    AgentSurfaceVariant::Embedded,
+                    false,
                 ))
-                .with_child(message_card(
+                .with_child(message_card_with_variant(
                     StudioUiPalette::IndustrialDark,
                     &second,
                     360.0,
                     1,
                     MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+                    AgentSurfaceVariant::Embedded,
+                    false,
                 )),
         );
         let mut session = UiSurfaceSession::default();
@@ -2563,19 +3610,23 @@ mod tests {
             StudioUiPalette::IndustrialDark,
             UiNode::new("root", UiNodeKind::Root)
                 .with_layout(UiLayout::fill(UiFlow::Column))
-                .with_child(message_card(
+                .with_child(message_card_with_variant(
                     StudioUiPalette::IndustrialDark,
                     &first,
                     260.0,
                     0,
                     MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+                    AgentSurfaceVariant::Embedded,
+                    false,
                 ))
-                .with_child(message_card(
+                .with_child(message_card_with_variant(
                     StudioUiPalette::IndustrialDark,
                     &second,
                     260.0,
                     1,
                     MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+                    AgentSurfaceVariant::Embedded,
+                    false,
                 )),
         );
         let mut session = UiSurfaceSession::default();
@@ -2609,14 +3660,105 @@ mod tests {
     fn dropdown_menus_have_vertical_flow_and_visible_bounds() {
         let panel = AgentPanel::default();
         let settings = EngineSettings::default();
-        let model_menu =
-            build_model_menu(StudioUiPalette::IndustrialDark, &panel, &settings, 720.0);
-        let mode_menu = build_mode_menu(StudioUiPalette::IndustrialDark, &settings, 720.0);
+        let model_menu = build_model_menu(
+            StudioUiPalette::IndustrialDark,
+            &panel,
+            &settings,
+            720.0,
+            AgentSurfaceVariant::Embedded,
+        );
+        let mode_menu = build_mode_menu(
+            StudioUiPalette::IndustrialDark,
+            &settings,
+            720.0,
+            AgentSurfaceVariant::Embedded,
+        );
 
         assert_eq!(model_menu.layout.flow, UiFlow::Column);
         assert_eq!(mode_menu.layout.flow, UiFlow::Column);
         assert!(model_menu.layout.rect.is_some_and(|rect| rect.height > 0.0));
         assert!(mode_menu.layout.rect.is_some_and(|rect| rect.height > 0.0));
+    }
+
+    #[test]
+    fn dock_mode_select_survives_the_real_input_protocol() {
+        let size = [760u32, 520];
+        let mut panel = AgentPanel::default();
+        let mut settings = EngineSettings::default();
+        settings.agent_mode = AgentMode::Active;
+        let resolve = |key: &str| key.to_string();
+        let idle = UiInputState::default();
+        let mut host =
+            CpuUiSurfaceHost::new(dock_wrapper_surface(&panel, &settings), [10, 10, 20, 255]);
+        let _ = host.process_input(size, resolve, &idle);
+        let trigger = host
+            .layout_rect("agent.mode.trigger")
+            .expect("mode trigger rect");
+        let trigger_point = [
+            trigger.x + trigger.width * 0.5,
+            trigger.y + trigger.height * 0.5,
+        ];
+        let open_click = UiInputState {
+            pointer_position: Some(trigger_point),
+            pointer_down: true,
+            pointer_buttons_down: vec![raf_ui::UiPointerButton::Primary],
+            pointer_pressed_buttons: vec![raf_ui::UiPointerButton::Primary],
+            pointer_released_buttons: vec![raf_ui::UiPointerButton::Primary],
+            ..UiInputState::default()
+        };
+        let opened = host.process_input(size, resolve, &open_click);
+        assert!(opened.iter().any(|dispatched| matches!(
+            &dispatched.action,
+            raf_ui::UiAction::SetSelectOpen {
+                id,
+                open: true
+            } if id == "agent.mode.trigger"
+        )));
+        panel.mode_menu_open = true;
+        host.set_surface(dock_wrapper_surface(&panel, &settings));
+        let _ = host.process_input(size, resolve, &idle);
+        let option = host
+            .layout_rect("agent.mode.option.plan")
+            .expect("plan option rect");
+        let option_point = [
+            option.x + option.width * 0.5,
+            option.y + option.height * 0.5,
+        ];
+        let press = UiInputState {
+            pointer_position: Some(option_point),
+            pointer_down: true,
+            pointer_buttons_down: vec![raf_ui::UiPointerButton::Primary],
+            pointer_pressed_buttons: vec![raf_ui::UiPointerButton::Primary],
+            ..UiInputState::default()
+        };
+        let pressed = host.process_input(size, resolve, &press);
+        assert!(pressed
+            .iter()
+            .all(|dispatched| !matches!(&dispatched.action, raf_ui::UiAction::SetSelectOpen {
+                open: false,
+                ..
+            })));
+        let release = UiInputState {
+            pointer_position: Some(option_point),
+            pointer_released_buttons: vec![raf_ui::UiPointerButton::Primary],
+            ..UiInputState::default()
+        };
+        let released = host.process_input(size, resolve, &release);
+        assert!(released.iter().any(|dispatched| matches!(
+            &dispatched.action,
+            raf_ui::UiAction::SetSelect {
+                key,
+                value,
+                ..
+            } if key == "agent.mode" && value == "plan"
+        )));
+        assert!(released.iter().any(|dispatched| matches!(
+            &dispatched.action,
+            raf_ui::UiAction::SetSelectOpen {
+                id,
+                open: false
+            } if id == "agent.mode.trigger"
+        )));
     }
 
     #[test]
@@ -2733,6 +3875,7 @@ mod tests {
             "Default".to_string(),
             "app.agent_mode_plan",
             340.0,
+            AgentSurfaceVariant::Embedded,
         );
         let narrow_surface = UiSurface::new(
             "agent-narrow-header",
@@ -2753,5 +3896,217 @@ mod tests {
         assert!(model.rect.width >= 100.0);
         assert!(mode.rect.width >= 80.0);
         assert!(mode.rect.x >= model.rect.right());
+    }
+
+    fn dock_wrapper_surface(
+        panel: &AgentPanel,
+        settings: &EngineSettings,
+    ) -> raf_render::api_graphic_basic::ui_surface::UiSurface {
+        build_dock_agent_surface(
+            StudioUiPalette::IndustrialDark,
+            panel,
+            settings,
+            AgentReadiness::ProviderDisabled,
+            ProjectType::Game,
+            [760.0, 520.0],
+            0.0,
+            1.0,
+        )
+    }
+
+    fn tool_message(content: &str) -> ChatMessage {
+        let mut message = message(content);
+        message.role = MessageRole::Tool;
+        message
+    }
+
+    fn dock_frame(
+        panel: &AgentPanel,
+        settings: &EngineSettings,
+        width: f32,
+        height: f32,
+    ) -> raf_render::api_graphic_basic::ui_surface::UiSurfaceFrame {
+        let surface = build_dock_agent_surface(
+            StudioUiPalette::IndustrialDark,
+            panel,
+            settings,
+            AgentReadiness::ProviderDisabled,
+            ProjectType::Game,
+            [width, height],
+            0.0,
+            1.0,
+        );
+        let mut session = UiSurfaceSession::default();
+        session.build_frame_with_resolved_text(&surface, 800, 800, [0, 0, 0, 255], |key| {
+            key.to_string()
+        })
+    }
+
+    #[test]
+    fn dock_collapses_tool_results_into_rows_until_expanded() {
+        let mut panel = AgentPanel::default();
+        panel
+            .runtime
+            .messages
+            .push(tool_message("Tool result ... Revision 7 ..."));
+
+        let frame = dock_frame(&panel, &EngineSettings::default(), 720.0, 520.0);
+        let row = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.message.0.row")
+            .expect("collapsed tool row in dock");
+        assert!(row.rect.height <= 40.0);
+        assert!(row
+            .rect
+            .height
+            .min(1.0)
+            .gt(&0.0));
+        assert!(frame
+            .layout_boxes
+            .iter()
+            .all(|layout| layout.id != "agent.message.0.body"));
+    }
+
+    #[test]
+    fn dock_expands_tool_results_after_the_panel_marks_them_expanded() {
+        let mut panel = AgentPanel::default();
+        panel
+            .runtime
+            .messages
+            .push(tool_message("Tool result ... Revision 7 ..."));
+        let expanded_id = panel.runtime.messages[0].id.to_string();
+        panel.expanded_tools.insert(expanded_id);
+
+        let frame = dock_frame(&panel, &EngineSettings::default(), 720.0, 520.0);
+        let body = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.message.0.body")
+            .expect("expanded tool body in dock");
+        let row = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.message.0.row")
+            .expect("tool toggle row stays visible while expanded");
+        assert!(row.rect.height <= 40.0);
+        assert!(body.rect.y >= row.rect.bottom() - 1.0);
+    }
+
+    #[test]
+    fn dock_keeps_assistant_messages_fully_visible_inside_the_tool_viewport() {
+        let mut panel = AgentPanel::default();
+        panel.runtime.messages.push(message("assistant answer body"));
+
+        let frame = dock_frame(&panel, &EngineSettings::default(), 720.0, 520.0);
+        let body = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.message.0.body.text")
+            .expect("assistant body text in dock");
+        let card = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.message.0.card")
+            .expect("assistant card in dock");
+        assert!(body.rect.bottom() <= card.rect.bottom() + 1.0);
+    }
+
+    #[test]
+    fn dock_shows_the_review_chip_only_when_there_is_room_for_it() {
+        let panel = AgentPanel::default();
+        let settings = EngineSettings::default();
+
+        let wide = dock_frame(&panel, &settings, 900.0, 520.0);
+        assert!(wide
+            .layout_boxes
+            .iter()
+            .any(|layout| layout.id == "agent.review.chip"));
+
+        let narrow = dock_frame(&panel, &settings, 540.0, 520.0);
+        assert!(narrow
+            .layout_boxes
+            .iter()
+            .all(|layout| layout.id != "agent.review.chip"));
+    }
+
+    #[test]
+    fn embedded_header_never_shows_the_dock_review_chip() {
+        let panel = AgentPanel::default();
+        let settings = EngineSettings::default();
+        let surface = build_agent_surface(
+            StudioUiPalette::IndustrialDark,
+            &panel,
+            &settings,
+            AgentReadiness::ProviderDisabled,
+            ProjectType::Game,
+            [1100.0, 640.0],
+            0.0,
+            1.0,
+        );
+        let mut session = UiSurfaceSession::default();
+        let frame =
+            session.build_frame_with_resolved_text(&surface, 1100, 640, [0, 0, 0, 255], |key| {
+                key.to_string()
+            });
+        assert!(frame
+            .layout_boxes
+            .iter()
+            .all(|layout| layout.id != "agent.review.chip"));
+    }
+
+    #[test]
+    fn dock_replaces_the_composer_with_the_approval_composer_when_requested() {
+        let mut panel = AgentPanel::default();
+        panel.runtime.status = AgentStatus::AwaitingApproval;
+        panel
+            .runtime
+            .pending_calls
+            .push(raf_ai::agent_runtime::PendingToolCall::new(
+                "op-1",
+                "scene.create_node",
+                serde_json::json!({ "name": "Cube" }),
+            ));
+        let settings = EngineSettings::default();
+
+        let frame = dock_frame(&panel, &settings, 720.0, 520.0);
+        let composer = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "agent.composer")
+            .expect("dock approval composer");
+        let input = frame
+            .layout_boxes
+            .iter()
+            .any(|layout| layout.id == "agent.input");
+        assert!(composer.rect.height >= 180.0 && !input);
+
+        let embedded_surface = build_agent_surface(
+            StudioUiPalette::IndustrialDark,
+            &panel,
+            &settings,
+            AgentReadiness::ProviderDisabled,
+            ProjectType::Game,
+            [820.0, 560.0],
+            0.0,
+            1.0,
+        );
+        let mut session = UiSurfaceSession::default();
+        let embedded = session.build_frame_with_resolved_text(
+            &embedded_surface,
+            820,
+            560,
+            [0, 0, 0, 255],
+            |key| key.to_string(),
+        );
+        let embedded_keeps_live_composer = embedded
+            .layout_boxes
+            .iter()
+            .any(|layout| layout.id == "agent.input");
+        assert!(embedded_keeps_live_composer);
+        assert!(embedded
+            .layout_boxes
+            .iter()
+            .any(|layout| layout.id == "agent.approval.operation"));
     }
 }
