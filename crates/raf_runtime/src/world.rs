@@ -55,12 +55,17 @@ pub struct RuntimeWorld {
     settings: ProjectSettings,
     preferences: RuntimePreferences,
     accumulator: f64,
-    pending_pressed: Vec<String>,
+    pending_input: InputSnapshot,
     physics: PhysicsWorld,
     diagnostics: VecDeque<String>,
     audio: Vec<AudioCommand>,
     last_reload: Instant,
     focus_paused: bool,
+    fallback_services: raf_script::services::RuntimeServices,
+    storage_config: Option<crate::storage::StorageConfig>,
+    storage: Option<crate::storage::StorageWorker>,
+    services_enabled: bool,
+    shutdown_started: Option<Instant>,
 }
 impl RuntimeWorld {
     pub fn prepare(
@@ -73,6 +78,7 @@ impl RuntimeWorld {
         progress: impl FnMut(ScriptLoadProgress),
     ) -> Result<Self, Vec<String>> {
         let preferences = preferences.normalized();
+        settings.runtime.validate_input().map_err(|e| vec![e])?;
         crate::validation::validate_scene(&scene).map_err(|e| vec![e])?;
         if cancellation.load(Ordering::Relaxed) {
             return Err(vec!["Runtime preparation cancelled".into()]);
@@ -127,14 +133,25 @@ impl RuntimeWorld {
             settings,
             preferences,
             accumulator: 0.0,
-            pending_pressed: Vec::new(),
+            pending_input: InputSnapshot::default(),
             physics,
             diagnostics: VecDeque::new(),
             audio: Vec::new(),
             last_reload: Instant::now(),
             focus_paused: false,
+            fallback_services: raf_script::services::RuntimeServices::default(),
+            storage_config: None,
+            storage: None,
+            services_enabled: false,
+            shutdown_started: None,
         };
         world.record(report);
+        let progress_policy = world.settings.runtime.progress.clone();
+        world
+            .services_mut()
+            .progress
+            .configure(progress_policy)
+            .map_err(|e| vec![e.to_string()])?;
         if let Some(scripts) = &mut world.scripts {
             scripts.view.active_camera = world.settings.runtime.active_camera;
         }
@@ -146,6 +163,80 @@ impl RuntimeWorld {
     }
     pub fn project_settings(&self) -> &ProjectSettings {
         &self.settings
+    }
+    pub fn services(&self) -> &raf_script::services::RuntimeServices {
+        self.scripts
+            .as_ref()
+            .map(|s| &s.view.services)
+            .unwrap_or(&self.fallback_services)
+    }
+    pub fn services_mut(&mut self) -> &mut raf_script::services::RuntimeServices {
+        self.scripts
+            .as_mut()
+            .map(|s| &mut s.view.services)
+            .unwrap_or(&mut self.fallback_services)
+    }
+    pub fn configure_storage(&mut self, config: crate::storage::StorageConfig) {
+        self.storage_config = Some(config);
+    }
+    pub fn activate_services(&mut self) {
+        self.services_enabled = true;
+    }
+    /// Only the host may move an already-prepared candidate across the commit boundary.
+    pub fn adopt_storage_worker(&mut self, previous: &mut Self) {
+        self.storage = previous.storage.take();
+        self.storage_config = previous.storage_config.take();
+    }
+    pub fn take_session_request(&mut self) -> Option<Uuid> {
+        self.services_mut().requested_session.take()
+    }
+    pub fn transition_failed(&mut self, error: String) {
+        let services = self.services_mut();
+        services.transition_status = "failed";
+        services.transition_error = Some(error);
+    }
+    pub fn poll_services(&mut self, dt: f64) {
+        if !self.services_enabled {
+            return;
+        }
+        if let Some(receipt) = self.storage.as_ref().and_then(|s| s.poll()) {
+            if let raf_script::services::ProgressOutcome::Failed(error) = &receipt.outcome {
+                if self.diagnostics.len() < 256 {
+                    self.diagnostics.push_back(error.clone());
+                }
+            }
+            self.services_mut().progress.complete(receipt);
+        }
+        if self.status.phase == RuntimePhase::Running {
+            self.services_mut().progress.autosave(dt);
+        }
+        if let Some(request) = self.services_mut().progress.take_request() {
+            if self.storage.is_none() {
+                let created = self
+                    .storage_config
+                    .clone()
+                    .ok_or_else(|| "progress.host_unavailable".to_string())
+                    .and_then(crate::storage::StorageWorker::new);
+                match created {
+                    Ok(worker) => self.storage = Some(worker),
+                    Err(error) => {
+                        self.services_mut().progress.complete(
+                            raf_script::services::ProgressReceipt {
+                                id: request.id,
+                                revision: request.revision,
+                                outcome: raf_script::services::ProgressOutcome::Failed(error),
+                            },
+                        );
+                        return;
+                    }
+                }
+            }
+            if let Some(worker) = &self.storage {
+                if let Err(receipt) = worker.submit(request) {
+                    self.services_mut().progress.complete(receipt);
+                }
+            }
+        }
     }
     pub fn attach_graph(&mut self, graph: &raf_nodes::NodeGraph) -> Result<(), Vec<String>> {
         if let Some(scripts) = &mut self.scripts {
@@ -220,7 +311,11 @@ impl RuntimeWorld {
         }
     }
     pub fn control(&mut self, control: RuntimeControl) {
-        self.pending_pressed.clear();
+        if control != RuntimeControl::Reload {
+            self.services_mut().cursor = raf_script::services::CursorIntent::default();
+            self.services_mut().effective_cursor = raf_script::services::CursorCapture::Free;
+        }
+        self.pending_input = InputSnapshot::default();
         self.previous_camera = None;
         match control {
             RuntimeControl::Pause if self.status.phase == RuntimePhase::Running => {
@@ -250,7 +345,9 @@ impl RuntimeWorld {
     }
     pub fn set_focused(&mut self, focused: bool) {
         if !focused {
-            self.pending_pressed.clear();
+            self.services_mut().cursor = raf_script::services::CursorIntent::default();
+            self.services_mut().effective_cursor = raf_script::services::CursorCapture::Free;
+            self.pending_input = InputSnapshot::default();
         }
         if !self.settings.pause_when_unfocused {
             return;
@@ -267,6 +364,21 @@ impl RuntimeWorld {
     }
     /// Fixed simulation is independent of display pacing. Catch-up is bounded.
     pub fn advance(&mut self, real_dt: f64, input: &InputSnapshot) -> bool {
+        self.poll_services(if real_dt.is_finite() { real_dt } else { 0.0 });
+        if self.status.phase == RuntimePhase::Stopping {
+            if !self.services().progress.busy()
+                || self
+                    .shutdown_started
+                    .is_some_and(|time| time.elapsed() >= Duration::from_secs(2))
+            {
+                if self.services().progress.busy() && self.diagnostics.len() < 256 {
+                    self.diagnostics
+                        .push_back("progress.write_not_confirmed_on_stop".into());
+                }
+                self.finish_stop();
+            }
+            return false;
+        }
         if self.status.phase != RuntimePhase::Running || !real_dt.is_finite() || real_dt < 0.0 {
             return false;
         }
@@ -278,11 +390,13 @@ impl RuntimeWorld {
             }
         }
         let step = self.fixed_step();
-        for key in input.keys_pressed.iter().take(128) {
-            if self.pending_pressed.len() < 128 && !self.pending_pressed.contains(key) {
-                self.pending_pressed.push(key.clone());
-            }
+        if input.pointer_blocked {
+            self.pending_input.suppress_pointer();
         }
+        if input.keyboard_blocked {
+            self.pending_input.suppress_keyboard();
+        }
+        self.pending_input.accumulate_edges(input);
         self.accumulator += real_dt.min(0.25);
         let mut ticks = 0;
         while self.accumulator + f64::EPSILON >= step
@@ -291,7 +405,8 @@ impl RuntimeWorld {
         {
             let mut snapshot = input.clone();
             // Edge-triggered input is consumed once, not for every catch-up tick.
-            snapshot.keys_pressed = std::mem::take(&mut self.pending_pressed);
+            snapshot.clear_edges();
+            snapshot.accumulate_edges(&std::mem::take(&mut self.pending_input));
             self.tick(&snapshot);
             self.accumulator -= step;
             ticks += 1;
@@ -366,12 +481,18 @@ impl RuntimeWorld {
                 .keys
                 .iter()
                 .take(16)
-                .any(|key| input.is_key_held(key));
+                .any(|key| input.binding_held(key));
             let pressed = action
                 .keys
                 .iter()
                 .take(16)
-                .any(|key| input.was_key_pressed(key));
+                .any(|key| input.binding_pressed(key));
+            let released = !held
+                && action
+                    .keys
+                    .iter()
+                    .take(16)
+                    .any(|key| input.binding_released(key));
             if held {
                 input
                     .keys_held
@@ -382,6 +503,36 @@ impl RuntimeWorld {
                     .keys_pressed
                     .push(format!("action:{}", action.name.to_ascii_lowercase()));
             }
+            if released {
+                input
+                    .keys_released
+                    .push(format!("action:{}", action.name.to_ascii_lowercase()));
+            }
+        }
+        for axis in self.settings.runtime.input_axes.iter().take(128) {
+            if axis.name.is_empty() || axis.name.len() > 128 || !axis.scale.is_finite() {
+                continue;
+            }
+            let source = |name: &str| match name {
+                "mouse_x" => input.mouse_delta[0],
+                "mouse_y" => input.mouse_delta[1],
+                "relative_x" => input.mouse_relative[0],
+                "relative_y" => input.mouse_relative[1],
+                "wheel_x" => input.mouse_wheel[0],
+                "wheel_y" => input.mouse_wheel[1],
+                "" => 0.0,
+                _ => {
+                    if input.binding_held(name) {
+                        1.0
+                    } else {
+                        0.0
+                    }
+                }
+            };
+            let value = ((source(&axis.positive) - source(&axis.negative))
+                * axis.scale.clamp(-100.0, 100.0))
+            .clamp(-1e6, 1e6);
+            input.axes.insert(axis.name.to_ascii_lowercase(), value);
         }
         if let Some(scripts) = &mut self.scripts {
             let report = scripts.update(&mut self.scene, dt, &input);
@@ -440,6 +591,7 @@ impl RuntimeWorld {
         self.status.fixed_ticks = self.status.fixed_ticks.saturating_add(1);
         self.status.elapsed_seconds = self.status.fixed_ticks as f64 * self.fixed_step();
         self.status.camera_ready = self.camera_pose().is_some();
+        self.poll_services(0.0);
     }
     fn record(&mut self, report: ScriptRuntimeReport) -> bool {
         let failed = !report.errors.is_empty();
@@ -493,15 +645,25 @@ impl RuntimeWorld {
             return;
         }
         self.status.phase = RuntimePhase::Stopping;
+        self.shutdown_started = Some(Instant::now());
         if let Some(scripts) = &mut self.scripts {
             let report = scripts.call_destroy(&mut self.scene);
             self.record(report);
         }
         self.audio.clear();
-        self.pending_pressed.clear();
+        self.services_mut().cursor = raf_script::services::CursorIntent::default();
+        self.poll_services(0.0);
+        self.pending_input = InputSnapshot::default();
+        if self.services().progress.busy() {
+            return;
+        }
+        self.finish_stop();
+    }
+    fn finish_stop(&mut self) {
         self.status.phase = RuntimePhase::Stopped;
         self.status.script_instances = 0;
         self.accumulator = 0.0;
+        self.storage = None;
     }
     pub fn camera_pose(&self) -> Option<RuntimeCameraPose> {
         let uuid = self.active_camera_uuid()?;
@@ -556,6 +718,144 @@ impl Drop for RuntimeWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn runtime_services_fixed_input_rhai_nodes_and_queries_share_the_host_api() {
+        let fixture = Fixture::new(
+            r#"
+let total_motion=0.0; let total_axis=0.0; let clicks=0;
+fn on_start() {
+    let me=owner();
+    let hit=raycast([0,0,0],[0,0,-1],10.0,me,"solid",false);
+    me.set_property("hit_distance",hit.distance);
+    let found=overlap_aabb([-1,-1,-6],[1,1,-4],me,"solid",false);
+    me.set_property("overlaps",found.len);
+    progress_set("score",7);
+}
+fn on_update(dt) {
+    total_motion+=mouse_relative()[0];
+    total_axis+=input_axis("look");
+    if was_mouse_just_pressed(0) { clicks+=1; }
+    let me=owner(); me.set_property("motion",total_motion); me.set_property("clicks",clicks);
+    me.set_property("axis",total_axis);
+}
+"#,
+        );
+        let mut scene = SceneGraph::new();
+        let controller = scene.add_root("Controller");
+        scene
+            .get_mut(controller)
+            .unwrap()
+            .scripts
+            .push("scripts/main.rhai".into());
+        let target = scene.add_root("Target");
+        let node = scene.get_mut(target).unwrap();
+        node.position = Vec3::new(0.0, 0.0, -5.0);
+        node.tags.push("solid".into());
+        node.collider.collider_type = raf_core::scene::ColliderType::Aabb;
+        node.collider.aabb = raf_core::scene::Aabb {
+            min: -Vec3::splat(0.5),
+            max: Vec3::splat(0.5),
+        };
+        let mut world = fixture.world(scene);
+        world
+            .settings
+            .runtime
+            .input_axes
+            .push(raf_core::runtime_config::RuntimeInputAxis {
+                name: "look".into(),
+                negative: "".into(),
+                positive: "relative_x".into(),
+                scale: 0.5,
+            });
+        let mut graph = raf_nodes::NodeGraph::new("Services");
+        let start = graph_node(&mut graph, "on-update", &[]);
+        let motion = graph_node(&mut graph, "pointer-motion", &[]);
+        let store = graph_node(
+            &mut graph,
+            "progress-set",
+            &[("progress_key", "node_delta")],
+        );
+        graph_link(&mut graph, start, "Out", store, "In");
+        graph_link(&mut graph, motion, "Value", store, "Value");
+        world.attach_graph(&graph).unwrap();
+        world.start();
+        assert_eq!(
+            world.status().phase,
+            RuntimePhase::Running,
+            "{:?}",
+            world.status().last_error
+        );
+        let input = InputSnapshot {
+            mouse_relative: [10.0, 0.0],
+            mouse_pressed: vec![0],
+            ..Default::default()
+        };
+        assert!(!world.advance(0.001, &input));
+        world.advance(0.08, &InputSnapshot::default());
+        assert_eq!(
+            world.status().phase,
+            RuntimePhase::Running,
+            "{:?}",
+            world.status().last_error
+        );
+        let node = world.scene.get(controller).unwrap();
+        assert_eq!(
+            node.get_variable("motion"),
+            Some(&VariableValue::Number(10.0))
+        );
+        assert_eq!(
+            node.get_variable("clicks"),
+            Some(&VariableValue::Number(1.0))
+        );
+        assert_eq!(node.get_variable("axis"), Some(&VariableValue::Number(5.0)));
+        assert_eq!(
+            node.get_variable("hit_distance"),
+            Some(&VariableValue::Number(4.5))
+        );
+        assert_eq!(
+            node.get_variable("overlaps"),
+            Some(&VariableValue::Number(1.0))
+        );
+        assert_eq!(
+            world
+                .services()
+                .progress
+                .get("node_delta", raf_script::ScriptValue::None),
+            raf_script::ScriptValue::Float(0.0)
+        );
+        assert_eq!(
+            world
+                .services()
+                .progress
+                .get("score", raf_script::ScriptValue::None),
+            raf_script::ScriptValue::Int(7)
+        );
+        assert!(!world.advance(
+            0.001,
+            &InputSnapshot {
+                mouse_relative: [3.0, 0.0],
+                mouse_pressed: vec![0],
+                ..Default::default()
+            }
+        ));
+        let mut blocked = InputSnapshot::default();
+        blocked.suppress_pointer();
+        world.advance(0.02, &blocked);
+        assert_eq!(
+            world.scene.get(controller).unwrap().get_variable("motion"),
+            Some(&VariableValue::Number(10.0))
+        );
+        for &(slug, _, _) in raf_nodes::scene_nodes::SCENE_NODES {
+            if raf_nodes::service_nodes::create(slug).is_some() {
+                let mut graph = raf_nodes::NodeGraph::new("Catalog");
+                graph.add_node(raf_nodes::catalog::create(slug).unwrap());
+                assert!(
+                    raf_nodes::runtime_compiler::to_rhai(&graph).is_ok(),
+                    "{slug}"
+                );
+            }
+        }
+    }
     #[test]
     fn lighting_clock_respects_pause_step_and_does_not_invent_a_camera() {
         let fixture = Fixture::new("");

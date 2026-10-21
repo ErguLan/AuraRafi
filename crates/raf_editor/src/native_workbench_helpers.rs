@@ -62,10 +62,13 @@ pub(crate) fn hierarchy_drop_target_is_valid(
     sources: &[SceneNodeId],
     target: Option<SceneNodeId>,
 ) -> bool {
+    if sources.is_empty() || sources.iter().any(|id| scene.get(*id).is_none_or(|node| node.locked)) {
+        return false;
+    }
     let Some(target) = target else {
         return true;
     };
-    if !scene.is_valid_node(target) || sources.contains(&target) {
+    if !scene.is_valid_node(target) || sources.contains(&target) || scene.get(target).is_some_and(|node| node.locked) {
         return false;
     }
     let mut current = Some(target);
@@ -84,7 +87,7 @@ pub(crate) fn numeric_commit_field(target_id: &str) -> Option<(String, String)> 
     let prefix = parts.next()?;
     let label = parts.next()?;
     let axis = parts.next()?;
-    if prefix != "inspector" || !matches!(label, "position" | "rotation" | "scale") {
+    if prefix != "inspector" || !matches!(label, "position" | "rotation" | "scale" | "size") {
         return None;
     }
     if !matches!(axis, "x" | "y" | "z") {

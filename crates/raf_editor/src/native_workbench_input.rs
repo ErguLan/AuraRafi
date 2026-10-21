@@ -35,6 +35,28 @@ impl NativeGameWorkbench {
             .has_focus("electronics.inspector.value");
         let search_open = self.search_surface.is_open();
         let mut intents = Vec::new();
+        if self.hierarchy_drag.is_some() {
+            if let Some((pointer, rect)) = native_input
+                .snapshot()
+                .pointer_position
+                .zip(self.host.layout_rect("hierarchy.tree"))
+            {
+                let direction = if pointer[1] < rect.y + 28.0 {
+                    -1.0
+                } else if pointer[1] > rect.y + rect.height - 28.0 {
+                    1.0
+                } else {
+                    0.0
+                };
+                if direction != 0.0 {
+                    let dt = native_input.snapshot().delta_seconds.clamp(0.001, 0.05);
+                    let controls = &mut self.host.session_mut().interaction.controls;
+                    let next = controls.scroll_by("hierarchy.tree", [0.0, direction * 420.0 * dt]);
+                    self.hierarchy_scroll_offset = next[1];
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                }
+            }
+        }
         if search_open {
             router.release_keyboard(self.owner());
             for search_intent in self.search_surface.process_input(native_input, router) {
@@ -496,6 +518,84 @@ impl NativeGameWorkbench {
                     }
                 }
                 UiAction::Command { name } => {
+                    if name=="authoring.notice.dismiss" {
+                        self.authoring_notice=None;
+                        self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
+                    if let Some(raw_id) = name.strip_prefix("hierarchy.insertion-parent:") {
+                        if raw_id == "clear" {
+                            self.hierarchy_model.insertion_parent = None;
+                            self.hierarchy_model.invalidate();
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                            continue;
+                        }
+                        if let Ok(raw) = raw_id.parse::<usize>() {
+                            self.hierarchy_model.insertion_parent =
+                                scene.get(SceneNodeId(raw)).map(|n| n.uuid);
+                            self.hierarchy_model.invalidate();
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        }
+                        continue;
+                    }
+                    if let Some(rest) = name.strip_prefix("hierarchy.inspect:") {
+                        if let Some((raw, section)) = rest.split_once(':') {
+                            if let Ok(id) = raw.parse::<usize>() {
+                                self.hierarchy_active_tab = "hierarchy".into();
+                                self.inspector_view.tab = InspectorTab::Properties;
+                                self.inspector_view.components = true;
+                                if section == "components" {
+                                    self.inspector_view.appearance = true;
+                                    self.inspector_view.audio = true;
+                                    self.inspector_view.physics = true;
+                                    self.inspector_view.metadata = true;
+                                }
+                                if self.last_layout.is_some_and(|layout| layout.right_panel.is_none()) {
+                                    intents.push(NativeWorkbenchIntent::Command(crate::application_menu::command::VIEW_INSPECTOR.to_string()));
+                                }
+                                if let Some(section) = inspector_section_from_slug(section) {
+                                    set_inspector_section(&mut self.inspector_view, section, true);
+                                }
+                                intents.push(NativeWorkbenchIntent::Command(format!(
+                                    "hierarchy.select:{id}:replace"
+                                )));
+                                self.toolbar_revision =
+                                    self.toolbar_revision.wrapping_add(1).max(1);
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(raw) = name.strip_prefix("hierarchy.snap-selected:") {
+                        if let Some(source) = raw
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|raw| scene.get(SceneNodeId(raw)))
+                        {
+                            if let Some(surface) = selected
+                                .iter()
+                                .filter_map(|id| scene.get(*id))
+                                .find(|node| node.uuid != source.uuid)
+                            {
+                                intents.push(NativeWorkbenchIntent::Command(format!(
+                                    "console.submit:/game.snap target={} mode=surface snap_to={}",
+                                    source.uuid, surface.uuid
+                                )));
+                            }
+                        }
+                        continue;
+                    }
+                    if let Some(raw) = name.strip_prefix("hierarchy.snap-floor:") {
+                        if let Ok(id) = raw.parse::<usize>() {
+                            if let Some(node) = scene.get(SceneNodeId(id)) {
+                                intents.push(NativeWorkbenchIntent::Command(format!(
+                                    "console.submit:/game.snap target={} mode=floor",
+                                    node.uuid
+                                )));
+                            }
+                        }
+                        continue;
+                    }
+
                     if name.starts_with("runtime.") {
                         intents.push(NativeWorkbenchIntent::Command(name.clone()));
                         continue;
@@ -610,7 +710,10 @@ impl NativeGameWorkbench {
                         _ => {}
                     }
                     if let Some(tab) = name.strip_prefix("electronics.navigator.tab:") {
-                        if matches!(tab, "project" | "library" | "components" | "wires") {
+                        if matches!(
+                            tab,
+                            "project" | "library" | "components" | "wires" | "objects" | "layers"
+                        ) {
                             self.electronics_navigator_tab = tab.to_string();
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         }
@@ -1215,7 +1318,11 @@ impl NativeGameWorkbench {
                                 .to_string();
                             if let Some(mut draft) = self.electronics_value_draft.take() {
                                 draft.value = value;
-                                if let electronics_model::InspectorValueEditEnd::Apply { source_id, value } = draft.finish() {
+                                if let electronics_model::InspectorValueEditEnd::Apply {
+                                    source_id,
+                                    value,
+                                } = draft.finish()
+                                {
                                     intents.push(NativeWorkbenchIntent::Command(
                                         crate::electronics_action::ElectronicsAction::CommitInspectorValueFor {
                                             source_id,
@@ -1418,7 +1525,16 @@ impl NativeGameWorkbench {
                         }
                         _ => {}
                     }
-                    if name.starts_with("assets.create-primitive:") {
+                    if let Some(slug) = name.strip_prefix("assets.create-primitive:") {
+                        self.assets_surface.primitive_menu_open = false;
+                        if let Some(parent) = self.insertion_parent(scene) {
+                            intents.push(NativeWorkbenchIntent::Command(format!(
+                                "hierarchy.create-primitive:{}:{slug}",
+                                parent.0
+                            )));
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                            continue;
+                        }
                         self.assets_surface.primitive_menu_open = false;
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
@@ -1540,6 +1656,44 @@ impl NativeGameWorkbench {
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
+                    if name == "assets.drag-move" || name == "assets.drag-end" {
+                        continue;
+                    }
+                    if let Some(row) = name
+                        .strip_prefix("assets.insert:")
+                        .or_else(|| name.strip_prefix("assets.drag-start:"))
+                    {
+                        let entry = raf_assets::authoring_catalog::AuthoringAsset::from_path(row);
+                        if entry.class == raf_assets::authoring_catalog::AssetClass::Camera {
+                            let parent = self
+                                .insertion_parent(scene)
+                                .map(|id| id.0.to_string())
+                                .unwrap_or_else(|| "root".into());
+                            intents.push(NativeWorkbenchIntent::Command(format!(
+                                "hierarchy.create-camera:{parent}"
+                            )));
+                        } else if entry.insertable() {
+                            let args = serde_json::json!({"path":row,"parent":self.insertion_parent(scene).map(|id|id.0),"drag":name.starts_with("assets.drag-start:")});
+                            intents.push(NativeWorkbenchIntent::Command(format!(
+                                "authoring.asset:{args}"
+                            )));
+                            self.assets_surface.status =
+                                Some(AssetsStatus::pending(raf_core::i18n::t(
+                                    "assets.placement_hint",
+                                    self.agent_settings.language,
+                                )));
+                        }
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
+                    if let Some(row) = name.strip_prefix("assets.usages:") {
+                        self.hierarchy_query = format!("asset:\"{}\"", row.replace('"', ""));
+                        self.hierarchy_scroll_offset = 0.0;
+                        self.hierarchy_model.invalidate();
+                        self.hierarchy_active_tab = "hierarchy".into();
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
                     if let Some(row) = name.strip_prefix("assets.select:") {
                         self.assets_surface.selected_asset = Some(row.to_string());
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -1563,14 +1717,14 @@ impl NativeGameWorkbench {
                     if let Some(row) = name.strip_prefix("assets.open:") {
                         if row == "builtin://camera" {
                             self.assets_surface.close_menus();
-                            intents.push(NativeWorkbenchIntent::Command(
-                                "hierarchy.create-camera:root".into(),
-                            ));
+                            let parent=self.insertion_parent(scene).map(|id|id.0.to_string()).unwrap_or_else(||"root".into());
+                            intents.push(NativeWorkbenchIntent::Command(format!("hierarchy.create-camera:{parent}")));
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         } else if let Some(slug) = row.strip_prefix("builtin://primitive/") {
-                            intents.push(NativeWorkbenchIntent::Command(format!(
-                                "assets.create-primitive:{slug}"
-                            )));
+                            let command=if let Some(parent)=self.insertion_parent(scene) {
+                                format!("hierarchy.create-primitive:{}:{slug}",parent.0)
+                            } else {format!("assets.create-primitive:{slug}")};
+                            intents.push(NativeWorkbenchIntent::Command(command));
                         } else {
                             self.assets_surface.close_menus();
                             self.assets_surface.close_modals();
@@ -1838,6 +1992,10 @@ impl NativeGameWorkbench {
                             };
                             self.hierarchy_drag = Some(HierarchyDragState {
                                 source,
+                                before: None,
+                                hovered: None,
+                                edge: 0,
+                                invalid: false,
                                 target: None,
                                 pointer,
                                 label: node.name.clone(),
@@ -1859,19 +2017,58 @@ impl NativeGameWorkbench {
                                 .pointer_position
                                 .unwrap_or([0.0, 0.0]);
                             let hovered = self.host.session().interaction.focus.hovered.as_deref();
-                            let target =
-                                hierarchy_drop_target_from_hovered(hovered).filter(|target| {
-                                    self.hierarchy_drag.as_ref().is_some_and(|drag| {
-                                        hierarchy_drop_target_is_valid(
-                                            scene,
-                                            &drag.source,
-                                            Some(*target),
-                                        )
-                                    })
-                                });
+                            let hovered_row = hierarchy_drop_target_from_hovered(hovered);
+                            let (target, before) = hovered_row
+                                .map(|id| {
+                                    let rect =
+                                        self.host.layout_rect(&format!("hierarchy.row.{}", id.0));
+                                    let fraction = rect
+                                        .map(|r| (pointer[1] - r.y) / r.height.max(1.0))
+                                        .unwrap_or(0.5);
+                                    let node = scene.get(id);
+                                    if fraction < 0.25 {
+                                        (node.and_then(|n| n.parent), Some(id))
+                                    } else if fraction > 0.75 {
+                                        let parent = node.and_then(|n| n.parent);
+                                        let siblings = parent
+                                            .and_then(|p| scene.get(p))
+                                            .map(|n| n.children.as_slice())
+                                            .unwrap_or(scene.roots());
+                                        let before = siblings
+                                            .iter()
+                                            .position(|s| *s == id)
+                                            .and_then(|i| siblings.get(i + 1))
+                                            .copied();
+                                        (parent, before)
+                                    } else {
+                                        (Some(id), None)
+                                    }
+                                })
+                                .unwrap_or((None, None));
+                            let invalid = self.hierarchy_drag.as_ref().is_some_and(|drag| {
+                                !hierarchy_drop_target_is_valid(scene, &drag.source, target)
+                                    || before.is_some_and(|id| drag.source.contains(&id))
+                            });
                             if let Some(drag) = self.hierarchy_drag.as_mut() {
                                 drag.pointer = pointer;
+                                drag.hovered = hovered_row;
+                                drag.edge = hovered_row
+                                    .and_then(|id| {
+                                        self.host.layout_rect(&format!("hierarchy.row.{}", id.0))
+                                    })
+                                    .map(|r| {
+                                        if pointer[1] < r.y + r.height * 0.25 {
+                                            -1
+                                        } else if pointer[1] > r.y + r.height * 0.75 {
+                                            1
+                                        } else {
+                                            0
+                                        }
+                                    })
+                                    .unwrap_or(0);
                                 drag.target = target;
+                                drag.before = before;
+                                drag.invalid = invalid;
                                 self.toolbar_revision =
                                     self.toolbar_revision.wrapping_add(1).max(1);
                             }
@@ -1885,13 +2082,18 @@ impl NativeGameWorkbench {
                                 .pointer_position
                                 .unwrap_or(drag.pointer);
                             drag.target = None;
+                            drag.before = None;
+                            drag.hovered = None;
+                            drag.invalid = false;
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         }
                         continue;
                     }
                     if name.starts_with("hierarchy.drag.end:") {
                         if let Some(drag) = self.hierarchy_drag.take() {
-                            if hierarchy_drop_target_is_valid(scene, &drag.source, drag.target) {
+                            if !drag.invalid
+                                && hierarchy_drop_target_is_valid(scene, &drag.source, drag.target)
+                            {
                                 let sources = drag
                                     .source
                                     .iter()
@@ -1903,7 +2105,10 @@ impl NativeGameWorkbench {
                                     .map(|id| id.0.to_string())
                                     .unwrap_or_else(|| "root".to_string());
                                 intents.push(NativeWorkbenchIntent::Command(format!(
-                                    "hierarchy.reparent:{sources}:{target}"
+                                    "hierarchy.reorder:{sources}:{target}:{}",
+                                    drag.before
+                                        .map(|id| id.0.to_string())
+                                        .unwrap_or_else(|| "end".into())
                                 )));
                             }
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -2186,7 +2391,19 @@ impl NativeGameWorkbench {
                                 self.agent_settings.clone(),
                             ));
                         }
-                        intents.push(NativeWorkbenchIntent::Viewport(action));
+                        if let ViewportToolbarAction::CreatePrimitive(primitive) = action {
+                            if let Some(parent) = self.insertion_parent(scene) {
+                                intents.push(NativeWorkbenchIntent::Command(format!(
+                                    "hierarchy.create-primitive:{}:{}",
+                                    parent.0,
+                                    primitive.descriptor().slug
+                                )));
+                            } else {
+                                intents.push(NativeWorkbenchIntent::Viewport(action));
+                            }
+                        } else {
+                            intents.push(NativeWorkbenchIntent::Viewport(action));
+                        }
                     } else {
                         self.hierarchy_empty_menu_open = false;
                         self.hierarchy_primitive_menu_open = false;
@@ -2794,8 +3011,9 @@ fn inspector_dropdown_navigation_command(
                 raf_core::scene::Primitive::Sphere => "Sphere",
                 raf_core::scene::Primitive::Plane => "Plane",
                 raf_core::scene::Primitive::Cylinder => "Cylinder",
+                raf_core::scene::Primitive::Capsule => "Capsule",
             },
-            &["Empty", "Cube", "Sphere", "Plane", "Cylinder"],
+            &["Empty", "Cube", "Sphere", "Plane", "Cylinder", "Capsule"],
         ),
         "collider" => (
             match node.collider.collider_type {

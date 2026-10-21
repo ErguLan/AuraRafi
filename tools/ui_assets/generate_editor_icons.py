@@ -134,20 +134,21 @@ def dots(draw):
 
 
 def folder(draw):
-    outline = [(8, 20), (8, 50), (56, 50), (56, 20), (31, 20), (26, 14), (8, 14), (8, 20)]
+    # Single clean folder silhouette with a top-left tab. No internal fold
+    # lines, so it stays legible from 16px to 256px and on both Hub themes.
+    outline = [(9, 21), (9, 51), (55, 51), (55, 21), (30, 21), (25, 15), (9, 15), (9, 21)]
     line(draw, outline, ORANGE, 3)
-    line(draw, [(10, 24), (54, 24)], WHITE, 2)
-    line(draw, [(14, 44), (50, 44)], MUTED, 2)
 
 
 def game(draw):
-    rounded(draw, (7, 25, 57, 48), 11, outline=WHITE, width=3)
-    line(draw, [(22, 30), (22, 42)], WHITE, 3)
-    line(draw, [(17, 36), (27, 36)], WHITE, 3)
-    draw.ellipse((42 * SCALE, 32 * SCALE, 47 * SCALE, 37 * SCALE), fill=ORANGE)
-    draw.ellipse((48 * SCALE, 38 * SCALE, 53 * SCALE, 43 * SCALE), fill=ORANGE)
-    line(draw, [(20, 25), (14, 17), (9, 16)], MUTED, 2)
-    line(draw, [(44, 25), (50, 17), (55, 16)], MUTED, 2)
+    # A calm gamepad: rounded body, D-pad and two face buttons. The previous
+    # top "antennae" strokes made the silhouette read as an insect, so they are
+    # intentionally gone.
+    rounded(draw, (6, 24, 58, 50), 12, outline=WHITE, width=3)
+    line(draw, [(19, 30), (19, 44)], WHITE, 3)
+    line(draw, [(12, 37), (26, 37)], WHITE, 3)
+    draw.ellipse((43 * SCALE, 31 * SCALE, 49 * SCALE, 37 * SCALE), fill=ORANGE)
+    draw.ellipse((49 * SCALE, 38 * SCALE, 55 * SCALE, 44 * SCALE), fill=ORANGE)
 
 
 def electronics(draw):

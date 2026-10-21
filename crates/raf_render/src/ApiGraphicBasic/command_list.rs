@@ -120,6 +120,8 @@ pub struct BasicCommandStats {
 /// Accumulator of drawing commands that represents a single frame's rendering pipeline instructions.
 #[derive(Debug, Clone)]
 pub struct BasicCommandList {
+    /// Scene-only presentation; independent from Neutral lighting and never applied to RafUI/CAD.
+    pub optimized_improved: bool,
     /// Small frame state shared by GPU and CPU executors; absent in neutral mode.
     pub environment: Option<crate::environment_frame::EnvironmentFrame>,
     pub shadows: Option<crate::shadow_frame::ShadowFrame>,
@@ -150,6 +152,7 @@ impl BasicCommandList {
     /// renderer's visible-set projection.
     pub fn with_capacity(command_capacity: usize, mesh_capacity: usize) -> Self {
         Self {
+            optimized_improved: false,
             environment: None,
             shadows: None,
             shadow_budget_exceeded: false,

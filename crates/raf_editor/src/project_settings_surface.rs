@@ -52,6 +52,7 @@ pub fn build_project_settings_surface(
     } else {
         settings_scroll = settings_scroll
             .with_child(runtime(palette, project, global_console_commands_enabled))
+            .with_child(progress(palette, project))
             .with_child(scripting(palette, project))
             .with_child(graphics(palette, project));
     }
@@ -274,6 +275,12 @@ fn runtime(
             "runtime.input_actions",
             8192,
         ))
+        .with_child(runtime_text_row(
+            palette,
+            "input_axes",
+            "runtime.input_axes",
+            8192,
+        ))
         .with_child(range_row_disabled(
             palette,
             "project-settings.runtime-fixed-hz",
@@ -338,8 +345,145 @@ fn runtime_text_row(
                 submit_command: Some(format!("project-settings.commit_text:runtime.{field}")),
             },
         )
+        .disabled(field == "progress_folder")
         .with_layout(UiLayout::fixed(CONTROL_WIDTH, 30.0)),
     )
+}
+
+fn progress(palette: StudioUiPalette, project: &Project) -> UiNode {
+    use raf_core::runtime_config::ProgressLocation;
+    let policy = &project.settings.runtime.progress;
+    section(
+        palette,
+        "project-settings.progress",
+        "runtime.progress_title",
+    )
+    .with_child(
+        UiNode::new("project-settings.progress.hint", UiNodeKind::Label)
+            .with_text_key("runtime.progress_hint")
+            .with_text_overflow(raf_ui::UiTextOverflow::Wrap)
+            .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
+            .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+    )
+    .with_child(toggle_row(
+        palette,
+        "project-settings.progress-enabled",
+        "runtime.progress_enabled",
+        "project-settings.progress-enabled",
+        policy.enabled,
+    ))
+    .with_child(progress_location_row(
+        palette,
+        &[
+            (
+                "runtime.storage_appdata",
+                "project-settings.progress-location.appdata",
+                policy.location == ProgressLocation::AppData,
+            ),
+            (
+                "runtime.storage_portable",
+                "project-settings.progress-location.portable",
+                policy.location == ProgressLocation::Portable,
+            ),
+            (
+                "runtime.storage_custom",
+                "project-settings.progress-location.custom",
+                policy.location == ProgressLocation::Custom,
+            ),
+        ],
+    ))
+    .with_child(segment_row(
+        palette,
+        "project-settings.progress-folder-actions",
+        "runtime.progress_folder",
+        &[
+            (
+                "runtime.choose_folder",
+                "project-settings.progress-folder.choose",
+                false,
+            ),
+            (
+                "runtime.revoke_folder",
+                "project-settings.progress-folder.revoke",
+                false,
+            ),
+        ],
+    ))
+    .with_child(
+        runtime_text_row(
+            palette,
+            "progress_folder",
+            "runtime.progress_local_grant",
+            1024,
+        )
+        .disabled(true),
+    )
+    .with_child(toggle_row_disabled(
+        palette,
+        "project-settings.progress-autosave",
+        "runtime.progress_autosave",
+        "project-settings.progress-autosave",
+        policy.autosave,
+        !policy.enabled,
+    ))
+    .with_child(range_row_disabled(
+        palette,
+        "project-settings.progress-interval",
+        "runtime.progress_interval",
+        "project-settings.progress-interval",
+        policy.autosave_seconds as f32,
+        10.0,
+        3600.0,
+        10.0,
+        policy.autosave_seconds.to_string(),
+        !policy.enabled || !policy.autosave,
+    ))
+    .with_child(runtime_text_row(
+        palette,
+        "autosave_slot",
+        "runtime.progress_autosave_slot",
+        48,
+    ))
+    .with_child(runtime_text_row(
+        palette,
+        "progress_schema",
+        "runtime.progress_schema",
+        10,
+    ))
+    .with_child(runtime_text_row(
+        palette,
+        "progress_slot_kib",
+        "runtime.progress_slot_kib",
+        5,
+    ))
+    .with_child(runtime_text_row(
+        palette,
+        "progress_slot_count",
+        "runtime.progress_slot_count",
+        3,
+    ))
+}
+fn progress_location_row(palette: StudioUiPalette, values: &[(&str, &str, bool)]) -> UiNode {
+    let mut node = segment_row(
+        palette,
+        "project-settings.progress-location",
+        "runtime.progress_location",
+        values,
+    );
+    node.layout = UiLayout {
+        flow: UiFlow::Column,
+        gap: 6.0,
+        padding: UiSpacing::xy(4.0, 6.0),
+        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+    };
+    if let Some(choices) = node.children.last_mut() {
+        choices.layout = UiLayout {
+            flow: UiFlow::RowWrap,
+            gap: 4.0,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        };
+    }
+    node
 }
 
 fn saving(palette: StudioUiPalette, project: &Project) -> UiNode {

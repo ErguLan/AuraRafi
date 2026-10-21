@@ -8,7 +8,7 @@
 
 use glam::Vec2;
 use raf_core::{i18n, Language};
-use raf_electronics::{CadObject, CadObjectKind};
+use raf_electronics::{CadObject, CadObjectKind, CadSurfaceKind};
 use raf_render::api_graphic_basic::ui_surface::{StudioUiPalette, UiSurface};
 use raf_ui::{
     UiAlign, UiFlow, UiFontWeight, UiIcon, UiIconId, UiIconSize, UiImage, UiImageFit,
@@ -146,7 +146,9 @@ pub fn build_electronics_canvas_overlay_surface(
     // Component artwork is a native PNG overlay. The CAD line stream keeps
     // wires, pins and hit regions, while the symbol itself comes from the
     // asset catalog so it stays crisp and does not depend on procedural
-    // line-by-line symbol geometry.
+    // line-by-line symbol geometry. Schematic symbols are white ink tinted by
+    // the theme; PCB bodies carry their own silkscreen artwork untinted.
+    let pcb_surface = editor.active_surface() == CadSurfaceKind::Pcb;
     for (index, object) in editor.scene().objects.iter().enumerate() {
         if object.kind != CadObjectKind::Component {
             continue;
@@ -156,10 +158,16 @@ pub fn build_electronics_canvas_overlay_surface(
         };
         let is_placement_preview = object.id == "component-placement-preview";
         let asset_key = match object.source_id {
-            Some(source_id) => editor.component_asset_key(source_id),
+            Some(source_id) => {
+                if pcb_surface {
+                    editor.pcb_artwork_key(source_id)
+                } else {
+                    editor.schematic_artwork_key(source_id)
+                }
+            }
             None if is_placement_preview => editor
                 .placement_preview_asset_key()
-                .unwrap_or("electronics://library/generic.png"),
+                .unwrap_or("electronics://symbols/generic.png"),
             None => continue,
         };
         let screen_center = camera.screen_from_world(rect.center, canvas_size);
@@ -170,15 +178,23 @@ pub fn build_electronics_canvas_overlay_surface(
         let image_size = Vec2::new(raw_size.x.clamp(16.0, 180.0), raw_size.y.clamp(16.0, 180.0));
         let x = screen_center.x - image_size.x * 0.5;
         let y = screen_center.y - image_size.y * 0.5;
+        let tint = if is_placement_preview {
+            Some(with_alpha(tokens.text, 156))
+        } else if pcb_surface {
+            // Footprint bodies carry their own silkscreen colors; tinting them
+            // with the ink token would erase the material distinction between
+            // body, silk and the live copper the CAD stream paints.
+            None
+        } else {
+            Some(with_alpha(tokens.text, 255))
+        };
         root = root.with_child(
             UiNode::image(
                 format!("electronics.canvas.component-image.{index}"),
                 UiImage {
                     source: UiImageSource::new(asset_key),
                     fit: UiImageFit::Stretch,
-                    // The placement ghost is the themed text token at a reduced
-                    // alpha, not a literal white, so it follows both themes.
-                    tint: is_placement_preview.then_some(with_alpha(tokens.text, 156)),
+                    tint,
                 },
             )
             .with_layout(

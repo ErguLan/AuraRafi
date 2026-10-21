@@ -18,6 +18,7 @@ pub const PRIMITIVE_MODEL_SCHEMA_VERSION: u32 = 1;
 
 const CUBE_JSON: &str = include_str!("prefabs/cube.json");
 const SPHERE_JSON: &str = include_str!("prefabs/sphere.json");
+const CAPSULE_JSON: &str = include_str!("prefabs/capsule.json");
 const CYLINDER_JSON: &str = include_str!("prefabs/cylinder.json");
 const PLANE_JSON: &str = include_str!("prefabs/plane.json");
 const PLATFORM_JSON: &str = include_str!("prefabs/platform.json");
@@ -25,7 +26,7 @@ const TOWER_JSON: &str = include_str!("prefabs/tower.json");
 const GATE_JSON: &str = include_str!("prefabs/gate.json");
 const BOAT_JSON: &str = include_str!("prefabs/boat.json");
 const BUILTIN_PRIMITIVE_MODEL_KINDS: &[&str] = &[
-    "cube", "sphere", "cylinder", "plane", "platform", "tower", "gate", "boat",
+    "cube", "sphere", "cylinder", "plane", "capsule", "platform", "tower", "gate", "boat",
 ];
 
 #[derive(Debug)]
@@ -101,6 +102,7 @@ impl PrimitiveModelManifest {
         let json = match normalize_builtin_kind(kind).as_str() {
             "cube" => CUBE_JSON,
             "sphere" => SPHERE_JSON,
+            "capsule" => CAPSULE_JSON,
             "cylinder" => CYLINDER_JSON,
             "plane" => PLANE_JSON,
             "platform" => PLATFORM_JSON,
@@ -118,6 +120,7 @@ impl PrimitiveModelManifest {
         let kind = match primitive {
             Primitive::Cube => "cube",
             Primitive::Sphere => "sphere",
+            Primitive::Capsule => "capsule",
             Primitive::Cylinder => "cylinder",
             Primitive::Plane => "plane",
             Primitive::Empty => return Ok(None),
@@ -245,6 +248,7 @@ fn primitive_shape_to_scene(shape: PrimitiveShape) -> Primitive {
     match shape {
         PrimitiveShape::Cube => Primitive::Cube,
         PrimitiveShape::Sphere => Primitive::Sphere,
+        PrimitiveShape::Capsule => Primitive::Capsule,
         PrimitiveShape::Cylinder => Primitive::Cylinder,
         PrimitiveShape::Plane => Primitive::Plane,
     }

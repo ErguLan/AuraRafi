@@ -8,6 +8,7 @@ use std::collections::HashSet;
 
 use crate::electronics_controller::{
     ElectronicsReportLineKind, ElectronicsSelectionKind, NativeElectronicsEditor,
+    PcbLayerVisibility,
 };
 use crate::panels::electronics_navigator_surface::{
     ElectronicsLibraryEntry, ElectronicsNavigatorEntry,
@@ -278,6 +279,7 @@ pub(crate) struct ElectronicsWorkbenchData {
     pub components: Vec<ElectronicsNavigatorEntry>,
     pub wires: Vec<ElectronicsNavigatorEntry>,
     pub library: Vec<ElectronicsLibraryEntry>,
+    pub layer_visibility: PcbLayerVisibility,
 }
 
 pub(crate) fn analysis_lines(
@@ -467,6 +469,7 @@ impl ElectronicsWorkbenchData {
                 components: Vec::new(),
                 wires: Vec::new(),
                 library: Vec::new(),
+                layer_visibility: PcbLayerVisibility::default(),
             };
         };
 
@@ -606,6 +609,7 @@ impl ElectronicsWorkbenchData {
             components,
             wires,
             library,
+            layer_visibility: editor.pcb_layer_visibility(),
         }
     }
 }

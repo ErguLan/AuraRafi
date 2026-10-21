@@ -13,6 +13,7 @@ pub enum ScriptRole {
 pub struct RuntimeViewState {
     pub active_camera: Option<Uuid>,
     pub role: ScriptRole,
+    pub services: crate::services::RuntimeServices,
     pub(crate) environment_overrides: serde_json::Map<String, serde_json::Value>,
     pub(crate) environment_revision: u64,
     pub(crate) environment_cache: std::cell::RefCell<

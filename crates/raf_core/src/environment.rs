@@ -12,6 +12,14 @@ pub enum EnvironmentMode {
     Neutral,
     Scene,
 }
+/// Rendering technology, independent from Neutral/Scene and the resource budget.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LightingTechnology {
+    #[default]
+    OptimizedCurrent,
+    OptimizedImproved,
+}
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SunControl {
@@ -40,6 +48,7 @@ pub struct SunSettings {
     pub angular_radius: f32,
     pub toon_enabled: bool,
     pub toon_steps: f32,
+    pub toon_softness: f32,
 }
 impl Default for SunSettings {
     fn default() -> Self {
@@ -54,6 +63,7 @@ impl Default for SunSettings {
             angular_radius: 0.00465,
             toon_enabled: false,
             toon_steps: 3.0,
+            toon_softness: 0.35,
         }
     }
 }
@@ -140,6 +150,8 @@ impl Default for ShadowSettings {
 pub struct EnvironmentSettings {
     pub version: u32,
     pub mode: EnvironmentMode,
+    pub technology: LightingTechnology,
+    pub exposure: f32,
     pub sun: SunSettings,
     pub sky: SkySettings,
     pub ambient_color: [u8; 3],
@@ -152,6 +164,8 @@ impl Default for EnvironmentSettings {
         Self {
             version: 1,
             mode: EnvironmentMode::Neutral,
+            technology: LightingTechnology::OptimizedCurrent,
+            exposure: 1.0,
             sun: Default::default(),
             sky: Default::default(),
             ambient_color: [255; 3],
@@ -182,6 +196,31 @@ pub struct EnvironmentProperty {
 }
 use EnvironmentPropertyKind::{Bool, Choice, Color, Number};
 pub const ENVIRONMENT_PROPERTIES: &[EnvironmentProperty] = &[
+    EnvironmentProperty {
+        path: "technology",
+        label: "lighting.technology",
+        kind: Choice(&["optimized_current", "optimized_improved"]),
+    },
+    EnvironmentProperty {
+        path: "exposure",
+        label: "lighting.exposure",
+        kind: Number {
+            min: 0.1,
+            max: 4.0,
+            display_scale: 1.0,
+            step: 0.05,
+        },
+    },
+    EnvironmentProperty {
+        path: "sun.toon_softness",
+        label: "lighting.toon_softness",
+        kind: Number {
+            min: 0.0,
+            max: 1.0,
+            display_scale: 1.0,
+            step: 0.05,
+        },
+    },
     EnvironmentProperty {
         path: "sun.toon_enabled",
         label: "lighting.toon_enabled",
@@ -436,6 +475,9 @@ impl EnvironmentSettings {
             hash = (hash ^ v as u64).wrapping_mul(0x100000001b3);
         };
         mix(self.mode as u32);
+        mix(self.technology as u32);
+        mix(self.exposure.to_bits());
+        mix(self.sun.toon_softness.to_bits());
         mix(self.sun.enabled as u32);
         mix(self.sun.control as u32);
         mix(self.sun.toon_enabled as u32);
@@ -480,6 +522,9 @@ impl EnvironmentSettings {
         // Script reads and numeric validation must not serialize the entire world environment.
         use serde_json::json;
         Ok(match path {
+            "technology" => json!(self.technology),
+            "exposure" => json!(self.exposure),
+            "sun.toon_softness" => json!(self.sun.toon_softness),
             "sun.toon_enabled" => json!(self.sun.toon_enabled),
             "sun.toon_steps" => json!(self.sun.toon_steps),
             "sky.stars_enabled" => json!(self.sky.stars_enabled),
@@ -622,6 +667,43 @@ impl EnvironmentSettings {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn optimized_technology_migrates_roundtrips_and_rejects_invalid_patches_atomically() {
+        let env = EnvironmentSettings::default();
+        let mut legacy = serde_json::to_value(env).unwrap();
+        legacy.as_object_mut().unwrap().remove("technology");
+        legacy.as_object_mut().unwrap().remove("exposure");
+        legacy["sun"]
+            .as_object_mut()
+            .unwrap()
+            .remove("toon_softness");
+        assert_eq!(
+            serde_json::from_value::<EnvironmentSettings>(legacy).unwrap(),
+            env
+        );
+        assert_eq!(env.technology, LightingTechnology::OptimizedCurrent);
+        for patch in [
+            serde_json::json!({"technology":"optimized_improved"}),
+            serde_json::json!({"exposure":1.5}),
+            serde_json::json!({"sun.toon_softness":0.7}),
+        ] {
+            let next = env.patched(patch.as_object().unwrap()).unwrap();
+            assert_ne!(next.render_fingerprint(), env.render_fingerprint());
+            assert_eq!(
+                ron::from_str::<EnvironmentSettings>(&ron::to_string(&next).unwrap()).unwrap(),
+                next
+            );
+        }
+        for patch in [
+            serde_json::json!({"technology":"pixel_art"}),
+            serde_json::json!({"technology":"optimized_improved","exposure":0.0}),
+            serde_json::json!({"exposure":4.1}),
+            serde_json::json!({"sun.toon_softness":1.1}),
+        ] {
+            assert!(env.patched(patch.as_object().unwrap()).is_err());
+        }
+        assert_eq!(env, EnvironmentSettings::default());
+    }
     #[test]
     fn stylized_environment_migrates_bounds_and_invalidates_frame_keys() {
         let env = EnvironmentSettings::default();

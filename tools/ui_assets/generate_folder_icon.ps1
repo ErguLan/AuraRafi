@@ -21,33 +21,29 @@ $graphics.Clear([System.Drawing.Color]::Transparent)
 $graphics.CompositingMode = [System.Drawing.Drawing2D.CompositingMode]::SourceOver
 
 $orange = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 224, 116, 24), 12)
-$white = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 245, 245, 245), 8)
-$muted = [System.Drawing.Pen]::new([System.Drawing.Color]::FromArgb(255, 184, 184, 184), 8)
-foreach ($pen in @($orange, $white, $muted)) {
+foreach ($pen in @($orange)) {
     $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
     $pen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
     $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
 }
 
 try {
+    # Matches folder() in tools/ui_assets/generate_editor_icons.py: one clean
+    # folder silhouette with a top-left tab and no internal fold lines.
     $outline = [System.Drawing.PointF[]]@(
-        [System.Drawing.PointF]::new(32, 80),
-        [System.Drawing.PointF]::new(32, 200),
-        [System.Drawing.PointF]::new(224, 200),
-        [System.Drawing.PointF]::new(224, 80),
-        [System.Drawing.PointF]::new(124, 80),
-        [System.Drawing.PointF]::new(104, 56),
-        [System.Drawing.PointF]::new(32, 56),
-        [System.Drawing.PointF]::new(32, 80)
+        [System.Drawing.PointF]::new(36, 84),
+        [System.Drawing.PointF]::new(36, 204),
+        [System.Drawing.PointF]::new(220, 204),
+        [System.Drawing.PointF]::new(220, 84),
+        [System.Drawing.PointF]::new(120, 84),
+        [System.Drawing.PointF]::new(100, 60),
+        [System.Drawing.PointF]::new(36, 60),
+        [System.Drawing.PointF]::new(36, 84)
     )
     $graphics.DrawLines($orange, $outline)
-    $graphics.DrawLine($white, 40, 96, 216, 96)
-    $graphics.DrawLine($muted, 56, 176, 200, 176)
     $bitmap.Save($OutputPath, [System.Drawing.Imaging.ImageFormat]::Png)
 }
 finally {
-    $muted.Dispose()
-    $white.Dispose()
     $orange.Dispose()
     $graphics.Dispose()
     $bitmap.Dispose()

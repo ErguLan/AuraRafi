@@ -205,6 +205,74 @@ pub struct ElectronicsInputResult {
     pub request_redraw: bool,
 }
 
+/// PCB presentation filters surfaced by the navigator's Layers tab.
+///
+/// They only prune objects when the presentation scene is built, so no
+/// document, memory or export ever observes a "hidden" element; re-showing a
+/// layer is one scene rebuild. This is a board view option in the same class
+/// as the grid and labels toggles: it never takes an undo entry and never
+/// marks the document dirty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PcbLayerVisibility {
+    /// Component profile bodies and their pads.
+    pub components: bool,
+    /// Top copper routing.
+    pub top_traces: bool,
+    /// Bottom copper routing.
+    pub bottom_traces: bool,
+    /// Board outline and silkscreen frame.
+    pub silkscreen: bool,
+    /// Rubber bands of unrouted pads.
+    pub airwires: bool,
+}
+
+impl Default for PcbLayerVisibility {
+    fn default() -> Self {
+        Self {
+            components: true,
+            top_traces: true,
+            bottom_traces: true,
+            silkscreen: true,
+            airwires: true,
+        }
+    }
+}
+
+impl PcbLayerVisibility {
+    /// True when no filter prunes anything, the common steady state, so the
+    /// scene rebuild stays a no-op for it.
+    fn is_all_visible(self) -> bool {
+        self.components
+            && self.top_traces
+            && self.bottom_traces
+            && self.silkscreen
+            && self.airwires
+    }
+
+    /// Flips one layer. `None` for an unknown key so the command bus reports a
+    /// rejected command instead of a silent success.
+    fn apply_toggle(&mut self, key: &str) -> Option<()> {
+        match key {
+            "components" => self.components = !self.components,
+            "top" => self.top_traces = !self.top_traces,
+            "bottom" => self.bottom_traces = !self.bottom_traces,
+            "silk" => self.silkscreen = !self.silkscreen,
+            "airwires" => self.airwires = !self.airwires,
+            _ => return None,
+        }
+        Some(())
+    }
+}
+
+/// Stable command suffixes of one visibility row.
+pub const PCB_LAYER_KEYS: [&str; 5] = [
+    "components",
+    "top",
+    "bottom",
+    "silk",
+    "airwires",
+];
+
 impl Default for ElectronicsInputResult {
     fn default() -> Self {
         Self {
@@ -242,6 +310,7 @@ pub struct NativeElectronicsEditor {
     placement_preview: Option<Vec2>,
     grid_opacity: f32,
     labels_visible: bool,
+    pcb_layer_visibility: PcbLayerVisibility,
     drc_lines: Vec<ElectronicsReportLine>,
     drc_report: Option<DrcReport>,
     drc_report_surface: Option<CadSurfaceKind>,
@@ -310,6 +379,7 @@ impl NativeElectronicsEditor {
             placement_preview: None,
             grid_opacity: 0.55,
             labels_visible: true,
+            pcb_layer_visibility: PcbLayerVisibility::default(),
             drc_lines: Vec::new(),
             drc_report: None,
             drc_report_surface: None,
@@ -505,13 +575,49 @@ impl NativeElectronicsEditor {
         self.labels_visible
     }
 
+    /// Current PCB presentation filters for the Layers rail tab.
+    pub fn pcb_layer_visibility(&self) -> PcbLayerVisibility {
+        self.pcb_layer_visibility
+    }
+
+    /// Flips one presentation filter and rebuilds the scene so the change is
+    /// visible at once.
+    ///
+    /// Like the grid and snap toggles, hiding a board layer is a view decision:
+    /// it deliberately takes no undo entry and leaves the project clean.
+    pub fn toggle_pcb_layer(&mut self, key: &str) -> bool {
+        if self.pcb_layer_visibility.apply_toggle(key).is_none() {
+            return false;
+        }
+        self.rebuild_scene();
+        self.touch_ui();
+        true
+    }
+
     pub fn component_asset_key(&self, source_id: Uuid) -> &'static str {
         self.schematic
             .components
             .iter()
             .find(|component| component.id == source_id)
             .map(|component| component_asset_key(component.kind_label()))
-            .unwrap_or("electronics://library/generic.png")
+            .unwrap_or("electronics://symbols/generic.png")
+    }
+
+    /// Schematic canvas artwork for a component body. Schematic symbols are
+    /// white ink tinted by the overlay; the palette icons live in the rails.
+    pub fn schematic_artwork_key(&self, source_id: Uuid) -> &'static str {
+        self.component_asset_key(source_id)
+    }
+
+    /// PCB canvas artwork for a placement body, resolved through the footprint
+    /// the layout assigned at sync time.
+    pub fn pcb_artwork_key(&self, source_id: Uuid) -> &'static str {
+        self.pcb
+            .components
+            .iter()
+            .find(|placement| placement.component_id == source_id)
+            .map(|placement| pcb_asset_key_for_footprint(&placement.footprint))
+            .unwrap_or("electronics://footprints/generic.png")
     }
 
     /// Asset used by the pointer-driven library placement ghost. Keeping this
@@ -522,7 +628,7 @@ impl NativeElectronicsEditor {
             self.placement_template
                 .and_then(|index| self.library.components.get(index))
                 .map(|template| component_asset_key(template.template.kind_label()))
-                .unwrap_or("electronics://library/generic.png")
+                .unwrap_or("electronics://symbols/generic.png")
         })
     }
 
@@ -1106,6 +1212,9 @@ impl NativeElectronicsEditor {
     pub fn apply_ui_command(&mut self, command: &str) -> bool {
         if let Some(action) = crate::electronics_action::ElectronicsAction::parse(command) {
             return self.dispatch_action(action);
+        }
+        if let Some(key) = command.strip_prefix("electronics.layer.toggle.") {
+            return self.toggle_pcb_layer(key);
         }
         if let Some(index) = command.strip_prefix("electronics.navigator.select-wire.") {
             if let Ok(index) = index.parse::<usize>() {
@@ -1807,6 +1916,25 @@ impl NativeElectronicsEditor {
         } else {
             self.scene.objects.truncate(self.base_scene_object_count);
         }
+        // Presentation filtering runs after the base build but before the
+        // analysis markers and previews, so a DRC marker always stays visible
+        // even when the graph it names is pruned.
+        if self.active_surface == CadSurfaceKind::Pcb
+            && !self.pcb_layer_visibility.is_all_visible()
+        {
+            let visibility = self.pcb_layer_visibility;
+            self.scene.objects.retain(|object| match object.kind {
+                CadObjectKind::Component | CadObjectKind::Pad => visibility.components,
+                CadObjectKind::Trace => match object.layer {
+                    CadLayerKind::PcbTopCopper => visibility.top_traces,
+                    CadLayerKind::PcbBottomCopper => visibility.bottom_traces,
+                    _ => true,
+                },
+                CadObjectKind::BoardOutline => visibility.silkscreen,
+                CadObjectKind::Airwire => visibility.airwires,
+                _ => true,
+            });
+        }
         if self.drc_report_surface == Some(self.active_surface) {
             if let Some(report) = &self.drc_report {
                 self.scene.push_drc_report(report);
@@ -1989,13 +2117,26 @@ fn net_name_suffix(name: &str) -> Option<usize> {
 
 fn component_asset_key(kind_label: &str) -> &'static str {
     match kind_label {
-        "Resistor" => "electronics://library/resistor.png",
-        "Capacitor" => "electronics://library/capacitor.png",
-        "LED" => "electronics://library/led.png",
-        "Magnet" => "electronics://library/magnet.png",
-        "Battery" => "electronics://library/battery.png",
-        "Ground" => "electronics://library/ground.png",
-        _ => "electronics://library/generic.png",
+        "Resistor" => "electronics://symbols/resistor.png",
+        "Capacitor" => "electronics://symbols/capacitor.png",
+        "LED" => "electronics://symbols/led.png",
+        "Magnet" => "electronics://symbols/magnet.png",
+        "Battery" => "electronics://symbols/battery.png",
+        "Ground" => "electronics://symbols/ground.png",
+        _ => "electronics://symbols/generic.png",
+    }
+}
+
+/// Canvas artwork for a PCB placement body, keyed by its footprint id. The
+/// copper pads stay live geometry behind the artwork, so the PNG only carries
+/// the silhouette and the silkscreen.
+fn pcb_asset_key_for_footprint(footprint: &str) -> &'static str {
+    match footprint {
+        "0805" => "electronics://footprints/0805.png",
+        "MAG-10x5" => "electronics://footprints/MAG-10x5.png",
+        "BAT-18650" => "electronics://footprints/BAT-18650.png",
+        "TP-GND" => "electronics://footprints/TP-GND.png",
+        _ => "electronics://footprints/generic.png",
     }
 }
 
@@ -2488,7 +2629,7 @@ mod tests {
         assert!(editor.begin_library_drag(0));
         assert_eq!(
             editor.placement_preview_asset_key(),
-            Some("electronics://library/resistor.png")
+            Some("electronics://symbols/resistor.png")
         );
         assert!(!editor.finish_library_drag_at(Some([2000.0, 2000.0]), canvas));
         assert!(editor.schematic.components.is_empty());

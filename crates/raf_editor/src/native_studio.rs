@@ -23,8 +23,9 @@ use crate::editor_layout::{EditorFrameLayout, EditorRect};
 use crate::folder_picker;
 use crate::settings_surface::SettingsSection;
 use crate::studio_surface::{
-    build_hub_surface_with_model, hub_visible_featured, hub_visible_projects, hub_visible_recent,
-    HubProjectCreateError, HubSurfaceFilter, HubSurfaceModel, HubSurfaceProject,
+    build_hub_surface_with_model, clamp_context_menu_position, hub_visible_featured,
+    hub_visible_projects, hub_visible_recent, HubProjectCreateError, HubSurfaceFilter,
+    HubSurfaceModel, HubSurfaceProject, HUB_CONTEXT_MENU_SIZE,
 };
 use raf_ui::UiWindowCommand;
 
@@ -123,6 +124,7 @@ impl NativeStudioSurface {
             };
         }
         self.rect = layout.window;
+        self.model.window_size = [layout.window.width, layout.window.height];
         let palette_changed = self.palette != palette;
         self.palette = palette;
         if self.last_model.as_ref() == Some(&self.model) && !palette_changed {
@@ -246,6 +248,7 @@ impl NativeStudioSurface {
         router: &mut InputRouter,
     ) -> Vec<NativeStudioIntent> {
         self.pointer_position = input.snapshot().pointer_position;
+        self.dismiss_context_menu_outside_press(input);
         let model = &self.model;
         let language = self.language;
         let actions = self.host.process_routed_input(
@@ -287,6 +290,38 @@ impl NativeStudioSurface {
             target_rect: self.rect.to_physical(scale_factor, target_size),
             logical_size: self.rect.logical_size(),
             raster_scale: scale_factor.max(1.0),
+        }
+    }
+
+    fn close_context_menu(&mut self) {
+        self.model.context_project = None;
+        self.model.context_menu_position = None;
+    }
+
+    /// A press anywhere outside the placed context menu dismisses it, matching
+    /// the desktop menu contract instead of requiring the explicit command.
+    fn dismiss_context_menu_outside_press(&mut self, input: &NativeUiInputBridge) {
+        if self.model.context_project.is_none() {
+            return;
+        }
+        if input.snapshot().pointer_pressed_buttons.is_empty() {
+            return;
+        }
+        let Some(pointer) = input.snapshot().pointer_position else {
+            return;
+        };
+        let Some(anchor) = self.model.context_menu_position else {
+            return;
+        };
+        let placed = clamp_context_menu_position(anchor, self.model.window_size);
+        let inside = pointer[0] >= placed[0]
+            && pointer[1] >= placed[1]
+            && pointer[0] <= placed[0] + HUB_CONTEXT_MENU_SIZE[0]
+            && pointer[1] <= placed[1] + HUB_CONTEXT_MENU_SIZE[1];
+        if !inside {
+            self.model.context_project = None;
+            self.model.context_menu_position = None;
+            self.last_model = None;
         }
     }
 
@@ -458,10 +493,22 @@ impl NativeStudioSurface {
                 };
                 let path = PathBuf::from(path);
                 match payload.get("action").and_then(|value| value.as_str()) {
-                    Some("open") => intents.push(NativeStudioIntent::Open(path)),
-                    Some("agent") => intents.push(NativeStudioIntent::OpenAgents(Some(path))),
-                    Some("duplicate") => intents.push(NativeStudioIntent::Duplicate(path)),
-                    Some("forget") => intents.push(NativeStudioIntent::Forget(path)),
+                    Some("open") => {
+                        self.close_context_menu();
+                        intents.push(NativeStudioIntent::Open(path));
+                    }
+                    Some("agent") => {
+                        self.close_context_menu();
+                        intents.push(NativeStudioIntent::OpenAgents(Some(path)));
+                    }
+                    Some("duplicate") => {
+                        self.close_context_menu();
+                        intents.push(NativeStudioIntent::Duplicate(path));
+                    }
+                    Some("forget") => {
+                        self.close_context_menu();
+                        intents.push(NativeStudioIntent::Forget(path));
+                    }
                     Some("hover") => {
                         self.model.hovered_project_path = Some(path);
                     }
@@ -477,7 +524,10 @@ impl NativeStudioSurface {
                             .iter()
                             .find(|project| project.path == path)
                             .cloned();
-                        self.model.context_menu_position = self.pointer_position;
+                        let anchor = self.pointer_position.unwrap_or([0.0, 0.0]);
+                        let window_size = self.model.window_size;
+                        self.model.context_menu_position =
+                            Some(clamp_context_menu_position(anchor, window_size));
                         self.model.hovered_project_path = Some(path);
                     }
                     _ => {}
@@ -729,6 +779,22 @@ fn load_hub_images(store: &mut UiSurfaceImageStore) {
         (
             "editor.hub.plus",
             include_bytes!("../../../editor/assets/ui_icons/hub_generated/plus.png").as_slice(),
+        ),
+        (
+            "editor.hub.agent",
+            include_bytes!("../../../editor/assets/ui_icons/ai_chat.png").as_slice(),
+        ),
+        (
+            "editor.hub.context-open",
+            include_bytes!("../../../editor/assets/ui_icons/open_HUB.png").as_slice(),
+        ),
+        (
+            "editor.hub.context-duplicate",
+            include_bytes!("../../../editor/assets/ui_icons/duplicate_HUB.png").as_slice(),
+        ),
+        (
+            "editor.hub.context-forget",
+            include_bytes!("../../../editor/assets/ui_icons/delete_HUB.png").as_slice(),
         ),
         (
             "editor.hub.folder",

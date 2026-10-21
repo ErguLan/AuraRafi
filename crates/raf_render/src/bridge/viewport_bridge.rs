@@ -101,6 +101,17 @@ impl Default for ViewportBridge {
 }
 
 impl ViewportBridge {
+    pub fn pick_surface(
+        &self,
+        scene: &SceneGraph,
+        view_proj: &Mat4,
+        pointer: [f32; 2],
+        size: [f32; 2],
+    ) -> Option<(Vec3, Vec3)> {
+        self.edit_session
+            .pick_surface(scene, view_proj, pointer, size)
+    }
+
     pub fn new() -> Self {
         Self {
             camera: Camera::default(),

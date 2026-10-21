@@ -394,13 +394,11 @@ fn view_controls(state: &ToolbarState) -> Vec<(ToolbarControl, bool)> {
             state.grid_visible,
         ),
         (
-            // The family has no magnet glyph. `Lock` reads as "locked to the
-            // grid", which is what snapping does, and no other Electronics
-            // command uses it. The glyph is the weakest link of this band and
-            // the family needs a magnet before it can be replaced.
+            // Snapping is "held to the grid", so the option carries the magnet
+            // glyph and every other Electronics command stays free of it.
             ToolbarControl::option(
                 "electronics.snap.toggle",
-                UiIconId::Lock,
+                UiIconId::Magnet,
                 Some("electronics.toolbar.snap"),
             ),
             state.snap_enabled,
@@ -413,11 +411,11 @@ fn view_controls(state: &ToolbarState) -> Vec<(ToolbarControl, bool)> {
             ),
             state.labels_visible,
         ),
-        // `Focus` is a crosshair, not a frame, so fit is the glyph of this band
-        // that describes a camera action least literally. It keeps the `F`
-        // shortcut, and the family needs a real frame glyph to replace it.
+        // Fit is a framing command, so it carries the frame glyph: corner
+        // brackets around the content that would fill the view. It keeps the
+        // `F` shortcut, and no other Electronics command owns the frame.
         (
-            ToolbarControl::command("electronics.fit", UiIconId::Focus, None, true),
+            ToolbarControl::command("electronics.fit", UiIconId::Frame, None, true),
             false,
         ),
         (

@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 use uuid::Uuid;
 
 struct ChildRuntime {
+    development_slot: u32,
     child: Child,
     listener: TcpListener,
     peer: Option<RuntimePeer>,
@@ -127,6 +128,14 @@ impl NativeRuntimeController {
             ron::de::from_bytes(&raw).map_err(|e| format!("runtime session scene: {e}"))?
         };
         let instance = Uuid::new_v4();
+        let development_slot = (0..4)
+            .find(|slot| {
+                !self
+                    .children
+                    .iter()
+                    .any(|child| child.development_slot == *slot)
+            })
+            .ok_or("runtime development slot limit reached")?;
         let node_graph = if registry.active_session == session.id {
             node_graph.cloned()
         } else {
@@ -153,6 +162,10 @@ impl NativeRuntimeController {
         };
         let safe_settings = RuntimeHostSettings::from_engine(settings);
         let manifest = RuntimeManifest {
+            project_id: project.id,
+            session_id: Some(session.id.0),
+            development_slot,
+            save_root_grant: settings.runtime_save_roots.get(&project.id).cloned(),
             node_graph,
             protocol: 1,
             instance,
@@ -204,6 +217,7 @@ impl NativeRuntimeController {
                     .spawn()
                     .map_err(|e| format!("start local runtime: {e}"))?;
                 Ok::<_, String>(ChildRuntime {
+                    development_slot,
                     child,
                     listener,
                     peer: None,

@@ -50,6 +50,9 @@ pub struct HubSurfaceModel {
     pub recent_activity: Vec<HubSurfaceProject>,
     pub context_project: Option<HubSurfaceProject>,
     pub context_menu_position: Option<[f32; 2]>,
+    /// Logical window size supplied by the host. It lets the retained document
+    /// keep the project context menu inside the viewport on every resize.
+    pub window_size: [f32; 2],
     /// Transient pointer state supplied by the host. Keeping it in the model
     /// lets the retained document reveal card actions without a renderer-only
     /// hover shortcut.
@@ -73,6 +76,25 @@ pub enum HubProjectCreateError {
     NameInvalid,
     LocationRequired,
     CreationFailed(String),
+}
+
+/// Fixed logical size of the project context menu. The builder and the host
+/// share it so the menu can be clamped inside the window and dismissed by a
+/// press outside the exact same rectangle.
+pub(crate) const HUB_CONTEXT_MENU_SIZE: [f32; 2] = [236.0, 180.0];
+const HUB_CONTEXT_MENU_MARGIN: f32 = 8.0;
+
+/// Clamps a context-menu anchor to the current logical window so the menu is
+/// never cut off at the bottom or right edge.
+pub(crate) fn clamp_context_menu_position(position: [f32; 2], window_size: [f32; 2]) -> [f32; 2] {
+    let max_x = (window_size[0] - HUB_CONTEXT_MENU_SIZE[0] - HUB_CONTEXT_MENU_MARGIN)
+        .max(HUB_CONTEXT_MENU_MARGIN);
+    let max_y = (window_size[1] - HUB_CONTEXT_MENU_SIZE[1] - HUB_CONTEXT_MENU_MARGIN)
+        .max(HUB_CONTEXT_MENU_MARGIN);
+    [
+        position[0].clamp(HUB_CONTEXT_MENU_MARGIN, max_x),
+        position[1].clamp(HUB_CONTEXT_MENU_MARGIN, max_y),
+    ]
 }
 
 fn hub_create_height(model: &HubSurfaceModel) -> f32 {
@@ -126,6 +148,7 @@ impl Default for HubSurfaceModel {
             recent_activity: Vec::new(),
             context_project: None,
             context_menu_position: None,
+            window_size: [1280.0, 900.0],
             hovered_project_path: None,
             create_name: String::new(),
             create_path: String::new(),
@@ -220,6 +243,7 @@ pub fn build_hub_surface_with_model(
     if let (Some(project), Some(position)) =
         (model.context_project.as_ref(), model.context_menu_position)
     {
+        let position = clamp_context_menu_position(position, model.window_size);
         root = root.with_child(hub_context_menu_surface(palette, project, position));
     }
 
@@ -545,13 +569,102 @@ pub fn build_hub_surface_with_model(
                 UiStyleSelector::Class("hub-context-menu".to_string()),
                 UiStylePatch {
                     fill: Some(tokens.surface_raised),
-                    border: Some(tokens.accent),
+                    border: Some(tokens.border),
                     border_width: Some(1.0),
                     radius: Some(6.0),
                     text: Some(tokens.text),
                     ..UiStylePatch::default()
                 },
             ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-menu-row".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(4.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-menu-row".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(4.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-menu-row-danger".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(4.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-menu-row-danger".to_string()),
+                UiStylePatch {
+                    fill: Some([180, 45, 45, 90]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(4.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-menu-divider".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.border),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(0.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-agent-toggle".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(5.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-agent-toggle".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.focus),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-agent-toggle-on".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    radius: Some(5.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-agent-toggle-on".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.accent_hot),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
             UiStyleRule::new(
                 UiStyleSelector::Class("hub-input".to_string()),
                 UiStylePatch {
@@ -1433,71 +1546,67 @@ fn hub_create_location_input(_palette: StudioUiPalette) -> UiNode {
 
 fn hub_agent_toggle(palette: StudioUiPalette, enabled: bool) -> UiNode {
     let tokens = hub_tokens(palette);
-    UiNode::new("hub.create.agent", UiNodeKind::Button)
-        .with_class("hub-agent-placeholder")
+    let mut toggle = UiNode::new("hub.create.agent", UiNodeKind::Button)
+        .with_class("hub-agent-toggle")
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
-            gap: 8.0,
-            padding: UiSpacing::xy(10.0, 0.0),
-            ..UiLayout::fixed(120.0, 52.0)
-        })
-        .with_style(UiStyle {
-            fill: tokens.surface_raised,
-            border: tokens.border,
-            text: tokens.text_muted,
-            border_width: 1.0,
-            radius: 5.0,
-            opacity: 1.0,
+            gap: 10.0,
+            padding: UiSpacing::xy(14.0, 0.0),
+            ..UiLayout::fixed(152.0, 52.0)
         })
         .focusable()
         .with_accessibility_checked(enabled)
         .with_accessibility_label_key("agent_workspace.create_with_agent")
+        .with_tooltip_key("agent_workspace.create_with_agent")
         .with_event(UiEventBinding::command(
             UiEventKind::Click,
             "hub.create.agent-toggle",
         ))
         .with_child(
-            UiNode::new("hub.create.agent-toggle", UiNodeKind::Panel)
-                .with_layout(UiLayout::fixed(28.0, 16.0))
-                .with_style(UiStyle {
-                    fill: if enabled {
-                        tokens.accent_hot
-                    } else {
-                        tokens.surface_alt
-                    },
-                    border: tokens.border,
-                    text: tokens.text_muted,
-                    border_width: 1.0,
-                    radius: 8.0,
-                    opacity: 1.0,
-                })
-                .with_child(
-                    UiNode::new("hub.create.agent-toggle-knob", UiNodeKind::Panel)
-                        .with_layout(UiLayout::absolute(
-                            raf_render::api_graphic_basic::ui_surface::UiRect::new(
-                                if enabled { 14.0 } else { 2.0 },
-                                2.0,
-                                12.0,
-                                12.0,
-                            ),
-                        ))
-                        .with_style(UiStyle {
-                            fill: tokens.text_muted,
-                            border: tokens.text_muted,
-                            text: tokens.text_muted,
-                            border_width: 0.0,
-                            radius: 6.0,
-                            opacity: 1.0,
-                        }),
-                ),
+            UiNode::image(
+                "hub.create.agent-icon",
+                UiImage {
+                    source: UiImageSource::new("editor.hub.agent"),
+                    fit: UiImageFit::Contain,
+                    tint: None,
+                },
+            )
+            .with_layout(UiLayout::fixed(20.0, 20.0)),
         )
         .with_child(
             UiNode::new("hub.create.agent-label", UiNodeKind::Label)
                 .with_text_key("app.hub_agent")
-                .with_text_style(UiTextStyle::body(tokens.text_muted))
-                .with_layout(UiLayout::fixed(0.0, 20.0)),
+                .with_text_style(UiTextStyle::button(if enabled {
+                    tokens.text
+                } else {
+                    tokens.text_muted
+                }))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fixed(0.0, 20.0)
+                }),
         )
+        .with_child(
+            UiNode::new("hub.create.agent-dot", UiNodeKind::Panel)
+                .with_layout(UiLayout::fixed(10.0, 10.0))
+                .with_style(UiStyle {
+                    fill: if enabled { tokens.accent } else { [0, 0, 0, 0] },
+                    border: if enabled {
+                        tokens.accent
+                    } else {
+                        tokens.border
+                    },
+                    text: tokens.text_muted,
+                    border_width: 1.0,
+                    radius: 5.0,
+                    opacity: 1.0,
+                }),
+        );
+    if enabled {
+        toggle = toggle.with_class("hub-agent-toggle-on");
+    }
+    toggle
 }
 
 fn hub_create_submit(palette: StudioUiPalette) -> UiNode {
@@ -2176,13 +2285,13 @@ fn hub_context_menu_surface(
         .with_layout(
             UiLayout {
                 flow: UiFlow::Column,
-                padding: UiSpacing::same(12.0),
-                gap: 6.0,
+                padding: UiSpacing::same(6.0),
+                gap: 2.0,
                 ..UiLayout::absolute(raf_render::api_graphic_basic::ui_surface::UiRect::new(
                     position[0],
                     position[1],
-                    224.0,
-                    216.0,
+                    HUB_CONTEXT_MENU_SIZE[0],
+                    HUB_CONTEXT_MENU_SIZE[1],
                 ))
             }
             .with_z_index(100),
@@ -2190,53 +2299,118 @@ fn hub_context_menu_surface(
         .with_child(
             UiNode::new("hub.context-title", UiNodeKind::Label)
                 .with_text_key("hub.context.title")
-                .with_text_style(UiTextStyle::panel_title(tokens.text))
-                .with_layout(UiLayout::fixed(0.0, 20.0)),
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout {
+                    flow: UiFlow::Row,
+                    align_items: UiAlign::Center,
+                    padding: UiSpacing::xy(10.0, 0.0),
+                    ..UiLayout::fixed(0.0, 26.0)
+                }),
         )
-        .with_child(hub_project_command_button(
+        .with_child(hub_menu_divider("hub.context-divider-top"))
+        .with_child(hub_menu_row(
+            palette,
             "hub.context-open",
             "app.hub_open",
             project,
             "open",
-            198.0,
-            32.0,
-            "hub-button",
+            "editor.hub.context-open",
         ))
-        .with_child(hub_project_command_button(
+        .with_child(hub_menu_row(
+            palette,
             "hub.context-agent",
             "agent_workspace.work_with_ai",
             project,
             "agent",
-            198.0,
-            32.0,
-            "hub-button",
+            "editor.hub.agent",
         ))
-        .with_child(hub_project_command_button(
+        .with_child(hub_menu_row(
+            palette,
             "hub.context-duplicate",
             "app.hub_duplicate",
             project,
             "duplicate",
-            198.0,
-            32.0,
-            "hub-button",
+            "editor.hub.context-duplicate",
         ))
-        .with_child(hub_project_command_button(
+        .with_child(hub_menu_divider("hub.context-divider-bottom"))
+        .with_child(hub_menu_row(
+            palette,
             "hub.context-forget",
             "app.hub_delete",
             project,
             "forget",
-            198.0,
-            32.0,
-            "hub-danger-button",
+            "editor.hub.context-forget",
         ))
-        .with_child(hub_command_button(
-            "hub.context-close",
-            "app.cancel",
-            "hub.context-close",
-            198.0,
-            32.0,
-            "hub-button",
-        ))
+}
+
+/// One desktop-grade context-menu row: borderless, full-width, with a semantic
+/// icon. Resting fill is transparent; hover illumination comes from the Hub
+/// stylesheet so the menu reads as a menu rather than a stack of buttons.
+fn hub_menu_row(
+    palette: StudioUiPalette,
+    id: &str,
+    label_key: &str,
+    project: &HubSurfaceProject,
+    action: &str,
+    icon_key: &str,
+) -> UiNode {
+    let destructive = action == "forget";
+    let class = if destructive {
+        "hub-menu-row-danger"
+    } else {
+        "hub-menu-row"
+    };
+    let text_color = if destructive {
+        palette.tokens().danger
+    } else {
+        palette.tokens().text
+    };
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class(class)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 10.0,
+            padding: UiSpacing::xy(10.0, 0.0),
+            basis: [0.0, 32.0],
+            width_mode: UiSizeMode::Fill,
+            height_mode: UiSizeMode::Fixed,
+            ..UiLayout::default()
+        })
+        .focusable()
+        .with_event(project_action(project, action))
+        .with_child(
+            UiNode::image(
+                format!("{id}.icon"),
+                UiImage {
+                    source: UiImageSource::new(icon_key),
+                    fit: UiImageFit::Contain,
+                    tint: None,
+                },
+            )
+            .with_layout(UiLayout::fixed(16.0, 16.0)),
+        )
+        .with_child(
+            UiNode::new(format!("{id}.label"), UiNodeKind::Label)
+                .with_text_key(label_key)
+                .with_text_style(UiTextStyle::button(text_color))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fixed(0.0, 18.0)
+                }),
+        )
+}
+
+fn hub_menu_divider(id: &str) -> UiNode {
+    UiNode::new(id, UiNodeKind::Panel)
+        .with_class("hub-menu-divider")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            basis: [0.0, 1.0],
+            width_mode: UiSizeMode::Fill,
+            height_mode: UiSizeMode::Fixed,
+            ..UiLayout::default()
+        })
 }
 
 #[allow(dead_code)]
@@ -2750,6 +2924,7 @@ fn hub_quick_action_button(
         )
 }
 
+#[allow(dead_code)]
 fn hub_project_command_button(
     id: &str,
     label_key: &str,

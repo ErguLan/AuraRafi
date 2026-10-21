@@ -217,7 +217,18 @@ pub fn player_surface(
                 .with_layout(UiLayout::fixed(130.0, 24.0))
                 .with_text_style(UiTextStyle::body(tokens.text)),
         )
-        .with_child(controls);
+        .with_child(controls)
+        .with_child(
+            UiNode::new("runtime.player.cursor-hint", UiNodeKind::Label)
+                .with_text_key("runtime.cursor_hint")
+                .with_tooltip_key("runtime.cursor_hint")
+                .with_text_overflow(raf_ui::UiTextOverflow::Ellipsis)
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fixed(0.0, 24.0).with_width_mode(raf_ui::UiSizeMode::Fill)
+                }),
+        );
     let mut root = UiNode::new("runtime.player.root", UiNodeKind::Root)
         .with_layout(UiLayout::fill(UiFlow::None))
         .with_style(UiStyle::transparent())

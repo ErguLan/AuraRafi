@@ -396,6 +396,21 @@ def draw_icon(name: str) -> Icon:
     elif name == "copy":
         R(10, 24, 40, 54, 4)
         L([(18, 24), (18, 10), (48, 10), (48, 40), (40, 40)])
+    elif name == "magnet":
+        icon.arc(32, 26, 16, 180, 360)
+        L([(16, 26), (16, 40)])
+        L([(48, 26), (48, 40)])
+        R(11, 40, 21, 50, 2)
+        R(43, 40, 53, 50, 2)
+    elif name == "frame":
+        L([(12, 22), (12, 12), (22, 12)])
+        L([(42, 12), (52, 12), (52, 22)])
+        L([(52, 42), (52, 52), (42, 52)])
+        L([(22, 52), (12, 52), (12, 42)])
+        R(26, 26, 38, 38, 2)
+    elif name == "capsule":
+        R(14, 20, 50, 44, 12)
+        L([(32, 20), (32, 44)])
     else:
         raise ValueError(f"Unknown icon: {name}")
     return icon
@@ -409,7 +424,7 @@ ICON_NAMES = [
     "add", "close", "play", "pause", "step-forward", "stop", "sun", "sky", "shadows", "clock", "console", "assets", "project", "node",
     "agent", "schematic", "pcb", "settings", "menu", "warning", "error", "success",
     "refresh", "trash", "wire", "route", "board-outline", "zoom-in", "zoom-out",
-    "script", "file", "external-link", "pencil", "copy",
+    "script", "file", "external-link", "pencil", "copy", "magnet", "frame", "capsule",
 ]
 
 TOP_ICONS = {

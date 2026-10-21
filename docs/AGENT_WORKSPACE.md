@@ -14,7 +14,45 @@ failure is shown as an error, not left spinning indefinitely. The pending handof
 reserves its document so a background run cannot continually start another save
 and starve opening the editor.
 
-## Ownership and continuity
+## Read-only 3D preview
+
+**3D view / Vista 3D**, identified by a framed-cube icon, is an optional tab
+beside Changes, Artifacts and Checks. It renders the selected conversation's
+Game document, not whichever world happened to be last mounted in the editor.
+When that document is mounted, it borrows the editor's live scene; otherwise
+it borrows the service-owned scene. There is no second scene owner, document
+clone, editor workbench, gizmo, construction tool, script execution or Play.
+Electronics shows an explicit unavailable state rather than a fake 3D board.
+
+The preview creates its SceneRenderer/RenderRuntime only when first rendered.
+It reuses the window's ApiGraphicBasic graphics context and native compositor.
+Camera and scene changes invalidate the retained output; unchanged UI frames
+reuse it, including CPU pixel uploads. Perspective camera state is transient
+and never updates project cameras or saves. Right drag orbits; right-drag with
+WASD/QE translates; the wheel zooms; Frame resets the view to scene bounds.
+Only an explicit pointer gesture in the canvas can acquire navigation input.
+Text fields, modals and focus loss cannot leave movement active.
+
+Project, conversation and right-panel dividers share clamped geometry, an
+8-point hit target and a horizontal-resize cursor. Drag adjusts live layout;
+Escape cancels a drag, arrows adjust a focused divider and Home resets it.
+Compact layouts collapse the conversation list before crushing the chat.
+Widths are transient application state, not project document settings.
+
+Hiding the preview stops all rendering immediately and retains resources for
+five seconds to support quick tab switches. The event loop schedules one
+expiration wakeup, not a hidden rendering loop. Leaving Agents, changing its
+document/project, closing its project or recreating the native graphics host
+releases resources immediately, including the compositor's retained source.
+Re-entering Agents does not automatically reopen the preview.
+
+Preview targets are capped at 1024x768 (GPU) or 480x360 (CPU), use Efficient
+geometry/textures, disable shadow maps, and apply an ApiGraphicBasic surface
+budget (64 MiB GPU resource admission, 512 cached meshes, 64 textures).
+This is not a total-process RAM guarantee or native performance acceptance.
+The preview does not yet advertise an Agent viewport-capture tool.
+
+## Project residency
 
 Starting at the Hub creates an empty `AgentService`; no project documents,
 histories, asset catalogs or model requests are loaded by that service yet.

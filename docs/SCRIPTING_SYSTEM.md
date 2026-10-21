@@ -1,5 +1,9 @@
 # AuraRafi Scripting System
 
+Runtime service ownership and current APIs: [Runtime Services](RUNTIME_SERVICES.md).
+This includes shared typed imports for future compiled-language providers;
+it does not activate a C++/WASM executor or install a compiler.
+
 Reading routes: [Programming guide](SCRIPTING_GUIDE.md) for game authors;
 [Scripting internals](SCRIPTING_INTERNALS.md) for the current code map.
 This document retains the architecture and staged roadmap; planned ABI

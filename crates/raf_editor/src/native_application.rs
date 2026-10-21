@@ -216,6 +216,14 @@ fn apply_project_setting_toggle(
 ) -> ProjectSettingsMutation {
     let mut layout_changed = false;
     let changed = match key {
+        "project-settings.progress-enabled" => {
+            let changed = settings.runtime.progress.enabled != value;
+            settings.runtime.progress.enabled = value; changed
+        }
+        "project-settings.progress-autosave" => {
+            let changed = settings.runtime.progress.autosave != value;
+            settings.runtime.progress.autosave = value; changed
+        }
         "project-settings.show-hierarchy" => {
             layout_changed = settings.show_hierarchy_panel != value;
             settings.show_hierarchy_panel = value;
@@ -323,6 +331,11 @@ fn apply_project_setting_range(
         (min + ((value.clamp(min, max) - min) / step).round() * step).clamp(min, max)
     };
     let changed = match key {
+        "project-settings.progress-interval" => {
+            let next = value.round().clamp(10.0,3600.0) as u32;
+            let changed = settings.runtime.progress.autosave_seconds != next;
+            settings.runtime.progress.autosave_seconds = next; changed
+        }
         "project-settings.runtime-fixed-hz" => {
             let next = value.round().clamp(15.0, 120.0) as u32;
             let changed = next != settings.runtime.fixed_hz;
@@ -411,6 +424,18 @@ fn apply_project_setting_command(
     command: &str,
 ) -> ProjectSettingsMutation {
     match command {
+        command if command.starts_with("project-settings.progress-location.") => {
+            use raf_core::runtime_config::ProgressLocation;
+            let location = match command.rsplit('.').next() {
+                Some("appdata") => ProgressLocation::AppData,
+                Some("portable") => ProgressLocation::Portable,
+                Some("custom") => ProgressLocation::Custom,
+                _ => return ProjectSettingsMutation::default(),
+            };
+            let changed = settings.runtime.progress.location != location;
+            settings.runtime.progress.location = location;
+            ProjectSettingsMutation::without_layout(changed)
+        }
         "project-settings.reset-panels" => {
             let changed = !settings.show_hierarchy_panel || !settings.show_properties_panel;
             settings.show_hierarchy_panel = true;
@@ -829,6 +854,7 @@ impl NativeEditorApplication {
         self.runtime = Some(runtime);
         self.workbench = None;
         self.studio = None;
+        self.agent_surface = None;
         self.settings_surface = None;
         self.exit_confirmation_surface = None;
         self.loading = Some(loading);
@@ -1375,49 +1401,7 @@ impl NativeEditorApplication {
     fn apply_project_setting_text_intent(&mut self, key: String, value: String) {
         if let Some(field) = key.strip_prefix("project-settings.runtime.") {
             let result = self.project.as_mut().map(|project| -> Result<(), String> {
-                let settings = &mut project.settings.runtime;
-                match field {
-                    "active_camera" | "startup_session" => {
-                        let id = if value.trim().is_empty() {
-                            None
-                        } else {
-                            Some(
-                                uuid::Uuid::parse_str(value.trim())
-                                    .map_err(|e| format!("invalid UUID: {e}"))?,
-                            )
-                        };
-                        let target = if field == "active_camera" {
-                            &mut settings.active_camera
-                        } else {
-                            &mut settings.startup_session
-                        };
-                        *target = id;
-                        Ok(())
-                    }
-                    "input_actions" => {
-                        let actions: Vec<raf_core::runtime_config::RuntimeInputAction> =
-                            serde_json::from_str(&value)
-                                .map_err(|e| format!("input actions JSON: {e}"))?;
-                        let mut names = std::collections::HashSet::new();
-                        if actions.len() > 128
-                            || actions.iter().any(|a| {
-                                a.name.is_empty()
-                                    || a.name.len() > 128
-                                    || !names.insert(a.name.to_ascii_lowercase())
-                                    || a.keys.len() > 16
-                                    || a.keys.iter().any(|k| k.len() > 64)
-                            })
-                        {
-                            return Err(
-                                "input actions exceed limits or contain invalid/duplicate names"
-                                    .into(),
-                            );
-                        }
-                        settings.input_actions = actions;
-                        Ok(())
-                    }
-                    _ => Err("unknown runtime project setting".into()),
-                }
+                crate::runtime_project_settings::apply_text(&mut project.settings.runtime,field,&value)
             });
             match result {
                 Some(Ok(())) => self.commit_project_settings_mutation(
@@ -1426,8 +1410,8 @@ impl NativeEditorApplication {
                 Some(Err(error)) => {
                     if let Some(workbench) = &mut self.workbench {
                         workbench.log_console_output(crate::commands::CommandOutput::error(
-                            "Runtime settings",
-                            error,
+                            raf_core::i18n::t("app.project_settings",self.settings_state.language),
+                            raf_core::i18n::t("runtime.invalid_setting",self.settings_state.language) + ": " + error.as_str(),
                         ));
                     }
                 }
@@ -1456,6 +1440,22 @@ impl NativeEditorApplication {
     }
 
     fn apply_project_setting_command_intent(&mut self, command: String) {
+        if matches!(command.as_str(),"project-settings.progress-folder.choose"|"project-settings.progress-folder.revoke") {
+            let Some(project) = &self.project else { return; };
+            let id = project.id;
+            if command.ends_with(".revoke") {
+                self.settings_state.runtime_save_roots.remove(&id);
+            } else {
+                let current = self.settings_state.runtime_save_roots.get(&id).unwrap_or(&project.path).display().to_string();
+                let Some(path) = crate::folder_picker::pick_folder(&current) else { return; };
+                let Ok(path) = path.canonicalize() else { return; };
+                if !path.is_absolute() || !path.is_dir() { return; }
+                self.settings_state.runtime_save_roots.insert(id,path);
+            }
+            self.persist_settings();
+            self.apply_committed_settings();
+            return;
+        }
         if command == "project-settings.runtime.camera.selected"
             || command == "project-settings.runtime.camera.clear"
         {
@@ -1871,9 +1871,12 @@ impl NativeEditorApplication {
                 surface.sync(runtime.layout().window, native_palette(self.settings_state.theme), &self.agents, &projects, &self.settings_state);
                 if !self.settings_open && !self.exit_confirmation_open {
                     intents = surface.process_input(&self.input, runtime.input_router_mut(), &mut self.agents, &mut self.settings_state);
+                    surface.sync(runtime.layout().window, native_palette(self.settings_state.theme), &self.agents, &projects, &self.settings_state);
+                } else {
+                    surface.suspend_preview_input(runtime.input_router_mut());
                 }
-                runtime.set_continuous_ui_motion(self.agents.loading());
-                if !intents.is_empty() { runtime.request_ui_frame(); }
+                runtime.set_continuous_ui_motion(self.agents.loading() || surface.preview.moving);
+                if !intents.is_empty() || surface.take_frame_request() { runtime.request_ui_frame(); }
             }
             self.apply_agent_workspace_intents(intents);
             if let Some(workspace) = self.agents.selected_workspace() {
@@ -2542,6 +2545,15 @@ impl NativeEditorApplication {
                 }
                 let viewport_update =
                     runtime.update_game_input(self.input.snapshot(), &mut self.scene);
+                if let Some(key)=runtime.game_viewport_mut().placement_notice.take() {
+                    if let Some(workbench)=self.workbench.as_mut() {workbench.authoring_status(key);}
+                }
+                if std::mem::take(&mut runtime.game_viewport_mut().edit_notice) {
+                    if let Some(workbench)=self.workbench.as_mut() {
+                        workbench.log_console_output(crate::commands::CommandOutput::info(
+                            raf_core::i18n::t("authoring.edit_pending",self.settings_state.language),Vec::new(),serde_json::json!({"available":false,"planned_version":"0.12"})));
+                    }
+                }
                 let selection_changed = viewport_update.selection_changed
                     || runtime.game_viewport().selected.as_slice()
                         != selected_before_input.as_slice();
@@ -2727,6 +2739,8 @@ impl NativeEditorApplication {
             );
         } else if self.agents_open {
             let Some(surface) = self.agent_surface.as_mut() else { runtime.cancel_frame(); return; };
+            let attached = self.project.as_ref().zip(self.workbench.as_ref()).map(|(p, w)| (p.path.as_path(), w.active_session_id(), &self.scene));
+            let preview_layer = agents::render_preview_layer(surface, &self.agents, attached, &self.settings_state, host, self.input.scale_factor() as f32, target_size);
             let mut layers = vec![surface.compositor_layer(self.input.scale_factor() as f32, target_size)];
             if self.settings_open { if let Some(settings) = self.settings_surface.as_mut() {
                 layers.push(settings.compositor_layer(self.input.scale_factor() as f32, target_size));
@@ -2734,7 +2748,7 @@ impl NativeEditorApplication {
             if self.exit_confirmation_open { if let Some(confirmation) = self.exit_confirmation_surface.as_mut() {
                 layers.push(confirmation.compositor_layer(self.input.scale_factor() as f32, target_size));
             } }
-            let _ = host.render_editor_layers(compositor, None, &mut layers, |key| raf_core::i18n::t(key, ui_language));
+            let _ = host.render_editor_layers(compositor, preview_layer, &mut layers, |key| raf_core::i18n::t(key, ui_language));
         } else if project_open {
             let Some(workbench) = self.workbench.as_mut() else {
                 runtime.cancel_frame();
@@ -3137,6 +3151,7 @@ impl NativeEditorApplication {
     fn about_to_wait_native(&mut self, event_loop: &ActiveEventLoop) {
         if std::mem::take(&mut self.pending_agents_open) { self.open_agents(None); }
         self.poll_agent_service();
+        let preview_deadline = self.poll_agent_preview();
         if let Some(command) = self.pending_runtime_command.take() {
             self.apply_runtime_command(&command);
         }
@@ -3320,6 +3335,10 @@ impl NativeEditorApplication {
         if self.agents.has_work() || (self.project.is_some() && self.workbench.as_ref().is_some_and(NativeGameWorkbench::has_agent_work)) {
             let agent_deadline = Instant::now() + Duration::from_millis(40);
             let deadline = match event_loop.control_flow() { ControlFlow::WaitUntil(existing) => existing.min(agent_deadline), _ => agent_deadline };
+            event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
+        }
+        if let Some(preview_deadline) = preview_deadline {
+            let deadline = match event_loop.control_flow() { ControlFlow::WaitUntil(existing) => existing.min(preview_deadline), _ => preview_deadline };
             event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
         }
     }
@@ -3587,6 +3606,14 @@ fn sync_electronics_canvas(
 }
 
 impl ApplicationHandler for NativeEditorApplication {
+    fn device_event(&mut self, _event_loop: &ActiveEventLoop, _device: winit::event::DeviceId, event: winit::event::DeviceEvent) {
+        if self.game_runtime.in_place.is_some() && self.window.as_ref().is_some_and(|w| w.has_focus()) {
+            if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+                self.input.ingest_relative_motion(delta);
+                if let Some(runtime) = &mut self.runtime { runtime.request_ui_frame(); }
+            }
+        }
+    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         self.resumed_native(event_loop);
     }

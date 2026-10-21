@@ -46,6 +46,7 @@ pub struct NativeEditorRuntime {
     target_size: [u32; 2],
     dynamic_resolution: DynamicResolutionController,
     project_type: ProjectType,
+    pub(crate) ui_language: raf_core::Language,
     active_frame: Option<FramePermit>,
     cached_game_canvas: Option<CachedGameCanvas>,
     canvas_renders: u64,
@@ -107,6 +108,7 @@ impl NativeEditorRuntime {
             ],
             dynamic_resolution: DynamicResolutionController::default(),
             project_type: ProjectType::Game,
+            ui_language: raf_core::Language::English,
             active_frame: None,
             cached_game_canvas: None,
             canvas_renders: 0,
@@ -1017,6 +1019,7 @@ impl NativeEditorRuntime {
         settings: &EngineSettings,
         advanced_gpu_features_allowed: bool,
     ) {
+        self.ui_language=settings.language;
         self.game_viewport.apply_engine_settings(settings);
         self.graphics.configure(
             settings.render_execution_policy,

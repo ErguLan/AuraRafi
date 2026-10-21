@@ -187,6 +187,15 @@ interfaces are prepared without installing any tools. A compiler alone cannot
 enable these languages: a concrete executor, guest ABI and Play loader
 integration are still required. Keep using Rhai and Nodes for authored behavior.
 
+## 8. Input, progress and saved worlds
+
+[Runtime Services](RUNTIME_SERVICES.md) covers input axes, relative mouse/cursor,
+filtered AABB queries, progress slots and saved-world transitions. Configure
+policy in Project Settings > Game progress; define game rules in your scripts.
+The optional [progress example](../examples/runtime/progress_checkpoint.rhai)
+explicitly waits for load completion and only writes when requested. A queued
+write is not a completed save; a loaded record does not restore entities itself.
+
 ## Troubleshooting and boundaries
 
 - Nothing happens: confirm the file is saved, attached, Rhai enabled, and inspect

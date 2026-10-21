@@ -25,6 +25,30 @@ fn apply_inspector_commit(
     if !scene.is_valid_node(target) {
         return None;
     }
+    if let Some(axis) = field.strip_prefix("size.") {
+        let node = scene.get(target)?;
+        let axis = match axis {
+            "x" => 0,
+            "y" => 1,
+            "z" => 2,
+            _ => return None,
+        };
+        let mut size = node.primitive.dimensions(node.scale);
+        let Some(dimension)=value.trim().parse::<f32>().ok().filter(|v|v.is_finite()) else {
+            return Some(CommandOutput::error(raf_core::i18n::t("app.dimensions",runtime.ui_language),"commands.error.dimensions_invalid"));
+        };
+        size[axis]=dimension;
+        let command = format!(
+            "/game.update target={} size=[{},{},{}]",
+            node.uuid, size.x, size.y, size.z
+        );
+        let before = scene.clone();
+        let output = apply_console_command(runtime, scene, None, &command);
+        if output.changed {
+            runtime.record_scene_change(before, scene);
+        }
+        return Some(output);
+    }
     if let Some(field) = field.strip_prefix("camera.") {
         let key = if field == "fov_degrees" { "fov" } else { field };
         let Some(value) = value.trim().parse::<f32>().ok().filter(|v| v.is_finite()) else {
@@ -398,6 +422,21 @@ pub(crate) fn apply_workbench_intents(
                 {
                     runtime.game_viewport_mut().snap_compass_target(target);
                     runtime.request_canvas_frame();
+                } else if let Some(raw) = command.strip_prefix("hierarchy.reorder:") {
+                    let parts = raw.split(':').collect::<Vec<_>>();
+                    if parts.len() == 3 {
+                        let ids = parts[0]
+                            .split(',')
+                            .filter_map(|id| id.parse::<usize>().ok().map(SceneNodeId))
+                            .collect::<Vec<_>>();
+                        let parent = parts[1].parse::<usize>().ok().map(SceneNodeId);
+                        let before_id = parts[2].parse::<usize>().ok().map(SceneNodeId);
+                        let before = scene.clone();
+                        if scene.reparent_nodes_before(&ids, parent, before_id) {
+                            runtime.record_scene_change(before, scene);
+                            runtime.request_document_frame();
+                        }
+                    }
                 } else if let Some(raw_resize) = command.strip_prefix("layout.resize.") {
                     if let Some((side, raw_value)) = raw_resize.split_once(':') {
                         if let Ok(value) = raw_value.parse::<f32>() {
@@ -413,12 +452,12 @@ pub(crate) fn apply_workbench_intents(
                     runtime.game_viewport_mut().lighting_preview_neutral = value == "true";
                     runtime.request_canvas_frame();
                 } else if let Some(raw_command) = command.strip_prefix("console.submit:") {
-                    console_outputs.push(apply_console_command(
-                        runtime,
-                        scene,
-                        project,
-                        raw_command,
-                    ));
+                    let before = scene.clone();
+                    let output = apply_console_command(runtime, scene, project, raw_command);
+                    if output.changed && raw_command.trim_start_matches('/').starts_with("game.") {
+                        runtime.record_scene_change(before, scene);
+                    }
+                    console_outputs.push(output);
                 } else if command == "bottom.toggle-collapsed" {
                     runtime.toggle_bottom_dock();
                 } else if command == crate::application_menu::command::VIEW_HIERARCHY {
@@ -878,6 +917,42 @@ pub(crate) fn apply_workbench_intents(
                         runtime.select_node(scene, SceneNodeId(id));
                         runtime.duplicate_selected(scene);
                     }
+                } else if let Some(raw) = command.strip_prefix("authoring.asset:") {
+                    if let (Ok(args), Some(project)) =
+                        (serde_json::from_str::<serde_json::Value>(raw), project)
+                    {
+                        let path = args["path"].as_str().unwrap_or("");
+                        let parent = args["parent"].as_u64().map(|id| SceneNodeId(id as usize));
+                        match crate::authoring_placement::AssetPlacement::prepare(
+                            path,
+                            &project.path,
+                            parent,
+                            args["drag"].as_bool().unwrap_or(false),
+                        ) {
+                            Ok(placement) => {
+                                runtime.game_viewport_mut().placement = Some(placement);
+                                runtime.request_canvas_frame();
+                            }
+                            Err(key) => console_outputs.push(CommandOutput::error(
+                                raf_core::i18n::t("assets.insert", runtime.ui_language),
+                                raf_core::i18n::t(&key, runtime.ui_language),
+                            )),
+                        }
+                    }
+                } else if let Some(path) = command.strip_prefix("assets.apply-texture:") {
+                    let selected = runtime.game_viewport().selected.clone();
+                    runtime.mutate_scene(scene, |scene| {
+                        for id in &selected {
+                            if let Some(node) = scene.get_mut(*id) {
+                                if !node.locked
+                                    && !node.is_folder
+                                    && node.primitive != raf_core::scene::Primitive::Empty
+                                {
+                                    node.base_color_texture = Some(path.to_string());
+                                }
+                            }
+                        }
+                    });
                 } else if let Some(slug) = command.strip_prefix("assets.create-primitive:") {
                     if let Some(primitive) = parse_primitive_slug(slug) {
                         runtime.create_primitive(scene, primitive);
@@ -1338,14 +1413,7 @@ fn create_asset_script(
 }
 
 pub(crate) fn parse_primitive_slug(value: &str) -> Option<Primitive> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "empty" | "entity" => Some(Primitive::Empty),
-        "cube" | "box" | "block" => Some(Primitive::Cube),
-        "sphere" | "ball" => Some(Primitive::Sphere),
-        "plane" | "floor" => Some(Primitive::Plane),
-        "cylinder" => Some(Primitive::Cylinder),
-        _ => None,
-    }
+    Primitive::from_slug(value)
 }
 
 #[cfg(test)]

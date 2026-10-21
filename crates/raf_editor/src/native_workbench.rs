@@ -98,6 +98,8 @@ use raf_core::project::BuildingStyle;
 mod electronics_model;
 #[path = "native_workbench_helpers.rs"]
 mod helpers;
+#[path = "native_workbench_hierarchy.rs"]
+mod hierarchy_state;
 #[path = "native_workbench_input.rs"]
 mod input;
 pub(crate) use input::parse_agent_action;
@@ -206,6 +208,10 @@ struct WorkbenchResizeState {
 #[derive(Debug, Clone)]
 struct HierarchyDragState {
     source: Vec<SceneNodeId>,
+    before: Option<SceneNodeId>,
+    hovered: Option<SceneNodeId>,
+    edge: i8,
+    invalid: bool,
     target: Option<SceneNodeId>,
     pointer: [f32; 2],
     label: String,
@@ -240,6 +246,8 @@ pub struct NativeGameWorkbench {
     assets_filter_key: Option<AssetFilter>,
     assets_project_root: Option<PathBuf>,
     assets_scroll_offset: f32,
+    asset_previews: crate::asset_previews::AssetPreviews,
+    authoring_notice: Option<String>,
     console: ConsolePanel,
     palette: StudioUiPalette,
     project_name: String,
@@ -250,6 +258,9 @@ pub struct NativeGameWorkbench {
     hierarchy_query: String,
     hierarchy_scroll_offset: f32,
     hierarchy_active_tab: String,
+    hierarchy_state_path: Option<PathBuf>,
+    hierarchy_pending_state: Option<crate::panels::hierarchy_model::details::HierarchyViewState>,
+    hierarchy_state_dirty: bool,
     lighting_section: String,
     lighting_preview_neutral: bool,
     lighting_error: bool,
@@ -397,6 +408,8 @@ impl NativeGameWorkbench {
             assets_filter_key: None,
             assets_project_root: None,
             assets_scroll_offset: 0.0,
+            asset_previews: Default::default(),
+            authoring_notice: None,
             console: ConsolePanel::default(),
             palette,
             project_name: DEFAULT_PROJECT_NAME.to_string(),
@@ -407,6 +420,9 @@ impl NativeGameWorkbench {
             hierarchy_query: String::new(),
             hierarchy_scroll_offset: 0.0,
             hierarchy_active_tab: "hierarchy".to_string(),
+            hierarchy_state_path: None,
+            hierarchy_pending_state: None,
+            hierarchy_state_dirty: false,
             lighting_section: "overview".into(),
             lighting_preview_neutral: false,
             lighting_error: false,
@@ -630,7 +646,20 @@ impl NativeGameWorkbench {
         self.host.has_interactive_hover() || self.viewport_compass.has_interactive_hover()
     }
 
-    pub fn log_console_output(&mut self, output: crate::commands::CommandOutput) {
+    pub(crate) fn authoring_status(&mut self, key:&str) {
+        let label=raf_core::i18n::t(key,self.agent_settings.language);
+        self.assets_surface.status=Some(if key=="assets.placed" || key=="assets.placement_cancelled" {
+            AssetsStatus::success(label)
+        } else { AssetsStatus::error(label) });
+        self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+    }
+    pub fn log_console_output(&mut self, mut output: crate::commands::CommandOutput) {
+        for line in &mut output.lines {
+            if line.starts_with("commands.error.dimensions_") { *line=raf_core::i18n::t(line,self.agent_settings.language); }
+        }
+        if output.title==raf_core::i18n::t("authoring.edit_pending",self.agent_settings.language) {
+            self.authoring_notice=Some(output.title.clone());
+        }
         self.console.log_command_output(output);
         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
     }
@@ -665,6 +694,7 @@ impl NativeGameWorkbench {
     }
 
     pub fn persist_project_layout(&mut self) {
+        self.flush_hierarchy_state();
         self.bottom_dock.persist_project_layout();
     }
 
@@ -888,6 +918,9 @@ impl NativeGameWorkbench {
         electronics: Option<&NativeElectronicsEditor>,
     ) {
         self.rect = layout.window;
+        if self.asset_previews.sync(project.map(|p|p.path.as_path()), self.project_catalog.revision(), self.host.images_mut()) {
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
         if self.agent_panel.borrow().opening && !self.agent_settings.prefers_reduced_motion {
             self.agent_panel.borrow_mut().spinner_step = ((now_seconds / 0.08) as u64 % 12) as u8;
         }
@@ -987,6 +1020,7 @@ impl NativeGameWorkbench {
             self.inspector_sessions_key = session_key;
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
+        self.sync_hierarchy_state(scene, project);
         if let Some(style) = project.map(|project| project.settings.building_style) {
             if self.toolbar_state.building_style != style {
                 self.toolbar_state.building_style = style;
@@ -1240,7 +1274,7 @@ impl NativeGameWorkbench {
     fn hierarchy_tree_viewport_height(&self, left: EditorRect) -> f32 {
         self.host
             .layout_rect("hierarchy.tree")
-            .map(|rect| rect.height)
+            .map(|rect| (rect.height - 8.0).max(1.0))
             .unwrap_or_else(|| (left.height - 130.0).max(1.0))
             .max(1.0)
     }
@@ -1789,6 +1823,9 @@ impl NativeGameWorkbench {
         &mut self,
         wakeup: Option<winit::event_loop::EventLoopProxy<()>>,
     ) {
+        self.asset_previews.wakeup = wakeup.clone().map(|proxy| {
+            std::sync::Arc::new(move || { let _ = proxy.send_event(()); }) as std::sync::Arc<dyn Fn() + Send + Sync>
+        });
         self.script_relationships.set_wakeup(wakeup);
     }
     pub fn needs_ui_frame(&self) -> bool {
@@ -1796,6 +1833,7 @@ impl NativeGameWorkbench {
             || self.agent_panel.borrow_mut().has_live_output()
             || self.has_active_ui_motion()
             || self.has_active_text_repeat()
+            || self.hierarchy_drag.is_some()
             || self.bottom_dock.drag().is_some()
             || self.bottom_dock.resize().is_some()
             || self.panel_resize.is_some()
@@ -2024,6 +2062,7 @@ impl NativeGameWorkbench {
             ("position", node.position.to_array()),
             ("rotation", node.rotation.to_array()),
             ("scale", node.scale.to_array()),
+            ("size", node.primitive.dimensions(node.scale).to_array()),
         ] {
             for (axis, value) in [("x", values[0]), ("y", values[1]), ("z", values[2])] {
                 let display_value = if label == "position" {
@@ -2031,11 +2070,11 @@ impl NativeGameWorkbench {
                 } else {
                     value
                 };
-                controls.set_text(
-                    format!("inspector.{label}.{axis}.text"),
-                    format!("{display_value:.4}"),
-                    24,
-                );
+                let key = format!("inspector.{label}.{axis}.text");
+                let input = format!("inspector.{label}.{axis}.input");
+                if focused.as_deref() != Some(input.as_str()) || !controls.has_text(&key) {
+                    controls.set_text(key, format!("{display_value:.4}"), 24);
+                }
             }
         }
         controls.set_text(
@@ -2049,9 +2088,18 @@ impl NativeGameWorkbench {
     }
 
     fn seed_project_settings_values(&mut self, project: &Project) {
+        let progress_folder = self.agent_settings.runtime_save_roots.get(&project.id)
+            .map(|p|p.display().to_string()).unwrap_or_else(|| raf_core::i18n::t("runtime.folder_not_granted",self.agent_settings.language));
         let focused = self.host.session().interaction.focus.focused.clone();
         let controls = &mut self.host.session_mut().interaction.controls;
         let values = [
+            ("project-settings.runtime.input_axes","project-settings.runtime-input_axes.control",serde_json::to_string(&project.settings.runtime.input_axes).unwrap_or_else(|_|"[]".into())),
+            ("project-settings.runtime.progress_folder","project-settings.runtime-progress_folder.control",progress_folder),
+            ("project-settings.runtime.autosave_slot","project-settings.runtime-autosave_slot.control",project.settings.runtime.progress.autosave_slot.clone()),
+            ("project-settings.runtime.progress_schema","project-settings.runtime-progress_schema.control",project.settings.runtime.progress.schema_version.to_string()),
+            ("project-settings.runtime.progress_slot_kib","project-settings.runtime-progress_slot_kib.control",(project.settings.runtime.progress.max_slot_bytes/1024).to_string()),
+            ("project-settings.runtime.progress_slot_count","project-settings.runtime-progress_slot_count.control",project.settings.runtime.progress.max_slots.to_string()),
+            ("project-settings.progress-interval.text","project-settings.progress-interval.value",project.settings.runtime.progress.autosave_seconds.to_string()),
             (
                 "project-settings.runtime.active_camera",
                 "project-settings.runtime-active_camera.control",
@@ -2124,8 +2172,9 @@ impl NativeGameWorkbench {
                 controls.set_text(
                     key,
                     value,
-                    if key == "project-settings.runtime.input_actions" {
+                    if matches!(key,"project-settings.runtime.input_actions"|"project-settings.runtime.input_axes") {
                         8192
+                    } else if key == "project-settings.runtime.progress_folder" { 1024
                     } else {
                         256
                     },

@@ -19,11 +19,27 @@ fn parse_json(raw: &str) -> HashMap<String, String> {
     map
 }
 
+fn authoring_dictionary(base: &str, authoring: &str) -> HashMap<String, String> {
+    let mut dictionary = parse_json(base);
+    dictionary.extend(parse_json(authoring));
+    dictionary
+}
+
 /// Translate a language key into the respective text
 pub fn t(key: &str, lang: Language) -> String {
     let dict = match lang {
-        Language::English => EN_DICT.get_or_init(|| parse_json(include_str!("../locales/en.json"))),
-        Language::Spanish => ES_DICT.get_or_init(|| parse_json(include_str!("../locales/es.json"))),
+        Language::English => EN_DICT.get_or_init(|| {
+            authoring_dictionary(
+                include_str!("../locales/en.json"),
+                include_str!("../locales/authoring_en.json"),
+            )
+        }),
+        Language::Spanish => ES_DICT.get_or_init(|| {
+            authoring_dictionary(
+                include_str!("../locales/es.json"),
+                include_str!("../locales/authoring_es.json"),
+            )
+        }),
     };
 
     dict.get(key).cloned().unwrap_or_else(|| key.to_string())

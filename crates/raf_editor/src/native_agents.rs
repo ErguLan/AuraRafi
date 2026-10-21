@@ -1,7 +1,49 @@
 //! Agent workspace integration and document ownership handoffs.
 use super::*;
+use crate::agent_preview::PreviewTarget;
 use crate::agent_project_store::{read_document_files, DocumentSave};
 use crate::agent_workspace_surface_host::{AgentWorkspaceIntent, AgentWorkspaceSurfaceHost};
+
+/// Resolve the one live owner; a mounted editor leaves only a placeholder in
+/// the service. Never render that placeholder or a different chat's world.
+pub(super) fn preview_document<'a>(
+    service: &'a crate::agent_service::AgentService,
+    target: &PreviewTarget,
+    attached: Option<(&Path, SessionId, &'a SceneGraph)>,
+) -> Option<(&'a Project, &'a SceneGraph)> {
+    let workspace = service
+        .workspace(&target.root)
+        .filter(|w| !w.closing && w.project.project_type == ProjectType::Game)?;
+    if let Some((root, id, scene)) =
+        attached.filter(|(root, id, _)| *root == target.root.as_path() && *id == target.document)
+    {
+        let _ = (root, id);
+        return Some((&workspace.project, scene));
+    }
+    let document = workspace.documents.get(&target.document.0.to_string())?;
+    Some((&workspace.project, &document.scene))
+}
+
+pub(super) fn render_preview_layer(
+    surface: &mut AgentWorkspaceSurfaceHost,
+    service: &crate::agent_service::AgentService,
+    attached: Option<(&Path, SessionId, &SceneGraph)>,
+    settings: &EngineSettings,
+    host: &raf_render::api_graphic_basic::ui_surface::NativeUiWindowHost,
+    scale: f32,
+    size: [u32; 2],
+) -> Option<raf_render::api_graphic_basic::EditorCanvasLayer> {
+    let target = surface.preview.target.clone()?;
+    let rect = surface.preview_rect(service)?;
+    let (project, scene) = preview_document(service, &target, attached)?;
+    surface.preview.render_layer(
+        scene,
+        project,
+        settings,
+        rect.to_physical(scale, size),
+        || Some(host.shared_graphics_context()),
+    )
+}
 
 pub(super) fn park_live_session(
     service: &mut crate::agent_service::AgentService,
@@ -97,6 +139,55 @@ pub(super) fn mount_live_session(
 }
 
 impl NativeEditorApplication {
+    pub(super) fn poll_agent_preview(&mut self) -> Option<Instant> {
+        let surface = self.agent_surface.as_mut()?;
+        if self.agents_open {
+            surface.sync_preview(&self.agents, Instant::now());
+        } else {
+            surface.close_preview();
+        }
+        if !surface.preview.visible
+            || self.settings_open
+            || self.exit_confirmation_open
+            || !self.input.snapshot().window_focused
+        {
+            if let Some(runtime) = self.runtime.as_mut() {
+                surface.suspend_preview_input(runtime.input_router_mut());
+            }
+        }
+        if surface.take_release_canvas() {
+            if let Some(compositor) = self.compositor.as_mut() {
+                compositor.release_canvas();
+            }
+        }
+        let changed = surface
+            .preview
+            .target
+            .as_ref()
+            .and_then(|target| {
+                let attached = self
+                    .project
+                    .as_ref()
+                    .zip(self.workbench.as_ref())
+                    .map(|(p, w)| (p.path.as_path(), w.active_session_id(), &self.scene));
+                preview_document(&self.agents, target, attached)
+                    .map(|(_, scene)| surface.preview.scene_changed(scene))
+            })
+            .unwrap_or(false);
+        if changed || surface.preview.moving {
+            if let Some(runtime) = self.runtime.as_mut() {
+                runtime.request_ui_frame();
+            }
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+        }
+        if surface.preview.moving {
+            Some(Instant::now() + Duration::from_millis(16))
+        } else {
+            surface.preview.deadline()
+        }
+    }
     pub(super) fn agent_projects(&self) -> Vec<crate::studio_surface::HubSurfaceProject> {
         let mut projects = self
             .studio
@@ -625,6 +716,43 @@ mod tests {
         assert!(!app.scene.all_live_ids().is_empty());
         drop(app);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn agent_workspace_preview_borrows_mounted_scene_and_never_falls_back_to_another_world() {
+        let (app, directory, project) = loaded_application();
+        let workspace = app.agents.selected_workspace().unwrap();
+        let id = workspace.registry.active_session;
+        let target = PreviewTarget {
+            root: workspace.project.path.clone(),
+            document: id,
+        };
+        let mut live = SceneGraph::new();
+        live.add_root_folder("Mounted live scene");
+        let (_, resolved) = preview_document(
+            &app.agents,
+            &target,
+            Some((workspace.project.path.as_path(), id, &live)),
+        )
+        .unwrap();
+        assert!(std::ptr::eq(resolved, &live));
+        let (_, parked) = preview_document(&app.agents, &target, None).unwrap();
+        assert!(std::ptr::eq(
+            parked,
+            &workspace.documents[&id.0.to_string()].scene
+        ));
+        let missing = PreviewTarget {
+            root: project.path,
+            document: SessionId(uuid::Uuid::new_v4()),
+        };
+        assert!(preview_document(
+            &app.agents,
+            &missing,
+            Some((target.root.as_path(), id, &live))
+        )
+        .is_none());
+        drop(app);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

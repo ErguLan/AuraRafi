@@ -9,7 +9,15 @@ use raf_ui::{
     UiStyleSelector, UiTextInput, UiTextStyle, UiToggle,
 };
 
-pub const SECTIONS: &[&str] = &["overview", "sun", "sky", "shadows", "time", "performance"];
+pub const SECTIONS: &[&str] = &[
+    "overview",
+    "technologies",
+    "sun",
+    "sky",
+    "shadows",
+    "time",
+    "performance",
+];
 pub fn value_key(path: &str) -> String {
     format!("lighting.value.{path}")
 }
@@ -231,6 +239,13 @@ pub fn inspector(
     if error {
         root = root.with_child(label(palette, "lighting.error", "lighting.invalid_value"));
     }
+    if section == "technologies" {
+        root = root.with_child(label(
+            palette,
+            "lighting.technology-note",
+            "lighting.description_technology",
+        ));
+    }
     if section == "shadows" || section == "performance" {
         root = root.with_child(label(
             palette,
@@ -247,13 +262,21 @@ pub fn inspector(
         "sky" => p.path.starts_with("sky."),
         "shadows" => p.path.starts_with("shadows."),
         "time" => p.path.starts_with("clock.") || p.path == "sun.control",
-        "overview" => matches!(p.path, "mode" | "ambient_color" | "ambient_intensity"),
+        "technologies" => p.path == "technology",
+        "overview" => matches!(
+            p.path,
+            "mode" | "ambient_color" | "ambient_intensity" | "exposure"
+        ),
         _ => false,
     }) {
         let path = property.path;
         let value = env.get_property(path).expect("Core property catalog");
-        let disabled =
-            env.sun.control == SunControl::Clock && matches!(path, "sun.azimuth" | "sun.elevation");
+        let needs_improved = env.technology
+            == raf_core::environment::LightingTechnology::OptimizedCurrent
+            && matches!(path, "exposure" | "sun.toon_softness");
+        let disabled = needs_improved
+            || env.sun.control == SunControl::Clock
+                && matches!(path, "sun.azimuth" | "sun.elevation");
         let mut field = UiNode::new(format!("lighting.field.{path}"), UiNodeKind::Panel)
             .with_layout(UiLayout {
                 flow: UiFlow::Column,
@@ -418,7 +441,11 @@ pub fn inspector(
             field = field.with_child(label(
                 palette,
                 format!("lighting.driver.{path}"),
-                "lighting.clock_controls_angles",
+                if needs_improved {
+                    "lighting.requires_improved"
+                } else {
+                    "lighting.clock_controls_angles"
+                },
             ));
         }
         field = field.with_child(
@@ -500,6 +527,50 @@ pub fn parse_value(path: &str, text: &str) -> Result<serde_json::Value, String> 
 mod tests {
     use super::*;
     #[test]
+    fn lighting_technologies_exposes_exactly_two_modes_and_gates_improved_only_controls() {
+        fn collect<'a>(node: &'a UiNode, nodes: &mut Vec<&'a UiNode>) {
+            nodes.push(node);
+            for child in &node.children {
+                collect(child, nodes);
+            }
+        }
+        for improved in [false, true] {
+            let mut env = EnvironmentSettings::default();
+            if improved {
+                env.technology = raf_core::environment::LightingTechnology::OptimizedImproved;
+            }
+            let surface = inspector(
+                StudioUiPalette::IndustrialDark,
+                &env,
+                "technologies",
+                false,
+                false,
+            );
+            let mut nodes = Vec::new();
+            collect(&surface.root, &mut nodes);
+            let choices: Vec<_> = nodes
+                .iter()
+                .filter(|n| n.id.starts_with("lighting.choice.technology."))
+                .collect();
+            assert_eq!(choices.len(), 2);
+            assert!(choices.iter().all(|n| !n.disabled));
+            for (section, path) in [("overview", "exposure"), ("sun", "sun.toon_softness")] {
+                let surface =
+                    inspector(StudioUiPalette::IndustrialDark, &env, section, false, false);
+                let mut nodes = Vec::new();
+                collect(&surface.root, &mut nodes);
+                assert_eq!(
+                    nodes
+                        .iter()
+                        .find(|n| n.id == value_key(path))
+                        .unwrap()
+                        .disabled,
+                    !improved
+                );
+            }
+        }
+    }
+    #[test]
     fn lighting_cpu_layout_is_scrollable_and_controls_stay_inside_the_inspector() {
         use raf_render::api_graphic_basic::ui_surface::CpuUiSurfaceHost;
         let env = EnvironmentSettings::default();
@@ -507,7 +578,7 @@ mod tests {
             (StudioUiPalette::IndustrialDark, "dark"),
             (StudioUiPalette::PaperLight, "light"),
         ] {
-            for section in ["overview", "sun", "sky", "shadows", "time", "performance"] {
+            for &section in SECTIONS {
                 let mut host = CpuUiSurfaceHost::new(
                     inspector(palette, &env, section, false, false),
                     [0, 0, 0, 255],

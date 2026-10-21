@@ -11,6 +11,9 @@ fn hash(mut n: u32) -> f32 {
 }
 
 pub(crate) fn brightness(ray: Vec3, density: f32) -> f32 {
+    brightness_filtered(ray, density, 0.0)
+}
+pub(crate) fn brightness_filtered(ray: Vec3, density: f32, footprint: f32) -> f32 {
     if ray.y <= 0.0 || density <= 0.0 {
         return 0.0;
     }
@@ -42,13 +45,14 @@ pub(crate) fn brightness(ray: Vec3, density: f32) -> f32 {
     let center =
         Vec2::new(hash(seed ^ 0xa511e9b3), hash(seed ^ 0x63d83595)) * 0.64 + Vec2::splat(0.18);
     let d = (p - cell - center).abs();
-    let radius = 0.055 + hash(seed ^ 0x9e3779b9) * 0.05;
+    let base_radius = 0.055 + hash(seed ^ 0x9e3779b9) * 0.05;
+    let radius = base_radius + footprint.max(0.0) * 0.5;
     let core = (1.0 - d.length() / radius).clamp(0.0, 1.0);
     let x = (1.0 - d.x / (radius * 0.28)).clamp(0.0, 1.0)
         * (1.0 - d.y / (radius * 1.7)).clamp(0.0, 1.0);
     let y = (1.0 - d.y / (radius * 0.28)).clamp(0.0, 1.0)
         * (1.0 - d.x / (radius * 1.7)).clamp(0.0, 1.0);
-    core.max(x.max(y) * 0.7) * (ray.y * 5.0).clamp(0.0, 1.0)
+    core.max(x.max(y) * 0.7) * (ray.y * 5.0).clamp(0.0, 1.0) * (base_radius / radius).powi(2)
 }
 
 pub(crate) const WGSL: &str = r#"
@@ -59,6 +63,9 @@ fn star_hash(seed: u32) -> f32 {
     return f32(n & 0x00ffffffu) / 16777216.0;
 }
 fn star_brightness(ray: vec3<f32>, density: f32) -> f32 {
+    return star_brightness_filtered(ray,density,0.0);
+}
+fn star_brightness_filtered(ray: vec3<f32>, density: f32, footprint: f32) -> f32 {
     if ray.y <= 0.0 || density <= 0.0 { return 0.0; }
     let a = abs(ray); var uv = vec2<f32>(0.0); var face = 0u;
     if a.x >= a.y && a.x >= a.z { uv = ray.yz / a.x; face = select(1u,0u,ray.x >= 0.0); }
@@ -68,11 +75,12 @@ fn star_brightness(ray: vec3<f32>, density: f32) -> f32 {
     let seed = u32(cell.x)*73856093u ^ u32(cell.y)*19349663u ^ face*83492791u;
     if star_hash(seed) > density*0.5 { return 0.0; }
     let center = vec2<f32>(star_hash(seed ^ 0xa511e9b3u),star_hash(seed ^ 0x63d83595u))*0.64+vec2<f32>(0.18);
-    let d = abs(p-cell-center); let radius = 0.055+star_hash(seed ^ 0x9e3779b9u)*0.05;
+    let d = abs(p-cell-center); let base_radius = 0.055+star_hash(seed ^ 0x9e3779b9u)*0.05;
+    let radius=base_radius+max(footprint,0.0)*0.5;
     let core = clamp(1.0-length(d)/radius,0.0,1.0);
     let x = clamp(1.0-d.x/(radius*0.28),0.0,1.0)*clamp(1.0-d.y/(radius*1.7),0.0,1.0);
     let y = clamp(1.0-d.y/(radius*0.28),0.0,1.0)*clamp(1.0-d.x/(radius*1.7),0.0,1.0);
-    return max(core,max(x,y)*0.7)*clamp(ray.y*5.0,0.0,1.0);
+    return max(core,max(x,y)*0.7)*clamp(ray.y*5.0,0.0,1.0)*(base_radius/radius)*(base_radius/radius);
 }
 "#;
 

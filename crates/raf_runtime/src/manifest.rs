@@ -14,6 +14,14 @@ pub const MANIFEST_LIMIT: usize = 64 * 1024 * 1024;
 #[derive(Clone, Serialize, Deserialize)]
 pub struct RuntimeManifest {
     #[serde(default)]
+    pub project_id: Uuid,
+    #[serde(default)]
+    pub session_id: Option<Uuid>,
+    #[serde(default)]
+    pub development_slot: u32,
+    #[serde(default)]
+    pub save_root_grant: Option<PathBuf>,
+    #[serde(default)]
     pub node_graph: Option<raf_nodes::NodeGraph>,
     pub protocol: u32,
     pub instance: Uuid,
@@ -88,6 +96,10 @@ mod tests {
             provider.api_key = "test-secret-must-not-leak".into();
         }
         let manifest = RuntimeManifest {
+            project_id: Uuid::new_v4(),
+            session_id: None,
+            development_slot: 0,
+            save_root_grant: None,
             node_graph: None,
             protocol: 1,
             instance: Uuid::new_v4(),

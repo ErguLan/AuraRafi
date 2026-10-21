@@ -193,18 +193,5 @@ impl PhysicsWorld {
     }
 }
 pub(super) fn world_bounds(scene: &SceneGraph, id: SceneNodeId) -> Option<Aabb> {
-    let node = scene.get(id)?;
-    if node.collider.collider_type != ColliderType::Aabb {
-        return None;
-    }
-    let matrix = scene.world_matrix(id);
-    let points = node
-        .collider
-        .aabb
-        .corners()
-        .map(|p| matrix.transform_point3(p + node.collider.offset));
-    points
-        .iter()
-        .all(|p| p.is_finite())
-        .then(|| Aabb::from_points(&points))
+    raf_script::query_api::world_aabb(scene, id)
 }

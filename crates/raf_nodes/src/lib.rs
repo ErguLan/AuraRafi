@@ -23,6 +23,7 @@ pub mod node;
 mod physics_nodes;
 pub mod runtime_compiler;
 pub mod scene_nodes;
+pub mod service_nodes;
 
 pub use entity_nodes::EntityNodes;
 pub use executor::{execute, ExecutionOutput, NodeValue};

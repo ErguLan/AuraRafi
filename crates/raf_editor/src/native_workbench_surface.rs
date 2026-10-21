@@ -69,9 +69,21 @@ impl NativeGameWorkbench {
             self.project_type,
             self.open_menu.as_deref(),
         );
-        if let Some(index) = application_bar.root.children.iter().position(|node| node.id == "application-bar.drag-region") {
-            application_bar.root.children.insert(index,
-                crate::agent_workspace_surface::button("application-bar.agents", "agent_workspace.title", "agent.workspace", &self.palette.tokens()));
+        if let Some(index) = application_bar
+            .root
+            .children
+            .iter()
+            .position(|node| node.id == "application-bar.drag-region")
+        {
+            application_bar.root.children.insert(
+                index,
+                crate::agent_workspace_surface::button(
+                    "application-bar.agents",
+                    "agent_workspace.title",
+                    "agent.workspace",
+                    &self.palette.tokens(),
+                ),
+            );
         }
         if self.project_type == ProjectType::Game {
             let children = &mut application_bar.root.children;
@@ -181,6 +193,11 @@ impl NativeGameWorkbench {
                         &data.components,
                         &data.wires,
                         &data.library,
+                        electronics.map_or(
+                            raf_electronics::CadSurfaceKind::Schematic,
+                            NativeElectronicsEditor::active_surface,
+                        ),
+                        data.layer_visibility,
                     ),
                     left,
                 );
@@ -195,6 +212,9 @@ impl NativeGameWorkbench {
                     hierarchy_tree_height,
                     hierarchy_row_height,
                 );
+                let max_scroll = (view.total_rows as f32 * hierarchy_row_height - hierarchy_tree_height).max(0.0);
+                let requested_scroll = self.hierarchy_scroll_offset;
+                sync_hierarchy_scroll_state(&mut self.host.session_mut().interaction.controls, &mut self.hierarchy_scroll_offset, requested_scroll, max_scroll);
                 append(
                     if self.hierarchy_active_tab == "lighting" {
                         crate::panels::lighting_surface::navigation(
@@ -202,35 +222,38 @@ impl NativeGameWorkbench {
                             &self.lighting_section,
                         )
                     } else {
-                        build_hierarchy_surface(
-                            self.palette,
-                            &view,
-                            selected,
-                            self.hierarchy_renaming
-                                .as_ref()
-                                .map(|(id, value)| (*id, value.as_str())),
-                            hierarchy_menu_target,
-                            self.hierarchy_empty_menu_open,
-                            self.hierarchy_primitive_menu_open,
-                            hierarchy_menu_label,
-                            self.hierarchy_menu_position,
-                            [left.width, left.height],
-                            hierarchy_row_height,
-                            self.agent_settings.hierarchy_indent_width,
-                            self.agent_settings.hierarchy_show_icons,
-                            self.agent_settings.hierarchy_show_visibility,
-                            self.agent_settings.hierarchy_show_locked,
-                            1.0,
-                            self.hierarchy_drag
-                                .as_ref()
-                                .map(|drag| (drag.label.as_str(), drag.pointer)),
-                            self.hierarchy_drag.as_ref().and_then(|drag| drag.target),
-                            None,
-                            can_paste,
-                            left.width < 540.0,
-                            &self.hierarchy_active_tab,
-                            self.hierarchy_bookmarks,
-                            Some(&search_results),
+                        self.decorate_hierarchy_surface(
+                            build_hierarchy_surface(
+                                self.palette,
+                                &view,
+                                selected,
+                                self.hierarchy_renaming
+                                    .as_ref()
+                                    .map(|(id, value)| (*id, value.as_str())),
+                                hierarchy_menu_target,
+                                self.hierarchy_empty_menu_open,
+                                self.hierarchy_primitive_menu_open,
+                                hierarchy_menu_label,
+                                self.hierarchy_menu_position,
+                                [left.width, left.height],
+                                hierarchy_row_height,
+                                self.agent_settings.hierarchy_indent_width,
+                                self.agent_settings.hierarchy_show_icons,
+                                self.agent_settings.hierarchy_show_visibility,
+                                self.agent_settings.hierarchy_show_locked,
+                                1.0,
+                                self.hierarchy_drag
+                                    .as_ref()
+                                    .map(|drag| (drag.label.as_str(), drag.pointer)),
+                                self.hierarchy_drag.as_ref().and_then(|drag| drag.target),
+                                None,
+                                can_paste,
+                                left.width < 540.0,
+                                &self.hierarchy_active_tab,
+                                self.hierarchy_bookmarks,
+                                Some(&search_results),
+                            ),
+                            scene,
                         )
                     },
                     left,
@@ -588,6 +611,36 @@ impl NativeGameWorkbench {
                         grid_viewport,
                         self.assets_surface.view,
                     );
+                    let entries = raf_assets::authoring_catalog::project_assets(&assets, scene);
+                    let visible = crate::panels::assets_surface::visible_asset_rows(
+                        &assets,
+                        &self.assets_surface.query,
+                        self.assets_surface.filter,
+                        &self.assets_surface.script_extension,
+                        self.assets_surface.sort,
+                    );
+                    let visuals = visible
+                        .iter()
+                        .copied()
+                        .skip(visible_range.0)
+                        .take(visible_range.1.saturating_sub(visible_range.0))
+                        .chain(self.assets_surface.selected_asset.as_ref().into_iter())
+                        .filter_map(|row| {
+                            entries.get(row.as_str()).map(|entry| (row.as_str(), entry))
+                        })
+                        .map(|(row, entry)| {
+                            let preview =
+                                self.asset_previews.request(entry, self.host.images_mut());
+                            (
+                                row.to_string(),
+                                crate::panels::assets_surface::AssetVisual {
+                                    entry: entry.clone(),
+                                    preview,
+                                    can_apply_texture: selected.iter().filter_map(|id|scene.get(*id)).any(|node|!node.locked && !node.is_folder && node.primitive!=raf_core::scene::Primitive::Empty),
+                                },
+                            )
+                        })
+                        .collect::<std::collections::HashMap<_, _>>();
                     append(
                         build_assets_surface(AssetsSurfaceParams {
                             palette: self.palette,
@@ -606,6 +659,7 @@ impl NativeGameWorkbench {
                             visible_range: Some(visible_range),
                             create_open: self.assets_surface.create_menu_open,
                             motion: self.assets_motion(),
+                            visuals: Some(&visuals),
                         }),
                         content_rect,
                     );
@@ -882,6 +936,15 @@ impl NativeGameWorkbench {
             }
         }
 
+        if let Some(notice)=&self.authoring_notice {
+            let notice=UiNode::new("authoring.notice",UiNodeKind::Button)
+                .with_text_value(notice.clone()).with_icon(raf_ui::UiIcon::new(UiIconId::Close))
+                .with_style(self.palette.panel_style()).focusable()
+                .with_layout(UiLayout::fill(UiFlow::Row))
+                .with_event(raf_ui::UiEventBinding::command(raf_ui::UiEventKind::Click,"authoring.notice.dismiss"));
+            append(UiSurface::new("authoring.notice",self.palette,notice),EditorRect::new(
+                layout.canvas.x+12.0,layout.canvas.y+48.0,(layout.canvas.width-24.0).clamp(120.0,520.0),52.0));
+        }
         let root = UiNode::new("editor.native.workbench.root", UiNodeKind::Root)
             .with_layout(UiLayout::fill(UiFlow::None))
             .with_style(UiStyle::transparent());

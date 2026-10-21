@@ -14,14 +14,18 @@
 
 // === NEW RENDERER ARCHITECTURE ===
 pub mod bridge;
+pub mod environment_frame;
 pub mod geometry;
 pub mod math;
+mod optimized_filter;
+pub mod optimized_lighting;
+#[cfg(test)]
+mod optimized_qa;
 pub mod render_pipeline;
 pub mod scene_renderer;
+pub mod scene_visibility;
 pub mod shadow_frame;
 mod sky_stars;
-pub mod scene_visibility;
-pub mod environment_frame;
 
 // --- Core renderer and compatibility exports ---
 // The active editor path is ApiGraphicBasic + SceneRenderer with GPU-first

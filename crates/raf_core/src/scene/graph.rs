@@ -31,6 +31,8 @@ pub enum Primitive {
     Plane,
     /// Cylinder along Y axis.
     Cylinder,
+    /// Rounded Y-axis solid, diameter 1 m and total height 2 m.
+    Capsule,
 }
 
 impl Default for Primitive {
@@ -48,6 +50,7 @@ impl Primitive {
             Self::Sphere => "Sphere",
             Self::Plane => "Plane",
             Self::Cylinder => "Cylinder",
+            Self::Capsule => "Capsule",
         }
     }
 
@@ -59,6 +62,7 @@ impl Primitive {
             Self::Sphere => "Esfera",
             Self::Plane => "Plano",
             Self::Cylinder => "Cilindro",
+            Self::Capsule => "Cápsula",
         }
     }
 }
@@ -89,6 +93,7 @@ impl NodeColor {
             Primitive::Sphere => Self::rgb(236, 236, 236),
             Primitive::Plane => Self::rgb(150, 150, 150),
             Primitive::Cylinder => Self::rgb(58, 58, 58),
+            Primitive::Capsule => Self::rgb(170, 180, 192),
         }
     }
 }
@@ -1055,6 +1060,7 @@ fn primitive_fingerprint(primitive: Primitive) -> u64 {
         Primitive::Sphere => 2,
         Primitive::Plane => 3,
         Primitive::Cylinder => 4,
+        Primitive::Capsule => 5,
     }
 }
 

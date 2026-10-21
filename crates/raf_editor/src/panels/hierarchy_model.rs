@@ -6,6 +6,11 @@
 use crate::script_relationships::{ScriptLink, ScriptLinks};
 use raf_core::scene::{Primitive, SceneGraph, SceneNodeId};
 use raf_ui::UiVirtualRange;
+#[path = "hierarchy_details.rs"]
+pub mod details;
+#[path = "hierarchy_query.rs"]
+mod query;
+use details::{HierarchyBadge, HierarchyViewState};
 
 pub const DEFAULT_ROW_HEIGHT: f32 = 26.0;
 pub const DEFAULT_OVERSCAN_ROWS: usize = 4;
@@ -24,6 +29,8 @@ pub struct HierarchyRow {
     pub expanded: bool,
     /// Presentation-only child; id is its owning entity, not a selectable scene id.
     pub script_link: Option<(usize, ScriptLink)>,
+    pub badges: Vec<HierarchyBadge>,
+    pub insertion_parent: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -45,6 +52,9 @@ pub struct HierarchyModel {
     needs_rebuild: bool,
     script_links: ScriptLinks,
     entity_rows: usize,
+    assets: Option<std::collections::HashSet<String>>,
+    badge_index: std::collections::HashMap<SceneNodeId, Vec<HierarchyBadge>>,
+    pub insertion_parent: Option<uuid::Uuid>,
 }
 
 impl Default for HierarchyModel {
@@ -57,6 +67,9 @@ impl Default for HierarchyModel {
             needs_rebuild: true,
             script_links: ScriptLinks::new(),
             entity_rows: 0,
+            assets: None,
+            badge_index: Default::default(),
+            insertion_parent: None,
         }
     }
 }
@@ -114,6 +127,53 @@ impl HierarchyModel {
             bottom_spacer: self.rows.len().saturating_sub(range.end) as f32 * row_height,
             rows,
         }
+    }
+
+    pub fn set_assets(&mut self, assets: &[String]) {
+        let paths = assets
+            .iter()
+            .map(|p| {
+                p.replace('\\', "/")
+                    .trim_start_matches("assets/")
+                    .to_string()
+            })
+            .collect();
+        if self.assets.as_ref() != Some(&paths) {
+            self.assets = Some(paths);
+            self.invalidate();
+        }
+    }
+    pub fn view_state(
+        &self,
+        scene: &SceneGraph,
+        query: &str,
+        scroll: f32,
+        show_hidden: bool,
+    ) -> HierarchyViewState {
+        HierarchyViewState {
+            version: 1,
+            collapsed: self
+                .collapsed
+                .iter()
+                .filter_map(|id| scene.get(*id).map(|node| node.uuid))
+                .collect(),
+            query: query.to_string(),
+            scroll: scroll.max(0.0),
+            show_hidden,
+            insertion_parent: self.insertion_parent,
+        }
+    }
+    pub fn restore_view(&mut self, scene: &SceneGraph, state: &HierarchyViewState) {
+        self.collapsed = scene
+            .iter()
+            .filter_map(|(id, node)| state.collapsed.contains(&node.uuid).then_some(id))
+            .collect();
+        self.insertion_parent = state.insertion_parent.filter(|uuid| {
+            scene
+                .iter()
+                .any(|(_, n)| n.uuid == *uuid && !n.name.is_empty())
+        });
+        self.invalidate();
     }
 
     pub fn row_ids(&self) -> impl Iterator<Item = SceneNodeId> + '_ {
@@ -193,6 +253,7 @@ impl HierarchyModel {
     fn rebuild(&mut self, scene: &SceneGraph) {
         self.rows.clear();
         self.clear_removed_state(scene);
+        self.badge_index = details::badge_index(scene, self.assets.as_ref());
         for &root in scene.roots() {
             self.append_node(scene, root, 0, false);
         }
@@ -218,18 +279,21 @@ impl HierarchyModel {
             return false;
         }
 
-        let name_matches =
-            self.query.is_empty() || node.name.to_ascii_lowercase().contains(self.query.as_str());
+        let name_matches = self.query.is_empty() || query::matches(scene, id, &self.query);
         let descendant_matches = !self.query.is_empty()
             && (self.script_matches(id)
                 || node
                     .children
                     .iter()
                     .any(|child| self.matches_descendant(scene, *child)));
-        let visible_by_filter =
-            self.query.is_empty() || name_matches || descendant_matches || ancestor_match;
-        let visible_by_hidden =
-            self.show_hidden || node.visible || self.has_visible_descendant(scene, id);
+        let visible_by_filter = self.query.is_empty()
+            || name_matches
+            || descendant_matches
+            || (ancestor_match && !self.query.contains(':'));
+        let visible_by_hidden = self.show_hidden
+            || node.visible
+            || self.has_visible_descendant(scene, id)
+            || !self.query.is_empty();
         if !visible_by_filter || !visible_by_hidden {
             return false;
         }
@@ -251,6 +315,8 @@ impl HierarchyModel {
                     .is_some_and(|links| !links.is_empty()),
             expanded,
             script_link: None,
+            badges: self.badge_index.get(&id).cloned().unwrap_or_default(),
+            insertion_parent: self.insertion_parent == Some(node.uuid),
         });
 
         if expanded || !self.query.is_empty() {
@@ -273,6 +339,8 @@ impl HierarchyModel {
                             has_children: false,
                             expanded: false,
                             script_link: Some((index, link.clone())),
+                            badges: Vec::new(),
+                            insertion_parent: false,
                         });
                     }
                 }
@@ -291,10 +359,8 @@ impl HierarchyModel {
         if node.name.is_empty() {
             return false;
         }
-        if self.show_hidden || node.visible {
-            if node.name.to_ascii_lowercase().contains(self.query.as_str())
-                || self.script_matches(id)
-            {
+        if self.show_hidden || node.visible || !self.query.is_empty() {
+            if query::matches(scene, id, &self.query) || self.script_matches(id) {
                 return true;
             }
         }
@@ -318,6 +384,28 @@ impl HierarchyModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authoring_hierarchy_restores_uuid_state_and_hidden_field_queries() {
+        let mut scene = SceneGraph::new();
+        let parent = scene.add_root("Group");
+        let child = scene.add_child_with_primitive(parent, "Hidden", Primitive::Capsule);
+        scene.get_mut(child).unwrap().visible = false;
+        let mut model = HierarchyModel::default();
+        model.insertion_parent = Some(scene.get(parent).unwrap().uuid);
+        model.toggle_expanded(parent);
+        let state = model.view_state(&scene, "type:capsule hidden:true", 24.0, false);
+        let encoded = ron::to_string(&state).unwrap();
+        let mut restored = HierarchyModel::default();
+        restored.restore_view(&scene, &ron::from_str(&encoded).unwrap());
+        assert_eq!(restored.insertion_parent, model.insertion_parent);
+        let view = restored.refresh(&scene, &state.query, false, 0.0, 200.0, 26.0);
+        assert_eq!(view.entity_rows, 2, "hidden result retains its ancestor");
+        let id = scene.add_root("Another");
+        scene.get_mut(id).unwrap().locked = true;
+        let view = restored.refresh(&scene, "type:capsule locked:true", false, 0.0, 200.0, 26.0);
+        assert_eq!(view.entity_rows, 0, "structured filters combine using AND");
+    }
 
     #[test]
     fn script_children_are_virtual_searchable_collapsible_and_excluded_from_selection() {

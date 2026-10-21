@@ -2,6 +2,51 @@
 
 This document outlines the development roadmap for AuraRafi.
 
+## Construction, visual Assets and Hierarchy: current scope and 0.12
+
+This pass improves supported authoring, without introducing another modeling
+stack. Capsule is the only new shape: 1 m diameter, 2 m total height, centered on
+Y. Shared shape descriptors define local dimensions and conservative world AABBs.
+Dimensions edit existing scale; no second persistent size is introduced. Existing
+scene transforms are preserved. Commands reject simultaneous size and scale.
+
+Current source scope:
+
+- Parent-aware authoring bounds, anchored single-face scaling, metric dimensions,
+  floor/surface snap and cancellable asset placement.
+- Existing Assets surface with typed catalog projections, image thumbnails and
+  isolated ApiGraphicBasic primitive/prefab previews. Demand-driven 128 px cache,
+  at most 256 entries and 16 MiB RGBA. Oversized prefabs keep an explanatory icon.
+  Refresh/catalog changes invalidate previews. GLB/GLTF remain discoverable files,
+  not placeable models.
+- Compact Hierarchy component/diagnostic badges, conjunctive field queries,
+  insertion parent, ordered drops, auto-scroll and per-session UUID view state
+  in `editor_hierarchy.ron`. Scripts remain optional virtual component rows.
+- Already implemented: camera component, environmental Sun, directional shadows,
+  AudioSource, triggers and independent editable prefabs.
+- Tab stays in Object Mode with an explicit notice until persistent mesh editing
+  exists. Mesh edge display is not advertised as editing.
+
+0.12 deliverables and acceptance:
+
+- GLB/GLTF Mesh Assets: meshes/material slots, import bounds, source identity,
+  validated textures, editor/runtime placement and save/load round trips.
+- Linked Prefab Packages: source/version, overrides, update, revert, make-unique;
+  nested instances only after cycle/reference validation.
+- Point/Spot Lights and functional spawn markers: registered capabilities with
+  actual Inspector, rendering/runtime behavior and automation schemas.
+- Persistent Editable Mesh: Object/Vertex/Edge/Face selection, Accept/Cancel,
+  undo/redo and saved geometry. Extrude, inset, interactive bevel, editable pivots
+  and experimental boolean subtraction require validated, bounded topology.
+- Wedge, torus, configurable prisms and parametric cylinder (radii, segments,
+  caps, thickness) extend the shared shape catalog, not disconnected menu lists.
+- Mesh Assets, linked Prefab Instances, supported lights, cameras, audio emitters,
+  trigger volumes, spawn markers, groups and shapes are displayed from real
+  registered capabilities. No placeholder types or fake Hierarchy nodes.
+
+After 0.12: splines, lathe/sweep/loft and extensive procedural construction.
+Native DPI/input/recovery acceptance is distinct from compilation/offscreen tests.
+
 ## Current Status: Active development beyond the initial foundation
 
 The engine foundation is in place and several vertical slices have already moved past pure scaffolding. This section tracks broadly available systems, while later sections separate implemented milestones from planned work.

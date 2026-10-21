@@ -377,6 +377,7 @@
         {"name": "name", "kind": "string", "required": false, "description_key": "commands.param.name"},
         {"name": "parent", "kind": "string", "required": false, "description_key": "commands.param.parent"},
         {"name": "transform", "kind": "object", "required": false, "description_key": "commands.param.transform"},
+        {"name": "size", "kind": "array", "required": false, "description_key": "commands.param.size"},
         {"name": "x", "kind": "f32", "required": false, "default": "0"},
         {"name": "y", "kind": "f32", "required": false, "default": "0"},
         {"name": "z", "kind": "f32", "required": false, "default": "0"},
@@ -680,6 +681,7 @@
       "category": "scene",
       "description_key": "commands.game_update.desc",
       "parameters": [
+        {"name": "size", "kind": "array", "required": false, "description_key": "commands.param.size"},
         {"name": "casts_shadows", "kind": "bool", "required": false},
         {"name": "receives_shadows", "kind": "bool", "required": false},
         {"name": "target", "kind": "string", "required": true, "description_key": "commands.param.target"},

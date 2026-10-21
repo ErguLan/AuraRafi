@@ -103,6 +103,7 @@ pub struct RenderRuntime {
     device: Option<BasicDevice>,
     device_generation: u64,
     scheduler: FrameScheduler,
+    memory_budget: Option<GraphicsMemoryBudget>,
 }
 
 impl Default for RenderRuntime {
@@ -116,11 +117,20 @@ impl Default for RenderRuntime {
             device: None,
             device_generation: 0,
             scheduler: FrameScheduler::default(),
+            memory_budget: None,
         }
     }
 }
 
 impl RenderRuntime {
+    /// Optional surface-specific cap, still enforced by ApiGraphicBasic.
+    pub fn set_memory_budget(&mut self, budget: GraphicsMemoryBudget) {
+        if self.memory_budget == Some(budget) {
+            return;
+        }
+        self.memory_budget = Some(budget);
+        self.device = None;
+    }
     pub fn configure(
         &mut self,
         policy: RenderExecutionPolicy,
@@ -265,6 +275,9 @@ impl RenderRuntime {
         if self.device.is_none() {
             let mut config = BasicDeviceConfig::from_render_policy(self.policy);
             config.shared_graphics_context = self.shared_graphics_context.clone();
+            if let Some(budget) = self.memory_budget {
+                config.memory_budget = budget;
+            }
             self.device = Some(BasicDevice::new(config));
             self.device_generation = self.device_generation.wrapping_add(1);
         }
@@ -274,6 +287,28 @@ impl RenderRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn agent_workspace_preview_surface_budget_is_applied_without_changing_other_runtimes() {
+        let mut runtime = RenderRuntime::default();
+        let budget = GraphicsMemoryBudget {
+            gpu_bytes: 64 * 1024 * 1024,
+            mesh_cache_entries: 512,
+            texture_cache_entries: 64,
+            ..GraphicsMemoryBudget::potato()
+        };
+        runtime.set_memory_budget(budget);
+        runtime.configure(RenderExecutionPolicy::CpuOnly, false);
+        runtime.activate_surface(GraphicsSurfaceKind::SceneViewport);
+        assert_eq!(runtime.snapshot().memory_budget, budget);
+        let mut other = RenderRuntime::default();
+        other.configure(RenderExecutionPolicy::CpuOnly, false);
+        other.activate_surface(GraphicsSurfaceKind::SceneViewport);
+        assert_eq!(
+            other.snapshot().memory_budget,
+            GraphicsMemoryBudget::potato()
+        );
+    }
 
     #[test]
     fn cpu_only_surface_forces_cpu_backend() {

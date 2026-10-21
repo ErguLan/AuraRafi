@@ -304,15 +304,112 @@ New-Icon 'library/ground.png' {
     $g.DrawLine($accentPen, 100,180,156,180)
 }
 
-Copy-Item (Join-Path $OutputRoot 'library\resistor.png') (Join-Path $OutputRoot 'symbols\resistor.png') -Force
-Copy-Item (Join-Path $OutputRoot 'library\capacitor.png') (Join-Path $OutputRoot 'symbols\capacitor.png') -Force
-Copy-Item (Join-Path $OutputRoot 'library\led.png') (Join-Path $OutputRoot 'symbols\led.png') -Force
-Copy-Item (Join-Path $OutputRoot 'library\magnet.png') (Join-Path $OutputRoot 'symbols\magnet.png') -Force
-Copy-Item (Join-Path $OutputRoot 'library\battery.png') (Join-Path $OutputRoot 'symbols\battery.png') -Force
-Copy-Item (Join-Path $OutputRoot 'library\ground.png') (Join-Path $OutputRoot 'symbols\ground.png') -Force
-Copy-Item (Join-Path $OutputRoot 'navigator\component.png') (Join-Path $OutputRoot 'symbols\generic.png') -Force
-Copy-Item (Join-Path $OutputRoot 'navigator\component.png') (Join-Path $OutputRoot 'library\generic.png') -Force
-Copy-Item (Join-Path $OutputRoot 'navigator\component.png') (Join-Path $OutputRoot 'footprints\generic.png') -Force
-Copy-Item (Join-Path $OutputRoot 'navigator\component.png') (Join-Path $OutputRoot 'toolbar\library.png') -Force
+# ---------------------------------------------------------------------------
+# Canvas symbol set (symbols/): engineering ink, not windowed pictograms.
+#
+# These PNGs paint the schematic symbols on the canvas overlay. They are
+# authored in opaque white because the overlay tints them with the theme ink
+# token, so the same asset reads as dark ink on the light paper canvas and as
+# light ink on the dark canvas. The colorful library/ icons above remain the
+# palette identity for the editor rail; the canvas stays monochrome.
+# ---------------------------------------------------------------------------
+$ink = [System.Drawing.Color]::FromArgb(246, 255, 255, 255)
+$inkPen = [System.Drawing.Pen]::new($ink, 12)
+$inkPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+$inkPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+$inkThickPen = [System.Drawing.Pen]::new($ink, 16)
+$inkThickPen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+$inkThickPen.EndCap = [System.Drawing.Drawing2D.LineCap]::Round
+$inkBrush = [System.Drawing.SolidBrush]::new($ink)
+
+function New-ScaleSymbol {
+    param(
+        [string]$RelativePath,
+        [scriptblock]$Draw
+    )
+    # The symbol canvas is 256 wide by 256 tall, but a canvas symbol image is
+    # stretched over the component body rect. Drawing 2:1 content keeps one
+    # proportion family with the old assets, so pin positions do not shift.
+    $path = Join-Path $OutputRoot $RelativePath
+    $directory = Split-Path -Parent $path
+    [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+    $bitmap = [System.Drawing.Bitmap]::new(256, 128)
+    $graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+    $graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $graphics.PixelOffsetMode = [System.Drawing.Drawing2D.PixelOffsetMode]::HighQuality
+    $graphics.Clear([System.Drawing.Color]::Transparent)
+    try {
+        & $Draw $graphics $inkPen $inkThickPen $inkBrush
+        $bitmap.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+    }
+    finally {
+        $graphics.Dispose()
+        $bitmap.Dispose()
+    }
+}
+
+New-ScaleSymbol 'symbols/resistor.png' {
+    param($g, $pen, $thickPen, $brush)
+    # IEC box style: two lead stubs into a rounded rectangle.
+    $g.DrawLine($pen, 28,64,70,64)
+    $g.DrawLine($pen, 186,64,228,64)
+    Draw-RoundedRect $g $thickPen 70 40 116 48 8
+}
+
+New-ScaleSymbol 'symbols/capacitor.png' {
+    param($g, $pen, $thickPen, $brush)
+    $g.DrawLine($pen, 28,64,108,64)
+    $g.DrawLine($thickPen, 112,26,112,102)
+    $g.DrawLine($thickPen, 144,26,144,102)
+    $g.DrawLine($pen, 148,64,228,64)
+}
+
+New-ScaleSymbol 'symbols/led.png' {
+    param($g, $pen, $thickPen, $brush)
+    $g.DrawLine($pen, 28,64,72,64)
+    $g.DrawPolygon($thickPen, (Points 72,28,72,100,148,64))
+    $g.DrawLine($thickPen, 152,28,152,100)
+    $g.DrawLine($pen, 156,64,228,64)
+    foreach ($arrow in @(@(160,46,196,18), @(198,44,206,36), @(160,88,196,60), @(198,86,206,78))) {
+        $g.DrawLine($thickPen, $arrow[0], $arrow[1], $arrow[2], $arrow[3])
+    }
+}
+
+New-ScaleSymbol 'symbols/magnet.png' {
+    param($g, $pen, $thickPen, $brush)
+    $g.DrawLine($pen, 28,64,52,64)
+    $g.DrawLine($pen, 204,64,228,64)
+    $g.DrawArc($thickPen, 52,26,152,76,180,180)
+    # Coil hatch marks read better than a filled arc at outline scale.
+    foreach ($offset in 74,92,110) {
+        $g.DrawLine($pen, $offset,30,$offset,46)
+    }
+}
+
+New-ScaleSymbol 'symbols/battery.png' {
+    param($g, $pen, $thickPen, $brush)
+    $g.DrawLine($pen, 28,64,104,64)
+    $g.DrawLine($thickPen, 110,22,110,106)
+    $g.DrawLine($pen, 130,40,130,88)
+    $g.DrawLine($pen, 146,64,228,64)
+}
+
+New-ScaleSymbol 'symbols/ground.png' {
+    param($g, $pen, $thickPen, $brush)
+    $g.DrawLine($pen, 128,20,128,52)
+    $g.DrawLine($thickPen, 68,56,188,56)
+    $g.DrawLine($pen, 88,84,168,84)
+    $g.DrawLine($pen, 108,106,148,106)
+}
+
+New-ScaleSymbol 'symbols/generic.png' {
+    param($g, $pen, $thickPen, $brush)
+    Draw-RoundedRect $g $thickPen 76 40 104 48 8
+    $g.DrawLine($pen, 28,52,76,52)
+    $g.DrawLine($pen, 28,76,76,76)
+    $g.DrawLine($pen, 180,52,228,52)
+    $g.DrawLine($pen, 180,76,228,76)
+    $g.FillEllipse($brush, 64,52,8,8)
+}
 
 Write-Output "Generated high-resolution Electronics icons in $OutputRoot"

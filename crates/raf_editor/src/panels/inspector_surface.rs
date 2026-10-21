@@ -435,6 +435,22 @@ fn content(
         });
 
     scroll = scroll.with_child(session_context_bar(palette, sessions));
+    let assets = project_assets
+        .iter()
+        .map(|path| raf_assets::authoring_catalog::normalized_reference(path))
+        .collect();
+    let diagnostics = crate::panels::hierarchy_model::details::badge_index(scene, Some(&assets));
+    if let Some(badges) = diagnostics.get(&id) {
+        for (index, key) in badges.iter().flat_map(|b| b.diagnostics.iter()).enumerate() {
+            scroll = scroll.with_child(
+                UiNode::new(format!("inspector.diagnostic.{index}"), UiNodeKind::Label)
+                    .with_icon(UiIcon::new(UiIconId::Warning))
+                    .with_text_key(*key)
+                    .with_layout(UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill))
+                    .with_tooltip_key(*key),
+            );
+        }
+    }
 
     scroll = scroll.with_child(section_title(
         palette,
@@ -477,6 +493,26 @@ fn content(
             .with_child(vector_row(palette, "position", node.position, display_unit))
             .with_child(vector_row(palette, "rotation", node.rotation, display_unit))
             .with_child(vector_row(palette, "scale", node.scale, display_unit))
+            .with_child(if node.primitive != Primitive::Empty && !node.is_folder {
+                vector_row(
+                    palette,
+                    "size",
+                    node.primitive.dimensions(node.scale),
+                    display_unit,
+                )
+            } else {
+                let dimensions = raf_core::scene::geometry::subtree_geometry_bounds(scene, id)
+                    .map(|(min, max)| max - min)
+                    .unwrap_or(Vec3::ZERO);
+                metadata_line(
+                    palette,
+                    "app.world_dimensions",
+                    &format!(
+                        "{:.3} × {:.3} × {:.3} m",
+                        dimensions.x, dimensions.y, dimensions.z
+                    ),
+                )
+            })
             .with_child(transform_actions(palette, id));
     }
 
@@ -1255,6 +1291,7 @@ fn vector_row(
         "position" => display_unit.distance_suffix(),
         "rotation" => "deg",
         "scale" => "x",
+        "size" => "m",
         _ => "",
     };
     let label_line = UiNode::new(
@@ -1269,7 +1306,11 @@ fn vector_row(
     })
     .with_child(
         UiNode::new(format!("inspector.vector.{label}.label"), UiNodeKind::Label)
-            .with_text_key(format!("app.{label}"))
+            .with_text_key(if label == "size" {
+                "app.dimensions".to_string()
+            } else {
+                format!("app.{label}")
+            })
             .with_text_style(UiTextStyle::body(palette.tokens().text_muted))
             .with_layout(UiLayout::fit_content()),
     )
@@ -1362,6 +1403,7 @@ fn primitive_options(current: Primitive) -> (Vec<UiSelectOption>, usize) {
         Primitive::Sphere,
         Primitive::Plane,
         Primitive::Cylinder,
+        Primitive::Capsule,
     ];
     let selected_index = primitives
         .iter()
@@ -2113,6 +2155,7 @@ fn primitive_label_key(primitive: Primitive) -> &'static str {
         Primitive::Sphere => "app.primitive_sphere",
         Primitive::Plane => "app.primitive_plane",
         Primitive::Cylinder => "app.primitive_cylinder",
+        Primitive::Capsule => "app.primitive_capsule",
     }
 }
 

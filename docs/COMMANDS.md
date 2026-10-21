@@ -1,6 +1,47 @@
 # AuraRafi Manual Commands
 
+## Precise shape dimensions
+
+The shared shape catalog includes `capsule`: Y-aligned, centered, 1 m diameter
+and 2 m total height at scale [1, 1, 1]. It uses existing collider types rather
+than introducing a dedicated runtime capsule collider.
+
+`game.add` and `game.update` accept optional local `size: [X,Y,Z]` in metres.
+The command computes scale from the same descriptor used by the Inspector,
+building constraints and scene observations. Size and any scale argument in the
+same request are rejected without editing the scene. A Plane has zero Y size.
+
+```text
+/game.add primitive=capsule name=Marker size=[1,2,1]
+/game.update target=Marker size=[2,6,2]
+```
+
+Typed tool arguments use the same contract:
+
+```json
+{"primitive":"capsule","name":"Marker","size":[2,6,2]}
+```
+
+Hierarchy insertion parent is a native UI context. Explicit parents prevail;
+CLI/MCP defaults remain unchanged. Asset placement preview, thumbnail generation
+and Hierarchy view-state persistence never modify the user's scene on their own.
+GLB/GLTF files are discoverable, but model import/placement remains a 0.12 item.
+
+## Runtime service authoring
+
+Use Project Settings for progress policy and local folder permissions. Existing
+`/session.list` supplies saved-world UUIDs; `/script.validate` and
+`/script.compile_nodes` remain authoring checks. Runtime input, queries, progress
+and transitions are Host API operations, not editor Console or attached commands
+that activate Play. See [Runtime Services](RUNTIME_SERVICES.md). Internal
+`project-settings.*` UI intents are not advertised as public engine commands.
+
 ## Native Agent workspace
+
+The optional `agent.workspace.tab.preview`, `agent.workspace.preview.fit`,
+`agent.workspace.preview.close` and divider actions are local presentation
+intents, not public engine commands. The 3D preview is read-only and cannot
+activate Play, construction, selection or mutation tools.
 
 The Hub and editor expose an **Agents / Agentes** section backed by the native
 command kernel, not a CLI/MCP subprocess. Project/document targets survive chat

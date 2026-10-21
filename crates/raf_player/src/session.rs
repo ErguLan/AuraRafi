@@ -34,11 +34,18 @@ use uuid::Uuid;
 pub enum PlayerSource {
     Snapshot(Box<RuntimeManifest>),
     File(PathBuf),
+    Session(Box<raf_runtime::session_loader::SessionSource>, Uuid),
 }
 enum Preparation {
     Stage(&'static str),
     Compile(raf_script::ScriptLoadProgress),
-    Ready(Box<RuntimeWorld>, Option<UiDocument>, PathBuf, bool),
+    Ready(
+        Box<RuntimeWorld>,
+        Option<UiDocument>,
+        PathBuf,
+        bool,
+        Box<raf_runtime::session_loader::SessionSource>,
+    ),
     Failed(Vec<String>),
 }
 #[derive(Clone, PartialEq)]
@@ -49,6 +56,10 @@ struct SurfaceKey {
     error: Option<String>,
 }
 pub struct PlayerSession {
+    cursor: raf_render::api_graphic_basic::ui_surface::NativeCursorLease,
+    context: Option<raf_runtime::session_loader::SessionSource>,
+    transition_previous: Option<RuntimePhase>,
+    cursor_suspended: bool,
     source: Option<PlayerSource>,
     receiver: Option<Receiver<Preparation>>,
     cancellation: Arc<AtomicBool>,
@@ -106,6 +117,10 @@ impl PlayerSession {
         );
         insert_loading_brand(&mut ui);
         Self {
+            cursor: host.cursor_lease(),
+            context: None,
+            transition_previous: None,
+            cursor_suspended: false,
             source: Some(source),
             receiver: None,
             cancellation: Arc::new(AtomicBool::new(false)),
@@ -161,6 +176,10 @@ impl PlayerSession {
         false
     }
     pub fn set_focused(&mut self, focused: bool) {
+        if !focused {
+            self.cursor.release();
+            self.cursor_suspended = true;
+        }
         self.focused = focused;
         self.router.cancel_all();
         if let Some(world) = &mut self.world {
@@ -172,15 +191,22 @@ impl PlayerSession {
         self.last_frame = Instant::now();
     }
     pub fn control(&mut self, control: RuntimeControl) {
+        if control != RuntimeControl::Reload {
+            self.cursor.release();
+            self.cursor_suspended = true;
+        }
         if control == RuntimeControl::Stop {
-            self.cancellation.store(true, Ordering::Relaxed);
             self.receiver = None;
             self.source = None;
             if let Some(world) = &mut self.world {
                 world.stop();
                 self.last_diagnostics.extend(world.drain_diagnostics());
             }
-            self.status.phase = RuntimePhase::Stopped;
+            self.cancellation.store(true, Ordering::Relaxed);
+            self.status.phase = self
+                .world
+                .as_ref()
+                .map_or(RuntimePhase::Stopped, |world| world.status().phase);
             self.audio.stop();
             self.cached_canvas = None;
             return;
@@ -229,13 +255,24 @@ impl PlayerSession {
                 let manifest = match source {
                     PlayerSource::Snapshot(manifest) => *manifest,
                     PlayerSource::File(path) => RuntimeManifest::read(&path).map_err(|e| vec![e])?,
+                    PlayerSource::Session(context,id) => context.load(id,instance).map_err(|e| vec![e])?,
                 };
                 if manifest.instance != instance { return Err(vec!["runtime snapshot instance mismatch".into()]); }
+                let context = raf_runtime::session_loader::SessionSource::from_manifest(&manifest);
+                let session_id = manifest.session_id;
+                let storage = raf_runtime::storage::StorageConfig {
+                    project: manifest.project_id, project_root: manifest.project_root.clone(),
+                    custom_root: manifest.save_root_grant.clone(), development_slot: manifest.development_slot,
+                    policy: manifest.project_settings.runtime.progress.clone(),
+                };
                 let root = manifest.project_root;
                 let enable_audio = manifest.project_settings.enable_audio;
                 let ui_path = manifest.ui_document_file;
                 let mut world = RuntimeWorld::prepare(instance, manifest.scene, &root, manifest.project_settings,
                     settings, cancellation.clone(), |progress| { let _ = sender.try_send(Preparation::Compile(progress)); })?;
+                world.configure_storage(storage);
+                world.services_mut().current_session = session_id;
+                world.services_mut().transition_status = "ready";
                 if let Some(graph) = &manifest.node_graph {
                     let _ = sender.try_send(Preparation::Stage("runtime.compiling_nodes"));
                     world.attach_graph(graph)?;
@@ -254,8 +291,7 @@ impl PlayerSession {
                 }
                 if cancellation.load(Ordering::Relaxed) { return Err(vec!["Runtime preparation cancelled".into()]); }
                 let _ = sender.try_send(Preparation::Stage("runtime.initializing"));
-                world.start();
-                Ok(Preparation::Ready(Box::new(world), document, root, enable_audio))
+                Ok(Preparation::Ready(Box::new(world), document, root, enable_audio, Box::new(context)))
             })).unwrap_or_else(|_| Err(vec!["Runtime preparation panicked; launch was cancelled".into()]));
             let message = match result {
                 Ok(message) => message,
@@ -292,8 +328,35 @@ impl PlayerSession {
                         t("runtime.cancel_hint", self.settings.language)
                     );
                 }
-                Preparation::Ready(mut world, document, root, audio) => {
+                Preparation::Ready(mut world, document, root, audio, context) => {
+                    if self.transition_previous.is_some() {
+                        if let Some(previous) = &self.world {
+                            world.services_mut().progress = previous.services().progress.clone();
+                        }
+                    }
+                    // Bounded on_start runs against the candidate before committing it.
+                    // No disk requests are polled until the candidate becomes the live world.
+                    world.start();
+                    if self.transition_previous.is_some() && world.status().last_error.is_some() {
+                        self.fail_preparation(vec![world
+                            .status()
+                            .last_error
+                            .clone()
+                            .unwrap_or_default()]);
+                        continue;
+                    }
+                    if let Some(previous) = &mut self.world {
+                        world.adopt_storage_worker(previous);
+                        previous.stop();
+                        self.audio.stop();
+                    }
+                    self.context = Some(*context);
+                    self.transition_previous = None;
+                    world.activate_services();
                     world.set_focused(self.focused);
+                    self.cached_canvas = None;
+                    self.surface_key = None;
+                    self.router.cancel_all();
                     let mut renderer = SceneRenderer::new(1, 1);
                     renderer.set_asset_root(Some(root.join("assets")));
                     self.renderer = Some(renderer);
@@ -324,13 +387,69 @@ impl PlayerSession {
                     self.last_frame = Instant::now();
                 }
                 Preparation::Failed(errors) => {
-                    self.status.phase = RuntimePhase::Failed;
-                    self.status.last_error = errors.first().cloned();
-                    self.last_diagnostics.extend(errors.into_iter().take(32));
-                    self.receiver = None;
+                    self.fail_preparation(errors);
                 }
             }
         }
+    }
+    fn fail_preparation(&mut self, errors: Vec<String>) {
+        if let Some(phase) = self.transition_previous.take() {
+            if let Some(world) = &mut self.world {
+                world.transition_failed(
+                    errors
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "runtime.session_failed".into()),
+                );
+                if phase == RuntimePhase::Running {
+                    world.control(RuntimeControl::Resume);
+                }
+                world.set_focused(self.focused);
+                self.status = world.status().clone();
+            }
+        } else {
+            self.status.phase = RuntimePhase::Failed;
+            self.status.last_error = errors.first().cloned();
+        }
+        self.last_diagnostics.extend(
+            errors
+                .into_iter()
+                .take(256usize.saturating_sub(self.last_diagnostics.len())),
+        );
+        self.receiver = None;
+        self.surface_key = None;
+        self.last_frame = Instant::now();
+    }
+    fn begin_transition(&mut self, id: Uuid) {
+        let Some(context) = self.context.clone() else {
+            return;
+        };
+        let Some(world) = &mut self.world else {
+            return;
+        };
+        if !matches!(
+            world.status().phase,
+            RuntimePhase::Running | RuntimePhase::Paused
+        ) {
+            return;
+        }
+        if world.services().progress.busy() {
+            world.transition_failed("runtime.progress_busy_finish_before_transition".into());
+            return;
+        }
+        self.transition_previous = Some(world.status().phase);
+        world.control(RuntimeControl::Pause);
+        world.services_mut().transition_status = "loading";
+        self.audio.set_paused(true);
+        self.cursor.release();
+        self.source = Some(PlayerSource::Session(Box::new(context), id));
+        self.status.phase = RuntimePhase::Preparing;
+        self.loading_key = "runtime.loading_session".into();
+        self.loading_progress = 0.0;
+        self.loading_count.clear();
+        self.loading_detail = t("runtime.cancel_hint", self.settings.language);
+        self.startup_presented = false;
+        self.loading_surface_key = None;
     }
     pub fn draw(
         &mut self,
@@ -358,7 +477,17 @@ impl PlayerSession {
         };
         self.ui.set_environment(environment);
         if input.snapshot().key_pressed(InputKey::Escape) {
-            self.control(RuntimeControl::Stop);
+            if self.is_preparing() || input.snapshot().modifiers.shift {
+                self.control(RuntimeControl::Stop);
+            } else {
+                self.cursor.release();
+                self.cursor_suspended = true;
+                if let Some(world) = &mut self.world {
+                    world.services_mut().cursor = Default::default();
+                    world.services_mut().effective_cursor =
+                        raf_script::services::CursorCapture::Free;
+                }
+            }
         }
         if self.should_close() {
             return Ok(());
@@ -424,7 +553,9 @@ impl PlayerSession {
         );
         let mut game_input =
             raf_runtime::input::RuntimeInputState::from_input(input.snapshot()).snapshot;
-        let ui_consumed_pointer = self.ui.has_interactive_hover() || self.ui.has_pointer_capture();
+        let mut ui_consumed_pointer =
+            self.ui.has_interactive_hover() || self.ui.has_pointer_capture();
+        let mut ui_consumed_keyboard = self.ui.captures_keyboard_input();
         let authored_visible = self.authored_ui_visible();
         if let Some(authored) = self.authored_ui.as_mut().filter(|_| authored_visible) {
             authored.set_environment(environment);
@@ -438,11 +569,12 @@ impl PlayerSession {
                 UiRect::new(0.0, 0.0, logical[0] as f32, logical[1] as f32),
             );
             if authored.has_interactive_hover() || authored.has_pointer_capture() {
-                game_input.mouse_held.clear();
+                ui_consumed_pointer = true;
+                game_input.suppress_pointer();
             }
             if authored.captures_keyboard_input() {
-                game_input.keys_held.clear();
-                game_input.keys_pressed.clear();
+                ui_consumed_keyboard = true;
+                game_input.suppress_keyboard();
             }
             if let Some(world) = &mut self.world {
                 for action in authored_actions.into_iter().take(128) {
@@ -470,7 +602,17 @@ impl PlayerSession {
             }
         }
         if ui_consumed_pointer {
-            game_input.mouse_held.clear();
+            game_input.suppress_pointer();
+        }
+        if ui_consumed_keyboard {
+            game_input.suppress_keyboard();
+        }
+        if self.focused
+            && !ui_consumed_pointer
+            && !ui_consumed_keyboard
+            && game_input.mouse_pressed.contains(&0)
+        {
+            self.cursor_suspended = false;
         }
         for action in actions.drain(..) {
             if let UiAction::Command { name } = action.action {
@@ -488,6 +630,26 @@ impl PlayerSession {
         self.last_frame = now;
         if let Some(world) = &mut self.world {
             world.advance(dt, &game_input);
+            let intent = if self.focused
+                && !self.cursor_suspended
+                && world.status().phase == RuntimePhase::Running
+                && !ui_consumed_pointer
+                && !ui_consumed_keyboard
+            {
+                world.services().cursor
+            } else {
+                Default::default()
+            };
+            match self.cursor.apply(intent.capture, intent.visible) {
+                Ok(mode) => world.services_mut().effective_cursor = mode,
+                Err(error) => {
+                    world.services_mut().effective_cursor =
+                        raf_script::services::CursorCapture::Free;
+                    if self.last_diagnostics.len() < 256 {
+                        self.last_diagnostics.push(error);
+                    }
+                }
+            }
             self.status = world.status().clone();
             let diagnostics = world.drain_diagnostics();
             self.last_diagnostics.extend(
@@ -509,6 +671,16 @@ impl PlayerSession {
                         .into_iter()
                         .take(256usize.saturating_sub(self.last_diagnostics.len())),
                 );
+            }
+        }
+        let requested = self
+            .world
+            .as_mut()
+            .and_then(|world| world.take_session_request());
+        if let Some(id) = requested {
+            self.begin_transition(id);
+            if self.is_preparing() {
+                return Ok(());
             }
         }
         let canvas = self.render_canvas(size, scale);

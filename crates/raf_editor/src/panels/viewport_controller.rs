@@ -104,6 +104,9 @@ pub struct NativeGameViewportController {
     pub mode: NativeViewportMode,
     pub render_style: NativeViewportRenderStyle,
     pub edit_mode: NativeViewportEditMode,
+    pub edit_notice: bool,
+    pub(crate) placement_notice: Option<&'static str>,
+    pub(crate) placement: Option<crate::authoring_placement::AssetPlacement>,
     pub selected: Vec<SceneNodeId>,
     pub grid_visible: bool,
     pub snap_to_grid: bool,
@@ -157,6 +160,9 @@ impl Default for NativeGameViewportController {
             mode: NativeViewportMode::View3d,
             render_style: NativeViewportRenderStyle::Solid,
             edit_mode: NativeViewportEditMode::Object,
+            edit_notice: false,
+            placement_notice: None,
+            placement: None,
             selected: Vec::new(),
             grid_visible: true,
             snap_to_grid: true,
@@ -272,6 +278,9 @@ impl NativeGameViewportController {
         rect: ViewportInputRect,
         scene: &mut SceneGraph,
     ) -> NativeViewportUpdate {
+        if self.placement.is_some() {
+            return self.update_asset_placement(input, rect, scene);
+        }
         self.selected.retain(|id| scene.is_valid_node(*id));
         let mut update = NativeViewportUpdate::default();
         let size = [rect.size[0].max(1.0), rect.size[1].max(1.0)];
@@ -480,6 +489,9 @@ impl NativeGameViewportController {
         }
         self.append_renderer_owned_gizmo(scene, &mut frame);
         self.append_collision_contact_outline(scene, &mut frame);
+        if let Some(placement) = &self.placement {
+            placement.append(&mut frame);
+        }
         frame
     }
 
@@ -491,6 +503,78 @@ impl NativeGameViewportController {
     ) -> SceneFrameOutput {
         let frame = self.build_scene_frame(scene, size);
         runtime.render_scene_frame(&frame)
+    }
+
+    fn update_asset_placement(
+        &mut self,
+        input: &InputSnapshot,
+        rect: ViewportInputRect,
+        scene: &mut SceneGraph,
+    ) -> NativeViewportUpdate {
+        let mut update = NativeViewportUpdate {
+            needs_redraw: true,
+            ..Default::default()
+        };
+        if input.key_pressed(InputKey::Escape) || !input.window_focused {
+            self.placement = None;
+            self.placement_notice = Some("assets.placement_cancelled");
+            return update;
+        }
+        let mut placement = self.placement.take().unwrap();
+        let point = input.pointer_position.filter(|p| rect.contains(*p));
+        placement.valid = false;
+        if let Some(pointer) = point {
+            self.bridge
+                .update_camera(self.mode == NativeViewportMode::View2d);
+            let local = rect.to_local(pointer);
+            let vp = self.bridge.view_projection(rect.size[0], rect.size[1]);
+            let hit = self
+                .bridge
+                .pick_surface(scene, &vp, local, rect.size)
+                .or_else(|| {
+                    let (origin, dir) = raf_render::math::transform::screen_to_world_ray(
+                        local[0],
+                        local[1],
+                        rect.size[0],
+                        rect.size[1],
+                        &vp.inverse(),
+                    )?;
+                    if dir.y.abs() < 1e-6 {
+                        return None;
+                    }
+                    // The grid's visual depth offset is not the construction floor.
+                    let t = -origin.y / dir.y;
+                    (t >= 0.0).then_some((origin + dir * t, Vec3::Y))
+                });
+            if let Some((point, normal)) = hit {
+                placement.support_at(point, normal);
+            }
+            placement.pressed |= input.button_pressed(PointerButton::Primary);
+        }
+        if input.button_released(PointerButton::Primary) && placement.pressed {
+            if placement.valid {
+                let before = scene.clone();
+                match placement.commit(scene) {
+                    Ok(id) => {
+                        self.selected = vec![id];
+                        self.completed_scene_edit_snapshot = Some(before);
+                        update.scene_changed = true;
+                        update.selection_changed = true;
+                        update.gesture_finished = true;
+                        self.placement_notice = Some("assets.placed");
+                    }
+                    Err(_) => {
+                        *scene = before;
+                        self.placement_notice = Some("assets.invalid_parent");
+                    }
+                }
+            } else {
+                self.placement_notice = Some("assets.placement_cancelled");
+            }
+        } else {
+            self.placement = Some(placement);
+        }
+        update
     }
 
     pub fn take_completed_scene_edit_snapshot(&mut self) -> Option<SceneGraph> {
@@ -546,15 +630,9 @@ impl NativeGameViewportController {
         } else if input.key_pressed(InputKey::F) && self.focus_lock_enabled {
             self.focus_selection(scene);
         } else if input.key_pressed(InputKey::Tab) && !self.selected.is_empty() {
-            self.edit_mode = match self.edit_mode {
-                NativeViewportEditMode::Object => NativeViewportEditMode::Vertex,
-                NativeViewportEditMode::Vertex => NativeViewportEditMode::Object,
-            };
+            self.edit_mode = NativeViewportEditMode::Object;
             self.bridge.clear_edit_drag_state();
-            if self.edit_mode == NativeViewportEditMode::Vertex {
-                self.bridge
-                    .prepare_selected_edit_mesh(scene, self.selected.first().copied());
-            }
+            self.edit_notice = true;
         }
         if input.key_pressed(InputKey::Numpad2) {
             self.mode = NativeViewportMode::View2d;
@@ -729,8 +807,9 @@ impl NativeGameViewportController {
             delta
         };
         for member in &drag.members {
+            let parent=scene.get(member.id).and_then(|node|node.parent).map(|id|scene.world_matrix(id)).unwrap_or(Mat4::IDENTITY);
             if let Some(node) = scene.get_mut(member.id) {
-                node.position = member.local_start + final_delta;
+                node.position = member.local_start + parent.inverse().transform_vector3(final_delta);
             }
         }
         drag.moved = true;
@@ -773,6 +852,7 @@ impl NativeGameViewportController {
         let members = if self.selected.len() > 1 && self.selected.contains(&picked) {
             self.selected
                 .iter()
+                .filter(|id| !self.selected.iter().any(|parent| *id != parent && building_mode::is_descendant_of_any(scene, **id, &[*parent])))
                 .filter_map(|id| {
                     scene
                         .get(*id)
@@ -828,8 +908,8 @@ impl NativeGameViewportController {
         let mut count = 0.0f32;
         let mut sum = Vec3::ZERO;
         for id in &members {
-            if let Some(node) = scene.get(*id) {
-                sum += node.position;
+            if scene.get(*id).is_some() {
+                sum += scene.world_matrix(*id).transform_point3(Vec3::ZERO);
                 count += 1.0;
             }
         }
@@ -855,6 +935,12 @@ impl NativeGameViewportController {
             .iter()
             .copied()
             .filter(|id| scene.get(*id).is_some_and(|node| !node.locked))
+            .filter(|id| {
+                !self
+                    .selected
+                    .iter()
+                    .any(|parent| parent != id && building_mode::is_descendant_of_any(scene, *id, &[*parent]))
+            })
             .collect()
     }
 
@@ -878,11 +964,7 @@ impl NativeGameViewportController {
             self.gesture_start = None;
             return;
         }
-        let pivot = if movers.len() == 1 {
-            movers[0].start_pos
-        } else {
-            movers.iter().fold(Vec3::ZERO, |acc, m| acc + m.start_pos) / movers.len() as f32
-        };
+        let pivot=movers.iter().map(|m|scene.world_matrix(m.id).transform_point3(Vec3::ZERO)).sum::<Vec3>() / movers.len() as f32;
         let mut start_union: Option<Aabb> = None;
         for mover in &movers {
             if let Some(bounds) = building_mode::mover_aabb(scene, mover.id) {
@@ -960,8 +1042,14 @@ impl NativeGameViewportController {
                 }
                 let offset = axis_direction(axis) * delta;
                 for mover in &gesture.movers {
+                    let parent = scene
+                        .get(mover.id)
+                        .and_then(|n| n.parent)
+                        .map(|id| scene.world_matrix(id))
+                        .unwrap_or(Mat4::IDENTITY);
                     if let Some(node) = scene.get_mut(mover.id) {
-                        node.position = mover.start_pos + offset;
+                        node.position =
+                            mover.start_pos + parent.inverse().transform_vector3(offset);
                     }
                 }
             }
@@ -983,14 +1071,33 @@ impl NativeGameViewportController {
                 }
                 let rotation = rotation_quat(axis, theta);
                 for mover in &gesture.movers {
-                    if let Some(node) = scene.get_mut(mover.id) {
-                        node.position =
-                            gesture.pivot + rotation * (mover.start_pos - gesture.pivot);
-                        set_axis_of(
-                            &mut node.rotation,
-                            axis,
-                            axis_of(mover.start_rotation, axis) + theta.to_degrees(),
+                    let parent = scene
+                        .get(mover.id)
+                        .and_then(|n| n.parent)
+                        .map(|id| scene.world_matrix(id))
+                        .unwrap_or(Mat4::IDENTITY);
+                    let start = Quat::from_euler(
+                        glam::EulerRot::YXZ,
+                        mover.start_rotation.y.to_radians(),
+                        mover.start_rotation.x.to_radians(),
+                        mover.start_rotation.z.to_radians(),
+                    );
+                    let desired = Mat4::from_translation(gesture.pivot)
+                        * Mat4::from_quat(rotation)
+                        * Mat4::from_translation(-gesture.pivot)
+                        * parent
+                        * Mat4::from_scale_rotation_translation(
+                            mover.start_scale,
+                            start,
+                            mover.start_pos,
                         );
+                    let (scale, orientation, position) =
+                        (parent.inverse() * desired).to_scale_rotation_translation();
+                    let (y, x, z) = orientation.to_euler(glam::EulerRot::YXZ);
+                    if let Some(node) = scene.get_mut(mover.id) {
+                        node.position = position;
+                        node.rotation = Vec3::new(x.to_degrees(), y.to_degrees(), z.to_degrees());
+                        node.scale = scale;
                     }
                 }
             }
@@ -1036,9 +1143,16 @@ impl NativeGameViewportController {
                 }
                 if uniform && multi {
                     for mover in &gesture.movers {
+                        let parent = scene
+                            .get(mover.id)
+                            .and_then(|n| n.parent)
+                            .map(|id| scene.world_matrix(id))
+                            .unwrap_or(Mat4::IDENTITY);
+                        let world = parent.transform_point3(mover.start_pos);
                         if let Some(node) = scene.get_mut(mover.id) {
-                            node.position =
-                                gesture.pivot + (mover.start_pos - gesture.pivot) * factor;
+                            node.position = parent
+                                .inverse()
+                                .transform_point3(gesture.pivot + (world - gesture.pivot) * factor);
                         }
                     }
                 }
@@ -1073,18 +1187,15 @@ impl NativeGameViewportController {
             GizmoAxis::Z => 2usize,
             GizmoAxis::None => return,
         };
+        let parent=scene.get(mover.id).and_then(|node|node.parent).map(|id|scene.world_matrix(id)).unwrap_or(Mat4::IDENTITY);
         let Some(node) = scene.get_mut(mover.id) else {
             return;
         };
         match self.bridge.gizmo().mode {
             GizmoMode::Translate => {
-                let raw = axis_of(node.position, axis) - axis_of(mover.start_pos, axis);
+                let raw = axis_of(parent.transform_vector3(node.position-mover.start_pos),axis);
                 let snapped = building_mode::snap_scalar(raw, self.grid_spacing);
-                set_axis_of(
-                    &mut node.position,
-                    axis,
-                    axis_of(mover.start_pos, axis) + snapped,
-                );
+                node.position=mover.start_pos+parent.inverse().transform_vector3(axis_direction(axis)*snapped);
             }
             GizmoMode::Rotate | GizmoMode::Scale => {}
         }
@@ -1113,8 +1224,14 @@ impl NativeGameViewportController {
         let start_union = gesture.start_union.unwrap_or_else(unbounded_aabb);
         match mode {
             GizmoMode::Translate => {
-                let raw_desired =
-                    axis_of(node.position, axis_index) - axis_of(mover.start_pos, axis_index);
+                let parent = node
+                    .parent
+                    .map(|id| scene.world_matrix(id))
+                    .unwrap_or(Mat4::IDENTITY);
+                let raw_desired = axis_of(
+                    parent.transform_vector3(node.position - mover.start_pos),
+                    axis_index,
+                );
                 // Quantize first so decimal pointer motion becomes fixed
                 // meter steps, then stop flush against the closest wall.
                 let snapped = building_mode::snap_scalar(raw_desired, step);
@@ -1122,11 +1239,10 @@ impl NativeGameViewportController {
                     building_mode::clamp_translation(start_union, &walls, axis_index, snapped);
                 mark_contact(&mut self.collision_contact, clamped, snapped);
                 if let Some(node) = scene.get_mut(mover.id) {
-                    set_axis_of(
-                        &mut node.position,
-                        axis_index,
-                        axis_of(mover.start_pos, axis_index) + clamped,
-                    );
+                    node.position = mover.start_pos
+                        + parent
+                            .inverse()
+                            .transform_vector3(axis_direction(axis_index) * clamped);
                 }
             }
             GizmoMode::Rotate => {
@@ -1151,46 +1267,94 @@ impl NativeGameViewportController {
                 }
             }
             GizmoMode::Scale => {
-                let raw = axis_of(node.scale, axis_index) - axis_of(mover.start_scale, axis_index);
-                let snapped = building_mode::snap_scalar(raw, step);
-                let sign = self.drag_face_sign();
-                let (min_shift, max_shift) = if self.uniform_scale_by_default {
-                    (-snapped * 0.5, snapped * 0.5)
-                } else if sign >= 0.0 {
-                    (0.0, snapped)
-                } else {
-                    (snapped, 0.0)
-                };
-                let (allowed_min, allowed_max) = building_mode::clamp_growth(
-                    start_union,
-                    &walls,
-                    axis_index,
-                    min_shift,
-                    max_shift,
+                let primitive = node.primitive;
+                let raw_scale = node.scale;
+                let parent = node
+                    .parent
+                    .map(|id| scene.world_matrix(id))
+                    .unwrap_or(Mat4::IDENTITY);
+                let rotation = Quat::from_euler(
+                    glam::EulerRot::YXZ,
+                    mover.start_rotation.y.to_radians(),
+                    mover.start_rotation.x.to_radians(),
+                    mover.start_rotation.z.to_radians(),
                 );
-                let allowed = if self.uniform_scale_by_default {
-                    (allowed_max - allowed_min) * snapped.signum()
-                } else if sign >= 0.0 {
-                    allowed_max
-                } else {
-                    allowed_min
-                };
-                mark_contact(&mut self.collision_contact, allowed, snapped);
-                if let Some(node) = scene.get_mut(mover.id) {
-                    let start_axis = axis_of(mover.start_scale, axis_index).abs().max(0.01);
-                    let new_axis = (start_axis + allowed).max(0.01);
-                    let delta = new_axis - start_axis;
-                    if self.uniform_scale_by_default {
-                        let factor = (new_axis / start_axis).max(0.05);
-                        node.scale = (mover.start_scale * factor).max(Vec3::splat(0.01));
-                    } else {
-                        let mut next = mover.start_scale;
-                        set_axis_of(&mut next, axis_index, new_axis);
-                        node.scale = next.max(Vec3::splat(0.01));
-                        node.position =
-                            mover.start_pos + axis_direction(axis_index) * (delta * 0.5 * sign);
-                    }
+                let local_axis = rotation * axis_direction(axis_index);
+                let unit = axis_of(primitive.descriptor().half_extents, axis_index) * 2.0;
+                let meters_per_scale = unit * parent.transform_vector3(local_axis).length();
+                if meters_per_scale <= 1e-6 {
+                    return;
                 }
+                let raw = axis_of(raw_scale - mover.start_scale, axis_index);
+                let delta =
+                    building_mode::snap_scalar(raw * meters_per_scale, step) / meters_per_scale;
+                let old = axis_of(mover.start_scale, axis_index);
+                let next_axis = old.signum() * (old.abs() + delta * old.signum()).max(0.01);
+                let mut desired = mover.start_scale;
+                if self.uniform_scale_by_default {
+                    desired *= next_axis / old;
+                } else {
+                    set_axis_of(&mut desired, axis_index, next_axis);
+                }
+                let sign = self.drag_face_sign();
+                let initial_overlaps = walls
+                    .iter()
+                    .filter(|wall| building_mode::penetrates_one(start_union, wall))
+                    .copied()
+                    .collect::<Vec<_>>();
+                let blockers = walls
+                    .iter()
+                    .filter(|wall| !initial_overlaps.contains(wall))
+                    .copied()
+                    .collect::<Vec<_>>();
+                let mut lo = 0.0f32;
+                let mut hi = 1.0f32;
+                let mut amount = 1.0;
+                let mut collision = false;
+                for _ in 0..18 {
+                    let scale = mover.start_scale + (desired - mover.start_scale) * amount;
+                    if let Some(node) = scene.get_mut(mover.id) {
+                        node.scale = scale;
+                        node.position = if self.uniform_scale_by_default {
+                            mover.start_pos
+                        } else {
+                            mover.start_pos
+                                + local_axis
+                                    * (axis_of(scale - mover.start_scale, axis_index)
+                                        * unit
+                                        * 0.5
+                                        * sign)
+                        };
+                    }
+                    let blocked = building_mode::mover_aabb(scene, mover.id)
+                        .is_some_and(|bounds| building_mode::penetrating(bounds, &blockers));
+                    if !blocked && amount == 1.0 {
+                        break;
+                    }
+                    if blocked {
+                        hi = amount;
+                        collision = true;
+                    } else {
+                        lo = amount;
+                    }
+                    amount = (lo + hi) * 0.5;
+                }
+                let scale = mover.start_scale
+                    + (desired - mover.start_scale) * if collision { lo } else { 1.0 };
+                if let Some(node) = scene.get_mut(mover.id) {
+                    node.scale = scale;
+                    node.position = if self.uniform_scale_by_default {
+                        mover.start_pos
+                    } else {
+                        mover.start_pos
+                            + local_axis
+                                * (axis_of(scale - mover.start_scale, axis_index)
+                                    * unit
+                                    * 0.5
+                                    * sign)
+                    };
+                }
+                self.collision_contact = collision;
             }
         }
     }
@@ -1539,6 +1703,31 @@ mod tests {
             node.position = Vec3::new(3.0, 0.0, 0.0);
         }
         (scene, mover, wall)
+    }
+
+    #[test]
+    fn authoring_face_scaling_keeps_anchor_with_rotation_and_parent_scale() {
+        let mut scene = SceneGraph::new();
+        let parent = scene.add_root("Parent");
+        scene.get_mut(parent).unwrap().scale = Vec3::new(2.0, 1.0, 3.0);
+        scene.get_mut(parent).unwrap().rotation.y = 30.0;
+        let id = scene.add_child_with_primitive(parent, "Capsule", Primitive::Capsule);
+        scene.get_mut(id).unwrap().rotation.z = 90.0;
+        let mut controller = organized_controller(id);
+        controller.uniform_scale_by_default = false;
+        controller.capture_gesture_start(&scene);
+        let before = scene
+            .world_matrix(id)
+            .transform_point3(Vec3::new(0.0, -1.0, 0.0));
+        scene.get_mut(id).unwrap().scale.y = 2.2;
+        controller.constrain_axis_drag(&mut scene, GizmoMode::Scale, GizmoAxis::Y);
+        let after = scene
+            .world_matrix(id)
+            .transform_point3(Vec3::new(0.0, -1.0, 0.0));
+        assert!(
+            (before - after).length() < 1e-4,
+            "opposite face moved: {before:?} -> {after:?}"
+        );
     }
 
     fn organized_controller(id: SceneNodeId) -> NativeGameViewportController {

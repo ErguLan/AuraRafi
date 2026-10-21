@@ -21,11 +21,11 @@ impl From<EnvironmentFrame> for Uniforms {
         let sky = env.settings.sky;
         Self {
             inverse_vp: env.inverse_view_projection.to_cols_array_2d(),
-            top: env.sky_top.extend(1.0).to_array(),
+            top: env.sky_top.extend(f32::from(env.improved())).to_array(),
             horizon: env.sky_horizon.extend(1.0).to_array(),
             ground: env.sky_ground.extend(1.0).to_array(),
             sun: (linear_color(env.settings.sun.color) * env.settings.sun.intensity)
-                .extend(1.0)
+                .extend(env.exposure())
                 .to_array(),
             direction: env
                 .sun_direction
@@ -171,22 +171,37 @@ struct Vertex { @builtin(position) position: vec4<f32>, @location(0) ndc: vec2<f
     let a = env.inverse_vp * vec4<f32>(input.ndc, 0.0, 1.0);
     let b = env.inverse_vp * vec4<f32>(input.ndc, 0.9, 1.0);
     let ray = normalize(b.xyz / b.w - a.xyz / a.w);
+    var footprint=0.0;
+    if env.top.w > 0.5 { footprint=length(fwidth(ray))*10.0; }
     var color = env.top.rgb;
     if env.params.x > 0.5 {
         color = mix(env.horizon.rgb, select(env.ground.rgb, env.top.rgb, ray.y >= 0.0), clamp(abs(ray.y), 0.0, 1.0));
     }
     if env.params.z > 0.0 && env.params.w > 0.0 {
-        color += vec3<f32>(0.72,0.86,1.0)*star_brightness(ray,env.params.z)*env.params.w;
+        var stars=0.0;
+        if env.top.w > 0.5 { stars=star_brightness_filtered(ray,env.params.z,footprint); }
+        else { stars=star_brightness(ray,env.params.z); }
+        color += vec3<f32>(0.72,0.86,1.0)*stars*env.params.w;
     }
     if env.params.y > 0.5 {
-        let disk = clamp((dot(ray, env.direction.xyz) - env.direction.w) / max(1.0 - env.direction.w, 0.0000001), 0.0, 1.0);
+        let disk_base = (dot(ray,env.direction.xyz)-env.direction.w) / max(1.0-env.direction.w,0.0000001);
+        var disk = clamp(disk_base,0.0,1.0);
+        if env.top.w > 0.5 { disk = smoothstep(-max(fwidth(disk_base),0.0001),1.0,disk_base); }
         color = mix(color, env.sun.rgb, disk);
     }
+    if env.top.w > 0.5 { color = improved_expose(color,env.sun.w); }
     return vec4<f32>(color, 1.0);
 }
 "#;
 fn sky_shader() -> String {
-    SKY_SHADER.replace("// STAR_FUNCTIONS", crate::sky_stars::WGSL)
+    SKY_SHADER.replace(
+        "// STAR_FUNCTIONS",
+        &format!(
+            "{}\n{}",
+            crate::sky_stars::WGSL,
+            crate::optimized_lighting::WGSL
+        ),
+    )
 }
 #[cfg(test)]
 mod tests {

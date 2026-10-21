@@ -120,6 +120,12 @@ impl Framebuffer {
     pub fn pixels(&self) -> &[u8] {
         unsafe { slice::from_raw_parts(self.color.as_ptr() as *const u8, self.color.len() * 4) }
     }
+    /// Mutable byte view of the owned color allocation; never aliases the depth buffer.
+    pub(crate) fn pixels_mut(&mut self) -> &mut [u8] {
+        unsafe {
+            slice::from_raw_parts_mut(self.color.as_mut_ptr() as *mut u8, self.color.len() * 4)
+        }
+    }
 
     /// Framebuffer width in pixels.
     pub fn width(&self) -> u32 {

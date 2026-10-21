@@ -1,8 +1,13 @@
 //! Native input and retained presentation for the application-wide Agent workspace.
 
+use crate::agent_preview::{AgentPreview, PreviewTarget};
 use crate::agent_service::AgentService;
+use crate::agent_workspace_layout::{
+    WorkspaceDivider, WorkspaceGeometry, WorkspaceLayout, WorkspaceResize,
+};
 use crate::agent_workspace_surface::{
-    build_workspace_surface, with_confirmation, EvidenceTab, WorkspaceConfirmation,
+    build_workspace_surface, build_workspace_surface_with_layout, with_confirmation, EvidenceTab,
+    WorkspaceConfirmation,
 };
 use crate::editor_layout::EditorRect;
 use crate::panels::ai_chat::AgentAction;
@@ -34,6 +39,11 @@ pub(crate) struct AgentWorkspaceSurfaceHost {
     evidence: EvidenceTab,
     review_open: bool,
     confirmation: Option<WorkspaceConfirmation>,
+    layout: WorkspaceLayout,
+    resize: WorkspaceResize,
+    pub preview: AgentPreview,
+    release_canvas: bool,
+    frame_requested: bool,
 }
 
 impl AgentWorkspaceSurfaceHost {
@@ -65,6 +75,11 @@ impl AgentWorkspaceSurfaceHost {
             evidence: EvidenceTab::Changes,
             review_open: rect.width >= 1200.0,
             confirmation: None,
+            layout: WorkspaceLayout::default(),
+            resize: WorkspaceResize::default(),
+            preview: AgentPreview::default(),
+            release_canvas: false,
+            frame_requested: false,
         }
     }
 
@@ -73,6 +88,8 @@ impl AgentWorkspaceSurfaceHost {
     }
 
     pub fn reset(&mut self, router: &mut InputRouter) {
+        self.resize.cancel(router);
+        self.preview.cancel_input(router);
         router.cancel_owner(self.owner());
         self.host
             .session_mut()
@@ -80,6 +97,64 @@ impl AgentWorkspaceSurfaceHost {
         self.scroll = 0.0;
         self.last_key.clear();
         self.confirmation = None;
+        self.frame_requested = true;
+    }
+
+    pub fn geometry(&self, service: &AgentService) -> WorkspaceGeometry {
+        let workspace = service.selected_workspace().filter(|w| !w.closing);
+        self.layout.resolve(
+            [self.rect.width, self.rect.height],
+            self.review_open && workspace.is_some(),
+            workspace.is_some_and(|w| w.panel.borrow().sidebar_open),
+        )
+    }
+
+    pub fn sync_preview(&mut self, service: &AgentService, now: Instant) {
+        let target = service
+            .selected_workspace()
+            .filter(|w| !w.closing && w.project.project_type == raf_core::ProjectType::Game)
+            .and_then(|w| {
+                let document = w
+                    .panel
+                    .borrow()
+                    .document_id()
+                    .unwrap_or(w.registry.active_session);
+                w.documents
+                    .contains_key(&document.0.to_string())
+                    .then(|| PreviewTarget {
+                        root: w.project.path.clone(),
+                        document,
+                    })
+            });
+        self.release_canvas |= self.preview.sync(
+            target,
+            self.review_open && self.evidence == EvidenceTab::Preview,
+            now,
+        );
+    }
+    pub fn close_preview(&mut self) {
+        if self.evidence == EvidenceTab::Preview {
+            self.evidence = EvidenceTab::Changes;
+            self.last_key.clear();
+        }
+        self.release_canvas |= self.preview.close();
+    }
+    pub fn suspend_preview_input(&mut self, router: &mut InputRouter) {
+        self.preview.cancel_input(router);
+        self.resize.cancel(router);
+    }
+    pub fn preview_rect(&self, service: &AgentService) -> Option<EditorRect> {
+        self.preview
+            .visible
+            .then(|| self.geometry(service).preview_rect())
+            .flatten()
+            .map(|r| EditorRect::new(self.rect.x + r.x, self.rect.y + r.y, r.width, r.height))
+    }
+    pub fn take_release_canvas(&mut self) -> bool {
+        std::mem::take(&mut self.release_canvas)
+    }
+    pub fn take_frame_request(&mut self) -> bool {
+        std::mem::take(&mut self.frame_requested)
     }
 
     pub fn sync(
@@ -91,6 +166,7 @@ impl AgentWorkspaceSurfaceHost {
         settings: &EngineSettings,
     ) {
         self.rect = rect;
+        self.sync_preview(service, Instant::now());
         let loading = service.loading()
             || (service
                 .selected
@@ -124,7 +200,7 @@ impl AgentWorkspaceSurfaceHost {
             )
         });
         let key = format!(
-            "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
+            "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
             rect,
             palette,
             settings.language,
@@ -136,6 +212,7 @@ impl AgentWorkspaceSurfaceHost {
             self.evidence,
             self.review_open,
             self.confirmation,
+            self.layout,
             (
                 settings.font_size,
                 settings.ui_scale,
@@ -153,7 +230,7 @@ impl AgentWorkspaceSurfaceHost {
                 rect.logical_size().map(|value| value as f32),
             ));
         self.host.set_surface(with_confirmation(
-            build_workspace_surface(
+            build_workspace_surface_with_layout(
                 palette,
                 service,
                 projects,
@@ -163,6 +240,7 @@ impl AgentWorkspaceSurfaceHost {
                 phase,
                 self.evidence,
                 self.review_open,
+                &self.layout,
             ),
             rect.logical_size().map(|v| v as f32),
             self.confirmation.as_ref(),
@@ -199,6 +277,43 @@ impl AgentWorkspaceSurfaceHost {
         settings: &mut EngineSettings,
     ) -> Vec<AgentWorkspaceIntent> {
         let language = settings.language;
+        if self.confirmation.is_none() {
+            let geometry = self.geometry(service);
+            // The splitter and camera acquire their own pointer ownership before
+            // RafUI sees the snapshot, preventing click-through into the chat.
+            let before = self.layout;
+            if self
+                .resize
+                .input(input.snapshot(), router, geometry, &mut self.layout)
+            {
+                if self.layout != before {
+                    self.last_key.clear();
+                    self.frame_requested = true;
+                }
+                return Vec::new();
+            }
+            if let Some(rect) = self.preview_rect(service) {
+                let snapshot = input.snapshot();
+                let hovered = snapshot.pointer_position.is_some_and(|p| {
+                    UiRect::new(rect.x, rect.y, rect.width, rect.height).contains(p)
+                });
+                if hovered && snapshot.button_pressed(raf_core::PointerButton::Secondary) {
+                    self.host.session_mut().interaction.focus.clear_focus();
+                    router.release_keyboard(self.owner());
+                }
+                let changed = self.preview.input(
+                    snapshot,
+                    router,
+                    UiRect::new(rect.x, rect.y, rect.width, rect.height),
+                );
+                self.frame_requested |= changed;
+                if self.preview.navigating || (hovered && snapshot.scroll_delta[1] != 0.0) {
+                    return Vec::new();
+                }
+            }
+        } else {
+            self.suspend_preview_input(router);
+        }
         let actions = self.host.process_routed_input(
             self.rect.logical_size(),
             input.scale_factor() as f32,
@@ -257,6 +372,47 @@ impl AgentWorkspaceSurfaceHost {
                     }
                 }
                 UiAction::Command { name } => match name.as_str() {
+                    "agent.workspace.tab.preview" => {
+                        self.evidence = EvidenceTab::Preview;
+                        self.review_open = true;
+                        self.layout.review = self.layout.review.max(480.0);
+                    }
+                    "agent.workspace.preview.close" => self.review_open = false,
+                    "agent.workspace.preview.fit" => {
+                        self.preview.request_fit();
+                        self.frame_requested = true;
+                    }
+                    name if name.starts_with("agent.workspace.resize.") => {
+                        if let Some((part, value)) = name
+                            .trim_start_matches("agent.workspace.resize.")
+                            .split_once(':')
+                        {
+                            let divider = match part {
+                                "projects" => Some(WorkspaceDivider::Projects),
+                                "sessions" => Some(WorkspaceDivider::Sessions),
+                                "review" => Some(WorkspaceDivider::Review),
+                                _ => None,
+                            };
+                            if let Some(divider) = divider {
+                                if value == "reset" {
+                                    let defaults = WorkspaceLayout::default();
+                                    match divider {
+                                        WorkspaceDivider::Projects => {
+                                            self.layout.projects = defaults.projects
+                                        }
+                                        WorkspaceDivider::Sessions => {
+                                            self.layout.sessions = defaults.sessions
+                                        }
+                                        WorkspaceDivider::Review => {
+                                            self.layout.review = defaults.review
+                                        }
+                                    }
+                                } else if let Ok(delta) = value.parse::<f32>() {
+                                    self.layout.adjust(divider, delta, self.geometry(service));
+                                }
+                            }
+                        }
+                    }
                     "agent.workspace.start-all" | "agent.workspace.close-all" => {
                         self.reset(router);
                         self.confirmation = Some(if name == "agent.workspace.start-all" {
@@ -378,6 +534,7 @@ impl AgentWorkspaceSurfaceHost {
                 _ => {}
             }
             self.last_key.clear();
+            self.frame_requested = true;
         }
         if !modal_was_open && self.confirmation.is_none() {
             if let Some(workspace) = service.selected_workspace().filter(|w| !w.closing) {
@@ -413,6 +570,9 @@ impl AgentWorkspaceSurfaceHost {
         self.host.has_active_text_repeat()
     }
     pub fn cursor_hint(&self) -> raf_ui::UiCursorIcon {
+        if self.resize.active() || self.resize.hovered.is_some() {
+            return raf_ui::UiCursorIcon::ResizeHorizontal;
+        }
         self.host.cursor_hint()
     }
     pub fn compositor_layer(&mut self, scale: f32, size: [u32; 2]) -> EditorUiLayer<'_> {

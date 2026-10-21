@@ -19,6 +19,7 @@ pub enum UiIconId {
     Grid,
     View2d,
     View3d,
+    ScenePreview,
     Shaded,
     Wireframe,
     Folder,
@@ -33,6 +34,7 @@ pub enum UiIconId {
     Sphere,
     Plane,
     Cylinder,
+    Capsule,
     Eye,
     EyeOff,
     Lock,
@@ -72,12 +74,14 @@ pub enum UiIconId {
     Warning,
     Error,
     Success,
+    Magnet,
+    Frame,
 }
 
 impl UiIconId {
     /// Every semantic icon in the family. Coverage tests and tooling iterate
     /// this instead of mirroring the enum by hand.
-    pub const ALL: [Self; 64] = [
+    pub const ALL: [Self; 68] = [
         Self::Select,
         Self::Move,
         Self::Rotate,
@@ -89,6 +93,7 @@ impl UiIconId {
         Self::Grid,
         Self::View2d,
         Self::View3d,
+        Self::ScenePreview,
         Self::Shaded,
         Self::Wireframe,
         Self::Folder,
@@ -103,6 +108,7 @@ impl UiIconId {
         Self::Sphere,
         Self::Plane,
         Self::Cylinder,
+        Self::Capsule,
         Self::Eye,
         Self::EyeOff,
         Self::Lock,
@@ -142,6 +148,8 @@ impl UiIconId {
         Self::Warning,
         Self::Error,
         Self::Success,
+        Self::Magnet,
+        Self::Frame,
     ];
 
     pub const fn key(self) -> &'static str {
@@ -157,6 +165,7 @@ impl UiIconId {
             Self::Grid => "grid",
             Self::View2d => "view-2d",
             Self::View3d => "view-3d",
+            Self::ScenePreview => "scene-preview",
             Self::Shaded => "shaded",
             Self::Wireframe => "wireframe",
             Self::Folder => "folder",
@@ -171,6 +180,7 @@ impl UiIconId {
             Self::Sphere => "sphere",
             Self::Plane => "plane",
             Self::Cylinder => "cylinder",
+            Self::Capsule => "capsule",
             Self::Eye => "eye",
             Self::EyeOff => "eye-off",
             Self::Lock => "lock",
@@ -210,6 +220,8 @@ impl UiIconId {
             Self::Warning => "warning",
             Self::Error => "error",
             Self::Success => "success",
+            Self::Magnet => "magnet",
+            Self::Frame => "frame",
         }
     }
 }
@@ -305,6 +317,6 @@ mod tests {
         keys.dedup();
 
         assert_eq!(keys.len(), UiIconId::ALL.len(), "icon keys must be unique");
-        assert_eq!(UiIconId::ALL.len(), 64);
+        assert_eq!(UiIconId::ALL.len(), 68);
     }
 }

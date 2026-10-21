@@ -2326,7 +2326,7 @@ fn mcp_semantic_tools() -> Vec<Value> {
                 vec![
                     ("query", json!({"type":"string"})),
                     ("root", json!({"type":"string","description":"Optional root ref, UUID, name or path to limit the query."})),
-                    ("primitive", json!({"type":"string","enum":["group","empty","cube","sphere","plane","cylinder"]})),
+                    ("primitive", json!({"type":"string","enum":["group","empty","cube","sphere","plane","cylinder", "capsule"]})),
                     ("semantic_role", json!({"type":"string","description":"Exact role or parent role prefix."})),
                     ("tags", json!({"type":"array","items":{"type":"string"},"maxItems":32})),
                     ("match_all_tags", json!({"type":"boolean"})),
@@ -2518,7 +2518,7 @@ fn mcp_semantic_tools() -> Vec<Value> {
                     ("expected", json!({
                         "type":"object",
                         "properties": {
-                            "primitive": {"type":"string","enum":["empty","cube","sphere","plane","cylinder","group"]},
+                            "primitive": {"type":"string","enum":["empty","cube","sphere","plane","cylinder", "capsule","group"]},
                             "transform": transform_schema(),
                             "color_rgba": {"type":"array","minItems":3,"maxItems":4,"items":{"type":"integer","minimum":0,"maximum":255}},
                             "parent": {"type":"string"}
@@ -2692,17 +2692,18 @@ fn scene_create_properties() -> Vec<(&'static str, Value)> {
         ("name", json!({"type":"string","minLength":1})),
         (
             "kind",
-            json!({"type":"string","enum":["empty","cube","sphere","plane","cylinder"]}),
+            json!({"type":"string","enum":["empty","cube","sphere","plane","cylinder", "capsule"]}),
         ),
         (
             "primitive",
-            json!({"type":"string","enum":["empty","cube","sphere","plane","cylinder"]}),
+            json!({"type":"string","enum":["empty","cube","sphere","plane","cylinder","capsule"]}),
         ),
         ("parent", json!({"type":"string"})),
         ("transform", transform_schema()),
         ("position", vec3_schema()),
         ("rotation_deg", vec3_schema()),
         ("scale", vec3_schema()),
+        ("size", vec3_schema()),
         (
             "color_rgba",
             json!({"type":"array","minItems":3,"maxItems":4,"items":{"type":"integer","minimum":0,"maximum":255}}),

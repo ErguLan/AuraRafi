@@ -1,4 +1,91 @@
-# Lighting deliveries 1–2
+# Lighting and bounded optimized technologies
+
+## Optimized technology modes (2026-10-19)
+
+**Hierarchy > Lighting > Technologies** exposes exactly two choices:
+**Optimized current** and **Optimized improved**. They select implementation,
+not art style or hardware ownership. Neutral/Scene remains independent. Missing
+technology fields deserialize to Current; projects are never silently upgraded.
+
+Improved adds hemispheric ambient response, optional softened cel transitions
+(`sun.toon_softness`, 0..1), and linear-light exposure (`exposure`, 0.1..4) with
+a bounded highlight shoulder. These two controls are inactive in Current.
+Spare uniform channels carry the values without increasing uniform sizes. The
+existing sky pass filters procedural stars using pixel footprint and smooths
+the solar disk. No atmosphere, cubemap, GI, bloom or volumetric pass is added.
+
+The scene-only five-tap spatial filter is our small corner-sensitive filter,
+**not FXAA or MSAA**. It preserves flat fields, axis-aligned edges and alpha;
+it does not use motion vectors/history, recover missing geometry/texture detail
+or filter RafUI text. GPU execution needs one additional RGBA8 scene target and
+one fullscreen pass. CPU recovery uses one reusable RGBA8 scratch image. Each
+owner admits at most min(64 MiB, configured graphics budget / 16); denial skips
+the filter and reports it, rather than allocating beyond that allowance.
+Current frees the filter resources and submits no filter pass. The first
+activation builds the private GPU pipeline synchronously; reactivation can pay
+that setup cost again. No new timer, simulation job or forced redraw is added.
+
+Improved shadows still use **one** directional map with the existing resolution,
+caster/work and memory limits. Camera-frustum receiver fitting, texel snapping
+and projection-aware slope bias improve its utilization. Hard filtering remains
+one comparison; Soft filtering is bounded to nine comparisons (Current keeps
+four). Existing distance fade and selective geometry-cache ownership remain.
+Fitting is not a cascade/PCSS implementation and can still shimmer on rotation
+or rapid Sun movement. A larger solar disk does not create physical penumbrae.
+CPU recovery remains capped at 256-square shadow depth and approximates ambient
+normals per triangle, versus GPU per-fragment normals.
+
+`SceneFrameMetrics.optimized_filter_*` reports pass count, retained bytes and
+admission denial. Overall scene GPU timestamps include the filter. Native
+presentation may still use dynamic internal-resolution scaling: this filter
+does not override the user's budget or make up detail lost by upscaling.
+
+The existing property catalog exposes the new paths to authoring commands,
+Agent/CLI/MCP and world/local-view scripting without a separate control API:
+
+```rhai
+set_environment("technology", "optimized_improved");
+set_environment("exposure", 1.0);
+set_environment("sun.toon_softness", 0.35);
+set_view_environment("shadows.soft_filter", true);
+```
+
+Optional real-project A/B QA: set `RAF_LIGHTING_PROJECTS` to semicolon-separated
+project directories, `RAF_LIGHTING_QA_DIR` to an artifact directory, and run the
+`optimized_project_ab_read_only_captures` renderer test. `RAF_REQUIRE_GPU_QA=1`
+makes adapter unavailability a failure instead of a reported skip. QA strictly
+decodes the active saved scene, uses its authored camera (or an explicitly
+reported QA default), captures both backends at 720x450, toggles only technology
+in memory, and asserts the scene file is unchanged. It does not start Play or
+execute scripts. Warm debug offscreen CPU/GPU timing samples are diagnostics,
+not native-window, release or low-end performance acceptance.
+
+Historical delivery notes below describe Current unless stated otherwise.
+
+### Optimized modes verification (2026-10-19)
+
+- Core library: 93 tests passed. Renderer library: 307 tests passed, repeated
+  after the CPU filter fast path. GPU was required for optimized acceptance;
+  actual GPU/CPU readback, filter admission/release/resize, migration, shaders,
+  shadow cache/fitting and CPU triangle coverage passed.
+- Read-only Amazing project / Project Linis captures and per-capture JSON were
+  generated under `artifacts/lighting-optimized-20261019`. Both scenes retained
+  their saved content. All eight project PNG hashes stayed identical after
+  bypassing mathematically zero-strength CPU filter work.
+- Saved configurations differ: Amazing uses Scene lighting, Adaptive resolution
+  and Adaptive texture quality; Linis uses Neutral, FullResolution and Detailed
+  textures. A/B captures hold camera, size and authored settings constant within
+  each project and change technology only. They do not prove the original
+  perceived blur was caused by Lighting or reproduce script-driven Play.
+- At 720x450, the optional image target is 1296000 bytes. Hardware timestamp
+  samples were approximately 0.32 to 0.63 ms for the Amazing fixture. Concurrent
+  work heavily varied CPU wall times; these small debug samples are not a
+  controlled benchmark, native presentation timing or potato-hardware promise.
+- Full Editor verification was blocked by concurrent unrelated compiler errors
+  in authoring, Electronics and Runtime code. No native-window, DPI, interactive
+  selector or rebuilt-editor acceptance is claimed. The added panel tests still
+  need to run once the full Editor build is clear; those other changes were not
+  repaired as part of Lighting.
 
 ## Instrument presentation update (2026-10-16)
 

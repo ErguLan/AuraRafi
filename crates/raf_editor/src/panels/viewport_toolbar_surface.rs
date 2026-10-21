@@ -734,6 +734,7 @@ fn viewport_primitive_option(palette: StudioUiPalette, primitive: Primitive) -> 
             Primitive::Cube => UiIconId::Cube,
             Primitive::Sphere => UiIconId::Sphere,
             Primitive::Cylinder => UiIconId::Cylinder,
+            Primitive::Capsule => UiIconId::Capsule,
             Primitive::Plane => UiIconId::Plane,
             Primitive::Empty => UiIconId::Node,
         })

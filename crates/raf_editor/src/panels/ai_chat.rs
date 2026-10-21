@@ -86,6 +86,7 @@ pub struct AgentPanel {
     pub tools: Vec<OpenAiTool>,
     pub tool_routes: std::collections::HashMap<String, AgentToolRoute>,
     pub input_text: String,
+    pub(crate) authoring_parent: Option<String>,
     pub selected_model: String,
     pub sidebar_open: bool,
     pub new_model_label: String,
@@ -136,6 +137,7 @@ impl Default for AgentPanel {
             tools: Vec::new(),
             tool_routes: std::collections::HashMap::new(),
             input_text: String::new(),
+            authoring_parent: None,
             selected_model: AgentModelRegistry::PROVIDER_DEFAULT.to_string(),
             sidebar_open: true,
             new_model_label: String::new(),
@@ -553,6 +555,9 @@ impl AgentPanel {
         self.tools = pack.tools;
         self.tool_routes = pack.routes;
         self.system_prompt = build_agent_system_prompt(snapshot, mode.label(), self.language);
+        if let Some(parent) = &self.authoring_parent {
+            self.system_prompt.push_str(&format!("\nAuthoring insertion scope: {}. Use this parent for new objects unless the user specifies another parent.", serde_json::json!({ "path": parent })));
+        }
         self.runtime.set_system_prompt(self.system_prompt.clone());
         self.runtime.set_initial_tool_context(
             "project_summary",

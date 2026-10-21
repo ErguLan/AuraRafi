@@ -32,6 +32,16 @@ impl Default for NativeUiInputBridge {
 }
 
 impl NativeUiInputBridge {
+    /// Raw device events must only be forwarded by the focused runtime host.
+    pub fn ingest_relative_motion(&mut self, delta: (f64, f64)) {
+        if self.snapshot.window_focused && delta.0.is_finite() && delta.1.is_finite() {
+            for (axis, value) in [delta.0, delta.1].into_iter().enumerate() {
+                self.snapshot.relative_pointer_delta[axis] =
+                    (self.snapshot.relative_pointer_delta[axis] + value as f32)
+                        .clamp(-1_000_000.0, 1_000_000.0);
+            }
+        }
+    }
     pub fn begin_frame(&mut self) {
         self.snapshot.clear_transient();
         self.clipboard_paste = None;
@@ -139,12 +149,24 @@ impl NativeUiInputBridge {
             }
             WindowEvent::ModifiersChanged(modifiers) => {
                 let modifiers = modifiers.state();
-                self.snapshot.modifiers = InputModifiers {
+                let next = InputModifiers {
                     shift: modifiers.shift_key(),
                     control: modifiers.control_key(),
                     alt: modifiers.alt_key(),
                     command: modifiers.super_key(),
                 };
+                let old = self.snapshot.modifiers;
+                let pressed = &mut self.snapshot.modifiers_pressed;
+                pressed.shift |= next.shift && !old.shift;
+                pressed.control |= next.control && !old.control;
+                pressed.alt |= next.alt && !old.alt;
+                pressed.command |= next.command && !old.command;
+                let released = &mut self.snapshot.modifiers_released;
+                released.shift |= old.shift && !next.shift;
+                released.control |= old.control && !next.control;
+                released.alt |= old.alt && !next.alt;
+                released.command |= old.command && !next.command;
+                self.snapshot.modifiers = next;
                 true
             }
             WindowEvent::Ime(Ime::Commit(text)) => {

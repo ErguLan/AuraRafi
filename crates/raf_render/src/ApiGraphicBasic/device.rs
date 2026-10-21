@@ -20,7 +20,7 @@ use crate::api_graphic_basic::resource_registry::{
 };
 use crate::render_pipeline::framebuffer::Framebuffer;
 use crate::scene_renderer::{rasterize_basic_scene_frame, SceneRenderFrame};
-use crate::shaders::BASIC_SCENE_WGSL;
+use crate::shaders::basic_scene_shader;
 use crate::texture::CpuTexture;
 
 /// Supported execution backends.
@@ -92,6 +92,10 @@ impl GpuTextureView {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct SceneFrameMetrics {
+    /// One optional scene-only spatial pass, never a RafUI pass.
+    pub optimized_filter_draw_calls: u32,
+    pub optimized_filter_resident_bytes: u64,
+    pub optimized_filter_budget_exceeded: bool,
     pub frame_cpu_ms: f32,
     pub gpu_frame_ms: f32,
     pub gpu_timing_supported: bool,
@@ -141,6 +145,7 @@ pub struct SceneFrameMetrics {
 impl SceneFrameMetrics {
     pub const fn total_draw_calls(self) -> u32 {
         self.mesh_draw_calls
+            .saturating_add(self.optimized_filter_draw_calls)
             .saturating_add(self.line_draw_calls)
             .saturating_add(self.overlay_draw_calls)
             .saturating_add(self.environment_draw_calls)
@@ -243,6 +248,7 @@ impl BasicDeviceConfig {
 /// Orchestrates commands recording and maps them onto the active execution backend (GPU or CPU).
 #[allow(dead_code)]
 pub struct BasicDevice {
+    cpu_filter_scratch: Vec<u8>,
     backend: BasicBackendType,
     capabilities: GraphicsCapabilities,
     memory_budget: GraphicsMemoryBudget,
@@ -277,6 +283,7 @@ impl BasicDevice {
                     ),
                     memory_budget: config.memory_budget,
                     gpu_scene: Some(GpuSceneState::new(&device, &queue, config.memory_budget)),
+                    cpu_filter_scratch: Vec::new(),
                     last_scene_frame_ready: false,
                     last_frame_metrics: SceneFrameMetrics::default(),
                     wgpu_instance: None,
@@ -303,6 +310,7 @@ impl BasicDevice {
                     memory_budget: config.memory_budget,
                     framebuffer: Framebuffer::new(1, 1),
                     gpu_scene: Some(gpu_scene),
+                    cpu_filter_scratch: Vec::new(),
                     last_scene_frame_ready: false,
                     last_frame_metrics: SceneFrameMetrics::default(),
                     wgpu_instance: Some(gpu_state.instance),
@@ -323,6 +331,7 @@ impl BasicDevice {
             memory_budget: config.memory_budget,
             framebuffer: Framebuffer::new(1, 1),
             gpu_scene: None,
+            cpu_filter_scratch: Vec::new(),
             last_scene_frame_ready: false,
             last_frame_metrics: SceneFrameMetrics::default(),
             wgpu_instance: None,
@@ -441,7 +450,11 @@ impl BasicDevice {
         });
         encoder.copy_texture_to_buffer(
             wgpu::ImageCopyTexture {
-                texture: &target._color_texture,
+                texture: gpu_scene
+                    .optimized_filter
+                    .as_ref()
+                    .map(|f| &f.texture)
+                    .unwrap_or(&target._color_texture),
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -580,8 +593,35 @@ impl BasicDevice {
         }
         let shadow_prepare_cpu_ms = shadow_start.elapsed().as_secs_f32() * 1000.0;
         rasterize_basic_scene_frame(frame, &mut self.framebuffer);
+        let filter_bytes = frame.width as u64 * frame.height as u64 * 4;
+        let filter_admitted = frame.commands.optimized_improved
+            && filter_bytes <= (self.memory_budget.gpu_bytes / 16).min(64 * 1024 * 1024);
+        if filter_admitted {
+            if self.cpu_filter_scratch.capacity() as u64 != filter_bytes {
+                self.cpu_filter_scratch = Vec::new();
+                self.cpu_filter_scratch.reserve_exact(filter_bytes as usize);
+            }
+            self.cpu_filter_scratch.resize(filter_bytes as usize, 0);
+            self.cpu_filter_scratch
+                .copy_from_slice(self.framebuffer.pixels());
+            crate::optimized_filter::filter_rgba(
+                &self.cpu_filter_scratch,
+                self.framebuffer.pixels_mut(),
+                frame.width,
+                frame.height,
+            );
+        } else {
+            self.cpu_filter_scratch = Vec::new();
+        }
         let command_stats = frame.commands.stats();
         self.last_frame_metrics = SceneFrameMetrics {
+            optimized_filter_draw_calls: u32::from(filter_admitted),
+            optimized_filter_resident_bytes: if filter_admitted {
+                self.cpu_filter_scratch.capacity() as u64
+            } else {
+                0
+            },
+            optimized_filter_budget_exceeded: frame.commands.optimized_improved && !filter_admitted,
             frame_cpu_ms: frame_start.elapsed().as_secs_f32() * 1000.0,
             command_count: command_stats.command_count,
             mesh_instances: command_stats.mesh_instances,
@@ -1139,6 +1179,8 @@ impl GpuTimestampState {
 mod shadow_gpu;
 
 struct GpuSceneState {
+    optimized_filter: Option<super::optimized_filter_gpu::OptimizedFilterGpu>,
+    optimized_filter_memory_budget: u64,
     shadows: Option<shadow_gpu::ShadowGpuState>,
     shadow_receiver: bool,
     shadow_memory_budget: u64,
@@ -1265,7 +1307,7 @@ impl GpuSceneState {
         let color_format = wgpu::TextureFormat::Rgba8UnormSrgb;
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ApiGraphicBasic.SceneShader"),
-            source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(BASIC_SCENE_WGSL)),
+            source: wgpu::ShaderSource::Wgsl(Cow::Owned(basic_scene_shader())),
         });
 
         let mesh_bind_group_layout =
@@ -1520,6 +1562,8 @@ impl GpuSceneState {
 
         Self {
             color_format,
+            optimized_filter: None,
+            optimized_filter_memory_budget: (memory_budget.gpu_bytes / 16).min(64 * 1024 * 1024),
             environment: None,
             shadows: None,
             shadow_receiver: true,
@@ -1957,6 +2001,30 @@ impl GpuSceneState {
             }
         }
 
+        let filter_bytes = frame.width as u64 * frame.height as u64 * 4;
+        if frame.commands.optimized_improved && filter_bytes <= self.optimized_filter_memory_budget
+        {
+            if target_rebuilt
+                || self
+                    .optimized_filter
+                    .as_ref()
+                    .is_none_or(|f| f.size != [frame.width, frame.height])
+            {
+                self.optimized_filter = None;
+                self.optimized_filter = Some(super::optimized_filter_gpu::OptimizedFilterGpu::new(
+                    device,
+                    color_view.as_ref(),
+                    [frame.width, frame.height],
+                    self.color_format,
+                ));
+            }
+            self.optimized_filter.as_ref().unwrap().encode(&mut encoder);
+            metrics.optimized_filter_draw_calls = 1;
+            metrics.optimized_filter_resident_bytes = filter_bytes;
+        } else {
+            self.optimized_filter = None;
+            metrics.optimized_filter_budget_exceeded = frame.commands.optimized_improved;
+        }
         if let Some((_, query_set, resolve_buffer, readback)) = timestamp_plan.as_ref() {
             encoder.write_timestamp(query_set.as_ref(), 1);
             encoder.resolve_query_set(query_set.as_ref(), 0..2, resolve_buffer.as_ref(), 0);
@@ -1991,7 +2059,10 @@ impl GpuSceneState {
         Some((
             SceneFrameOutput::GpuTexture {
                 view: GpuTextureView::from_wgpu(
-                    color_view,
+                    self.optimized_filter
+                        .as_ref()
+                        .map(|f| Arc::clone(&f.view))
+                        .unwrap_or(color_view),
                     TextureHandle::new(0, self.target_generation),
                 ),
                 width: frame.width,
@@ -2173,7 +2244,16 @@ impl GpuSceneState {
             model: transform.to_cols_array_2d(),
             normal_matrix: gpu_normal_matrix(transform),
             color: rgba8_to_f32(color),
-            light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
+            light_dir: [
+                frame.light_dir.x,
+                frame.light_dir.y,
+                frame.light_dir.z,
+                frame
+                    .commands
+                    .environment
+                    .map(|e| e.softness())
+                    .unwrap_or(0.0),
+            ],
             sun: frame
                 .commands
                 .environment
@@ -2182,7 +2262,7 @@ impl GpuSceneState {
             ambient: frame
                 .commands
                 .environment
-                .map(|env| env.ambient.extend(1.0).to_array())
+                .map(|env| env.ambient.extend(env.exposure()).to_array())
                 .unwrap_or([0.0; 4]),
             params: [
                 if lit { 1.0 } else { 0.0 },
@@ -2364,7 +2444,16 @@ impl GpuSceneState {
             model: glam::Mat4::IDENTITY.to_cols_array_2d(),
             normal_matrix: glam::Mat4::IDENTITY.to_cols_array_2d(),
             color: [1.0; 4],
-            light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
+            light_dir: [
+                frame.light_dir.x,
+                frame.light_dir.y,
+                frame.light_dir.z,
+                frame
+                    .commands
+                    .environment
+                    .map(|e| e.softness())
+                    .unwrap_or(0.0),
+            ],
             sun: frame
                 .commands
                 .environment
@@ -2373,7 +2462,7 @@ impl GpuSceneState {
             ambient: frame
                 .commands
                 .environment
-                .map(|env| env.ambient.extend(1.0).to_array())
+                .map(|env| env.ambient.extend(env.exposure()).to_array())
                 .unwrap_or([0.0; 4]),
             params: [
                 if lit { 1.0 } else { 0.0 },
@@ -2576,7 +2665,16 @@ impl GpuSceneState {
             model: transform.to_cols_array_2d(),
             normal_matrix: gpu_normal_matrix(transform),
             color: rgba8_to_f32(color),
-            light_dir: [frame.light_dir.x, frame.light_dir.y, frame.light_dir.z, 0.0],
+            light_dir: [
+                frame.light_dir.x,
+                frame.light_dir.y,
+                frame.light_dir.z,
+                frame
+                    .commands
+                    .environment
+                    .map(|e| e.softness())
+                    .unwrap_or(0.0),
+            ],
             sun: frame
                 .commands
                 .environment
@@ -2585,7 +2683,7 @@ impl GpuSceneState {
             ambient: frame
                 .commands
                 .environment
-                .map(|env| env.ambient.extend(1.0).to_array())
+                .map(|env| env.ambient.extend(env.exposure()).to_array())
                 .unwrap_or([0.0; 4]),
             params: [
                 if lit { 1.0 } else { 0.0 },
@@ -3023,6 +3121,98 @@ mod tests {
     use crate::api_graphic_basic::command_list::BasicCommandList;
     use crate::scene_renderer::FrameStats;
     use glam::{Mat4, Vec3};
+
+    #[test]
+    fn optimized_modes_restore_pixels_release_filter_resize_and_report_denied_admission() {
+        use raf_core::environment::LightingTechnology;
+        for gpu in [false, true] {
+            let mut device = BasicDevice::new(BasicDeviceConfig {
+                allow_gpu: gpu,
+                force_cpu: !gpu,
+                ..Default::default()
+            });
+            if gpu && device.capabilities().backend != GraphicsBackendId::Wgpu {
+                assert!(
+                    std::env::var_os("RAF_REQUIRE_GPU_QA").is_none(),
+                    "GPU QA required but unavailable"
+                );
+                eprintln!("Optimized GPU QA SKIPPED: no adapter");
+                continue;
+            }
+            let (mut scene, _, _) = crate::shadow_frame::tests::fixture();
+            let mut renderer = crate::scene_renderer::SceneRenderer::new(128, 128);
+            let current = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+            device.execute_scene_frame(&current);
+            let baseline = device.capture_last_scene_rgba().unwrap().rgba8;
+            assert_eq!(
+                device.last_frame_metrics().optimized_filter_resident_bytes,
+                0
+            );
+            let mut env = *scene.environment();
+            env.technology = LightingTechnology::OptimizedImproved;
+            env.shadows.soft_filter = true;
+            scene.set_environment(env);
+            let improved = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+            device.execute_scene_frame(&improved);
+            let upgraded = device.capture_last_scene_rgba().unwrap().rgba8;
+            assert_ne!(
+                baseline, upgraded,
+                "improved mode must affect real pixels GPU={gpu}"
+            );
+            assert_eq!(device.last_frame_metrics().optimized_filter_draw_calls, 1);
+            assert_eq!(
+                device.last_frame_metrics().optimized_filter_resident_bytes,
+                128 * 128 * 4
+            );
+            device.execute_scene_frame(&improved);
+            assert_eq!(upgraded, device.capture_last_scene_rgba().unwrap().rgba8);
+            assert_eq!(device.last_frame_metrics().shadow_map_rebuilds, 0);
+            assert_eq!(device.last_frame_metrics().shadow_cache_hits, 1);
+            // Exercise target replacement while the filter owns the old source binding.
+            let mut resized = improved.clone();
+            resized.width = 96;
+            resized.height = 64;
+            device.execute_scene_frame(&resized);
+            let captured = device.capture_last_scene_rgba().unwrap();
+            assert_eq!(
+                (captured.width, captured.height, captured.rgba8.len()),
+                (96, 64, 96 * 64 * 4)
+            );
+            assert_eq!(
+                device.last_frame_metrics().optimized_filter_resident_bytes,
+                96 * 64 * 4
+            );
+            if gpu {
+                device
+                    .gpu_scene
+                    .as_mut()
+                    .unwrap()
+                    .optimized_filter_memory_budget = 1;
+            } else {
+                device.memory_budget.gpu_bytes = 16;
+            }
+            device.execute_scene_frame(&improved);
+            assert!(device.last_frame_metrics().optimized_filter_budget_exceeded);
+            assert_eq!(
+                device.last_frame_metrics().optimized_filter_resident_bytes,
+                0
+            );
+            device.execute_scene_frame(&current);
+            assert_eq!(baseline, device.capture_last_scene_rgba().unwrap().rgba8);
+            assert_eq!(device.last_frame_metrics().optimized_filter_draw_calls, 0);
+            assert!(!device.last_frame_metrics().optimized_filter_budget_exceeded);
+            if gpu {
+                assert!(device
+                    .gpu_scene
+                    .as_ref()
+                    .unwrap()
+                    .optimized_filter
+                    .is_none());
+            } else {
+                assert_eq!(device.cpu_filter_scratch.capacity(), 0);
+            }
+        }
+    }
 
     #[test]
     fn stylized_stars_and_toon_change_real_pixels_on_cpu_and_gpu() {

@@ -4,6 +4,137 @@
 //! documents from [`AssetsSurfaceParams`] and emits commands. Filesystem work,
 //! focus and transient state live in the host and in the application boundary.
 
+fn find_node_mut<'a>(node: &'a mut UiNode, id: &str) -> Option<&'a mut UiNode> {
+    if node.id == id {
+        return Some(node);
+    }
+    node.children
+        .iter_mut()
+        .find_map(|child| find_node_mut(child, id))
+}
+
+fn decorate_asset_card(
+    mut card: UiNode,
+    visual: Option<&AssetVisual>,
+    view: AssetViewMode,
+    language: raf_core::Language,
+) -> UiNode {
+    use crate::asset_previews::PreviewState;
+    let Some(visual) = visual else {
+        return card;
+    };
+    if view == AssetViewMode::Grid {
+        if let Some(icon) = card
+            .children
+            .iter_mut()
+            .find(|node| node.id.ends_with(".icon"))
+        {
+            icon.layout.basis[1] = 64.0;
+        }
+        let icon = match &visual.preview {
+            PreviewState::Loading => Some(UiIconId::Refresh),
+            PreviewState::Error(_) => Some(UiIconId::Warning),
+            _ => None,
+        };
+        if let Some(icon) = icon {
+            card.children.push(
+                UiNode::new(format!("{}.preview-state", card.id), UiNodeKind::Label)
+                    .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
+                    .with_layout(UiLayout {
+                        position_mode: raf_ui::UiPositionMode::Absolute,
+                        rect: Some(raf_ui::UiRect::new(88.0, 8.0, 16.0, 16.0)),
+                        z_index: 1,
+                        ..Default::default()
+                    }),
+            );
+        }
+    }
+    if let raf_assets::authoring_catalog::AssetClass::Shape(shape)=visual.entry.class {
+        if let Some(label)=card.children.iter_mut().find(|node|node.id.ends_with(".label")) {
+            label.text_value=None;
+            label.text_key=Some(shape.descriptor().label_key.to_string());
+        }
+        card.accessibility_label_key=Some(shape.descriptor().label_key.to_string());
+    }
+    let mut info = format!(
+        "{}\n{}: {}",
+        visual.entry.path,
+        raf_core::i18n::t("assets.usages", language),
+        visual.entry.usages
+    );
+    let (state, detail) = match &visual.preview {
+        PreviewState::Ready { key, dimensions } => {
+            if let Some(icon) = card.children.iter_mut().find(|n| n.id.ends_with(".icon")) {
+                let layout = icon.layout.clone();
+                *icon = UiNode::image(
+                    icon.id.clone(),
+                    raf_ui::UiImage {
+                        source: raf_ui::UiImageSource::new(key),
+                        fit: raf_ui::UiImageFit::Contain,
+                        tint: None,
+                    },
+                )
+                .with_layout(layout);
+                if view == AssetViewMode::Grid {
+                    icon.layout.basis[1] = 64.0;
+                }
+            }
+            let dimensions = dimensions
+                .or(visual.entry.dimensions)
+                .map(|s| format!("\n{:.2} × {:.2} × {:.2} m", s[0], s[1], s[2]))
+                .unwrap_or_default();
+            ("assets.preview_ready", dimensions)
+        }
+        PreviewState::Loading => ("assets.preview_loading", String::new()),
+        PreviewState::Error(error) => ("assets.preview_error", format!("\n{error}")),
+        PreviewState::Unavailable(key) => (*key, String::new()),
+    };
+    info.push_str(&format!(
+        "\n{}{}",
+        raf_core::i18n::t(state, language),
+        detail
+    ));
+    card.tooltip_value = Some(info);
+    card
+}
+
+fn append_asset_actions(bar: &mut UiNode, visual: &AssetVisual, palette: StudioUiPalette) {
+    use raf_assets::authoring_catalog::AssetClass;
+    let entry = &visual.entry;
+    let mut actions = Vec::new();
+    if entry.insertable() {
+        actions.push((
+            "assets.insert",
+            UiIconId::Add,
+            format!("assets.insert:{}", entry.path),
+        ));
+    }
+    if entry.class == AssetClass::Image && visual.can_apply_texture {
+        actions.push((
+            "assets.apply_texture",
+            UiIconId::Shaded,
+            format!("assets.apply-texture:{}", entry.path),
+        ));
+    }
+    actions.push((
+        "assets.view_usages",
+        UiIconId::Search,
+        format!("assets.usages:{}", entry.path),
+    ));
+    for (key, icon, command) in actions {
+        bar.children.push(
+            UiNode::new(format!("assets.capability.{key}"), UiNodeKind::Button)
+                .with_class("asset-card-action")
+                .with_layout(UiLayout::fixed(26.0, 24.0))
+                .with_icon(UiIcon::new(icon).with_tint(palette.tokens().text))
+                .with_tooltip_key(key)
+                .with_accessibility_label_key(key)
+                .focusable()
+                .with_event(UiEventBinding::command(UiEventKind::Click, command)),
+        );
+    }
+}
+
 use std::path::Path;
 
 use raf_render::api_graphic_basic::ui_surface::{
@@ -168,6 +299,13 @@ pub struct AssetsSurfaceParams<'a> {
     pub visible_range: Option<(usize, usize)>,
     pub create_open: bool,
     pub motion: AssetsMotion,
+    pub visuals: Option<&'a std::collections::HashMap<String, AssetVisual>>,
+}
+
+pub struct AssetVisual {
+    pub entry: raf_assets::authoring_catalog::AuthoringAsset,
+    pub preview: crate::asset_previews::PreviewState,
+    pub can_apply_texture: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -187,24 +325,26 @@ pub enum AssetsIntent {
 /// Virtual assets that are always available in a Game project. They are
 /// authoring shortcuts, not files on disk; opening or dropping one still
 /// executes the real scene-creation path in the application boundary.
-pub const BUILTIN_ASSET_ROWS: [&str; 5] = [
+pub const BUILTIN_ASSET_ROWS: [&str; 6] = [
     "builtin://primitive/cube",
     "builtin://primitive/sphere",
     "builtin://primitive/cylinder",
+    "builtin://primitive/capsule",
     "builtin://primitive/plane",
     "builtin://camera",
 ];
 
 pub fn asset_rows_with_builtins(asset_rows: &[String]) -> Vec<String> {
-    BUILTIN_ASSET_ROWS
-        .iter()
-        .map(|row| (*row).to_string())
+    raf_core::scene::geometry::CREATABLE_PRIMITIVES
+        .into_iter()
+        .map(|shape| shape.descriptor().source.to_string())
+        .chain(std::iter::once("builtin://camera".to_string()))
         .chain(asset_rows.iter().cloned())
         .collect()
 }
 
 const ASSET_CARD_WIDTH: f32 = 116.0;
-const ASSET_CARD_HEIGHT: f32 = 116.0;
+const ASSET_CARD_HEIGHT: f32 = 164.0;
 const ASSET_CARD_GAP: f32 = 6.0;
 const ASSET_LIST_ROW_HEIGHT: f32 = 34.0;
 const ASSET_LIST_ROW_GAP: f32 = 2.0;
@@ -256,6 +396,7 @@ pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
         visible_range,
         create_open,
         motion,
+        visuals,
     } = params;
 
     let filtered_rows = visible_asset_rows(rows, query, filter, script_extension, sort);
@@ -310,7 +451,7 @@ pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
         .skip(start)
         .take(end - start)
     {
-        grid = grid.with_child(asset_card(
+        let card = asset_card(
             palette,
             source_index,
             row.as_str(),
@@ -318,6 +459,12 @@ pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
             selected == Some(row.as_str()),
             highlight == Some(row.as_str()),
             motion,
+        );
+        grid = grid.with_child(decorate_asset_card(
+            card,
+            visuals.and_then(|v| v.get(row.as_str())),
+            view,
+            language,
         ));
     }
     if end < total_rows {
@@ -330,7 +477,7 @@ pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
         grid = grid.with_child(empty_state(palette, rows.is_empty(), query, filter));
     }
 
-    let root = UiNode::new("assets.root", UiNodeKind::Panel)
+    let mut root = UiNode::new("assets.root", UiNodeKind::Panel)
         .with_class("bottom-panel")
         .with_layout(UiLayout::fill(UiFlow::Row))
         .with_style(palette.panel_style())
@@ -370,6 +517,11 @@ pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
                 )),
         );
 
+    if let Some(visual) = selected.and_then(|row| visuals.and_then(|v| v.get(row))) {
+        if let Some(bar) = find_node_mut(&mut root, "assets.selection") {
+            append_asset_actions(bar, visual, palette);
+        }
+    }
     let mut surface = UiSurface::new("editor.bottom.assets", palette, root);
     surface.style_sheet = bottom_style_sheet(palette);
     surface
@@ -931,52 +1083,64 @@ fn asset_card(
         )
     };
 
-    node.with_tooltip_value(format!("{row}"))
-        .with_accessibility_label_key(name.clone())
-        .with_accessibility_role(UiAccessibilityRole::Button)
-        .with_accessibility_selected(selected)
-        .focusable()
-        .with_event(UiEventBinding::command(UiEventKind::Click, select_command))
-        .with_event(UiEventBinding::command(
-            UiEventKind::DoubleClick,
-            open_command.clone(),
-        ))
-        .with_event(UiEventBinding::command(
-            UiEventKind::KeyPress("enter".to_string()),
-            open_command.clone(),
-        ))
-        .with_event(UiEventBinding::command(
-            UiEventKind::KeyPress("space".to_string()),
-            open_command,
-        ))
-        .with_event(UiEventBinding::command(
-            UiEventKind::ContextMenu,
-            format!("assets.context-menu:{row}"),
-        ))
-        .with_style(UiStyle {
-            fill: tokens.surface,
-            border: if highlighted {
-                tokens.accent
-            } else {
-                tokens.border
-            },
-            text: tokens.text,
-            border_width: if highlighted {
-                1.0 + (1.0 - motion.highlight).clamp(0.0, 1.0)
+    node.with_event(UiEventBinding::command(
+        UiEventKind::DragStart,
+        format!("assets.drag-start:{row}"),
+    ))
+    .with_event(UiEventBinding::command(
+        UiEventKind::DragMove,
+        "assets.drag-move",
+    ))
+    .with_event(UiEventBinding::command(
+        UiEventKind::DragEnd,
+        "assets.drag-end",
+    ))
+    .with_tooltip_value(format!("{row}"))
+    .with_accessibility_label_key(name.clone())
+    .with_accessibility_role(UiAccessibilityRole::Button)
+    .with_accessibility_selected(selected)
+    .focusable()
+    .with_event(UiEventBinding::command(UiEventKind::Click, select_command))
+    .with_event(UiEventBinding::command(
+        UiEventKind::DoubleClick,
+        open_command.clone(),
+    ))
+    .with_event(UiEventBinding::command(
+        UiEventKind::KeyPress("enter".to_string()),
+        open_command.clone(),
+    ))
+    .with_event(UiEventBinding::command(
+        UiEventKind::KeyPress("space".to_string()),
+        open_command,
+    ))
+    .with_event(UiEventBinding::command(
+        UiEventKind::ContextMenu,
+        format!("assets.context-menu:{row}"),
+    ))
+    .with_style(UiStyle {
+        fill: tokens.surface,
+        border: if highlighted {
+            tokens.accent
+        } else {
+            tokens.border
+        },
+        text: tokens.text,
+        border_width: if highlighted {
+            1.0 + (1.0 - motion.highlight).clamp(0.0, 1.0)
+        } else {
+            1.0
+        },
+        radius: 4.0,
+        opacity: {
+            let settle = motion.view.clamp(0.0, 1.0);
+            let pulse = if highlighted {
+                0.85 + 0.15 * motion.highlight.clamp(0.0, 1.0)
             } else {
                 1.0
-            },
-            radius: 4.0,
-            opacity: {
-                let settle = motion.view.clamp(0.0, 1.0);
-                let pulse = if highlighted {
-                    0.85 + 0.15 * motion.highlight.clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                (settle * pulse).clamp(0.0, 1.0)
-            },
-        })
+            };
+            (settle * pulse).clamp(0.0, 1.0)
+        },
+    })
 }
 
 fn grid_card(
@@ -2535,6 +2699,7 @@ fn asset_primitive_modal_option(
             raf_core::scene::Primitive::Cube => UiIconId::Cube,
             raf_core::scene::Primitive::Sphere => UiIconId::Sphere,
             raf_core::scene::Primitive::Cylinder => UiIconId::Cylinder,
+            raf_core::scene::Primitive::Capsule => UiIconId::Capsule,
             raf_core::scene::Primitive::Plane => UiIconId::Plane,
             raf_core::scene::Primitive::Empty => UiIconId::Node,
         })
@@ -2702,10 +2867,13 @@ fn asset_matches(row: &str, query: &str, filter: AssetFilter) -> bool {
                 | Some("webp")
                 | Some("svg")
         ),
-        AssetFilter::Models => matches!(
-            extension.as_deref(),
-            Some("obj") | Some("gltf") | Some("glb") | Some("fbx") | Some("stl")
-        ),
+        AssetFilter::Models => {
+            row.to_ascii_lowercase().ends_with(".prefab.ron")
+                || matches!(
+                    extension.as_deref(),
+                    Some("obj") | Some("gltf") | Some("glb") | Some("fbx") | Some("stl")
+                )
+        }
         AssetFilter::Audio => matches!(
             extension.as_deref(),
             Some("wav") | Some("mp3") | Some("ogg") | Some("flac")
@@ -2733,6 +2901,7 @@ fn asset_icon(name: &str) -> UiIconId {
         return match crate::panels::primitive_create::parse_primitive_slug(slug) {
             Some(raf_core::scene::Primitive::Cube) => UiIconId::Cube,
             Some(raf_core::scene::Primitive::Sphere) => UiIconId::Sphere,
+            Some(raf_core::scene::Primitive::Capsule) => UiIconId::Capsule,
             Some(raf_core::scene::Primitive::Cylinder) => UiIconId::Cylinder,
             Some(raf_core::scene::Primitive::Plane) => UiIconId::Plane,
             _ => UiIconId::Assets,
@@ -2781,6 +2950,7 @@ mod tests {
             visible_range: None,
             create_open: false,
             motion: AssetsMotion::default(),
+            visuals: None,
         }
     }
 

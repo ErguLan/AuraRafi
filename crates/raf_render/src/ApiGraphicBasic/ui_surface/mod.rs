@@ -36,8 +36,8 @@ pub use gpu_renderer::{UiSurfaceGpuMetrics, UiSurfaceGpuRenderer};
 pub use images::{UiSurfaceImageData, UiSurfaceImageStore};
 pub use native_input::NativeUiInputBridge;
 pub use native_window::{
-    NativeGraphicsContext, NativePresentMode, NativeUiWindowConfig, NativeUiWindowHost,
-    NativeWindowCommandResult,
+    NativeCursorLease, NativeGraphicsContext, NativePresentMode, NativeUiWindowConfig,
+    NativeUiWindowHost, NativeWindowCommandResult,
 };
 pub use presentation::{
     UiSurfaceDrawList, UiSurfaceImageQuad, UiSurfacePaintCommand, UiSurfaceQuad, UiSurfaceStroke,

@@ -6,6 +6,8 @@ mod physics_contacts;
 mod physics_response;
 #[cfg(test)]
 mod physics_tests;
+pub mod session_loader;
+pub mod storage;
 mod validation;
 pub mod wire;
 pub mod world;

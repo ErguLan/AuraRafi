@@ -172,6 +172,7 @@ pub struct SceneRenderer {
     cube_basic_mesh: Arc<BasicMesh>,
     cube_edges: Vec<[Vec3; 2]>,
     cube_local_bounds: (Vec3, Vec3),
+    capsule_detail: MeshDetailLevel,
     cylinder_detail: CurvedMeshDetail,
     cylinder_local_bounds: (Vec3, Vec3),
     sphere_detail: CurvedMeshDetail,
@@ -246,6 +247,7 @@ impl SceneRenderer {
             cube_edges: primitives::extract_edges(&cube_mesh),
             cube_local_bounds,
             cube_mesh,
+            capsule_detail: MeshDetailLevel::new(primitives::capsule(16, 4)),
             cylinder_detail,
             cylinder_local_bounds,
             sphere_detail,
@@ -297,6 +299,7 @@ impl SceneRenderer {
     fn local_bounds_for_primitive(&self, primitive: Primitive) -> (Vec3, Vec3) {
         match primitive {
             Primitive::Cube => self.cube_local_bounds,
+            Primitive::Capsule => (-Vec3::new(0.5, 1.0, 0.5), Vec3::new(0.5, 1.0, 0.5)),
             Primitive::Cylinder => self.cylinder_local_bounds,
             Primitive::Sphere => self.sphere_local_bounds,
             Primitive::Plane => self.plane_local_bounds,
@@ -524,7 +527,17 @@ impl SceneRenderer {
         };
         let settings = env.settings.shadows;
         let resolution = settings.resolution as u32;
-        let vp = directional_projection(env.sun_direction, camera, settings.distance, resolution);
+        let vp = if env.improved() {
+            fitted_directional_projection(
+                env.sun_direction,
+                camera,
+                env.inverse_view_projection,
+                settings.distance,
+                resolution,
+            )
+        } else {
+            directional_projection(env.sun_direction, camera, settings.distance, resolution)
+        };
         if mesh_override.is_none() && self.shadow_geometry_revision == scene.geometry_revision() {
             if let Some(geometry) = self
                 .shadow_geometry
@@ -535,6 +548,7 @@ impl SceneRenderer {
                     geometry: Arc::clone(geometry),
                     settings,
                     camera,
+                    improved: env.improved(),
                 });
             }
         }
@@ -604,6 +618,7 @@ impl SceneRenderer {
             } else {
                 match node.primitive {
                     Primitive::Plane => Arc::clone(&self.plane_basic_mesh),
+                    Primitive::Capsule => Arc::clone(&self.capsule_detail.basic_mesh),
                     Primitive::Cylinder => Arc::clone(&self.cylinder_detail.level(1).basic_mesh),
                     Primitive::Sphere => Arc::clone(&self.sphere_detail.level(1).basic_mesh),
                     _ => Arc::clone(&self.cube_basic_mesh),
@@ -645,6 +660,7 @@ impl SceneRenderer {
             geometry: Arc::clone(self.shadow_geometry.as_ref().unwrap()),
             settings,
             camera,
+            improved: env.improved(),
         })
     }
 
@@ -727,6 +743,7 @@ impl SceneRenderer {
         let cube_mesh = &self.cube_mesh;
         let cube_basic_mesh = Arc::clone(&self.cube_basic_mesh);
         let cube_edges = self.cube_edges.as_slice();
+        let capsule_detail = &self.capsule_detail;
         let cylinder_detail = &self.cylinder_detail;
         let sphere_detail = &self.sphere_detail;
         let plane_mesh = &self.plane_mesh;
@@ -740,6 +757,11 @@ impl SceneRenderer {
         );
         commands.clear(bg_color);
         commands.environment = environment;
+        commands.optimized_improved = options
+            .environment_override
+            .unwrap_or(*scene.environment())
+            .technology
+            == raf_core::environment::LightingTechnology::OptimizedImproved;
         commands.shadows = shadows;
         commands.shadow_budget_exceeded = self.shadow_budget_exceeded;
 
@@ -781,6 +803,9 @@ impl SceneRenderer {
                     )
                 } else {
                     match job.primitive {
+                        Primitive::Capsule => {
+                            (&capsule_detail.mesh, Arc::clone(&capsule_detail.basic_mesh))
+                        }
                         Primitive::Cube => (cube_mesh, Arc::clone(&cube_basic_mesh)),
                         Primitive::Cylinder => {
                             let detail = cylinder_detail.level(job.geometry_lod);
@@ -865,6 +890,7 @@ impl SceneRenderer {
                     override_edges.as_deref().unwrap_or(&[])
                 } else {
                     match job.primitive {
+                        Primitive::Capsule => capsule_detail.edges.as_slice(),
                         Primitive::Cube => cube_edges,
                         Primitive::Cylinder => {
                             cylinder_detail.level(job.geometry_lod).edges.as_slice()
@@ -1124,6 +1150,7 @@ fn opaque_depth_bucket(distance_squared: f32, max_distance_squared: f32) -> u8 {
 const fn primitive_batch_key(primitive: Primitive) -> u8 {
     match primitive {
         Primitive::Cube => 0,
+        Primitive::Capsule => 5,
         Primitive::Cylinder => 1,
         Primitive::Sphere => 2,
         Primitive::Plane => 3,
@@ -1281,7 +1308,13 @@ fn rasterize_clipped_triangle(
                 [textured_first, textured_second, textured_third],
                 texture,
                 color,
-                environment.map(|env| (env.ambient, env.sun, env.settings.sun.shading_steps())),
+                environment.map(|env| crate::optimized_lighting::SurfaceLighting {
+                    ambient: env.ambient,
+                    sun: env.sun,
+                    steps: env.settings.sun.shading_steps(),
+                    softness: env.softness(),
+                    exposure: env.exposure(),
+                }),
                 shadows
                     .zip(environment)
                     .map(|(shadow, env)| (shadow, env.inverse_view_projection)),
@@ -1415,7 +1448,19 @@ fn rasterize_mesh_command(
             pipeline.is_two_sided(),
             vp_w,
             vp_h,
-            environment.filter(|_| shaded),
+            environment.filter(|_| shaded).map(|mut env| {
+                if env.improved() {
+                    let up = [i0, i1, i2]
+                        .map(|i| {
+                            transform::transform_normal(mesh.vertices[i].normal, &normal_mat).y
+                        })
+                        .into_iter()
+                        .sum::<f32>()
+                        / 3.0;
+                    env.ambient = crate::optimized_lighting::ambient(env.ambient, up);
+                }
+                env
+            }),
             shadows.filter(|_| shaded),
         );
     }

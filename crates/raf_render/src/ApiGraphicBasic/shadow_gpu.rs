@@ -24,7 +24,14 @@ fn sun_visibility(world: vec3<f32>, ndotl: f32) -> f32 {
     let footprint = select(0.75,1.5,shadow.params.y > 0.5);
     let depth = p.z - shadow.params.x - footprint * shadow.params.w * slope;
     var visible = 1.0;
-    if (shadow.params.y > 0.5) {
+    if (shadow.params.y > 1.5) {
+        let texel = 1.0 / f32(textureDimensions(shadow_depth).x);
+        visible = 0.0;
+        for (var y=-1; y<=1; y=y+1) { for (var x=-1; x<=1; x=x+1) {
+            visible += shadow_tap(uv+vec2<f32>(f32(x),f32(y))*texel,depth);
+        } }
+        visible /= 9.0;
+    } else if (shadow.params.y > 0.5) {
         let half_texel = 0.5 / f32(textureDimensions(shadow_depth).x);
         // Exactly four comparisons. No variable kernel, temporal history or extra targets.
         visible = (shadow_tap(uv + vec2<f32>(-half_texel,-half_texel),depth)
@@ -48,7 +55,7 @@ struct Input {
 "#;
 
 pub(super) fn receiver_shader() -> String {
-    BASIC_SCENE_WGSL
+    crate::shaders::basic_scene_shader()
         .replace("// SHADOW_DECLARATIONS", SHADOW_DECLARATIONS)
         .replace(
             "fn sun_visibility(world: vec3<f32>, ndotl: f32) -> f32 { return 1.0; }",
@@ -253,9 +260,23 @@ impl ShadowGpuState {
             camera_distance: frame.camera.extend(frame.settings.distance).to_array(),
             params: [
                 frame.settings.bias / (8.0 * frame.settings.distance),
-                f32::from(frame.settings.soft_filter),
+                if frame.settings.soft_filter {
+                    if frame.improved {
+                        2.0
+                    } else {
+                        1.0
+                    }
+                } else {
+                    0.0
+                },
                 frame.settings.strength,
-                1.0 / (4.0 * frame.geometry.resolution as f32),
+                if frame.improved {
+                    frame
+                        .geometry
+                        .normalized_texel_bias(frame.geometry.resolution)
+                } else {
+                    1.0 / (4.0 * frame.geometry.resolution as f32)
+                },
             ],
         };
         if self.last_uniform != Some(uniforms) {

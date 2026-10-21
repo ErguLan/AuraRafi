@@ -1242,6 +1242,7 @@ fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIntent) {
                     string_schema("Optional group ID, UUID, name, or path; omit for scene root."),
                 ),
                 ("transform".to_string(), transform.clone()),
+                ("size".to_string(), vec3_schema("Local dimensions X/Y/Z in metres; do not combine with scale.")),
                 ("semantic_role".to_string(), string_schema("Optional semantic role such as store.shelf.")),
                 ("stable_key".to_string(), string_schema("Optional unique reconciliation key.")),
                 ("tags".to_string(), semantic_tags_schema()),
@@ -1261,7 +1262,7 @@ fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIntent) {
                     "kind".to_string(),
                     enum_schema(
                         "Entity primitive.",
-                        &["empty", "cube", "sphere", "plane", "cylinder"],
+                        &["empty", "cube", "sphere", "plane", "cylinder", "capsule"],
                     ),
                 ),
                 (
@@ -1295,6 +1296,7 @@ fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIntent) {
                 ("target".to_string(), string_schema("Entity target.")),
                 ("name".to_string(), string_schema("Optional new name.")),
                 ("transform".to_string(), transform),
+                ("size".to_string(), vec3_schema("Local dimensions X/Y/Z in metres; do not combine with scale.")),
                 (
                     "color_rgba".to_string(),
                     color_schema("Optional RGBA channels from 0 to 255."),
@@ -1760,6 +1762,7 @@ fn compact_entity_data(entity: &Value) -> Value {
         "position",
         "rotation_deg",
         "scale",
+        "size",
         "world_position",
         "color_rgba",
         "visible",
@@ -2716,7 +2719,7 @@ fn command_to_openai_tool(
             "object" => serde_json::json!({"type": "object", "description": description}),
             "enum" if parameter.name == "primitive" => enum_schema(
                 &description,
-                &["empty", "cube", "sphere", "plane", "cylinder"],
+                &["empty", "cube", "sphere", "plane", "cylinder", "capsule"],
             ),
             "enum" if parameter.name == "design_profile" => enum_schema(
                 &description,
@@ -2910,7 +2913,7 @@ fn scene_entity_schema() -> Value {
                 "kind".to_string(),
                 enum_schema(
                     "Primitive to create.",
-                    &["empty", "cube", "sphere", "plane", "cylinder"],
+                    &["empty", "cube", "sphere", "plane", "cylinder", "capsule"],
                 ),
             ),
             ("name".to_string(), string_schema("Unique entity name.")),

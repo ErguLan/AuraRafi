@@ -3,6 +3,27 @@ use crate::{Node, NodeCategory, NodeId, NodePin, NodeProperty, PinDataType as T,
 use uuid::Uuid;
 
 pub const SCENE_NODES: &[(&str, &str, bool)] = &[
+    ("input-axis", "Input Axis", false),
+    ("pointer-motion", "Pointer Motion", false),
+    ("pointer-button", "Pointer Button", false),
+    ("set-cursor", "Set Cursor", true),
+    ("progress-set", "Set Progress", true),
+    ("progress-get", "Get Progress", false),
+    ("progress-loaded-get", "Get Loaded Progress", false),
+    ("progress-remove", "Remove Progress Value", true),
+    ("progress-clear", "Clear Progress Data", true),
+    ("progress-discard", "Discard Progress Edits", true),
+    ("progress-profile", "Select Progress Profile", true),
+    ("progress-save", "Save Progress", true),
+    ("progress-load", "Load Progress", true),
+    ("progress-load-backup", "Load Progress Backup", true),
+    ("progress-apply-loaded", "Apply Loaded Progress", true),
+    ("progress-status", "Progress Status", false),
+    ("request-session", "Request Session", true),
+    ("session-status", "Session Status", false),
+    ("runtime-field", "Read Runtime Field", false),
+    ("raycast", "Raycast AABB", false),
+    ("overlap-aabb", "Overlap AABB", false),
     ("environment-get", "Get Environment", false),
     ("environment-set-number", "Set Environment Number", true),
     ("environment-set-bool", "Set Environment Bool", true),
@@ -56,6 +77,9 @@ pub const SCENE_NODES: &[(&str, &str, bool)] = &[
 ];
 
 pub fn create(slug: &str) -> Option<Node> {
+    if let Some(node) = crate::service_nodes::create(slug) {
+        return Some(node);
+    }
     if let Some(node) = crate::environment_nodes::create(slug) {
         return Some(node);
     }

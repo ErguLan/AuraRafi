@@ -429,6 +429,7 @@ pub fn create_engine(max_operations: u64) -> Engine {
     });
     super::rhai_scene_api::register(&mut engine);
     super::rhai_physics_api::register(&mut engine);
+    super::rhai_services_api::register(&mut engine);
     engine
 }
 

@@ -65,6 +65,13 @@ impl PlayerApplication {
     fn stop(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(session) = &mut self.session {
             session.control(RuntimeControl::Stop);
+            if !session.should_close() {
+                self.next_frame = Instant::now();
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+                return;
+            }
         }
         if let Some(peer) = &mut self.peer {
             if let Some(session) = &self.session {
@@ -99,6 +106,24 @@ impl PlayerApplication {
     }
 }
 impl ApplicationHandler for PlayerApplication {
+    fn device_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        _device: winit::event::DeviceId,
+        event: winit::event::DeviceEvent,
+    ) {
+        if let winit::event::DeviceEvent::MouseMotion { delta } = event {
+            if self.window.as_ref().is_some_and(|w| w.has_focus()) {
+                self.input.ingest_relative_motion(delta);
+                self.next_frame = self.next_frame.min(
+                    Instant::now()
+                        + Duration::from_secs_f64(
+                            1.0 / self.launch.settings.runtime.fps_limit.clamp(15, 120) as f64,
+                        ),
+                );
+            }
+        }
+    }
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
             return;

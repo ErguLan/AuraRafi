@@ -3,6 +3,30 @@
 Status: local implementation present; native acceptance and measured
 performance remain separate gates.
 
+## Runtime services source pass (2026-10-18)
+
+Input axes/raw motion/cursor leasing, filtered AABB queries, configurable typed
+progress storage, optional autosave and candidate-based saved-world transitions
+are connected in source. Project Settings and Nodes expose these services in
+EN/ES. See [Runtime Services](RUNTIME_SERVICES.md) for ownership, guarantees,
+limits and the optional Rhai example. No dependency/toolchain, engine executable,
+game export, animation, audio expansion or online transport is added by this pass.
+Focused verification results are recorded separately; native acceptance is not
+inferred from source implementation.
+
+Verification checkpoint (2026-10-19): formatting of the 32 explicitly selected
+runtime/service and integration modules completed. Locale JSON and 152 relevant
+EN/ES presentation, pin and property keys passed static validation. Scoped
+`git diff --check` passed with Windows CRLF-aware whitespace handling.
+
+`cargo test --offline --locked -p raf_runtime -p raf_script -p raf_nodes --lib runtime_services_`
+stopped before compilation because opening `target_gnu/debug/.cargo-lock`
+returned access denied (OS error 5). Four focused regressions are written but
+not reported executed. No permission repair, alternate target, engine executable
+build/run or dependency download was attempted. Integration type checking and
+native-window acceptance remain unverified; parallel authoring/renderer/CAD
+changes were not repaired by this pass.
+
 ## Physics scripting checkpoint (2026-10-06)
 
 The composable behavior/reference checkpoint is documented in

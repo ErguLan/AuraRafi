@@ -147,33 +147,21 @@ pub fn is_solid(scene: &SceneGraph, id: SceneNodeId) -> bool {
     !node.is_folder && node.visible && node.primitive != raf_core::scene::Primitive::Empty
 }
 
-/// Unit half-extents contributed by each primitive before node scale.
-fn primitive_half_extents(scene: &SceneGraph, id: SceneNodeId) -> Option<Vec3> {
-    let node = scene.get(id)?;
-    let scale = node.scale.abs().max(Vec3::splat(0.01));
-    let base = match node.primitive {
-        raf_core::scene::Primitive::Empty => return None,
-        raf_core::scene::Primitive::Cube | raf_core::scene::Primitive::Sphere => Vec3::splat(0.5),
-        raf_core::scene::Primitive::Plane => Vec3::new(0.5, PLANE_HALF_THICKNESS, 0.5),
-        raf_core::scene::Primitive::Cylinder => Vec3::new(0.5, 0.5, 0.5),
-    };
-    Some(base * scale)
-}
-
-/// Conservative world AABB for one node using its world transform corners.
+/// Conservative geometry bounds from the shared scene contract.
 fn solid_aabb(scene: &SceneGraph, id: SceneNodeId) -> Aabb {
-    let world = scene.world_matrix(id);
-    let half = primitive_half_extents(scene, id).unwrap_or(Vec3::ZERO);
-    let mut min = Vec3::splat(f32::INFINITY);
-    let mut max = Vec3::splat(f32::NEG_INFINITY);
-    for sign_x in [-1.0, 1.0] {
-        for sign_y in [-1.0, 1.0] {
-            for sign_z in [-1.0, 1.0] {
-                let corner_world = world.transform_point3(half * Vec3::new(sign_x, sign_y, sign_z));
-                min = min.min(corner_world);
-                max = max.max(corner_world);
-            }
-        }
+    let (mut min, mut max) = raf_core::scene::geometry::node_geometry_bounds(scene, id)
+        .unwrap_or((Vec3::ZERO, Vec3::ZERO));
+    if scene
+        .get(id)
+        .is_some_and(|node| node.primitive == raf_core::scene::Primitive::Plane)
+    {
+        let normal = scene
+            .world_matrix(id)
+            .transform_vector3(Vec3::Y)
+            .normalize_or_zero();
+        let padding = normal.abs() * PLANE_HALF_THICKNESS;
+        min -= padding;
+        max += padding;
     }
     Aabb { min, max }
 }

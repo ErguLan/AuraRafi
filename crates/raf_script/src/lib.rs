@@ -17,17 +17,19 @@
 pub mod backends;
 pub mod behavior_api;
 pub mod camera_api;
-pub mod errors;
 pub mod environment_api;
+pub mod errors;
 pub mod host;
 pub mod host_api;
 pub mod lifetime;
 pub mod node_handle;
 pub mod physics_api;
 pub mod prelude;
+pub mod query_api;
 pub mod reference_analysis;
 pub mod references;
 pub mod runtime;
+pub mod services;
 pub mod value;
 pub mod view;
 

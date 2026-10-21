@@ -233,8 +233,15 @@ pub struct InputSnapshot {
     pub pointer_position: Option<[f32; 2]>,
     /// Logical delta accumulated since the previous consumed frame.
     pub pointer_delta: [f32; 2],
+    /// Unaccelerated device motion, independent of the window cursor position.
+    #[serde(default)]
+    pub relative_pointer_delta: [f32; 2],
     pub scroll_delta: [f32; 2],
     pub modifiers: InputModifiers,
+    #[serde(default)]
+    pub modifiers_pressed: InputModifiers,
+    #[serde(default)]
+    pub modifiers_released: InputModifiers,
     /// Committed text. Commands and movement must never infer keys from it.
     pub text_input: String,
     /// Current IME pre-edit string, if any.
@@ -255,8 +262,11 @@ impl Default for InputSnapshot {
             pointer_released_buttons: PointerButtonSet::default(),
             pointer_position: None,
             pointer_delta: [0.0; 2],
+            relative_pointer_delta: [0.0; 2],
             scroll_delta: [0.0; 2],
             modifiers: InputModifiers::default(),
+            modifiers_pressed: InputModifiers::default(),
+            modifiers_released: InputModifiers::default(),
             text_input: String::new(),
             ime_preedit: String::new(),
             window_focused: true,
@@ -292,11 +302,14 @@ impl InputSnapshot {
     }
 
     pub fn clear_transient(&mut self) {
+        self.modifiers_pressed = InputModifiers::default();
+        self.modifiers_released = InputModifiers::default();
         self.keys_pressed.clear();
         self.keys_released.clear();
         self.pointer_pressed_buttons.clear();
         self.pointer_released_buttons.clear();
         self.pointer_delta = [0.0; 2];
+        self.relative_pointer_delta = [0.0; 2];
         self.scroll_delta = [0.0; 2];
         self.text_input.clear();
     }

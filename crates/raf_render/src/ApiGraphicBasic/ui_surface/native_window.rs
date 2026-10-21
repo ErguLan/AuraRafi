@@ -117,7 +117,79 @@ pub struct NativeUiWindowHost {
     ui_shared: Arc<UiSurfaceGpuSharedResources>,
 }
 
+/// Runtime-owned cursor lease. Dropping Play never leaves the editor cursor captured.
+pub struct NativeCursorLease {
+    window: Arc<Window>,
+    requested: Option<(raf_core::runtime_config::CursorCapture, bool)>,
+    effective: raf_core::runtime_config::CursorCapture,
+}
+impl NativeCursorLease {
+    pub fn apply(
+        &mut self,
+        capture: raf_core::runtime_config::CursorCapture,
+        visible: bool,
+    ) -> Result<raf_core::runtime_config::CursorCapture, String> {
+        use raf_core::runtime_config::CursorCapture;
+        use winit::window::CursorGrabMode;
+        if self.requested == Some((capture, visible)) {
+            return Ok(self.effective);
+        }
+        self.requested = Some((capture, visible));
+        let result = match capture {
+            CursorCapture::Free => self
+                .window
+                .set_cursor_grab(CursorGrabMode::None)
+                .map(|_| CursorCapture::Free),
+            CursorCapture::Confined => self
+                .window
+                .set_cursor_grab(CursorGrabMode::Confined)
+                .map(|_| CursorCapture::Confined),
+            CursorCapture::Locked => self
+                .window
+                .set_cursor_grab(CursorGrabMode::Locked)
+                .map(|_| CursorCapture::Locked)
+                .or_else(|_| {
+                    self.window
+                        .set_cursor_grab(CursorGrabMode::Confined)
+                        .map(|_| CursorCapture::Confined)
+                }),
+        };
+        match result {
+            Ok(effective) => {
+                self.effective = effective;
+                self.window.set_cursor_visible(visible);
+                Ok(effective)
+            }
+            Err(error) => {
+                self.release();
+                self.requested = Some((capture, visible));
+                Err(format!("input.cursor_unavailable: {error}"))
+            }
+        }
+    }
+    pub fn release(&mut self) {
+        let _ = self
+            .window
+            .set_cursor_grab(winit::window::CursorGrabMode::None);
+        self.window.set_cursor_visible(true);
+        self.requested = None;
+        self.effective = raf_core::runtime_config::CursorCapture::Free;
+    }
+}
+impl Drop for NativeCursorLease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
 impl NativeUiWindowHost {
+    pub fn cursor_lease(&self) -> NativeCursorLease {
+        NativeCursorLease {
+            window: self.window.clone(),
+            requested: None,
+            effective: raf_core::runtime_config::CursorCapture::Free,
+        }
+    }
     pub async fn create(window: Arc<Window>) -> Result<Self, String> {
         Self::create_with_config(window, NativeUiWindowConfig::default()).await
     }

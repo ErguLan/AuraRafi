@@ -6,6 +6,40 @@ use glam::Vec3;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GuestEntity(pub u32);
 
+pub enum InputQuery {
+    KeyPressed(String),
+    KeyReleased(String),
+    Axis(String),
+    MouseHeld(i32),
+    MousePressed(i32),
+    MouseReleased(i32),
+    MousePosition,
+    MouseDelta,
+    MouseRelative,
+    MouseWheel,
+    CursorCapture,
+}
+pub enum ProgressImport {
+    Set(String, ScriptValue),
+    Get(String, ScriptValue),
+    LoadedGet(String, ScriptValue),
+    Remove(String),
+    Clear,
+    Discard,
+    Profile(String),
+    Save(String),
+    Load(String),
+    LoadBackup(String),
+    ApplyLoaded,
+    Status,
+}
+pub struct GuestRayHit {
+    pub entity: GuestEntity,
+    pub position: [f32; 3],
+    pub normal: [f32; 3],
+    pub distance: f32,
+}
+
 pub enum HostOperation {
     Owner,
     Entity(String),
@@ -40,6 +74,26 @@ pub enum HostOperation {
         dt: f32,
     },
     KeyHeld(String),
+    Input(InputQuery),
+    SetCursor(crate::services::CursorCapture, bool),
+    Progress(ProgressImport),
+    RequestSession(uuid::Uuid),
+    SessionStatus,
+    Raycast {
+        origin: [f32; 3],
+        direction: [f32; 3],
+        distance: f32,
+        ignore: GuestEntity,
+        tag: Option<String>,
+        triggers: bool,
+    },
+    OverlapAabb {
+        min: [f32; 3],
+        max: [f32; 3],
+        ignore: GuestEntity,
+        tag: Option<String>,
+        triggers: bool,
+    },
     IsClient,
     DeltaTime,
     Elapsed,
@@ -55,6 +109,8 @@ pub enum HostOperation {
 pub enum HostReply {
     Value(ScriptValue),
     Entity(GuestEntity),
+    Entities(Vec<GuestEntity>),
+    RayHit(Option<GuestRayHit>),
 }
 
 pub trait GuestImports {
@@ -109,6 +165,14 @@ pub(crate) struct GuestHandles {
 }
 
 impl GuestHandles {
+    fn export_token(&mut self, handle: NodeHandle, max: usize) -> ScriptResult<GuestEntity> {
+        match self.export(Some(handle), max)? {
+            HostReply::Entity(token) => Ok(token),
+            _ => Err(ScriptError::InvalidArgument(
+                "WASM entity export mismatch".into(),
+            )),
+        }
+    }
     fn export(&mut self, handle: Option<NodeHandle>, max: usize) -> ScriptResult<HostReply> {
         let Some(handle) = handle else {
             return Ok(HostReply::Entity(GuestEntity(0)));
@@ -152,6 +216,78 @@ impl GuestImports for HostBridge<'_, '_> {
         let handles = &mut *self.handles;
         let none = HostReply::Value(ScriptValue::None);
         Ok(match operation {
+            HostOperation::Input(query) => HostReply::Value(input_value(ctx, query)?),
+            HostOperation::SetCursor(mode, visible) => {
+                ctx.set_cursor(mode, visible)?;
+                none
+            }
+            HostOperation::Progress(operation) => {
+                HostReply::Value(progress_value(&mut ctx.view.services.progress, operation)?)
+            }
+            HostOperation::RequestSession(id) => {
+                ctx.request_session(id)?;
+                none
+            }
+            HostOperation::SessionStatus => HostReply::Value(ctx.session_report()),
+            HostOperation::Raycast {
+                origin,
+                direction,
+                distance,
+                ignore,
+                tag,
+                triggers,
+            } => {
+                let filter = crate::query_api::QueryFilter {
+                    ignore: if ignore.0 == 0 {
+                        None
+                    } else {
+                        Some(handles.get(ignore)?)
+                    },
+                    tag,
+                    include_triggers: triggers,
+                };
+                let hit = ctx.raycast(
+                    Vec3::from_array(origin),
+                    Vec3::from_array(direction),
+                    distance,
+                    &filter,
+                )?;
+                HostReply::RayHit(
+                    hit.map(|hit| {
+                        Ok::<GuestRayHit, ScriptError>(GuestRayHit {
+                            entity: handles.export_token(hit.entity, self.max_handles)?,
+                            position: hit.position.to_array(),
+                            normal: hit.normal.to_array(),
+                            distance: hit.distance,
+                        })
+                    })
+                    .transpose()?,
+                )
+            }
+            HostOperation::OverlapAabb {
+                min,
+                max,
+                ignore,
+                tag,
+                triggers,
+            } => {
+                let filter = crate::query_api::QueryFilter {
+                    ignore: if ignore.0 == 0 {
+                        None
+                    } else {
+                        Some(handles.get(ignore)?)
+                    },
+                    tag,
+                    include_triggers: triggers,
+                };
+                let hits =
+                    ctx.overlap_aabb(Vec3::from_array(min), Vec3::from_array(max), &filter)?;
+                HostReply::Entities(
+                    hits.into_iter()
+                        .map(|h| handles.export_token(h, self.max_handles))
+                        .collect::<ScriptResult<Vec<_>>>()?,
+                )
+            }
             HostOperation::Owner => return handles.export(ctx.owner(), self.max_handles),
             HostOperation::Entity(name) => {
                 if name.len() > 1024 {
@@ -303,4 +439,105 @@ impl GuestImports for HostBridge<'_, '_> {
             }
         })
     }
+}
+
+fn input_value(ctx: &ScriptContext<'_>, query: InputQuery) -> ScriptResult<ScriptValue> {
+    let pair = |v: [f32; 2]| ScriptValue::List(v.into_iter().map(ScriptValue::Float).collect());
+    let name = |key: &str| {
+        if key.len() <= 128 {
+            Ok(())
+        } else {
+            Err(ScriptError::InvalidArgument("input.name_limit".into()))
+        }
+    };
+    let button = |b: i32| {
+        if (0..=4).contains(&b) {
+            Ok(())
+        } else {
+            Err(ScriptError::InvalidArgument("input.invalid_button".into()))
+        }
+    };
+    Ok(match query {
+        InputQuery::KeyPressed(key) => {
+            name(&key)?;
+            ScriptValue::Bool(ctx.input.binding_pressed(&key))
+        }
+        InputQuery::KeyReleased(key) => {
+            name(&key)?;
+            ScriptValue::Bool(ctx.input.binding_released(&key))
+        }
+        InputQuery::Axis(key) => {
+            name(&key)?;
+            ScriptValue::Float(
+                ctx.input
+                    .axes
+                    .get(&key.to_ascii_lowercase())
+                    .copied()
+                    .unwrap_or(0.0),
+            )
+        }
+        InputQuery::MouseHeld(b) => {
+            button(b)?;
+            ScriptValue::Bool(ctx.input.mouse_held.contains(&b))
+        }
+        InputQuery::MousePressed(b) => {
+            button(b)?;
+            ScriptValue::Bool(ctx.input.mouse_pressed.contains(&b))
+        }
+        InputQuery::MouseReleased(b) => {
+            button(b)?;
+            ScriptValue::Bool(ctx.input.mouse_released.contains(&b))
+        }
+        InputQuery::MousePosition => ctx.input.mouse_position.map(pair).unwrap_or_default(),
+        InputQuery::MouseDelta => pair(ctx.input.mouse_delta),
+        InputQuery::MouseRelative => pair(ctx.input.mouse_relative),
+        InputQuery::MouseWheel => pair(ctx.input.mouse_wheel),
+        InputQuery::CursorCapture => {
+            ScriptValue::String(ctx.view.services.effective_cursor.name().into())
+        }
+    })
+}
+fn progress_value(
+    state: &mut crate::services::ProgressState,
+    operation: ProgressImport,
+) -> ScriptResult<ScriptValue> {
+    let none = ScriptValue::None;
+    Ok(match operation {
+        ProgressImport::Set(key, value) => {
+            state.set(&key, value)?;
+            none
+        }
+        ProgressImport::Get(key, fallback) => {
+            fallback.validate_event_payload()?;
+            state.get(&key, fallback)
+        }
+        ProgressImport::LoadedGet(key, fallback) => {
+            fallback.validate_event_payload()?;
+            state.loaded_get(&key, fallback)
+        }
+        ProgressImport::Remove(key) => {
+            state.remove(&key)?;
+            none
+        }
+        ProgressImport::Clear => {
+            state.clear()?;
+            none
+        }
+        ProgressImport::Discard => {
+            state.discard()?;
+            none
+        }
+        ProgressImport::Profile(profile) => {
+            state.set_profile(&profile)?;
+            none
+        }
+        ProgressImport::Save(slot) => ScriptValue::Int(state.request(&slot, false)? as i64),
+        ProgressImport::Load(slot) => ScriptValue::Int(state.request(&slot, true)? as i64),
+        ProgressImport::LoadBackup(slot) => ScriptValue::Int(state.request_backup(&slot)? as i64),
+        ProgressImport::ApplyLoaded => {
+            state.apply_loaded()?;
+            none
+        }
+        ProgressImport::Status => state.report(),
+    })
 }

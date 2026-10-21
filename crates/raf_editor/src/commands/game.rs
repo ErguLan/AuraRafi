@@ -1755,11 +1755,11 @@ fn add_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> Comm
         None => {
             return CommandOutput::error(
                 "Create entity",
-                "Unsupported primitive. Use empty, cube, sphere, plane, or cylinder.",
+                "Unsupported shape. Use empty, cube, sphere, plane, cylinder, or capsule.",
             )
         }
     };
-    let transform = match parse_transform_patch(command) {
+    let transform = match parse_transform_patch(command).and_then(|patch| dimensions_patch(command, primitive, Vec3::ONE, patch)) {
         Ok(transform) => transform,
         Err(error) => return CommandOutput::error("Create entity", error),
     };
@@ -1839,6 +1839,7 @@ fn primitive_asset_source(primitive: Primitive) -> Option<&'static str> {
     match primitive {
         Primitive::Cube => Some("builtin://primitive/cube"),
         Primitive::Sphere => Some("builtin://primitive/sphere"),
+        Primitive::Capsule => Some("builtin://primitive/capsule"),
         Primitive::Cylinder => Some("builtin://primitive/cylinder"),
         Primitive::Plane => Some("builtin://primitive/plane"),
         Primitive::Empty => None,
@@ -2167,7 +2168,7 @@ fn update_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> C
     let Some(current_node) = ctx.scene.get(id) else {
         return CommandOutput::error("Update entity", "Target not found.");
     };
-    let transform = match parse_transform_patch(command) {
+    let transform = match parse_transform_patch(command).and_then(|patch| dimensions_patch(command, current_node.primitive, current_node.scale, patch)) {
         Ok(transform) => transform,
         Err(error) => return CommandOutput::error("Update entity", error),
     };
@@ -2649,16 +2650,7 @@ fn default_entity_name(scene: &SceneGraph, primitive: Primitive) -> String {
 
 fn primitive_arg(command: &ParsedCommand) -> Option<Primitive> {
     let raw = primitive_argument(command)?;
-    match raw.to_ascii_lowercase().as_str() {
-        "empty" | "group" | "folder" => Some(Primitive::Empty),
-        "cube" | "box" | "block" => Some(Primitive::Cube),
-        "sphere" | "ball" | "circle" | "uv_sphere" => Some(Primitive::Sphere),
-        "plane" | "floor" => Some(Primitive::Plane),
-        "cylinder" => Some(Primitive::Cylinder),
-        // Keep command compatibility while using the orthographic 3D plane.
-        "sprite" | "sprite2d" => Some(Primitive::Plane),
-        _ => None,
-    }
+    Primitive::from_slug(&raw)
 }
 
 fn primitive_argument(command: &ParsedCommand) -> Option<&str> {
@@ -2675,7 +2667,7 @@ fn node_detail_lines(
     node: &raf_core::scene::graph::SceneNode,
     scene: &SceneGraph,
 ) -> Vec<String> {
-    let bounds = primitive_bounds(node.scale);
+    let bounds = primitive_bounds(node.primitive);
     let mut lines = vec![
         format!("id: {}", id.0),
         format!("uuid: {}", node.uuid),
@@ -2715,7 +2707,7 @@ fn node_json(
     node: &raf_core::scene::graph::SceneNode,
     scene: &SceneGraph,
 ) -> serde_json::Value {
-    let (bounds_min, bounds_max) = primitive_bounds(node.scale);
+    let (bounds_min, bounds_max) = primitive_bounds(node.primitive);
     let world_position = scene.world_matrix(id).col(3).truncate();
     serde_json::json!({
         "ok": true,
@@ -2748,6 +2740,7 @@ fn node_json(
             "position": vec3_json(node.position),
             "rotation_deg": vec3_json(node.rotation),
             "scale": vec3_json(node.scale),
+            "size": vec3_json(node.primitive.dimensions(node.scale)),
             "world_position": vec3_json(world_position),
             "color_rgba": [node.color.r, node.color.g, node.color.b, node.color.a],
             "visible": node.visible,
@@ -2770,8 +2763,8 @@ fn node_json(
     })
 }
 
-fn primitive_bounds(scale: Vec3) -> (Vec3, Vec3) {
-    let half = scale * 0.5;
+fn primitive_bounds(primitive: Primitive) -> (Vec3, Vec3) {
+    let half = primitive.descriptor().half_extents;
     (-half, half)
 }
 
@@ -2781,6 +2774,7 @@ fn mesh_vertex_count(primitive: Primitive) -> usize {
         Primitive::Cube => 24,
         Primitive::Sphere => 425,
         Primitive::Plane => 4,
+        Primitive::Capsule => 170,
         Primitive::Cylinder => 68,
     }
 }
@@ -2791,6 +2785,7 @@ fn mesh_index_count(primitive: Primitive) -> usize {
         Primitive::Cube => 36,
         Primitive::Sphere => 2304,
         Primitive::Plane => 6,
+        Primitive::Capsule => 768,
         Primitive::Cylinder => 192,
     }
 }
@@ -2923,6 +2918,15 @@ fn apply_transform_patch(node: &mut raf_core::scene::graph::SceneNode, patch: Tr
     if !patch.scale.iter().all(Option::is_none) {
         node.scale = patch.scale_or(node.scale);
     }
+}
+
+fn dimensions_patch(command: &ParsedCommand, primitive: Primitive, previous: Vec3, mut patch: TransformPatch) -> Result<TransformPatch, String> {
+    if let Some(value) = structured_or_json_value(command, "size", "size")? {
+        if patch.scale.iter().any(Option::is_some) { return Err("commands.error.dimensions_scale".into()); }
+        let size = Vec3::from_array(parse_vec3_value(&value, "size")?);
+        patch.scale = optional_vec3_values(primitive.scale_for_dimensions(size, previous).map_err(str::to_string)?.to_array());
+    }
+    Ok(patch)
 }
 
 fn parse_transform_patch(command: &ParsedCommand) -> Result<TransformPatch, String> {
@@ -4043,6 +4047,30 @@ mod tests {
             execute("game.camera", &fuzzy, &mut ctx).level,
             CommandLevel::Error
         );
+    }
+
+    #[test]
+    fn authoring_capsule_dimensions_validate_and_round_trip_without_duplicate_size() {
+        let mut scene=SceneGraph::new();
+        let mut selection=SceneSelectionState::default();
+        let mut viewport=HeadlessGameViewportPort::default();
+        let mut ctx=GameCommandContext {scene:&mut scene,selection:&mut selection,viewport:&mut viewport};
+        let add=parsed_command("game.add",serde_json::json!({"primitive":"capsule","name":"Capsule","size":[2,6,2]}));
+        let output=execute("game.add",&add,&mut ctx);
+        assert!(output.changed,"{:?}",output.lines);
+        let id=ctx.selection.selected_node.unwrap();
+        assert_eq!(ctx.scene.get(id).unwrap().scale,Vec3::new(2.0,3.0,2.0));
+        let before=ctx.scene.clone();
+        let bad=parsed_command("game.update",serde_json::json!({"target":"Capsule","size":[1,2,1],"transform":{"scale":[1,1,1]}}));
+        assert_eq!(execute("game.update",&bad,&mut ctx).level,CommandLevel::Error);
+        assert_eq!(ctx.scene.render_fingerprint(),before.render_fingerprint());
+        let serialized=ron::to_string(ctx.scene).unwrap();
+        let restored:SceneGraph=ron::from_str(&serialized).unwrap();
+        assert_eq!(restored.get(id).unwrap().primitive,Primitive::Capsule);
+        let prefab=raf_core::scene::prefab::ScenePrefab::capture(&restored,id).unwrap();
+        let mut copy=SceneGraph::new();
+        let copied=prefab.instantiate(&mut copy,None).unwrap();
+        assert_eq!(copy.get(copied).unwrap().scale,Vec3::new(2.0,3.0,2.0));
     }
 
     fn parsed_command(name: &str, params: Value) -> ParsedCommand {

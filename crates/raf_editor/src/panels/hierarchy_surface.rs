@@ -60,7 +60,7 @@ pub fn build_hierarchy_surface(
             flow: UiFlow::Column,
             grow: 1.0,
             padding: UiSpacing::xy(6.0, 4.0),
-            gap: 1.0,
+            gap: 0.0,
             overflow: UiOverflow::ScrollY,
             ..UiLayout::fill(UiFlow::Column)
         })
@@ -490,6 +490,7 @@ fn primitive_menu_item(
                 Primitive::Cube => UiIconId::Cube,
                 Primitive::Sphere => UiIconId::Sphere,
                 Primitive::Cylinder => UiIconId::Cylinder,
+                Primitive::Capsule => UiIconId::Capsule,
                 Primitive::Plane => UiIconId::Plane,
                 Primitive::Empty => UiIconId::Node,
             })
@@ -1287,6 +1288,55 @@ fn row_node(
         );
     }
     root = root.with_child(main);
+    if row.insertion_parent {
+        root = root.with_child(
+            UiNode::new(format!("hierarchy.parent.{}", row.id.0), UiNodeKind::Label)
+                .with_icon(UiIcon::new(UiIconId::Add).with_size(UiIconSize::Small))
+                .with_tooltip_key("hierarchy.insertion_parent")
+                .with_layout(UiLayout::fixed(18.0, row_height - 2.0)),
+        );
+    }
+    for (index, badge) in row.badges.iter().take(2).enumerate() {
+        let icon = match badge.section {
+            "metadata" => UiIconId::Warning,
+            "behavior" => UiIconId::Script,
+            "appearance" => UiIconId::Assets,
+            "audio" => UiIconId::Play,
+            _ => UiIconId::Node,
+        };
+        root = root.with_child(
+            UiNode::new(
+                format!("hierarchy.badge.{}.{index}", row.id.0),
+                UiNodeKind::Button,
+            )
+            .with_class("hierarchy-row-action")
+            .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
+            .with_tooltip_key(badge.key)
+            .with_accessibility_label_key(badge.key)
+            .with_layout(UiLayout::fixed(22.0, row_height - 2.0))
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                format!("hierarchy.inspect:{}:{}", row.id.0, badge.section),
+            )),
+        );
+    }
+    if row.badges.len() > 2 {
+        root = root.with_child(
+            UiNode::new(
+                format!("hierarchy.badges.more.{}", row.id.0),
+                UiNodeKind::Button,
+            )
+            .with_text_value(format!("+{}", row.badges.len() - 2))
+            .with_tooltip_key("hierarchy.more_details")
+            .with_layout(UiLayout::fixed(22.0, row_height - 2.0))
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                format!("hierarchy.inspect:{}:components", row.id.0),
+            )),
+        );
+    }
     if show_visibility {
         root = root.with_child(
             icon_button(
@@ -1382,6 +1432,7 @@ fn row_icon(row: &HierarchyRow) -> UiIconId {
         Primitive::Sphere => UiIconId::Sphere,
         Primitive::Plane => UiIconId::Plane,
         Primitive::Cylinder => UiIconId::Cylinder,
+        Primitive::Capsule => UiIconId::Capsule,
     }
 }
 
@@ -1571,6 +1622,33 @@ fn context_menu(
     // Separator 2
     menu = menu.with_child(menu_separator("hierarchy.context-menu.sep2", palette));
 
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.insertion",
+        "hierarchy.set_insertion_parent",
+        Some(UiIconId::Add),
+        format!("hierarchy.insertion-parent:{id}"),
+        false,
+        false,
+    ));
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.snap-floor",
+        "hierarchy.snap_floor",
+        Some(UiIconId::Magnet),
+        format!("hierarchy.snap-floor:{id}"),
+        false,
+        false,
+    ));
+    menu = menu.with_child(context_menu_item(
+        palette,
+        "hierarchy.context-menu.snap-selected",
+        "hierarchy.snap_selected",
+        Some(UiIconId::Magnet),
+        format!("hierarchy.snap-selected:{id}"),
+        false,
+        false,
+    ));
     // Group 3: Structure and Hierarchy
     menu = menu.with_child(context_menu_item(
         palette,
@@ -1651,7 +1729,7 @@ const CONTEXT_MENU_PADDING: f32 = 6.0;
 const CONTEXT_MENU_GAP: f32 = 2.0;
 const CONTEXT_MENU_TITLE_HEIGHT: f32 = 26.0;
 const CONTEXT_MENU_BUTTON_HEIGHT: f32 = 26.0;
-const CONTEXT_MENU_BASE_BUTTON_COUNT: usize = 13;
+const CONTEXT_MENU_BASE_BUTTON_COUNT: usize = 16;
 const CONTEXT_MENU_SEPARATOR_COUNT: usize = 3;
 const CONTEXT_MENU_SEPARATOR_HEIGHT: f32 = 5.0;
 
@@ -2235,6 +2313,8 @@ mod tests {
             has_children: false,
             expanded: false,
             script_link: None,
+            badges: Vec::new(),
+            insertion_parent: false,
         }
     }
 

@@ -1485,7 +1485,8 @@ pub fn project_health_scoped(
     let live_set = live.iter().copied().collect::<HashSet<_>>();
     // Duplicates only matter within the same parent: unique full paths still
     // resolve unambiguously, matching the behavior of Unity/Unreal/Godot.
-    let mut duplicate_names = BTreeMap::<(Option<SceneNodeId>, String), Vec<Value>>::new();
+    let mut duplicate_names =
+        BTreeMap::<(Option<usize>, String), (Option<usize>, Vec<Value>)>::new();
     let mut missing_assets = Vec::new();
     let mut missing_scripts = Vec::new();
     let mut sanitized_names = Vec::new();
@@ -1500,8 +1501,12 @@ pub fn project_health_scoped(
             sanitized_names.push(scene_item_reference(scene, *id).unwrap_or(Value::Null));
         }
         duplicate_names
-            .entry((node.parent, presentation.to_ascii_lowercase()))
-            .or_default()
+            .entry((
+                node.parent.map(|parent_id| parent_id.0),
+                presentation.to_ascii_lowercase(),
+            ))
+            .or_insert_with(|| (node.parent.map(|parent_id| parent_id.0), Vec::new()))
+            .1
             .push(scene_item_reference(scene, *id).unwrap_or(Value::Null));
         if let Some(source) = &node.source_asset {
             let source_lower = normalize_asset_path(source);
@@ -1530,12 +1535,12 @@ pub fn project_health_scoped(
     }
     let duplicate_names = duplicate_names
         .into_iter()
-        .filter(|(_, entities)| entities.len() > 1)
-        .map(|((parent, name), entities)| {
+        .filter(|(_, (_, entities))| entities.len() > 1)
+        .map(|((_, name), (parent, entities))| {
             json!({
                 "name": name,
                 "parent": parent
-                    .and_then(|parent_id| scene_item_reference(scene, parent_id))
+                    .and_then(|parent_id| scene_item_reference(scene, SceneNodeId(parent_id)))
                     .unwrap_or(Value::Null),
                 "entities": entities
             })
@@ -2166,6 +2171,7 @@ fn scene_item(scene: &SceneGraph, id: SceneNodeId, include_details: bool) -> Opt
         "scale".to_string(),
         json!([node.scale.x, node.scale.y, node.scale.z]),
     );
+    item.insert("size".to_string(), json!(node.primitive.dimensions(node.scale).to_array()));
     if include_details {
         item.insert(
             "world_position".to_string(),
@@ -2372,48 +2378,7 @@ fn descendants_to_depth(
 /// Primitive meshes are unit-sized in the semantic graph, so this remains
 /// useful to an agent without loading renderer mesh data.
 pub fn world_bounds(scene: &SceneGraph, id: SceneNodeId) -> Option<(Vec3, Vec3)> {
-    fn visit(
-        scene: &SceneGraph,
-        id: SceneNodeId,
-        visited: &mut HashSet<SceneNodeId>,
-        bounds: &mut Option<(Vec3, Vec3)>,
-    ) {
-        if !visited.insert(id) {
-            return;
-        }
-        let Some(node) = scene.get(id) else { return };
-        if !node.is_folder && node.primitive != Primitive::Empty {
-            let half_extents = match node.primitive {
-                Primitive::Plane => Vec3::new(0.5, 0.01, 0.5),
-                _ => Vec3::splat(0.5),
-            };
-            let world = scene.world_matrix(id);
-            for x in [-half_extents.x, half_extents.x] {
-                for y in [-half_extents.y, half_extents.y] {
-                    for z in [-half_extents.z, half_extents.z] {
-                        let point = world.transform_point3(Vec3::new(x, y, z));
-                        if !point.is_finite() {
-                            continue;
-                        }
-                        if let Some((min, max)) = bounds.as_mut() {
-                            *min = min.min(point);
-                            *max = max.max(point);
-                        } else {
-                            *bounds = Some((point, point));
-                        }
-                    }
-                }
-            }
-        }
-        for child in &node.children {
-            visit(scene, *child, visited, bounds);
-        }
-    }
-
-    let mut visited = HashSet::new();
-    let mut bounds = None;
-    visit(scene, id, &mut visited, &mut bounds);
-    bounds
+    crate::scene::geometry::subtree_geometry_bounds(scene, id)
 }
 
 fn aabb_overlaps(left: (Vec3, Vec3), right: (Vec3, Vec3)) -> bool {
@@ -2500,6 +2465,7 @@ fn node_kind(node: &SceneNode) -> &'static str {
             Primitive::Sphere => "sphere",
             Primitive::Plane => "plane",
             Primitive::Cylinder => "cylinder",
+            Primitive::Capsule => "capsule",
         }
     }
 }

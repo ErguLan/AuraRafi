@@ -54,6 +54,45 @@ struct RayPickCandidate {
 }
 
 impl ViewportEditSession {
+    /// Exact point/normal on the nearest supported primitive; ignores editor helpers.
+    pub fn pick_surface(
+        &self,
+        scene: &SceneGraph,
+        view_proj: &Mat4,
+        pointer: [f32; 2],
+        size: [f32; 2],
+    ) -> Option<(Vec3, Vec3)> {
+        let id = self.pick_entity(scene, view_proj, pointer[0], pointer[1], size[0], size[1])?;
+        let node = scene.get(id)?;
+        let (origin, direction) = transform::screen_to_world_ray(
+            pointer[0],
+            pointer[1],
+            size[0],
+            size[1],
+            &view_proj.inverse(),
+        )?;
+        let ray = Ray::new(origin, direction);
+        let world = scene.world_matrix(id);
+        self.with_pick_mesh(id, node, |mesh| {
+            let mut nearest: Option<(f32, Vec3)> = None;
+            for tri in mesh.indices.chunks_exact(3) {
+                let a = world.transform_point3(mesh.positions[tri[0] as usize]);
+                let b = world.transform_point3(mesh.positions[tri[1] as usize]);
+                let c = world.transform_point3(mesh.positions[tri[2] as usize]);
+                if let Some(t) = ray_triangle_two_sided(&ray, a, b, c) {
+                    if nearest.is_none_or(|hit| t < hit.0) {
+                        let mut normal = (b - a).cross(c - a).normalize_or_zero();
+                        if normal.dot(direction) > 0.0 {
+                            normal = -normal;
+                        }
+                        nearest = Some((t, normal));
+                    }
+                }
+            }
+            nearest.map(|(t, n)| (origin + direction * t, n))
+        })
+    }
+
     pub fn clear_drag_state(&mut self) {
         self.drag_active = false;
         self.last_pointer = None;
@@ -341,6 +380,27 @@ impl ViewportEditSession {
             .or_insert_with(|| match node.primitive {
                 Primitive::Cube => EditableMesh::cube(),
                 Primitive::Plane => EditableMesh::plane(),
+                Primitive::Capsule => {
+                    let source = primitives::capsule(16, 4);
+                    let mut mesh = EditableMesh::new();
+                    mesh.vertices = source
+                        .positions
+                        .iter()
+                        .zip(source.normals.iter())
+                        .map(|(position, normal)| crate::editable::Vertex {
+                            position: *position,
+                            normal: *normal,
+                        })
+                        .collect();
+                    mesh.faces = source
+                        .indices
+                        .chunks_exact(3)
+                        .map(|t| {
+                            crate::editable::Face::new(t[0] as usize, t[1] as usize, t[2] as usize)
+                        })
+                        .collect();
+                    mesh
+                }
                 Primitive::Cylinder => EditableMesh::cylinder(16),
                 Primitive::Sphere => EditableMesh::sphere(8, 12),
                 Primitive::Empty => EditableMesh::cube(),
@@ -368,12 +428,14 @@ impl ViewportEditSession {
 
 fn primitive_mesh_data(primitive: Primitive) -> &'static MeshData {
     static CUBE: OnceLock<MeshData> = OnceLock::new();
+    static CAPSULE: OnceLock<MeshData> = OnceLock::new();
     static CYLINDER: OnceLock<MeshData> = OnceLock::new();
     static SPHERE: OnceLock<MeshData> = OnceLock::new();
     static PLANE: OnceLock<MeshData> = OnceLock::new();
 
     match primitive {
         Primitive::Cube | Primitive::Empty => CUBE.get_or_init(|| primitives::cube(1)),
+        Primitive::Capsule => CAPSULE.get_or_init(|| primitives::capsule(16, 4)),
         Primitive::Cylinder => CYLINDER.get_or_init(|| primitives::cylinder(16)),
         Primitive::Sphere => SPHERE.get_or_init(|| primitives::sphere(8, 12)),
         Primitive::Plane => PLANE.get_or_init(|| primitives::plane(1)),

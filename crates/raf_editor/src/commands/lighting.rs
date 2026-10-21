@@ -32,8 +32,8 @@ fn execute_inner(command: &ParsedCommand, scene: &mut SceneGraph) -> Result<Comm
                 json!({"property":p.path,"schema":kind})
             })
             .collect();
-        return Ok(CommandOutput::info("Lighting", vec!["World environment; angles in radians, time in seconds. One directional shadow map; GPU 256/512/1024, CPU capped at 256; hard or four-tap filter. Shadow distance/bias use world units.".into()],
-            json!({"environment":before,"properties":properties,"scope":"world","shadows_supported":true,"shadow_resolutions":[256,512,1024],"shadow_cpu_max_resolution":256,"shadow_transparent_casters":false})));
+        return Ok(CommandOutput::info("Lighting", vec!["World environment; angles in radians, time in seconds. One directional shadow map; GPU 256/512/1024, CPU capped at 256. Hard: one comparison; Soft: four in optimized_current, nine in optimized_improved. Shadow distance/bias use world units. Improved adds an optional budget-admitted five-tap scene filter, not FXAA/MSAA.".into()],
+            json!({"environment":before,"properties":properties,"scope":"world","technologies":["optimized_current","optimized_improved"],"shadows_supported":true,"shadow_resolutions":[256,512,1024],"shadow_cpu_max_resolution":256,"shadow_transparent_casters":false,"shadow_soft_filter_taps":{"optimized_current":4,"optimized_improved":9},"optimized_filter":{"samples":5,"extra_rgba8_targets":1,"max_bytes":67108864,"graphics_budget_fraction":0.0625,"budget_denial":"skip_filter_and_report"}})));
     }
     let next = match command.name.as_str() {
         "lighting.set" => {

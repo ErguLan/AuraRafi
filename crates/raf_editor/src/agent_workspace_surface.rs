@@ -1,6 +1,7 @@
 //! Creative native Agent workspace: project rail, conversation and evidence.
 
 use crate::agent_service::AgentService;
+use crate::agent_workspace_layout::{WorkspaceDivider, WorkspaceLayout};
 use crate::studio_surface::HubSurfaceProject;
 use raf_ai::agent_runtime::AgentToolResult;
 use raf_ai::chat::MessageRole;
@@ -15,6 +16,7 @@ pub(crate) enum EvidenceTab {
     Changes,
     Artifacts,
     Verification,
+    Preview,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -106,16 +108,43 @@ pub(crate) fn build_workspace_surface(
     evidence: EvidenceTab,
     review_open: bool,
 ) -> UiSurface {
+    build_workspace_surface_with_layout(
+        palette,
+        service,
+        projects,
+        settings,
+        size,
+        scroll,
+        step,
+        evidence,
+        review_open,
+        &WorkspaceLayout::default(),
+    )
+}
+
+pub(crate) fn build_workspace_surface_with_layout(
+    palette: StudioUiPalette,
+    service: &AgentService,
+    projects: &[HubSurfaceProject],
+    settings: &EngineSettings,
+    size: [f32; 2],
+    scroll: f32,
+    step: u8,
+    evidence: EvidenceTab,
+    review_open: bool,
+    layout: &WorkspaceLayout,
+) -> UiSurface {
     let tokens = workspace_tokens(palette);
     let width = size[0].max(1.0);
     let height = size[1].max(1.0);
-    let rail = if width < 900.0 { 176.0 } else { 216.0 };
-    let review = if review_open && width >= 1200.0 && service.selected_workspace().is_some() {
-        286.0
-    } else {
-        0.0
-    };
     let ready = service.selected_workspace().filter(|w| !w.closing);
+    let geometry = layout.resolve(
+        size,
+        review_open && ready.is_some(),
+        ready.is_some_and(|w| w.panel.borrow().sidebar_open),
+    );
+    let rail = geometry.projects;
+    let review = geometry.review.map_or(0.0, |r| r.width);
     let mut header = UiNode::new("agent.workspace.header", UiNodeKind::Toolbar)
         .with_layout(UiLayout {
             flow: UiFlow::Row,
@@ -170,7 +199,20 @@ pub(crate) fn build_workspace_surface(
                 &tokens,
             )
             .disabled(ready.is_none()),
-        );
+        )
+        .with_child({
+            let mut preview = button(
+                "agent.workspace.preview",
+                "agent_workspace.preview_3d",
+                "agent.workspace.tab.preview",
+                &tokens,
+            )
+            .with_icon(UiIcon::new(UiIconId::ScenePreview).with_tint(tokens.text))
+            .with_tooltip_key("agent_workspace.preview_3d");
+            preview.text_key = None;
+            preview.layout = UiLayout::fixed(34.0, 32.0);
+            preview.disabled(ready.is_none())
+        });
     header = header
         .with_child(window_button(
             "minimize",
@@ -406,7 +448,7 @@ pub(crate) fn build_workspace_surface(
     let mut rules = Vec::new();
     if let Some(workspace) = ready {
         let panel = workspace.panel.borrow();
-        let mut chat = crate::panels::agent_surface::build_agent_surface(
+        let mut chat = crate::panels::agent_surface::build_workspace_agent_surface(
             palette,
             &panel,
             settings,
@@ -414,7 +456,7 @@ pub(crate) fn build_workspace_surface(
             workspace.project.project_type,
             [(width - rail - review).max(1.0), height - 52.0],
             scroll,
-            if panel.sidebar_open { 1.0 } else { 0.0 },
+            geometry.sessions,
         );
         chat.root.layout = UiLayout::absolute(UiRect::new(
             rail,
@@ -424,14 +466,34 @@ pub(crate) fn build_workspace_surface(
         ));
         root = root.with_child(chat.root);
         rules.extend(chat.style_sheet.rules);
-        if review_open {
+        if let Some(review_rect) = geometry.review {
             root = root.with_child(evidence_surface(
                 palette,
                 &panel,
                 settings.language,
-                UiRect::new(width - 286.0, 52.0, 286.0, height - 52.0),
+                review_rect,
                 evidence,
+                workspace.project.project_type == raf_core::ProjectType::Game,
             ));
+            if evidence == EvidenceTab::Preview
+                && workspace.project.project_type == raf_core::ProjectType::Game
+            {
+                root.style.fill = [0; 4];
+                root.children.insert(
+                    0,
+                    UiNode::new("agent.workspace.background", UiNodeKind::Panel)
+                        .with_layout(UiLayout::absolute(UiRect::new(
+                            0.0,
+                            52.0,
+                            review_rect.x,
+                            height - 52.0,
+                        )))
+                        .with_style(UiStyle {
+                            fill: tokens.background,
+                            ..UiStyle::transparent()
+                        }),
+                );
+            }
         }
     } else {
         let mut empty =
@@ -487,6 +549,48 @@ pub(crate) fn build_workspace_surface(
         }
         root = root.with_child(empty);
     }
+    for (divider, rect) in geometry.dividers() {
+        let name = match divider {
+            WorkspaceDivider::Projects => "projects",
+            WorkspaceDivider::Sessions => "sessions",
+            WorkspaceDivider::Review => "review",
+        };
+        root = root.with_child(
+            UiNode::new(
+                format!("agent.workspace.divider.{name}"),
+                UiNodeKind::Button,
+            )
+            .with_class("agent-workspace-divider")
+            .with_layout(UiLayout::absolute(rect).with_z_index(50))
+            .with_style(UiStyle::transparent())
+            .with_accessibility_label_key("agent_workspace.resize")
+            .with_tooltip_key("agent_workspace.resize")
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("ArrowLeft".into()),
+                format!("agent.workspace.resize.{name}:-24"),
+            ))
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("ArrowRight".into()),
+                format!("agent.workspace.resize.{name}:24"),
+            ))
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("Home".into()),
+                format!("agent.workspace.resize.{name}:reset"),
+            ))
+            .with_child(
+                UiNode::new(
+                    format!("agent.workspace.divider.{name}.line"),
+                    UiNodeKind::Panel,
+                )
+                .with_layout(UiLayout::absolute(UiRect::new(3.5, 0.0, 1.0, rect.height)))
+                .with_style(UiStyle {
+                    fill: tokens.border,
+                    ..UiStyle::transparent()
+                }),
+            ),
+        );
+    }
     let mut surface = UiSurface::new("editor.agent.workspace", palette, root);
     for class in ["agent-workspace-button", "agent-workspace-project"] {
         rules.push(
@@ -512,6 +616,18 @@ pub(crate) fn build_workspace_surface(
         );
     }
     surface.style_sheet.rules = rules;
+    for state in [UiStyleRuleState::Hovered, UiStyleRuleState::Focused] {
+        surface.style_sheet.rules.push(
+            UiStyleRule::new(
+                UiStyleSelector::Class("agent-workspace-divider".into()),
+                UiStylePatch {
+                    fill: Some(tokens.selection),
+                    ..Default::default()
+                },
+            )
+            .when(state),
+        );
+    }
     surface
 }
 
@@ -662,6 +778,7 @@ fn evidence_surface(
     language: Language,
     rect: UiRect,
     tab: EvidenceTab,
+    game: bool,
 ) -> UiNode {
     let tokens = workspace_tokens(palette);
     let mut root = UiNode::new("agent.workspace.evidence", UiNodeKind::Panel)
@@ -693,6 +810,11 @@ fn evidence_surface(
             "agent_workspace.verification",
             EvidenceTab::Verification,
         ),
+        (
+            "preview",
+            "agent_workspace.preview_3d",
+            EvidenceTab::Preview,
+        ),
     ] {
         let mut item = button(
             &format!("agent.workspace.tab.{id}"),
@@ -705,13 +827,19 @@ fn evidence_surface(
             padding: UiSpacing::xy(4.0, 6.0),
             ..UiLayout::fixed(
                 match value {
-                    EvidenceTab::Changes => 72.0,
-                    EvidenceTab::Artifacts => 80.0,
-                    EvidenceTab::Verification => 102.0,
+                    EvidenceTab::Changes => 66.0,
+                    EvidenceTab::Artifacts => 74.0,
+                    EvidenceTab::Verification => 94.0,
+                    EvidenceTab::Preview => 34.0,
                 },
                 32.0,
             )
         };
+        if value == EvidenceTab::Preview {
+            item.text_key = None;
+            item.icon = Some(UiIcon::new(UiIconId::ScenePreview).with_tint(tokens.text));
+            item.tooltip_key = Some(key.into());
+        }
         item.style.fill = if tab == value {
             tokens.surface_raised
         } else {
@@ -720,6 +848,117 @@ fn evidence_surface(
         tabs = tabs.with_child(item);
     }
     root = root.with_child(tabs);
+    if tab == EvidenceTab::Preview {
+        if !game {
+            return root.with_child(
+                label(
+                    "agent.workspace.preview.unavailable",
+                    "agent_workspace.preview_game_only",
+                    &tokens,
+                )
+                .with_text_overflow(UiTextOverflow::Wrap)
+                .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+            );
+        }
+        root.style.fill = [0; 4];
+        root.layout.padding = UiSpacing::ZERO;
+        root.children[0].layout = UiLayout {
+            flow: UiFlow::Row,
+            gap: 4.0,
+            ..UiLayout::absolute(UiRect::new(12.0, 12.0, rect.width - 24.0, 34.0))
+        };
+        for (id, area) in [
+            ("top", UiRect::new(0.0, 0.0, rect.width, 86.0)),
+            (
+                "bottom",
+                UiRect::new(0.0, rect.height - 46.0, rect.width, 46.0),
+            ),
+            ("left", UiRect::new(0.0, 0.0, 8.0, rect.height)),
+            (
+                "right",
+                UiRect::new(rect.width - 8.0, 0.0, 8.0, rect.height),
+            ),
+        ] {
+            root.children.insert(
+                0,
+                UiNode::new(
+                    format!("agent.workspace.preview.background.{id}"),
+                    UiNodeKind::Panel,
+                )
+                .with_layout(UiLayout::absolute(area))
+                .with_style(UiStyle {
+                    fill: tokens.surface,
+                    ..UiStyle::transparent()
+                }),
+            );
+        }
+        let icon_button = |id: &str, key: &str, command: &str, icon| {
+            let mut node = button(id, key, command, &tokens)
+                .with_icon(UiIcon::new(icon).with_tint(tokens.text))
+                .with_tooltip_key(key);
+            node.text_key = None;
+            node.layout = UiLayout::fixed(30.0, 28.0);
+            node
+        };
+        return root
+            .with_child(
+                UiNode::new("agent.workspace.preview.controls", UiNodeKind::Toolbar)
+                    .with_layout(UiLayout {
+                        flow: UiFlow::Row,
+                        gap: 8.0,
+                        align_items: UiAlign::Center,
+                        ..UiLayout::absolute(UiRect::new(12.0, 50.0, rect.width - 24.0, 28.0))
+                    })
+                    .with_child(
+                        label(
+                            "agent.workspace.preview.readonly",
+                            "agent_workspace.preview_readonly",
+                            &tokens,
+                        )
+                        .with_layout(UiLayout {
+                            grow: 1.0,
+                            ..UiLayout::fit_content()
+                        }),
+                    )
+                    .with_child(icon_button(
+                        "agent.workspace.preview.fit",
+                        "agent_workspace.preview_fit",
+                        "agent.workspace.preview.fit",
+                        UiIconId::Focus,
+                    ))
+                    .with_child(icon_button(
+                        "agent.workspace.preview.close",
+                        "agent_workspace.preview_close",
+                        "agent.workspace.preview.close",
+                        UiIconId::Close,
+                    )),
+            )
+            .with_child(
+                UiNode::new("agent.workspace.preview.canvas", UiNodeKind::Canvas)
+                    .with_layout(UiLayout::absolute(UiRect::new(
+                        8.0,
+                        86.0,
+                        rect.width - 16.0,
+                        (rect.height - 132.0).max(1.0),
+                    )))
+                    .with_style(UiStyle::transparent())
+                    .with_accessibility_label_key("agent_workspace.preview_3d"),
+            )
+            .with_child(
+                label(
+                    "agent.workspace.preview.help",
+                    "agent_workspace.preview_controls",
+                    &tokens,
+                )
+                .with_text_overflow(UiTextOverflow::Wrap)
+                .with_layout(UiLayout::absolute(UiRect::new(
+                    12.0,
+                    rect.height - 40.0,
+                    rect.width - 24.0,
+                    36.0,
+                ))),
+            );
+    }
     let mut list = UiNode::scroll_view("agent.workspace.evidence.scroll", UiScrollAxis::Vertical)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
@@ -754,6 +993,7 @@ fn evidence_surface(
                         .any(|r| r.contains("generated") || r.contains("agent_artifacts"))
             }
             EvidenceTab::Verification => result.verification.is_some(),
+            EvidenceTab::Preview => false,
         };
         if !relevant {
             continue;
@@ -809,6 +1049,7 @@ fn evidence_surface(
                 .get("artifact")
                 .or_else(|| result.data.pointer("/receipt/artifacts")),
             EvidenceTab::Verification => result.verification.as_ref(),
+            EvidenceTab::Preview => None,
         };
         if let Some(detail) = detail {
             entry = entry.with_child(button(

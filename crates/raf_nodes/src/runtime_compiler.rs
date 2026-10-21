@@ -178,6 +178,50 @@ impl Generator<'_> {
             .ok_or("Unknown node")?
             .slug;
         Ok(match slug {
+            "input-axis" => format!(
+                "input_axis({})",
+                self.input(index, "Name", "axis_name", "", depth + 1)?
+            ),
+            "pointer-motion" => format!(
+                "pointer_axis({},{})",
+                self.input(index, "Source", "pointer_source", "relative", depth + 1)?,
+                self.input(index, "Axis", "pointer_axis", "0", depth + 1)?
+            ),
+            "pointer-button" => format!(
+                "mouse_button({},{})",
+                self.input(index, "Button", "pointer_button", "0", depth + 1)?,
+                self.input(index, "Phase", "pointer_phase", "pressed", depth + 1)?
+            ),
+            "progress-get" | "progress-loaded-get" => format!(
+                "{}({},{})",
+                slug.replace('-', "_"),
+                self.input(index, "Key", "progress_key", "", depth + 1)?,
+                self.input(index, "Fallback", "fallback", "", depth + 1)?
+            ),
+            "progress-status" | "session-status" => format!("{}()", slug.replace('-', "_")),
+            "runtime-field" => format!(
+                "runtime_field({},{},{})",
+                self.input(index, "Record", "record", "", depth + 1)?,
+                self.input(index, "Field", "field_name", "status", depth + 1)?,
+                self.input(index, "Fallback", "fallback", "", depth + 1)?
+            ),
+            "raycast" => format!(
+                "raycast({},{},{},{},{},{})",
+                self.input(index, "Origin", "ray_origin", "0,0,0", depth + 1)?,
+                self.input(index, "Direction", "ray_direction", "0,0,-1", depth + 1)?,
+                self.input(index, "Distance", "ray_distance", "100", depth + 1)?,
+                self.entity_input(index, "Ignore", "query_ignore", depth + 1)?,
+                self.input(index, "Tag", "query_tag", "", depth + 1)?,
+                self.input(index, "Triggers", "query_triggers", "false", depth + 1)?
+            ),
+            "overlap-aabb" => format!(
+                "overlap_aabb({},{},{},{},{})",
+                self.input(index, "Min", "query_min", "-1,-1,-1", depth + 1)?,
+                self.input(index, "Max", "query_max", "1,1,1", depth + 1)?,
+                self.entity_input(index, "Ignore", "query_ignore", depth + 1)?,
+                self.input(index, "Tag", "query_tag", "", depth + 1)?,
+                self.input(index, "Triggers", "query_triggers", "false", depth + 1)?
+            ),
             "environment-get" => format!(
                 "{}({})",
                 environment_function(node, false)?,
@@ -329,6 +373,7 @@ impl Generator<'_> {
             },
         )?;
         let entity = if slug.starts_with("environment-")
+            || crate::service_nodes::is_service(slug)
             || crate::physics_nodes::is_event(slug)
             || matches!(
                 slug,
@@ -357,6 +402,14 @@ impl Generator<'_> {
         };
         let mut code = String::new();
         match slug {
+            "set-cursor" => code = format!("set_cursor({},{});",self.input(i,"Mode","cursor_mode","free",0)?,self.input(i,"Visible","cursor_visible","true",0)?),
+            "progress-set" => code = format!("progress_set({},{});",self.input(i,"Key","progress_key","",0)?,self.input(i,"Value","value","",0)?),
+            "progress-save"|"progress-load"|"progress-load-backup" => code = format!("{}({});",slug.replace('-',"_"),self.input(i,"Slot","progress_slot","manual",0)?),
+            "progress-profile" => code = format!("progress_profile({});",self.input(i,"Profile","progress_profile","main",0)?),
+            "progress-remove" => code = format!("progress_remove({});",self.input(i,"Key","progress_key","",0)?),
+            "progress-clear"|"progress-discard"|"progress-apply-loaded" => code = format!("{}();",slug.replace('-',"_")),
+            "request-session" => code = format!("request_session({});",self.input(i,"Session","session_id","",0)?),
+            slug if crate::service_nodes::is_service(slug) => return Err(format!("Data-only node {} cannot be in a flow chain",n.name)),
             "environment-get" => return Err("Get Environment is data-only".into()),
             "environment-clear-view" => code = "clear_view_environment();".into(),
             "environment-set-number" | "environment-set-bool" | "environment-set-choice" | "environment-set-color" => {

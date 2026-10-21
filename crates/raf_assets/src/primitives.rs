@@ -14,6 +14,8 @@ pub enum PrimitiveShape {
     Sphere,
     #[serde(alias = "cylinder", alias = "tube")]
     Cylinder,
+    #[serde(alias = "capsule")]
+    Capsule,
     #[serde(alias = "plane", alias = "floor")]
     Plane,
 }
@@ -23,6 +25,7 @@ impl PrimitiveShape {
         match self {
             Self::Cube => "Cube",
             Self::Sphere => "Sphere",
+            Self::Capsule => "Capsule",
             Self::Cylinder => "Cylinder",
             Self::Plane => "Plane",
         }

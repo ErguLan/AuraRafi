@@ -13,7 +13,9 @@ use raf_ui::{
     UiSpacing, UiStylePatch, UiStyleRuleState, UiStyleSheet, UiTextInput, UiTextOverflow,
     UiTextRole, UiTextStyle,
 };
+use raf_electronics::CadSurfaceKind;
 
+use crate::electronics_controller::PcbLayerVisibility;
 use crate::panels::electronics_surface::{
     electronics_active_rule, electronics_body_style, electronics_class_rule,
     electronics_disabled_rule, electronics_flat_class_rule, electronics_focus_rule,
@@ -66,7 +68,10 @@ pub fn build_electronics_navigator_surface(
     components: &[ElectronicsNavigatorEntry],
     wires: &[ElectronicsNavigatorEntry],
     library: &[ElectronicsLibraryEntry],
+    surface: CadSurfaceKind,
+    layer_visibility: PcbLayerVisibility,
 ) -> UiSurface {
+    let active_tab = normalize_tab(active_tab, surface);
     let mut root = UiNode::new("electronics.navigator", UiNodeKind::Panel)
         .with_class("electronics-navigator")
         .with_layout(UiLayout {
@@ -77,38 +82,81 @@ pub fn build_electronics_navigator_surface(
             ..UiLayout::fill(UiFlow::Column)
         })
         .with_child(header(palette, schematic_name))
-        .with_child(tabs(palette, active_tab))
+        .with_child(tabs(palette, active_tab, surface))
         .with_child(summary(palette, counts));
 
-    // The search field filters every list in the navigator, not only the
+    // The search field filters every book list in the navigator, not only the
     // catalog: components and wires are the two long lists.
-    if matches!(active_tab, "library" | "components" | "wires") {
+    if matches!(active_tab, "library" | "components" | "wires" | "objects") {
         root = root.with_child(search(query));
     }
 
-    if active_tab == "library" {
-        root = root.with_child(library_list(palette, library, query));
-    } else {
-        let rows = if active_tab == "wires" {
-            wires
-        } else {
-            components
-        };
-        // The project tab shows the document list, not a searchable list, so a
-        // query left over from another tab must not filter it silently.
-        let list_query = if active_tab == "project" { "" } else { query };
-        root = root.with_child(document_list(
-            palette,
-            rows,
-            active_tab,
-            schematic_name,
-            list_query,
-        ));
+    match active_tab {
+        "library" => {
+            root = root.with_child(library_list(palette, library, query));
+        }
+        "layers" => {
+            root = root.with_child(layers_list(palette, layer_visibility));
+        }
+        // The board inventory presents placements and copper runs as one list
+        // so the rail keeps one strong finding point for every PCB object.
+        "objects" => {
+            root = root.with_child(document_objects_list(palette, components, wires, query));
+        }
+        "project" => {
+            root = root.with_child(document_list(palette, components, schematic_name));
+        }
+        "components" => {
+            root = root.with_child(entries_list(
+                palette,
+                components,
+                query,
+                DocumentRowKind::Component,
+            ));
+        }
+        _ => {
+            root = root.with_child(entries_list(
+                palette,
+                wires,
+                query,
+                DocumentRowKind::Wire,
+            ));
+        }
     }
 
     let mut surface = UiSurface::new("electronics.navigator", palette, root);
     surface.style_sheet = style_sheet(palette);
     surface
+}
+
+/// Resolves a stored tab id against the active surface.
+///
+/// A session may persist the tab of the other surface ("wires" open when the
+/// user pressed PCB), so the rail self-heals to the document inventory of the
+/// surface instead of rendering a tab that does not exist.
+fn normalize_tab(active_tab: &str, surface: CadSurfaceKind) -> &'static str {
+    match surface {
+        CadSurfaceKind::Schematic => match active_tab {
+            "project" | "components" | "wires" | "library" => mapper(active_tab),
+            _ => "components",
+        },
+        CadSurfaceKind::Pcb => match active_tab {
+            "project" | "objects" | "layers" | "library" => mapper(active_tab),
+            _ => "objects",
+        },
+    }
+}
+
+/// Maps a shelved tab id to the static label the same id uses.
+fn mapper(tab: &str) -> &'static str {
+    match tab {
+        "project" => "project",
+        "components" => "components",
+        "wires" => "wires",
+        "objects" => "objects",
+        "layers" => "layers",
+        _ => "library",
+    }
 }
 
 fn header(palette: StudioUiPalette, schematic_name: &str) -> UiNode {
@@ -167,7 +215,7 @@ fn header(palette: StudioUiPalette, schematic_name: &str) -> UiNode {
         )
 }
 
-fn tabs(palette: StudioUiPalette, active: &str) -> UiNode {
+fn tabs(palette: StudioUiPalette, active: &str, surface: CadSurfaceKind) -> UiNode {
     let mut row = UiNode::new("electronics.navigator.tabs", UiNodeKind::Toolbar)
         .with_class("electronics-nav-tabs")
         .with_layout(UiLayout {
@@ -176,16 +224,25 @@ fn tabs(palette: StudioUiPalette, active: &str) -> UiNode {
             padding: UiSpacing::xy(2.0, 0.0),
             ..UiLayout::fixed(0.0, ELECTRONICS_CONTROL_HEIGHT).with_width_mode(UiSizeMode::Fill)
         });
-    for (id, label_key, icon) in [
-        ("project", "app.electronics_project_tab", UiIconId::Project),
-        ("library", "app.electronics_library", UiIconId::Assets),
-        (
-            "components",
-            "app.schematic_components",
-            UiIconId::Schematic,
-        ),
-        ("wires", "app.schematic_wires", UiIconId::Move),
-    ] {
+    let tab_defs: &[(&str, &str, UiIconId)] = match surface {
+        CadSurfaceKind::Schematic => &[
+            ("project", "app.electronics_project_tab", UiIconId::Project),
+            ("library", "app.electronics_library", UiIconId::Assets),
+            (
+                "components",
+                "app.schematic_components",
+                UiIconId::Schematic,
+            ),
+            ("wires", "app.schematic_wires", UiIconId::Move),
+        ],
+        CadSurfaceKind::Pcb => &[
+            ("project", "app.electronics_project_tab", UiIconId::Project),
+            ("library", "app.electronics_library", UiIconId::Assets),
+            ("objects", "electronics.rail.objects", UiIconId::Entity),
+            ("layers", "electronics.rail.layers", UiIconId::Eye),
+        ],
+    };
+    for (id, label_key, icon) in tab_defs.iter().copied() {
         let active_tab = active == id;
         row = row.with_child(
             UiNode::new(
@@ -493,47 +550,88 @@ fn library_card(palette: StudioUiPalette, entry: &ElectronicsLibraryEntry) -> Ui
 fn document_list(
     palette: StudioUiPalette,
     entries: &[ElectronicsNavigatorEntry],
-    active_tab: &str,
     schematic_name: &str,
-    query: &str,
 ) -> UiNode {
     let tokens = palette.tokens();
     let mut list = list_node("electronics.document.list");
-    if active_tab == "project" {
-        list = list
-            .with_child(section_label(
-                "app.electronics_schematic_section",
-                tokens.text_muted,
-            ))
-            .with_child(document_row(
-                palette,
-                &ElectronicsNavigatorEntry {
-                    label: schematic_name.to_string(),
-                    secondary: String::new(),
-                    secondary_key: Some("app.electronics_active_document"),
-                    command: "electronics.navigator.tab:components".to_string(),
-                    icon: UiIconId::Schematic,
-                    active: true,
-                },
-                0,
-                "project",
-            ));
-    }
-    let query = query.trim().to_lowercase();
-    let mut visible = 0usize;
+    list = list
+        .with_child(section_label(
+            "app.electronics_schematic_section",
+            tokens.text_muted,
+        ))
+        .with_child(document_row(
+            palette,
+            &ElectronicsNavigatorEntry {
+                label: schematic_name.to_string(),
+                secondary: String::new(),
+                secondary_key: Some("app.electronics_active_document"),
+                command: "electronics.navigator.tab:components".to_string(),
+                icon: UiIconId::Schematic,
+                active: true,
+            },
+            0,
+            DocumentRowKind::Project,
+        ));
+    // The project tab shows the document list, not a searchable one, so a
+    // query left over from another tab must not filter it silently.
+    list = list
+        .with_child(section_label("electronics.rail.documents", tokens.accent));
     for (index, entry) in entries.iter().enumerate() {
-        if !query.is_empty() && !entry_matches(entry, &query) {
-            continue;
-        }
-        visible += 1;
-        let row_index = if active_tab == "project" {
-            index + 1
-        } else {
-            index
-        };
-        list = list.with_child(document_row(palette, entry, row_index, active_tab));
+        list = list.with_child(document_row(
+            palette,
+            entry,
+            index + 1,
+            DocumentRowKind::Component,
+        ));
     }
-    if visible == 0 && active_tab != "project" {
+    list
+}
+
+/// PCB document inventory: placements and copper runs as one list.
+///
+/// The board tracks are navigable targets like the components, so a section
+/// header separates the two instead of giving them separate tabs.
+fn document_objects_list(
+    palette: StudioUiPalette,
+    components: &[ElectronicsNavigatorEntry],
+    traces: &[ElectronicsNavigatorEntry],
+    query: &str,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let query = query.trim().to_lowercase();
+    let matches = |entry: &ElectronicsNavigatorEntry| {
+        query.is_empty() || entry_matches(entry, &query)
+    };
+    let mut list = list_node("electronics.document.list");
+    let mut visible = 0usize;
+    let mut stream = 0usize;
+    if components.iter().any(|entry| matches(entry)) {
+        list = list.with_child(section_label("electronics.rail.components", tokens.accent));
+        for entry in components.iter().filter(|entry| matches(entry)) {
+            visible += 1;
+            list = list.with_child(document_row(
+                palette,
+                entry,
+                stream,
+                DocumentRowKind::Component,
+            ));
+            stream += 1;
+        }
+    }
+    if traces.iter().any(|entry| matches(entry)) {
+        list = list.with_child(section_label("electronics.rail.traces", tokens.accent));
+        for entry in traces.iter().filter(|entry| matches(entry)) {
+            visible += 1;
+            list = list.with_child(document_row(
+                palette,
+                entry,
+                format!("t.{stream}"),
+                DocumentRowKind::Trace,
+            ));
+            stream += 1;
+        }
+    }
+    if visible == 0 {
         let message = if query.is_empty() {
             "app.electronics_no_items"
         } else {
@@ -547,6 +645,135 @@ fn document_list(
 /// Whether a document row matches the navigator query.
 fn entry_matches(entry: &ElectronicsNavigatorEntry, query: &str) -> bool {
     entry.label.to_lowercase().contains(query) || entry.secondary.to_lowercase().contains(query)
+}
+
+/// One flat, searchable document list: the schematic Components and Wires tabs.
+fn entries_list(
+    palette: StudioUiPalette,
+    entries: &[ElectronicsNavigatorEntry],
+    query: &str,
+    kind: DocumentRowKind,
+) -> UiNode {
+    let query = query.trim().to_lowercase();
+    let mut list = list_node("electronics.document.list");
+    let mut visible = 0usize;
+    for (index, entry) in entries.iter().enumerate() {
+        if !query.is_empty() && !entry_matches(entry, &query) {
+            continue;
+        }
+        visible += 1;
+        list = list.with_child(document_row(palette, entry, index, kind));
+    }
+    if visible == 0 {
+        let message = if query.is_empty() {
+            "app.electronics_no_items"
+        } else {
+            "app.electronics_no_items_match"
+        };
+        list = list.with_child(empty_row(palette, "electronics.document.empty", message));
+    }
+    list
+}
+
+/// The PCB visibility sheet of the Layers tab.
+///
+/// One row per presentation filter: the toggle is the whole row, the state is
+/// its own accessibility flag instead of a live color patch, and the trailing
+/// count tells the user what is actually being pruned right now.
+fn layers_list(palette: StudioUiPalette, visibility: PcbLayerVisibility) -> UiNode {
+    let tokens = palette.tokens();
+    let rows: [(&str, &'static str, UiIconId, bool); 5] = [
+        ("components", "electronics.rail.layer.components", UiIconId::Entity, visibility.components),
+        ("top", "electronics.rail.layer.top", UiIconId::Pcb, visibility.top_traces),
+        ("bottom", "electronics.rail.layer.bottom", UiIconId::Pcb, visibility.bottom_traces),
+        ("silk", "electronics.rail.layer.silk", UiIconId::Frame, visibility.silkscreen),
+        ("airwires", "electronics.rail.layer.airwires", UiIconId::Wire, visibility.airwires),
+    ];
+    let mut list = list_node("electronics.layers.list");
+    for (key, label_key, icon, visible) in rows {
+        let state_key = if visible {
+            "electronics.rail.layer.on"
+        } else {
+            "electronics.rail.layer.off"
+        };
+        list = list.with_child(
+            UiNode::new(
+                format!("electronics.layers.row.{key}"),
+                UiNodeKind::Button,
+            )
+            .with_class("electronics-layers-row")
+            .with_class(if visible {
+                "electronics-layers-row-on"
+            } else {
+                ""
+            })
+            .with_layout(UiLayout {
+                flow: UiFlow::Row,
+                align_items: UiAlign::Center,
+                gap: 7.0,
+                padding: UiSpacing::xy(8.0, 3.0),
+                ..UiLayout::fixed(0.0, ELECTRONICS_ITEM_HEIGHT).with_width_mode(UiSizeMode::Fill)
+            })
+            .with_accessibility_role(UiAccessibilityRole::Checkbox)
+            .with_accessibility_label_key(label_key)
+            .with_accessibility_checked(visible)
+            .with_tooltip_key(label_key)
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                format!("electronics.layer.toggle.{key}"),
+            ))
+            .with_child(
+                UiNode::new(
+                    format!("electronics.layers.row.{key}.icon"),
+                    UiNodeKind::Label,
+                )
+                .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small).with_tint(if visible {
+                    tokens.text
+                } else {
+                    tokens.text_muted
+                }))
+                .with_layout(UiLayout::fixed(
+                    ELECTRONICS_ROW_GLYPH_TRACK,
+                    ELECTRONICS_ITEM_HEIGHT - 6.0,
+                )),
+            )
+            .with_child(
+                UiNode::new(
+                    format!("electronics.layers.row.{key}.label"),
+                    UiNodeKind::Label,
+                )
+                .with_text_key(label_key)
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_text_style(electronics_body_style(tokens.text))
+                .with_layout(
+                    UiLayout::fixed(0.0, ELECTRONICS_BODY_LINE_HEIGHT)
+                        .with_width_mode(UiSizeMode::Fill),
+                ),
+            )
+            .with_child(
+                UiNode::new(
+                    format!("electronics.layers.row.{key}.state"),
+                    UiNodeKind::Label,
+                )
+                .with_text_key(state_key)
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_text_style(electronics_body_style(tokens.text_muted)),
+            ),
+        );
+    }
+    list = list.with_child(
+        UiNode::new("electronics.layers.hint", UiNodeKind::Label)
+            .with_text_key("electronics.rail.layer.hint")
+            .with_text_overflow(UiTextOverflow::Ellipsis)
+            .with_text_style(electronics_body_style(tokens.text_muted))
+            .with_layout(
+                UiLayout::fixed(0.0, ELECTRONICS_ROW_HEIGHT)
+                    .with_width_mode(UiSizeMode::Fill)
+                    .with_text_safe_area(true),
+            ),
+    );
+    list
 }
 
 fn list_node(id: &str) -> UiNode {
@@ -574,11 +801,32 @@ fn empty_row(palette: StudioUiPalette, id: &str, message_key: &str) -> UiNode {
         )
 }
 
+/// What a navigator row represents, so its accessible name never depends on
+/// which tab rendered it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DocumentRowKind {
+    Project,
+    Component,
+    Wire,
+    Trace,
+}
+
+impl DocumentRowKind {
+    fn accessibility_key(self) -> &'static str {
+        match self {
+            Self::Project => "app.electronics_schematic_tab",
+            Self::Component => "app.electronics_component",
+            Self::Wire => "app.electronics_wire",
+            Self::Trace => "electronics.rail.trace",
+        }
+    }
+}
+
 fn document_row(
     palette: StudioUiPalette,
     entry: &ElectronicsNavigatorEntry,
-    index: usize,
-    active_tab: &str,
+    index: impl std::fmt::Display,
+    kind: DocumentRowKind,
 ) -> UiNode {
     let tokens = palette.tokens();
     let secondary_id = format!("electronics.document.row.{index}.secondary");
@@ -655,7 +903,7 @@ fn document_row(
     .with_accessibility_role(UiAccessibilityRole::Button)
     // The row label is a runtime value, so the accessible name is the localized
     // kind of the row and the rendered text stays the designator and value.
-    .with_accessibility_label_key(row_kind_key(active_tab))
+    .with_accessibility_label_key(kind.accessibility_key())
     .with_accessibility_selected(entry.active)
     .focusable()
     .with_tooltip_value(format!("{} - {}", entry.label, entry.secondary))
@@ -663,15 +911,6 @@ fn document_row(
         UiEventKind::Click,
         entry.command.clone(),
     ))
-}
-
-/// Localized name of what a navigator row represents.
-fn row_kind_key(active_tab: &str) -> &'static str {
-    match active_tab {
-        "wires" => "app.electronics_wire",
-        "project" => "app.electronics_schematic_tab",
-        _ => "app.electronics_component",
-    }
 }
 
 fn section_label(label_key: &str, color: [u8; 4]) -> UiNode {
@@ -757,6 +996,15 @@ fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             tokens.border,
             tokens.text_muted,
         ),
+        electronics_flat_class_rule("electronics-layers-row", tokens.surface_alt, tokens.text),
+        // A hidden layer dims but keeps a full-color text so its name stays
+        // readable while waiting to be re-enabled.
+        electronics_class_rule(
+            "electronics-layers-row-on",
+            tokens.surface_raised,
+            tokens.border,
+            tokens.text,
+        ),
     ];
     for class in [
         "electronics-nav-tab",
@@ -765,6 +1013,7 @@ fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
         "electronics-document-row",
         "electronics-document-row-active",
         "electronics-icon-button",
+        "electronics-layers-row",
     ] {
         rules.push(electronics_hover_rule(class, tokens));
         rules.push(electronics_focus_rule(class, tokens));
@@ -835,6 +1084,8 @@ mod tests {
             components,
             wires,
             &library(),
+            raf_electronics::CadSurfaceKind::Schematic,
+            crate::electronics_controller::PcbLayerVisibility::default(),
         )
     }
 
@@ -963,6 +1214,8 @@ mod tests {
             &[],
             &[],
             &entries,
+            raf_electronics::CadSurfaceKind::Schematic,
+            crate::electronics_controller::PcbLayerVisibility::default(),
         );
         assert!(surface
             .root
@@ -981,6 +1234,79 @@ mod tests {
             let surface = build(tab, "", &[entry(0, true), entry(1, false)], &[]);
             assert_electronics_layout_gate(&surface, 224, 720);
         }
+        for tab in ["project", "objects", "layers", "library"] {
+            let surface = build_electronics_navigator_surface(
+                palette(),
+                tab,
+                "",
+                "Main Schematic",
+                (1, 1, 1),
+                &[entry(0, true)],
+                &[entry(0, false)],
+                &library(),
+                raf_electronics::CadSurfaceKind::Pcb,
+                crate::electronics_controller::PcbLayerVisibility {
+                    top_traces: false,
+                    ..Default::default()
+                },
+            );
+            assert_electronics_layout_gate(&surface, 224, 720);
+        }
+    }
+
+    #[test]
+    fn pcb_tabs_self_heal_a_stored_schematic_tab_in_the_objects_list() {
+        let surface = build_electronics_navigator_surface(
+            palette(),
+            "wires",
+            "",
+            "Main Schematic",
+            (1, 1, 1),
+            &[entry(0, false)],
+            &[entry(0, false)],
+            &library(),
+            raf_electronics::CadSurfaceKind::Pcb,
+            crate::electronics_controller::PcbLayerVisibility::default(),
+        );
+        assert!(surface.root.find("electronics.navigator.tab.objects").is_some());
+        assert!(surface.root.find("electronics.document.list").is_some());
+    }
+
+    #[test]
+    fn layers_rows_toggle_through_the_controller_command() {
+        let surface = build_electronics_navigator_surface(
+            palette(),
+            "layers",
+            "",
+            "Main Schematic",
+            (0, 1, 0),
+            &[],
+            &[],
+            &library(),
+            raf_electronics::CadSurfaceKind::Pcb,
+            crate::electronics_controller::PcbLayerVisibility {
+                airwires: false,
+                ..Default::default()
+            },
+        );
+        let airwires = surface
+            .root
+            .find("electronics.layers.row.airwires")
+            .expect("airwires row");
+        assert_eq!(
+            airwires.accessibility_role,
+            UiAccessibilityRole::Checkbox,
+            "a visibility row is a checkbox"
+        );
+        assert_eq!(airwires.accessibility_checked, Some(false));
+        assert!(airwires.event_handlers.iter().any(|event| {
+            matches!(&event.action, UiAction::Command { name } if name == "electronics.layer.toggle.airwires")
+        }));
+        let components = surface
+            .root
+            .find("electronics.layers.row.components")
+            .expect("components layer row");
+        assert_eq!(components.accessibility_checked, Some(true));
     }
 
     #[test]
@@ -1089,6 +1415,8 @@ mod tests {
                 &[],
                 &[],
                 &[],
+                raf_electronics::CadSurfaceKind::Schematic,
+                crate::electronics_controller::PcbLayerVisibility::default(),
             );
             let rule = surface
                 .style_sheet

@@ -20,6 +20,62 @@
 use super::framebuffer::Framebuffer;
 use crate::texture::{linear_to_srgb, srgb_to_linear, CpuTexture};
 
+#[cfg(test)]
+mod optimized_coverage_tests {
+    use super::*;
+    use crate::optimized_lighting::SurfaceLighting;
+    #[test]
+    fn optimized_center_coverage_fills_thin_triangles_and_shared_edges_without_holes() {
+        let vertex = |x, y| TexturedScreenVertex {
+            x,
+            y,
+            z: 0.5,
+            shade: 1.0,
+            uv_over_w: [0.0; 2],
+            inv_w: 1.0,
+        };
+        let light = SurfaceLighting {
+            ambient: glam::Vec3::ONE,
+            sun: glam::Vec3::ZERO,
+            steps: 0.0,
+            softness: 0.0,
+            exposure: 1.0,
+        };
+        let mut fb = Framebuffer::new(8, 8);
+        fb.clear(0, 0, 0, 255);
+        for triangle in [
+            [vertex(0.1, 0.1), vertex(0.1, 7.9), vertex(7.9, 0.1)],
+            [vertex(7.9, 0.1), vertex(0.1, 7.9), vertex(7.9, 7.9)],
+        ] {
+            rasterize_triangle_lighting_shadowed(
+                &mut fb,
+                triangle,
+                None,
+                [200, 200, 200, 255],
+                Some(light),
+                None,
+            );
+        }
+        assert!(
+            fb.pixels().chunks_exact(4).all(|p| p[0] > 190),
+            "shared edge coverage must not leave clear pixels"
+        );
+        fb.clear(0, 0, 0, 255);
+        rasterize_triangle_lighting_shadowed(
+            &mut fb,
+            [vertex(0.0, 0.4), vertex(7.9, 0.6), vertex(7.9, 0.4)],
+            None,
+            [200, 200, 200, 255],
+            Some(light),
+            None,
+        );
+        assert!(
+            fb.pixels().chunks_exact(4).any(|p| p[0] > 190),
+            "subpixel height can still cover pixel centers"
+        );
+    }
+}
+
 /// A screen-space vertex ready for rasterization.
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenVertex {
@@ -84,7 +140,7 @@ pub fn rasterize_triangle_lighting(
         vertices,
         texture,
         tint,
-        lighting.map(|(a, s)| (a, s, 0.0)),
+        lighting.map(|(a, s)| crate::optimized_lighting::SurfaceLighting::current(a, s, 0.0)),
         None,
     )
 }
@@ -94,10 +150,13 @@ pub fn rasterize_triangle_lighting_shadowed(
     vertices: [TexturedScreenVertex; 3],
     texture: Option<&CpuTexture>,
     tint: [u8; 4],
-    lighting: Option<(glam::Vec3, glam::Vec3, f32)>,
+    lighting: Option<crate::optimized_lighting::SurfaceLighting>,
     shadows: Option<(&crate::shadow_frame::ShadowFrame, glam::Mat4)>,
 ) {
     let [v0, v1, v2] = vertices;
+    let improved = lighting.is_some_and(|l| l.exposure > 0.0);
+    let center_offset = if improved { 0.5 } else { 0.0 };
+    let minimum_span = if improved { f32::EPSILON } else { 0.5 };
     let area = (v1.x - v0.x) * (v2.y - v0.y) - (v2.x - v0.x) * (v1.y - v0.y);
     if area >= 0.0 {
         return;
@@ -115,7 +174,7 @@ pub fn rasterize_triangle_lighting_shadowed(
     }
     let [top, mid, bot] = sorted;
     let total_height = bot.y - top.y;
-    if total_height < 0.5 {
+    if total_height < minimum_span {
         return;
     }
     let fb_h = fb.height() as f32;
@@ -125,8 +184,8 @@ pub fn rasterize_triangle_lighting_shadowed(
         srgb_to_linear(tint[2]),
     ];
     let alpha_tint = tint[3] as f32 / 255.0;
-    let y_start = top.y.ceil().max(0.0) as u32;
-    let y_end = bot.y.ceil().min(fb_h) as u32;
+    let y_start = (top.y - center_offset).ceil().max(0.0) as u32;
+    let y_end = (bot.y - center_offset).ceil().min(fb_h) as u32;
     let inv_total_height = 1.0 / total_height;
 
     for y in y_start..y_end {
@@ -134,13 +193,13 @@ pub fn rasterize_triangle_lighting_shadowed(
         let long = top.lerp(bot, (sample_y - top.y) * inv_total_height);
         let short = if sample_y < mid.y {
             let segment_height = mid.y - top.y;
-            if segment_height < 0.5 {
+            if segment_height < minimum_span {
                 continue;
             }
             top.lerp(mid, (sample_y - top.y) / segment_height)
         } else {
             let segment_height = bot.y - mid.y;
-            if segment_height < 0.5 {
+            if segment_height < minimum_span {
                 continue;
             }
             mid.lerp(bot, (sample_y - mid.y) / segment_height)
@@ -151,11 +210,11 @@ pub fn rasterize_triangle_lighting_shadowed(
             (short, long)
         };
         let span = right.x - left.x;
-        if span < 0.5 {
+        if span < minimum_span {
             continue;
         }
-        let x_start = left.x.ceil().max(0.0) as u32;
-        let x_end = right.x.ceil().min(fb.width() as f32) as u32;
+        let x_start = (left.x - center_offset).ceil().max(0.0) as u32;
+        let x_end = (right.x - center_offset).ceil().min(fb.width() as f32) as u32;
         for x in x_start..x_end {
             let t = ((x as f32 + 0.5) - left.x) / span;
             let inv_w = left.inv_w + (right.inv_w - left.inv_w) * t;
@@ -170,7 +229,14 @@ pub fn rasterize_triangle_lighting_shadowed(
                 .map(|texture| texture.sample_uv_linear(u, v))
                 .unwrap_or([1.0; 4]);
             let light = lighting
-                .map(|(ambient, sun, steps)| {
+                .map(|lighting| {
+                    let crate::optimized_lighting::SurfaceLighting {
+                        ambient,
+                        sun,
+                        steps,
+                        softness,
+                        ..
+                    } = lighting;
                     let visibility = shadows
                         .map(|(shadow, inverse)| {
                             // CPU and GPU depth both use the zero-to-one NDC convention.
@@ -182,7 +248,9 @@ pub fn rasterize_triangle_lighting_shadowed(
                             shadow.visibility(world, shade)
                         })
                         .unwrap_or(1.0);
-                    let direct = if steps >= 2.0 {
+                    let direct = if lighting.exposure > 0.0 {
+                        crate::optimized_lighting::direct(shade, steps, softness)
+                    } else if steps >= 2.0 {
                         (shade * steps + 0.5).floor() / steps
                     } else {
                         shade
@@ -191,9 +259,13 @@ pub fn rasterize_triangle_lighting_shadowed(
                 })
                 .unwrap_or([shade; 3]);
             let alpha = (sampled[3] * alpha_tint * 255.0).round().clamp(0.0, 255.0) as u8;
-            let red = linear_to_srgb(sampled[0] * tint_linear[0] * light[0]);
-            let green = linear_to_srgb(sampled[1] * tint_linear[1] * light[1]);
-            let blue = linear_to_srgb(sampled[2] * tint_linear[2] * light[2]);
+            let mut rgb = glam::Vec3::from_array(std::array::from_fn(|i| {
+                sampled[i] * tint_linear[i] * light[i]
+            }));
+            if let Some(l) = lighting.filter(|l| l.exposure > 0.0) {
+                rgb = crate::optimized_lighting::expose(rgb, l.exposure);
+            }
+            let [red, green, blue] = rgb.to_array().map(linear_to_srgb);
             fb.blend_pixel(x, y, z, red, green, blue, alpha);
         }
     }

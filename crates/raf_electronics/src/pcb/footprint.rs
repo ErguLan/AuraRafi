@@ -50,7 +50,7 @@ pub fn footprint_definition(id: &str, pin_count: usize) -> FootprintDefinition {
                     size: Vec2::new(12.0, 12.0),
                 },
             ],
-            preview_asset: Some("footprints/magnet-10x5.png".to_string()),
+            preview_asset: Some("footprints/MAG-10x5.png".to_string()),
         },
         "BAT-18650" => FootprintDefinition {
             id: id.to_string(),
@@ -67,7 +67,7 @@ pub fn footprint_definition(id: &str, pin_count: usize) -> FootprintDefinition {
                     size: Vec2::new(16.0, 14.0),
                 },
             ],
-            preview_asset: Some("footprints/battery-18650.png".to_string()),
+            preview_asset: Some("footprints/BAT-18650.png".to_string()),
         },
         "TP-GND" => FootprintDefinition {
             id: id.to_string(),
@@ -77,7 +77,7 @@ pub fn footprint_definition(id: &str, pin_count: usize) -> FootprintDefinition {
                 offset: Vec2::ZERO,
                 size: Vec2::new(16.0, 16.0),
             }],
-            preview_asset: Some("footprints/test-point.png".to_string()),
+            preview_asset: Some("footprints/TP-GND.png".to_string()),
         },
         _ => generic_footprint(id, pin_count.max(1)),
     }

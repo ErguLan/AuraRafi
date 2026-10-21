@@ -293,6 +293,52 @@ pub fn plane(segments: usize) -> MeshData {
 
 /// Extract wireframe edges from a MeshData.
 /// Returns unique edges as pairs of positions (no duplicates).
+/// Rounded Y-axis solid with diameter 1 m and total height 2 m.
+pub fn capsule(segments: usize, hemisphere_rings: usize) -> MeshData {
+    let segments = segments.clamp(8, 48);
+    let rings = hemisphere_rings.clamp(2, 12);
+    let mut mesh = MeshData::new();
+    for hemisphere in 0..2 {
+        for ring in 0..=rings {
+            let angle =
+                (hemisphere as f32 + ring as f32 / rings as f32) * std::f32::consts::FRAC_PI_2;
+            let offset = if hemisphere == 0 { 0.5 } else { -0.5 };
+            for side in 0..=segments {
+                let azimuth = std::f32::consts::TAU * (side % segments) as f32 / segments as f32;
+                let normal = Vec3::new(
+                    angle.sin() * azimuth.cos(),
+                    angle.cos(),
+                    angle.sin() * azimuth.sin(),
+                );
+                let position = normal * 0.5 + Vec3::Y * offset;
+                mesh.push_vertex_uv(
+                    position,
+                    normal,
+                    [side as f32 / segments as f32, (1.0 - position.y) * 0.5],
+                );
+            }
+        }
+    }
+    let row = segments + 1;
+    for ring in 0..(2 * (rings + 1) - 1) {
+        for side in 0..segments {
+            let a = (ring * row + side) as u32;
+            let b = a + 1;
+            let c = a + row as u32;
+            let d = c + 1;
+            for [x, y, z] in [[a, b, c], [b, d, c]] {
+                let pa = mesh.positions[x as usize];
+                let pb = mesh.positions[y as usize];
+                let pc = mesh.positions[z as usize];
+                if (pb - pa).cross(pc - pa).length_squared() > 1e-12 {
+                    mesh.push_triangle(x, y, z);
+                }
+            }
+        }
+    }
+    mesh
+}
+
 pub fn extract_edges(mesh: &MeshData) -> Vec<[Vec3; 2]> {
     use std::collections::HashSet;
 
@@ -427,6 +473,27 @@ mod tests {
             "expected ~0.707, got {}",
             radius
         );
+    }
+
+    #[test]
+    fn authoring_capsule_geometry_has_outward_winding_normals_and_metric_bounds() {
+        let mesh = capsule(16, 4);
+        let (min, max) = mesh.aabb();
+        assert!((min - Vec3::new(-0.5, -1.0, -0.5)).length() < 1e-5);
+        assert!((max - Vec3::new(0.5, 1.0, 0.5)).length() < 1e-5);
+        assert_eq!(mesh.indices.len(), 768);
+        for tri in mesh.indices.chunks_exact(3) {
+            let a = tri[0] as usize;
+            let b = tri[1] as usize;
+            let c = tri[2] as usize;
+            let cross = (mesh.positions[b] - mesh.positions[a])
+                .cross(mesh.positions[c] - mesh.positions[a]);
+            assert!(cross.dot(mesh.normals[a] + mesh.normals[b] + mesh.normals[c]) > 0.0);
+        }
+        assert!(mesh
+            .normals
+            .iter()
+            .all(|normal| (normal.length() - 1.0).abs() < 1e-5));
     }
 
     #[test]

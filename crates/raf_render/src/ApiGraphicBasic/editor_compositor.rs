@@ -43,6 +43,9 @@ pub struct NativeEditorCompositor {
 }
 
 impl NativeEditorCompositor {
+    pub fn release_canvas(&mut self) {
+        self.canvas.release_source();
+    }
     pub fn new(graphics: &NativeGraphicsContext<'_>, clear_color: [u8; 4]) -> Self {
         Self {
             canvas: DirectCanvasPresenter::new(graphics.device(), graphics.color_format()),
@@ -97,7 +100,7 @@ impl NativeEditorCompositor {
     {
         let prepared_canvas = canvas_layer.and_then(|layer| {
             self.canvas
-                .prepare_output(device, queue, layer.output.as_ref(), layer.source_size)
+                .prepare_shared_output(device, queue, &layer.output, layer.source_size)
                 .map(|source| (source, layer.target_rect))
         });
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {

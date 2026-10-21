@@ -330,6 +330,7 @@ fn builtin_icon_png(id: UiIconId) -> Option<&'static [u8]> {
         UiIconId::Shadows => Some(include_bytes!("../../../assets/ui_icons/png/shadows.png")),
         UiIconId::Clock => Some(include_bytes!("../../../assets/ui_icons/png/clock.png")),
         UiIconId::Camera => None,
+        UiIconId::ScenePreview => None,
         UiIconId::Stop => Some(include_bytes!("../../../assets/ui_icons/png/stop.png")),
         UiIconId::Console => Some(include_bytes!("../../../assets/ui_icons/png/console.png")),
         UiIconId::Assets => Some(include_bytes!("../../../assets/ui_icons/png/assets.png")),
@@ -358,6 +359,9 @@ fn builtin_icon_png(id: UiIconId) -> Option<&'static [u8]> {
         UiIconId::Warning => Some(include_bytes!("../../../assets/ui_icons/png/warning.png")),
         UiIconId::Error => Some(include_bytes!("../../../assets/ui_icons/png/error.png")),
         UiIconId::Success => Some(include_bytes!("../../../assets/ui_icons/png/success.png")),
+        UiIconId::Magnet => Some(include_bytes!("../../../assets/ui_icons/png/magnet.png")),
+        UiIconId::Frame => Some(include_bytes!("../../../assets/ui_icons/png/frame.png")),
+        UiIconId::Capsule => Some(include_bytes!("../../../assets/ui_icons/png/capsule.png")),
     }
 }
 // HARDCODEED!!!
@@ -381,6 +385,7 @@ fn icon_id_from_key(key: &str) -> Option<UiIconId> {
         UiIconId::Scene,
         UiIconId::Entity,
         UiIconId::Camera,
+        UiIconId::ScenePreview,
         UiIconId::Sun,
         UiIconId::Sky,
         UiIconId::Shadows,
@@ -428,6 +433,9 @@ fn icon_id_from_key(key: &str) -> Option<UiIconId> {
         UiIconId::Warning,
         UiIconId::Error,
         UiIconId::Success,
+        UiIconId::Magnet,
+        UiIconId::Frame,
+        UiIconId::Capsule,
     ]
     .into_iter()
     .find(|id| id.key() == key)
@@ -921,6 +929,74 @@ fn builtin_icon_pixels(id: UiIconId) -> Vec<u8> {
             line(&mut pixels, [20.0, 32.0], [29.0, 41.0], stroke);
             line(&mut pixels, [29.0, 41.0], [46.0, 22.0], stroke);
         }
+        UiIconId::Magnet => {
+            // Horseshoe body built as a twelve-segment half ring so the
+            // fallback shares the measures of the generated master.
+            let mut previous = [16.0, 26.0];
+            for step in 1..=12 {
+                let angle = (180.0 + 15.0 * step as f32).to_radians();
+                let point = [32.0 + angle.cos() * 16.0, 26.0 + angle.sin() * 16.0];
+                line(&mut pixels, previous, point, stroke);
+                previous = point;
+            }
+            line(&mut pixels, [16.0, 26.0], [16.0, 40.0], stroke);
+            line(&mut pixels, [48.0, 26.0], [48.0, 40.0], stroke);
+            line(&mut pixels, [11.0, 40.0], [21.0, 40.0], stroke);
+            line(&mut pixels, [21.0, 40.0], [21.0, 50.0], stroke);
+            line(&mut pixels, [21.0, 50.0], [11.0, 50.0], stroke);
+            line(&mut pixels, [11.0, 50.0], [11.0, 40.0], stroke);
+            line(&mut pixels, [43.0, 40.0], [53.0, 40.0], stroke);
+            line(&mut pixels, [53.0, 40.0], [53.0, 50.0], stroke);
+            line(&mut pixels, [53.0, 50.0], [43.0, 50.0], stroke);
+            line(&mut pixels, [43.0, 50.0], [43.0, 40.0], stroke);
+        }
+        UiIconId::ScenePreview => {
+            // Framed perspective cube: a dedicated read-only scene instrument.
+            for (a, b) in [([8.0,22.0],[8.0,10.0]), ([8.0,10.0],[22.0,10.0]),
+                ([42.0,10.0],[56.0,10.0]), ([56.0,10.0],[56.0,22.0]),
+                ([8.0,42.0],[8.0,54.0]), ([8.0,54.0],[22.0,54.0]),
+                ([42.0,54.0],[56.0,54.0]), ([56.0,54.0],[56.0,42.0]),
+                ([32.0,18.0],[46.0,26.0]), ([46.0,26.0],[46.0,42.0]),
+                ([46.0,42.0],[32.0,50.0]), ([32.0,50.0],[18.0,42.0]),
+                ([18.0,42.0],[18.0,26.0]), ([18.0,26.0],[32.0,18.0]),
+                ([18.0,26.0],[32.0,34.0]), ([46.0,26.0],[32.0,34.0]),
+                ([32.0,34.0],[32.0,50.0])] { line(&mut pixels, a, b, stroke); }
+        }
+        UiIconId::Frame => {
+            line(&mut pixels, [12.0, 22.0], [12.0, 12.0], stroke);
+            line(&mut pixels, [12.0, 12.0], [22.0, 12.0], stroke);
+            line(&mut pixels, [42.0, 12.0], [52.0, 12.0], stroke);
+            line(&mut pixels, [52.0, 12.0], [52.0, 22.0], stroke);
+            line(&mut pixels, [52.0, 42.0], [52.0, 52.0], stroke);
+            line(&mut pixels, [52.0, 52.0], [42.0, 52.0], stroke);
+            line(&mut pixels, [22.0, 52.0], [12.0, 52.0], stroke);
+            line(&mut pixels, [12.0, 52.0], [12.0, 42.0], stroke);
+            line(&mut pixels, [26.0, 26.0], [38.0, 26.0], stroke);
+            line(&mut pixels, [38.0, 26.0], [38.0, 38.0], stroke);
+            line(&mut pixels, [38.0, 38.0], [26.0, 38.0], stroke);
+            line(&mut pixels, [26.0, 38.0], [26.0, 26.0], stroke);
+        }
+        UiIconId::Capsule => {
+            // Pill outline approximated with two end caps and parallel edges
+            // so the fallback reads like the generated master.
+            line(&mut pixels, [14.0, 20.0], [50.0, 20.0], stroke);
+            line(&mut pixels, [14.0, 44.0], [50.0, 44.0], stroke);
+            let mut previous = [14.0, 20.0];
+            for step in 1..=8 {
+                let angle = (90.0 + 22.5 * step as f32).to_radians();
+                let point = [14.0 + angle.cos() * 12.0, 32.0 + angle.sin() * 12.0];
+                line(&mut pixels, previous, point, stroke);
+                previous = point;
+            }
+            previous = [50.0, 20.0];
+            for step in 1..=8 {
+                let angle = (-90.0 + 22.5 * step as f32).to_radians();
+                let point = [50.0 + angle.cos() * 12.0, 32.0 + angle.sin() * 12.0];
+                line(&mut pixels, previous, point, stroke);
+                previous = point;
+            }
+            line(&mut pixels, [32.0, 20.0], [32.0, 44.0], stroke);
+        }
         _ => {
             line(&mut pixels, [16.0, 32.0], [48.0, 32.0], stroke);
             line(&mut pixels, [32.0, 16.0], [32.0, 48.0], stroke);
@@ -1049,7 +1125,7 @@ mod tests {
                 assert!(
                     matches!(
                         icon,
-                        UiIconId::Camera | UiIconId::Pause | UiIconId::StepForward
+                        UiIconId::Camera | UiIconId::Pause | UiIconId::StepForward | UiIconId::ScenePreview
                     ),
                     "{} must ship a PNG master or an explicit procedural icon",
                     icon.key()

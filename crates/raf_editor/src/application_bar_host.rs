@@ -261,7 +261,59 @@ pub(crate) fn register_bar_images(
 pub(crate) fn register_electronics_images(
     store: &mut raf_render::api_graphic_basic::ui_surface::UiSurfaceImageStore,
 ) {
+    // Canvas symbols are authored in opaque white ink: the overlay tints them
+    // with the theme ink token, so one asset serves both canvases.
     for (key, bytes) in [
+        (
+            "electronics://symbols/resistor.png",
+            include_bytes!("../../../editor/assets/electronics/symbols/resistor.png").as_slice(),
+        ),
+        (
+            "electronics://symbols/capacitor.png",
+            include_bytes!("../../../editor/assets/electronics/symbols/capacitor.png").as_slice(),
+        ),
+        (
+            "electronics://symbols/led.png",
+            include_bytes!("../../../editor/assets/electronics/symbols/led.png").as_slice(),
+        ),
+        (
+            "electronics://symbols/magnet.png",
+            include_bytes!("../../../editor/assets/electronics/symbols/magnet.png").as_slice(),
+        ),
+        (
+            "electronics://symbols/battery.png",
+            include_bytes!("../../../editor/assets/electronics/symbols/battery.png").as_slice(),
+        ),
+        (
+            "electronics://symbols/ground.png",
+            include_bytes!("../../../editor/assets/electronics/symbols/ground.png").as_slice(),
+        ),
+        (
+            "electronics://symbols/generic.png",
+            include_bytes!("../../../editor/assets/electronics/symbols/generic.png").as_slice(),
+        ),
+        (
+            "electronics://footprints/0805.png",
+            include_bytes!("../../../editor/assets/electronics/footprints/0805.png").as_slice(),
+        ),
+        (
+            "electronics://footprints/MAG-10x5.png",
+            include_bytes!("../../../editor/assets/electronics/footprints/MAG-10x5.png").as_slice(),
+        ),
+        (
+            "electronics://footprints/BAT-18650.png",
+            include_bytes!("../../../editor/assets/electronics/footprints/BAT-18650.png")
+                .as_slice(),
+        ),
+        (
+            "electronics://footprints/TP-GND.png",
+            include_bytes!("../../../editor/assets/electronics/footprints/TP-GND.png").as_slice(),
+        ),
+        (
+            "electronics://footprints/generic.png",
+            include_bytes!("../../../editor/assets/electronics/footprints/generic.png").as_slice(),
+        ),
+        // Palette identity for the rail, navigator and library rows.
         (
             "electronics://library/resistor.png",
             include_bytes!("../../../editor/assets/electronics/library/resistor.png").as_slice(),

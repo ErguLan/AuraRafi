@@ -240,6 +240,7 @@ fn sun_visibility(world: vec3<f32>, ndotl: f32) -> f32 { return 1.0; }
 fn sun_shade(ndotl: f32) -> f32 {
     let steps = mesh_uniforms.sun.w;
     if steps < 2.0 { return ndotl; }
+    if mesh_uniforms.ambient.w > 0.0 { return improved_direct(ndotl,steps,mesh_uniforms.light_dir.w); }
     return floor(ndotl*steps+0.5)/steps;
 }
 
@@ -290,8 +291,12 @@ fn mesh_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
     if (mesh_uniforms.params.z > 0.5) {
         let ndotl = max(dot(normalize(input.world_normal), light_dir), 0.0);
         let visibility = select(1.0, sun_visibility(input.world_position, ndotl), mesh_uniforms.params.w > 0.5);
-        let lighting = mesh_uniforms.ambient.rgb + mesh_uniforms.sun.rgb * sun_shade(ndotl) * visibility;
-        return vec4<f32>(base_color.rgb * lighting, base_color.a);
+        var ambient = mesh_uniforms.ambient.rgb;
+        if mesh_uniforms.ambient.w > 0.0 { ambient = improved_ambient(ambient,normalize(input.world_normal).y); }
+        let lighting = ambient + mesh_uniforms.sun.rgb * sun_shade(ndotl) * visibility;
+        var result = base_color.rgb * lighting;
+        if mesh_uniforms.ambient.w > 0.0 { result = improved_expose(result,mesh_uniforms.ambient.w); }
+        return vec4<f32>(result, base_color.a);
     }
     let lambert = 0.3 + 0.7 * max(dot(normalize(input.world_normal), light_dir), 0.0);
     return vec4<f32>(base_color.rgb * lambert, base_color.a);
@@ -332,8 +337,12 @@ fn mesh_instanced_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
         let base = sample_base_color(input.uv, input.color);
         let ndotl = max(dot(normalize(input.world_normal), light_dir), 0.0);
         let visibility = select(1.0, sun_visibility(input.world_position, ndotl), mesh_uniforms.params.w > 0.5);
-        let lighting = mesh_uniforms.ambient.rgb + mesh_uniforms.sun.rgb * sun_shade(ndotl) * visibility;
-        return vec4<f32>(base.rgb * lighting, base.a);
+        var ambient = mesh_uniforms.ambient.rgb;
+        if mesh_uniforms.ambient.w > 0.0 { ambient = improved_ambient(ambient,normalize(input.world_normal).y); }
+        let lighting = ambient + mesh_uniforms.sun.rgb * sun_shade(ndotl) * visibility;
+        var result = base.rgb * lighting;
+        if mesh_uniforms.ambient.w > 0.0 { result = improved_expose(result,mesh_uniforms.ambient.w); }
+        return vec4<f32>(result, base.a);
     }
     let lambert = 0.3 + 0.7 * max(dot(normalize(input.world_normal), light_dir), 0.0);
     let base_color = sample_base_color(input.uv, input.color);
@@ -440,13 +449,24 @@ fn overlay_fs(input: OverlayVertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// Complete scene shader, including the shared allocation-free light response.
+pub(crate) fn basic_scene_shader() -> String {
+    format!("{}\n{}", crate::optimized_lighting::WGSL, BASIC_SCENE_WGSL)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::BASIC_SCENE_WGSL;
+    use super::basic_scene_shader;
 
     #[test]
     fn basic_scene_shader_parses_with_wgpu_naga() {
-        wgpu::naga::front::wgsl::parse_str(BASIC_SCENE_WGSL)
+        let module = wgpu::naga::front::wgsl::parse_str(&basic_scene_shader())
             .expect("ApiGraphicBasic scene WGSL must parse before GPU startup");
+        wgpu::naga::valid::Validator::new(
+            wgpu::naga::valid::ValidationFlags::all(),
+            wgpu::naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .expect("scene shader validates");
     }
 }

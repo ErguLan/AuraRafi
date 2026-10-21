@@ -14,6 +14,7 @@ pub mod handles;
 pub mod line_projection;
 pub mod memory_ledger;
 pub mod mesh;
+mod optimized_filter_gpu;
 pub mod pipeline;
 pub mod resource_registry;
 pub mod ui_surface;

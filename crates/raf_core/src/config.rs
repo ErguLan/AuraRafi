@@ -289,6 +289,9 @@ pub struct EngineSettings {
     /// Local Play preferences; independent of background editor script tooling.
     #[serde(default)]
     pub runtime: crate::runtime_config::RuntimePreferences,
+    /// Explicit local folder grants, keyed by project UUID. Never part of a project file.
+    #[serde(default)]
+    pub runtime_save_roots: std::collections::BTreeMap<uuid::Uuid, std::path::PathBuf>,
     // -- Appearance --
     pub theme: Theme,
     #[serde(default)]
@@ -709,6 +712,7 @@ impl Default for EngineSettings {
             grid_size: 1.0,
             grid_load_distance: 15.0,
             auto_save_interval_seconds: 120,
+            runtime_save_roots: std::collections::BTreeMap::new(),
             display_unit: DisplayUnit::Metric,
             hierarchy_show_icons: true,
             hierarchy_show_script_links: false,
@@ -919,7 +923,10 @@ mod tests {
         settings.external_asset_studio.entry_point = "cli/asset-worker.js".into();
         let raw = ron::to_string(&settings).unwrap();
         let restored: EngineSettings = ron::from_str(&raw).unwrap();
-        assert_eq!(restored.external_asset_studio, settings.external_asset_studio);
+        assert_eq!(
+            restored.external_asset_studio,
+            settings.external_asset_studio
+        );
     }
 
     #[test]

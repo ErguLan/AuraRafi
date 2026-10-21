@@ -69,6 +69,7 @@ impl MessageViewport {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn build_agent_surface(
     palette: StudioUiPalette,
     panel: &AgentPanel,
@@ -89,6 +90,7 @@ pub(crate) fn build_agent_surface(
         scroll_offset,
         sidebar_progress,
         AgentSurfaceVariant::Embedded,
+        None,
     )
 }
 
@@ -112,6 +114,7 @@ pub(crate) fn build_dock_agent_surface(
         scroll_offset,
         sidebar_progress,
         AgentSurfaceVariant::Dock,
+        None,
     )
 }
 
@@ -125,10 +128,12 @@ fn build_agent_surface_with_variant(
     scroll_offset: f32,
     sidebar_progress: f32,
     variant: AgentSurfaceVariant,
+    sidebar_override: Option<f32>,
 ) -> UiSurface {
     let width = size[0].max(1.0);
     let height = size[1].max(1.0);
-    let requested_sidebar_width = (width * 0.30).clamp(184.0, 236.0).min(width * 0.52);
+    let requested_sidebar_width =
+        sidebar_override.unwrap_or_else(|| (width * 0.30).clamp(184.0, 236.0).min(width * 0.52));
     let sidebar_width = requested_sidebar_width * sidebar_progress.clamp(0.0, 1.0);
     let main_width = (width - sidebar_width).max(1.0);
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
@@ -144,7 +149,13 @@ fn build_agent_surface_with_variant(
             radius: 0.0,
             opacity: 1.0,
         })
-        .with_child(build_sidebar(palette, panel, sidebar_width, height, variant))
+        .with_child(build_sidebar(
+            palette,
+            panel,
+            sidebar_width,
+            height,
+            variant,
+        ))
         .with_child(build_main(
             palette,
             panel,
@@ -161,6 +172,31 @@ fn build_agent_surface_with_variant(
     let mut surface = UiSurface::new("editor.bottom.agent", palette, root);
     surface.style_sheet = agent_style_sheet(palette);
     surface
+}
+
+/// Application workspace splitters only; the compact dock keeps its own layout.
+pub(crate) fn build_workspace_agent_surface(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    settings: &EngineSettings,
+    readiness: AgentReadiness,
+    project_type: ProjectType,
+    size: [f32; 2],
+    scroll_offset: f32,
+    sidebar_width: f32,
+) -> UiSurface {
+    build_agent_surface_with_variant(
+        palette,
+        panel,
+        settings,
+        readiness,
+        project_type,
+        size,
+        scroll_offset,
+        if sidebar_width > 0.0 { 1.0 } else { 0.0 },
+        AgentSurfaceVariant::Embedded,
+        Some(sidebar_width),
+    )
 }
 
 fn build_sidebar(

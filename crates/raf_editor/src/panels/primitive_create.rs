@@ -2,41 +2,16 @@
 
 use raf_core::scene::Primitive;
 
-pub const CREATEABLE_PRIMITIVES: [Primitive; 4] = [
-    Primitive::Cube,
-    Primitive::Sphere,
-    Primitive::Cylinder,
-    Primitive::Plane,
-];
+pub use raf_core::scene::geometry::CREATABLE_PRIMITIVES as CREATEABLE_PRIMITIVES;
 
 pub fn primitive_key(primitive: Primitive) -> &'static str {
-    match primitive {
-        Primitive::Cube => "app.primitive_cube",
-        Primitive::Sphere => "app.primitive_sphere",
-        Primitive::Cylinder => "app.primitive_cylinder",
-        Primitive::Plane => "app.primitive_plane",
-        Primitive::Empty => "app.primitive_empty",
-    }
+    primitive.descriptor().label_key
 }
-
 pub fn primitive_slug(primitive: Primitive) -> &'static str {
-    match primitive {
-        Primitive::Cube => "cube",
-        Primitive::Sphere => "sphere",
-        Primitive::Cylinder => "cylinder",
-        Primitive::Plane => "plane",
-        Primitive::Empty => "empty",
-    }
+    primitive.descriptor().slug
 }
-
 pub fn parse_primitive_slug(slug: &str) -> Option<Primitive> {
-    match slug {
-        "cube" => Some(Primitive::Cube),
-        "sphere" => Some(Primitive::Sphere),
-        "cylinder" => Some(Primitive::Cylinder),
-        "plane" => Some(Primitive::Plane),
-        _ => None,
-    }
+    Primitive::from_slug(slug).filter(|primitive| *primitive != Primitive::Empty)
 }
 
 pub fn primitive_name(primitive: Primitive) -> &'static str {
@@ -44,6 +19,7 @@ pub fn primitive_name(primitive: Primitive) -> &'static str {
         Primitive::Cube => "Cube",
         Primitive::Sphere => "Sphere",
         Primitive::Cylinder => "Cylinder",
+        Primitive::Capsule => "Capsule",
         Primitive::Plane => "Plane",
         Primitive::Empty => "Entity",
     }

@@ -1005,6 +1005,192 @@ mod tests {
     }
 
     #[test]
+    fn agent_workspace_preview_surface_matches_canvas_geometry_and_both_locales() {
+        use crate::agent_workspace_layout::WorkspaceLayout;
+        use crate::agent_workspace_surface::{build_workspace_surface_with_layout, EvidenceTab};
+        let root =
+            std::env::temp_dir().join(format!("raf-agent-preview-layout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let project = Project::create("Preview layout", ProjectType::Game, &root).unwrap();
+        let mut service = AgentService::default();
+        service.request(project.path.clone());
+        drive_until(&mut service, |s| s.is_open(&project.path) && !s.has_work());
+        let workspace = service.selected_workspace_mut().unwrap();
+        let id = workspace.registry.active_session;
+        workspace
+            .documents
+            .get_mut(&id.0.to_string())
+            .unwrap()
+            .scene
+            .add_root_with_primitive("Read-only cube", raf_core::scene::Primitive::Cube);
+        let layout = WorkspaceLayout {
+            review: 480.0,
+            ..Default::default()
+        };
+        let rows = [crate::studio_surface::HubSurfaceProject {
+            name: project.name.clone(),
+            path: project.path.clone(),
+            project_type: ProjectType::Game,
+            last_opened_label: String::new(),
+        }];
+        for language in [raf_core::Language::English, raf_core::Language::Spanish] {
+            for palette in [StudioUiPalette::IndustrialDark, StudioUiPalette::PaperLight] {
+                for width in [900u32, 1440] {
+                    let settings = EngineSettings {
+                        language,
+                        theme: if palette == StudioUiPalette::PaperLight {
+                            raf_core::Theme::Light
+                        } else {
+                            raf_core::Theme::Dark
+                        },
+                        render_execution_policy: raf_core::config::RenderExecutionPolicy::CpuOnly,
+                        ..Default::default()
+                    };
+                    let geometry = layout.resolve([width as f32, 900.0], true, true);
+                    let surface = build_workspace_surface_with_layout(
+                        palette,
+                        &service,
+                        &rows,
+                        &settings,
+                        [width as f32, 900.0],
+                        0.0,
+                        0,
+                        EvidenceTab::Preview,
+                        true,
+                        &layout,
+                    );
+                    for id in [
+                        "agent.workspace.preview",
+                        "agent.workspace.tab.preview",
+                        "agent.workspace.preview.fit",
+                        "agent.workspace.preview.close",
+                    ] {
+                        let icon = surface.root.find(id).unwrap().icon.unwrap();
+                        assert_eq!(
+                            icon.tint,
+                            Some(crate::agent_workspace_surface::workspace_tokens(palette).text),
+                            "{id} must stay visible in both themes"
+                        );
+                    }
+                    let mut session = UiSurfaceSession::default();
+                    let frame = session.build_frame_with_resolved_text(
+                        &surface,
+                        width,
+                        900,
+                        [0; 4],
+                        |key| raf_core::i18n::t(key, language),
+                    );
+                    let canvas = frame
+                        .layout_boxes
+                        .iter()
+                        .find(|item| item.id == "agent.workspace.preview.canvas")
+                        .unwrap();
+                    let wanted = geometry.preview_rect().unwrap();
+                    assert_eq!(
+                        canvas.rect, wanted,
+                        "renderer and UI must share the same canvas rectangle"
+                    );
+                    assert_eq!(canvas.style.fill[3], 0);
+                    let center = [
+                        wanted.x + wanted.width * 0.5,
+                        wanted.y + wanted.height * 0.5,
+                    ];
+                    assert!(
+                        !frame
+                            .layout_boxes
+                            .iter()
+                            .any(|b| b.style.fill[3] == 255 && b.rect.contains(center)),
+                        "opaque UI covered the preview"
+                    );
+                    for id in [
+                        "agent.workspace.preview.close",
+                        "agent.workspace.preview.fit",
+                        "agent.workspace.divider.review",
+                        "agent.input",
+                    ] {
+                        let item = frame.layout_boxes.iter().find(|b| b.id == id).unwrap();
+                        assert!(
+                            item.rect.x >= 0.0
+                                && item.rect.x + item.rect.width <= width as f32 + 1.0,
+                            "{id}: {:?}",
+                            item.rect
+                        );
+                    }
+                    if let Some(directory) = std::env::var_os("RAF_AGENT_UI_QA_DIR") {
+                        std::fs::create_dir_all(&directory).unwrap();
+                        let mut host =
+                            raf_render::api_graphic_basic::ui_surface::CpuUiSurfaceHost::new(
+                                surface, [0; 4],
+                            );
+                        let rendered =
+                            host.render([width, 900], |key| raf_core::i18n::t(key, language));
+                        let ui = image::RgbaImage::from_raw(width, 900, rendered.pixels.to_vec())
+                            .unwrap();
+                        let workspace = service.selected_workspace().unwrap();
+                        let scene = &workspace.documents[&id.0.to_string()].scene;
+                        let mut preview = crate::agent_preview::AgentPreview::default();
+                        preview.sync(
+                            Some(crate::agent_preview::PreviewTarget {
+                                root: workspace.project.path.clone(),
+                                document: id,
+                            }),
+                            true,
+                            Instant::now(),
+                        );
+                        let target = raf_render::api_graphic_basic::CanvasTargetRect::new(
+                            wanted.x as u32,
+                            wanted.y as u32,
+                            wanted.width as u32,
+                            wanted.height as u32,
+                        );
+                        let layer = preview
+                            .render_layer(scene, &workspace.project, &settings, target, || None)
+                            .unwrap();
+                        if let raf_render::api_graphic_basic::device::SceneFrameOutput::CpuPixels(
+                            pixels,
+                        ) = layer.output.as_ref()
+                        {
+                            let canvas = image::RgbaImage::from_raw(
+                                layer.source_size[0],
+                                layer.source_size[1],
+                                pixels.clone(),
+                            )
+                            .unwrap();
+                            let canvas = image::imageops::resize(
+                                &canvas,
+                                target.width,
+                                target.height,
+                                image::imageops::FilterType::Nearest,
+                            );
+                            let mut composed = image::RgbaImage::from_pixel(
+                                width,
+                                900,
+                                image::Rgba([9, 9, 10, 255]),
+                            );
+                            image::imageops::overlay(
+                                &mut composed,
+                                &canvas,
+                                target.x as i64,
+                                target.y as i64,
+                            );
+                            image::imageops::overlay(&mut composed, &ui, 0, 0);
+                            composed
+                                .save(PathBuf::from(&directory).join(format!(
+                                    "agents-preview-{width}-{palette:?}-{language:?}.png"
+                                )))
+                                .unwrap();
+                        }
+                    }
+                }
+            }
+        }
+        service.close_all();
+        drive_until(&mut service, |s| !s.has_projects());
+        drop(service);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn agent_workspace_startup_is_lazy_and_bulk_load_is_serial() {
         let root = std::env::temp_dir().join(format!("raf-agent-bulk-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();

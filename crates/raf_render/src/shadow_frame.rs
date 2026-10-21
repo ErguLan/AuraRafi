@@ -27,6 +27,7 @@ pub struct ShadowGeometry {
     pub view_projection: Mat4,
     pub resolution: u32,
     pub casters: Vec<ShadowCaster>,
+    normalized_pixel_extent: f32,
     cpu_depth: OnceLock<CpuShadowDepth>,
 }
 
@@ -35,6 +36,57 @@ pub struct ShadowFrame {
     pub geometry: Arc<ShadowGeometry>,
     pub settings: ShadowSettings,
     pub camera: Vec3,
+    pub improved: bool,
+}
+
+/// Fits the visible receiver cone to one square map. Depth remains conservatively
+/// extended for offscreen casters. Snapping preserves coverage and stable texels.
+pub fn fitted_directional_projection(
+    sun: Vec3,
+    camera: Vec3,
+    inverse_vp: Mat4,
+    distance: f32,
+    resolution: u32,
+) -> Mat4 {
+    let up = if sun.y.abs() > 0.95 { Vec3::Z } else { Vec3::Y };
+    let rotation = Mat4::look_to_rh(Vec3::ZERO, -sun, up);
+    let forward = (inverse_vp.project_point3(Vec3::new(0.0, 0.0, 0.9))
+        - inverse_vp.project_point3(Vec3::ZERO))
+    .normalize_or_zero();
+    let mut min = Vec3::splat(f32::INFINITY);
+    let mut max = Vec3::splat(f32::NEG_INFINITY);
+    for x in [-1.0, 1.0] {
+        for y in [-1.0, 1.0] {
+            let near = inverse_vp.project_point3(Vec3::new(x, y, 0.0));
+            let far = inverse_vp.project_point3(Vec3::new(x, y, 0.9));
+            let ray = (far - near).normalize_or_zero();
+            // A common view-depth plane encloses the distance sphere, including
+            // center rays that extend farther forward than normalized corner rays.
+            let extent = distance / ray.dot(forward).max(0.001);
+            for point in [near, near + ray * extent] {
+                let p = rotation.transform_point3(point);
+                min = min.min(p);
+                max = max.max(p);
+            }
+        }
+    }
+    if !min.is_finite() || !max.is_finite() {
+        return directional_projection(sun, camera, distance, resolution);
+    }
+    let radius = ((max.x - min.x).max(max.y - min.y) * 0.5).max(0.25);
+    // One texel of padding prevents snapping from cutting off a receiver edge.
+    let texel = 2.0 * radius / resolution.max(1) as f32;
+    let radius = radius + texel;
+    let center = ((min + max) * 0.5 / texel).round() * texel;
+    Mat4::orthographic_rh(
+        -radius,
+        radius,
+        -radius,
+        radius,
+        -4.0 * distance,
+        4.0 * distance,
+    ) * Mat4::from_translation(-center)
+        * rotation
 }
 
 /// Snap all light-space axes, keeping both XY coverage and the depth interval stable.
@@ -55,6 +107,9 @@ pub fn directional_projection(sun: Vec3, camera: Vec3, distance: f32, resolution
 }
 
 impl ShadowGeometry {
+    pub fn normalized_texel_bias(&self, resolution: u32) -> f32 {
+        self.normalized_pixel_extent / resolution.max(1) as f32
+    }
     pub fn new(view_projection: Mat4, resolution: u32, casters: Vec<ShadowCaster>) -> Self {
         let mut key = 0xcbf29ce484222325u64;
         let mut mix = |v: u64| {
@@ -70,11 +125,15 @@ impl ShadowGeometry {
                 mix(n.to_bits() as u64);
             }
         }
+        let x = view_projection.row(0).truncate().length();
+        let y = view_projection.row(1).truncate().length();
+        let z = view_projection.row(2).truncate().length();
         Self {
             key,
             view_projection,
             resolution,
             casters,
+            normalized_pixel_extent: 2.0 * z / x.min(y).max(1e-6),
             cpu_depth: OnceLock::new(),
         }
     }
@@ -167,7 +226,13 @@ impl ShadowFrame {
         let footprint = if self.settings.soft_filter { 1.5 } else { 0.75 };
         let z = p.z
             - self.settings.bias / (8.0 * self.settings.distance)
-            - footprint * slope / (4.0 * size as f32);
+            - footprint
+                * slope
+                * if self.improved {
+                    self.geometry.normalized_texel_bias(size as u32)
+                } else {
+                    1.0 / (4.0 * size as f32)
+                };
         let depth = self.geometry.cpu_depth();
         let sample = |x: i32, y: i32| {
             if x < 0 || y < 0 || x >= size || y >= size {
@@ -176,7 +241,15 @@ impl ShadowFrame {
                 f32::from(z <= depth[(y * size + x) as usize])
             }
         };
-        let visibility = if self.settings.soft_filter {
+        let visibility = if self.settings.soft_filter && self.improved {
+            let mut total = 0.0;
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    total += sample(x.floor() as i32 + dx, y.floor() as i32 + dy);
+                }
+            }
+            total / 9.0
+        } else if self.settings.soft_filter {
             let (x0, x1) = ((x - 0.5).floor() as i32, (x + 0.5).floor() as i32);
             let (y0, y1) = ((y - 0.5).floor() as i32, (y + 0.5).floor() as i32);
             (sample(x0, y0) + sample(x1, y0) + sample(x0, y1) + sample(x1, y1)) * 0.25
@@ -198,6 +271,53 @@ pub(crate) mod tests {
         scene_renderer::{RenderOptions, SceneRenderer, SCENE_BACKGROUND, SCENE_LIGHT_DIRECTION},
     };
     use raf_core::{environment::EnvironmentMode, scene::Primitive, SceneGraph};
+
+    #[test]
+    fn optimized_fitted_shadow_covers_receivers_and_reuses_unaffected_casters() {
+        let camera = Camera::default();
+        let inverse = camera.view_projection(128.0, 128.0).inverse();
+        let sun = Vec3::new(0.4, 0.8, 0.3).normalize();
+        let projection = fitted_directional_projection(sun, camera.position, inverse, 32.0, 512);
+        for x in [-1.0, 0.0, 1.0] {
+            for y in [-1.0, 0.0, 1.0] {
+                let near = inverse.project_point3(Vec3::new(x, y, 0.0));
+                let far = inverse.project_point3(Vec3::new(x, y, 0.9));
+                let ray = (far - near).normalize();
+                for d in [0.0, 16.0, 32.0] {
+                    let point = projection.transform_point3(near + ray * d);
+                    assert!(
+                        point.x.abs() <= 1.0
+                            && point.y.abs() <= 1.0
+                            && (0.0..=1.0).contains(&point.z)
+                    );
+                }
+            }
+        }
+        let g = ShadowGeometry::new(projection, 512, Vec::new());
+        assert!(g.normalized_texel_bias(512) > 0.0);
+        assert_eq!(
+            g.normalized_texel_bias(256),
+            g.normalized_texel_bias(512) * 2.0
+        );
+        let (mut scene, _, _) = fixture();
+        let mut env = *scene.environment();
+        env.technology = raf_core::environment::LightingTechnology::OptimizedImproved;
+        env.shadows.soft_filter = true;
+        scene.set_environment(env);
+        let distant = scene.add_root_with_primitive("Outside shadow volume", Primitive::Cube);
+        scene.get_mut(distant).unwrap().position = Vec3::splat(10000.0);
+        let mut renderer = SceneRenderer::new(128, 128);
+        let initial = frame(&mut renderer, &scene).commands.shadows.unwrap();
+        scene.get_mut(distant).unwrap().position.x += 5.0;
+        let next = frame(&mut renderer, &scene).commands.shadows.unwrap();
+        assert!(Arc::ptr_eq(&initial.geometry, &next.geometry));
+        assert!(next.improved);
+        for x in -20..20 {
+            assert!(
+                (0.0..=1.0).contains(&next.visibility(Vec3::new(x as f32 * 0.2, 0.0, 0.0), 0.7))
+            );
+        }
+    }
 
     pub(crate) fn fixture() -> (
         SceneGraph,

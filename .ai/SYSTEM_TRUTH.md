@@ -1,5 +1,58 @@
 # AuraRafi — System Truth (Source of Truth)
 
+## Agent scene preview (2026-10-19)
+
+`agent_preview.rs` owns an optional read-only, demand-created scene presentation
+and temporary camera; `agent_workspace_layout.rs` owns transient splitter geometry
+and pointer capture. The Agent right rail projects these through RafUI chrome.
+`native_agents.rs` resolves the conversation's service-owned or editor-mounted
+scene without cloning/mutating it. ApiGraphicBasic retains rendering ownership
+and shares the native graphics context/compositor; no editor UI or Runtime is
+mounted for preview. Hidden previews stop drawing immediately, expire after five
+seconds, and are destroyed on leaving Agents or changing document/project.
+Compositor source release also drops CPU-upload/GPU-view references. See
+`docs/AGENT_WORKSPACE.md`; native-window and performance acceptance remain separate.
+Editor verification initially encountered unrelated compile errors in
+`electronics_controller.rs::toggle_pcb_layer` (`?` in a bool-returning method)
+and the runtime-settings error message in `native_application.rs` (`String + &String`).
+The user explicitly authorized the two narrow corrections. Verification passed:
+26 focused workspace tests, all 35 raf_ai unit tests, four semantic-icon tests,
+and `cargo build -p aura_rafi_editor --target-dir target_agent_workbench_20261014`.
+Real CPU scene/UI captures were generated for both themes and languages at
+900/1440 px; visual inspection covered Spanish dark/wide and light/narrow.
+This does not establish native GPU interaction or FPS/RAM/frame-time acceptance.
+
+## Precise construction, visual Assets and Hierarchy (2026-10-19)
+
+Shared authoring geometry lives in `raf_core::scene::geometry`: shape descriptors,
+local dimensions and world/subtree AABBs apply transforms once. Capsule has a
+1 m diameter and 2 m total Y height. Optional `size` on game.add/update derives
+scale and rejects simultaneous scale; no scene migration or duplicate size state.
+Assets use a typed catalog projection and a bounded worker for 128 px image and
+isolated ApiGraphicBasic shape/prefab thumbnails. Catalog refresh invalidates
+previews; GLB/GLTF remain pending 0.12. Placement stages geometry outside the
+live scene and commits one undoable edit. Hierarchy adds conjunctive field
+queries, bounded badges, insertion parent, ordered drops and UUID session view
+state in editor_hierarchy.ron. Script rows remain optional and virtual. Tab keeps
+Object Mode with an explicit unavailable notice; persistent topology editing,
+linked prefab packages and additional shapes stay in the 0.12 roadmap.
+Verification status must distinguish focused tests from native DPI/interaction QA.
+
+## Runtime services (2026-10-18, source implementation)
+
+`runtime_config` owns input axes/progress policy. `raf_script::services` owns
+typed progress requests/receipts, cursor intent and session requests; `query_api`
+owns bounded AABB queries and the bounds helper shared with current physics.
+`raf_runtime::{storage,session_loader}` own lazy bounded disk I/O and strict
+saved-session ingress. `RuntimeWorld`/`raf_player` prepare candidate worlds,
+retain the old world on failure, and transfer progress only after commit.
+Project Settings exposes local folder grants separately from shared policy.
+Rhai and generated service Nodes share the Host API; future WASM imports carry
+scoped guest tokens and typed values, without installing or activating a provider.
+No controller/player is injected. Export, animation, audio expansion and online
+transport are excluded. See `docs/RUNTIME_SERVICES.md`; native interaction,
+failure-injection and low-resource acceptance remain distinct from static checks.
+
 ## Camera helper and instrument presentation (2026-10-16)
 
 Camera is a virtual Assets shortcut (`builtin://camera`) using existing camera
@@ -37,6 +90,18 @@ Imported skyboxes, contact shadows, cascades, GI, volumetrics, network replicati
 and WASM environment imports are not implemented by this delivery.
 See `docs/LIGHTING.md`; native visual/performance acceptance is distinct
 from automated checks.
+
+Lighting optimized modes (2026-10-19): `EnvironmentSettings.technology` selects
+exactly `optimized_current` (legacy default) or `optimized_improved`, exposed in
+Lighting > Technologies. Improved reuses spare light/sky uniform channels for
+hemispheric ambient, exposure shoulder and softened cel transitions. The private
+ApiGraphicBasic executor admits one five-tap scene-only spatial filter and one
+RGBA8 target within min(64 MiB, graphics budget / 16), or explicitly skips it on
+budget denial; this is not FXAA/MSAA and never filters RafUI/CAD. Improved fits
+the existing single shadow map to camera receivers and bounds Soft filtering at
+nine comparisons; Current retains four. There are no cascades, temporal history
+or extra background jobs. See `docs/LIGHTING.md` for opt-in read-only project A/B
+captures and the distinction between offscreen QA and native/low-end acceptance.
 
 This file contains the definitive technical registry of AuraRafi. AI agents must rely on this file as the primary architectural mapping of the codebase.
 

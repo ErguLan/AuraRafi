@@ -27,11 +27,92 @@ pub struct InputSnapshot {
     pub keys_held: Vec<String>,
     /// Keys pressed this frame (edge-triggered).
     pub keys_pressed: Vec<String>,
+    pub keys_released: Vec<String>,
     /// Mouse buttons held (0=left, 1=right, 2=middle).
     pub mouse_held: Vec<i32>,
+    pub mouse_pressed: Vec<i32>,
+    pub mouse_released: Vec<i32>,
+    pub mouse_position: Option<[f32; 2]>,
+    pub mouse_delta: [f32; 2],
+    pub mouse_relative: [f32; 2],
+    pub mouse_wheel: [f32; 2],
+    pub axes: std::collections::BTreeMap<String, f32>,
+    pub keyboard_blocked: bool,
+    pub pointer_blocked: bool,
 }
 
 impl InputSnapshot {
+    pub fn clear_edges(&mut self) {
+        self.keys_pressed.clear();
+        self.keys_released.clear();
+        self.mouse_pressed.clear();
+        self.mouse_released.clear();
+        self.mouse_delta = [0.0; 2];
+        self.mouse_relative = [0.0; 2];
+        self.mouse_wheel = [0.0; 2];
+        self.axes.clear();
+    }
+    pub fn suppress_pointer(&mut self) {
+        self.pointer_blocked = true;
+        self.mouse_held.clear();
+        self.mouse_pressed.clear();
+        self.mouse_released.clear();
+        self.mouse_position = None;
+        self.mouse_delta = [0.0; 2];
+        self.mouse_relative = [0.0; 2];
+        self.mouse_wheel = [0.0; 2];
+    }
+    pub fn suppress_keyboard(&mut self) {
+        self.keyboard_blocked = true;
+        self.keys_held.clear();
+        self.keys_pressed.clear();
+        self.keys_released.clear();
+    }
+    /// Accumulate edges until the next simulation tick, with a hard bound.
+    pub fn accumulate_edges(&mut self, next: &Self) {
+        fn merge<T: PartialEq + Clone>(to: &mut Vec<T>, from: &[T]) {
+            for value in from.iter().take(128) {
+                if to.len() < 128 && !to.contains(value) {
+                    to.push(value.clone());
+                }
+            }
+        }
+        merge(&mut self.keys_pressed, &next.keys_pressed);
+        merge(&mut self.keys_released, &next.keys_released);
+        merge(&mut self.mouse_pressed, &next.mouse_pressed);
+        merge(&mut self.mouse_released, &next.mouse_released);
+        for axis in 0..2 {
+            self.mouse_delta[axis] =
+                (self.mouse_delta[axis] + next.mouse_delta[axis]).clamp(-1e6, 1e6);
+            self.mouse_relative[axis] =
+                (self.mouse_relative[axis] + next.mouse_relative[axis]).clamp(-1e6, 1e6);
+            self.mouse_wheel[axis] =
+                (self.mouse_wheel[axis] + next.mouse_wheel[axis]).clamp(-1e6, 1e6);
+        }
+    }
+    pub fn binding_held(&self, name: &str) -> bool {
+        if let Some(button) = name.strip_prefix("mouse:").and_then(|s| s.parse().ok()) {
+            self.is_mouse_held(button)
+        } else {
+            self.is_key_held(name)
+        }
+    }
+    pub fn binding_pressed(&self, name: &str) -> bool {
+        if let Some(button) = name.strip_prefix("mouse:").and_then(|s| s.parse().ok()) {
+            self.mouse_pressed.contains(&button)
+        } else {
+            self.was_key_pressed(name)
+        }
+    }
+    pub fn binding_released(&self, name: &str) -> bool {
+        if let Some(button) = name.strip_prefix("mouse:").and_then(|s| s.parse().ok()) {
+            self.mouse_released.contains(&button)
+        } else {
+            self.keys_released
+                .iter()
+                .any(|k| k.eq_ignore_ascii_case(name))
+        }
+    }
     /// Check if a key is currently held.
     pub fn is_key_held(&self, key: &str) -> bool {
         let lower = key.to_lowercase();
@@ -334,6 +415,7 @@ fn parse_primitive(name: &str) -> ScriptResult<raf_core::scene::Primitive> {
         "sphere" | "ball" => Primitive::Sphere,
         "plane" | "ground" => Primitive::Plane,
         "cylinder" | "tube" => Primitive::Cylinder,
+        "capsule" => Primitive::Capsule,
         // Sprite2D was retired: 2D game content is an orthographic 3D plane.
         "sprite" | "sprite2d" | "billboard" => Primitive::Plane,
         "empty" | "group" => Primitive::Empty,

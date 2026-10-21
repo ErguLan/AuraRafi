@@ -493,7 +493,7 @@ fn node_summary(scene: &SceneGraph, id: SceneNodeId, include_transform: bool) ->
     }
     let node = scene.get(id)?;
     let world_position = scene.world_matrix(id).col(3).truncate();
-    let half = node.scale.abs() * 0.5;
+    let half = node.primitive.descriptor().half_extents;
     let mut value = serde_json::json!({
         "id": id.0,
         "uuid": node.uuid,
@@ -542,6 +542,7 @@ fn node_summary(scene: &SceneGraph, id: SceneNodeId, include_transform: bool) ->
             "position": [node.position.x, node.position.y, node.position.z],
             "rotation_deg": [node.rotation.x, node.rotation.y, node.rotation.z],
             "scale": [node.scale.x, node.scale.y, node.scale.z],
+            "size": node.primitive.dimensions(node.scale).to_array(),
             "world_position": [world_position.x, world_position.y, world_position.z]
         });
     }
@@ -690,6 +691,7 @@ fn node_kind(node: &SceneNode) -> &'static str {
             raf_core::scene::graph::Primitive::Sphere => "sphere",
             raf_core::scene::graph::Primitive::Plane => "plane",
             raf_core::scene::graph::Primitive::Cylinder => "cylinder",
+            raf_core::scene::graph::Primitive::Capsule => "capsule",
         }
     }
 }

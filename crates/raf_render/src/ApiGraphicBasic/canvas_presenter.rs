@@ -88,6 +88,7 @@ pub struct DirectCanvasPresenter {
     cpu_size: [u32; 2],
     source_key: usize,
     source_bind_group: Option<wgpu::BindGroup>,
+    last_cpu_source: Option<Arc<SceneFrameOutput>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -129,6 +130,15 @@ pub(crate) struct PreparedCanvasSource {
 }
 
 impl DirectCanvasPresenter {
+    /// Drop retained scene output without recreating presentation pipelines.
+    pub fn release_source(&mut self) {
+        self.source_bind_group = None;
+        self.source_key = 0;
+        self.cpu_view = None;
+        self.cpu_texture = None;
+        self.cpu_size = [0, 0];
+        self.last_cpu_source = None;
+    }
     pub fn new(device: &wgpu::Device, color_format: wgpu::TextureFormat) -> Self {
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("ApiGraphicBasic.CanvasPresenterShader"),
@@ -202,6 +212,7 @@ impl DirectCanvasPresenter {
             cpu_size: [0, 0],
             source_key: 0,
             source_bind_group: None,
+            last_cpu_source: None,
         }
     }
 
@@ -254,6 +265,36 @@ impl DirectCanvasPresenter {
         );
     }
 
+    /// A retained CPU canvas does not upload its pixels again when only UI
+    /// chrome changes. Retaining the Arc also prevents pointer-identity reuse.
+    pub(crate) fn prepare_shared_output(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        output: &Arc<SceneFrameOutput>,
+        source_size: [u32; 2],
+    ) -> Option<PreparedCanvasSource> {
+        if matches!(output.as_ref(), SceneFrameOutput::CpuPixels(_)) {
+            if self
+                .last_cpu_source
+                .as_ref()
+                .is_some_and(|cached| Arc::ptr_eq(cached, output))
+                && self.cpu_size == source_size
+            {
+                return self
+                    .cpu_view
+                    .clone()
+                    .map(|view| PreparedCanvasSource { view });
+            }
+            let source = self.prepare_output(device, queue, output.as_ref(), source_size)?;
+            self.last_cpu_source = Some(output.clone());
+            Some(source)
+        } else {
+            self.last_cpu_source = None;
+            self.prepare_output(device, queue, output.as_ref(), source_size)
+        }
+    }
+
     pub(crate) fn prepare_output(
         &mut self,
         device: &wgpu::Device,
@@ -261,6 +302,7 @@ impl DirectCanvasPresenter {
         output: &SceneFrameOutput,
         source_size: [u32; 2],
     ) -> Option<PreparedCanvasSource> {
+        self.last_cpu_source = None;
         let view = match output {
             SceneFrameOutput::GpuTexture { view, .. } => view.arc(),
             SceneFrameOutput::CpuPixels(pixels) => {
