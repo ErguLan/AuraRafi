@@ -69,6 +69,32 @@ fn physics_sweep_floor_parented_motion_and_initial_penetration() {
     assert!((scene.world_matrix(moving).transform_point3(Vec3::ZERO).x - 1.0).abs() < 1e-5);
 }
 #[test]
+fn dynamic_body_passes_through_an_enabled_static_trigger() {
+    let mut scene = SceneGraph::new();
+    let zone = collider(&mut scene, "Zone", Vec3::ZERO);
+    let trigger = &mut scene.get_mut(zone).unwrap().rigid_body;
+    trigger.enabled = true;
+    trigger.body_type = RigidBodyType::Static;
+    trigger.is_trigger = true;
+
+    let id = collider(&mut scene, "Body", Vec3::Y * 3.0);
+    let body = &mut scene.get_mut(id).unwrap().rigid_body;
+    body.enabled = true;
+    body.body_type = RigidBodyType::Dynamic;
+    body.use_gravity = true;
+    body.damping = 0.0;
+
+    let mut physics = PhysicsWorld::prepare(&scene).unwrap();
+    for _ in 0..120 {
+        physics.step(&mut scene, 1.0 / 60.0).unwrap();
+    }
+    assert!(
+        scene.get(id).unwrap().position.y < -5.0,
+        "a dynamic body must not rest on an enabled static trigger"
+    );
+}
+
+#[test]
 fn physics_contact_flood_is_explicit_and_has_no_partial_events() {
     let mut scene = SceneGraph::new();
     for index in 0..18 {

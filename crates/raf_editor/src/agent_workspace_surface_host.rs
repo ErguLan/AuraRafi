@@ -6,8 +6,8 @@ use crate::agent_workspace_layout::{
     WorkspaceDivider, WorkspaceGeometry, WorkspaceLayout, WorkspaceResize,
 };
 use crate::agent_workspace_surface::{
-    build_workspace_surface, build_workspace_surface_with_layout, with_confirmation, EvidenceTab,
-    WorkspaceConfirmation,
+    build_workspace_surface, build_workspace_surface_with_laboratory, with_confirmation,
+    workspace_tokens, EvidenceTab, WorkspaceConfirmation,
 };
 use crate::editor_layout::EditorRect;
 use crate::panels::ai_chat::AgentAction;
@@ -21,6 +21,16 @@ use raf_ui::UiRect;
 use std::path::PathBuf;
 use std::time::Instant;
 
+#[derive(PartialEq)]
+struct LabFieldKey {
+    logical_size: [f32; 2],
+    palette: StudioUiPalette,
+    document: u64,
+    graph_version: u64,
+    selected: Option<uuid::Uuid>,
+    selected_pin: Option<usize>,
+}
+
 pub(crate) enum AgentWorkspaceIntent {
     Back,
     OpenEditor(PathBuf),
@@ -28,6 +38,8 @@ pub(crate) enum AgentWorkspaceIntent {
     Window(raf_ui::UiWindowCommand),
     StartAllProjects,
     CloseProjects(Option<PathBuf>),
+    Laboratory(String),
+    LeaveLaboratory(PathBuf, raf_core::session::SessionId),
 }
 
 pub(crate) struct AgentWorkspaceSurfaceHost {
@@ -44,6 +56,7 @@ pub(crate) struct AgentWorkspaceSurfaceHost {
     pub preview: AgentPreview,
     release_canvas: bool,
     frame_requested: bool,
+    lab_field_key: Option<LabFieldKey>,
 }
 
 impl AgentWorkspaceSurfaceHost {
@@ -80,6 +93,7 @@ impl AgentWorkspaceSurfaceHost {
             preview: AgentPreview::default(),
             release_canvas: false,
             frame_requested: false,
+            lab_field_key: None,
         }
     }
 
@@ -107,6 +121,49 @@ impl AgentWorkspaceSurfaceHost {
             self.review_open && workspace.is_some(),
             workspace.is_some_and(|w| w.panel.borrow().sidebar_open),
         )
+    }
+
+    fn sync_laboratory_field(
+        &mut self,
+        laboratory: Option<&crate::electronics_controller::NativeElectronicsEditor>,
+        palette: StudioUiPalette,
+        logical_size: [f32; 2],
+        project_rail: f32,
+    ) {
+        use crate::electronics_lab_field::{paint, texture_size, Field, IMAGE_KEY};
+        let field = laboratory.and_then(|editor| {
+            let field_size = crate::electronics_lab_surface::field_size(
+                UiRect::new(
+                    0.0,
+                    0.0,
+                    (logical_size[0] - project_rail).max(1.0),
+                    (logical_size[1] - 140.0).max(1.0),
+                ),
+                editor.lab.view,
+            )?;
+            Some((editor, field_size))
+        });
+        let key = field.map(|(editor, logical_size)| LabFieldKey {
+            logical_size,
+            palette,
+            document: editor.lab_fingerprint(),
+            graph_version: editor.lab.graph_version,
+            selected: editor.lab.selected,
+            selected_pin: editor.lab.selected_pin,
+        });
+        if self.lab_field_key == key {
+            return;
+        }
+        self.lab_field_key = key;
+        if let Some((editor, [width, height])) = field {
+            let size = texture_size(width, height);
+            let pixels = paint(&Field::new(&editor.lab, width, height), size, &workspace_tokens(palette));
+            if let Err(error) = self.host.images_mut().insert_rgba(IMAGE_KEY, size, pixels) {
+                tracing::warn!(%error, "Electronics signal map could not be registered");
+            }
+        } else {
+            self.host.images_mut().remove(IMAGE_KEY);
+        }
     }
 
     pub fn sync_preview(&mut self, service: &AgentService, now: Instant) {
@@ -164,9 +221,13 @@ impl AgentWorkspaceSurfaceHost {
         service: &AgentService,
         projects: &[HubSurfaceProject],
         settings: &EngineSettings,
+        laboratory: Option<&crate::electronics_controller::NativeElectronicsEditor>,
     ) {
         self.rect = rect;
         self.sync_preview(service, Instant::now());
+        let logical_size = rect.logical_size().map(|value| value as f32);
+        let project_rail = self.layout.resolve(logical_size, false, false).projects;
+        self.sync_laboratory_field(laboratory, palette, logical_size, project_rail);
         let loading = service.loading()
             || (service
                 .selected
@@ -200,7 +261,7 @@ impl AgentWorkspaceSurfaceHost {
             )
         });
         let key = format!(
-            "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
+            "{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}{:?}",
             rect,
             palette,
             settings.language,
@@ -213,7 +274,9 @@ impl AgentWorkspaceSurfaceHost {
             self.review_open,
             self.confirmation,
             self.layout,
+            laboratory.map(|editor| (editor.lab.version, editor.lab_fingerprint(), editor.analysis_running())),
             (
+                settings.agent_mode,
                 settings.font_size,
                 settings.ui_scale,
                 settings.prefers_reduced_motion,
@@ -230,7 +293,7 @@ impl AgentWorkspaceSurfaceHost {
                 rect.logical_size().map(|value| value as f32),
             ));
         self.host.set_surface(with_confirmation(
-            build_workspace_surface_with_layout(
+            build_workspace_surface_with_laboratory(
                 palette,
                 service,
                 projects,
@@ -241,6 +304,7 @@ impl AgentWorkspaceSurfaceHost {
                 self.evidence,
                 self.review_open,
                 &self.layout,
+                laboratory,
             ),
             rect.logical_size().map(|v| v as f32),
             self.confirmation.as_ref(),
@@ -263,7 +327,6 @@ impl AgentWorkspaceSurfaceHost {
             let panel = workspace.panel.borrow();
             let controls = &mut self.host.session_mut().interaction.controls;
             controls.set_text("agent.input", &panel.input_text, 16_384);
-            controls.set_text("agent.new-model.label", &panel.new_model_label, 256);
             controls.set_text("agent.new-model.id", &panel.new_model_id, 256);
         }
         self.last_key = key;
@@ -282,7 +345,7 @@ impl AgentWorkspaceSurfaceHost {
             // The splitter and camera acquire their own pointer ownership before
             // RafUI sees the snapshot, preventing click-through into the chat.
             let before = self.layout;
-            if self
+            if service.selected_lab_target().is_none() && self
                 .resize
                 .input(input.snapshot(), router, geometry, &mut self.layout)
             {
@@ -367,11 +430,19 @@ impl AgentWorkspaceSurfaceHost {
                 }
                 UiAction::Custom { channel, payload } if channel == "agent.workspace.project" => {
                     if let Some(path) = payload.get("path").and_then(|v| v.as_str()) {
+                        if let Some((current, session, _)) = service.selected_lab_target() {
+                            if current != std::path::Path::new(path) {
+                                intents.push(AgentWorkspaceIntent::LeaveLaboratory(current.to_owned(), session));
+                            }
+                        }
                         service.request(PathBuf::from(path));
                         self.reset(router);
                     }
                 }
                 UiAction::Command { name } => match name.as_str() {
+                    command if command.starts_with("agent.lab.") => {
+                        intents.push(AgentWorkspaceIntent::Laboratory(command["agent.lab.".len()..].to_owned()));
+                    }
                     "agent.workspace.tab.preview" => {
                         self.evidence = EvidenceTab::Preview;
                         self.review_open = true;
@@ -470,12 +541,12 @@ impl AgentWorkspaceSurfaceHost {
                                         .focus
                                         .request_focus("agent.input");
                                 }
-                                if workspace.panel.borrow().add_model_open {
+                                if workspace.panel.borrow().model_menu_open {
                                     self.host
                                         .session_mut()
                                         .interaction
                                         .focus
-                                        .request_focus("agent.new-model.label");
+                                        .request_focus("agent.new-model.id");
                                 }
                             }
                         }
@@ -483,8 +554,11 @@ impl AgentWorkspaceSurfaceHost {
                 },
                 UiAction::SetText { key, value } => {
                     let action = match key.as_str() {
+                        key if key.starts_with("lab.output-value:") => {
+                            intents.push(AgentWorkspaceIntent::Laboratory(format!("{}:{value}", &key[4..])));
+                            None
+                        }
                         "agent.input" => Some(AgentAction::SetInput(value)),
-                        "agent.new-model.label" => Some(AgentAction::SetNewModelLabel(value)),
                         "agent.new-model.id" => Some(AgentAction::SetNewModelId(value)),
                         _ => None,
                     };
@@ -539,6 +613,23 @@ impl AgentWorkspaceSurfaceHost {
         if !modal_was_open && self.confirmation.is_none() {
             if let Some(workspace) = service.selected_workspace().filter(|w| !w.closing) {
                 let mut panel = workspace.panel.borrow_mut();
+                let dropped_on_composer = input.snapshot().pointer_position.is_some_and(|point| {
+                    self.host.layout_rect("agent.composer").is_some_and(|rect| rect.contains([point[0] - self.rect.x, point[1] - self.rect.y]))
+                });
+                if dropped_on_composer && !input.dropped_files().is_empty() {
+                    panel.apply_action(AgentAction::AttachFiles(input.dropped_files().to_vec()), settings);
+                    self.last_key.clear();
+                }
+                if input.snapshot().modifiers.command_modifier()
+                    && input.snapshot().window_focused
+                    && router.keyboard_owner() == Some(self.owner())
+                    && input.snapshot().key_pressed(InputKey::V)
+                    && !input.has_clipboard_text()
+                    && self.host.session().interaction.focus.has_focus("agent.input")
+                {
+                    panel.apply_action(AgentAction::PasteImage, settings);
+                    self.last_key.clear();
+                }
                 if input.snapshot().key_pressed(InputKey::Escape) {
                     panel.close_menus();
                     if self.rect.width < 1200.0 {

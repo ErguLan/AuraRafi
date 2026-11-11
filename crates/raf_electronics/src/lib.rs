@@ -40,7 +40,7 @@ pub use library::{ComponentLibrary, ComponentTemplate, ELECTRICAL_ASSETS_DIR};
 pub use netlist::Netlist;
 pub use pcb::{
     footprint_definition, BoardOutline, FootprintDefinition, FootprintPadDefinition, PcbAirwire,
-    PcbComponentPlacement, PcbLayer, PcbLayout, PcbSyncSummary, PcbTrace,
+    PcbComponentPlacement, PcbLayer, PcbLayout, PcbSyncSummary, PcbTrace, PcbVia,
 };
 pub use schematic::Schematic;
 pub use simulation::{simulate_dc, SimulationResults};

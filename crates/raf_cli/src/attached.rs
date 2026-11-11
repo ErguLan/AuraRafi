@@ -39,6 +39,10 @@ impl std::fmt::Debug for AttachedClient {
 }
 
 impl AttachedClient {
+    pub fn project_path(&self) -> &Path {
+        &self.project_path
+    }
+
     pub fn connect(project_path: &Path, client_name: &str) -> Result<Self, String> {
         let project_path = if project_path.is_file() {
             project_path.parent().unwrap_or(project_path).to_path_buf()

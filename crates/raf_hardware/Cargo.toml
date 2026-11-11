@@ -9,4 +9,5 @@ description = "Hardware integration layer: serial ports, sensors, actuators, and
 raf_core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serialport = { version = "4", default-features = false }
 tracing = { workspace = true }

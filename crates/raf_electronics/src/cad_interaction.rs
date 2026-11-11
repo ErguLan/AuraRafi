@@ -4,7 +4,9 @@ use glam::Vec2;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::cad_scene::{CadLayerKind, CadObject, CadObjectKind, CadPickPriority, CadScene};
+use crate::cad_scene::{
+    cad_object_distance, CadLayerKind, CadObject, CadObjectKind, CadPickPriority, CadScene,
+};
 
 /// Longest gap between two clicks that may still be treated as one double click.
 ///
@@ -221,19 +223,7 @@ fn is_painted_overlay(object: &CadObject) -> bool {
 }
 
 fn pick_object(object: &CadObject, point: Vec2, tolerance: f32) -> Option<CadPickHit> {
-    let distance = if let Some(rect) = object.rect {
-        let half = rect.size * 0.5;
-        let min = rect.center - half;
-        let max = rect.center + half;
-        let closest = point.clamp(min, max);
-        point.distance(closest)
-    } else {
-        object
-            .points
-            .windows(2)
-            .map(|segment| point_segment_distance(point, segment[0], segment[1]))
-            .fold(f32::INFINITY, f32::min)
-    };
+    let distance = cad_object_distance(object, point);
     if distance > tolerance {
         return None;
     }
@@ -247,16 +237,6 @@ fn pick_object(object: &CadObject, point: Vec2, tolerance: f32) -> Option<CadPic
         priority: object.pick_priority,
         distance,
     })
-}
-
-fn point_segment_distance(point: Vec2, start: Vec2, end: Vec2) -> f32 {
-    let delta = end - start;
-    let length_squared = delta.length_squared();
-    if length_squared <= f32::EPSILON {
-        return point.distance(start);
-    }
-    let projection = ((point - start).dot(delta) / length_squared).clamp(0.0, 1.0);
-    point.distance(start + delta * projection)
 }
 
 fn layer_order(layer: CadLayerKind) -> u8 {
@@ -291,6 +271,10 @@ mod tests {
             layer,
             pick_priority: priority,
             rect: Some(CadRect::new(center, size)),
+            shape: crate::cad_scene::CadShape::Rectangle,
+            rotation_degrees: 0.0,
+            drill: None,
+            stroke_width_world: None,
             points: Vec::new(),
             line_paths: Vec::new(),
             label: None,
@@ -332,6 +316,10 @@ mod tests {
             layer: CadLayerKind::Schematic,
             pick_priority: CadPickPriority::Component,
             rect: Some(CadRect::new(Vec2::ZERO, Vec2::splat(20.0))),
+            shape: crate::cad_scene::CadShape::Rectangle,
+            rotation_degrees: 0.0,
+            drill: None,
+            stroke_width_world: None,
             points: Vec::new(),
             line_paths: Vec::new(),
             label: None,
@@ -346,6 +334,10 @@ mod tests {
             layer: CadLayerKind::Schematic,
             pick_priority: CadPickPriority::Pin,
             rect: Some(CadRect::new(Vec2::ZERO, Vec2::splat(4.0))),
+            shape: crate::cad_scene::CadShape::Rectangle,
+            rotation_degrees: 0.0,
+            drill: None,
+            stroke_width_world: None,
             points: Vec::new(),
             line_paths: Vec::new(),
             label: None,
@@ -369,6 +361,10 @@ mod tests {
             layer: CadLayerKind::Schematic,
             pick_priority: CadPickPriority::Wire,
             rect: None,
+            shape: crate::cad_scene::CadShape::Rectangle,
+            rotation_degrees: 0.0,
+            drill: None,
+            stroke_width_world: None,
             points: vec![Vec2::new(0.0, 0.0), Vec2::new(20.0, 0.0)],
             line_paths: Vec::new(),
             label: None,
@@ -379,6 +375,65 @@ mod tests {
 
         assert!(pick_object(&object, Vec2::new(10.0, 2.0), 3.0).is_some());
         assert!(pick_object(&object, Vec2::new(10.0, 4.0), 3.0).is_none());
+    }
+
+    #[test]
+    fn round_shapes_and_rotation_define_the_pick_boundary() {
+        let mut circle = rect_object(
+            "circle",
+            CadObjectKind::Pad,
+            CadLayerKind::PcbTopCopper,
+            CadPickPriority::Pin,
+            Vec2::ZERO,
+            Vec2::splat(20.0),
+        );
+        circle.shape = crate::cad_scene::CadShape::Circle;
+        assert!(pick_object(&circle, Vec2::new(9.0, 0.0), 0.5).is_some());
+        assert!(pick_object(&circle, Vec2::new(9.0, 9.0), 1.0).is_none());
+
+        let mut round_rect = rect_object(
+            "roundrect",
+            CadObjectKind::Pad,
+            CadLayerKind::PcbTopCopper,
+            CadPickPriority::Pin,
+            Vec2::ZERO,
+            Vec2::new(20.0, 10.0),
+        );
+        round_rect.shape = crate::cad_scene::CadShape::RoundRect { corner_radius: 2.0 };
+        assert!(pick_object(&round_rect, Vec2::new(9.9, 4.9), 0.5).is_none());
+        assert!(pick_object(&round_rect, Vec2::new(8.0, 3.0), 0.5).is_some());
+
+        let mut rotated = rect_object(
+            "rotated",
+            CadObjectKind::Pad,
+            CadLayerKind::PcbTopCopper,
+            CadPickPriority::Pin,
+            Vec2::ZERO,
+            Vec2::new(20.0, 4.0),
+        );
+        rotated.rotation_degrees = 90.0;
+        assert!(pick_object(&rotated, Vec2::new(0.0, 8.0), 0.5).is_some());
+        assert!(pick_object(&rotated, Vec2::new(8.0, 0.0), 0.5).is_none());
+    }
+
+    #[test]
+    fn drill_hole_is_a_real_gap_in_pad_picking() {
+        let mut pad = rect_object(
+            "through-hole",
+            CadObjectKind::Pad,
+            CadLayerKind::PcbTopCopper,
+            CadPickPriority::Pin,
+            Vec2::ZERO,
+            Vec2::splat(12.0),
+        );
+        pad.drill = Some(crate::cad_scene::CadDrill {
+            shape: crate::cad_scene::CadDrillShape::Circle,
+            size: Vec2::splat(4.0),
+            offset: Vec2::ZERO,
+            plated: true,
+        });
+        assert!(pick_object(&pad, Vec2::ZERO, 1.0).is_none());
+        assert!(pick_object(&pad, Vec2::new(3.0, 0.0), 0.5).is_some());
     }
 
     #[test]

@@ -12,6 +12,13 @@ use crate::scene_renderer::SceneRenderFrame;
 
 const SVG: &str = include_str!("../../assets/ui_icons/svg/camera.svg");
 pub const CAMERA_ICON_SIZE: f32 = 32.0;
+/// Design canvas of the embedded camera SVG (`viewBox="0 0 64 64"`).
+const SVG_DESIGN_SIZE: f32 = 64.0;
+/// Smallest source-pixel footprint that survives the editor compositor's
+/// dynamic-resolution upscale without visible stair steps or dashes.
+const MIN_CORE_PX: f32 = 1.75;
+const MIN_OUTLINE_PX: f32 = 3.6;
+const MIN_GLYPH_PX: f32 = 24.0;
 const OUTLINE: [u8; 4] = [12, 17, 23, 255];
 const NORMAL: [u8; 4] = [235, 241, 248, 255];
 const SELECTED: [u8; 4] = [255, 160, 40, 255];
@@ -119,19 +126,31 @@ impl CameraHelperCache {
             }
             // Both passes use the same vector source. A dark rim remains legible
             // over the bright scene; the glyph always faces the editor camera.
-            for (width, tint) in [(4.0, OUTLINE), (1.8, color)] {
+            // The embedded SVG is authored on a 64x64 design canvas; map that
+            // canvas onto the logical glyph box instead of assuming a 24-unit
+            // crop (which drew the billboard ~2.7x oversized and off-center).
+            //
+            // Dynamic resolution can render this target below 1:1, so strokes
+            // and the glyph itself clamp to a readable source-pixel floor.
+            // Without that floor a 1.8 logical stroke lands around one source
+            // pixel and the compositor upscale tears it into dashes.
+            let glyph_px = (CAMERA_ICON_SIZE * pixel_scale).max(MIN_GLYPH_PX);
+            let unit = glyph_px / SVG_DESIGN_SIZE;
+            let core = (1.8 * pixel_scale).max(MIN_CORE_PX);
+            let outline = (4.0 * pixel_scale).max(MIN_OUTLINE_PX);
+            for (width, tint) in [(outline, OUTLINE), (core, color)] {
                 for segment in svg_segments() {
                     let point = |p: [f32; 2]| {
                         [
-                            screen[0] + (p[0] - 12.0) / 24.0 * half * 2.0,
-                            screen[1] + (p[1] - 12.0) / 24.0 * half * 2.0,
+                            screen[0] + (p[0] - SVG_DESIGN_SIZE * 0.5) * unit,
+                            screen[1] + (p[1] - SVG_DESIGN_SIZE * 0.5) * unit,
                         ]
                     };
                     append_screen_line(
                         &mut frame.commands,
                         point(segment[0]),
                         point(segment[1]),
-                        width * pixel_scale,
+                        width,
                         tint,
                     );
                 }
@@ -162,7 +181,12 @@ fn append_direction(
         (tip, tip - forward * 0.28 + right * 0.16),
         (tip, tip - forward * 0.28 - right * 0.16),
     ];
-    for (width, tint) in [(4.0 * scale, OUTLINE), (1.8 * scale, color)] {
+    // Same source-pixel floor as the billboard: the world-space stroke is
+    // resampled by the dynamic-resolution compositor, so keep enough coverage
+    // for the analytic line AA to resolve instead of tearing into dashes.
+    let core = (2.2 * scale).max(1.9);
+    let outline = (4.6 * scale).max(3.8);
+    for (width, tint) in [(outline, OUTLINE), (core, color)] {
         for (a, b) in segments {
             frame.commands.draw_line(a, b, tint, width, true, 0.0);
         }
@@ -192,14 +216,15 @@ fn append_direction(
         } else {
             origin
         };
+        let guide_width = (1.3 * scale).max(1.5);
         frame
             .commands
-            .draw_line(start, corners[index], SELECTED, scale, true, 0.0);
+            .draw_line(start, corners[index], SELECTED, guide_width, true, 0.0);
         frame.commands.draw_line(
             corners[index],
             corners[(index + 1) % 4],
             SELECTED,
-            scale,
+            guide_width,
             true,
             0.0,
         );

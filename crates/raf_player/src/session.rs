@@ -11,7 +11,6 @@ use raf_render::api_graphic_basic::ui_surface::loading::{
 };
 use raf_render::api_graphic_basic::ui_surface::{
     DirectUiSurfaceHost, NativeUiInputBridge, NativeUiWindowHost, StudioUiPalette, UiAction,
-    UiSurface,
 };
 use raf_render::api_graphic_basic::{
     CanvasTargetRect, EditorCanvasLayer, EditorUiLayer, NativeEditorCompositor,
@@ -67,8 +66,7 @@ pub struct PlayerSession {
     instance: Uuid,
     world: Option<RuntimeWorld>,
     ui: DirectUiSurfaceHost,
-    authored_ui: Option<DirectUiSurfaceHost>,
-    authored_camera_binding: Option<String>,
+    game_ui: crate::game_ui::GameUiPresenter,
     router: InputRouter,
     renderer: Option<SceneRenderer>,
     device: Option<BasicDevice>,
@@ -129,8 +127,7 @@ impl PlayerSession {
             instance,
             world: None,
             ui,
-            authored_ui: None,
-            authored_camera_binding: None,
+            game_ui: Default::default(),
             router: InputRouter::default(),
             renderer: None,
             device: None,
@@ -198,6 +195,7 @@ impl PlayerSession {
         if control == RuntimeControl::Stop {
             self.receiver = None;
             self.source = None;
+            self.game_ui.clear();
             if let Some(world) = &mut self.world {
                 world.stop();
                 self.last_diagnostics.extend(world.drain_diagnostics());
@@ -229,10 +227,7 @@ impl PlayerSession {
             .world
             .as_ref()
             .is_some_and(|w| w.has_active_simulation())
-            || self
-                .authored_ui
-                .as_ref()
-                .is_some_and(|ui| ui.has_active_motion())
+            || self.game_ui.has_active_motion()
         {
             1.0 / self.settings.runtime.fps_limit.clamp(15, 120) as f64
         } else {
@@ -329,6 +324,12 @@ impl PlayerSession {
                     );
                 }
                 Preparation::Ready(mut world, document, root, audio, context) => {
+                    if let Some(document) = &document {
+                        if let Err(error) = world.game_ui_mut().mount_document(document) {
+                            self.fail_preparation(vec![error]);
+                            continue;
+                        }
+                    }
                     if self.transition_previous.is_some() {
                         if let Some(previous) = &self.world {
                             world.services_mut().progress = previous.services().progress.clone();
@@ -368,17 +369,7 @@ impl PlayerSession {
                         config.allow_gpu = false;
                     }
                     self.device = Some(BasicDevice::new(config));
-                    self.authored_camera_binding = document
-                        .as_ref()
-                        .filter(|d| d.space == raf_ui::UiDocumentSpace::Camera)
-                        .and_then(|d| d.camera_binding.as_ref())
-                        .map(|b| b.camera_key.clone());
-                    self.authored_ui = document.map(|document| {
-                        host.graphics_context().create_ui_host(
-                            UiSurface::from_document(&document, palette(self.settings.theme)),
-                            [0, 0, 0, 0],
-                        )
-                    });
+                    self.game_ui.clear();
                     self.status = world.status().clone();
                     self.world = Some(*world);
                     self.audio = RuntimeAudio::new(audio);
@@ -556,28 +547,15 @@ impl PlayerSession {
         let mut ui_consumed_pointer =
             self.ui.has_interactive_hover() || self.ui.has_pointer_capture();
         let mut ui_consumed_keyboard = self.ui.captures_keyboard_input();
-        let authored_visible = self.authored_ui_visible();
-        if let Some(authored) = self.authored_ui.as_mut().filter(|_| authored_visible) {
-            authored.set_environment(environment);
-            let authored_actions = authored.process_routed_input(
-                logical,
-                scale,
-                |key| t(key, language),
-                input,
-                &mut self.router,
-                InputOwner::RetainedUi(InputRegionId(0x67616d65)),
-                UiRect::new(0.0, 0.0, logical[0] as f32, logical[1] as f32),
-            );
-            if authored.has_interactive_hover() || authored.has_pointer_capture() {
-                ui_consumed_pointer = true;
-                game_input.suppress_pointer();
-            }
-            if authored.captures_keyboard_input() {
-                ui_consumed_keyboard = true;
-                game_input.suppress_keyboard();
-            }
-            if let Some(world) = &mut self.world {
-                for action in authored_actions.into_iter().take(128) {
+        let game_rect=UiRect::new(0.0,34.0,logical[0] as f32,(logical[1] as f32-34.0).max(1.0));
+        environment.viewport_size=[game_rect.width,game_rect.height];
+        if let Some((world,root))=self.world.as_mut().zip(self.root.as_ref()) {
+            self.game_ui.sync(host,world,root,self.settings.theme,environment);
+            let game_ui_input=self.game_ui.input(input,&mut self.router,world,game_rect,scale,language,ui_consumed_pointer);
+            ui_consumed_pointer |= game_ui_input.pointer;
+            ui_consumed_keyboard |= game_ui_input.keyboard;
+                for (instance,action) in game_ui_input.actions.into_iter().take(128) {
+                    let element=action.target_id;
                     // Authored UI never executes commands against the editor kernel.
                     let (name, value) = match action.action {
                         UiAction::Command { name } => (name, raf_script::ScriptValue::None),
@@ -595,11 +573,17 @@ impl PlayerSession {
                         }
                         _ => continue,
                     };
-                    if let Err(error) = world.emit_ui_event(&name, value) {
-                        self.last_diagnostics.push(error);
+                    let structured=raf_script::ScriptValue::Record(std::collections::BTreeMap::from([
+                        ("instance".into(),raf_script::ScriptValue::String(instance)),
+                        ("element".into(),raf_script::ScriptValue::String(element)),
+                        ("name".into(),raf_script::ScriptValue::String(name.clone())),
+                        ("value".into(),value.clone()),
+                    ]));
+                    if name.len()<=128 && name!="ui.event" {
+                        if let Err(error)=world.emit_ui_event(&name,value){if self.last_diagnostics.len()<256{self.last_diagnostics.push(error);}}
                     }
+                    if let Err(error)=world.emit_ui_event("ui.event",structured){if self.last_diagnostics.len()<256{self.last_diagnostics.push(error);}}
                 }
-            }
         }
         if ui_consumed_pointer {
             game_input.suppress_pointer();
@@ -683,17 +667,12 @@ impl PlayerSession {
                 return Ok(());
             }
         }
-        let canvas = self.render_canvas(size, scale);
-        let mut layers = Vec::new();
-        let authored_visible = self.authored_ui_visible();
-        if let Some(authored) = self.authored_ui.as_mut().filter(|_| authored_visible) {
-            layers.push(EditorUiLayer {
-                host: authored,
-                target_rect: CanvasTargetRect::full(size),
-                logical_size: logical,
-                raster_scale: scale.max(1.0),
-            });
+        if let Some((world,root))=self.world.as_ref().zip(self.root.as_ref()) {
+            self.game_ui.sync(host,world,root,self.settings.theme,environment);
         }
+        let canvas = self.render_canvas(host,size,scale);
+        let top=(34.0*scale) as u32;
+        let mut layers=self.game_ui.overlay_layers(CanvasTargetRect{x:0,y:top,width:size[0],height:size[1].saturating_sub(top).max(1)},[logical[0],(game_rect.height as u32).max(1)],scale);
         layers.push(EditorUiLayer {
             host: &mut self.ui,
             target_rect: CanvasTargetRect::full(size),
@@ -705,24 +684,7 @@ impl PlayerSession {
         self.router.reconcile_input(input.snapshot());
         Ok(())
     }
-    fn authored_ui_visible(&self) -> bool {
-        let Some(binding) = &self.authored_camera_binding else {
-            return true;
-        };
-        let Some(world) = &self.world else {
-            return false;
-        };
-        let Some(uuid) = world.active_camera_uuid() else {
-            return false;
-        };
-        world.scene.iter().any(|(id, node)| {
-            world.scene.is_valid_node(id)
-                && node.uuid == uuid
-                && node.game_camera.is_some()
-                && (*binding == uuid.to_string() || *binding == node.name)
-        })
-    }
-    fn render_canvas(&mut self, size: [u32; 2], scale: f32) -> Option<EditorCanvasLayer> {
+    fn render_canvas(&mut self, host:&NativeUiWindowHost,size: [u32; 2], scale: f32) -> Option<EditorCanvasLayer> {
         let world = self.world.as_ref()?;
         let pose = world.presentation_camera_pose()?;
         let top = (34.0 * scale) as u32;
@@ -755,7 +717,7 @@ impl PlayerSession {
             (target.height as f32 * scale).max(1.0) as u32,
         ];
         let cache_size = [size[0], size[1], source_size[0], source_size[1]];
-        let revision = world.presentation_revision();
+        let revision = world.presentation_revision().wrapping_mul(31).wrapping_add(self.game_ui.revision());
         if let Some((cached_revision, cached_size, cached_pose, canvas)) = &self.cached_canvas {
             if *cached_revision == revision && *cached_size == cache_size && *cached_pose == pose {
                 return Some(canvas.clone());
@@ -787,7 +749,7 @@ impl PlayerSession {
             ..RenderOptions::default()
         };
         let render_started = Instant::now();
-        let frame = self.renderer.as_mut()?.build_frame(
+        let mut frame = self.renderer.as_mut()?.build_frame(
             &world.scene,
             &camera,
             source_size[0] as f32,
@@ -798,6 +760,10 @@ impl PlayerSession {
             options,
             None,
         );
+        let cpu=self.device.as_ref()?.backend()==raf_render::api_graphic_basic::device::BasicBackendType::CpuSoftware;
+        if let Err(error)=self.game_ui.world_commands(host,&mut frame,cpu,self.settings.language){
+            if self.last_diagnostics.len()<256 {self.last_diagnostics.push(error);}
+        }
         let output = self.device.as_mut()?.execute_scene_frame(&frame);
         let canvas = EditorCanvasLayer {
             output: Arc::new(output),
@@ -870,10 +836,5 @@ fn load_ui_document(
     let mut document: UiDocument =
         ron::de::from_bytes(&bytes).map_err(|e| vec![format!("game UI document: {e}")])?;
     document.migrate()?;
-    if document.space == raf_ui::UiDocumentSpace::World {
-        return Err(vec![
-            "world-space game UI is not implemented in the local player".into(),
-        ]);
-    }
     Ok(Some(document))
 }

@@ -66,7 +66,7 @@ pub const EDITOR_COMMANDS: &[EditorCommandSpec] = &[
         "Ctrl+S",
         true,
         false,
-        true,
+        false,
     ),
     spec(
         command::EDITOR_SETTINGS,

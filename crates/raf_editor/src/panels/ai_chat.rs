@@ -10,11 +10,11 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use raf_ai::agent_history::{AgentHistory, AgentHistoryWriter};
-use raf_ai::agent_model_registry::AgentModelRegistry;
 use raf_ai::agent_runtime::{
     AgentRuntime, AgentStatus, AgentToolResult, ToolExecutionMode, ToolExecutor,
 };
 use raf_ai::chat::ChatMessage;
+use raf_ai::model_capabilities::{vision_support, VisionSupport};
 use raf_ai::openai_client::{OpenAiConfig, OpenAiTool};
 use raf_ai::provider::{AgentMode, AiProvider, AiProviderConfig};
 use raf_core::config::EngineSettings;
@@ -27,6 +27,10 @@ use crate::agent_executor::{AgentToolExecutor, AgentToolRoute};
 use crate::commands::catalog::CommandCatalog;
 
 const MIN_AGENT_STREAM_PRESENTATION: Duration = Duration::from_millis(33);
+
+/// Transient sentinel: the panel always shows the provider card model.
+/// Unifying the model system removed the second label-based selection path.
+pub(crate) const MODEL_SENTINEL: &str = "provider_default";
 
 pub(crate) type SharedAgentPanel = Rc<RefCell<AgentPanel>>;
 
@@ -74,22 +78,25 @@ struct RuntimeKey {
     api_key: String,
     streaming: bool,
     max_tokens: u32,
+    reasoning_effort: String,
+    chatgpt_plan: bool,
+    chatgpt_registration: Option<String>,
     tool_call_limit_enabled: bool,
     max_tool_calls: u32,
 }
 
 /// The editor-facing Agent state.
 pub struct AgentPanel {
+    media_job: Option<(String, crate::agent_media::MediaReceiver)>,
+    pub(crate) media_error: Option<String>,
     pub runtime: AgentRuntime,
     pub history: AgentHistory,
-    pub model_registry: AgentModelRegistry,
     pub tools: Vec<OpenAiTool>,
     pub tool_routes: std::collections::HashMap<String, AgentToolRoute>,
     pub input_text: String,
     pub(crate) authoring_parent: Option<String>,
     pub selected_model: String,
     pub sidebar_open: bool,
-    pub new_model_label: String,
     pub new_model_id: String,
     pub new_model_error: Option<String>,
     pub open_settings_requested: bool,
@@ -99,6 +106,9 @@ pub struct AgentPanel {
     pub(crate) add_model_open: bool,
     tool_call_warning_dismissed: bool,
     pub language: Language,
+    pub(crate) show_reasoning: bool,
+    catalog_pending: bool,
+    catalog_fingerprint: String,
     pub last_status: AgentStatus,
     visual_revision: u64,
     last_visual_message_revision: u64,
@@ -131,16 +141,16 @@ pub struct AgentPanel {
 impl Default for AgentPanel {
     fn default() -> Self {
         Self {
+            media_job: None,
+            media_error: None,
             runtime: AgentRuntime::new(OpenAiConfig::default()),
             history: AgentHistory::default(),
-            model_registry: AgentModelRegistry::default(),
             tools: Vec::new(),
             tool_routes: std::collections::HashMap::new(),
             input_text: String::new(),
             authoring_parent: None,
-            selected_model: AgentModelRegistry::PROVIDER_DEFAULT.to_string(),
+            selected_model: MODEL_SENTINEL.to_string(),
             sidebar_open: true,
-            new_model_label: String::new(),
             new_model_id: String::new(),
             new_model_error: None,
             open_settings_requested: false,
@@ -150,6 +160,9 @@ impl Default for AgentPanel {
             add_model_open: false,
             tool_call_warning_dismissed: false,
             language: Language::English,
+            show_reasoning: true,
+            catalog_pending: false,
+            catalog_fingerprint: String::new(),
             last_status: AgentStatus::Done,
             visual_revision: 0,
             last_visual_message_revision: 0,
@@ -188,6 +201,9 @@ impl AgentPanel {
         settings: &EngineSettings,
     ) -> Option<(raf_ai::AssetImageProvider, String)> {
         let provider = self.effective_provider(settings)?;
+        if provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan {
+            return None;
+        }
         Some((
             raf_ai::AssetImageProvider {
                 provider: match provider.provider {
@@ -212,23 +228,91 @@ impl AgentPanel {
         _catalog: &CommandCatalog,
     ) -> AgentReadiness {
         self.language = settings.language;
-        self.external_studio_enabled = settings.external_asset_studio.enabled;
-        if self.model_registry.shortcuts != settings.agent_model_shortcuts {
-            self.model_registry = AgentModelRegistry::new(settings.agent_model_shortcuts.clone());
+        self.show_reasoning = settings.agent_show_reasoning;
+        if settings.agent_openai_use_plan && settings.default_ai_provider == AiProvider::OpenAI {
+            raf_ai::chatgpt_auth::ensure_models_requested();
         }
-        if self.runtime_key.is_none()
-            && self.selected_model == AgentModelRegistry::PROVIDER_DEFAULT
-            && !settings.default_agent_model.trim().is_empty()
-            && self
-                .model_registry
-                .get(settings.default_agent_model.trim())
-                .is_some()
+        if let Some(provider) =
+            settings
+                .ai_providers
+                .iter()
+                .find(|p| p.provider == settings.default_ai_provider && p.enabled)
         {
-            self.selected_model = settings.default_agent_model.trim().to_string();
+            if !(provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan) && matches!(
+                provider.provider,
+                AiProvider::OpenRouter
+                    | AiProvider::OpenAI
+                    | AiProvider::OpenCode
+                    | AiProvider::OpenCodeGo
+            ) {
+                // OpenCode services keep their dedicated catalog endpoints; the
+                // generic gateways fetch from the configured base URL.
+                let base_url = match provider.provider {
+                    AiProvider::OpenRouter | AiProvider::OpenAI => provider.base_url.clone(),
+                    _ => String::new(),
+                };
+                raf_ai::provider_catalog::ensure_requested(
+                    provider.provider,
+                    &base_url,
+                    &provider.api_key,
+                );
+            }
         }
+        let catalog = match settings.default_ai_provider {
+            AiProvider::OpenAI
+                if settings.agent_openai_use_plan && !raf_ai::chatgpt_auth::active_connected() =>
+            {
+                None
+            }
+            AiProvider::OpenAI if settings.agent_openai_use_plan => raf_ai::chatgpt_auth::snapshot()
+                .map(|view| (view.busy, format!("{:?}{:?}{}", view.models, view.message, view.busy))),
+            AiProvider::OpenRouter
+            | AiProvider::OpenAI
+            | AiProvider::OpenCode
+            | AiProvider::OpenCodeGo => {
+                let view = self.effective_provider(settings).map(|p| raf_ai::provider_catalog::snapshot_for(p.provider, &p.base_url, &p.api_key)).unwrap_or_default();
+                Some((view.loading, format!("{:?}{:?}{}{}", view.models, view.error, view.loading, view.fetched)))
+            }
+            _ => Some((false, String::new())),
+        };
+        if let Some((pending, fingerprint)) = catalog {
+            self.catalog_pending = pending;
+            if self.catalog_fingerprint != fingerprint {
+                self.catalog_fingerprint = fingerprint;
+                self.visual_revision = self.visual_revision.wrapping_add(1);
+            }
+        } else if self.catalog_pending {
+            self.catalog_pending = false;
+            self.catalog_fingerprint.clear();
+            self.visual_revision = self.visual_revision.wrapping_add(1);
+        }
+        self.external_studio_enabled = settings.external_asset_studio.enabled;
         self.ensure_project_history(project);
+        self.poll_media();
         self.ensure_runtime_config(settings);
+        if let Some(session) = self.history.active_session() {
+            self.runtime.client.set_session_id(&session.id);
+        }
+        self.sync_execution_permissions(settings.agent_mode);
         self.readiness(settings)
+    }
+
+    /// Active is the user's authorization for native tool execution. Review
+    /// preferences cannot override it, including in parked conversations.
+    pub(crate) fn sync_execution_permissions(&mut self, mode: AgentMode) {
+        let before = self.runtime.status.clone();
+        self.runtime
+            .set_review_mutations(self.review_writes && mode != AgentMode::Active);
+        let mut changed = before != self.runtime.status;
+        for run in self.parked_runs.values_mut() {
+            let before = run.runtime.status.clone();
+            run.runtime
+                .set_review_mutations(run.review_writes && mode != AgentMode::Active);
+            changed |= before != run.runtime.status;
+        }
+        if changed {
+            self.visual_revision = self.visual_revision.wrapping_add(1);
+        }
     }
 
     /// Poll the non-blocking runtime once per editor frame.
@@ -270,7 +354,9 @@ impl AgentPanel {
     }
 
     pub(crate) fn has_live_output(&self) -> bool {
-        self.opening
+        self.media_job.is_some()
+            || self.catalog_pending
+            || self.opening
             || self.pending_submission.is_some()
             || self.decision.is_some()
             || (self.save_error.is_none() && self.runtime.status.needs_continuous_frame())
@@ -287,7 +373,8 @@ impl AgentPanel {
     }
 
     pub(crate) fn current_needs_poll(&self) -> bool {
-        self.opening
+        self.media_job.is_some()
+            || self.opening
             || self.pending_submission.is_some()
             || self.decision.is_some()
             || (self.save_error.is_none() && self.runtime.status.needs_continuous_frame())
@@ -319,11 +406,19 @@ impl AgentPanel {
         if !provider.enabled {
             return AgentReadiness::ProviderDisabled;
         }
+        if provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan
+            && !raf_ai::chatgpt_auth::active_connected() {
+            return AgentReadiness::AdapterRequired;
+        }
         let model = self.effective_model(provider);
         if model.trim().is_empty() {
             return AgentReadiness::ModelMissing;
         }
-        if provider.base_url.trim().is_empty() {
+        if provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan
+            && !crate::panels::ai_model_options::selection_allowed(settings, provider.provider, &format!("account:{model}")) {
+            return AgentReadiness::ModelMissing;
+        }
+        if provider.base_url.trim().is_empty() && !(provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan) {
             return AgentReadiness::AdapterRequired;
         }
         AgentReadiness::Ready
@@ -333,45 +428,174 @@ impl AgentPanel {
         &self,
         settings: &'a EngineSettings,
     ) -> Option<&'a AiProviderConfig> {
-        let selected_provider = self
-            .model_registry
-            .get(&self.selected_model)
-            .map(|shortcut| shortcut.provider)
-            .unwrap_or(settings.default_ai_provider);
         settings
             .ai_providers
             .iter()
-            .find(|config| config.provider == selected_provider)
+            .find(|config| config.provider == settings.default_ai_provider)
     }
 
     pub(crate) fn effective_model(&self, provider: &AiProviderConfig) -> String {
-        self.model_registry
-            .resolve_model_id(&self.selected_model, provider.provider)
-            .unwrap_or_else(|| provider.model.clone())
+        provider.model.clone()
+    }
+
+    /// Automatic image-input policy. Only a model family known to be text-only
+    /// blocks the attachment; unknown models are attempted and the provider
+    /// remains the authority.
+    pub(crate) fn vision_support(&self, settings: &EngineSettings) -> VisionSupport {
+        self.effective_provider(settings)
+            .map(|provider| vision_support(&self.effective_model(provider)))
+            .unwrap_or(VisionSupport::Unknown)
+    }
+
+    fn images_allowed(&self, settings: &EngineSettings) -> bool {
+        self.vision_support(settings).allows_attempt()
     }
 
     pub(crate) fn apply_action(&mut self, action: AgentAction, settings: &mut EngineSettings) {
         match action {
+            AgentAction::PasteImage => self.paste_image(settings),
+            AgentAction::RefreshModelCatalog => {
+                match settings.default_ai_provider {
+                    AiProvider::OpenAI if settings.agent_openai_use_plan => { let _ = raf_ai::chatgpt_auth::begin_model_refresh(); }
+                    AiProvider::OpenRouter | AiProvider::OpenAI | AiProvider::OpenCode | AiProvider::OpenCodeGo => {
+                        if let Some(provider) = self.effective_provider(settings) {
+                            let base_url = match provider.provider {
+                                AiProvider::OpenRouter | AiProvider::OpenAI => provider.base_url.clone(),
+                                _ => String::new(),
+                            };
+                            raf_ai::provider_catalog::refresh(provider.provider, &base_url, &provider.api_key);
+                        }
+                    }
+                    _ => {}
+                }
+                self.visual_revision = self.visual_revision.wrapping_add(1);
+            }
+            AgentAction::OpenPlanUsage => { crate::script_support::open_url("https://chatgpt.com/settings/usage"); }
+            AgentAction::AttachFiles(files) => self.attach_files(files, settings),
+            AgentAction::CycleReasoning => {
+                if !self.runtime.status.blocks_input() {
+                    settings.agent_reasoning_effort =
+                        match settings.agent_reasoning_effort.as_str() {
+                            "" => "low",
+                            "low" => "medium",
+                            "medium" => "high",
+                            "high" => "max",
+                            _ => "",
+                        }
+                        .into();
+                    self.settings_changed = true;
+                    self.visual_revision = self.visual_revision.wrapping_add(1);
+                }
+            }
+            AgentAction::RemoveImage(file) => {
+                if let Some(session) = self.history.active_session_mut() {
+                    session.draft_images.retain(|image| image.file != file);
+                }
+                self.enqueue_history_snapshot();
+                self.visual_revision = self.visual_revision.wrapping_add(1);
+            }
             AgentAction::SetInput(value) => self.input_text = value,
             AgentAction::ToggleSidebar => self.sidebar_open = !self.sidebar_open,
             AgentAction::CloseSidebar => self.sidebar_open = false,
             AgentAction::NewChat => self.start_new_chat(),
             AgentAction::SelectSession(index) => self.select_session(index),
             AgentAction::DeleteSession(index) => self.delete_session(index),
-            AgentAction::SelectModel(label) => {
-                // A shortcut is provider-owned. Selecting it must also move
-                // the active provider, otherwise `effective_model` correctly
-                // rejects the shortcut and the runtime silently falls back
-                // to the provider card's default model.
-                if let Some(shortcut) = self.model_registry.get(&label) {
-                    settings.default_ai_provider = shortcut.provider;
+            AgentAction::SelectModel(value) => {
+                // One truth: every selection writes the provider card model.
+                let (prefix, model_id) = match value
+                    .strip_prefix("account:")
+                    .map(|slug| ("account", slug.to_string()))
+                    .or_else(|| {
+                        value
+                            .strip_prefix("catalog:")
+                            .map(|slug| ("catalog", slug.to_string()))
+                    }) {
+                    Some(pair) => pair,
+                    None => ("card", value.trim().to_string()),
+                };
+                if model_id.trim().is_empty() {
+                    self.model_menu_open = false;
+                    return;
                 }
-                self.selected_model = label.clone();
-                settings.default_agent_model = (label != AgentModelRegistry::PROVIDER_DEFAULT)
-                    .then_some(label)
-                    .unwrap_or_default();
-                self.settings_changed = true;
+                let target_provider = if prefix == "account" {
+                    AiProvider::OpenAI
+                } else {
+                    settings.default_ai_provider
+                };
+                let validated_model_id = if prefix == "account" {
+                    let available = raf_ai::chatgpt_auth::snapshot().is_some_and(|view| {
+                        view.models.iter().any(|model| model.slug == model_id)
+                    });
+                    if available {
+                        Some(model_id)
+                    } else {
+                        None
+                    }
+                } else if !crate::panels::ai_model_options::selection_allowed(settings, target_provider, &model_id) {
+                    None
+                } else {
+                    Some(model_id)
+                };
+                if let Some(model_id) = validated_model_id {
+                    if prefix == "account" { settings.agent_openai_use_plan = true; }
+                    let (mut changed, mut provider_switched) = (false, false);
+                    if let Some(config) = settings
+                        .ai_providers
+                        .iter_mut()
+                        .find(|config| config.provider == target_provider)
+                    {
+                        if config.model.trim() != model_id {
+                            config.model = model_id.clone();
+                            changed = true;
+                        }
+                    }
+                    if settings.default_ai_provider != target_provider {
+                        settings.default_ai_provider = target_provider;
+                        provider_switched = true;
+                    }
+                    if changed || provider_switched {
+                        settings.agent_vision_enabled = false;
+                        settings.agent_reasoning_effort.clear();
+                    }
+                    self.selected_model = MODEL_SENTINEL.to_string();
+                    self.settings_changed = true;
+                    self.visual_revision = self.visual_revision.wrapping_add(1);
+                }
                 self.model_menu_open = false;
+            }
+            AgentAction::PinModel(value) => {
+                let model_id = value
+                    .strip_prefix("account:")
+                    .map(str::to_string)
+                    .or_else(|| value.strip_prefix("catalog:").map(str::to_string))
+                    .unwrap_or_else(|| value.trim().to_string());
+                let pin_changed = settings
+                    .ai_providers
+                    .iter_mut()
+                    .find(|config| config.provider == settings.default_ai_provider)
+                    .is_some_and(|config| {
+                        if !crate::panels::ai_model_options::pin_allowed(config) {
+                            return false;
+                        }
+                        if let Some(position) = config
+                            .pinned_models
+                            .iter()
+                            .position(|pinned| pinned == &model_id)
+                        {
+                            config.pinned_models.remove(position);
+                        } else if !model_id.trim().is_empty()
+                            && !config.pinned_models.contains(&model_id)
+                        {
+                            config.pinned_models.push(model_id.clone());
+                        } else {
+                            return false;
+                        }
+                        true
+                    });
+                if pin_changed {
+                    self.settings_changed = true;
+                }
+                self.visual_revision = self.visual_revision.wrapping_add(1);
             }
             AgentAction::ToggleModelMenu => {
                 self.model_menu_open = !self.model_menu_open;
@@ -382,16 +606,6 @@ impl AgentPanel {
                 self.mode_menu_open = !self.mode_menu_open;
                 self.model_menu_open = false;
                 self.add_model_open = false;
-            }
-            AgentAction::OpenAddModel => {
-                self.add_model_open = true;
-                self.model_menu_open = false;
-                self.mode_menu_open = false;
-                self.new_model_error = None;
-            }
-            AgentAction::CloseAddModel => {
-                self.add_model_open = false;
-                self.new_model_error = None;
             }
             AgentAction::CloseMenus => {
                 self.model_menu_open = false;
@@ -404,45 +618,61 @@ impl AgentPanel {
                     self.settings_changed = true;
                 }
                 self.mode_menu_open = false;
-            }
-            AgentAction::SetNewModelLabel(value) => {
-                self.new_model_label = value;
-                self.new_model_error = None;
+                self.sync_execution_permissions(mode);
             }
             AgentAction::SetNewModelId(value) => {
                 self.new_model_id = value;
                 self.new_model_error = None;
             }
             AgentAction::AddModel => {
-                let label = self.new_model_label.trim();
-                let model_id = self.new_model_id.trim();
-                if label.is_empty() {
+                // The single-field custom id confirms into the card model and
+                // pins it, so "easier adding" is literally one field.
+                let model_id = self.new_model_id.trim().to_string();
+                if model_id.is_empty() {
                     self.new_model_error =
-                        Some(t("app.agent_add_model_missing_label", self.language));
-                } else if model_id.is_empty() {
-                    self.new_model_error = Some(t("app.agent_add_model_missing_id", self.language));
-                } else if self.model_registry.get(label).is_some() {
-                    self.new_model_error = Some(t("app.agent_add_model_duplicate", self.language));
-                } else if self
-                    .model_registry
-                    .add(label, settings.default_ai_provider, model_id)
-                {
-                    settings.agent_model_shortcuts = self.model_registry.shortcuts.clone();
-                    self.selected_model = label.to_string();
-                    settings.default_agent_model = label.to_string();
-                    self.settings_changed = true;
-                    self.new_model_label.clear();
-                    self.new_model_id.clear();
-                    self.new_model_error = None;
-                    self.add_model_open = false;
+                        Some(t("app.agent_add_model_missing_id", self.language));
+                    self.visual_revision = self.visual_revision.wrapping_add(1);
+                    return;
                 }
+                let provider_changed = settings
+                    .ai_providers
+                    .iter_mut()
+                    .find(|config| config.provider == settings.default_ai_provider)
+                    .unwrap()
+                    .model
+                    .trim()
+                    != model_id;
+                if let Some(config) = settings
+                    .ai_providers
+                    .iter_mut()
+                    .find(|config| config.provider == settings.default_ai_provider)
+                {
+                    config.model = model_id.clone();
+                    if !config.pinned_models.contains(&model_id) {
+                        if config.pinned_models.len() < 32 {
+                            config.pinned_models.push(model_id.clone());
+                        }
+                    }
+                }
+                if provider_changed {
+                    settings.agent_vision_enabled = false;
+                    settings.agent_reasoning_effort.clear();
+                }
+                self.selected_model = MODEL_SENTINEL.to_string();
+                self.settings_changed = true;
+                self.new_model_id.clear();
+                self.new_model_error = None;
+                self.model_menu_open = false;
+                self.visual_revision = self.visual_revision.wrapping_add(1);
             }
             AgentAction::OpenSettings => self.open_settings_requested = true,
             AgentAction::DismissToolCallWarning => self.dismiss_tool_call_warning(),
-            AgentAction::Submit => self.queue_submission(),
+            AgentAction::Submit => {
+                self.queue_submission(settings);
+            }
             AgentAction::Resume => {
                 self.input_text = t("agent_workspace.resume_prompt", self.language);
-                self.queue_submission();
+                self.queue_submission(settings);
             }
             AgentAction::Stop => {
                 self.runtime.cancel();
@@ -457,7 +687,12 @@ impl AgentPanel {
             }
             AgentAction::ApproveCall(id) => self.decision = Some(AgentDecision::Approve(id)),
             AgentAction::DenyCall(id) => self.decision = Some(AgentDecision::Deny(id)),
-            AgentAction::ToggleReview => self.review_writes = !self.review_writes,
+            AgentAction::ToggleReview => {
+                if settings.agent_mode != AgentMode::Active {
+                    self.review_writes = !self.review_writes;
+                    self.sync_execution_permissions(settings.agent_mode);
+                }
+            }
             AgentAction::ToggleTool(id) => {
                 if !self.expanded_tools.remove(&id) {
                     self.expanded_tools.insert(id);
@@ -500,12 +735,122 @@ impl AgentPanel {
         self.model_menu_open || self.mode_menu_open || self.add_model_open
     }
 
-    fn queue_submission(&mut self) {
+    pub(crate) fn media_pending(&self) -> bool {
+        self.media_job.is_some()
+    }
+
+    fn paste_image(&mut self, settings: &EngineSettings) {
+        if self.media_job.is_some()
+            || self.pending_submission.is_some()
+            || self.runtime.status.blocks_input()
+        {
+            return;
+        }
+        if !self.images_allowed(settings) {
+            self.media_error = Some(t("agent.media.model_text_only", self.language));
+            self.visual_revision = self.visual_revision.wrapping_add(1);
+            return;
+        }
+        let Some(root) = self.loaded_project_path.clone() else {
+            return;
+        };
+        let Some(session) = self.history.active_session() else {
+            return;
+        };
+        if session.draft_images.len() >= raf_ai::chat_media::MAX_IMAGES {
+            self.media_error = Some(t("agent.media.too_many", self.language));
+            self.visual_revision = self.visual_revision.wrapping_add(1);
+            return;
+        }
+        self.media_error = None;
+        self.media_job = Some((session.id.clone(), crate::agent_media::clipboard_job(root)));
+        self.visual_revision = self.visual_revision.wrapping_add(1);
+    }
+
+    fn attach_files(&mut self, files: Vec<std::path::PathBuf>, settings: &EngineSettings) {
+        if files.is_empty()
+            || self.media_job.is_some()
+            || self.pending_submission.is_some()
+            || self.runtime.status.blocks_input()
+        {
+            return;
+        }
+        let Some(session) = self.history.active_session() else {
+            return;
+        };
+        let Some(root) = self.loaded_project_path.clone() else {
+            return;
+        };
+        let error = if !self.images_allowed(settings) {
+            Some("agent.media.model_text_only")
+        } else if files.len() + session.draft_images.len() > raf_ai::chat_media::MAX_IMAGES {
+            Some("agent.media.too_many")
+        } else {
+            None
+        };
+        if let Some(key) = error {
+            self.media_error = Some(t(key, self.language));
+        } else {
+            self.media_error = None;
+            self.media_job = Some((
+                session.id.clone(),
+                crate::agent_media::files_job(root, files),
+            ));
+        }
+        self.visual_revision = self.visual_revision.wrapping_add(1);
+    }
+
+    fn poll_media(&mut self) {
+        let result = self
+            .media_job
+            .as_ref()
+            .and_then(|(_, rx)| match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => None,
+                Err(_) => Some(vec![Err("agent.media.save_failed".into())]),
+            });
+        if let Some(result) = result {
+            let (id, _) = self.media_job.take().unwrap();
+            for result in result {
+                match result {
+                    Ok(image) => {
+                        if let Some(session) = self.history.sessions.iter_mut().find(|s| s.id == id)
+                        {
+                            session.draft_images.push(image);
+                        }
+                        self.enqueue_history_snapshot();
+                    }
+                    Err(key) => self.media_error = Some(t(&key, self.language)),
+                }
+            }
+            self.visual_revision = self.visual_revision.wrapping_add(1);
+        }
+    }
+
+    fn queue_submission(&mut self, settings: &EngineSettings) {
+        if !self.images_allowed(settings)
+            && self
+                .history
+                .active_session()
+                .is_some_and(|s| !s.draft_images.is_empty())
+        {
+            self.media_error = Some(t("agent.media.model_text_only", self.language));
+            self.visual_revision = self.visual_revision.wrapping_add(1);
+            return;
+        }
         let content = self.input_text.trim().to_string();
-        if content.is_empty() || self.runtime.status.blocks_input() {
+        let has_images = self
+            .history
+            .active_session_mut()
+            .is_some_and(|s| !s.draft_images.is_empty());
+        if (content.is_empty() && !has_images)
+            || self.runtime.status.blocks_input()
+            || self.media_job.is_some()
+        {
             return;
         }
         self.input_text.clear();
+        self.media_error = None;
         self.pending_submission = Some(content);
         self.visual_revision = self.visual_revision.wrapping_add(1);
     }
@@ -516,7 +861,7 @@ impl AgentPanel {
         catalog: &CommandCatalog,
         project_type: Option<ProjectType>,
         mode: AgentMode,
-        viewport_available: bool,
+        _viewport_available: bool,
     ) {
         let Some(content) = self.pending_submission.take() else {
             return;
@@ -547,11 +892,6 @@ impl AgentPanel {
             pack.routes
                 .retain(|name, _| !name.starts_with("external_studio_"));
         }
-        if !viewport_available {
-            pack.tools
-                .retain(|tool| tool.function.name != "viewport_capture");
-            pack.routes.remove("viewport_capture");
-        }
         self.tools = pack.tools;
         self.tool_routes = pack.routes;
         self.system_prompt = build_agent_system_prompt(snapshot, mode.label(), self.language);
@@ -572,9 +912,15 @@ impl AgentPanel {
             AgentMode::Plan => ToolExecutionMode::Preview,
             AgentMode::Active => ToolExecutionMode::Apply,
         };
+        let images = self
+            .history
+            .active_session_mut()
+            .map(|s| std::mem::take(&mut s.draft_images))
+            .unwrap_or_default();
+        self.runtime.media_root = self.loaded_project_path.clone();
         self.runtime
-            .start_run(&content, &self.tools, execution_mode);
-        self.runtime.set_review_mutations(self.review_writes);
+            .start_run_with_images(&content, images, &self.tools, execution_mode);
+        self.sync_execution_permissions(mode);
         self.tool_call_warning_dismissed = false;
         self.last_status = AgentStatus::Thinking;
         self.persist_history();
@@ -592,6 +938,8 @@ impl AgentPanel {
             return;
         }
         self.runtime.cancel();
+        self.media_job = None;
+        self.media_error = None;
         self.loaded_project_path = next_path.clone();
         self.history = next_path
             .as_deref()
@@ -625,7 +973,16 @@ impl AgentPanel {
             model: self.effective_model(&provider),
             api_key: provider.api_key.clone(),
             streaming: settings.agent_streaming_enabled,
-            max_tokens: settings.agent_max_response_tokens,
+            max_tokens: if settings.agent_response_limit_enabled {
+                settings.agent_max_response_tokens
+            } else {
+                0
+            },
+            reasoning_effort: settings.agent_reasoning_effort.clone(),
+            chatgpt_plan: provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan,
+            chatgpt_registration: if provider.provider == AiProvider::OpenAI && settings.agent_openai_use_plan {
+                raf_ai::chatgpt_auth::active_registration().or_else(|| self.runtime_key.as_ref().and_then(|key| key.chatgpt_registration.clone()))
+            } else { None },
             tool_call_limit_enabled: settings.agent_tool_call_limit_enabled,
             max_tool_calls: settings.agent_max_tool_calls,
         };
@@ -635,11 +992,14 @@ impl AgentPanel {
         let messages = self.runtime.messages.clone();
         self.runtime.cancel();
         self.runtime = AgentRuntime::new(OpenAiConfig {
-            base_url: key.base_url.clone(),
+            base_url: if key.chatgpt_plan { "https://api.openai.com/v1".into() } else { key.base_url.clone() },
             model: key.model.clone(),
-            api_key: key.api_key.clone(),
+            api_key: if key.chatgpt_plan { String::new() } else { key.api_key.clone() },
             max_tokens: key.max_tokens,
-            temperature: 0.2,
+            reasoning_effort: key.reasoning_effort.clone(),
+            chatgpt_plan: key.chatgpt_plan,
+            chatgpt_registration: key.chatgpt_registration.clone(),
+            temperature: None,
             streaming: key.streaming,
         });
         self.runtime.messages = messages;
@@ -655,6 +1015,7 @@ impl AgentPanel {
     }
 
     fn start_new_chat(&mut self) {
+        self.media_error = None;
         self.park_current_run();
         self.tool_call_warning_dismissed = false;
         let default_title = t("app.agent_new_chat_default", self.language);
@@ -675,6 +1036,7 @@ impl AgentPanel {
     }
 
     fn select_session(&mut self, index: usize) {
+        self.media_error = None;
         if index >= self.history.sessions.len() {
             return;
         }
@@ -783,7 +1145,13 @@ impl AgentPanel {
             .messages
             .iter()
             .find(|message| message.role == raf_ai::chat::MessageRole::User)
-            .map(|message| fallback_session_title(&message.content));
+            .map(|message| {
+                if message.content.trim().is_empty() && !message.images.is_empty() {
+                    t("agent.media.conversation", self.language)
+                } else {
+                    fallback_session_title(&message.content)
+                }
+            });
         let title_changed = title.as_deref().is_some_and(|title| {
             is_default_session_title(&session.title) && session.title != title
         });
@@ -1037,6 +1405,12 @@ fn fallback_session_title(content: &str) -> String {
 #[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
 pub(crate) enum AgentAction {
+    AttachFiles(Vec<std::path::PathBuf>),
+    RefreshModelCatalog,
+    OpenPlanUsage,
+    CycleReasoning,
+    PasteImage,
+    RemoveImage(String),
     SetInput(String),
     ToggleSidebar,
     CloseSidebar,
@@ -1044,13 +1418,11 @@ pub(crate) enum AgentAction {
     SelectSession(usize),
     DeleteSession(usize),
     SelectModel(String),
+    PinModel(String),
     ToggleModelMenu,
     ToggleModeMenu,
-    OpenAddModel,
-    CloseAddModel,
     CloseMenus,
     SetMode(AgentMode),
-    SetNewModelLabel(String),
     SetNewModelId(String),
     AddModel,
     OpenSettings,
@@ -1073,6 +1445,8 @@ fn messages_equal(left: &[ChatMessage], right: &[ChatMessage]) -> bool {
             left.id == right.id
                 && left.role == right.role
                 && left.content == right.content
+                && left.images == right.images
+                && left.reasoning == right.reasoning
                 && left.tool_calls == right.tool_calls
         })
 }
@@ -1081,6 +1455,53 @@ fn messages_equal(left: &[ChatMessage], right: &[ChatMessage]) -> bool {
 mod tests {
     use super::*;
     use raf_ai::chat::MessageRole;
+
+    #[test]
+    fn harness_attachment_completion_targets_the_original_conversation() {
+        let mut panel = AgentPanel::default();
+        let first = panel.history.start_session("First");
+        let first_id = panel.history.sessions[first].id.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        panel.media_job = Some((first_id, rx));
+        let second = panel.history.start_session("Second");
+        tx.send(vec![Ok(raf_ai::chat_media::ChatImage {
+            file: "fixture.png".into(),
+            width: 16,
+            height: 16,
+        })])
+        .unwrap();
+        panel.poll_media();
+        assert_eq!(panel.history.sessions[first].draft_images.len(), 1);
+        assert!(panel.history.sessions[second].draft_images.is_empty());
+        assert!(!panel.media_pending());
+    }
+
+    #[test]
+    fn harness_image_only_submit_uses_automatic_model_capability() {
+        let mut panel = AgentPanel::default();
+        panel.history.start_session("Images");
+        panel
+            .history
+            .active_session_mut()
+            .unwrap()
+            .draft_images
+            .push(raf_ai::chat_media::ChatImage {
+                file: "fixture.png".into(),
+                width: 16,
+                height: 16,
+            });
+        let mut settings = EngineSettings::default();
+        settings.ai_providers[0].model = "unknown-local-model".into();
+        settings.agent_vision_enabled = false;
+        panel.apply_action(AgentAction::Submit, &mut settings);
+        assert_eq!(panel.pending_submission.as_deref(), Some(""));
+        panel.pending_submission = None;
+
+        settings.ai_providers[0].model = "deepseek-chat".into();
+        panel.apply_action(AgentAction::Submit, &mut settings);
+        assert!(panel.pending_submission.is_none());
+        assert!(panel.media_error.is_some());
+    }
 
     #[test]
     fn agent_workspace_navigation_preserves_runs_drafts_and_document_binding() {
@@ -1126,7 +1547,47 @@ mod tests {
     fn new_panel_starts_with_a_collapsible_chat_rail() {
         let panel = AgentPanel::default();
         assert!(panel.sidebar_open);
-        assert_eq!(panel.selected_model, AgentModelRegistry::PROVIDER_DEFAULT);
+        assert_eq!(panel.selected_model, MODEL_SENTINEL);
+    }
+
+    #[test]
+    fn active_permissions_override_legacy_review_and_resume_current_and_parked_chats() {
+        let mut panel = AgentPanel::default();
+        panel.start_new_chat();
+        let first = panel.history.active_index.unwrap();
+        panel.runtime.status = AgentStatus::AwaitingApproval;
+        panel
+            .runtime
+            .pending_calls
+            .push(raf_ai::agent_runtime::PendingToolCall::new(
+                "first",
+                "scene_create",
+                serde_json::json!({}),
+            ));
+        panel.start_new_chat();
+        panel.runtime.status = AgentStatus::AwaitingApproval;
+        panel
+            .runtime
+            .pending_calls
+            .push(raf_ai::agent_runtime::PendingToolCall::new(
+                "second",
+                "scene_create",
+                serde_json::json!({}),
+            ));
+        let mut settings = EngineSettings::default();
+        panel.apply_action(AgentAction::SetMode(AgentMode::Active), &mut settings);
+        assert_eq!(panel.runtime.status, AgentStatus::ExecutingTools);
+        assert!(
+            panel.review_writes,
+            "legacy preference must not control Active"
+        );
+        panel.apply_action(AgentAction::ToggleReview, &mut settings);
+        assert!(panel.review_writes);
+        panel.select_session(first);
+        assert_eq!(panel.runtime.status, AgentStatus::ExecutingTools);
+        assert_eq!(panel.runtime.pending_calls[0].id, "first");
+        panel.runtime.cancel();
+        panel.visit_runs(|run| run.runtime.cancel());
     }
 
     #[test]
@@ -1162,40 +1623,66 @@ mod tests {
     }
 
     #[test]
-    fn selecting_model_shortcut_switches_provider_and_effective_model() {
+    fn selecting_a_card_model_sets_the_active_provider_model() {
         let mut panel = AgentPanel::default();
         let mut settings = EngineSettings::default();
-        assert!(panel
-            .model_registry
-            .add("GPT test", AiProvider::OpenAI, "gpt-test"));
 
         panel.apply_action(
-            AgentAction::SelectModel("GPT test".to_string()),
+            AgentAction::SelectModel("anthropic/claude-sonnet-4.5".to_string()),
             &mut settings,
         );
 
-        assert_eq!(settings.default_ai_provider, AiProvider::OpenAI);
-        assert_eq!(settings.default_agent_model, "GPT test");
+        assert_eq!(settings.default_ai_provider, AiProvider::OpenRouter);
         let provider = settings
             .ai_providers
             .iter()
-            .find(|provider| provider.provider == AiProvider::OpenAI)
-            .expect("OpenAI provider");
-        assert_eq!(panel.effective_model(provider), "gpt-test");
+            .find(|provider| provider.provider == AiProvider::OpenRouter)
+            .expect("OpenRouter provider");
+        assert_eq!(panel.effective_model(provider), "anthropic/claude-sonnet-4.5");
+        assert!(panel.selected_model == MODEL_SENTINEL);
+        assert!(panel.settings_changed);
     }
 
     #[test]
-    fn adding_model_shortcut_persists_it_as_the_default_selection() {
+    fn pinning_toggles_the_provider_card_favorites() {
         let mut panel = AgentPanel::default();
         let mut settings = EngineSettings::default();
-        panel.new_model_label = "Local test".to_string();
+
+        panel.apply_action(AgentAction::PinModel("gpt-5".to_string()), &mut settings);
+        let provider = settings
+            .ai_providers
+            .iter()
+            .find(|provider| provider.provider == AiProvider::OpenRouter)
+            .expect("OpenRouter provider");
+        assert_eq!(provider.pinned_models, vec!["gpt-5".to_string()]);
+
+        panel.apply_action(AgentAction::PinModel("gpt-5".to_string()), &mut settings);
+        let provider = settings
+            .ai_providers
+            .iter()
+            .find(|provider| provider.provider == AiProvider::OpenRouter)
+            .expect("OpenRouter provider");
+        assert!(provider.pinned_models.is_empty());
+        assert!(panel.settings_changed);
+    }
+
+    #[test]
+    fn custom_model_confirmation_writes_and_pins_the_card() {
+        let mut panel = AgentPanel::default();
+        let mut settings = EngineSettings::default();
         panel.new_model_id = "local-model".to_string();
 
         panel.apply_action(AgentAction::AddModel, &mut settings);
 
-        assert_eq!(settings.default_agent_model, "Local test");
-        assert_eq!(panel.selected_model, "Local test");
-        assert!(panel.model_registry.get("Local test").is_some());
+        let provider = settings
+            .ai_providers
+            .iter()
+            .find(|provider| provider.provider == AiProvider::OpenRouter)
+            .expect("OpenRouter provider");
+        assert_eq!(provider.model, "local-model");
+        assert!(provider.pinned_models.contains(&"local-model".to_string()));
+        assert!(panel.selected_model == MODEL_SENTINEL);
+        assert!(panel.settings_changed);
     }
 
     #[test]
@@ -1203,6 +1690,7 @@ mod tests {
         let mut panel = AgentPanel::default();
         let mut settings = EngineSettings::default();
         settings.agent_max_response_tokens = 8_192;
+        settings.agent_response_limit_enabled = true;
         settings
             .ai_providers
             .iter_mut()

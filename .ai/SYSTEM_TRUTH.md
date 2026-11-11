@@ -1,5 +1,67 @@
 # AuraRafi — System Truth (Source of Truth)
 
+## Provider model selection (2026-10-30)
+
+The shared provider picker separates API-key catalogs from authorized account
+plan catalogs. OpenAI has no bundled model suggestions; account choices preserve
+server display names, slugs and ordering. Refresh never replaces a saved model.
+API fields and manual ids are hidden in plan mode. Favorites use the selected
+credential lane. Catalog requests initialize their state, remain bounded to one
+pending worker per provider, hide results from other credentials and wake the UI
+on loading/error/empty transitions. Settings requests discovery when its picker
+opens or the user explicitly refreshes, not while typing a credential.
+
+Verification: final AI catalog tests 4/4; initial focused editor pass 10/10.
+Final editor retest was blocked by unrelated pipeline signature errors in
+`shadow_gpu.rs`; those files were not modified. No live login/inference,
+application build or native-window acceptance was performed. Details and limits
+are recorded in `docs/AI_SYSTEM.md`.
+
+## Harness implementation pass (2026-10-23)
+
+Native Agent receipts bypass wire-result truncation until postconditions have
+been checked; provider output still uses the existing bounded model projection.
+Parent verification resolves live node identity. Mixed script/build tool packs
+prioritize scripting within the existing contextual budget, and unknown-tool
+diagnostics enumerate only advertised routes. Step-guard exhaustion is an Error,
+not successful completion. Workspace tool rows reuse the compact dock renderer,
+including virtual height calculations, and failures expand automatically.
+Native workspace/dock group multi-tool activity without hiding failures/final
+answers and render bounded Markdown/code tiles. Composer image paste and file
+drops use bounded worker ingestion, project-confined media references and actual
+multimodal provider content parts; metadata chips are not thumbnails or proof of
+model understanding. Vision requires explicit confirmation. Only latest-turn
+images are sent. Automatic output omits the cap; reasoning uses endpoint-specific
+overrides. Provider length/filter stops and incomplete streams fail explicitly.
+Settings show one provider editor and truthful local setup status, not connection
+validation. See `docs/AGENT_WORKSPACE.md` for limits and remaining work; automatic
+context management, visual feedback from captures and generation recipes are not
+implemented by this pass. Native-window/provider/performance validation is pending.
+
+Focused verification on 2026-10-23: 52 editor tests, 44 `raf_ai` tests and 8 CLI/MCP
+tests passed. A Spanish dark 760x640 CPU UI fixture was visually inspected; locale
+JSON and scoped whitespace checks passed. The application build failed on a full
+C: temporary volume; tests subsequently passed with process-local TEMP/TMP on D:.
+No updated application executable is delivered, per the user's later tests-only
+instruction. See `docs/AGENT_WORKSPACE.md` for verification scope and remaining work.
+
+## Native Active execution permissions (2026-10-20)
+
+`AgentPanel::sync_execution_permissions` makes Active authoritative over the
+legacy review preference, for current and parked runs. Native workspace and
+editor dock hide review controls/approval cards in Active. Disabling runtime
+review resumes a suspended queue and drops only unapproved review snapshots;
+explicit decisions keep their revision guards. Inspect/Plan, command gateway
+validation, project confinement, durable saves and external-tool grants remain
+unchanged. Focused runtime, panel-controller and workspace/dock presentation
+regressions passed on 2026-10-23. Native-window interaction remains unverified.
+
+The workspace presentation key also includes AgentMode, so changing the mode
+through Settings invalidates cached permission controls even for an idle chat.
+Revalidated on 2026-10-30: four focused Active-permission tests and the scoped
+review revision-conflict regression passed. No application executable was built
+and no running editor instance was modified by this verification pass.
+
 ## Agent scene preview (2026-10-19)
 
 `agent_preview.rs` owns an optional read-only, demand-created scene presentation
@@ -17,7 +79,7 @@ Editor verification initially encountered unrelated compile errors in
 and the runtime-settings error message in `native_application.rs` (`String + &String`).
 The user explicitly authorized the two narrow corrections. Verification passed:
 26 focused workspace tests, all 35 raf_ai unit tests, four semantic-icon tests,
-and `cargo build -p aura_rafi_editor --target-dir target_agent_workbench_20261014`.
+and `cargo build -p aura_rafi_editor` (historical note: `--target-dir target_agent_workbench_20261014` was used once; that practice is now FORBIDDEN — use `target_gnu/`).
 Real CPU scene/UI captures were generated for both themes and languages at
 900/1440 px; visual inspection covered Spanish dark/wide and light/narrow.
 This does not establish native GPU interaction or FPS/RAM/frame-time acceptance.
@@ -208,7 +270,10 @@ active code map below, this document and the live code win.
   `raf_core::i18n::t()` with entries in both `en.json` and `es.json`; inline
   language branches are deprecated.
 * **Windows toolchain**: the repository's documented build target remains
-  `stable-x86_64-pc-windows-gnu` with outputs under `target_gnu/`.
+  `stable-x86_64-pc-windows-gnu` with outputs under `target_gnu/` (set in
+  `.cargo/config.toml`). FORBIDDEN to create other `target_*` (`target_ai`,
+  `target_check`, `target_fix`, ...). Agents: do not use a custom `--target-dir`;
+  isolation only via `CARGO_TARGET_DIR` outside the repo.
 
 * **Visual design governance**: `.ai/STUDIO_GRADE_UI.md` is the active
   product-wide visual guide. It supplies defaults rather than immutable
@@ -226,7 +291,7 @@ AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Gr
 * **Unified Event & Mutator Layers**: `CommandBus` supplies transactional
   history; the editor `CommandGateway` and shared command protocol are the
   boundary used by native UI, Agent, CLI and MCP for project mutations.
-* **No MSVC Tooling Assumptions**: Always compiled via `stable-x86_64-pc-windows-gnu` using MinGW/MSYS2 toolchains on Windows. All compiled outputs are routed to `target_gnu/`.
+* **No MSVC Tooling Assumptions**: Always compiled via `stable-x86_64-pc-windows-gnu` using MinGW/MSYS2 toolchains on Windows. All compiled outputs are routed to `target_gnu/` (the only one allowed). Never create an alternate `target/` or `target_*` inside the repo.
 * **Canonical Unit System**: 1 world unit = 1 meter (games viewport 3D). 1 schematic unit = 1 millimeter (schematic/PCB canvas). All internal calculations in SI. `DisplayUnit` enum only changes UI display, never computation. Constants in `raf_core::units`.
 * **Scripts Never Touch Engine Internals**: All scripting (Rhai, WASM, Visual Nodes) calls the shared Host API in `raf_script::host_api::ScriptContext`. No tier accesses `SceneGraph`, `InputState`, or audio directly. Scripts hold `NodeHandle` (opaque IDs), not references. See `docs/SCRIPTING_SYSTEM.md`.
 

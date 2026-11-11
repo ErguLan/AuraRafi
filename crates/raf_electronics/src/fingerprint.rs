@@ -18,6 +18,16 @@ const PRIME: u64 = 0x0000_0100_0000_01b3;
 #[derive(Clone, Copy)]
 struct Hasher(u64);
 
+impl std::io::Write for Hasher {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.write_bytes(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl Hasher {
     fn new() -> Self {
         Self(OFFSET)
@@ -117,6 +127,15 @@ pub fn schematic_fingerprint(schematic: &Schematic) -> u64 {
 
 pub fn pcb_fingerprint(layout: &PcbLayout) -> u64 {
     let mut hasher = Hasher::new();
+    ron::ser::to_writer(&mut hasher, &layout.vias).expect("serializable vias");
+    ron::ser::to_writer(&mut hasher, &layout.rules).expect("serializable rules");
+    for (name, asset) in &layout.footprint_assets {
+        hasher.write_str(name);
+        // Includes physical edits, not only the source name, for undo and analysis invalidation.
+        // Stream into the hash without allocating a second copy of the source
+        // and every physical primitive during the editor's dirty check.
+        ron::ser::to_writer(&mut hasher, asset).expect("serializable physical asset");
+    }
     hasher.write_str(&layout.name);
     write_board_outline(&mut hasher, &layout.board_outline);
     hasher.write_usize(layout.components.len());
@@ -154,6 +173,11 @@ fn write_component(hasher: &mut Hasher, component: &ElectronicComponent) {
     hasher.write_vec2(component.position);
     hasher.write_f32(component.rotation);
     hasher.write_str(&component.footprint);
+    hasher.write_usize(component.footprint_pin_map.len());
+    for (pin, pad) in &component.footprint_pin_map {
+        hasher.write_str(pin);
+        hasher.write_str(pad);
+    }
     hasher.write_option_str(component.datasheet.as_deref());
     hasher.write_bool(component.locked);
     hasher.write_bool(component.visible);

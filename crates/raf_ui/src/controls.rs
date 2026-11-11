@@ -26,13 +26,139 @@ impl Default for UiImageFit {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// A normalized crop in the source image's UV space.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct UiImageRect {
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl UiImageRect {
+    pub const FULL: Self = Self {
+        x: 0.0,
+        y: 0.0,
+        width: 1.0,
+        height: 1.0,
+    };
+
+    pub const fn new(x: f32, y: f32, width: f32, height: f32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
+/// Source-image pixel insets in top, right, bottom, left order.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct UiImageInsets {
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+    pub left: f32,
+}
+
+impl UiImageInsets {
+    pub const fn new(top: f32, right: f32, bottom: f32, left: f32) -> Self {
+        Self {
+            top,
+            right,
+            bottom,
+            left,
+        }
+    }
+}
+
+/// Sampling policy for this image use. `Auto` preserves host defaults.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiImageSampling {
+    Auto,
+    Nearest,
+    Linear,
+}
+
+impl Default for UiImageSampling {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+/// Placeholder behavior while an image is pending or unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiImagePlaceholder {
+    /// Pending images use a skeleton; missing and failed images show status.
+    Automatic,
+    Skeleton,
+    Checkerboard,
+    Hidden,
+}
+
+impl Default for UiImagePlaceholder {
+    fn default() -> Self {
+        Self::Automatic
+    }
+}
+
+/// Runtime-only residency state; it is never serialized into a UI document.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiImageResourceStatus {
+    Pending,
+    Ready,
+    Missing,
+    Error,
+}
+
+/// Per-use image presentation settings, kept portable with the UI document.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiImageOptions {
+    /// Optional normalized source crop. `None` selects the full image.
+    #[serde(default)]
+    pub source_rect: Option<UiImageRect>,
+    /// Normalized focal point within the selected source crop.
+    #[serde(default = "default_ui_image_focal_point")]
+    pub focal_point: [f32; 2],
+    /// Optional source-pixel insets for nine-slice rendering.
+    #[serde(default)]
+    pub nine_slice: Option<UiImageInsets>,
+    #[serde(default)]
+    pub sampling: UiImageSampling,
+    /// Localization key for accessible image text.
+    #[serde(default)]
+    pub alt_text_key: Option<String>,
+    #[serde(default)]
+    pub placeholder: UiImagePlaceholder,
+}
+
+fn default_ui_image_focal_point() -> [f32; 2] {
+    [0.5, 0.5]
+}
+
+impl Default for UiImageOptions {
+    fn default() -> Self {
+        Self {
+            source_rect: None,
+            focal_point: default_ui_image_focal_point(),
+            nine_slice: None,
+            sampling: UiImageSampling::Auto,
+            alt_text_key: None,
+            placeholder: UiImagePlaceholder::Automatic,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiImage {
     pub source: UiImageSource,
     #[serde(default)]
     pub fit: UiImageFit,
     #[serde(default)]
     pub tint: Option<[u8; 4]>,
+    #[serde(default)]
+    pub options: UiImageOptions,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

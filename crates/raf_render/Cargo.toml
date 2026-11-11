@@ -24,5 +24,6 @@ pollster = "0.3"
 bytemuck = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
+uuid = { workspace = true }
 ron = { workspace = true }
 serde_json = { workspace = true }

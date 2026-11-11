@@ -42,6 +42,7 @@ pub struct NativeEditorRuntime {
     graphics: RenderRuntime,
     layout_request: EditorLayoutRequest,
     layout: EditorFrameLayout,
+    electronics_library_width: f32,
     scale_factor: f32,
     target_size: [u32; 2],
     dynamic_resolution: DynamicResolutionController,
@@ -101,6 +102,7 @@ impl NativeEditorRuntime {
             graphics: RenderRuntime::default(),
             layout_request,
             layout,
+            electronics_library_width: 260.0,
             scale_factor: 1.0,
             target_size: [
                 layout_request.logical_size[0].round().max(1.0) as u32,
@@ -900,17 +902,47 @@ impl NativeEditorRuntime {
         self.layout_request.bottom_height
     }
 
-    pub fn set_layout_request(&mut self, request: EditorLayoutRequest) {
+    pub fn set_layout_request(&mut self, mut request: EditorLayoutRequest) {
+        if request.kind == crate::editor_layout::EditorWorkbenchKind::Electronics {
+            if self.layout_request.kind == request.kind {
+                request.right_width = self.layout_request.right_width;
+            } else {
+                self.electronics_library_width = request.left_width.max(224.0);
+            }
+        }
         self.layout_request = request;
         self.layout = EditorFrameLayout::compute(request);
         self.cached_game_canvas = None;
         self.graphics.request_frame(FrameInvalidation::WINDOW);
     }
 
+    /// Panel policy is transient presentation state; authored widths survive
+    /// switching between the compact rail and the full library.
+    pub fn configure_electronics_workspace(&mut self, library_open: bool, inspector_open: bool) {
+        if self.layout_request.kind != crate::editor_layout::EditorWorkbenchKind::Electronics {
+            return;
+        }
+        let library_open = library_open && (!inspector_open || self.layout_request.logical_size[0] >= 980.0);
+        let inspector_open = inspector_open && self.layout_request.logical_size[0] >= 720.0;
+        let width = if library_open { self.electronics_library_width } else { crate::editor_layout::ELECTRONICS_RAIL_WIDTH };
+        if self.layout_request.left_width == width && self.layout_request.right_visible == inspector_open && self.layout_request.left_visible {
+            return;
+        }
+        self.layout_request.left_width = width;
+        self.layout_request.left_visible = true;
+        self.layout_request.right_visible = inspector_open;
+        self.layout = EditorFrameLayout::compute(self.layout_request);
+        self.cached_game_canvas = None;
+        self.graphics.request_frame(FrameInvalidation::WINDOW | FrameInvalidation::UI);
+    }
+
     /// Updates the authored width of the left workbench panel while keeping
     /// the canvas and right panel under the same layout solver.
     pub fn resize_left_panel(&mut self, width: f32) {
         self.layout_request.left_width = width.clamp(224.0, 760.0);
+        if self.layout_request.kind == crate::editor_layout::EditorWorkbenchKind::Electronics {
+            self.electronics_library_width = self.layout_request.left_width;
+        }
         self.layout = EditorFrameLayout::compute(self.layout_request);
         self.cached_game_canvas = None;
         self.graphics
@@ -1386,6 +1418,34 @@ impl NativeEditorRuntime {
 mod tests {
     use super::*;
     use raf_core::{InputKey, InputSnapshot};
+
+    #[test]
+    fn electronics_workspace_preserves_manual_width_across_rail_toggles() {
+        let mut runtime = NativeEditorRuntime::new(EditorLayoutRequest::electronics([1600.0, 900.0]));
+        runtime.resize_left_panel(312.0);
+        runtime.configure_electronics_workspace(false, true);
+        assert_eq!(runtime.layout().left_panel.unwrap().width, crate::editor_layout::ELECTRONICS_RAIL_WIDTH);
+        assert!(runtime.layout().right_panel.is_some());
+        runtime.configure_electronics_workspace(true, false);
+        assert_eq!(runtime.layout().left_panel.unwrap().width, 312.0);
+        assert!(runtime.layout().right_panel.is_none());
+        runtime.configure_electronics_workspace(false, false);
+        runtime.resize_right_panel(340.0);
+        runtime.configure_electronics_workspace(false, true);
+        assert_eq!(runtime.layout().right_panel.unwrap().width, 340.0);
+        runtime.set_layout_request(EditorLayoutRequest::electronics([1600.0, 900.0]));
+        runtime.configure_electronics_workspace(true, true);
+        assert_eq!(runtime.layout().left_panel.unwrap().width, 312.0);
+        assert_eq!(runtime.layout().right_panel.unwrap().width, 340.0);
+        runtime.resize([900, 600], 1.0);
+        runtime.configure_electronics_workspace(true, true);
+        assert_eq!(runtime.layout().left_panel.unwrap().width, crate::editor_layout::ELECTRONICS_RAIL_WIDTH);
+        assert_eq!(runtime.layout().right_panel.unwrap().width, 340.0);
+        let mut game = NativeEditorRuntime::new(EditorLayoutRequest::game([1600.0, 900.0]));
+        let before = game.layout();
+        game.configure_electronics_workspace(false, false);
+        assert_eq!(game.layout(), before);
+    }
 
     #[test]
     fn overlay_frame_reuses_the_scene_canvas() {

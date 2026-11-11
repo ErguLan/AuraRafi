@@ -96,6 +96,10 @@ pub struct ElectronicComponent {
     pub rotation: f32,
     /// Footprint reference for PCB (e.g. "0805", "DIP-28").
     pub footprint: String,
+    /// Explicit logical pin name -> physical pad number assignment. An empty
+    /// map preserves the legacy exact-name convention.
+    #[serde(default)]
+    pub footprint_pin_map: std::collections::BTreeMap<String, String>,
     /// Simulation model for this component.
     pub sim_model: SimModel,
     /// Optional datasheet URL or project-relative path.
@@ -235,6 +239,7 @@ impl ElectronicComponent {
             position: Vec2::ZERO,
             rotation: 0.0,
             footprint: "0805".to_string(),
+            footprint_pin_map: Default::default(),
             sim_model: SimModel::Resistor { ohms },
             datasheet: None,
             locked: false,
@@ -279,6 +284,7 @@ impl ElectronicComponent {
             position: Vec2::ZERO,
             rotation: 0.0,
             footprint: "0805".to_string(),
+            footprint_pin_map: Default::default(),
             sim_model: SimModel::Led {
                 forward_voltage: 2.0,
             },
@@ -325,6 +331,7 @@ impl ElectronicComponent {
             position: Vec2::ZERO,
             rotation: 0.0,
             footprint: "MAG-10x5".to_string(),
+            footprint_pin_map: Default::default(),
             sim_model: SimModel::Magnet {
                 tesla,
                 north_up: true,
@@ -365,6 +372,7 @@ impl ElectronicComponent {
             position: Vec2::ZERO,
             rotation: 0.0,
             footprint: "BAT-18650".to_string(),
+            footprint_pin_map: Default::default(),
             sim_model: SimModel::DcSource { voltage },
             datasheet: None,
             locked: false,
@@ -393,6 +401,7 @@ impl ElectronicComponent {
             position: Vec2::ZERO,
             rotation: 0.0,
             footprint: "TP-GND".to_string(),
+            footprint_pin_map: Default::default(),
             sim_model: SimModel::Wire, // electrically transparent
             datasheet: None,
             locked: false,

@@ -12,6 +12,7 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         "settings.simple_mode" => settings.simple_mode = value,
         "settings.prefers_reduced_motion" => settings.prefers_reduced_motion = value,
         "settings.high_contrast" => settings.high_contrast = value,
+        "settings.native_accessibility_enabled" => settings.native_accessibility_enabled = value,
         "settings.reduce_transparency" => settings.reduce_transparency = value,
         "settings.show_fps_counter" => settings.show_fps_counter = value,
         "settings.auto_ui_scale" | "settings.auto-ui-scale" => settings.auto_ui_scale = value,
@@ -24,6 +25,19 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         }
         "settings.command_console_enabled" => settings.command_console_enabled = value,
         "settings.ai_persist_credentials" => settings.ai_persist_credentials = value,
+        "settings.agent_openai_use_plan" => {
+            if settings.agent_openai_use_plan != value { settings.agent_reasoning_effort.clear(); }
+            settings.agent_openai_use_plan = value;
+            if value {
+                settings.default_ai_provider = AiProvider::OpenAI;
+                if let Some(config) = settings.ai_providers.iter_mut().find(|p| p.provider == AiProvider::OpenAI) {
+                    config.enabled = true;
+                }
+            }
+        }
+        "settings.agent_response_limit_enabled" => settings.agent_response_limit_enabled = value,
+        "settings.agent_show_reasoning" => settings.agent_show_reasoning = value,
+        "settings.agent_vision_enabled" => settings.agent_vision_enabled = value,
         "settings.external_studio.enabled" => settings.external_asset_studio.enabled = value,
         "settings.hierarchy_show_icons" => settings.hierarchy_show_icons = value,
         "settings.hierarchy_show_script_links" => settings.hierarchy_show_script_links = value,
@@ -186,39 +200,124 @@ pub(crate) fn apply_settings_command(settings: &mut EngineSettings, key: &str) -
             else {
                 return false;
             };
+            if settings.default_ai_provider != provider {
+                settings.agent_vision_enabled = false;
+                settings.agent_reasoning_effort.clear();
+            }
             settings.default_ai_provider = provider;
             true
         }
-        key if key.starts_with("settings.ai_model.default:") => {
-            let Some(index) = key
-                .trim_start_matches("settings.ai_model.default:")
-                .parse::<usize>()
-                .ok()
+        key if key.starts_with("settings.ai_provider.model.select:") => {
+            // Ordered value lanes: `account:` selects an OpenAI plan slug,
+            // anything else writes the default provider card model directly.
+            let Some(rest) = key.strip_prefix("settings.ai_provider.model.select:") else {
+                return false;
+            };
+            // The command shape is `select:{provider_id}:{model_id}`; the raw
+            // model id is everything after the provider id.
+            let Some((provider_id, value)) = rest.split_once(':') else {
+                return false;
+            };
+            let provider = if value.starts_with("account:") {
+                AiProvider::OpenAI
+            } else {
+                ai_provider_from_id(provider_id).unwrap_or(settings.default_ai_provider)
+            };
+            let model_id = value.trim_start_matches("account:").trim();
+            if model_id.is_empty() || model_id.len() > 160 {
+                return false;
+            }
+            if provider == AiProvider::OpenAI && value.starts_with("account:") {
+                if !raf_ai::chatgpt_auth::snapshot().is_some_and(|view| {
+                    view.models.iter().any(|model| model.slug == model_id)
+                }) {
+                    return false;
+                }
+                if let Some(config) = settings
+                    .ai_providers
+                    .iter_mut()
+                    .find(|config| config.provider == AiProvider::OpenAI)
+                {
+                    if config.model.trim() != model_id {
+                        settings.agent_vision_enabled = false;
+                        settings.agent_reasoning_effort.clear();
+                    }
+                    config.model = model_id.to_string();
+                }
+                settings.agent_openai_use_plan = true;
+                settings.default_ai_provider = AiProvider::OpenAI;
+                return true;
+            }
+            let known = crate::panels::ai_model_options::selection_allowed(settings, provider, model_id);
+            if !known {
+                // Custom ids typed in the advanced field remain the direct
+                // escape hatch; picker rows only activate known ids.
+                return false;
+            }
+            let Some(config) = settings
+                .ai_providers
+                .iter_mut()
+                .find(|config| config.provider == provider)
             else {
                 return false;
             };
-            let Some(shortcut) = settings.agent_model_shortcuts.get(index) else {
-                return false;
-            };
-            settings.default_agent_model = shortcut.label.clone();
-            settings.default_ai_provider = shortcut.provider;
+            if config.model.trim() != model_id {
+                settings.agent_vision_enabled = false;
+                settings.agent_reasoning_effort.clear();
+                config.model = model_id.to_string();
+            }
             true
         }
-        key if key.starts_with("settings.ai_model.remove:") => {
-            let Some(index) = key
-                .trim_start_matches("settings.ai_model.remove:")
-                .parse::<usize>()
-                .ok()
+        key if key.starts_with("settings.ai_model.pin:") => {
+            let rest = key.trim_start_matches("settings.ai_model.pin:");
+            let model_id = rest
+                .trim_start_matches("account:")
+                .trim_start_matches("catalog:")
+                .trim();
+            if model_id.is_empty() || model_id.len() > 160 {
+                return false;
+            }
+            let Some(config) = settings
+                .ai_providers
+                .iter_mut()
+                .find(|config| config.provider == settings.default_ai_provider)
             else {
                 return false;
             };
-            if index >= settings.agent_model_shortcuts.len() {
+            if let Some(position) = config
+                .pinned_models
+                .iter()
+                .position(|pinned| pinned == model_id)
+            {
+                config.pinned_models.remove(position);
+            } else if config.pinned_models.len() < 32 {
+                config.pinned_models.push(model_id.to_string());
+            } else {
                 return false;
             }
-            let removed = settings.agent_model_shortcuts.remove(index);
-            if settings.default_agent_model == removed.label {
-                settings.default_agent_model.clear();
+            true
+        }
+        key if key.starts_with("settings.ai_provider.refresh_catalog.") => {
+            let Some(provider) =
+                ai_provider_from_id(key.trim_start_matches("settings.ai_provider.refresh_catalog."))
+            else {
+                return false;
+            };
+            if provider == AiProvider::OpenAI && settings.agent_openai_use_plan {
+                return raf_ai::chatgpt_auth::begin_model_refresh().is_ok();
             }
+            let Some(config) = settings
+                .ai_providers
+                .iter_mut()
+                .find(|config| config.provider == provider)
+            else {
+                return false;
+            };
+            let base_url = match provider {
+                AiProvider::OpenRouter | AiProvider::OpenAI => config.base_url.clone(),
+                _ => String::new(),
+            };
+            raf_ai::provider_catalog::refresh(provider, &base_url, &config.api_key);
             true
         }
         _ => return false,
@@ -227,6 +326,56 @@ pub(crate) fn apply_settings_command(settings: &mut EngineSettings, key: &str) -
 
 pub(crate) fn apply_settings_select(settings: &mut EngineSettings, key: &str, value: &str) -> bool {
     match key {
+        "settings.ai.model" => {
+            let model_id = value.trim_start_matches("account:").trim();
+            if model_id.is_empty() || model_id.len() > 160 {
+                return false;
+            }
+            if value.starts_with("account:") {
+                if !raf_ai::chatgpt_auth::snapshot().is_some_and(|view| {
+                    view.models.iter().any(|model| model.slug == model_id)
+                }) {
+                    return false;
+                }
+                if let Some(config) = settings
+                    .ai_providers
+                    .iter_mut()
+                    .find(|config| config.provider == AiProvider::OpenAI)
+                {
+                    if config.model.trim() != model_id {
+                        settings.agent_vision_enabled = false;
+                        settings.agent_reasoning_effort.clear();
+                    }
+                    config.model = model_id.to_string();
+                }
+                settings.agent_openai_use_plan = true;
+                settings.default_ai_provider = AiProvider::OpenAI;
+                return true;
+            }
+            let known = crate::panels::ai_model_options::selection_allowed(settings, settings.default_ai_provider, model_id);
+            if !known {
+                return false;
+            }
+            let Some(config) = settings
+                .ai_providers
+                .iter_mut()
+                .find(|config| config.provider == settings.default_ai_provider)
+            else {
+                return false;
+            };
+            if config.model.trim() != model_id {
+                settings.agent_vision_enabled = false;
+                settings.agent_reasoning_effort.clear();
+                config.model = model_id.to_string();
+            }
+        }
+        "settings.openai.plan_model" => {
+            return apply_settings_select(settings, "settings.ai.model", &format!("account:{value}"));
+        }
+        "settings.agent_reasoning_effort" => {
+            if !matches!(value, "" | "none" | "low" | "medium" | "high" | "max") { return false; }
+            settings.agent_reasoning_effort = value.into();
+        }
         "settings.runtime.launch_mode" => {
             settings.runtime.launch_mode = match value {
                 "separate" => raf_core::runtime_config::RuntimeLaunchMode::SeparateWindow,
@@ -298,6 +447,10 @@ pub(crate) fn apply_settings_select(settings: &mut EngineSettings, key: &str, va
             let Some(provider) = ai_provider_from_id(value) else {
                 return false;
             };
+            if settings.default_ai_provider != provider {
+                settings.agent_vision_enabled = false;
+                settings.agent_reasoning_effort.clear();
+            }
             settings.default_ai_provider = provider;
         }
         "settings.agent_mode" => {
@@ -455,11 +608,17 @@ pub(crate) fn apply_settings_text(settings: &mut EngineSettings, key: &str, valu
     else {
         return false;
     };
+    let model_changed = provider == settings.default_ai_provider
+        && ((field == "base_url" && config.base_url != value) || (field == "model" && config.model != value));
     match field {
         "base_url" => config.base_url = value.to_string(),
         "model" => config.model = value.to_string(),
         "api_key" => config.api_key = value.to_string(),
         _ => return false,
+    }
+    if model_changed {
+        settings.agent_vision_enabled = false;
+        settings.agent_reasoning_effort.clear();
     }
     true
 }
@@ -473,6 +632,8 @@ pub(crate) fn ai_provider_from_id(id: &str) -> Option<AiProvider> {
         "puerto" => Some(AiProvider::Puerto),
         "openrouter" => Some(AiProvider::OpenRouter),
         "openai" => Some(AiProvider::OpenAI),
+        "opencode" => Some(AiProvider::OpenCode),
+        "opencode_go" => Some(AiProvider::OpenCodeGo),
         "genai" => Some(AiProvider::GenAI),
         "claude" => Some(AiProvider::Claude),
         _ => None,
@@ -481,9 +642,36 @@ pub(crate) fn ai_provider_from_id(id: &str) -> Option<AiProvider> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn provider_redesign_explicit_plan_toggle_selects_route_without_replacing_model() {
+        let mut settings = super::EngineSettings::default();
+        let old_model = settings.ai_providers.iter().find(|p| p.provider == super::AiProvider::OpenAI).unwrap().model.clone();
+        settings.agent_reasoning_effort = "high".into();
+        assert!(super::apply_settings_toggle(&mut settings, "settings.agent_openai_use_plan", true));
+        assert_eq!(settings.default_ai_provider, super::AiProvider::OpenAI);
+        assert!(settings.agent_reasoning_effort.is_empty());
+        let config = settings.ai_providers.iter().find(|p| p.provider == super::AiProvider::OpenAI).unwrap();
+        assert!(config.enabled); assert_eq!(config.model, old_model);
+    }
     use super::*;
     use raf_core::config::{Language, Theme};
     use raf_core::units::DisplayUnit;
+
+    #[test]
+    fn harness_model_change_clears_capability_overrides_and_validates_reasoning() {
+        let mut settings = EngineSettings::default();
+        settings.agent_vision_enabled = true;
+        settings.agent_reasoning_effort = "high".into();
+        let next = if settings.default_ai_provider == AiProvider::OpenAI { "openrouter" } else { "openai" };
+        assert!(apply_settings_select(&mut settings, "settings.default_ai_provider", next));
+        assert!(!settings.agent_vision_enabled);
+        assert!(settings.agent_reasoning_effort.is_empty());
+        assert!(!apply_settings_select(&mut settings, "settings.agent_reasoning_effort", "unlimited"));
+        assert!(apply_settings_select(&mut settings, "settings.agent_reasoning_effort", "medium"));
+        assert_eq!(settings.agent_reasoning_effort, "medium");
+        assert!(apply_settings_toggle(&mut settings, "settings.agent_response_limit_enabled", true));
+        assert!(settings.agent_response_limit_enabled);
+    }
 
     #[test]
     fn segmented_settings_commands_update_the_draft() {
@@ -585,6 +773,8 @@ mod tests {
             AiProvider::Puerto => "puerto",
             AiProvider::OpenRouter => "openrouter",
             AiProvider::OpenAI => "openai",
+            AiProvider::OpenCode => "opencode",
+            AiProvider::OpenCodeGo => "opencode_go",
             AiProvider::GenAI => "genai",
             AiProvider::Claude => "claude",
         };

@@ -2,6 +2,23 @@
 
 All specifications, architectural schemas, file registries, and developer personality guides have been modularized to optimize token consumption and eliminate agent regressions.
 
+## Universal AI Directives & Non-Negotiable Mandates
+
+All AI models and contributors must strictly adhere to these fundamental operating rules across every task:
+
+1. **NEVER MENTION COMPETITORS IN CODE OR DOCS**: Never reference competing software, external engines, or competing companies in source code, variable names, comments, documentation, commit messages, or prompts. The system vocabulary belongs exclusively to AuraRafi and RafUI.
+2. **ALL UI STRINGS FULLY LOCALIZED VIA i18n**: Never hardcode user-facing strings in UI code or use ad-hoc conditional strings (`if is_es ...`). Every label, tooltip, notification, dialog, and title must be registered through `t("namespace.key", lang)` with synchronized entries in both:
+   * `crates/raf_core/locales/en.json` (English)
+   * `crates/raf_core/locales/es.json` (Spanish)
+3. **ONE-PASS COMPLETE IMPLEMENTATION (DIRECT & BOLD)**: Never waste time with incremental hesitation or piecemeal half-measures. Code the entire solution directly across all necessary modules, files, handlers, and branches in a single focused pass without stopping midway for trivial approvals.
+4. **MINIMAL TESTS ONLY AT THE VERY END (NO CUSTOM TARGET-DIR)**: Never interrupt development flow by running builds or test suites midway. Only run minimal, targeted tests (`cargo test -p <crate> --lib`, single crate, no `--workspace`) at the absolute end of the implementation to verify system integrity. FORBIDDEN to create/use a custom `--target-dir target_*` (`target_ai`, `target_check`, `target_fix`, etc.): the only valid target-dir in this repo is `target_gnu/` set in `.cargo/config.toml`. Do not create `target*` folders inside the code or the repo; if an isolated build is needed, use `CARGO_TARGET_DIR` outside the repo (`/tmp/...`).
+5. **DO NOT FIX OR TOUCH UNRELATED ERRORS**: If you encounter compiler warnings, errors, or broken tests in parts of the codebase you did not modify, DO NOT attempt to fix, repair, or refactor them. Other developers may be working in parallel. Strictly contain changes to the requested scope.
+6. **MODULAR ARCHITECTURE & ZERO HARDCODING (ANTI-SPAGHETTI & ANTI-GOD-CODE)**:
+   * AuraRafi is a serious, complex creative desktop engine—never treat it like a simple web landing page where shortcuts and hardcoding are tolerated.
+   * Eliminate hardcoded values: Never use magic numbers, rigid inline style blobs, or inflexible data structures that prevent future expansion.
+   * Eliminate God-functions and God-files: Never write monster functions or bloated files. Decompose logic into clean, focused, composable units.
+   * Proactive modular file creation: The AI is explicitly empowered and expected to create as many dedicated files (helpers, sub-surfaces, hosts, models) as needed to maintain high modularity and clean architectural growth.
+
 ## Synaptic Directory Map
 * **Definitive Architectural Directory**: [.ai/SYSTEM_TRUTH.md](.ai/SYSTEM_TRUTH.md) — All crates, files, and logic paths detailed.
 * **Strict Quality & Localisation Policies**: [.ai/instructions.md](.ai/instructions.md) — Languages, modular layouts, commands consistency, and no-emoji mandates.
@@ -9,6 +26,17 @@ All specifications, architectural schemas, file registries, and developer person
 * **ApiGraphicBasic Contributor Contract**: [docs/APIGRAPHICBASIC.md](docs/APIGRAPHICBASIC.md) — Surface ownership, resource ingress, GPU/CPU recovery, and asset boundaries.
 * **RafUI Technical Contract**: [docs/RAF_UI.md](docs/RAF_UI.md) — Retained documents, layout, rendering boundary, and core validation.
 * **Editor RafUI Contract**: [docs/EDITOR_RAFUI.md](docs/EDITOR_RAFUI.md) — Game/Electronics shell, panels, Inspector, Hierarchy, interaction, and UX rules.
+
+## Agent Completion & Visual Evidence
+The native Agent, CLI, and MCP are expected to finish what they start. A gameplay
+request is not complete after geometry alone: it needs a camera, authored lighting
+where appropriate, attached and validated Rhai gameplay source, a
+`game_completion_audit` pass, and at least two inspected `viewport_capture` angles.
+Image input is automatic: known text-only model families are blocked, unknown
+models are attempted, and provider rejections surface as explicit errors. Captures
+are attached to the next native provider request and returned as MCP image content.
+Never claim a visual or gameplay result was verified when only a mutation receipt
+exists.
 
 ## Domain Persona Templates
 * **Agent/CLI/MCP Expansion Contract**: [docs/AGENT_CLI_MCP_EXPANSION.md](docs/AGENT_CLI_MCP_EXPANSION.md) - Game-first stabilization, attached editor bridge, external project tools, budgets, diffs, and the no-Runtime boundary.

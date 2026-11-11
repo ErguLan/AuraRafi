@@ -32,6 +32,7 @@ pub mod runtime;
 pub mod services;
 pub mod value;
 pub mod view;
+pub mod ui_api;
 
 pub use backends::{ExecutionResult, LoadedScript, ScriptTier};
 pub use errors::{ScriptError, ScriptResult};

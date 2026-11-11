@@ -7,17 +7,27 @@
 
 mod application_menu;
 mod compilation;
+mod cost_observation;
 mod cpu_host;
 mod cpu_renderer;
 mod diagnostics;
+mod authoring_gallery;
+mod flow_sizing;
+mod inspection;
 mod direct_host;
+mod effects;
 mod gpu_renderer;
+mod image_layout;
 mod images;
 pub mod loading;
 mod native_input;
 mod native_window;
+mod offscreen;
+mod paint_motion;
 mod presentation;
 mod quality;
+mod regional_layout;
+mod regional_paint;
 mod render;
 mod text_atlas;
 
@@ -30,11 +40,16 @@ pub use compilation::UiSurfaceCompileMetrics;
 pub use cpu_host::{CpuUiSurfaceHost, DirectUiSurfaceCpuFrame};
 pub use cpu_renderer::{UiSurfaceCpuMetrics, UiSurfaceCpuRenderer};
 pub use diagnostics::UiSurfaceDiagnostics;
+pub use authoring_gallery::component_gallery;
+pub use inspection::{inspect_surface, UiAuthoringIssue, UiAuthoringIssueKind,
+    UiImageInspection, UiNodeInspection, UiSurfaceInspection};
 pub use direct_host::{DirectUiSurfaceFrame, DirectUiSurfaceHost};
+pub use effects::{UiPaintEffects, UiPaintKey, UiRoundedClip, UiSurfaceEffects};
 pub(crate) use gpu_renderer::UiSurfaceGpuSharedResources;
 pub use gpu_renderer::{UiSurfaceGpuMetrics, UiSurfaceGpuRenderer};
 pub use images::{UiSurfaceImageData, UiSurfaceImageStore};
 pub use native_input::NativeUiInputBridge;
+pub use offscreen::UiOffscreenTarget;
 pub use native_window::{
     NativeCursorLease, NativeGraphicsContext, NativePresentMode, NativeUiWindowConfig,
     NativeUiWindowHost, NativeWindowCommandResult,
@@ -43,24 +58,25 @@ pub use presentation::{
     UiSurfaceDrawList, UiSurfaceImageQuad, UiSurfacePaintCommand, UiSurfaceQuad, UiSurfaceStroke,
     UiSurfaceTextQuad,
 };
-pub use quality::{cpu_quality_matrix, UiSurfaceQualitySample};
+pub use quality::{cpu_quality_matrix, craftsmanship_gallery, UiSurfaceQualitySample};
 pub use raf_ui::{
     BottomDockLayout, DockDropTarget, DockLayout, DockLayoutEntry, DockLayoutFrame, DockPanel,
     DockSide, DockTab, DockTabGroup, DockWorkspaceController, DockWorkspaceEvent, FloatingPanel,
     StudioUiPalette, UiAccessibilityRole, UiAction, UiAlign, UiColorMode, UiColorPicker,
     UiColorPickerHit, UiCompactMode, UiControl, UiControlState, UiCursorIcon, UiDensityContract,
-    UiDispatchedAction, UiEnvironment, UiEventBinding, UiEventKind, UiFlow, UiFocusPolicy,
-    UiFocusState, UiFontWeight, UiGeometrySnap, UiGridLayout, UiHitRegion, UiHitResult,
-    UiHitTestMode, UiIcon, UiIconId, UiIconSize, UiImage, UiImageFit, UiImageSource, UiInputState,
-    UiInteractionState, UiJustify, UiLayout, UiNode, UiNodeKind, UiOverflow, UiPointerButton,
-    UiPositionMode, UiRange, UiRangeOrientation, UiRect, UiResponsiveRule, UiSamplingMode,
-    UiScrollAxis, UiSelect, UiSelectOption, UiSizeMode, UiSkeleton, UiSkeletonShape, UiSpacing,
-    UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet,
-    UiSurfaceMaterial, UiTextAtlasRequest, UiTextEditState, UiTextInput, UiTextOverflow,
-    UiTextRole, UiTextStyle, UiTheme, UiThemeMetrics, UiToggle, UiTogglePresentation, UiTokens,
-    UiTween, UiVirtualRange, UiVisualState, BOTTOM_DOCK_LAYOUT_VERSION,
-    FLOATING_PANEL_RESIZE_HANDLE_SIZE, FLOATING_PANEL_TITLE_BAR_HEIGHT,
+    UiDispatchedAction, UiDocumentUpdate, UiDocumentUpdateError, UiEnvironment, UiEventBinding,
+    UiEventKind, UiFlow, UiFocusPolicy, UiFocusState, UiFontWeight, UiGeometrySnap, UiGridLayout,
+    UiHitRegion, UiHitResult, UiHitTestMode, UiIcon, UiIconId, UiIconSize, UiImage, UiImageFit,
+    UiImageSource, UiInputState, UiInteractionState, UiJustify, UiLayout, UiNode, UiNodeKind,
+    UiOverflow, UiPointerButton, UiPositionMode, UiRange, UiRangeOrientation, UiRect,
+    UiResponsiveRule, UiSamplingMode, UiScrollAxis, UiSelect, UiSelectOption, UiSizeMode,
+    UiSkeleton, UiSkeletonShape, UiSpacing, UiStyle, UiStylePatch, UiStyleRule, UiStyleRuleState,
+    UiStyleSelector, UiStyleSheet, UiSurfaceMaterial, UiTextAtlasRequest, UiTextEditState,
+    UiTextInput, UiTextOverflow, UiTextRole, UiTextStyle, UiTheme, UiThemeMetrics, UiToggle,
+    UiTogglePresentation, UiTokens, UiTween, UiVirtualRange, UiVisualState,
+    BOTTOM_DOCK_LAYOUT_VERSION, FLOATING_PANEL_RESIZE_HANDLE_SIZE, FLOATING_PANEL_TITLE_BAR_HEIGHT,
 };
+use render::effective_accessibility_role;
 pub use render::{UiLayoutBox, UiScrollMetrics, UiSurfaceFrame};
 pub use text_atlas::{UiTextAtlas, UiTextAtlasRect, UiTextAtlasSlot, UiTextAtlasSyncStats};
 
@@ -95,10 +111,16 @@ impl UiSurface {
     pub fn from_document(document: &raf_ui::UiDocument, palette: StudioUiPalette) -> Self {
         Self::new(document.id.0.to_string(), palette, document.root.clone())
             .with_theme(document.theme.clone())
+            .with_style_sheet(document.style_sheet.clone())
     }
 
     pub fn with_theme(mut self, theme: UiTheme) -> Self {
         self.theme = theme;
+        self
+    }
+
+    pub fn with_style_sheet(mut self, style_sheet: UiStyleSheet) -> Self {
+        self.style_sheet = style_sheet;
         self
     }
 
@@ -213,6 +235,13 @@ impl UiSurface {
             clear_color,
             text_scale,
         );
+        frame.tokens = self.theme.tokens_for(
+            match self.palette {
+                StudioUiPalette::IndustrialDark => UiColorMode::Dark,
+                StudioUiPalette::PaperLight => UiColorMode::Light,
+            },
+            matches!(self.palette, StudioUiPalette::IndustrialDark),
+        );
         if self.retained_tooltips {
             append_hover_tooltip(
                 &mut frame,
@@ -271,6 +300,13 @@ impl UiSurface {
             clear_color,
             text_scale,
             intrinsic_sizes,
+        );
+        frame.tokens = self.theme.tokens_for(
+            match self.palette {
+                StudioUiPalette::IndustrialDark => UiColorMode::Dark,
+                StudioUiPalette::PaperLight => UiColorMode::Light,
+            },
+            matches!(self.palette, StudioUiPalette::IndustrialDark),
         );
         if self.retained_tooltips {
             append_hover_tooltip(
@@ -392,6 +428,9 @@ fn append_hover_tooltip(
     let text_color = tokens.text;
     let tooltip_id = "__rafui.tooltip".to_string();
     frame.layout_boxes.push(UiLayoutBox {
+        focused: false,
+        visual: raf_ui::UiVisual::default(),
+        rounded_clips: Vec::new(),
         id: tooltip_id.clone(),
         kind: UiNodeKind::Tooltip,
         text_key: tooltip_key.clone(),
@@ -481,10 +520,27 @@ fn apply_high_contrast(frame: &mut UiSurfaceFrame, palette: StudioUiPalette) {
 /// and guarantees that GPU and CPU compositors consume identical results.
 fn apply_surface_materials(
     frame: &mut UiSurfaceFrame,
-    palette: StudioUiPalette,
+    surface: &UiSurface,
     environment: UiEnvironment,
 ) {
-    let tokens = palette.tokens();
+    let palette = surface.palette;
+    let tokens = surface.theme_tokens(environment);
+    frame.tokens = tokens;
+    for layout in &mut frame.layout_boxes {
+        if layout.id.starts_with("__rafui.scrollbar.") {
+            let active = layout.style.fill == [232, 133, 28, 255];
+            if layout.id.ends_with(".thumb") {
+                layout.style.fill = if active {
+                    tokens.chrome().scrollbar_hover
+                } else {
+                    tokens.chrome().scrollbar
+                };
+                layout.style.border = tokens.chrome().divider;
+            } else if layout.style.fill[3] > 0 {
+                layout.style.fill = tokens.surface_raised;
+            }
+        }
+    }
     let force_opaque = environment.high_contrast || environment.reduce_transparency;
     for layout in &mut frame.layout_boxes {
         let material = layout.material;
@@ -493,15 +549,18 @@ fn apply_surface_materials(
         }
 
         if material == UiSurfaceMaterial::BackdropScrim {
-            layout.style.fill = if force_opaque {
-                [0, 0, 0, 224]
+            if layout.style.fill[3] == 0 {
+                layout.style.fill = tokens.background;
+            }
+            let scrim_alpha = if force_opaque {
+                224
             } else {
                 match palette {
-                    StudioUiPalette::IndustrialDark => [0, 0, 0, 176],
-                    StudioUiPalette::PaperLight => [0, 0, 0, 128],
+                    StudioUiPalette::IndustrialDark => 176,
+                    StudioUiPalette::PaperLight => 128,
                 }
             };
-            layout.style.border = [0, 0, 0, 0];
+            layout.style.fill[3] = layout.style.fill[3].min(scrim_alpha);
             continue;
         }
 
@@ -527,17 +586,18 @@ fn apply_surface_materials(
         }
 
         if layout.style.border_width > 0.0 && layout.style.border[3] > 0 {
-            layout.style.border = if force_opaque {
-                match palette {
-                    StudioUiPalette::IndustrialDark => [255, 255, 255, 255],
-                    StudioUiPalette::PaperLight => [0, 0, 0, 255],
-                }
+            let alpha = if force_opaque {
+                255
             } else {
-                let alpha = match palette {
+                match palette {
                     StudioUiPalette::IndustrialDark => 72,
                     StudioUiPalette::PaperLight => 88,
-                };
-                [tokens.text[0], tokens.text[1], tokens.text[2], alpha]
+                }
+            };
+            layout.style.border[3] = if force_opaque {
+                alpha
+            } else {
+                layout.style.border[3].min(alpha)
             };
         }
     }
@@ -616,10 +676,13 @@ fn blend_channel(base: u8, target: u8, amount: f32) -> u8 {
 /// when an editor workspace changes without invalidating persisted layouts.
 #[derive(Debug, Clone, Default)]
 pub struct UiSurfaceSession {
+    regional_layout: regional_layout::UiRegionalLayoutCache,
+    pub performance: raf_ui::UiPerformanceMonitor,
     pub text_atlas: UiTextAtlas,
     pub interaction: UiInteractionState,
     pub focus_policy: UiFocusPolicy,
     tooltip_motion: UiTween,
+    paint_motion: paint_motion::UiPaintMotion,
     reduced_motion: bool,
     high_contrast: bool,
     last_input_time_seconds: f64,
@@ -637,7 +700,7 @@ impl UiSurfaceSession {
     /// retained frame. Native hosts use this to keep event-driven rendering
     /// alive until the interaction settles.
     pub fn has_active_motion(&self) -> bool {
-        !self.tooltip_motion.is_settled()
+        !self.tooltip_motion.is_settled() || self.paint_motion.has_active_motion()
     }
 
     /// Keeps an event-driven native host rendering while a text-editing key
@@ -688,6 +751,7 @@ impl UiSurfaceSession {
             self.interaction.controls.reset_scroll(scroll_id);
         }
         self.tooltip_motion.set_immediate(0.0);
+        self.paint_motion.reset();
         self.last_input_time_seconds = 0.0;
         self.tooltip_input_seen = false;
     }
@@ -747,23 +811,34 @@ impl UiSurfaceSession {
         } else {
             self.tooltip_motion.value()
         };
-        let mut frame = surface
-            .build_frame_with_state_and_tooltip_alpha_and_pointer_with_text_scale(
-                width,
-                height,
-                clear_color,
+        let text_scale = self.text_scale();
+        let mut frame = self.regional_layout.build(
+            &surface.root,
+            &surface.style_sheet,
+            UiVisualState::from_focus(&self.interaction.focus),
+            &self.interaction.controls,
+            width,
+            height,
+            clear_color,
+            text_scale,
+            &HashMap::new(),
+            &mut self.performance,
+        );
+        if surface.retained_tooltips {
+            append_hover_tooltip(
+                &mut frame,
                 UiVisualState::from_focus(&self.interaction.focus),
-                &self.interaction.controls,
+                surface.palette,
                 tooltip_alpha,
                 self.interaction.pointer_position(),
-                self.text_scale(),
             );
+        }
         apply_experimental_tint(
             &mut frame,
             surface.palette,
             self.environment_theme_experimental(),
         );
-        apply_surface_materials(&mut frame, surface.palette, self.environment);
+        apply_surface_materials(&mut frame, surface, self.environment);
         if self.high_contrast {
             apply_high_contrast(&mut frame, surface.palette);
         }
@@ -795,6 +870,179 @@ impl UiSurfaceSession {
             }
         }
         self.reconcile_focus(&frame);
+        self.paint_motion
+            .snap_to_current_styles(surface, UiVisualState::from_focus(&self.interaction.focus));
+        frame
+    }
+
+    /// Refreshes current paint state over retained geometry. Focus, hover,
+    /// caret, and selection changes may alter colors or text quads without
+    /// rebuilding layout or replacing hit-region geometry.
+    pub(super) fn refresh_paint_frame(
+        &mut self,
+        surface: &UiSurface,
+        retained: &UiSurfaceFrame,
+    ) -> UiSurfaceFrame {
+        let mut frame = retained.clone();
+        frame
+            .layout_boxes
+            .retain(|layout| layout.id != "__rafui.tooltip");
+        frame
+            .text_requests
+            .retain(|request| request.node_id != "__rafui.tooltip");
+        frame.tooltip_anchor = None;
+
+        fn index_nodes<'a>(
+            node: &'a UiNode,
+            nodes: &mut std::collections::HashMap<&'a str, &'a UiNode>,
+        ) {
+            nodes.insert(node.id.as_str(), node);
+            for child in &node.children {
+                index_nodes(child, nodes);
+            }
+        }
+        let mut nodes = std::collections::HashMap::new();
+        index_nodes(&surface.root, &mut nodes);
+
+        for layout in &mut frame.layout_boxes {
+            let Some(&node) = nodes.get(layout.id.as_str()) else {
+                continue;
+            };
+            layout.focused = self.interaction.focus.focused.as_deref() == Some(node.id.as_str());
+            layout.visual = node.visual.clone();
+            layout.kind = node.kind;
+            layout.text_key = node.text_key.clone();
+            layout.text_value = node.text_value.clone();
+            layout.tooltip_key = node.tooltip_key.clone();
+            layout.tooltip_value = node.tooltip_value.clone();
+            layout.interactive = node.interactive;
+            layout.text_selectable = node.text_selectable;
+            layout.focusable = node.focusable;
+            layout.disabled = node.disabled;
+            layout.invalid = node.invalid;
+            layout.accessibility_label_key =
+                node.accessibility_label_key
+                    .clone()
+                    .or_else(|| match &node.control {
+                        UiControl::Image(image) => image.options.alt_text_key.clone(),
+                        _ => None,
+                    });
+            layout.accessibility_role = effective_accessibility_role(node);
+            layout.accessibility_description_key = node.accessibility_description_key.clone();
+            layout.accessibility_expanded = node
+                .accessibility_expanded
+                .or_else(|| node.control.select().map(|select| select.open));
+            layout.accessibility_checked = node
+                .accessibility_checked
+                .or_else(|| node.control.toggle().map(|toggle| toggle.value));
+            layout.accessibility_selected = node.accessibility_selected;
+            layout.material = node.material;
+            layout.text_style = node.text_style;
+            layout.text_overflow = node.text_overflow;
+            layout.icon = node.icon;
+            layout.control = node.control.clone();
+            layout.text_edit = if layout.focused {
+                node.control
+                    .text_input()
+                    .map(|input| {
+                        self.interaction
+                            .controls
+                            .text_edit(input.value_key.as_str())
+                    })
+                    .or_else(|| {
+                        node.text_selectable.then(|| {
+                            self.interaction.controls.selectable_text_edit(
+                                node.id.as_str(),
+                                node.text_value.as_deref().unwrap_or_default(),
+                            )
+                        })
+                    })
+            } else {
+                None
+            };
+            layout.ime_preedit = node.control.text_input().and_then(|input| {
+                layout
+                    .focused
+                    .then(|| {
+                        self.interaction
+                            .controls
+                            .ime_preedit(input.value_key.as_str())
+                            .to_string()
+                    })
+                    .filter(|value| !value.is_empty())
+            });
+        }
+
+        for hit in &mut frame.hit_regions {
+            if let Some(&node) = nodes.get(hit.id.as_str()) {
+                hit.kind = node.kind;
+                hit.interactive = node.interactive;
+                hit.focusable = node.focusable;
+                hit.disabled = node.disabled;
+            }
+        }
+        frame.focus_order = frame
+            .layout_boxes
+            .iter()
+            .filter(|layout| layout.focusable && !layout.disabled)
+            .map(|layout| layout.id.clone())
+            .collect();
+        self.reconcile_focus(&frame);
+
+        for layout in &mut frame.layout_boxes {
+            layout.focused = self.interaction.focus.focused.as_deref() == Some(layout.id.as_str());
+            if !layout.focused {
+                layout.text_edit = None;
+                layout.ime_preedit = None;
+            }
+        }
+
+        let visual_state = UiVisualState::from_focus(&self.interaction.focus);
+        let styles =
+            self.paint_motion
+                .resolve_styles(surface, visual_state, 0.0, self.reduced_motion);
+        for layout in &mut frame.layout_boxes {
+            if let Some(style) = styles.get(&layout.id) {
+                layout.style = style.clone();
+            }
+        }
+
+        // This is intentionally after state-style resolution and before
+        // material/tint and text-color synchronization. It affects text color
+        // only, never layout, borders, opacity, or hit regions.
+        render::resolve_inherited_text(&mut frame, &surface.root);
+
+        let tooltip_alpha = if !self.tooltip_input_seen && self.interaction.focus.hovered.is_some()
+        {
+            1.0
+        } else {
+            self.tooltip_motion.value()
+        };
+        if surface.retained_tooltips {
+            append_hover_tooltip(
+                &mut frame,
+                visual_state,
+                surface.palette,
+                tooltip_alpha,
+                self.interaction.pointer_position(),
+            );
+        }
+
+        apply_experimental_tint(
+            &mut frame,
+            surface.palette,
+            self.environment_theme_experimental(),
+        );
+        apply_surface_materials(&mut frame, surface, self.environment);
+        refresh_text_request_colors(
+            &mut frame,
+            &self.interaction.controls,
+            self.text_scale(),
+            self.last_raster_scale,
+        );
+        if self.high_contrast {
+            apply_high_contrast(&mut frame, surface.palette);
+        }
         frame
     }
 
@@ -859,15 +1107,17 @@ impl UiSurfaceSession {
         raster_scale: f32,
     ) -> HashMap<String, [f32; 2]> {
         let raster_scale = raster_scale.clamp(1.0, 4.0);
+        let layouts = frame
+            .layout_boxes
+            .iter()
+            .map(|layout| (layout.id.as_str(), layout))
+            .collect::<HashMap<_, _>>();
         frame
             .text_requests
             .iter()
             .zip(resolved_text.iter())
             .filter_map(|(request, resolved)| {
-                let layout = frame
-                    .layout_boxes
-                    .iter()
-                    .find(|entry| entry.id == request.node_id)?;
+                let layout = *layouts.get(request.node_id.as_str())?;
                 if !matches!(
                     (layout.width_mode, layout.height_mode),
                     (UiSizeMode::FitContent, _)
@@ -884,7 +1134,14 @@ impl UiSurfaceSession {
                     request.node_id.clone(),
                     [
                         f32::from(slot.rect.width) / raster_scale
-                            + (layout.rect.width - layout.content_rect.width).max(0.0),
+                            + (layout.rect.width - layout.content_rect.width).max(0.0)
+                            + layout
+                                .icon
+                                .map(|icon| {
+                                    f32::from(icon.size.logical_pixels())
+                                        + layout.visual.content.gap.max(0.0)
+                                })
+                                .unwrap_or(0.0),
                         f32::from(slot.rect.height) / raster_scale
                             + (layout.rect.height - layout.content_rect.height).max(0.0),
                     ],
@@ -908,23 +1165,34 @@ impl UiSurfaceSession {
         } else {
             self.tooltip_motion.value()
         };
-        let mut frame = surface.build_frame_with_intrinsic_sizes_and_text_scale(
+        let text_scale = self.text_scale();
+        let mut frame = self.regional_layout.build(
+            &surface.root,
+            &surface.style_sheet,
+            UiVisualState::from_focus(&self.interaction.focus),
+            &self.interaction.controls,
             width,
             height,
             clear_color,
-            UiVisualState::from_focus(&self.interaction.focus),
-            &self.interaction.controls,
-            tooltip_alpha,
-            self.interaction.pointer_position(),
+            text_scale,
             intrinsic_sizes,
-            self.text_scale(),
+            &mut self.performance,
         );
+        if surface.retained_tooltips {
+            append_hover_tooltip(
+                &mut frame,
+                UiVisualState::from_focus(&self.interaction.focus),
+                surface.palette,
+                tooltip_alpha,
+                self.interaction.pointer_position(),
+            );
+        }
         apply_experimental_tint(
             &mut frame,
             surface.palette,
             self.environment_theme_experimental(),
         );
-        apply_surface_materials(&mut frame, surface.palette, self.environment);
+        apply_surface_materials(&mut frame, surface, self.environment);
         if self.high_contrast {
             apply_high_contrast(&mut frame, surface.palette);
         }
@@ -1171,6 +1439,7 @@ impl UiSurfaceSession {
         frame: &UiSurfaceFrame,
         input: &UiInputState,
     ) -> Vec<UiDispatchedAction> {
+        let input_started = std::time::Instant::now();
         self.tooltip_input_seen = true;
         self.reconcile_focus(frame);
         // Keep metric lookup renderer-owned while editing state and pointer
@@ -1178,9 +1447,36 @@ impl UiSurfaceSession {
         // because RafUI passes the current value to this callback.
         let atlas = &self.text_atlas;
         let raster_scale = self.last_raster_scale.max(1.0);
+        let hit_regions = if let Some(point) = input.pointer_position.filter(|_| {
+            frame
+                .layout_boxes
+                .iter()
+                .any(|b| !b.rounded_clips.is_empty())
+        }) {
+            let masks = frame
+                .layout_boxes
+                .iter()
+                .filter(|b| !b.rounded_clips.is_empty())
+                .map(|b| (b.id.as_str(), &b.rounded_clips))
+                .collect::<HashMap<_, _>>();
+            std::borrow::Cow::Owned(
+                frame
+                    .hit_regions
+                    .iter()
+                    .filter(|region| {
+                        masks
+                            .get(region.id.as_str())
+                            .is_none_or(|clips| effects::clip_coverage(clips, point) > 0.0)
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>(),
+            )
+        } else {
+            std::borrow::Cow::Borrowed(frame.hit_regions.as_slice())
+        };
         let actions = self.interaction.update_with_text_hit_test_and_vertical(
             &surface.root,
-            &frame.hit_regions,
+            &hit_regions,
             input,
             &self.focus_policy,
             |node_id, value, point| {
@@ -1223,11 +1519,30 @@ impl UiSurfaceSession {
         } else {
             self.tooltip_motion.set_immediate(0.0);
         }
-        self.tooltip_motion.advance(
-            input.delta_seconds_since(self.last_input_time_seconds),
-            self.reduced_motion,
-        );
+        let delta_seconds = input.delta_seconds_since(self.last_input_time_seconds);
+        self.tooltip_motion
+            .advance(delta_seconds, self.reduced_motion);
+        // Targets are resolved once during paint refresh. Input only advances
+        // existing transitions; resolving the entire stylesheet here used to
+        // duplicate that work on every hover/animation frame.
+        self.paint_motion
+            .advance(delta_seconds, self.reduced_motion);
         self.last_input_time_seconds = input.time_seconds;
+        let input_cause = if input.scroll_delta.iter().any(|delta| *delta != 0.0) {
+            raf_ui::UiWorkCause::Scroll
+        } else {
+            raf_ui::UiWorkCause::Visual
+        };
+        cost_observation::observe(
+            &mut self.performance,
+            &surface.id,
+            raf_ui::UiWorkPhase::Input,
+            input_cause,
+            input_started.elapsed(),
+            frame.hit_regions.len(),
+            0,
+            true,
+        );
         actions
     }
 
@@ -1240,6 +1555,71 @@ impl UiSurfaceSession {
                 .map(|region| region.id.as_str()),
         );
     }
+}
+
+fn refresh_text_request_colors(
+    frame: &mut UiSurfaceFrame,
+    controls: &UiControlState,
+    text_scale: f32,
+    raster_scale: f32,
+) {
+    let layouts = frame
+        .layout_boxes
+        .iter()
+        .map(|layout| (layout.id.as_str(), layout))
+        .collect::<HashMap<_, _>>();
+    for request in &mut frame.text_requests {
+        let Some(&layout) = layouts.get(request.node_id.as_str()) else {
+            continue;
+        };
+        request.text_key = layout
+            .text_key
+            .as_deref()
+            .or(layout.text_value.as_deref())
+            .or_else(|| {
+                layout
+                    .control
+                    .text_input()
+                    .map(|input| input.value_key.as_str())
+            })
+            .unwrap_or_default()
+            .to_string();
+
+        let mut style = layout
+            .text_style
+            .unwrap_or_else(|| UiTextStyle::body(layout.style.text))
+            .scaled_for_ui(text_scale);
+        if style.inherit_color || (layout.visual.inherit_text && layout.text_style.is_none()) {
+            style.color = layout.style.text;
+        }
+        style.color = apply_text_opacity(style.color, layout.style.opacity);
+        if let Some(input) = layout.control.text_input() {
+            if controls.text(input.value_key.as_str()).is_empty()
+                && controls.ime_preedit(input.value_key.as_str()).is_empty()
+                && input.placeholder_key.is_some()
+            {
+                style.color[3] = style.color[3].min(156);
+            }
+        }
+        request.style = style;
+        if raster_scale > 1.0 {
+            // max_width is already in physical pixels in a retained frame.
+            // Only the style above was reconstructed in logical units.
+            request.style.size_px *= raster_scale;
+            request.style.line_height_px *= raster_scale;
+            // The tooltip was appended above in logical units, not retained.
+            if request.node_id == "__rafui.tooltip" {
+                request.max_width *= raster_scale;
+            }
+        }
+    }
+}
+
+fn apply_text_opacity(mut color: [u8; 4], opacity: f32) -> [u8; 4] {
+    color[3] = (f32::from(color[3]) * opacity.clamp(0.0, 1.0))
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    color
 }
 
 fn text_input_index_at(
@@ -1395,12 +1775,12 @@ mod tests {
             .find(|layout| layout.id == "chrome")
             .expect("chrome layout");
         assert_eq!(chrome.style.fill[3], 255);
-        assert_eq!(chrome.style.border, [255, 255, 255, 255]);
+        assert_eq!(chrome.style.border, [38, 45, 54, 255]);
         assert_eq!(chrome.style.text, tokens.text);
     }
 
     #[test]
-    fn light_material_uses_higher_alpha_and_dark_adaptive_border() {
+    fn light_material_uses_higher_alpha_and_preserves_authored_border_color() {
         let palette = StudioUiPalette::PaperLight;
         let tokens = palette.tokens();
         let root = UiNode::new("root", UiNodeKind::Root).with_child(
@@ -1426,8 +1806,67 @@ mod tests {
             .expect("menu layout");
 
         assert_eq!(menu.style.fill[3], 249);
-        assert_eq!(menu.style.border, [28, 28, 30, 88]);
+        assert_eq!(menu.style.border, [210, 210, 210, 88]);
         assert_eq!(menu.style.text, tokens.text);
+    }
+
+    #[test]
+    fn document_surface_keeps_stylesheet_theme_and_authored_material_colors() {
+        let mut tokens = StudioUiPalette::IndustrialDark.tokens();
+        tokens.background = [13, 24, 35, 255];
+        let theme = UiTheme::raf_ui().with_dark_tokens(tokens);
+        let root = UiNode::new("root", UiNodeKind::Root)
+            .with_child(
+                UiNode::new("theme-fallback", UiNodeKind::Overlay)
+                    .with_material(UiSurfaceMaterial::BackdropScrim)
+                    .with_layout(UiLayout::fixed(48.0, 24.0))
+                    .with_style(UiStyle::transparent()),
+            )
+            .with_child(
+                UiNode::new("authored-color", UiNodeKind::Panel)
+                    .with_material(UiSurfaceMaterial::TranslucentChrome)
+                    .with_layout(UiLayout::fixed(48.0, 24.0))
+                    .with_style(UiStyle {
+                        fill: [71, 82, 93, 255],
+                        border: [17, 28, 39, 190],
+                        text: [240, 240, 240, 255],
+                        border_width: 1.0,
+                        radius: 0.0,
+                        opacity: 1.0,
+                    }),
+            );
+        let mut document = raf_ui::UiDocument::blank("Theme fidelity");
+        document.theme = theme.clone();
+        document.root = root;
+        document.style_sheet.rules.push(UiStyleRule::new(
+            UiStyleSelector::Id("authored-color".to_string()),
+            UiStylePatch {
+                text: Some([230, 230, 230, 255]),
+                ..UiStylePatch::default()
+            },
+        ));
+
+        let surface = UiSurface::from_document(&document, StudioUiPalette::IndustrialDark);
+        assert_eq!(surface.style_sheet, document.style_sheet);
+        assert_eq!(surface.theme, document.theme);
+
+        let mut session = UiSurfaceSession::default();
+        let frame = session.build_frame(&surface, 120, 64, [0, 0, 0, 255]);
+        let fallback = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "theme-fallback")
+            .expect("theme fallback layout");
+        let authored = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "authored-color")
+            .expect("authored material layout");
+
+        assert_eq!(fallback.style.fill, [13, 24, 35, 176]);
+        assert_eq!(authored.style.fill, [71, 82, 93, 220]);
+        assert_eq!(authored.style.border, [17, 28, 39, 72]);
+        assert_eq!(authored.style.text, [230, 230, 230, 255]);
     }
 
     #[test]

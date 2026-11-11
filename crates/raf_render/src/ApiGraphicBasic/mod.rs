@@ -2,6 +2,7 @@ pub mod grid;
 pub mod recipes;
 
 pub mod cad_surface;
+mod cad_board_surface;
 pub mod cad_surface_host;
 pub mod canvas_presenter;
 pub mod capabilities;

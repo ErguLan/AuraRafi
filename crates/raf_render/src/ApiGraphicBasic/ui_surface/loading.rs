@@ -67,6 +67,7 @@ pub fn build_loading_surface(
             UiNode::image(
                 "loading.brand-mark",
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new("loading.brand-mark"),
                     fit: UiImageFit::Contain,
                     tint: None,

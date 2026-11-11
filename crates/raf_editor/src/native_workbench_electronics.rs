@@ -22,6 +22,19 @@ use raf_render::api_graphic_basic::ui_surface::UiIconId;
 pub(crate) const ELECTRONICS_ANALYSIS_DRC_TAB: &str = "drc";
 pub(crate) const ELECTRONICS_ANALYSIS_SIMULATION_TAB: &str = "simulation";
 
+/// Reveal results in the existing dock group, also when the dock was folded.
+pub(super) fn reveal_analysis(
+    dock: &mut crate::panels::editor_bottom_dock_host::EditorBottomDockHost,
+    command: &str,
+) -> bool {
+    let tab = match command {
+        "electronics.analysis.drc" | "electronics.fabrication.export" | "electronics.fabrication.deliver" => ELECTRONICS_ANALYSIS_DRC_TAB,
+        "electronics.analysis.simulation" => ELECTRONICS_ANALYSIS_SIMULATION_TAB,
+        _ => return false,
+    };
+    dock.select(tab)
+}
+
 /// Which analysis dock panel is being presented.
 ///
 /// The dock used to pass the display string as the discriminant and the surface
@@ -148,6 +161,17 @@ pub(crate) fn inspector_data(editor: &NativeElectronicsEditor) -> Option<Electro
     let selection = editor.selection()?;
 
     if editor.active_surface() == CadSurfaceKind::Pcb {
+        if let Some(via) = editor.pcb().vias.iter().find(|via| via.id == selection.source_id) {
+            return Some(ElectronicsInspectorData {
+                title: via.net.clone(),
+                fields: vec![("Value".into(), via.net.clone()), ("Category".into(), "PCB via".into()),
+                    ("Editable".into(), "false".into()),
+                    ("Position".into(), format!("{:.3}, {:.3} mm", via.position.x, via.position.y)),
+                    ("Via diameter".into(), format!("{:.3} mm", via.diameter)),
+                    ("Via drill".into(), format!("{:.3} mm", via.drill)),
+                    ("Trace layer".into(), "F.Cu ↔ B.Cu".into())], pins: Vec::new(),
+            });
+        }
         if selection.kind == ElectronicsSelectionKind::Trace {
             return editor
                 .pcb()
@@ -158,18 +182,12 @@ pub(crate) fn inspector_data(editor: &NativeElectronicsEditor) -> Option<Electro
                 .map(|(index, trace)| ElectronicsInspectorData {
                     title: format!("Trace #{}", index + 1),
                     fields: vec![
-                        ("Value".to_string(), trace.net.clone()),
-                        ("Category".to_string(), "PCB trace".to_string()),
-                        (
-                            "Position".to_string(),
-                            format!("{} points", trace.points.len()),
-                        ),
-                        ("Rotation".to_string(), "Orthogonal".to_string()),
-                        (
-                            "Footprint".to_string(),
-                            trace.layer.display_name().to_string(),
-                        ),
-                        ("Editable".to_string(), "false".to_string()),
+                        ("Value".into(),trace.net.clone()),("Category".into(),"PCB trace".into()),
+                        ("Trace width".into(),format!("{:.3} mm",trace.width)),
+                        ("Trace length".into(),format!("{:.3} mm",trace.points.windows(2).map(|p|p[0].distance(p[1])).sum::<f32>())),
+                        ("Trace layer".into(),trace.layer.display_name().to_owned()),
+                        ("Trace vertices".into(),trace.points.len().to_string()),
+                        ("Editable".into(),"false".into()),
                     ],
                     pins: Vec::new(),
                 });
@@ -183,8 +201,15 @@ pub(crate) fn inspector_data(editor: &NativeElectronicsEditor) -> Option<Electro
             .map(|component| ElectronicsInspectorData {
                 title: format!("{}  {}", component.designator, component.value),
                 fields: vec![
+                    ("Show reference".into(),editor.pcb_label_visibility().0.to_string()),
+                    ("Show value".into(),editor.pcb_label_visibility().1.to_string()),
                     ("Value".to_string(), component.value.clone()),
+                    ("Reference".to_string(),component.designator.clone()),
                     ("Category".to_string(), "PCB component".to_string()),
+                    (
+                        "Transform target".to_string(),
+                        format!("pcb:{}", component.component_id),
+                    ),
                     (
                         "Position".to_string(),
                         format!("{:.1}, {:.1}", component.position.x, component.position.y),
@@ -200,7 +225,12 @@ pub(crate) fn inspector_data(editor: &NativeElectronicsEditor) -> Option<Electro
                     .pad_nets
                     .iter()
                     .enumerate()
-                    .map(|(index, net)| (format!("Pad {}", index + 1), net.clone()))
+                    .map(|(index, net)| {
+                        let pad=editor.physical_footprint_asset(&component.footprint).and_then(|a|a.pads.get(index));
+                        let pin=pad.and_then(|pad|editor.schematic().components.iter().find(|c|c.id==component.component_id)
+                            .and_then(|source|source.pins.iter().find(|p|source.footprint_pin_map.get(&p.name).unwrap_or(&p.name)==&pad.number)));
+                        (pin.map(|p|p.name.clone()).or_else(||pad.map(|p|p.number.clone())).unwrap_or_else(||format!("Pad {}",index+1)),net.clone())
+                    })
                     .collect(),
             });
     }
@@ -244,7 +274,12 @@ pub(crate) fn inspector_data(editor: &NativeElectronicsEditor) -> Option<Electro
         title: format!("{}  {}", component.designator, component.kind_label()),
         fields: vec![
             ("Value".to_string(), component.value.clone()),
+                    ("Reference".to_string(),component.designator.clone()),
             ("Category".to_string(), component.category.clone()),
+            (
+                "Transform target".to_string(),
+                format!("schematic:{}", component.id),
+            ),
             (
                 "Position".to_string(),
                 format!("{:.1}, {:.1}", component.position.x, component.position.y),
@@ -451,12 +486,21 @@ fn report_tone(
 
 /// Workbench-level notices the dock and the status bar must show. Kept separate
 /// from the analysis lines so a failure is never presented as a design result.
-pub(crate) fn notice_lines(editor: &NativeElectronicsEditor, language: Language) -> Vec<String> {
+pub(crate) fn notice_lines(editor: &NativeElectronicsEditor, language: Language) -> Vec<ElectronicsAnalysisLine> {
     let mut notices = Vec::new();
     if editor.sync_is_stale() {
-        notices.push(i18n::t("electronics.sync.pcb_stale", language));
+        notices.push(ElectronicsAnalysisLine::with_tone(i18n::t("electronics.sync.pcb_stale", language), ElectronicsAnalysisTone::Issues));
     }
-    notices.extend(editor.surface_errors().iter().cloned());
+    notices.extend(editor.surface_errors().iter().map(|error| ElectronicsAnalysisLine::with_tone(error, ElectronicsAnalysisTone::Failed)));
+    if let Some(status) = editor.fabrication_status() {
+        notices.push(ElectronicsAnalysisLine::with_tone(status, if editor.fabrication_failed() { ElectronicsAnalysisTone::Failed } else { ElectronicsAnalysisTone::Passed }));
+    }
+    notices.extend(editor.fabrication_summary().iter().map(ElectronicsAnalysisLine::normal));
+    notices.extend(editor.fabrication_warnings().iter().map(|warning| ElectronicsAnalysisLine::with_tone(warning, ElectronicsAnalysisTone::Issues)));
+    if editor.fabrication_job_available() {
+        notices.push(ElectronicsAnalysisLine::with_target(i18n::t("electronics.fabrication.deliver", language), ElectronicsAnalysisTone::Normal,
+            crate::panels::electronics_surface::ElectronicsAnalysisTarget::Command { name: "electronics.fabrication.deliver".into() }));
+    }
     notices
 }
 
@@ -496,6 +540,13 @@ impl ElectronicsWorkbenchData {
                         ) && selection.source_id == component.component_id
                     }),
                 })
+                .chain(editor.pcb().vias.iter().enumerate().map(|(index, via)| ElectronicsNavigatorEntry {
+                    label: format!("{} {} · {}", i18n::t("electronics.pcb.via_label", editor.language()), index + 1, via.net),
+                    secondary: format!("Ø {:.2} / {:.2} mm · F.Cu ↔ B.Cu", via.diameter, via.drill),
+                    secondary_key: None, command: format!("electronics.pcb.select:{}", via.id),
+                    icon: raf_ui::UiIconId::CadVia,
+                    active: editor.selection().is_some_and(|selection| selection.source_id == via.id),
+                }))
                 .collect()
         } else {
             editor
@@ -618,7 +669,9 @@ fn electronics_icon_for_category(category: &str) -> UiIconId {
     match category.to_ascii_lowercase().as_str() {
         "pcb" => UiIconId::Pcb,
         "passive" => UiIconId::Scale,
-        "diode" => UiIconId::Warning,
+        // A diode is a normal schematic part; warnings are reserved for actual
+        // validation problems, not component categories.
+        "diode" | "led" => UiIconId::Schematic,
         "power" => UiIconId::Add,
         "magnet" => UiIconId::Move,
         _ => UiIconId::Schematic,
@@ -628,7 +681,29 @@ fn electronics_icon_for_category(category: &str) -> UiIconId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn electronics_analysis_reveals_the_requested_tab_from_a_folded_dock() {
+        use crate::panels::editor_bottom_dock_host::EditorBottomDockHost;
+        let mut dock = EditorBottomDockHost::default();
+        dock.reset_group(raf_core::project::ProjectType::Electronics);
+        for (command, tab) in [("electronics.analysis.drc", "drc"),
+            ("electronics.analysis.simulation", "simulation")] {
+            if !dock.is_collapsed() { dock.toggle_collapsed(); }
+            assert!(reveal_analysis(&mut dock, command));
+            assert!(!dock.is_collapsed());
+            assert_eq!(dock.active_tab(), tab);
+        }
+        assert!(!reveal_analysis(&mut dock, "electronics.analysis.cancel"));
+        assert_eq!(dock.active_tab(), "simulation");
+    }
     use crate::electronics_controller::{ElectronicsReportLine, NativeElectronicsEditor};
+
+    #[test]
+    fn diode_and_led_components_do_not_use_a_warning_icon() {
+        assert_eq!(electronics_icon_for_category("diode"), UiIconId::Schematic);
+        assert_eq!(electronics_icon_for_category("LED"), UiIconId::Schematic);
+    }
 
     #[test]
     fn electronics_schematic_selection_exposes_a_real_editable_value_field() {

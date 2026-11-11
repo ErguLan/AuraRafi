@@ -51,6 +51,47 @@ impl UiTextEditState {
 }
 
 impl UiControlState {
+    pub fn has_same_text(&self, other: &Self) -> bool {
+        self.text_values == other.text_values && self.ime_preedit == other.ime_preedit
+    }
+
+    pub fn retained_text_bytes(&self) -> usize {
+        self.text_values.values().chain(self.ime_preedit.values()).map(String::len).sum()
+    }
+    /// Only controls owned by this retained subtree participate in its cache.
+    /// Measured extents and undo histories remain outputs/session data.
+    pub fn scoped_snapshot(&self, root: &crate::UiNode) -> Self {
+        fn visit(source: &UiControlState, target: &mut UiControlState, node: &crate::UiNode) {
+            if let Some(input) = node.control.text_input() {
+                let key = input.value_key.as_str();
+                if let Some(value) = source.text_values.get(key) { target.text_values.insert(key.into(), value.clone()); }
+                if let Some(value) = source.text_edit.get(key) { target.text_edit.insert(key.into(), *value); }
+                if let Some(value) = source.ime_preedit.get(key) { target.ime_preedit.insert(key.into(), value.clone()); }
+            }
+            if let Some(value) = source.scroll_offsets.get(&node.id).filter(|v| **v != [0.0; 2]) { target.scroll_offsets.insert(node.id.clone(), *value); }
+            if let Some(value) = source.text_selection.get(&node.id) { target.text_selection.insert(node.id.clone(), *value); }
+            for child in &node.children { visit(source, target, child); }
+        }
+        let mut scoped = Self::default();
+        visit(self, &mut scoped, root);
+        scoped
+    }
+    /// Geometry depends on values and scroll positions, never on caret or
+    /// selection. Construct this directly so cache lookups do not walk the
+    /// authored tree or scan every selectable transcript again.
+    pub fn geometry_snapshot(&self) -> Self {
+        let mut snapshot = Self {
+            text_values: self.text_values.clone(),
+            scroll_offsets: self.scroll_offsets.clone(),
+            ime_preedit: self.ime_preedit.clone(),
+            ..Self::default()
+        };
+        snapshot
+            .scroll_offsets
+            .retain(|_, offset| offset.iter().any(|value| *value != 0.0));
+        snapshot
+    }
+
     /// Returns the portion of control state that changes retained layout.
     ///
     /// Measured scroll extents are outputs of layout, not layout inputs. They
@@ -58,15 +99,22 @@ impl UiControlState {
     /// immediately invalidate its own measured frame and leave hit-testing on
     /// the provisional scroll range.
     pub fn layout_snapshot(&self) -> Self {
-        let mut snapshot = self.clone();
-        snapshot.scroll_max_offsets.clear();
+        // Do not clone undo histories only to discard them. A long editing
+        // session must not make an unchanged layout-key lookup more expensive.
+        let mut snapshot = Self {
+            text_values: self.text_values.clone(),
+            scroll_offsets: self.scroll_offsets.clone(),
+            text_edit: self.text_edit.clone(),
+            text_selection: self.text_selection.clone(),
+            ime_preedit: self.ime_preedit.clone(),
+            ..Self::default()
+        };
         snapshot
             .scroll_offsets
             .retain(|_, offset| offset.iter().any(|value| *value != 0.0));
-        // Caret, selection, and IME preedit affect the rendered text pass and
-        // therefore belong in the layout cache key. Dropping them here makes
-        // a focused field keep painting the previous caret after typing.
-        snapshot.text_history.clear();
+        // This shared snapshot retains edit state for paint consumers. The
+        // compositor normalizes caret/selection separately in its geometry
+        // key, while keeping IME text because it can change measured extent.
         snapshot
     }
 
@@ -80,6 +128,14 @@ impl UiControlState {
     /// from the application model on the next frame.
     pub fn has_text(&self, key: &str) -> bool {
         self.text_values.contains_key(key)
+    }
+
+    /// Releases one field's value, selection, IME and edit history together.
+    pub fn remove_text(&mut self, key: &str) {
+        self.text_values.remove(key);
+        self.text_edit.remove(key);
+        self.ime_preedit.remove(key);
+        self.text_history.remove(key);
     }
 
     pub fn set_ime_preedit(&mut self, key: impl Into<String>, value: impl Into<String>) {
@@ -779,6 +835,19 @@ impl UiVirtualRange {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rafui_regression_geometry_snapshot_excludes_caret_and_selection() {
+        let mut state = UiControlState::default();
+        state.set_text("name", "Camera", 100);
+        let original = state.geometry_snapshot();
+        state.set_cursor("name", 2, false);
+        state.set_selectable_cursor("output", "A long selectable transcript", 6, true);
+        state.set_scroll_metrics("list", [0.0, 500.0]);
+        assert_eq!(state.geometry_snapshot(), original);
+        state.scroll_by("list", [0.0, 20.0]);
+        assert_ne!(state.geometry_snapshot(), original);
+    }
 
     #[test]
     fn scroll_is_clamped_to_measured_content() {

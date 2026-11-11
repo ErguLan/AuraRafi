@@ -62,6 +62,10 @@ impl ExitConfirmationSurfaceHost {
         self.host.set_environment(environment);
     }
 
+    pub fn has_interactive_hover(&self) -> bool {
+        self.host.has_interactive_hover()
+    }
+
     pub fn process_input(
         &mut self,
         input: &NativeUiInputBridge,

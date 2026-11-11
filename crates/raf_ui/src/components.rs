@@ -4,27 +4,300 @@
 //! ordinary `UiNode`s, so authors can still add classes, controls, and event
 //! bindings without introducing a second widget system.
 
-use crate::controls::{UiSelect, UiTextInput};
-use crate::events::{UiEventBinding, UiEventKind};
+mod kit;
+mod media;
+mod states;
+pub use kit::{UiButtonVariant, UiComponents};
+pub use media::{UiImageView, UiImageViewShape};
+
+use crate::controls::{UiImageFit, UiSelect, UiTextInput};
+use crate::events::{UiAction, UiEventBinding, UiEventKind};
 use crate::geometry::UiSpacing;
 use crate::icons::{UiIcon, UiIconId, UiIconSize};
 use crate::layout::{UiAlign, UiFlow, UiJustify, UiLayout, UiSizeMode};
 use crate::node::{UiAccessibilityRole, UiNode, UiNodeKind};
-use crate::style::{StudioUiPalette, UiStyle, UiSurfaceMaterial};
-use crate::text::{UiFontWeight, UiTextOverflow, UiTextRole, UiTextStyle};
+use crate::style::{StudioUiPalette, UiControlKind, UiStyle, UiSurfaceMaterial, UiThemeMetrics};
+use crate::text::{
+    UiFontWeight, UiTextOverflow, UiTextRole, UiTextRun, UiTextRunContent, UiTextStyle,
+};
+use crate::visual::{UiContentAlign, UiIconPlacement, UiVisual};
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct UiSegmentedOption {
+    pub id: String,
+    pub label_key: String,
+    pub icon: Option<UiIconId>,
+    pub action: UiAction,
+    pub selected: bool,
+    pub show_label: bool,
+}
+
+impl UiSegmentedOption {
+    pub fn new(id: impl Into<String>, label_key: impl Into<String>, action: UiAction) -> Self {
+        Self {
+            id: id.into(),
+            label_key: label_key.into(),
+            icon: None,
+            action,
+            selected: false,
+            show_label: true,
+        }
+    }
+
+    pub fn with_icon(mut self, icon: UiIconId) -> Self {
+        self.icon = Some(icon);
+        self
+    }
+
+    pub fn with_selected(mut self, selected: bool) -> Self {
+        self.selected = selected;
+        self
+    }
+
+    pub fn with_icon_only(mut self) -> Self {
+        self.show_label = false;
+        self
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiSegmentedOrientation {
+    Horizontal,
+    Vertical,
+}
+
+/// Shared group recipe for mutually exclusive actions such as viewport tools.
+pub fn segmented_group(
+    id: impl Into<String>,
+    options: impl IntoIterator<Item = UiSegmentedOption>,
+    orientation: UiSegmentedOrientation,
+    palette: StudioUiPalette,
+    theme: UiThemeMetrics,
+) -> UiNode {
+    let id = id.into();
+    let tokens = palette.tokens();
+    let chrome = tokens.chrome();
+    let metrics = theme.for_control(UiControlKind::Button);
+    let options = options.into_iter().collect::<Vec<_>>();
+    let option_count = options.len();
+    let mut group = UiNode::new(id.clone(), UiNodeKind::Panel)
+        .with_class("segmented-group")
+        .with_layout(UiLayout {
+            flow: match orientation {
+                UiSegmentedOrientation::Horizontal => UiFlow::Row,
+                UiSegmentedOrientation::Vertical => UiFlow::Column,
+            },
+            align_items: UiAlign::Center,
+            gap: 0.0,
+            ..UiLayout::fit_content()
+        });
+
+    for (index, option) in options.into_iter().enumerate() {
+        let first = index == 0;
+        let last = index + 1 == option_count;
+        let single = first && last;
+        let radius = metrics.corner_radius.max(0.0);
+        let corners = match orientation {
+            UiSegmentedOrientation::Horizontal => [
+                if first || single { radius } else { 0.0 },
+                if last || single { radius } else { 0.0 },
+                if last || single { radius } else { 0.0 },
+                if first || single { radius } else { 0.0 },
+            ],
+            UiSegmentedOrientation::Vertical => [
+                if first || single { radius } else { 0.0 },
+                if first || single { radius } else { 0.0 },
+                if last || single { radius } else { 0.0 },
+                if last || single { radius } else { 0.0 },
+            ],
+        };
+        let mut button = UiNode::new(option.id.clone(), UiNodeKind::Button)
+            .with_class(if option.selected {
+                "segmented-option segmented-option-selected"
+            } else {
+                "segmented-option"
+            })
+            .with_layout(UiLayout {
+                flow: UiFlow::Row,
+                align_items: UiAlign::Center,
+                justify_content: UiJustify::Center,
+                padding: UiSpacing::xy(metrics.horizontal_padding, 0.0),
+                ..UiLayout::fit_content().fixed_height(metrics.height)
+            })
+            .with_visual(UiVisual {
+                corners: Some(corners),
+                content: crate::visual::UiContentLayout {
+                    align: UiContentAlign::Center,
+                    icon_placement: UiIconPlacement::Start,
+                    gap: metrics.icon_gap,
+                },
+                ..UiVisual::default()
+            })
+            .with_style(UiStyle {
+                fill: if option.selected {
+                    tokens.selection
+                } else {
+                    tokens.surface_alt
+                },
+                border: if option.selected {
+                    tokens.accent
+                } else {
+                    tokens.border
+                },
+                text: tokens.text,
+                border_width: 1.0,
+                radius: metrics.corner_radius,
+                opacity: 1.0,
+            })
+            .with_tooltip_key(option.label_key.clone())
+            .with_accessibility_label_key(option.label_key.clone())
+            .with_accessibility_role(UiAccessibilityRole::Tab)
+            .with_accessibility_selected(option.selected)
+            .focusable()
+            .with_event(UiEventBinding {
+                event: UiEventKind::Click,
+                action: option.action,
+            });
+        if let Some(icon) = option.icon {
+            button = button.with_icon(UiIcon::new(icon).with_size(UiIconSize::Toolbar).with_tint(
+                if option.selected {
+                    chrome.icon_accent
+                } else {
+                    chrome.icon_muted
+                },
+            ));
+        }
+        if option.show_label {
+            button = button
+                .with_text_key(option.label_key)
+                .with_text_style(UiTextStyle::button(tokens.text_muted));
+        }
+        group = group.with_child(button);
+    }
+    group
+}
+
+/// Thumbnail image recipe that keeps the crop and visible rounded clip on the
+/// same retained node.
+pub fn thumbnail_image(
+    id: impl Into<String>,
+    source_key: impl Into<String>,
+    fit: crate::controls::UiImageFit,
+    layout: UiLayout,
+    corner_radius: f32,
+) -> UiNode {
+    let mut node = UiNode::new(id, UiNodeKind::Image).with_layout(layout);
+    set_thumbnail_image(&mut node, source_key, fit, corner_radius);
+    node.with_class("thumbnail-image")
+}
+
+/// Changes an existing retained node into an image without replacing its id,
+/// classes, layout, handlers, accessibility, or interaction state.
+pub fn set_thumbnail_image(
+    node: &mut UiNode,
+    source_key: impl Into<String>,
+    fit: UiImageFit,
+    corner_radius: f32,
+) {
+    UiImageView::new(source_key).fit(fit)
+        .shape(UiImageViewShape::Rounded(corner_radius)).apply_to(node);
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiStatusTone {
+    Neutral,
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+/// Honest state badge recipe; callers provide a localized key for a real
+/// loading, ready, unavailable, or error state.
+pub fn status_badge(
+    id: impl Into<String>,
+    label_key: impl Into<String>,
+    tone: UiStatusTone,
+    palette: StudioUiPalette,
+    theme: UiThemeMetrics,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let metrics = theme.for_control(UiControlKind::Button);
+    let color = match tone {
+        UiStatusTone::Neutral => tokens.text_muted,
+        UiStatusTone::Info => tokens.info,
+        UiStatusTone::Success => tokens.positive,
+        UiStatusTone::Warning => tokens.warning,
+        UiStatusTone::Error => tokens.danger,
+    };
+    UiNode::new(id, UiNodeKind::Label)
+        .with_class("status-badge")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            padding: UiSpacing::xy(metrics.horizontal_padding, 0.0),
+            ..UiLayout::fit_content().fixed_height(metrics.height)
+        })
+        .with_style(UiStyle {
+            fill: [color[0], color[1], color[2], 42],
+            border: color,
+            text: color,
+            border_width: 1.0,
+            radius: metrics.corner_radius,
+            opacity: 1.0,
+        })
+        .with_text_key(label_key)
+        .with_text_style(UiTextStyle::body(color))
+        .with_accessibility_role(UiAccessibilityRole::Status)
+        .with_visual(UiVisual {
+            corners: Some([metrics.corner_radius; 4]),
+            ..UiVisual::default()
+        })
+}
+
+/// Builds a real retained row from independently styled text fragments.
+///
+/// Each fragment remains an ordinary label, so translation and literal
+/// runtime values keep their existing resolution paths. Runs stay on one row;
+/// use multiple rows when the content must wrap between fragments.
+pub fn inline_text_row(id: impl Into<String>, runs: impl IntoIterator<Item = UiTextRun>) -> UiNode {
+    let id = id.into();
+    let mut row = UiNode::new(id.clone(), UiNodeKind::Panel)
+        .with_class("inline-text-row")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Baseline,
+            ..UiLayout::fit_content()
+        });
+
+    for (index, run) in runs.into_iter().enumerate() {
+        let mut label = UiNode::new(format!("{id}.run-{index}"), UiNodeKind::Label)
+            .with_layout(UiLayout::fit_content())
+            .with_text_style(run.style)
+            .with_text_overflow(UiTextOverflow::Clip);
+        label = match run.content {
+            UiTextRunContent::Key(key) => label.with_text_key(key),
+            UiTextRunContent::Value(value) => label.with_text_value(value),
+        };
+        row = row.with_child(label);
+    }
+
+    row
+}
 
 pub fn icon_button(
     id: impl Into<String>,
     command: impl Into<String>,
     tooltip_key: impl Into<String>,
 ) -> UiNode {
+    let tooltip_key = tooltip_key.into();
     UiNode::new(id, UiNodeKind::Button)
         .with_class("icon-button")
         .with_layout(UiLayout::fixed(32.0, 32.0))
         .focusable()
         .with_accessibility_role(UiAccessibilityRole::Button)
-        .with_tooltip_key(tooltip_key)
-        .with_accessibility_label_key("ui.icon_button")
+        .with_tooltip_key(tooltip_key.clone())
+        .with_accessibility_label_key(tooltip_key)
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 

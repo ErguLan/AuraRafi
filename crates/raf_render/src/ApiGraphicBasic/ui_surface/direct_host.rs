@@ -8,16 +8,20 @@ use std::sync::Arc;
 
 use raf_core::{CaptureMode, InputOwner, InputRouter, PointerButton};
 
-use super::compilation::{UiSurfaceCompilationCache, UiSurfaceCompileMetrics};
+use super::compilation::{
+    update_surface_node, UiSurfaceCompilationCache, UiSurfaceCompileMetrics, UiSurfaceUpdateImpact,
+};
 use super::{
-    NativeUiInputBridge, UiDispatchedAction, UiInputState, UiSurface, UiSurfaceDiagnostics,
-    UiSurfaceDrawList, UiSurfaceFrame, UiSurfaceGpuMetrics, UiSurfaceGpuRenderer,
-    UiSurfaceGpuSharedResources, UiSurfaceImageStore, UiSurfaceSession,
+    NativeGraphicsContext, NativeUiInputBridge, UiDispatchedAction, UiDocumentUpdate,
+    UiDocumentUpdateError, UiInputState, UiSurface, UiSurfaceDiagnostics, UiSurfaceDrawList,
+    UiSurfaceFrame, UiSurfaceGpuMetrics, UiSurfaceGpuRenderer, UiSurfaceGpuSharedResources,
+    UiSurfaceImageStore, UiSurfaceSession,
 };
 use raf_ui::UiEnvironment;
 
 use crate::api_graphic_basic::canvas_presenter::CanvasTargetRect;
 use crate::api_graphic_basic::capabilities::GraphicsMemoryBudget;
+use crate::api_graphic_basic::device::GpuTextureView;
 
 pub struct DirectUiSurfaceHost {
     surface: UiSurface,
@@ -29,6 +33,7 @@ pub struct DirectUiSurfaceHost {
     clear_color: [u8; 4],
     compilation: UiSurfaceCompilationCache,
     last_gpu_metrics: UiSurfaceGpuMetrics,
+    automation: Option<raf_ui::automation::UiAutomationInbox>,
 }
 
 impl DirectUiSurfaceHost {
@@ -74,6 +79,7 @@ impl DirectUiSurfaceHost {
             clear_color,
             compilation: UiSurfaceCompilationCache::default(),
             last_gpu_metrics: UiSurfaceGpuMetrics::default(),
+            automation: None,
         }
     }
 
@@ -89,6 +95,7 @@ impl DirectUiSurfaceHost {
 
     pub fn set_surface(&mut self, surface: UiSurface) {
         if self.surface != surface {
+            if let Some(inbox) = self.automation.take() { inbox.cancel(); }
             self.surface = surface;
             self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
             self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
@@ -132,8 +139,36 @@ impl DirectUiSurfaceHost {
         true
     }
 
+    /// Applies one typed document update. Paint-only changes refresh the
+    /// retained snapshot; visibility, localization keys, image replacement,
+    /// and text that can affect intrinsic extent rebuild layout.
+    pub fn update_node(
+        &mut self,
+        id: &str,
+        update: UiDocumentUpdate,
+    ) -> Result<bool, UiDocumentUpdateError> {
+        let impact = update_surface_node(&mut self.surface, id, update)?;
+        if impact == UiSurfaceUpdateImpact::NoChange {
+            return Ok(false);
+        }
+        if impact == UiSurfaceUpdateImpact::Layout {
+            self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
+        } else {
+            self.compilation.invalidate_paint_snapshot();
+        }
+        self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
+        Ok(true)
+    }
+
     pub fn session(&self) -> &UiSurfaceSession {
         &self.session
+    }
+
+    /// Reads already compiled geometry; never triggers layout or rendering.
+    pub fn accessibility_frame(&self) -> Option<Arc<UiSurfaceFrame>> { self.compilation.cached_frame() }
+
+    pub fn automation_inbox(&mut self) -> raf_ui::automation::UiAutomationInbox {
+        self.automation.get_or_insert_with(Default::default).clone()
     }
 
     /// Mutable access to transient focus, text, and scroll state. The retained
@@ -169,7 +204,7 @@ impl DirectUiSurfaceHost {
     }
 
     pub fn has_active_motion(&self) -> bool {
-        self.surface.retained_tooltips && self.session.has_active_motion()
+        self.session.has_active_motion()
     }
 
     pub fn has_active_text_repeat(&self) -> bool {
@@ -199,12 +234,78 @@ impl DirectUiSurfaceHost {
         &mut self.images
     }
 
+    /// Registers a GPU-produced image for image nodes that reference `key`.
+    /// The public host surface stays typed and does not expose a WGPU device.
+    pub fn register_external_image(
+        &mut self,
+        graphics: &NativeGraphicsContext<'_>,
+        key: impl Into<String>,
+        view: GpuTextureView,
+        size: [u32; 2],
+        revision: u64,
+    ) -> Result<(), String> {
+        self.compositor
+            .register_external_image(graphics.device(), key, view, size, revision)?;
+        self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
+        Ok(())
+    }
+
     pub fn compilation_metrics(&self) -> UiSurfaceCompileMetrics {
         self.compilation.metrics()
     }
 
+    pub fn remove_external_image(&mut self, key: &str) -> bool {
+        let removed = self.compositor.remove_external_image(key);
+        if removed {
+            self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
+        }
+        removed
+    }
+
     pub fn last_gpu_metrics(&self) -> UiSurfaceGpuMetrics {
         self.last_gpu_metrics
+    }
+
+    pub fn performance_snapshot(&self) -> raf_ui::UiPerformanceSnapshot {
+        let mut snapshot = self.session.performance.snapshot();
+        snapshot.append(self.images.performance_snapshot());
+        snapshot
+    }
+
+    pub fn record_document_work(
+        &mut self,
+        elapsed: std::time::Duration,
+        cause: raf_ui::UiWorkCause,
+    ) {
+        super::cost_observation::observe(
+            &mut self.session.performance,
+            &self.surface.id,
+            raf_ui::UiWorkPhase::Document,
+            cause,
+            elapsed,
+            self.surface.root.children.len(),
+            0,
+            false,
+        );
+    }
+
+    pub fn record_document_region(
+        &mut self,
+        id: &str,
+        elapsed: std::time::Duration,
+        nodes: usize,
+        reused: bool,
+    ) {
+        super::cost_observation::observe(
+            &mut self.session.performance,
+            id,
+            raf_ui::UiWorkPhase::Document,
+            raf_ui::UiWorkCause::Document,
+            elapsed,
+            nodes,
+            0,
+            reused,
+        );
     }
 
     pub fn build_frame<F>(&mut self, size: [u32; 2], resolve: F) -> UiSurfaceFrame
@@ -253,7 +354,9 @@ impl DirectUiSurfaceHost {
             raster_scale,
             self.clear_color,
         );
-        self.session.process_input(&self.surface, &frame, input)
+        let mut actions = self.automation.as_ref().map(|inbox| inbox.drain(&self.surface.root, &mut self.session.interaction)).unwrap_or_default();
+        actions.extend(self.session.process_input(&self.surface, &frame, input));
+        actions
     }
 
     /// Routes one native snapshot through the shared ownership arbiter before
@@ -339,6 +442,15 @@ impl DirectUiSurfaceHost {
     }
 
     /// Renders a logical retained layout into a potentially denser physical
+    pub fn rasterize_cpu_texture<F>(&mut self, size: [u32; 2], renderer: &mut super::UiSurfaceCpuRenderer, mut resolve: F) -> Vec<u8>
+    where F: FnMut(&str) -> String {
+        let compiled = self.compilation.compile_with_paint_revision(&self.surface,&mut self.session,self.surface_revision,size,1.0,self.clear_color,self.paint_revision,|key|resolve(key));
+        for quad in &compiled.draw_list.images { self.images.ensure_builtin_key(&quad.source_key); }
+        renderer.render(&compiled.draw_list,&self.session.text_atlas,&self.images,size,self.clear_color);
+        renderer.pixels().to_vec()
+    }
+
+    /// Renders a logical retained layout into a potentially denser physical
     /// texture. This removes the post-render upscale blur on HiDPI displays
     /// without changing pointer coordinates or document layout values.
     pub fn render_at_scale<F>(
@@ -368,6 +480,7 @@ impl DirectUiSurfaceHost {
         for quad in &compiled.draw_list.images {
             self.images.ensure_builtin_key(&quad.source_key);
         }
+        let submission_started = std::time::Instant::now();
         let metrics = self.compositor.render_at_scale_with_revision(
             device,
             queue,
@@ -379,6 +492,18 @@ impl DirectUiSurfaceHost {
             &mut self.session.text_atlas,
             &self.images,
             self.clear_color,
+        );
+        super::cost_observation::observe(
+            &mut self.session.performance,
+            &self.surface.id,
+            raf_ui::UiWorkPhase::Submission,
+            raf_ui::UiWorkCause::Resources,
+            submission_started.elapsed(),
+            0,
+            metrics
+                .buffer_upload_bytes
+                .saturating_add(metrics.image_upload_bytes),
+            metrics.geometry_cache_hit,
         );
         self.last_gpu_metrics = metrics;
         DirectUiSurfaceFrame {
@@ -419,6 +544,7 @@ impl DirectUiSurfaceHost {
         for quad in &compiled.draw_list.images {
             self.images.ensure_builtin_key(&quad.source_key);
         }
+        let submission_started = std::time::Instant::now();
         let metrics = self.compositor.encode_in_rect_with_revision(
             device,
             queue,
@@ -432,6 +558,18 @@ impl DirectUiSurfaceHost {
             &mut self.session.text_atlas,
             &self.images,
             load,
+        );
+        super::cost_observation::observe(
+            &mut self.session.performance,
+            &self.surface.id,
+            raf_ui::UiWorkPhase::Submission,
+            raf_ui::UiWorkCause::Resources,
+            submission_started.elapsed(),
+            0,
+            metrics
+                .buffer_upload_bytes
+                .saturating_add(metrics.image_upload_bytes),
+            metrics.geometry_cache_hit,
         );
         self.last_gpu_metrics = metrics;
         DirectUiSurfaceFrame {

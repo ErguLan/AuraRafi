@@ -237,11 +237,12 @@ uploads, mip policy, GPU sampler choice, CPU recovery sampling, and final
 logical-to-physical geometry. RafUI owns only serializable semantics, layout,
 style, focus, actions, and text/icon requests.
 
-Technical icons resolve through `UiIconId` and are generated from compact
-vector-like primitives into a 64px source image. They are not tiny PNGs scaled
-up by a panel. Text and icons have independent density/sampling policies, and
-CPU recovery uses nearest sampling for built-in icons so the fallback does not
-reintroduce the blur that the GPU path removed.
+Technical icons resolve through `UiIconId` and the shared semantic catalog.
+Development tooling generates the registered 64px SVG/PNG family; the runtime
+does not duplicate each icon as procedural Rust artwork. Text and images have
+independent sampling policies. The GPU uses padded, budgeted icon pages, while
+CPU recovery consumes the same registered pixels. Per-use image sampling and
+physical density are separate from logical layout.
 
 The font registry is now located here as well. It selects the bundled Ubuntu
 Regular, Medium, or Bold outline for each semantic request; the UFL license is

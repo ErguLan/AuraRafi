@@ -64,7 +64,7 @@ pub struct SceneFrameCapture {
 
 /// A backend-neutral scene texture result with a WGPU view for native
 /// presentation hosts.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct GpuTextureView {
     view: Arc<wgpu::TextureView>,
     handle: TextureHandle,
@@ -1189,11 +1189,16 @@ struct GpuSceneState {
     mesh_bind_group_layout: wgpu::BindGroupLayout,
     scene_texture_bind_group_layout: wgpu::BindGroupLayout,
     scene_texture_sampler: wgpu::Sampler,
+    ui_texture_sampler: wgpu::Sampler,
     fallback_texture_bind_group: Arc<wgpu::BindGroup>,
     line_bind_group_layout: wgpu::BindGroupLayout,
     overlay_bind_group_layout: wgpu::BindGroupLayout,
     mesh_pipeline: wgpu::RenderPipeline,
     mesh_two_sided_pipeline: wgpu::RenderPipeline,
+    ui_surface_pipeline: Option<wgpu::RenderPipeline>,
+    ui_overlay_pipeline: Option<wgpu::RenderPipeline>,
+    ui_mode: Option<bool>,
+    ui_premultiplied: bool,
     mesh_instanced_pipeline: wgpu::RenderPipeline,
     mesh_instanced_two_sided_pipeline: wgpu::RenderPipeline,
     line_pipeline_depth: wgpu::RenderPipeline,
@@ -1204,6 +1209,7 @@ struct GpuSceneState {
     mesh_cache_limit: usize,
     texture_registry: TextureRegistry<GpuSceneTexture>,
     texture_handles: HashMap<PathBuf, TextureHandle>,
+    external_texture_bindings: HashMap<usize, (GpuTextureView, Arc<wgpu::BindGroup>)>,
     texture_cache_limit: usize,
     texture_cache_budget_bytes: u64,
     mesh_uniform_reuse: UniformReuse<MeshUniforms>,
@@ -1232,6 +1238,7 @@ fn create_scene_mesh_pipeline(
     color_format: wgpu::TextureFormat,
     instanced: bool,
     two_sided: bool,
+    ui_mode: Option<bool>,
 ) -> wgpu::RenderPipeline {
     let (label, vertex_entry, fragment_entry) = match (instanced, two_sided) {
         (false, false) => ("ApiGraphicBasic.MeshPipeline", "mesh_vs", "mesh_fs"),
@@ -1287,8 +1294,8 @@ fn create_scene_mesh_pipeline(
         },
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
-            depth_write_enabled: true,
-            depth_compare: wgpu::CompareFunction::LessEqual,
+            depth_write_enabled: ui_mode.is_none(),
+            depth_compare: if ui_mode == Some(true) { wgpu::CompareFunction::Always } else { wgpu::CompareFunction::LessEqual },
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -1405,6 +1412,7 @@ impl GpuSceneState {
             color_format,
             false,
             false,
+            None,
         );
         let mesh_two_sided_pipeline = create_scene_mesh_pipeline(
             device,
@@ -1413,6 +1421,7 @@ impl GpuSceneState {
             color_format,
             false,
             true,
+            None,
         );
         let mesh_instanced_pipeline = create_scene_mesh_pipeline(
             device,
@@ -1421,6 +1430,7 @@ impl GpuSceneState {
             color_format,
             true,
             false,
+            None,
         );
         let mesh_instanced_two_sided_pipeline = create_scene_mesh_pipeline(
             device,
@@ -1429,7 +1439,9 @@ impl GpuSceneState {
             color_format,
             true,
             true,
+            None,
         );
+        let ui_texture_sampler=device.create_sampler(&wgpu::SamplerDescriptor{label:Some("ApiGraphicBasic.UiSurfaceSampler"),address_mode_u:wgpu::AddressMode::ClampToEdge,address_mode_v:wgpu::AddressMode::ClampToEdge,mag_filter:wgpu::FilterMode::Linear,min_filter:wgpu::FilterMode::Linear,..Default::default()});
 
         let line_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ApiGraphicBasic.LinePipelineLayout"),
@@ -1571,11 +1583,16 @@ impl GpuSceneState {
             mesh_bind_group_layout,
             scene_texture_bind_group_layout,
             scene_texture_sampler,
+            ui_texture_sampler,
             fallback_texture_bind_group: fallback_texture.bind_group,
             line_bind_group_layout,
             overlay_bind_group_layout,
             mesh_pipeline,
             mesh_two_sided_pipeline,
+            ui_surface_pipeline:None,
+            ui_overlay_pipeline:None,
+            ui_mode: None,
+            ui_premultiplied: false,
             mesh_instanced_pipeline,
             mesh_instanced_two_sided_pipeline,
             line_pipeline_depth,
@@ -1586,6 +1603,7 @@ impl GpuSceneState {
             mesh_cache_limit: memory_budget.mesh_cache_entries as usize,
             texture_registry: TextureRegistry::new(memory_budget.gpu_bytes / 8),
             texture_handles: HashMap::new(),
+            external_texture_bindings: HashMap::new(),
             texture_cache_limit: (memory_budget.texture_cache_entries as usize).min(512),
             texture_cache_budget_bytes: memory_budget.gpu_bytes / 8,
             mesh_uniform_reuse: UniformReuse::default(),
@@ -1732,6 +1750,21 @@ impl GpuSceneState {
             .unwrap_or_else(|| Arc::clone(&self.fallback_texture_bind_group))
     }
 
+    fn external_texture_bind_group(&mut self, device: &wgpu::Device, texture: &GpuTextureView) -> Arc<wgpu::BindGroup> {
+        let key = Arc::as_ptr(&texture.view) as usize;
+        self.external_texture_bindings.entry(key).or_insert_with(|| {
+            let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("ApiGraphicBasic.GameUiSceneBinding"),
+                layout: &self.scene_texture_bind_group_layout,
+                entries: &[
+                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(texture.as_wgpu()) },
+                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.ui_texture_sampler) },
+                ],
+            });
+            (texture.clone(), Arc::new(binding))
+        }).1.clone()
+    }
+
     fn render(
         &mut self,
         device: &wgpu::Device,
@@ -1740,6 +1773,15 @@ impl GpuSceneState {
     ) -> Option<(SceneFrameOutput, SceneFrameMetrics)> {
         let frame_start = Instant::now();
         self.frame_index = self.frame_index.wrapping_add(1).max(1);
+        self.ui_mode=None;
+        self.ui_premultiplied=false;
+        if self.ui_surface_pipeline.is_none() && frame.commands.commands().iter().any(|command|matches!(command,GraphicCommand::SetPipeline(BasicPipelineKind::UiSurface|BasicPipelineKind::UiSurfaceOverlay))) {
+            let shader=device.create_shader_module(wgpu::ShaderModuleDescriptor{label:Some("ApiGraphicBasic.UiSurfaceShader"),source:wgpu::ShaderSource::Wgsl(Cow::Owned(basic_scene_shader()))});
+            let layout=device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("ApiGraphicBasic.UiSurfaceLayout"),bind_group_layouts:&[&self.mesh_bind_group_layout,&self.scene_texture_bind_group_layout],push_constant_ranges:&[]});
+            self.ui_surface_pipeline=Some(create_scene_mesh_pipeline(device,&shader,&layout,self.color_format,false,true,Some(false)));
+            self.ui_overlay_pipeline=Some(create_scene_mesh_pipeline(device,&shader,&layout,self.color_format,false,true,Some(true)));
+        }
+        self.external_texture_bindings.retain(|key,_| frame.commands.gpu_textures().any(|view| Arc::as_ptr(&view.view) as usize == *key));
         let target_rebuilt = self.ensure_target(device, frame.width, frame.height);
         let timestamp_plan = self.gpu_timing.as_mut().and_then(|timing| {
             timing.collect_ready(device);
@@ -1885,7 +1927,10 @@ impl GpuSceneState {
             for command in frame.commands.commands() {
                 match command {
                     GraphicCommand::Clear { .. } => {}
-                    GraphicCommand::SetPipeline(pipeline) => current_pipeline = *pipeline,
+                    GraphicCommand::SetPipeline(pipeline) => {
+                        current_pipeline = *pipeline;
+                        self.ui_mode = match pipeline { BasicPipelineKind::UiSurface=>Some(false),BasicPipelineKind::UiSurfaceOverlay=>Some(true),_=>None };
+                    }
                     GraphicCommand::SetShadowReceiver(value) => self.shadow_receiver = *value,
                     GraphicCommand::DrawMesh {
                         mesh_id,
@@ -1897,10 +1942,14 @@ impl GpuSceneState {
                             continue;
                         };
                         let cacheable = frame.commands.mesh_cacheable(*mesh_id);
-                        let texture_bind_group = texture_id
-                            .and_then(|id| frame.commands.texture(id))
-                            .map(|texture| self.scene_texture_bind_group(texture))
-                            .unwrap_or_else(|| Arc::clone(&self.fallback_texture_bind_group));
+                        self.ui_premultiplied = self.ui_mode.is_some() && texture_id.and_then(|id|frame.commands.gpu_texture(id)).is_some();
+                        let texture_bind_group = if let Some(view) = texture_id.and_then(|id| frame.commands.gpu_texture(id)) {
+                            self.external_texture_bind_group(device, view)
+                        } else {
+                            texture_id.and_then(|id| frame.commands.texture(id))
+                                .map(|texture| self.scene_texture_bind_group(texture))
+                                .unwrap_or_else(|| Arc::clone(&self.fallback_texture_bind_group))
+                        };
                         self.draw_mesh(
                             device,
                             queue,
@@ -2137,7 +2186,9 @@ impl GpuSceneState {
         instanced: bool,
         two_sided: bool,
     ) {
-        if let Some(shadows) = self.shadows.as_ref() {
+        if let Some(overlay) = self.ui_mode {
+            pass.set_pipeline(if overlay { self.ui_overlay_pipeline.as_ref().expect("prepared UI pipeline") } else { self.ui_surface_pipeline.as_ref().expect("prepared UI pipeline") });
+        } else if let Some(shadows) = self.shadows.as_ref() {
             pass.set_pipeline(
                 &shadows.pipelines[usize::from(instanced) * 2 + usize::from(two_sided)],
             );
@@ -2266,7 +2317,7 @@ impl GpuSceneState {
                 .unwrap_or([0.0; 4]),
             params: [
                 if lit { 1.0 } else { 0.0 },
-                if texture_enabled { 1.0 } else { 0.0 },
+                if self.ui_premultiplied { 2.0 } else if texture_enabled { 1.0 } else { 0.0 },
                 f32::from(frame.commands.environment.is_some()),
                 f32::from(self.shadows.is_some() && self.shadow_receiver),
             ],
@@ -2687,7 +2738,7 @@ impl GpuSceneState {
                 .unwrap_or([0.0; 4]),
             params: [
                 if lit { 1.0 } else { 0.0 },
-                if texture_enabled { 1.0 } else { 0.0 },
+                if self.ui_premultiplied { 2.0 } else if texture_enabled { 1.0 } else { 0.0 },
                 f32::from(frame.commands.environment.is_some()),
                 f32::from(self.shadows.is_some() && self.shadow_receiver),
             ],

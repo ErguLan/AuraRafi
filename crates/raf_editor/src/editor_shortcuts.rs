@@ -287,10 +287,9 @@ fn resolve_command(
     input: &InputSnapshot,
     context: ShortcutContext,
 ) -> Option<&'static str> {
-    if context.keyboard_captured_by_text || context.modal_open {
-        return None;
-    }
+    if context.modal_open { return None; }
     specs.iter().find_map(|shortcut| {
+        if context.keyboard_captured_by_text && shortcut.command != command::PROJECT_SAVE { return None; }
         if shortcut.scope == ShortcutScope::Viewport && !context.viewport_active {
             return None;
         }
@@ -371,6 +370,14 @@ mod tests {
         }
     }
 
+    #[test]
+    fn save_remains_global_while_text_is_focused() {
+        let mut focused = context();
+        focused.keyboard_captured_by_text = true;
+        assert_eq!(global_command(&input_with(InputKey::S, false), focused), Some(command::PROJECT_SAVE));
+        focused.modal_open = true;
+        assert_eq!(global_command(&input_with(InputKey::S, false), focused), None);
+    }
     #[test]
     fn global_shortcuts_share_the_application_command_ids() {
         assert_eq!(

@@ -201,10 +201,10 @@ fn electronics(palette: StudioUiPalette, project: &Project) -> UiNode {
         "app.electronics_pcb_grid_step",
         "project-settings.electronics-pcb-grid-step",
         project.settings.electronics_pcb_grid_step_mm,
-        1.0,
+        0.05,
         100.0,
-        1.0,
-        format!("{:.0} mm", project.settings.electronics_pcb_grid_step_mm),
+        0.05,
+        format!("{:.2} mm", project.settings.electronics_pcb_grid_step_mm),
         false,
     ))
     .with_child(toggle_row(

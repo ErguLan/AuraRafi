@@ -41,6 +41,8 @@ pub struct GuestRayHit {
 }
 
 pub enum HostOperation {
+    /// Optional typed UI imports; executor adapters still enforce guest memory and fuel limits.
+    GameUi(crate::ui_api::UiImport),
     Owner,
     Entity(String),
     EntityParameter(String),
@@ -216,6 +218,7 @@ impl GuestImports for HostBridge<'_, '_> {
         let handles = &mut *self.handles;
         let none = HostReply::Value(ScriptValue::None);
         Ok(match operation {
+            HostOperation::GameUi(operation)=>HostReply::Value(crate::ui_api::dispatch_import(ctx,operation)?),
             HostOperation::Input(query) => HostReply::Value(input_value(ctx, query)?),
             HostOperation::SetCursor(mode, visible) => {
                 ctx.set_cursor(mode, visible)?;

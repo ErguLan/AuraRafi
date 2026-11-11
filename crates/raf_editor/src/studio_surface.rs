@@ -12,7 +12,7 @@ use raf_render::api_graphic_basic::ui_surface::{
     UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurface, UiSurfaceMaterial, UiTextInput,
     UiTextRole, UiTextStyle, UiTokens,
 };
-use raf_ui::UiFontWeight;
+use raf_ui::{UiFontWeight, UiIcon, UiIconId, UiIconSize};
 use serde_json::json;
 use std::path::PathBuf;
 
@@ -35,6 +35,15 @@ pub struct HubSurfaceProject {
     pub path: PathBuf,
     pub project_type: ProjectType,
     pub last_opened_label: String,
+}
+
+/// A folder chosen through the native picker that is not a project yet. The
+/// Hub asks for confirmation before adopting it as a project root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HubPendingAdopt {
+    pub path: PathBuf,
+    pub name: String,
+    pub project_type: ProjectType,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +73,31 @@ pub struct HubSurfaceModel {
     pub create_active: bool,
     pub create_type_menu_open: bool,
     pub create_with_agent: bool,
+    /// True when `create_path` points at an existing project folder. The Hub
+    /// reuses the create row as the "open existing project" entry point, so
+    /// the primary action flips from Create to Open.
+    pub create_path_is_project: bool,
+    /// True while the project name field owns the keyboard. The host mirrors
+    /// focus so the retained name pill can draw its focus ring.
+    pub create_name_focused: bool,
+    /// Transient hover state for the name pill. The host mirrors it so the
+    /// whole pill (sparkle, padding and rounded corners) reacts as one unit.
+    pub create_name_hovered: bool,
+    /// Same contract for the location pill.
+    pub create_path_hovered: bool,
+    /// True while the host is scanning the filesystem in the background. The
+    /// Hub shows a loading state instead of "No projects found" on first paint.
+    pub discovery_pending: bool,
+    /// Two-step confirmation for destructive context-menu rows. The first
+    /// activation arms the row; the second one removes the project.
+    pub context_confirm_forget: bool,
+    /// "Get in" dropdown: new project, open folder, or open a `.ron` file.
+    pub get_in_menu_open: bool,
+    pub get_in_menu_position: Option<[f32; 2]>,
+    /// Folder awaiting the "create a project here" confirmation.
+    pub pending_adopt: Option<HubPendingAdopt>,
+    /// Human-readable reason shown when a project cannot be opened.
+    pub pending_open_error: Option<String>,
     pub opening_project: Option<String>,
     pub opening_error: Option<String>,
     pub opening_step: u8,
@@ -82,26 +116,35 @@ pub enum HubProjectCreateError {
 /// share it so the menu can be clamped inside the window and dismissed by a
 /// press outside the exact same rectangle.
 pub(crate) const HUB_CONTEXT_MENU_SIZE: [f32; 2] = [236.0, 180.0];
+/// Fixed logical size of the "Get in" dropdown.
+pub(crate) const HUB_GET_IN_MENU_SIZE: [f32; 2] = [252.0, 112.0];
 const HUB_CONTEXT_MENU_MARGIN: f32 = 8.0;
 
-/// Clamps a context-menu anchor to the current logical window so the menu is
-/// never cut off at the bottom or right edge.
-pub(crate) fn clamp_context_menu_position(position: [f32; 2], window_size: [f32; 2]) -> [f32; 2] {
-    let max_x = (window_size[0] - HUB_CONTEXT_MENU_SIZE[0] - HUB_CONTEXT_MENU_MARGIN)
-        .max(HUB_CONTEXT_MENU_MARGIN);
-    let max_y = (window_size[1] - HUB_CONTEXT_MENU_SIZE[1] - HUB_CONTEXT_MENU_MARGIN)
-        .max(HUB_CONTEXT_MENU_MARGIN);
+/// Clamps a menu anchor to the current logical window so the menu is never cut
+/// off at the bottom or right edge.
+pub(crate) fn clamp_menu_position(
+    position: [f32; 2],
+    window_size: [f32; 2],
+    size: [f32; 2],
+) -> [f32; 2] {
+    let max_x = (window_size[0] - size[0] - HUB_CONTEXT_MENU_MARGIN).max(HUB_CONTEXT_MENU_MARGIN);
+    let max_y = (window_size[1] - size[1] - HUB_CONTEXT_MENU_MARGIN).max(HUB_CONTEXT_MENU_MARGIN);
     [
         position[0].clamp(HUB_CONTEXT_MENU_MARGIN, max_x),
         position[1].clamp(HUB_CONTEXT_MENU_MARGIN, max_y),
     ]
 }
 
+/// Clamps the project context menu anchor.
+pub(crate) fn clamp_context_menu_position(position: [f32; 2], window_size: [f32; 2]) -> [f32; 2] {
+    clamp_menu_position(position, window_size, HUB_CONTEXT_MENU_SIZE)
+}
+
 fn hub_create_height(model: &HubSurfaceModel) -> f32 {
-    if model.create_error.is_some() {
-        112.0
+    if model.create_error.is_some() || model.create_path_is_project {
+        102.0
     } else {
-        64.0
+        52.0
     }
 }
 
@@ -157,6 +200,16 @@ impl Default for HubSurfaceModel {
             create_active: false,
             create_type_menu_open: false,
             create_with_agent: false,
+            create_path_is_project: false,
+            create_name_focused: false,
+            create_name_hovered: false,
+            create_path_hovered: false,
+            discovery_pending: false,
+            context_confirm_forget: false,
+            get_in_menu_open: false,
+            get_in_menu_position: None,
+            pending_adopt: None,
+            pending_open_error: None,
             opening_project: None,
             opening_error: None,
             opening_step: 0,
@@ -215,6 +268,34 @@ pub(crate) fn hub_visible_featured(
         .or_else(|| projects.first().cloned())
 }
 
+/// True when the Hub list is showing a filtered subset rather than the whole
+/// library. The empty states use this to distinguish "no projects yet" from
+/// "this search matched nothing".
+pub(crate) fn hub_is_filtering(model: &HubSurfaceModel) -> bool {
+    model.filter != HubSurfaceFilter::All || !model.search_query.trim().is_empty()
+}
+
+/// Number of project rows visible before the list starts scrolling.
+const HUB_LIST_VISIBLE_ROWS: usize = 7;
+/// Vertical footprint of one project row in the Hub list.
+const HUB_LIST_ROW_HEIGHT: f32 = 43.0;
+
+/// Copy for the showpiece and the list when nothing is visible. The Hub must
+/// not claim "no projects" while it is still scanning, nor when a search or
+/// filter simply matched nothing.
+fn hub_empty_copy(model: &HubSurfaceModel) -> (&'static str, Option<&'static str>) {
+    if model.discovery_pending && model.projects.is_empty() {
+        ("app.hub_loading_projects", None)
+    } else if hub_is_filtering(model) {
+        (
+            "app.hub_no_results_title",
+            Some("app.hub_no_results_subtitle"),
+        )
+    } else {
+        ("app.hub_empty_title", Some("app.hub_empty_subtitle"))
+    }
+}
+
 /// Builds a valid empty retained Hub document. Hosts should use
 /// [`build_hub_surface_with_model`] when project data is available.
 pub fn build_hub_surface(palette: StudioUiPalette) -> UiSurface {
@@ -229,6 +310,17 @@ pub fn build_hub_surface_with_model(
     model: &HubSurfaceModel,
 ) -> UiSurface {
     let tokens = hub_tokens(palette);
+    // Soft warm outline for the primary project-name pill, matching the design
+    // reference without competing with the orange primary action.
+    let accent_line = [tokens.accent[0], tokens.accent[1], tokens.accent[2], 140];
+    // Whole-pill hover wash. It keeps the rounded silhouette intact instead of
+    // letting a child control paint a rectangular block.
+    let raised_hover = [
+        tokens.surface_raised[0].saturating_add(10),
+        tokens.surface_raised[1].saturating_add(10),
+        tokens.surface_raised[2].saturating_add(10),
+        tokens.surface_raised[3],
+    ];
     let visible_projects = hub_visible_projects(model);
     let mut visible_model = model.clone();
     visible_model.projects = visible_projects.clone();
@@ -244,7 +336,28 @@ pub fn build_hub_surface_with_model(
         (model.context_project.as_ref(), model.context_menu_position)
     {
         let position = clamp_context_menu_position(position, model.window_size);
-        root = root.with_child(hub_context_menu_surface(palette, project, position));
+        root = root.with_child(hub_context_menu_surface(
+            palette,
+            project,
+            position,
+            model.context_confirm_forget,
+        ));
+    }
+
+    if let Some(position) = model
+        .get_in_menu_position
+        .filter(|_| model.get_in_menu_open)
+    {
+        let position = clamp_menu_position(position, model.window_size, HUB_GET_IN_MENU_SIZE);
+        root = root.with_child(hub_get_in_menu_surface(palette, position));
+    }
+
+    if let Some(adopt) = model.pending_adopt.as_ref() {
+        root = root.with_child(hub_adopt_overlay(palette, model, adopt));
+    }
+
+    if let Some(error) = model.pending_open_error.as_ref() {
+        root = root.with_child(hub_open_error_overlay(palette, model, error));
     }
 
     if model.opening_project.is_some() {
@@ -634,7 +747,7 @@ pub fn build_hub_surface_with_model(
                     fill: Some(tokens.surface_raised),
                     border: Some(tokens.border),
                     border_width: Some(1.0),
-                    radius: Some(5.0),
+                    radius: Some(10.0),
                     ..UiStylePatch::default()
                 },
             ),
@@ -652,7 +765,7 @@ pub fn build_hub_surface_with_model(
                 UiStylePatch {
                     border: Some(tokens.accent),
                     border_width: Some(1.0),
-                    radius: Some(5.0),
+                    radius: Some(10.0),
                     ..UiStylePatch::default()
                 },
             ),
@@ -831,10 +944,10 @@ pub fn build_hub_surface_with_model(
             UiStyleRule::new(
                 UiStyleSelector::Class("hub-create-form".to_string()),
                 UiStylePatch {
-                    fill: Some(tokens.surface),
-                    border: Some(tokens.border),
-                    border_width: Some(1.0),
-                    radius: Some(7.0),
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(0.0),
                     ..UiStylePatch::default()
                 },
             ),
@@ -848,12 +961,151 @@ pub fn build_hub_surface_with_model(
                 },
             ),
             UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-name-field".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(accent_line),
+                    border_width: Some(1.0),
+                    radius: Some(10.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-name-hovered".to_string()),
+                UiStylePatch {
+                    fill: Some(raised_hover),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-name-focused".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.focus),
+                    border_width: Some(2.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-name-input".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(0.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-name-input".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-name-input".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-location".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    radius: Some(10.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-location-hovered".to_string()),
+                UiStylePatch {
+                    fill: Some(raised_hover),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-path-input".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(0.0),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-path-input".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-path-input".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-location-button".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(8.0),
+                    text: Some(tokens.text_muted),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-location-button".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.surface_alt),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-location-button".to_string()),
+                UiStylePatch {
+                    border: Some(tokens.focus),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Focused),
+            UiStyleRule::new(
+                UiStyleSelector::Class("hub-create-submit".to_string()),
+                UiStylePatch {
+                    radius: Some(8.0),
+                    ..UiStylePatch::default()
+                },
+            ),
+            UiStyleRule::new(
                 UiStyleSelector::Class("hub-create-picker".to_string()),
                 UiStylePatch {
                     fill: Some(tokens.surface_raised),
                     border: Some(tokens.border),
                     border_width: Some(1.0),
-                    radius: Some(4.0),
+                    radius: Some(10.0),
                     text: Some(tokens.text),
                     ..UiStylePatch::default()
                 },
@@ -1090,6 +1342,7 @@ fn hub_topbar_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
                     UiNode::image(
                         "hub.brand-logo",
                         UiImage {
+                            options: Default::default(),
                             source: UiImageSource::new("editor.hub.brand"),
                             fit: UiImageFit::Contain,
                             tint: None,
@@ -1152,11 +1405,19 @@ fn hub_topbar_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
                 .with_event(UiEventBinding::command(
                     UiEventKind::DragStart,
                     "window.drag",
+                ))
+                .with_event(UiEventBinding::command(
+                    UiEventKind::DoubleClick,
+                    "window.maximize",
+                ))
+                .with_event(UiEventBinding::command(
+                    UiEventKind::ContextMenu,
+                    "window.system-menu",
                 )),
         )
         .with_child(
             UiNode::new("hub.new", UiNodeKind::Button)
-                .with_class(if model.create_active {
+                .with_class(if model.get_in_menu_open {
                     "hub-new-button hub-new-active"
                 } else {
                     "hub-new-button"
@@ -1167,26 +1428,26 @@ fn hub_topbar_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
                     justify_content: UiJustify::Center,
                     gap: 6.0,
                     padding: UiSpacing::xy(12.0, 0.0),
-                    ..UiLayout::fixed(86.0, 34.0)
+                    ..UiLayout::fixed(104.0, 34.0)
                 })
                 .focusable()
+                .with_tooltip_key("app.hub_get_in")
+                .with_accessibility_label_key("app.hub_get_in")
                 .with_event(UiEventBinding::command(UiEventKind::Click, "hub.new"))
                 .with_child(
-                    UiNode::image(
-                        "hub.new.icon",
-                        UiImage {
-                            source: UiImageSource::new("editor.hub.plus"),
-                            fit: UiImageFit::Contain,
-                            tint: None,
-                        },
-                    )
-                    .with_layout(UiLayout::fixed(15.0, 15.0)),
-                )
-                .with_child(
                     UiNode::new("hub.new.label", UiNodeKind::Label)
-                        .with_text_key("app.hub_new_short")
+                        .with_text_key("app.hub_get_in")
                         .with_text_style(UiTextStyle::button(tokens.text))
                         .with_layout(UiLayout::fixed(0.0, 20.0)),
+                )
+                .with_child(
+                    UiNode::new("hub.new.chevron", UiNodeKind::Label)
+                        .with_icon(
+                            UiIcon::new(UiIconId::ChevronDown)
+                                .with_size(UiIconSize::Small)
+                                .with_tint(tokens.text_muted),
+                        )
+                        .with_layout(UiLayout::fixed(14.0, 14.0)),
                 ),
         )
         .with_child(hub_window_button(
@@ -1219,16 +1480,21 @@ fn hub_header_surface(palette: StudioUiPalette) -> UiNode {
             UiNode::new("hub.title", UiNodeKind::Label)
                 .with_text_key("app.hub_start_building")
                 .with_text_style(UiTextStyle {
-                    size_px: 28.0,
-                    line_height_px: 34.0,
+                    size_px: 32.0,
+                    line_height_px: 38.0,
+                    weight: UiFontWeight::Regular,
                     ..UiTextStyle::panel_title(tokens.text)
                 })
-                .with_layout(UiLayout::fixed(0.0, 34.0)),
+                .with_layout(UiLayout::fixed(0.0, 38.0)),
         )
         .with_child(
             UiNode::new("hub.subtitle", UiNodeKind::Label)
                 .with_text_key("app.hub_start_building_detail")
-                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_text_style(UiTextStyle {
+                    size_px: 14.0,
+                    line_height_px: 18.0,
+                    ..UiTextStyle::body(tokens.text_muted)
+                })
                 .with_layout(UiLayout::fixed(0.0, 20.0)),
         )
 }
@@ -1297,7 +1563,6 @@ fn hub_create_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             gap: 6.0,
-            padding: UiSpacing::same(6.0),
             ..UiLayout::fixed(0.0, hub_create_height(model))
         })
         .with_child(
@@ -1305,20 +1570,24 @@ fn hub_create_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
                 .with_layout(UiLayout {
                     flow: UiFlow::Row,
                     align_items: UiAlign::Center,
-                    gap: 10.0,
+                    gap: 12.0,
                     ..UiLayout::fixed(0.0, 52.0)
                 })
                 .with_style(UiStyle::transparent())
-                .with_child(hub_create_name_input(palette))
+                .with_child(hub_create_name_input(
+                    palette,
+                    model.create_name_focused,
+                    model.create_name_hovered,
+                ))
                 .with_child(hub_create_type_picker(palette, model))
-                .with_child(hub_create_location_input(palette))
+                .with_child(hub_create_location_input(
+                    palette,
+                    &model.create_path,
+                    model.create_path_hovered,
+                ))
                 .with_child(hub_agent_toggle(palette, model.create_with_agent))
-                .with_child(hub_create_submit(palette)),
+                .with_child(hub_create_submit(palette, model.create_path_is_project)),
         );
-
-    if model.create_active {
-        panel = panel.with_class("hub-create-highlight");
-    }
 
     if model.create_error.is_some() {
         panel = panel.with_child(
@@ -1328,27 +1597,74 @@ fn hub_create_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
                 .with_text_style(UiTextStyle::body(tokens.danger))
                 .with_layout(UiLayout::fixed(0.0, 44.0)),
         );
+    } else if model.create_path_is_project {
+        panel = panel.with_child(
+            UiNode::new("hub.create-open-hint", UiNodeKind::Label)
+                .with_text_key("app.hub_open_existing")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fixed(0.0, 44.0)),
+        );
     }
     panel
 }
 
-fn hub_create_name_input(_palette: StudioUiPalette) -> UiNode {
-    UiNode::text_input(
-        "hub.create.name",
-        UiTextInput {
-            value_key: "hub.create.name".to_string(),
-            placeholder_key: Some("app.hub_project_name_placeholder".to_string()),
-            ..UiTextInput::new("hub.create.name")
-        },
-    )
-    .with_class("hub-input")
-    .with_class("hub-create-name")
-    .with_layout(UiLayout {
-        grow: 1.0,
-        min_size: [180.0, 52.0],
-        ..UiLayout::fixed(360.0, 52.0)
-    })
-    .with_accessibility_label_key("app.hub_project_name_placeholder")
+fn hub_create_name_input(_palette: StudioUiPalette, focused: bool, hovered: bool) -> UiNode {
+    let mut field = UiNode::new("hub.create.name-field", UiNodeKind::Panel)
+        .with_class("hub-create-name-field")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 10.0,
+            padding: UiSpacing {
+                left: 14.0,
+                right: 12.0,
+                ..UiSpacing::ZERO
+            },
+            grow: 1.0,
+            min_size: [180.0, 52.0],
+            basis: [0.0, 52.0],
+            width_mode: UiSizeMode::Fill,
+            height_mode: UiSizeMode::Fixed,
+            ..UiLayout::default()
+        })
+        .with_child(
+            UiNode::image(
+                "hub.create.name-sparkle",
+                UiImage {
+                    options: Default::default(),
+                    source: UiImageSource::new("editor.hub.sparkle"),
+                    fit: UiImageFit::Contain,
+                    tint: None,
+                },
+            )
+            .with_layout(UiLayout::fixed(18.0, 18.0)),
+        )
+        .with_child(
+            UiNode::text_input(
+                "hub.create.name",
+                UiTextInput {
+                    value_key: "hub.create.name".to_string(),
+                    placeholder_key: Some("app.hub_project_name_placeholder".to_string()),
+                    ..UiTextInput::new("hub.create.name")
+                },
+            )
+            .with_class("hub-name-input")
+            .with_layout(UiLayout {
+                grow: 1.0,
+                basis: [0.0, 52.0],
+                width_mode: UiSizeMode::Fill,
+                height_mode: UiSizeMode::Fixed,
+                ..UiLayout::default()
+            })
+            .with_accessibility_label_key("app.hub_project_name_placeholder"),
+        );
+    if hovered {
+        field = field.with_class("hub-create-name-hovered");
+    }
+    if focused {
+        field = field.with_class("hub-create-name-focused");
+    }
+    field
 }
 
 fn hub_create_type_picker(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNode {
@@ -1375,6 +1691,7 @@ fn hub_create_type_picker(palette: StudioUiPalette, model: &HubSurfaceModel) -> 
             UiNode::image(
                 "hub.create.type-icon",
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(icon_key),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -1392,15 +1709,13 @@ fn hub_create_type_picker(palette: StudioUiPalette, model: &HubSurfaceModel) -> 
                 }),
         )
         .with_child(
-            UiNode::image(
-                "hub.create.type-chevron",
-                UiImage {
-                    source: UiImageSource::new("editor.hub.chevron-down"),
-                    fit: UiImageFit::Contain,
-                    tint: None,
-                },
-            )
-            .with_layout(UiLayout::fixed(16.0, 16.0)),
+            UiNode::new("hub.create.type-chevron", UiNodeKind::Label)
+                .with_icon(
+                    UiIcon::new(UiIconId::ChevronDown)
+                        .with_size(UiIconSize::Small)
+                        .with_tint(tokens.text_muted),
+                )
+                .with_layout(UiLayout::fixed(16.0, 16.0)),
         );
 
     if model.create_type_menu_open {
@@ -1468,6 +1783,7 @@ fn hub_create_type_option(
             UiNode::image(
                 format!("{id}.icon"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(icon_key),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -1486,62 +1802,70 @@ fn hub_create_type_option(
         )
 }
 
-fn hub_create_location_input(_palette: StudioUiPalette) -> UiNode {
-    UiNode::new("hub.create.location-row", UiNodeKind::Panel)
+fn hub_create_location_input(
+    _palette: StudioUiPalette,
+    current_path: &str,
+    hovered: bool,
+) -> UiNode {
+    let mut input = UiNode::text_input(
+        "hub.create.path",
+        UiTextInput {
+            value_key: "hub.create.path".to_string(),
+            placeholder_key: Some("app.location".to_string()),
+            ..UiTextInput::new("hub.create.path")
+        },
+    )
+    .with_class("hub-path-input")
+    .with_class("hub-create-path")
+    .with_layout(UiLayout {
+        grow: 1.0,
+        min_size: [110.0, 52.0],
+        ..UiLayout::fixed(0.0, 52.0)
+    })
+    .with_accessibility_label_key("app.location");
+    if !current_path.is_empty() {
+        input = input.with_tooltip_value(current_path.to_string());
+    }
+    let mut pill = UiNode::new("hub.create.location-row", UiNodeKind::Panel)
         .with_class("hub-create-location")
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
-            gap: 8.0,
-            ..UiLayout::fixed(236.0, 52.0)
-        })
-        .with_style(UiStyle::transparent())
-        .with_child(
-            UiNode::text_input(
-                "hub.create.path",
-                UiTextInput {
-                    value_key: "hub.create.path".to_string(),
-                    placeholder_key: Some("app.location".to_string()),
-                    ..UiTextInput::new("hub.create.path")
-                },
-            )
-            .with_class("hub-input")
-            .with_class("hub-create-path")
+            padding: UiSpacing::xy(4.0, 0.0),
+            ..UiLayout::fixed(200.0, 52.0)
+        });
+    if hovered {
+        pill = pill.with_class("hub-create-location-hovered");
+    }
+    pill.with_child(input).with_child(
+        UiNode::new("hub.create.choose-path", UiNodeKind::Button)
+            .with_class("hub-location-button")
             .with_layout(UiLayout {
-                grow: 1.0,
-                min_size: [120.0, 52.0],
-                ..UiLayout::fixed(0.0, 52.0)
+                flow: UiFlow::Row,
+                align_items: UiAlign::Center,
+                justify_content: UiJustify::Center,
+                ..UiLayout::fixed(40.0, 44.0)
             })
-            .with_accessibility_label_key("app.location"),
-        )
-        .with_child(
-            UiNode::new("hub.create.choose-path", UiNodeKind::Button)
-                .with_class("hub-create-icon-button")
-                .with_layout(UiLayout {
-                    flow: UiFlow::Row,
-                    align_items: UiAlign::Center,
-                    justify_content: UiJustify::Center,
-                    ..UiLayout::fixed(44.0, 52.0)
-                })
-                .with_tooltip_key("app.choose_location")
-                .with_accessibility_label_key("app.choose_location")
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
-                    "hub.create.choose-path",
-                ))
-                .with_child(
-                    UiNode::image(
-                        "hub.create.choose-path-icon",
-                        UiImage {
-                            source: UiImageSource::new("editor.hub.folder"),
-                            fit: UiImageFit::Contain,
-                            tint: None,
-                        },
-                    )
-                    .with_layout(UiLayout::fixed(20.0, 20.0)),
-                ),
-        )
+            .with_tooltip_key("app.choose_location")
+            .with_accessibility_label_key("app.choose_location")
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                "hub.create.choose-path",
+            ))
+            .with_child(
+                UiNode::image(
+                    "hub.create.choose-path-icon",
+                    UiImage {
+                        options: Default::default(),
+                        source: UiImageSource::new("editor.hub.folder"),
+                        fit: UiImageFit::Contain,
+                        tint: None,
+                    },
+                )
+                .with_layout(UiLayout::fixed(20.0, 20.0)),
+            ),
+    )
 }
 
 fn hub_agent_toggle(palette: StudioUiPalette, enabled: bool) -> UiNode {
@@ -1564,20 +1888,56 @@ fn hub_agent_toggle(palette: StudioUiPalette, enabled: bool) -> UiNode {
             "hub.create.agent-toggle",
         ))
         .with_child(
-            UiNode::image(
-                "hub.create.agent-icon",
-                UiImage {
-                    source: UiImageSource::new("editor.hub.agent"),
-                    fit: UiImageFit::Contain,
-                    tint: None,
-                },
-            )
-            .with_layout(UiLayout::fixed(20.0, 20.0)),
+            UiNode::new("hub.create.agent-switch", UiNodeKind::Panel)
+                .with_layout(UiLayout::fixed(34.0, 18.0))
+                .with_style(UiStyle {
+                    fill: if enabled {
+                        tokens.accent_hot
+                    } else {
+                        [58, 58, 62, 255]
+                    },
+                    border: if enabled {
+                        tokens.accent
+                    } else {
+                        [82, 82, 88, 255]
+                    },
+                    text: tokens.text_muted,
+                    border_width: 1.0,
+                    radius: 9.0,
+                    opacity: 1.0,
+                })
+                .with_child(
+                    UiNode::new("hub.create.agent-knob", UiNodeKind::Panel)
+                        .with_layout(UiLayout::absolute(
+                            raf_render::api_graphic_basic::ui_surface::UiRect::new(
+                                if enabled { 18.0 } else { 2.0 },
+                                2.0,
+                                14.0,
+                                14.0,
+                            ),
+                        ))
+                        .with_style(UiStyle {
+                            fill: if enabled {
+                                [245, 245, 247, 255]
+                            } else {
+                                [198, 198, 204, 255]
+                            },
+                            border: if enabled {
+                                [245, 245, 247, 255]
+                            } else {
+                                [198, 198, 204, 255]
+                            },
+                            text: tokens.text_muted,
+                            border_width: 0.0,
+                            radius: 7.0,
+                            opacity: 1.0,
+                        }),
+                ),
         )
         .with_child(
             UiNode::new("hub.create.agent-label", UiNodeKind::Label)
                 .with_text_key("app.hub_agent")
-                .with_text_style(UiTextStyle::button(if enabled {
+                .with_text_style(UiTextStyle::body(if enabled {
                     tokens.text
                 } else {
                     tokens.text_muted
@@ -1586,22 +1946,6 @@ fn hub_agent_toggle(palette: StudioUiPalette, enabled: bool) -> UiNode {
                     grow: 1.0,
                     ..UiLayout::fixed(0.0, 20.0)
                 }),
-        )
-        .with_child(
-            UiNode::new("hub.create.agent-dot", UiNodeKind::Panel)
-                .with_layout(UiLayout::fixed(10.0, 10.0))
-                .with_style(UiStyle {
-                    fill: if enabled { tokens.accent } else { [0, 0, 0, 0] },
-                    border: if enabled {
-                        tokens.accent
-                    } else {
-                        tokens.border
-                    },
-                    text: tokens.text_muted,
-                    border_width: 1.0,
-                    radius: 5.0,
-                    opacity: 1.0,
-                }),
         );
     if enabled {
         toggle = toggle.with_class("hub-agent-toggle-on");
@@ -1609,8 +1953,9 @@ fn hub_agent_toggle(palette: StudioUiPalette, enabled: bool) -> UiNode {
     toggle
 }
 
-fn hub_create_submit(palette: StudioUiPalette) -> UiNode {
+fn hub_create_submit(palette: StudioUiPalette, opens_existing: bool) -> UiNode {
     let tokens = hub_tokens(palette);
+    let width = if opens_existing { 150.0 } else { 132.0 };
     UiNode::new("hub.create.submit", UiNodeKind::Button)
         .with_class("hub-primary-button")
         .with_class("hub-create-submit")
@@ -1618,9 +1963,9 @@ fn hub_create_submit(palette: StudioUiPalette) -> UiNode {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
             justify_content: UiJustify::Center,
-            gap: 0.0,
+            gap: 6.0,
             padding: UiSpacing::xy(12.0, 0.0),
-            ..UiLayout::fixed(112.0, 52.0)
+            ..UiLayout::fixed(width, 52.0)
         })
         .focusable()
         .with_event(UiEventBinding::command(
@@ -1629,7 +1974,11 @@ fn hub_create_submit(palette: StudioUiPalette) -> UiNode {
         ))
         .with_child(
             UiNode::new("hub.create.submit-label", UiNodeKind::Label)
-                .with_text_key("app.hub_create")
+                .with_text_key(if opens_existing {
+                    "app.hub_open"
+                } else {
+                    "app.hub_create"
+                })
                 .with_text_style(UiTextStyle {
                     role: UiTextRole::Button,
                     size_px: 13.0,
@@ -1645,12 +1994,24 @@ fn hub_create_submit(palette: StudioUiPalette) -> UiNode {
                     ..UiLayout::default()
                 }),
         )
+        .with_child(
+            UiNode::image(
+                "hub.create.submit-arrow",
+                UiImage {
+                    options: Default::default(),
+                    source: UiImageSource::new("editor.hub.submit-arrow"),
+                    fit: UiImageFit::Contain,
+                    tint: None,
+                },
+            )
+            .with_layout(UiLayout::fixed(15.0, 15.0)),
+        )
         .with_style(UiStyle {
             fill: tokens.accent,
             border: tokens.accent_hot,
             text: [18, 18, 20, 255],
             border_width: 1.0,
-            radius: 4.0,
+            radius: 8.0,
             opacity: 1.0,
         })
 }
@@ -1677,7 +2038,7 @@ fn hub_showcase_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> Ui
     if let Some(featured) = model.featured_project.as_ref() {
         row = row.with_child(hub_showcase_featured(palette, featured));
     } else {
-        row = row.with_child(hub_showcase_empty(palette));
+        row = row.with_child(hub_showcase_empty(palette, model));
     }
 
     let mut side = UiNode::new("hub.showcase-side", UiNodeKind::Panel)
@@ -1710,13 +2071,16 @@ fn hub_showcase_featured(palette: StudioUiPalette, project: &HubSurfaceProject) 
             ..UiLayout::fill(UiFlow::Column)
         })
         .focusable()
+        .with_tooltip_value(project.path.display().to_string())
         .with_event(project_action(project, "open"))
+        .with_event(project_context_action(project))
         .with_event(project_hover_event(project, UiEventKind::HoverEnter))
         .with_event(project_hover_event(project, UiEventKind::HoverLeave))
         .with_child(
             UiNode::image(
                 "hub.showcase-featured-image",
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(preview_key),
                     fit: UiImageFit::Cover,
                     tint: None,
@@ -1779,6 +2143,7 @@ fn hub_showcase_small(
             ..UiLayout::fill(UiFlow::Row)
         })
         .focusable()
+        .with_tooltip_value(project.path.display().to_string())
         .with_event(project_action(project, "open"))
         .with_event(project_context_action(project))
         .with_event(project_hover_event(project, UiEventKind::HoverEnter))
@@ -1787,6 +2152,7 @@ fn hub_showcase_small(
             UiNode::image(
                 format!("{id}.image"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(preview_key),
                     fit: UiImageFit::Cover,
                     tint: None,
@@ -1825,9 +2191,10 @@ fn hub_showcase_small(
         )
 }
 
-fn hub_showcase_empty(palette: StudioUiPalette) -> UiNode {
+fn hub_showcase_empty(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNode {
     let tokens = hub_tokens(palette);
-    UiNode::new("hub.showcase-empty", UiNodeKind::Panel)
+    let (title_key, subtitle_key) = hub_empty_copy(model);
+    let mut empty = UiNode::new("hub.showcase-empty", UiNodeKind::Panel)
         .with_class("hub-featured")
         .with_layout(UiLayout {
             grow: 1.0,
@@ -1835,15 +2202,55 @@ fn hub_showcase_empty(palette: StudioUiPalette) -> UiNode {
         })
         .with_child(
             UiNode::new("hub.showcase-empty-title", UiNodeKind::Label)
-                .with_text_key("app.hub_empty_title")
+                .with_text_key(title_key)
                 .with_text_style(UiTextStyle::panel_title(tokens.text))
                 .with_layout(UiLayout::fixed(0.0, 28.0)),
-        )
+        );
+    if let Some(subtitle_key) = subtitle_key {
+        empty = empty.with_child(
+            UiNode::new("hub.showcase-empty-subtitle", UiNodeKind::Label)
+                .with_text_key(subtitle_key)
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fixed(0.0, 24.0)),
+        );
+    }
+    empty
 }
 
 fn hub_recent_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNode {
     let tokens = hub_tokens(palette);
-    let mut panel = UiNode::new("hub.recent", UiNodeKind::Panel)
+    let mut header = UiNode::new("hub.recent-header", UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 12.0,
+            ..UiLayout::fixed(0.0, 34.0)
+        })
+        .with_style(UiStyle::transparent())
+        .with_child(
+            UiNode::new("hub.recent-title", UiNodeKind::Label)
+                .with_text_key("app.hub_nav_projects")
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fixed(0.0, 22.0)
+                }),
+        );
+    // While the first scan is still running the count would lie ("0 projects").
+    if !(model.discovery_pending && model.projects.is_empty()) {
+        header = header.with_child(
+            UiNode::new("hub.recent-count", UiNodeKind::Label)
+                .with_text_key("hub.results")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout {
+                    width_mode: UiSizeMode::FitContent,
+                    height_mode: UiSizeMode::Fixed,
+                    basis: [0.0, 18.0],
+                    ..UiLayout::default()
+                }),
+        );
+    }
+    let panel = UiNode::new("hub.recent", UiNodeKind::Panel)
         .with_class("hub-recent")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
@@ -1851,38 +2258,35 @@ fn hub_recent_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
             gap: 0.0,
             ..UiLayout::fixed(0.0, hub_recent_height(model))
         })
-        .with_child(
-            UiNode::new("hub.recent-header", UiNodeKind::Panel)
-                .with_layout(UiLayout {
-                    flow: UiFlow::Row,
-                    align_items: UiAlign::Center,
-                    gap: 12.0,
-                    ..UiLayout::fixed(0.0, 34.0)
-                })
-                .with_style(UiStyle::transparent())
-                .with_child(
-                    UiNode::new("hub.recent-title", UiNodeKind::Label)
-                        .with_text_key("app.hub_recent")
-                        .with_text_style(UiTextStyle::panel_title(tokens.text))
-                        .with_layout(UiLayout {
-                            grow: 1.0,
-                            ..UiLayout::fixed(0.0, 22.0)
-                        }),
-                ),
-        );
+        .with_child(header);
 
     if model.projects.is_empty() {
+        let (title_key, subtitle_key) = hub_empty_copy(model);
         return panel.with_child(
             UiNode::new("hub.recent-empty", UiNodeKind::Label)
-                .with_text_key("app.hub_empty_subtitle")
+                .with_text_key(subtitle_key.unwrap_or(title_key))
                 .with_text_style(UiTextStyle::body(tokens.text_muted))
                 .with_layout(UiLayout::fixed(0.0, 42.0)),
         );
     }
 
+    let visible_rows = model.projects.len().min(HUB_LIST_VISIBLE_ROWS);
+    let mut rows = UiNode::scroll_view("hub.recent-scroll", UiScrollAxis::Vertical)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 0.0,
+            overflow: UiOverflow::ScrollY,
+            padding: UiSpacing {
+                right: 20.0,
+                ..UiSpacing::ZERO
+            },
+            ..UiLayout::fixed(0.0, visible_rows as f32 * HUB_LIST_ROW_HEIGHT)
+        })
+        .with_style(UiStyle::transparent());
+
     for (index, project) in model.projects.iter().enumerate() {
         let row_id = format!("hub.recent.{index}");
-        panel = panel.with_child(
+        rows = rows.with_child(
             UiNode::new(row_id.clone(), UiNodeKind::Panel)
                 .with_class("hub-recent-row")
                 .with_layout(UiLayout {
@@ -1890,9 +2294,10 @@ fn hub_recent_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
                     align_items: UiAlign::Center,
                     gap: 12.0,
                     padding: UiSpacing::xy(4.0, 0.0),
-                    ..UiLayout::fixed(0.0, 43.0)
+                    ..UiLayout::fixed(0.0, HUB_LIST_ROW_HEIGHT)
                 })
                 .with_style(UiStyle::transparent())
+                .with_tooltip_value(project.path.display().to_string())
                 .focusable()
                 .with_event(project_action(project, "open"))
                 .with_event(project_context_action(project))
@@ -1902,6 +2307,7 @@ fn hub_recent_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
                     UiNode::image(
                         format!("{row_id}.icon"),
                         UiImage {
+                            options: Default::default(),
                             source: UiImageSource::new(project_kind_icon_key(project)),
                             fit: UiImageFit::Contain,
                             tint: None,
@@ -1934,11 +2340,12 @@ fn hub_recent_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiNo
                 .with_child(hub_recent_menu_button(project, &row_id)),
         );
     }
-    panel
+    panel.with_child(rows)
 }
 
 fn hub_recent_height(model: &HubSurfaceModel) -> f32 {
-    (66.0 + model.projects.len() as f32 * 43.0).max(326.0)
+    let visible_rows = model.projects.len().min(HUB_LIST_VISIBLE_ROWS);
+    (66.0 + visible_rows as f32 * HUB_LIST_ROW_HEIGHT).max(326.0)
 }
 
 fn hub_recent_menu_button(project: &HubSurfaceProject, row_id: &str) -> UiNode {
@@ -1957,6 +2364,7 @@ fn hub_recent_menu_button(project: &HubSurfaceProject, row_id: &str) -> UiNode {
             UiNode::image(
                 format!("{row_id}.menu-icon"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new("editor.hub.more"),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -2002,6 +2410,7 @@ fn hub_featured_project(palette: StudioUiPalette, project: &HubSurfaceProject) -
                     UiNode::image(
                         "hub.featured-preview-image",
                         UiImage {
+                            options: Default::default(),
                             source: UiImageSource::new(preview_key),
                             fit: UiImageFit::Cover,
                             tint: None,
@@ -2087,6 +2496,7 @@ fn hub_featured_continue_button(project: &HubSurfaceProject) -> UiNode {
             UiNode::image(
                 "hub.featured-continue-arrow",
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new("editor.hub.icon-arrow"),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -2177,6 +2587,7 @@ fn hub_activity_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> Ui
                     UiNode::image(
                         "hub.activity-header-icon",
                         UiImage {
+                            options: Default::default(),
                             source: UiImageSource::new("editor.hub.icon-pulse"),
                             fit: UiImageFit::Contain,
                             tint: None,
@@ -2227,6 +2638,7 @@ fn hub_activity_surface(palette: StudioUiPalette, model: &HubSurfaceModel) -> Ui
                     UiNode::image(
                         format!("hub.activity.{index}.icon"),
                         UiImage {
+                            options: Default::default(),
                             source: UiImageSource::new(project_kind_icon_key(project)),
                             fit: UiImageFit::Contain,
                             tint: None,
@@ -2277,6 +2689,7 @@ fn hub_context_menu_surface(
     palette: StudioUiPalette,
     project: &HubSurfaceProject,
     position: [f32; 2],
+    confirm_forget: bool,
 ) -> UiNode {
     let tokens = hub_tokens(palette);
     UiNode::new("hub.context-menu", UiNodeKind::Menu)
@@ -2336,7 +2749,11 @@ fn hub_context_menu_surface(
         .with_child(hub_menu_row(
             palette,
             "hub.context-forget",
-            "app.hub_delete",
+            if confirm_forget {
+                "app.hub_remove_confirm"
+            } else {
+                "app.hub_delete"
+            },
             project,
             "forget",
             "editor.hub.context-forget",
@@ -2383,6 +2800,7 @@ fn hub_menu_row(
             UiNode::image(
                 format!("{id}.icon"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(icon_key),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -2411,6 +2829,272 @@ fn hub_menu_divider(id: &str) -> UiNode {
             height_mode: UiSizeMode::Fixed,
             ..UiLayout::default()
         })
+}
+
+/// "Get in" dropdown: the single entry point for creating a project or opening
+/// one that lives anywhere on disk.
+fn hub_get_in_menu_surface(palette: StudioUiPalette, position: [f32; 2]) -> UiNode {
+    UiNode::new("hub.getin-menu", UiNodeKind::Menu)
+        .with_class("hub-context-menu")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
+        .with_layout(
+            UiLayout {
+                flow: UiFlow::Column,
+                padding: UiSpacing::same(6.0),
+                gap: 2.0,
+                ..UiLayout::absolute(raf_render::api_graphic_basic::ui_surface::UiRect::new(
+                    position[0],
+                    position[1],
+                    HUB_GET_IN_MENU_SIZE[0],
+                    HUB_GET_IN_MENU_SIZE[1],
+                ))
+            }
+            .with_z_index(100),
+        )
+        .with_child(hub_menu_command_row(
+            palette,
+            "hub.getin.new",
+            "app.hub_new_project",
+            "hub.getin.new",
+            "editor.hub.plus",
+        ))
+        .with_child(hub_menu_command_row(
+            palette,
+            "hub.getin.open-folder",
+            "app.hub_open_folder",
+            "hub.getin.open-folder",
+            "editor.hub.folder",
+        ))
+        .with_child(hub_menu_command_row(
+            palette,
+            "hub.getin.open-file",
+            "app.hub_open_ron",
+            "hub.getin.open-file",
+            "editor.hub.project-file",
+        ))
+}
+
+fn hub_menu_command_row(
+    palette: StudioUiPalette,
+    id: &str,
+    label_key: &str,
+    command: &str,
+    icon_key: &str,
+) -> UiNode {
+    let tokens = hub_tokens(palette);
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class("hub-menu-row")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 10.0,
+            padding: UiSpacing::xy(10.0, 0.0),
+            basis: [0.0, 32.0],
+            width_mode: UiSizeMode::Fill,
+            height_mode: UiSizeMode::Fixed,
+            ..UiLayout::default()
+        })
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
+        .with_child(
+            UiNode::image(
+                format!("{id}.icon"),
+                UiImage {
+                    options: Default::default(),
+                    source: UiImageSource::new(icon_key),
+                    fit: UiImageFit::Contain,
+                    tint: None,
+                },
+            )
+            .with_layout(UiLayout::fixed(16.0, 16.0)),
+        )
+        .with_child(
+            UiNode::new(format!("{id}.label"), UiNodeKind::Label)
+                .with_text_key(label_key)
+                .with_text_style(UiTextStyle::button(tokens.text))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fixed(0.0, 18.0)
+                }),
+        )
+}
+
+fn hub_dialog_overlay(model: &HubSurfaceModel, id: &str, card: UiNode) -> UiNode {
+    UiNode::new(id, UiNodeKind::Panel)
+        .with_layout(
+            UiLayout {
+                flow: UiFlow::Column,
+                align_items: UiAlign::Center,
+                justify_content: UiJustify::Center,
+                ..UiLayout::absolute(raf_ui::UiRect::new(
+                    0.0,
+                    0.0,
+                    model.window_size[0],
+                    model.window_size[1],
+                ))
+            }
+            .with_z_index(110),
+        )
+        .with_style(UiStyle {
+            fill: [0, 0, 0, 180],
+            ..UiStyle::transparent()
+        })
+        .with_child(card)
+}
+
+fn hub_dialog_card(palette: StudioUiPalette, id: &str, width: f32) -> UiNode {
+    let tokens = hub_tokens(palette);
+    UiNode::new(id, UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 12.0,
+            padding: UiSpacing::same(24.0),
+            basis: [width, 0.0],
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fixed)
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface,
+            border: tokens.border,
+            border_width: 1.0,
+            radius: 10.0,
+            ..UiStyle::transparent()
+        })
+        .with_accessibility_role(raf_ui::UiAccessibilityRole::Dialog)
+}
+
+fn hub_dialog_primary_button(
+    palette: StudioUiPalette,
+    id: &str,
+    label_key: &str,
+    command: &str,
+    width: f32,
+) -> UiNode {
+    let tokens = hub_tokens(palette);
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class("hub-primary-button")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            justify_content: UiJustify::Center,
+            ..UiLayout::fixed(width, 32.0)
+        })
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
+        .with_child(
+            UiNode::new(format!("{id}.label"), UiNodeKind::Label)
+                .with_text_key(label_key)
+                .with_text_style(UiTextStyle::button([18, 18, 20, 255]))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_style(UiStyle {
+            fill: tokens.accent,
+            border: tokens.accent_hot,
+            text: [18, 18, 20, 255],
+            border_width: 1.0,
+            radius: 4.0,
+            opacity: 1.0,
+        })
+}
+
+fn hub_adopt_overlay(
+    palette: StudioUiPalette,
+    model: &HubSurfaceModel,
+    adopt: &HubPendingAdopt,
+) -> UiNode {
+    let tokens = hub_tokens(palette);
+    let card = hub_dialog_card(palette, "hub.adopt.card", 540.0)
+        .with_accessibility_label_key("app.hub_adopt_title")
+        .with_child(
+            UiNode::new("hub.adopt.title", UiNodeKind::Label)
+                .with_text_key("app.hub_adopt_title")
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(
+            UiNode::new("hub.adopt.path", UiNodeKind::Label)
+                .with_text_value(adopt.path.display().to_string())
+                .with_text_style(UiTextStyle::body(tokens.text))
+                .with_text_overflow(raf_ui::UiTextOverflow::Wrap)
+                .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+        )
+        .with_child(
+            UiNode::new("hub.adopt.type", UiNodeKind::Label)
+                .with_text_key("hub.adopt.type")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(
+            UiNode::new("hub.adopt.note", UiNodeKind::Label)
+                .with_text_key("app.hub_adopt_note")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_text_overflow(raf_ui::UiTextOverflow::Wrap)
+                .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+        )
+        .with_child(
+            UiNode::new("hub.adopt.actions", UiNodeKind::Toolbar)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Row,
+                    justify_content: UiJustify::End,
+                    gap: 8.0,
+                    ..UiLayout::fit_content()
+                })
+                .with_child(hub_command_button(
+                    "hub.adopt.cancel",
+                    "app.cancel",
+                    "hub.adopt.cancel",
+                    120.0,
+                    32.0,
+                    "hub-project-menu",
+                ))
+                .with_child(hub_dialog_primary_button(
+                    palette,
+                    "hub.adopt.confirm",
+                    "app.hub_adopt_confirm",
+                    "hub.adopt.confirm",
+                    170.0,
+                )),
+        );
+    hub_dialog_overlay(model, "hub.adopt.overlay", card)
+}
+
+fn hub_open_error_overlay(
+    palette: StudioUiPalette,
+    model: &HubSurfaceModel,
+    error: &str,
+) -> UiNode {
+    let tokens = hub_tokens(palette);
+    let card = hub_dialog_card(palette, "hub.open-error.card", 520.0)
+        .with_accessibility_label_key("app.hub_open_error_title")
+        .with_child(
+            UiNode::new("hub.open-error.title", UiNodeKind::Label)
+                .with_text_key("app.hub_open_error_title")
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(
+            UiNode::new("hub.open-error.detail", UiNodeKind::Label)
+                .with_text_value(error.to_string())
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_text_overflow(raf_ui::UiTextOverflow::Wrap)
+                .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+        )
+        .with_child(
+            UiNode::new("hub.open-error.actions", UiNodeKind::Toolbar)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Row,
+                    justify_content: UiJustify::End,
+                    ..UiLayout::fit_content()
+                })
+                .with_child(hub_command_button(
+                    "hub.open-error.close",
+                    "app.hub_close",
+                    "hub.open-error.close",
+                    110.0,
+                    32.0,
+                    "hub-project-menu",
+                )),
+        );
+    hub_dialog_overlay(model, "hub.open-error.overlay", card)
 }
 
 #[allow(dead_code)]
@@ -2564,6 +3248,7 @@ fn hub_project_card(
                     UiNode::image(
                         format!("{card_id}.preview-image"),
                         UiImage {
+                            options: Default::default(),
                             source: UiImageSource::new(preview_key),
                             fit: UiImageFit::Cover,
                             tint: None,
@@ -2648,6 +3333,7 @@ fn hub_project_menu_button(project: &HubSurfaceProject, card_id: &str) -> UiNode
             UiNode::image(
                 format!("{card_id}.menu-icon"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new("editor.hub.more"),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -2815,7 +3501,7 @@ fn hub_project_opening(palette: StudioUiPalette, model: &HubSurfaceModel) -> UiN
                 model.opening_size[0],
                 model.opening_size[1],
             ))
-            .with_z_index(100)
+            .with_z_index(120)
         })
         .with_style(UiStyle {
             fill: [0, 0, 0, 180],
@@ -2906,6 +3592,7 @@ fn hub_quick_action_button(
             UiNode::image(
                 format!("{id}.icon"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(icon_key),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -2992,6 +3679,7 @@ fn hub_theme_icon_button(
             UiNode::image(
                 format!("{id}.icon"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(icon_key),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -3027,6 +3715,7 @@ fn hub_nav_button(
             UiNode::image(
                 format!("{id}.icon"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(icon_key),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -3107,6 +3796,7 @@ fn hub_icon_command_button(id: &str, command: &str, image_key: &str) -> UiNode {
             UiNode::image(
                 format!("{id}.icon"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(image_key),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -3143,6 +3833,7 @@ fn hub_window_button(id: &str, command: &str, image_key: &str) -> UiNode {
             UiNode::image(
                 format!("{id}.icon"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(image_key),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -3440,6 +4131,18 @@ fn command_button(id: &str, text_key: &str, command: &str, class_name: &str) -> 
 mod tests {
     use super::*;
     use raf_render::api_graphic_basic::ui_surface::{UiInputState, UiSurfaceSession};
+
+    #[test]
+    fn rafui_regression_hub_type_picker_uses_a_registered_semantic_chevron() {
+        let picker =
+            hub_create_type_picker(StudioUiPalette::IndustrialDark, &HubSurfaceModel::default());
+        let chevron = picker.find("hub.create.type-chevron").unwrap();
+        assert_eq!(
+            chevron.icon.map(|icon| icon.id),
+            Some(UiIconId::ChevronDown)
+        );
+        assert_eq!(chevron.control, raf_ui::UiControl::None);
+    }
 
     #[test]
     fn studio_surface_has_fixed_docks_and_a_growing_canvas() {
@@ -3770,22 +4473,67 @@ mod tests {
 
         assert_eq!(picker.rect.height, 52.0);
         assert_eq!(submit.rect.height, 52.0);
-        assert_eq!(folder.rect.height, 52.0);
-        assert_eq!(folder.rect.width, 44.0);
+        assert_eq!(folder.rect.height, 44.0);
+        assert_eq!(folder.rect.width, 40.0);
     }
 
     #[test]
-    fn hub_create_submit_is_text_only_without_low_res_icon() {
+    fn hub_create_row_is_a_set_of_separate_pills() {
+        let frame = build_hub_surface(StudioUiPalette::IndustrialDark).build_frame(
+            1_300,
+            900,
+            [8, 11, 15, 255],
+        );
+        let rect = |id: &str| {
+            frame
+                .layout_boxes
+                .iter()
+                .find(|layout| layout.id == id)
+                .unwrap_or_else(|| panic!("{id} box"))
+                .rect
+        };
+
+        let name = rect("hub.create.name");
+        let name_field = rect("hub.create.name-field");
+        let picker = rect("hub.create.type-picker");
+        let location = rect("hub.create.location-row");
+        let agent = rect("hub.create.agent");
+        let submit = rect("hub.create.submit");
+
+        assert!(picker.x >= name.right() + 10.0);
+        assert!((picker.x - name_field.right() - 12.0).abs() < 0.6);
+        assert!(name_field.width > 420.0);
+        assert!(name.width > 350.0);
+        assert!(location.x >= picker.right() + 10.0);
+        assert!(agent.x >= location.right() + 10.0);
+        assert!(submit.x >= agent.right() + 10.0);
+        assert_eq!(location.width, 200.0);
+        assert_eq!(submit.width, 132.0);
+    }
+
+    #[test]
+    fn hub_create_name_field_uses_the_ai_sparkle() {
+        let surface = build_hub_surface(StudioUiPalette::IndustrialDark);
+        let serialized = format!("{:?}", surface.root);
+
+        assert!(serialized.contains("hub.create.name-sparkle"));
+        assert!(serialized.contains("editor.hub.sparkle"));
+    }
+
+    #[test]
+    fn hub_create_submit_uses_the_crisp_arrow_asset() {
         let surface = build_hub_surface(StudioUiPalette::IndustrialDark);
         let serialized = format!("{:?}", surface.root);
         assert!(
             !serialized.contains("hub.create.submit-icon"),
-            "submit must not embed a low-resolution arrow image"
+            "the stale low-resolution arrow node must not remain"
         );
         assert!(
             !serialized.contains("editor.hub.arrow-right"),
             "stale arrow key must not remain in the hub document"
         );
+        assert!(serialized.contains("hub.create.submit-arrow"));
+        assert!(serialized.contains("editor.hub.submit-arrow"));
     }
 
     #[test]
@@ -3824,5 +4572,204 @@ mod tests {
 
         assert_eq!(rule.patch.text, Some([18, 18, 20, 255]));
         assert_eq!(rule.patch.radius, Some(4.0));
+    }
+
+    fn hub_test_project(name: &str) -> HubSurfaceProject {
+        HubSurfaceProject {
+            name: name.to_string(),
+            path: PathBuf::from(format!("C:/Projects/{name}")),
+            project_type: ProjectType::Game,
+            last_opened_label: "14/07/2026".to_string(),
+        }
+    }
+
+    #[test]
+    fn hub_search_without_matches_reports_no_results_instead_of_missing_projects() {
+        let project = hub_test_project("Demo");
+        let model = HubSurfaceModel {
+            projects: vec![project.clone()],
+            featured_project: Some(project),
+            search_query: "zzz".to_string(),
+            ..HubSurfaceModel::default()
+        };
+        let surface = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model);
+
+        let empty_title = surface
+            .root
+            .find("hub.showcase-empty-title")
+            .expect("showcase empty title");
+        assert_eq!(
+            empty_title.text_key.as_deref(),
+            Some("app.hub_no_results_title")
+        );
+        let list_empty = surface
+            .root
+            .find("hub.recent-empty")
+            .expect("list empty copy");
+        assert_eq!(
+            list_empty.text_key.as_deref(),
+            Some("app.hub_no_results_subtitle")
+        );
+    }
+
+    #[test]
+    fn hub_loading_state_waits_for_discovery_before_reporting_empty() {
+        let model = HubSurfaceModel {
+            discovery_pending: true,
+            ..HubSurfaceModel::default()
+        };
+        let surface = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model);
+
+        let empty = surface
+            .root
+            .find("hub.recent-empty")
+            .expect("list loading copy");
+        assert_eq!(empty.text_key.as_deref(), Some("app.hub_loading_projects"));
+    }
+
+    #[test]
+    fn hub_create_row_offers_open_when_the_path_is_a_project() {
+        let model = HubSurfaceModel {
+            create_path_is_project: true,
+            create_path: "C:/Projects/Demo".to_string(),
+            ..HubSurfaceModel::default()
+        };
+        let surface = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model);
+
+        let label = surface
+            .root
+            .find("hub.create.submit-label")
+            .expect("submit label");
+        assert_eq!(label.text_key.as_deref(), Some("app.hub_open"));
+        assert!(surface.root.find("hub.create-open-hint").is_some());
+
+        let frame = surface.build_frame(1_300, 900, [8, 11, 15, 255]);
+        let form = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "hub.create-form")
+            .expect("create form");
+        assert_eq!(form.rect.height, 102.0);
+    }
+
+    #[test]
+    fn hub_context_menu_confirms_destructive_removal_before_acting() {
+        let project = hub_test_project("Demo");
+        let model = HubSurfaceModel {
+            projects: vec![project.clone()],
+            context_project: Some(project),
+            context_menu_position: Some([12.0, 12.0]),
+            context_confirm_forget: true,
+            ..HubSurfaceModel::default()
+        };
+        let surface = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model);
+
+        let label = surface
+            .root
+            .find("hub.context-forget.label")
+            .expect("forget row label");
+        assert_eq!(label.text_key.as_deref(), Some("app.hub_remove_confirm"));
+    }
+
+    #[test]
+    fn hub_list_bounds_its_height_and_scrolls_large_libraries() {
+        let projects: Vec<_> = (0..20)
+            .map(|index| hub_test_project(&format!("Project {index}")))
+            .collect();
+        let model = HubSurfaceModel {
+            projects,
+            ..HubSurfaceModel::default()
+        };
+        let surface = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model);
+        let frame = surface.build_frame(1_300, 900, [8, 11, 15, 255]);
+
+        let panel = frame
+            .layout_boxes
+            .iter()
+            .find(|layout| layout.id == "hub.recent")
+            .expect("projects panel");
+        assert_eq!(
+            panel.rect.height,
+            66.0 + HUB_LIST_VISIBLE_ROWS as f32 * 43.0
+        );
+        assert!(surface.root.find("hub.recent-scroll").is_some());
+        assert!(frame
+            .layout_boxes
+            .iter()
+            .any(|layout| layout.id == "__rafui.scrollbar.hub.recent-scroll.track"));
+    }
+
+    #[test]
+    fn hub_top_action_is_the_get_in_menu_trigger() {
+        let surface = build_hub_surface(StudioUiPalette::IndustrialDark);
+        let trigger = surface.root.find("hub.new").expect("get in trigger");
+        let label = trigger.find("hub.new.label").expect("trigger label");
+
+        assert_eq!(label.text_key.as_deref(), Some("app.hub_get_in"));
+        assert!(trigger.find("hub.new.chevron").is_some());
+    }
+
+    #[test]
+    fn hub_get_in_menu_offers_create_and_open_entries() {
+        let model = HubSurfaceModel {
+            get_in_menu_open: true,
+            get_in_menu_position: Some([40.0, 40.0]),
+            ..HubSurfaceModel::default()
+        };
+        let surface = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model);
+
+        for id in [
+            "hub.getin.new",
+            "hub.getin.open-folder",
+            "hub.getin.open-file",
+        ] {
+            let row = surface.root.find(id).unwrap_or_else(|| panic!("{id} row"));
+            assert_eq!(row.kind, UiNodeKind::Button);
+        }
+    }
+
+    #[test]
+    fn hub_adopt_overlay_confirms_before_creating_a_project() {
+        let model = HubSurfaceModel {
+            pending_adopt: Some(HubPendingAdopt {
+                path: PathBuf::from("C:/Projects/Imported"),
+                name: "Imported".to_string(),
+                project_type: ProjectType::Game,
+            }),
+            ..HubSurfaceModel::default()
+        };
+        let surface = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model);
+
+        assert!(surface.root.find("hub.adopt.overlay").is_some());
+        assert_eq!(
+            surface.root.find("hub.adopt.confirm").map(|node| node.kind),
+            Some(UiNodeKind::Button)
+        );
+        assert_eq!(
+            surface.root.find("hub.adopt.cancel").map(|node| node.kind),
+            Some(UiNodeKind::Button)
+        );
+        let path = surface.root.find("hub.adopt.path").expect("adopt path");
+        assert_eq!(path.text_value.as_deref(), Some("C:/Projects/Imported"));
+        let kind = surface.root.find("hub.adopt.type").expect("adopt kind");
+        assert_eq!(kind.text_key.as_deref(), Some("hub.adopt.type"));
+    }
+
+    #[test]
+    fn hub_open_error_overlay_keeps_the_reason_readable() {
+        let detail = "Rafi could not read this project: bad ron";
+        let model = HubSurfaceModel {
+            pending_open_error: Some(detail.to_string()),
+            ..HubSurfaceModel::default()
+        };
+        let surface = build_hub_surface_with_model(StudioUiPalette::IndustrialDark, &model);
+
+        assert!(surface.root.find("hub.open-error.overlay").is_some());
+        let reason = surface
+            .root
+            .find("hub.open-error.detail")
+            .expect("error detail");
+        assert_eq!(reason.text_value.as_deref(), Some(detail));
+        assert!(surface.root.find("hub.open-error.close").is_some());
     }
 }

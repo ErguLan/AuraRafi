@@ -11,6 +11,7 @@ pub enum AssetClass {
     Script,
     Audio,
     Camera,
+    Interface,
     File,
 }
 
@@ -58,6 +59,8 @@ impl AuthoringAsset {
                 .unwrap_or(AssetClass::File)
         } else if lower == "builtin://camera" {
             AssetClass::Camera
+        } else if lower.starts_with("builtin://interface/") || lower.ends_with(".ui.ron") {
+            AssetClass::Interface
         } else if lower.ends_with(".prefab.ron") {
             AssetClass::Prefab
         } else {
@@ -89,7 +92,7 @@ impl AuthoringAsset {
     pub fn insertable(&self) -> bool {
         matches!(
             self.class,
-            AssetClass::Shape(_) | AssetClass::Prefab | AssetClass::Camera
+            AssetClass::Shape(_) | AssetClass::Prefab | AssetClass::Camera | AssetClass::Interface
         )
     }
 }

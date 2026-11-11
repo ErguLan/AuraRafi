@@ -25,7 +25,7 @@ pub(crate) fn bottom_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
                 UiStylePatch {
                     fill: Some(tokens.surface_raised),
                     border: Some(tokens.accent),
-                    border_width: Some(1.0),
+                    border_width: Some(0.0),
                     text: Some(tokens.text),
                     ..UiStylePatch::default()
                 },
@@ -53,10 +53,10 @@ pub(crate) fn bottom_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             UiStyleRule::new(
                 UiStyleSelector::Class("bottom-tab-active".to_string()),
                 UiStylePatch {
-                    fill: Some(tokens.accent),
-                    border: Some(tokens.accent_hot),
-                    border_width: Some(1.0),
-                    text: Some([255, 255, 255, 255]),
+                    fill: Some(tokens.surface_raised),
+                    border: Some(tokens.border),
+                    border_width: Some(0.0),
+                    text: Some(tokens.text),
                     ..UiStylePatch::default()
                 },
             )

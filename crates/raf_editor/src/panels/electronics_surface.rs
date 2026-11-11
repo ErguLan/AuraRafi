@@ -122,6 +122,8 @@ pub enum ElectronicsAnalysisTarget {
     /// whenever a status or stale line is added above it, and the controller
     /// resolves the report list, not the dock list.
     Component { source_id: Uuid },
+    /// Explicit workbench action, such as saving a validated fabrication ZIP.
+    Command { name: String },
 }
 
 /// One row of the analysis dock body.
@@ -244,7 +246,7 @@ pub fn build_electronics_analysis_surface(
         .with_class("electronics-analysis")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 6.0,
+            gap: 4.0,
             padding: UiSpacing::xy(PANEL_PADDING_X, PANEL_PADDING_Y),
             ..UiLayout::fill(UiFlow::Column)
         })
@@ -256,7 +258,7 @@ pub fn build_electronics_analysis_surface(
                     align_items: UiAlign::Center,
                     gap: 7.0,
                     padding: UiSpacing::xy(8.0, 6.0),
-                    ..UiLayout::fixed(0.0, ELECTRONICS_ITEM_HEIGHT)
+                    ..UiLayout::fixed(0.0, 28.0)
                         .with_width_mode(UiSizeMode::Fill)
                 })
                 .with_child(
@@ -266,7 +268,7 @@ pub fn build_electronics_analysis_surface(
                         // width and its glyph is never painted.
                         .with_layout(UiLayout::fixed(
                             ELECTRONICS_ROW_GLYPH_TRACK,
-                            ELECTRONICS_ITEM_HEIGHT - 12.0,
+                            16.0,
                         )),
                 )
                 .with_child(
@@ -281,7 +283,7 @@ pub fn build_electronics_analysis_surface(
                             color: tokens.text,
                             inherit_color: false,
                         })
-                        .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+                        .with_layout(UiLayout::fit_content().fill_width().grow(1.0)),
                 ),
         );
 
@@ -291,7 +293,7 @@ pub fn build_electronics_analysis_surface(
         .with_class("electronics-analysis-lines")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 3.0,
+            gap: 0.0,
             padding: UiSpacing::xy(2.0, 2.0),
             grow: 1.0,
             overflow: UiOverflow::ScrollY,
@@ -306,11 +308,21 @@ pub fn build_electronics_analysis_surface(
         body = body.with_child(running_progress(motion));
     }
     for (index, line) in lines.iter().enumerate() {
-        body = body.with_child(analysis_row(palette, panel, line, index));
+        if !matches!(line.target, Some(ElectronicsAnalysisTarget::Command { .. })) {
+            body = body.with_child(analysis_row(palette, panel, line, index));
+        }
     }
 
+    let mut heading = raf_ui::table::table_heading("electronics.analysis.columns", &[("", ELECTRONICS_ROW_GLYPH_TRACK),("electronics.desktop.message",0.0)], tokens);
+    heading.layout = heading.layout.fixed_height(28.0);
+    root = root.with_child(heading);
     root = root.with_child(body);
-    root = root.with_child(action_row(palette, panel, is_running, has_result));
+    let mut actions = action_row(palette, panel, is_running, has_result);
+    if lines.iter().any(|line| matches!(&line.target, Some(ElectronicsAnalysisTarget::Command { name }) if name == "electronics.fabrication.deliver")) {
+        actions = actions.with_child(analysis_action(palette, "electronics.fabrication.deliver",
+            "electronics.fabrication.deliver", "electronics.fabrication.deliver", "electronics.fabrication.deliver", false));
+    }
+    root = root.with_child(actions);
 
     let mut surface = UiSurface::new("electronics.analysis", palette, root);
     surface.style_sheet = analysis_style_sheet(palette);
@@ -393,9 +405,10 @@ fn analysis_row(
     let text = UiNode::new(format!("{id}.text"), UiNodeKind::Label)
         .with_class("electronics-analysis-line-text")
         .with_text_value(line.text.clone())
+        .with_tooltip_value(line.text.clone())
         .with_text_overflow(UiTextOverflow::Ellipsis)
         .with_text_style(electronics_body_style(color))
-        .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill));
+        .with_layout(UiLayout::fit_content().fill_width().grow(1.0));
 
     let mut row = match command {
         Some(command) => UiNode::new(id.clone(), UiNodeKind::Button)
@@ -410,6 +423,9 @@ fn analysis_row(
             .with_class("electronics-analysis-line")
             .with_layout(analysis_row_layout()),
     };
+    if matches!(line.target, Some(ElectronicsAnalysisTarget::Command { .. })) {
+        row.accessibility_label_key = None;
+    }
     if let Some(icon) = icon {
         row = row.with_child(
             UiNode::new(format!("{id}.icon"), UiNodeKind::Label)
@@ -425,6 +441,7 @@ fn analysis_row(
                 )),
         );
     }
+    if index % 2 == 0 { row = row.with_style(UiStyle::transparent().with_fill(tokens.surface_alt)); }
     row.with_child(text)
 }
 
@@ -449,6 +466,7 @@ fn analysis_row_command(line: &ElectronicsAnalysisLine) -> Option<String> {
         Some(ElectronicsAnalysisTarget::Component { source_id }) => Some(format!(
             "{ELECTRONICS_ANALYSIS_FOCUS_COMPONENT_PREFIX}:{source_id}"
         )),
+        Some(ElectronicsAnalysisTarget::Command { name }) => Some(name.clone()),
         None => None,
     }
 }
@@ -527,8 +545,7 @@ fn analysis_action(
     UiNode::new(id, UiNodeKind::Button)
         .with_class(class)
         .with_layout(
-            UiLayout::fixed(0.0, ELECTRONICS_CONTROL_HEIGHT)
-                .with_width_mode(UiSizeMode::Fill)
+            UiLayout::fit_content().fixed_height(ELECTRONICS_CONTROL_HEIGHT)
                 .with_text_safe_area(true),
         )
         .with_text_key(label_key)
@@ -805,12 +822,12 @@ fn modal_button(
 pub(crate) const ELECTRONICS_CONTROL_HEIGHT: f32 = 30.0;
 /// Height of one single-line list or property row: analysis lines, inspector
 /// field rows, pin rows and category headers.
-pub(crate) const ELECTRONICS_ROW_HEIGHT: f32 = 24.0;
+pub(crate) const ELECTRONICS_ROW_HEIGHT: f32 = 28.0;
 /// Height of one two-line item: navigator rows, library cards and panel headers.
-pub(crate) const ELECTRONICS_ITEM_HEIGHT: f32 = 38.0;
+pub(crate) const ELECTRONICS_ITEM_HEIGHT: f32 = 44.0;
 /// Line box of [`electronics_body_style`]. A label that declares a smaller track
 /// than this clips its own glyphs, so row builders use it as their minimum.
-pub(crate) const ELECTRONICS_BODY_LINE_HEIGHT: f32 = 15.0;
+pub(crate) const ELECTRONICS_BODY_LINE_HEIGHT: f32 = 18.0;
 /// Width reserved for a 14px leading glyph inside a row or control.
 pub(crate) const ELECTRONICS_ROW_GLYPH_TRACK: f32 = 14.0;
 /// Smallest track a standalone label may claim before its text has no room.
@@ -841,11 +858,22 @@ const DELETE_MODAL_RADIUS: f32 = 6.0;
 /// Width of one modal button, in logical points.
 const MODAL_BUTTON_WIDTH: f32 = 112.0;
 
+/// Electronics has its own workstation palette; Game chrome is independent.
+pub(crate) fn electronics_tokens(palette: StudioUiPalette) -> UiTokens {
+    let mut t=palette.tokens();
+    if palette==StudioUiPalette::IndustrialDark {
+        t.background=[9,16,23,255]; t.canvas=[6,15,21,255];
+        t.surface=[14,23,31,255]; t.surface_alt=[17,27,36,255]; t.surface_raised=[23,35,46,255];
+        t.border=[44,61,74,255]; t.text=[229,234,240,255]; t.text_muted=[151,166,180,255];
+    }
+    t
+}
+
 /// Compact body text used by every Electronics surface.
 pub(crate) fn electronics_body_style(color: [u8; 4]) -> UiTextStyle {
     UiTextStyle {
         role: UiTextRole::Body,
-        size_px: 11.0,
+        size_px: 14.0,
         line_height_px: ELECTRONICS_BODY_LINE_HEIGHT,
         weight: UiFontWeight::Regular,
         color,
@@ -1048,10 +1076,9 @@ fn analysis_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             [0, 0, 0, 0],
             tokens.text,
         ),
-        electronics_class_rule(
+        electronics_flat_class_rule(
             "electronics-analysis-line",
             tokens.surface,
-            tokens.border,
             tokens.text_muted,
         ),
         electronics_class_rule(
@@ -1182,9 +1209,17 @@ pub(crate) fn assert_electronics_layout_gate(
     width: u32,
     height: u32,
 ) -> UiSurfaceDiagnostics {
-    let diagnostics =
-        UiSurfaceDiagnostics::from_frame(&surface.build_frame(width, height, [0, 0, 0, 255]));
-    let expected_untyped = untyped_interactive_nodes(&surface.root);
+    let frame = surface.build_frame(width, height, [0, 0, 0, 255]);
+    let diagnostics = UiSurfaceDiagnostics::from_frame(&frame);
+    // Overflow adds real track/thumb controls after the authored tree. These
+    // belong to the scroll view, whose generic role is intentionally tolerated.
+    let generated_scroll_controls = frame.layout_boxes.iter().filter(|node| {
+        node.interactive && !node.disabled
+            && node.accessibility_role == UiAccessibilityRole::Generic
+            && node.id.starts_with("__rafui.scrollbar.")
+            && (node.id.ends_with(".track") || node.id.ends_with(".thumb"))
+    }).count();
+    let expected_untyped = untyped_interactive_nodes(&surface.root) + generated_scroll_controls;
     assert_eq!(diagnostics.duplicate_ids, 0, "retained ids must be unique");
     assert_eq!(diagnostics.zero_sized_boxes, 0, "no collapsed layout box");
     assert_eq!(
@@ -1431,6 +1466,36 @@ mod tests {
             diagnostics.layout_boxes > 8 && diagnostics.focusable_regions >= 2,
             "the gate must have run over a real body, not an empty document"
         );
+    }
+
+    #[test]
+    fn electronics_analysis_messages_use_the_available_width_with_real_text_metrics() {
+        use raf_core::{i18n, Language};
+        use raf_render::api_graphic_basic::ui_surface::CpuUiSurfaceHost;
+        for language in [Language::English, Language::Spanish] {
+            for width in [420, 980] {
+                let surface = surface_for(ELECTRONICS_ANALYSIS_SIMULATION_TAB, &[
+                    ElectronicsAnalysisLine::normal("D1: 2.636335 V | 0.006363 A | 0.016776 W"),
+                    ElectronicsAnalysisLine::with_tone("Solver converged.", ElectronicsAnalysisTone::Passed),
+                ]);
+                let mut host = CpuUiSurfaceHost::new(surface, [9,16,23,255]);
+                let output = host.render([width, 240], |key| i18n::t(key, language));
+                let rect = |id: &str| output.frame.layout_boxes.iter().find(|b| b.id==id).unwrap().rect;
+                for id in ["electronics.analysis.line.0.text", "electronics.analysis.line.1.text",
+                    "electronics.analysis.header.title"] {
+                    assert!(rect(id).width > width as f32 - 100.0, "{id}: {:?}", rect(id));
+                }
+                assert!(rect("electronics.analysis.simulation").width > 100.0);
+                let message = rect("electronics.analysis.line.0.text");
+                assert!(message.right() <= width as f32);
+                if let Some(dir) = std::env::var_os("RAF_ELECTRONICS_POLISH_QA_DIR") {
+                    let dir = std::path::PathBuf::from(dir);
+                    std::fs::create_dir_all(&dir).unwrap();
+                    image::save_buffer(dir.join(format!("analysis-{language:?}-{width}.png")),
+                        output.pixels, width, 240, image::ColorType::Rgba8).unwrap();
+                }
+            }
+        }
     }
 
     #[test]

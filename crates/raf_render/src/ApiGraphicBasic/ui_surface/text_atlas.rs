@@ -5,10 +5,15 @@
 //! and cache keys that presentation backends consume.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ab_glyph::{point, Font, FontArc, ScaleFont};
-use raf_ui::{UiFontWeight, UiTextAtlasRequest, UiTextOverflow, UiTextRole};
+use raf_ui::{UiFontWeight, UiTextAtlasRequest, UiTextOverflow, UiTextRole, UiTextStyle};
+
+const TEXT_RASTER_PADDING: f32 = 2.0;
+const MAX_LAYOUT_CACHE_ENTRIES: usize = 96;
+const MAX_LAYOUT_CACHE_BYTES: usize = 384 * 1024;
+const MAX_LAYOUT_CACHE_TEXT_BYTES: usize = 4 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UiTextAtlasRect {
@@ -52,11 +57,35 @@ struct UiTextAtlasKey {
     text_hash: u64,
     role: UiTextRole,
     weight: UiFontWeight,
-    size_px: u16,
-    line_height_px: u16,
-    max_width_px: u16,
+    size_px: u32,
+    line_height_px: u32,
+    max_width_px: u32,
     overflow: UiTextOverflow,
     single_line: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct UiTextLayoutCacheKey {
+    text_hash: u64,
+    role: UiTextRole,
+    weight: UiFontWeight,
+    size_px_bits: u32,
+    width_px_bits: u32,
+    tracking_bits: u32,
+}
+
+struct UiTextLayoutCacheEntry {
+    text: String,
+    lines: Arc<Vec<RasterLine>>,
+    bytes: usize,
+    last_used: u64,
+}
+
+#[derive(Default)]
+struct UiTextLayoutCache {
+    entries: HashMap<UiTextLayoutCacheKey, UiTextLayoutCacheEntry>,
+    bytes: usize,
+    clock: u64,
 }
 
 impl UiTextAtlas {
@@ -221,6 +250,10 @@ impl UiTextAtlas {
             }
 
             let raster = rasterize_text(request, resolved_text);
+            if raster.pixels.is_empty() {
+                stats.overflowed += 1;
+                continue;
+            }
             let estimated_size = [
                 raster.width.try_into().unwrap_or(u16::MAX),
                 raster.height.try_into().unwrap_or(u16::MAX),
@@ -277,24 +310,39 @@ impl UiTextAtlas {
         resolved_text: &str,
         cursor: usize,
     ) -> f32 {
-        let prefix = resolved_text.chars().take(cursor).collect::<String>();
-        if prefix.is_empty() {
-            return 0.0;
+        let prepared = (request.overflow == UiTextOverflow::Ellipsis)
+            .then(|| prepare_text(request, resolved_text));
+        let display_cursor = prepared
+            .as_ref()
+            .map(|prepared| prepared.display_cursor_for_source(cursor))
+            .unwrap_or(cursor);
+        let display_text = prepared
+            .as_ref()
+            .map(|prepared| prepared.display.as_str())
+            .unwrap_or(resolved_text);
+        let lines = layout_for_request(request, display_text);
+        let mut visible_width = 0.0_f32;
+
+        for line in lines.iter() {
+            if line.end <= display_cursor {
+                visible_width = visible_width.max(line.width);
+            }
+            if line.start <= display_cursor && display_cursor <= line.end {
+                let partial_width = line
+                    .glyphs
+                    .iter()
+                    .take_while(|glyph| glyph.character_index < display_cursor)
+                    .last()
+                    .map(|glyph| glyph.end_x)
+                    .unwrap_or(0.0);
+                visible_width = visible_width.max(partial_width);
+            }
+            if line.start > display_cursor {
+                break;
+            }
         }
-        let font = atlas_font(request.style.role, request.style.weight);
-        let scale = font.as_scaled(request.style.size_px.max(6.0));
-        let lines = layout_lines(
-            &scale,
-            &prefix,
-            text_layout_width(
-                request.style.role,
-                request.max_width,
-                request.single_line,
-                request.overflow,
-            ),
-            brand_tracking(request.style.role),
-        );
-        lines.iter().map(|line| line.width).fold(0.0_f32, f32::max)
+
+        visible_width
     }
 
     fn allocate(&mut self, estimated_size: [u16; 2]) -> Option<UiTextAtlasRect> {
@@ -373,6 +421,24 @@ impl UiTextAtlas {
     }
 }
 
+/// Returns the baseline from the raster text-box top and the actual height of
+/// one line at this style's scale. Layout callers should pass an already
+/// `scaled_for_ui` style when measuring a scaled child.
+pub(super) fn baseline_metrics(style: &UiTextStyle) -> [f32; 2] {
+    let font = atlas_font(style.role, style.weight);
+    let scale = font.as_scaled(style.size_px.max(6.0));
+    let line_height = raster_line_height(style, &scale);
+    let raster_height = (line_height + TEXT_RASTER_PADDING * 2.0).ceil().max(1.0);
+    [TEXT_RASTER_PADDING + scale.ascent(), raster_height]
+}
+
+fn raster_line_height<F: Font>(style: &UiTextStyle, scale: &impl ScaleFont<F>) -> f32 {
+    style
+        .line_height_px
+        .max(scale.height().ceil() + TEXT_RASTER_PADDING)
+        .ceil()
+}
+
 impl Default for UiTextAtlas {
     fn default() -> Self {
         Self::with_capacity([1024, 1024], 256)
@@ -385,9 +451,9 @@ impl UiTextAtlasKey {
             text_hash: stable_text_hash(resolved_text),
             role: request.style.role,
             weight: request.style.weight,
-            size_px: pixels_to_u16(request.style.size_px),
-            line_height_px: pixels_to_u16(request.style.line_height_px),
-            max_width_px: pixels_to_u16(request.max_width),
+            size_px: request.style.size_px.to_bits(),
+            line_height_px: request.style.line_height_px.to_bits(),
+            max_width_px: request.max_width.to_bits(),
             overflow: request.overflow,
             single_line: request.single_line,
         }
@@ -422,10 +488,6 @@ fn merge_rects(
     }
 }
 
-fn pixels_to_u16(value: f32) -> u16 {
-    value.ceil().clamp(1.0, u16::MAX as f32) as u16
-}
-
 struct RasterizedText {
     width: usize,
     height: usize,
@@ -433,49 +495,51 @@ struct RasterizedText {
 }
 
 fn rasterize_text(request: &UiTextAtlasRequest, text: &str) -> RasterizedText {
-    const PADDING: f32 = 2.0;
+    if text.len() > 64 * 1024 {
+        tracing::warn!(node=%request.node_id,"RafUI text must be split into bounded tiles");
+        return RasterizedText {
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+        };
+    }
     let font = atlas_font(request.style.role, request.style.weight);
     let scale = font.as_scaled(request.style.size_px.max(6.0));
-    let tracking = brand_tracking(request.style.role);
-    let line_height = request
-        .style
-        .line_height_px
-        .max(scale.height().ceil() + 2.0)
-        .ceil();
-    let display_text = if request.overflow == UiTextOverflow::Ellipsis {
-        ellipsize_text(&scale, text, request.max_width.max(1.0), tracking)
-    } else {
-        text.to_string()
-    };
-    let lines = layout_lines(
-        &scale,
-        &display_text,
-        text_layout_width(
-            request.style.role,
-            request.max_width,
-            request.single_line,
-            request.overflow,
-        ),
-        tracking,
-    );
+    let line_height = raster_line_height(&request.style, &scale);
+    let prepared =
+        (request.overflow == UiTextOverflow::Ellipsis).then(|| prepare_text(request, text));
+    let display_text = prepared
+        .as_ref()
+        .map(|prepared| prepared.display.as_str())
+        .unwrap_or(text);
+    let lines = layout_for_request(request, display_text);
     let width = lines
         .iter()
         .map(|line| line.width)
         .fold(1.0f32, f32::max)
         .ceil()
         .max(1.0) as usize
-        + (PADDING * 2.0) as usize;
-    let height = ((lines.len().max(1) as f32 * line_height) + PADDING * 2.0)
+        + (TEXT_RASTER_PADDING * 2.0) as usize;
+    let height = ((lines.len().max(1) as f32 * line_height) + TEXT_RASTER_PADDING * 2.0)
         .ceil()
         .max(1.0) as usize;
+    if width > 2048 || height > 2048 {
+        tracing::warn!(node=%request.node_id,width,height,"RafUI text tile exceeds atlas dimensions");
+        return RasterizedText {
+            width,
+            height,
+            pixels: Vec::new(),
+        };
+    }
     let mut pixels = vec![0; width * height];
 
     for (line_index, line) in lines.iter().enumerate() {
-        let baseline = PADDING + scale.ascent() + line_index as f32 * line_height;
+        let baseline = TEXT_RASTER_PADDING + scale.ascent() + line_index as f32 * line_height;
         for glyph in &line.glyphs {
-            let glyph = glyph
-                .id
-                .with_scale_and_position(scale.scale(), point(PADDING + glyph.x, baseline));
+            let glyph = glyph.id.with_scale_and_position(
+                scale.scale(),
+                point(TEXT_RASTER_PADDING + glyph.x, baseline),
+            );
             let Some(outlined) = font.outline_glyph(glyph) else {
                 continue;
             };
@@ -532,25 +596,136 @@ fn ellipsize_text<F: Font>(
     text: &str,
     max_width: f32,
     tracking: f32,
-) -> String {
-    let ellipsis = "…";
-    let width_of = |value: &str| appended_text_width(scale, 0.0, None, value, tracking);
-    if width_of(text) <= max_width {
-        return text.to_string();
+) -> PreparedText {
+    let mut result = PreparedText::new();
+    let mut paragraph = Vec::new();
+    let mut paragraph_start = 0;
+
+    for (source_index, character) in text.chars().enumerate() {
+        if character == '\n' {
+            append_ellipsized_paragraph(
+                scale,
+                &paragraph,
+                paragraph_start,
+                max_width,
+                tracking,
+                &mut result,
+            );
+            paragraph.clear();
+            result.push_source('\n', source_index);
+            paragraph_start = source_index + 1;
+        } else {
+            paragraph.push((source_index, character));
+        }
     }
-    let mut result = String::new();
-    for character in text.chars() {
-        let candidate = format!("{result}{character}{ellipsis}");
-        if width_of(&candidate) > max_width {
+    append_ellipsized_paragraph(
+        scale,
+        &paragraph,
+        paragraph_start,
+        max_width,
+        tracking,
+        &mut result,
+    );
+    result
+}
+
+struct PreparedText {
+    display: String,
+    /// Maps display-character boundaries back to source-character boundaries.
+    /// A synthetic ellipsis maps to the end of the retained source prefix.
+    source_boundaries: Vec<usize>,
+}
+
+impl PreparedText {
+    fn new() -> Self {
+        Self {
+            display: String::new(),
+            source_boundaries: vec![0],
+        }
+    }
+
+    fn push_source(&mut self, character: char, source_index: usize) {
+        self.display.push(character);
+        self.source_boundaries.push(source_index + 1);
+    }
+
+    fn push_synthetic(&mut self, character: char, source_boundary: usize) {
+        self.display.push(character);
+        self.source_boundaries.push(source_boundary);
+    }
+
+    fn display_cursor_for_source(&self, source_cursor: usize) -> usize {
+        self.source_boundaries
+            .iter()
+            .enumerate()
+            .take_while(|(_, source_boundary)| **source_boundary <= source_cursor)
+            .map(|(display_boundary, _)| display_boundary)
+            .last()
+            .unwrap_or(0)
+    }
+}
+
+fn prepare_text(request: &UiTextAtlasRequest, text: &str) -> PreparedText {
+    if request.overflow == UiTextOverflow::Ellipsis {
+        let font = atlas_font(request.style.role, request.style.weight);
+        let scale = font.as_scaled(request.style.size_px.max(6.0));
+        return ellipsize_text(
+            &scale,
+            text,
+            request.max_width.max(1.0),
+            brand_tracking(request.style.role),
+        );
+    }
+
+    let mut prepared = PreparedText::new();
+    for (source_index, character) in text.chars().enumerate() {
+        prepared.push_source(character, source_index);
+    }
+    prepared
+}
+
+fn append_ellipsized_paragraph<F: Font>(
+    scale: &impl ScaleFont<F>,
+    paragraph: &[(usize, char)],
+    source_start: usize,
+    max_width: f32,
+    tracking: f32,
+    output: &mut PreparedText,
+) {
+    let mut full_text = String::new();
+    for (_, character) in paragraph {
+        full_text.push(*character);
+    }
+    if appended_text_width(scale, 0.0, None, &full_text, tracking) <= max_width {
+        for (source_index, character) in paragraph {
+            output.push_source(*character, *source_index);
+        }
+        return;
+    }
+
+    let ellipsis_width = appended_character_width(scale, 0.0, None, '…', tracking);
+    if ellipsis_width > max_width {
+        return;
+    }
+
+    let mut prefix_width = 0.0;
+    let mut previous = None;
+    let mut source_boundary = source_start;
+    for (source_index, character) in paragraph {
+        let id = resolved_glyph_id(scale, *character);
+        let next_width =
+            appended_character_width(scale, prefix_width, previous, *character, tracking);
+        let width_with_ellipsis =
+            appended_character_width(scale, next_width, Some(id), '…', tracking);
+        if width_with_ellipsis > max_width {
             break;
         }
-        result.push(character);
+        output.push_source(*character, *source_index);
+        prefix_width = next_width;
+        previous = Some(id);
+        source_boundary = *source_index + 1;
     }
-    if result.is_empty() {
-        ellipsis.to_string()
-    } else {
-        format!("{result}{ellipsis}")
-    }
+    output.push_synthetic('…', source_boundary);
 }
 
 /// Real Ubuntu outlines already carry their own weight. Do not darken or
@@ -577,6 +752,8 @@ pub(crate) struct UiTextVisualLine {
 struct RasterGlyph {
     id: ab_glyph::GlyphId,
     x: f32,
+    end_x: f32,
+    character_index: usize,
 }
 
 fn layout_lines<F: Font>(
@@ -592,7 +769,8 @@ fn layout_lines<F: Font>(
         glyphs: Vec::new(),
     }];
     let mut previous = None;
-    for (character_index, character) in text.chars().enumerate() {
+    let mut characters = text.chars().enumerate().peekable();
+    while let Some((character_index, character)) = characters.next() {
         if character == '\n' {
             lines.last_mut().expect("text layout line exists").end = character_index;
             lines.push(RasterLine {
@@ -605,21 +783,201 @@ fn layout_lines<F: Font>(
             continue;
         }
 
+        if character.is_whitespace() {
+            let line = lines.last().expect("text layout begins with a line");
+            let next_width =
+                appended_character_width(scale, line.width, previous, character, tracking);
+            if !line.glyphs.is_empty() && next_width > max_width {
+                lines.push(RasterLine {
+                    start: character_index,
+                    end: character_index,
+                    width: 0.0,
+                    glyphs: Vec::new(),
+                });
+                previous = None;
+            }
+            let line = lines.last_mut().expect("text layout line exists");
+            append_character_to_line(
+                scale,
+                line,
+                &mut previous,
+                character_index,
+                character,
+                tracking,
+            );
+            line.end = character_index + 1;
+            continue;
+        }
+
+        let mut word = vec![(character_index, character)];
+        while characters
+            .peek()
+            .map(|(_, next)| !next.is_whitespace() && *next != '\n')
+            .unwrap_or(false)
+        {
+            word.push(characters.next().expect("peeked word character exists"));
+        }
+
         let line = lines.last().expect("text layout begins with a line");
-        let next_width = appended_character_width(scale, line.width, previous, character, tracking);
-        if !line.glyphs.is_empty() && next_width > max_width {
+        let mut word_width = line.width;
+        let mut word_previous = previous;
+        for (_, word_character) in &word {
+            word_width = appended_character_width(
+                scale,
+                word_width,
+                word_previous,
+                *word_character,
+                tracking,
+            );
+            word_previous = Some(resolved_glyph_id(scale, *word_character));
+        }
+        if !line.glyphs.is_empty() && word_width > max_width {
             lines.push(RasterLine {
-                start: character_index,
-                end: character_index,
+                start: word[0].0,
+                end: word[0].0,
                 width: 0.0,
                 glyphs: Vec::new(),
             });
             previous = None;
         }
-        let line = lines.last_mut().expect("text layout line exists");
-        append_character_to_line(scale, line, &mut previous, character, tracking);
-        line.end = character_index + 1;
+
+        for (word_index, word_character) in word {
+            let line = lines.last().expect("text layout begins with a line");
+            let next_width =
+                appended_character_width(scale, line.width, previous, word_character, tracking);
+            if !line.glyphs.is_empty() && next_width > max_width {
+                lines.push(RasterLine {
+                    start: word_index,
+                    end: word_index,
+                    width: 0.0,
+                    glyphs: Vec::new(),
+                });
+                previous = None;
+            }
+            let line = lines.last_mut().expect("text layout line exists");
+            append_character_to_line(
+                scale,
+                line,
+                &mut previous,
+                word_index,
+                word_character,
+                tracking,
+            );
+            line.end = word_index + 1;
+        }
     }
+    lines
+}
+
+fn layout_for_request(request: &UiTextAtlasRequest, text: &str) -> Arc<Vec<RasterLine>> {
+    cached_layout(
+        request,
+        text,
+        text_layout_width(
+            request.style.role,
+            request.max_width,
+            request.single_line,
+            request.overflow,
+        ),
+        brand_tracking(request.style.role),
+    )
+}
+
+fn cached_layout(
+    request: &UiTextAtlasRequest,
+    text: &str,
+    max_width: f32,
+    tracking: f32,
+) -> Arc<Vec<RasterLine>> {
+    static CACHE: OnceLock<Mutex<UiTextLayoutCache>> = OnceLock::new();
+
+    let key = UiTextLayoutCacheKey {
+        text_hash: stable_text_hash(text),
+        role: request.style.role,
+        weight: request.style.weight,
+        size_px_bits: request.style.size_px.max(6.0).to_bits(),
+        width_px_bits: max_width.to_bits(),
+        tracking_bits: tracking.to_bits(),
+    };
+
+    if text.len() <= MAX_LAYOUT_CACHE_TEXT_BYTES {
+        let cache = CACHE.get_or_init(|| Mutex::new(UiTextLayoutCache::default()));
+        let mut cache = cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        cache.clock = cache.clock.wrapping_add(1).max(1);
+        let last_used = cache.clock;
+        if let Some(entry) = cache.entries.get_mut(&key) {
+            if entry.text == text {
+                entry.last_used = last_used;
+                return Arc::clone(&entry.lines);
+            }
+        }
+    }
+
+    let font = atlas_font(request.style.role, request.style.weight);
+    let scale = font.as_scaled(request.style.size_px.max(6.0));
+    let lines = Arc::new(layout_lines(&scale, text, max_width, tracking));
+    if text.len() > MAX_LAYOUT_CACHE_TEXT_BYTES {
+        return lines;
+    }
+
+    let bytes = text
+        .len()
+        .saturating_add(
+            lines
+                .len()
+                .saturating_mul(std::mem::size_of::<RasterLine>()),
+        )
+        .saturating_add(
+            lines
+                .iter()
+                .map(|line| {
+                    line.glyphs
+                        .len()
+                        .saturating_mul(std::mem::size_of::<RasterGlyph>())
+                })
+                .sum::<usize>(),
+        )
+        .saturating_add(std::mem::size_of::<UiTextLayoutCacheEntry>());
+    if bytes > MAX_LAYOUT_CACHE_BYTES {
+        return lines;
+    }
+
+    let cache = CACHE.get_or_init(|| Mutex::new(UiTextLayoutCache::default()));
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(replaced) = cache.entries.remove(&key) {
+        cache.bytes = cache.bytes.saturating_sub(replaced.bytes);
+    }
+    while cache.entries.len() >= MAX_LAYOUT_CACHE_ENTRIES
+        || cache.bytes.saturating_add(bytes) > MAX_LAYOUT_CACHE_BYTES
+    {
+        let Some(oldest_key) = cache
+            .entries
+            .iter()
+            .min_by_key(|(_, entry)| entry.last_used)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        if let Some(oldest) = cache.entries.remove(&oldest_key) {
+            cache.bytes = cache.bytes.saturating_sub(oldest.bytes);
+        }
+    }
+    cache.clock = cache.clock.wrapping_add(1).max(1);
+    let last_used = cache.clock;
+    cache.bytes = cache.bytes.saturating_add(bytes);
+    cache.entries.insert(
+        key,
+        UiTextLayoutCacheEntry {
+            text: text.to_string(),
+            lines: Arc::clone(&lines),
+            bytes,
+            last_used,
+        },
+    );
     lines
 }
 
@@ -630,27 +988,27 @@ pub(crate) fn visual_line_ranges(
     request: &UiTextAtlasRequest,
     text: &str,
 ) -> Vec<UiTextVisualLine> {
-    let font = atlas_font(request.style.role, request.style.weight);
-    let scale = font.as_scaled(request.style.size_px.max(6.0));
-    let lines = layout_lines(
-        &scale,
-        text,
-        text_layout_width(
-            request.style.role,
-            request.max_width,
-            request.single_line,
-            request.overflow,
-        ),
-        brand_tracking(request.style.role),
-    );
+    let prepared =
+        (request.overflow == UiTextOverflow::Ellipsis).then(|| prepare_text(request, text));
+    let display_text = prepared
+        .as_ref()
+        .map(|prepared| prepared.display.as_str())
+        .unwrap_or(text);
+    let lines = layout_for_request(request, display_text);
     lines
-        .into_iter()
+        .iter()
         .map(|line| UiTextVisualLine {
-            start: line.start,
-            end: line.end,
+            start: source_boundary(prepared.as_ref(), line.start),
+            end: source_boundary(prepared.as_ref(), line.end),
             width: line.width,
         })
         .collect()
+}
+
+fn source_boundary(prepared: Option<&PreparedText>, display_boundary: usize) -> usize {
+    prepared
+        .map(|prepared| prepared.source_boundaries[display_boundary])
+        .unwrap_or(display_boundary)
 }
 
 fn appended_text_width<F: Font>(
@@ -661,7 +1019,7 @@ fn appended_text_width<F: Font>(
     tracking: f32,
 ) -> f32 {
     for character in text.chars() {
-        let id = scale.glyph_id(character);
+        let id = resolved_glyph_id(scale, character);
         if previous.is_some() {
             width += tracking;
         }
@@ -679,7 +1037,7 @@ fn appended_character_width<F: Font>(
     character: char,
     tracking: f32,
 ) -> f32 {
-    let id = scale.glyph_id(character);
+    let id = resolved_glyph_id(scale, character);
     (width
         + if previous.is_some() { tracking } else { 0.0 }
         + previous.map(|glyph| scale.kern(glyph, id)).unwrap_or(0.0))
@@ -691,17 +1049,45 @@ fn append_character_to_line<F: Font>(
     scale: &impl ScaleFont<F>,
     line: &mut RasterLine,
     previous: &mut Option<ab_glyph::GlyphId>,
+    character_index: usize,
     character: char,
     tracking: f32,
 ) {
-    let id = scale.glyph_id(character);
+    let id = resolved_glyph_id(scale, character);
     let tracking = if previous.is_some() { tracking } else { 0.0 };
-    line.width =
-        (line.width + tracking + previous.map(|glyph| scale.kern(glyph, id)).unwrap_or(0.0))
-            .max(0.0);
-    line.glyphs.push(RasterGlyph { id, x: line.width });
-    line.width += scale.h_advance(id);
+    let x = (line.width + tracking + previous.map(|glyph| scale.kern(glyph, id)).unwrap_or(0.0))
+        .max(0.0);
+    let end_x = x + scale.h_advance(id);
+    line.glyphs.push(RasterGlyph {
+        id,
+        x,
+        end_x,
+        character_index,
+    });
+    line.width = end_x;
     *previous = Some(id);
+}
+
+fn resolved_glyph_id<F: Font>(scale: &impl ScaleFont<F>, character: char) -> ab_glyph::GlyphId {
+    let glyph = scale.glyph_id(character);
+    if glyph.0 != 0 {
+        return glyph;
+    }
+    if character.is_whitespace() {
+        let space = scale.glyph_id(' ');
+        return if space.0 != 0 { space } else { glyph };
+    }
+
+    let replacement = scale.glyph_id('\u{fffd}');
+    if replacement.0 != 0 {
+        return replacement;
+    }
+    let question = scale.glyph_id('?');
+    if question.0 != 0 {
+        question
+    } else {
+        glyph
+    }
 }
 
 fn brand_tracking(role: UiTextRole) -> f32 {
@@ -755,6 +1141,19 @@ fn stable_text_hash(text: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rafui_fractional_font_sizes_do_not_alias_and_oversized_tiles_are_bounded() {
+        let mut first = request();
+        first.style.size_px = 11.1;
+        let mut second = first.clone();
+        second.style.size_px = 11.8;
+        assert_ne!(
+            super::UiTextAtlasKey::from_request(&first, "same"),
+            super::UiTextAtlasKey::from_request(&second, "same")
+        );
+        let raster = super::rasterize_text(&first, &"x".repeat(70 * 1024));
+        assert!(raster.pixels.is_empty());
+    }
     use super::*;
 
     fn request() -> UiTextAtlasRequest {
@@ -933,6 +1332,88 @@ mod tests {
             atlas.measure_prefix_width(&request, "a  b", 4)
                 > atlas.measure_prefix_width(&request, "ab", 2)
         );
+    }
+
+    #[test]
+    fn wrapping_prefers_word_boundaries_and_hard_breaks_overlong_tokens() {
+        let mut request = request();
+        let font = atlas_font(request.style.role, request.style.weight);
+        let scale = font.as_scaled(request.style.size_px.max(6.0));
+        let tracking = brand_tracking(request.style.role);
+        request.max_width = appended_text_width(&scale, 0.0, None, "alpha ", tracking) + 0.1;
+
+        let word_lines = visual_line_ranges(&request, "alpha beta");
+        assert_eq!(word_lines.len(), 2);
+        assert_eq!((word_lines[0].start, word_lines[0].end), (0, 6));
+        assert_eq!((word_lines[1].start, word_lines[1].end), (6, 10));
+
+        request.max_width = appended_text_width(&scale, 0.0, None, "ab", tracking) + 0.1;
+        let token = "unbreakable";
+        let token_lines = visual_line_ranges(&request, token);
+        assert!(token_lines.len() > 1);
+        assert_eq!(token_lines.first().unwrap().start, 0);
+        assert_eq!(token_lines.last().unwrap().end, token.chars().count());
+        assert!(token_lines
+            .windows(2)
+            .all(|pair| pair[0].end == pair[1].start));
+    }
+
+    #[test]
+    fn explicit_newlines_keep_empty_visual_lines_and_source_ranges() {
+        let mut request = request();
+        request.max_width = 512.0;
+        let lines = visual_line_ranges(&request, "a\n\nb");
+
+        assert_eq!(lines.len(), 3);
+        assert_eq!((lines[0].start, lines[0].end), (0, 1));
+        assert_eq!((lines[1].start, lines[1].end), (2, 2));
+        assert_eq!((lines[2].start, lines[2].end), (3, 4));
+    }
+
+    #[test]
+    fn ellipsis_is_measured_and_never_exceeds_a_narrow_width() {
+        let mut request = request();
+        request.overflow = UiTextOverflow::Ellipsis;
+        let font = atlas_font(request.style.role, request.style.weight);
+        let scale = font.as_scaled(request.style.size_px.max(6.0));
+        let mark_width = appended_character_width(&scale, 0.0, None, '…', 0.0);
+
+        request.max_width = (mark_width * 0.5).max(0.1);
+        let too_narrow = prepare_text(&request, "A long label");
+        assert!(too_narrow.display.is_empty());
+
+        request.max_width = mark_width;
+        let marker_only = prepare_text(&request, "A long label");
+        assert_eq!(marker_only.display, "…");
+        let line = visual_line_ranges(&request, "A long label");
+        assert_eq!((line[0].start, line[0].end), (0, 0));
+        assert!(line[0].width <= request.max_width + f32::EPSILON);
+    }
+
+    #[test]
+    fn missing_non_whitespace_glyphs_resolve_to_a_visible_fallback() {
+        let request = request();
+        let font = atlas_font(request.style.role, request.style.weight);
+        let scale = font.as_scaled(request.style.size_px.max(6.0));
+        let missing = char::MAX;
+        if scale.glyph_id(missing).0 != 0 {
+            return;
+        }
+
+        assert_ne!(resolved_glyph_id(&scale, missing).0, 0);
+        let raster = rasterize_text(&request, &missing.to_string());
+        assert!(raster.pixels.iter().any(|pixel| *pixel > 0));
+    }
+
+    #[test]
+    fn baseline_metrics_match_the_single_line_raster_box() {
+        let request = request();
+        let font = atlas_font(request.style.role, request.style.weight);
+        let scale = font.as_scaled(request.style.size_px.max(6.0));
+        let metrics = baseline_metrics(&request.style);
+
+        assert_eq!(metrics[0], TEXT_RASTER_PADDING + scale.ascent());
+        assert_eq!(metrics[1], raster_line_height(&request.style, &scale) + 4.0);
     }
 
     #[test]

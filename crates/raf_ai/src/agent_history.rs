@@ -131,6 +131,8 @@ pub struct AgentSession {
     pub saved_revision: Option<u64>,
     #[serde(default)]
     pub draft: String,
+    #[serde(default)]
+    pub draft_images: Vec<crate::chat_media::ChatImage>,
 }
 
 impl AgentSession {
@@ -145,6 +147,7 @@ impl AgentSession {
             task_events: Vec::new(),
             saved_revision: None,
             draft: String::new(),
+            draft_images: Vec::new(),
         }
     }
 
@@ -267,6 +270,24 @@ impl AgentHistory {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn harness_image_metadata_round_trips_without_embedding_pixels() {
+        let mut session = AgentSession::new("image-session", "Images");
+        let image = crate::chat_media::ChatImage { file: "fixture.png".into(), width: 320, height: 240 };
+        session.draft_images.push(image.clone());
+        let mut message = ChatMessage::user("Reference");
+        message.images.push(image.clone());
+        session.messages.push(message);
+        let raw = ron::to_string(&session).unwrap();
+        let restored: AgentSession = ron::from_str(&raw).unwrap();
+        assert_eq!(restored.draft_images, vec![image.clone()]);
+        assert_eq!(restored.messages[0].images, vec![image]);
+        assert!(!raw.contains("data:image"));
+        let legacy = r#"(id:"old",title:"Legacy",messages:[],updated_at:"2026-01-01")"#;
+        let restored: AgentSession = ron::from_str(legacy).unwrap();
+        assert!(restored.draft_images.is_empty());
+    }
 
     #[test]
     fn round_trip_ron() {

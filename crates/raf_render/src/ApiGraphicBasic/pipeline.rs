@@ -14,6 +14,9 @@ pub enum BasicPipelineKind {
     PbrLitTwoSided,
     /// X-Ray style rendering that bypasses the depth test (e.g. for gizmos and active selection grid).
     XRay,
+    /// Unlit, two-sided authored UI; transparent fragments do not write scene depth.
+    UiSurface,
+    UiSurfaceOverlay,
 }
 
 impl Default for BasicPipelineKind {
@@ -28,6 +31,6 @@ impl BasicPipelineKind {
     }
 
     pub const fn is_two_sided(self) -> bool {
-        matches!(self, Self::FlatColorTwoSided | Self::PbrLitTwoSided)
+        matches!(self, Self::FlatColorTwoSided | Self::PbrLitTwoSided | Self::UiSurface | Self::UiSurfaceOverlay)
     }
 }

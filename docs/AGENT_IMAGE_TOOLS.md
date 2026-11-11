@@ -4,6 +4,20 @@ Image generation extends the existing image queue and Assets catalog. It does
 not add an asset database, a second renderer, separate Chat/Image/Vision model
 settings, or an obligatory linear workflow.
 
+## Automatic vision and capture evidence
+
+There is no manual "this model supports images" confirmation. Known text-only
+model families are blocked with an explicit message; unknown models are
+attempted so the provider remains authoritative. A provider image rejection is
+reported as an error, and structural tools stay available.
+
+`viewport_capture` can return the last editor frame or a framed offscreen angle
+(selection/entity targets, named or custom camera views). Successful captures
+are stored under `.aura_rafi/agent_artifacts/` and attached to the next native
+Agent request as ephemeral image evidence. They are not persisted as user chat
+messages and are not resent by later text-only turns. MCP clients receive the
+PNG as image content in the tool result.
+
 ## Routes
 
 - `asset_generate_local_png`: the existing offline icon/badge/sprite/texture

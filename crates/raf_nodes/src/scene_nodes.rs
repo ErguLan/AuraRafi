@@ -3,6 +3,12 @@ use crate::{Node, NodeCategory, NodeId, NodePin, NodeProperty, PinDataType as T,
 use uuid::Uuid;
 
 pub const SCENE_NODES: &[(&str, &str, bool)] = &[
+    ("ui-text", "Set UI Text", true),
+    ("ui-image", "Set UI Image", true),
+    ("ui-visible", "Set UI Visibility", true),
+    ("ui-enabled", "Set UI Enabled", true),
+    ("ui-show", "Show UI Instance", true),
+    ("ui-value", "Set UI Value", true),
     ("input-axis", "Input Axis", false),
     ("pointer-motion", "Pointer Motion", false),
     ("pointer-button", "Pointer Button", false),

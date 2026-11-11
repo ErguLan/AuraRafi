@@ -6,225 +6,65 @@
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum UiIconId {
-    Select,
-    Move,
-    Rotate,
-    Scale,
-    Focus,
-    Undo,
-    Redo,
-    Refresh,
-    Grid,
-    View2d,
-    View3d,
-    ScenePreview,
-    Shaded,
-    Wireframe,
-    Folder,
-    Scene,
-    Entity,
-    Camera,
-    Sun,
-    Sky,
-    Shadows,
-    Clock,
-    Cube,
-    Sphere,
-    Plane,
-    Cylinder,
-    Capsule,
-    Eye,
-    EyeOff,
-    Lock,
-    Unlock,
-    ChevronLeft,
-    ChevronRight,
-    ChevronDown,
-    More,
-    Search,
-    Filter,
-    Add,
-    Close,
-    Play,
-    Pause,
-    StepForward,
-    Stop,
-    Console,
-    Assets,
-    Project,
-    Node,
-    Agent,
-    Schematic,
-    Pcb,
-    Wire,
-    Route,
-    BoardOutline,
-    ZoomIn,
-    ZoomOut,
-    Trash,
-    Script,
-    File,
-    ExternalLink,
-    Pencil,
-    Copy,
-    Settings,
-    Menu,
-    Warning,
-    Error,
-    Success,
-    Magnet,
-    Frame,
+/// Static source and lookup metadata for one semantic icon.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiIconDescriptor {
+    pub id: UiIconId,
+    /// Stable kebab-case resource key.
+    pub key: &'static str,
+    /// Existing project-relative SVG master path.
+    pub master_svg: &'static str,
+    /// Width and height of the bundled runtime PNG in pixels.
+    pub source_raster_size: [u16; 2],
+    /// Width and height of the SVG master's design coordinate canvas.
+    pub source_canvas_size: [u16; 2],
+    /// Declared default logical display size, matching `UiIconSize::Toolbar`.
+    /// This is not a measured or per-icon optical correction.
+    pub optical_size_px: u16,
+    /// Intentional lookup aliases, including the stable serde variant spelling.
+    pub aliases: &'static [&'static str],
 }
 
-impl UiIconId {
-    /// Every semantic icon in the family. Coverage tests and tooling iterate
-    /// this instead of mirroring the enum by hand.
-    pub const ALL: [Self; 68] = [
-        Self::Select,
-        Self::Move,
-        Self::Rotate,
-        Self::Scale,
-        Self::Focus,
-        Self::Undo,
-        Self::Redo,
-        Self::Refresh,
-        Self::Grid,
-        Self::View2d,
-        Self::View3d,
-        Self::ScenePreview,
-        Self::Shaded,
-        Self::Wireframe,
-        Self::Folder,
-        Self::Scene,
-        Self::Entity,
-        Self::Camera,
-        Self::Sun,
-        Self::Sky,
-        Self::Shadows,
-        Self::Clock,
-        Self::Cube,
-        Self::Sphere,
-        Self::Plane,
-        Self::Cylinder,
-        Self::Capsule,
-        Self::Eye,
-        Self::EyeOff,
-        Self::Lock,
-        Self::Unlock,
-        Self::ChevronLeft,
-        Self::ChevronRight,
-        Self::ChevronDown,
-        Self::More,
-        Self::Search,
-        Self::Filter,
-        Self::Add,
-        Self::Close,
-        Self::Play,
-        Self::Pause,
-        Self::StepForward,
-        Self::Stop,
-        Self::Console,
-        Self::Assets,
-        Self::Project,
-        Self::Node,
-        Self::Agent,
-        Self::Schematic,
-        Self::Pcb,
-        Self::Wire,
-        Self::Route,
-        Self::BoardOutline,
-        Self::ZoomIn,
-        Self::ZoomOut,
-        Self::Trash,
-        Self::Script,
-        Self::File,
-        Self::ExternalLink,
-        Self::Pencil,
-        Self::Copy,
-        Self::Settings,
-        Self::Menu,
-        Self::Warning,
-        Self::Error,
-        Self::Success,
-        Self::Magnet,
-        Self::Frame,
-    ];
-
-    pub const fn key(self) -> &'static str {
-        match self {
-            Self::Select => "select",
-            Self::Move => "move",
-            Self::Rotate => "rotate",
-            Self::Scale => "scale",
-            Self::Focus => "focus",
-            Self::Undo => "undo",
-            Self::Redo => "redo",
-            Self::Refresh => "refresh",
-            Self::Grid => "grid",
-            Self::View2d => "view-2d",
-            Self::View3d => "view-3d",
-            Self::ScenePreview => "scene-preview",
-            Self::Shaded => "shaded",
-            Self::Wireframe => "wireframe",
-            Self::Folder => "folder",
-            Self::Scene => "scene",
-            Self::Entity => "entity",
-            Self::Camera => "camera",
-            Self::Sun => "sun",
-            Self::Sky => "sky",
-            Self::Shadows => "shadows",
-            Self::Clock => "clock",
-            Self::Cube => "cube",
-            Self::Sphere => "sphere",
-            Self::Plane => "plane",
-            Self::Cylinder => "cylinder",
-            Self::Capsule => "capsule",
-            Self::Eye => "eye",
-            Self::EyeOff => "eye-off",
-            Self::Lock => "lock",
-            Self::Unlock => "unlock",
-            Self::ChevronLeft => "chevron-left",
-            Self::ChevronRight => "chevron-right",
-            Self::ChevronDown => "chevron-down",
-            Self::More => "more",
-            Self::Search => "search",
-            Self::Filter => "filter",
-            Self::Add => "add",
-            Self::Close => "close",
-            Self::Play => "play",
-            Self::Pause => "pause",
-            Self::StepForward => "step-forward",
-            Self::Stop => "stop",
-            Self::Console => "console",
-            Self::Assets => "assets",
-            Self::Project => "project",
-            Self::Node => "node",
-            Self::Agent => "agent",
-            Self::Schematic => "schematic",
-            Self::Pcb => "pcb",
-            Self::Wire => "wire",
-            Self::Route => "route",
-            Self::BoardOutline => "board-outline",
-            Self::ZoomIn => "zoom-in",
-            Self::ZoomOut => "zoom-out",
-            Self::Trash => "trash",
-            Self::Script => "script",
-            Self::File => "file",
-            Self::ExternalLink => "external-link",
-            Self::Pencil => "pencil",
-            Self::Copy => "copy",
-            Self::Settings => "settings",
-            Self::Menu => "menu",
-            Self::Warning => "warning",
-            Self::Error => "error",
-            Self::Success => "success",
-            Self::Magnet => "magnet",
-            Self::Frame => "frame",
+macro_rules! declare_icon_family {
+    ($($variant:ident => {
+        key: $key:literal,
+        master_svg: $master_svg:literal,
+        source_raster_size: [$raster_width:literal, $raster_height:literal],
+        source_canvas_size: [$canvas_width:literal, $canvas_height:literal],
+        optical_size_px: $optical_size_px:literal,
+        aliases: [$($alias:literal),*],
+    },)*) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+        pub enum UiIconId { $($variant,)* }
+        impl UiIconId {
+            pub const ALL: [Self; [$(stringify!($variant)),*].len()] = [$(Self::$variant,)*];
+            pub const fn descriptor(self) -> UiIconDescriptor {
+                match self {
+                    $(Self::$variant => UiIconDescriptor {
+                        id: Self::$variant,
+                        key: $key,
+                        master_svg: $master_svg,
+                        source_raster_size: [$raster_width, $raster_height],
+                        source_canvas_size: [$canvas_width, $canvas_height],
+                        optical_size_px: $optical_size_px,
+                        aliases: &[$($alias),*],
+                    },)*
+                }
+            }
+            pub const fn key(self) -> &'static str { self.descriptor().key }
+            pub fn from_alias_key(key: &str) -> Option<Self> {
+                Self::ALL.iter().copied().find(|id| id.descriptor().aliases.contains(&key))
+            }
+            pub fn from_key(key: &str) -> Option<Self> {
+                match key {
+                    $($key => Some(Self::$variant),)*
+                    _ => Self::from_alias_key(key),
+                }
+            }
         }
-    }
+    };
 }
+crate::ui_icon_catalog!(declare_icon_family, metadata);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UiIconSize {
@@ -266,8 +106,22 @@ impl Default for UiIconState {
 }
 
 /// A renderer-neutral icon request embedded in a retained node.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum UiIconTone {
+    #[default]
+    Inherit,
+    Normal,
+    Muted,
+    Accent,
+    OnAccent,
+    Disabled,
+}
+
+/// A renderer-neutral icon request embedded in a retained node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct UiIcon {
+    #[serde(default)]
+    pub tone: UiIconTone,
     pub id: UiIconId,
     #[serde(default)]
     pub size: UiIconSize,
@@ -280,6 +134,7 @@ pub struct UiIcon {
 impl UiIcon {
     pub const fn new(id: UiIconId) -> Self {
         Self {
+            tone: UiIconTone::Inherit,
             id,
             size: UiIconSize::Toolbar,
             state: UiIconState::Normal,
@@ -296,11 +151,20 @@ impl UiIcon {
         self.tint = Some(tint);
         self
     }
+    pub const fn with_tone(mut self, tone: UiIconTone) -> Self {
+        self.tone = tone;
+        self
+    }
+    pub const fn with_state(mut self, state: UiIconState) -> Self {
+        self.state = state;
+        self
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{collections::HashSet, fs, path::Path};
 
     #[test]
     fn icon_identity_is_stable_and_does_not_depend_on_a_file_path() {
@@ -312,11 +176,106 @@ mod tests {
 
     #[test]
     fn all_lists_every_icon_with_a_unique_key() {
-        let mut keys: Vec<&'static str> = UiIconId::ALL.iter().map(|id| id.key()).collect();
-        keys.sort_unstable();
-        keys.dedup();
+        let keys: HashSet<&'static str> = UiIconId::ALL.iter().map(|id| id.key()).collect();
 
         assert_eq!(keys.len(), UiIconId::ALL.len(), "icon keys must be unique");
         assert_eq!(UiIconId::ALL.len(), 68);
+    }
+
+    #[test]
+    fn descriptors_and_aliases_are_unique_and_resolve_to_their_canonical_id() {
+        let mut lookup_keys = HashSet::new();
+        let mut master_paths = HashSet::new();
+
+        for id in UiIconId::ALL {
+            let descriptor = id.descriptor();
+            assert_eq!(descriptor.id, id);
+            assert_eq!(descriptor.key, id.key());
+            assert!(
+                lookup_keys.insert(descriptor.key),
+                "duplicate icon key: {}",
+                descriptor.key
+            );
+            assert!(
+                master_paths.insert(descriptor.master_svg),
+                "duplicate SVG master: {}",
+                descriptor.master_svg
+            );
+            assert!(descriptor.source_raster_size.iter().all(|size| *size > 0));
+            assert!(descriptor.source_canvas_size.iter().all(|size| *size > 0));
+            assert_eq!(
+                descriptor.optical_size_px,
+                UiIconSize::Toolbar.logical_pixels()
+            );
+
+            for alias in descriptor.aliases {
+                assert!(lookup_keys.insert(alias), "duplicate icon alias: {alias}");
+                assert_eq!(UiIconId::from_alias_key(alias), Some(id));
+                assert_eq!(UiIconId::from_key(alias), Some(id));
+            }
+        }
+
+        assert_eq!(UiIconId::from_alias_key("Undo"), Some(UiIconId::Undo));
+        assert_eq!(UiIconId::from_alias_key("undo"), None);
+        assert_eq!(UiIconId::from_key("unregistered-icon"), None);
+    }
+
+    #[test]
+    fn descriptor_asset_references_match_existing_svg_and_png_sources() {
+        let repository_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+
+        for id in UiIconId::ALL {
+            let descriptor = id.descriptor();
+            let svg_path = repository_root.join(descriptor.master_svg);
+            assert!(
+                svg_path.is_file(),
+                "missing SVG master for {}: {}",
+                id.key(),
+                svg_path.display()
+            );
+
+            let svg = fs::read_to_string(&svg_path).expect("read registered SVG master");
+            let expected_svg_header = format!(
+                "width=\"{}\" height=\"{}\" viewBox=\"0 0 {} {}\"",
+                descriptor.source_raster_size[0],
+                descriptor.source_raster_size[1],
+                descriptor.source_canvas_size[0],
+                descriptor.source_canvas_size[1],
+            );
+            assert!(
+                svg.contains(&expected_svg_header),
+                "SVG dimensions disagree with metadata for {}",
+                id.key()
+            );
+
+            let png_path = repository_root
+                .join("crates/raf_render/assets/ui_icons/png")
+                .join(format!("{}.png", descriptor.key));
+            assert!(
+                png_path.is_file(),
+                "missing runtime PNG for {}: {}",
+                id.key(),
+                png_path.display()
+            );
+            let png = fs::read(&png_path).expect("read registered runtime PNG");
+            assert!(png.len() >= 24, "truncated PNG for {}", id.key());
+            assert_eq!(
+                &png[..8],
+                b"\x89PNG\r\n\x1a\n",
+                "invalid PNG signature for {}",
+                id.key()
+            );
+            let width = u32::from_be_bytes([png[16], png[17], png[18], png[19]]);
+            let height = u32::from_be_bytes([png[20], png[21], png[22], png[23]]);
+            assert_eq!(
+                [width, height],
+                [
+                    u32::from(descriptor.source_raster_size[0]),
+                    u32::from(descriptor.source_raster_size[1])
+                ],
+                "runtime PNG dimensions disagree with metadata for {}",
+                id.key(),
+            );
+        }
     }
 }

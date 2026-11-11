@@ -47,6 +47,7 @@ pub(crate) fn default_toolbar_state() -> ViewportToolbarState {
         primitive_menu_open: false,
         building_style: BuildingStyle::Free,
         building_menu_open: false,
+        actions_menu_open: false,
         compact: false,
     }
 }

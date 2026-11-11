@@ -25,6 +25,10 @@ pub fn create(slug: &str) -> Option<Node> {
         pin(&mut node, "Out", K::Output, T::Flow);
     }
     let fields: &[(&str, &str, T, &str)] = match slug {
+        "ui-text" | "ui-image" => &[("ui_instance","Instance",T::String,"main"),("ui_node","Element",T::String,""),("ui_text","Value",T::String,"")],
+        "ui-visible" | "ui-enabled" => &[("ui_instance","Instance",T::String,"main"),("ui_node","Element",T::String,""),("ui_visible","Visible",T::Bool,"true")],
+        "ui-show" => &[("ui_instance","Instance",T::String,"main"),("ui_visible","Visible",T::Bool,"true")],
+        "ui-value" => &[("ui_key","Key",T::String,""),("ui_text","Value",T::String,"")],
         "input-axis" => &[("axis_name", "Name", T::String, "")],
         "pointer-motion" => &[
             ("pointer_source", "Source", T::String, "relative"),
@@ -95,6 +99,7 @@ pub fn create(slug: &str) -> Option<Node> {
 pub(crate) fn is_service(slug: &str) -> bool {
     matches!(
         slug,
+        "ui-text"|"ui-image"|"ui-visible"|"ui-enabled"|"ui-show"|"ui-value"|
         "input-axis"
             | "pointer-motion"
             | "pointer-button"

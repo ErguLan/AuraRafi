@@ -1,6 +1,11 @@
 {
   "version": 1,
   "commands": [
+    {"name":"ui.document.read","aliases":[],"domain":"game","category":"interface","description_key":"ui.commands.read","parameters":[{"name":"path","kind":"string","required":true,"description_key":"ui.commands.path"}],"examples":["/ui.document.read path=sessions/<session-id>/ui.ron"]},
+    {"name":"ui.document.create","aliases":[],"domain":"game","category":"interface","description_key":"ui.commands.create","parameters":[{"name":"path","kind":"string","required":true,"description_key":"ui.commands.path"},{"name":"name","kind":"string","required":false,"description_key":"commands.param.name"}],"examples":["/ui.document.create path=assets/ui/menu.ui.ron name=Menu"]},
+    {"name":"ui.document.apply","aliases":[],"domain":"game","category":"interface","description_key":"ui.commands.apply","parameters":[{"name":"path","kind":"string","required":true,"description_key":"ui.commands.path"},{"name":"revision","kind":"string","required":true,"description_key":"ui.commands.revision"},{"name":"edits","kind":"json","required":true,"description_key":"ui.commands.edits"}],"examples":["/ui.document.apply path=assets/ui/menu.ui.ron revision=<revision> edits='[{\"op\":\"insert\",\"parent\":\"root\",\"id\":\"title\",\"kind\":\"label\",\"text\":\"Menu\"}]'"]},
+    {"name":"ui.document.undo","aliases":[],"domain":"game","category":"interface","description_key":"ui.commands.undo","parameters":[{"name":"path","kind":"string","required":true,"description_key":"ui.commands.path"},{"name":"revision","kind":"string","required":true,"description_key":"ui.commands.revision"}],"examples":["/ui.document.undo path=assets/ui/menu.ui.ron revision=<revision>"]},
+    {"name":"ui.performance","aliases":[],"domain":"shared","category":"system","description_key":"ui.performance.command_desc","parameters":[],"examples":["/ui.performance","/ui.performance refresh","/ui.performance clear","/ui.performance close"]},
     {"name":"lighting.inspect","aliases":[],"domain":"game","category":"lighting","description_key":"commands.lighting.inspect.desc","parameters":[],"examples":["/lighting.inspect"]},
     {"name":"lighting.set","aliases":[],"domain":"game","category":"lighting","description_key":"commands.lighting.set.desc","parameters":[{"name":"patch","kind":"json","required":false,"description_key":"commands.lighting.patch"},{"name":"property","kind":"string","required":false,"description_key":"commands.lighting.property"},{"name":"value","kind":"json","required":false,"description_key":"commands.lighting.value"}],"examples":["/lighting.set patch='{\"mode\":\"scene\",\"sun.intensity\":1.0}'"]},
     {"name":"lighting.reset","aliases":[],"domain":"game","category":"lighting","description_key":"commands.lighting.reset.desc","parameters":[{"name":"property","kind":"string","required":false,"description_key":"commands.lighting.property"}],"examples":["/lighting.reset property=sun.intensity"]},
@@ -945,6 +950,19 @@
       "examples": ["/script.create lang=rhai name=player_controller"]
     },
     {
+      "name": "script.write",
+      "aliases": ["script.save"],
+      "domain": "shared",
+      "category": "script",
+      "description_key": "commands.script_write.desc",
+      "parameters": [
+        {"name": "file", "kind": "string", "required": true, "description_key": "commands.param.path"},
+        {"name": "content", "kind": "string", "required": true, "description_key": "commands.script_source"},
+        {"name": "overwrite", "kind": "bool", "required": false, "default": "false", "description_key": "commands.param.overwrite"}
+      ],
+      "examples": ["/script.write file=scripts/player.rhai content='fn on_update(dt) { owner().move_by(0.0, 0.0, 2.0 * dt); }' overwrite=true"]
+    },
+    {
       "name": "script.attach",
       "aliases": [],
       "domain": "shared",
@@ -995,9 +1013,12 @@
       "category": "script",
       "description_key": "commands.script_run.desc",
       "parameters": [
-        {"name": "file", "kind": "string", "required": true, "description_key": "commands.param.path"}
+        {"name": "file", "kind": "string", "required": true, "description_key": "commands.param.path"},
+        {"name": "entity", "kind": "string", "required": false, "description_key": "commands.param.target"},
+        {"name": "ticks", "kind": "usize", "required": false, "default": "0"},
+        {"name": "keys", "kind": "array", "required": false}
       ],
-      "examples": ["/script.run file=player_controller.rhai"]
+      "examples": ["/script.run file=player_controller.rhai entity=Player ticks=120 keys=[w,space]"]
     },
     {
       "name": "script.compile_nodes",

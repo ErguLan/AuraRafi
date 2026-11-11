@@ -6,9 +6,10 @@ use crate::controls::{
 };
 use crate::events::UiEventBinding;
 use crate::icons::UiIcon;
-use crate::layout::UiLayout;
+use crate::layout::{UiFlow, UiLayout};
 use crate::style::{UiStyle, UiSurfaceMaterial};
 use crate::text::{UiTextOverflow, UiTextStyle};
+use crate::visual::UiVisual;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiAccessibilityRole {
@@ -24,6 +25,7 @@ pub enum UiAccessibilityRole {
     Tab,
     Dialog,
     Status,
+    Image,
 }
 
 impl Default for UiAccessibilityRole {
@@ -81,6 +83,10 @@ pub struct UiNode {
     pub focusable: bool,
     #[serde(default)]
     pub disabled: bool,
+    /// Data-only visibility flag. Presentation hosts decide how hidden nodes
+    /// affect layout and paint.
+    #[serde(default)]
+    pub hidden: bool,
     #[serde(default)]
     pub invalid: bool,
     #[serde(default)]
@@ -110,6 +116,8 @@ pub struct UiNode {
     pub accessibility_selected: Option<bool>,
     #[serde(default)]
     pub control: UiControl,
+    #[serde(default)]
+    pub visual: UiVisual,
 }
 
 impl UiNode {
@@ -128,6 +136,7 @@ impl UiNode {
             text_selectable: false,
             focusable: false,
             disabled: false,
+            hidden: false,
             invalid: false,
             tooltip_key: None,
             tooltip_value: None,
@@ -142,7 +151,50 @@ impl UiNode {
             accessibility_checked: None,
             accessibility_selected: None,
             control: UiControl::None,
+            visual: UiVisual::default(),
         }
+    }
+
+    pub fn new_scoped(scope: impl AsRef<str>, id: impl AsRef<str>, kind: UiNodeKind) -> Self {
+        Self::new(Self::scoped_id(scope.as_ref(), id.as_ref()), kind)
+    }
+
+    pub fn scoped_id(scope: &str, id: &str) -> String {
+        let scope = scope.trim().trim_matches('/');
+        let id = id.trim_matches('/');
+        if scope.is_empty() {
+            id.to_string()
+        } else if id.is_empty() {
+            scope.to_string()
+        } else {
+            format!("{scope}/{id}")
+        }
+    }
+
+    /// Prefixes every id in this subtree, making reusable component recipes
+    /// safe to place more than once in a document.
+    pub fn with_id_scope(mut self, scope: impl AsRef<str>) -> Self {
+        let scope = scope.as_ref().trim().trim_matches('/').to_string();
+        if !scope.is_empty() {
+            prefix_node_ids(&mut self, &scope);
+        }
+        self
+    }
+
+    pub fn row(id: impl Into<String>, children: impl IntoIterator<Item = UiNode>) -> Self {
+        let mut layout = UiLayout::default();
+        layout.flow = UiFlow::Row;
+        Self::new(id, UiNodeKind::Panel)
+            .with_layout(layout)
+            .with_children(children)
+    }
+
+    pub fn column(id: impl Into<String>, children: impl IntoIterator<Item = UiNode>) -> Self {
+        let mut layout = UiLayout::default();
+        layout.flow = UiFlow::Column;
+        Self::new(id, UiNodeKind::Panel)
+            .with_layout(layout)
+            .with_children(children)
     }
 
     pub fn image(id: impl Into<String>, image: UiImage) -> Self {
@@ -206,6 +258,8 @@ impl UiNode {
         self
     }
 
+    /// Replaces the whole layout, including flow and anchoring. Use
+    /// `map_layout` or the sizing/spacing builders for a partial adjustment.
     pub fn with_layout(mut self, layout: UiLayout) -> Self {
         self.layout = layout;
         self
@@ -213,6 +267,11 @@ impl UiNode {
 
     pub fn with_style(mut self, style: UiStyle) -> Self {
         self.style = style;
+        self
+    }
+
+    pub fn with_visual(mut self, visual: UiVisual) -> Self {
+        self.visual = visual;
         self
     }
 
@@ -244,6 +303,11 @@ impl UiNode {
 
     pub fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    pub fn with_hidden(mut self, hidden: bool) -> Self {
+        self.hidden = hidden;
         self
     }
 
@@ -347,6 +411,11 @@ impl UiNode {
         self
     }
 
+    pub fn with_children(mut self, children: impl IntoIterator<Item = UiNode>) -> Self {
+        self.children.extend(children);
+        self
+    }
+
     /// Finds a node by its retained identity without exposing a second tree
     /// representation to hosts. Native adapters use this for focus/IME
     /// coordination while authored surfaces remain declarative.
@@ -364,6 +433,13 @@ impl UiNode {
         self.children
             .iter_mut()
             .find_map(|child| child.find_mut(id))
+    }
+}
+
+fn prefix_node_ids(node: &mut UiNode, scope: &str) {
+    node.id = UiNode::scoped_id(scope, &node.id);
+    for child in &mut node.children {
+        prefix_node_ids(child, scope);
     }
 }
 
@@ -385,6 +461,26 @@ mod tests {
     fn an_empty_class_string_registers_nothing() {
         let node = UiNode::new("card", UiNodeKind::Button).with_class("   ");
         assert!(node.classes.is_empty());
+    }
+
+    #[test]
+    fn row_and_column_helpers_keep_children_in_flow_and_support_scoped_ids() {
+        let row = UiNode::row(
+            "toolbar",
+            [
+                UiNode::new("save", UiNodeKind::Button),
+                UiNode::new("open", UiNodeKind::Button),
+            ],
+        )
+        .with_id_scope("editor");
+        let column = UiNode::column("details", [UiNode::new("title", UiNodeKind::Label)]);
+
+        assert_eq!(row.layout.flow, UiFlow::Row);
+        assert_eq!(row.id, "editor/toolbar");
+        assert_eq!(row.children[0].id, "editor/save");
+        assert_eq!(row.children[1].id, "editor/open");
+        assert_eq!(column.layout.flow, UiFlow::Column);
+        assert_eq!(column.children.len(), 1);
     }
 
     #[test]

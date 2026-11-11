@@ -427,10 +427,9 @@ impl NativeElectronicsEditor {
         };
         let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
         self.ensure_camera(canvas);
-        let panel = crate::electronics_minimap::overlay_rect(size);
-        let image = crate::electronics_minimap::image_rect(size);
-        let over_panel = rect_contains(panel, pointer);
-        let over_image = rect_contains(image, pointer);
+        let minimap = self.minimap_rects(size);
+        let over_panel = minimap.is_some_and(|rects| rect_contains(rects.panel, pointer));
+        let over_image = !self.minimap_collapsed && minimap.is_some_and(|rects| rect_contains(rects.image, pointer));
 
         // Sampled before the assignment below so the hover repick can tell a real
         // cursor movement from a repeated frame.
@@ -674,7 +673,9 @@ impl NativeElectronicsEditor {
         if self.component_drag.is_some()
             && router.is_pointer_owned_by(PointerButton::Primary, owner)
         {
-            if input.button_down(PointerButton::Primary) && input.pointer_delta != [0.0, 0.0] {
+            if (input.button_down(PointerButton::Primary) && input.pointer_delta != [0.0, 0.0])
+                || input.button_released(PointerButton::Primary)
+            {
                 let drag_kind = self.selection.map(|selection| selection.kind);
                 let drag_state = self.component_drag.as_ref().map(|drag| {
                     (
@@ -838,6 +839,14 @@ impl NativeElectronicsEditor {
             result.request_redraw = true;
         }
 
+        if self.active_surface == CadSurfaceKind::Pcb && self.tool == ElectronicsTool::Route && pointer_changed {
+            let target_changed = previous_pointer_world.and_then(|p| self.route_hover_identity(p)) != self.route_hover_identity(world);
+            if self.pcb_route_draft.is_some() || target_changed {
+                self.rebuild_scene();
+                if target_changed { self.touch_ui(); } else { self.touch(); }
+                result.request_redraw = true;
+            }
+        }
         result
     }
 
@@ -898,10 +907,12 @@ impl NativeElectronicsEditor {
     }
 
     /// True when a pointer gesture, a preview or a confirmation is armed.
-    fn has_pending_gesture(&self) -> bool {
+    pub(crate) fn has_pending_gesture(&self) -> bool {
         self.component_drag.is_some()
+            || self.placement_drag_active
             || self.wire_start.is_some()
             || self.board_outline_start.is_some()
+            || self.pcb_route_draft.is_some()
             || self.secondary_pointer.is_some()
             || self.pan_pointer.is_some()
             || self.minimap_drag
@@ -972,6 +983,9 @@ impl NativeElectronicsEditor {
         if input.modifiers.command_modifier() || input.modifiers.alt {
             return false;
         }
+        if input.key_pressed(InputKey::Enter) && self.tool == ElectronicsTool::Route && self.active_surface == CadSurfaceKind::Pcb {
+            return self.apply_pcb_tool_command("electronics.pcb.route.finish");
+        }
         if input.key_pressed(shortcut::ROTATE) {
             // `R` turns clockwise and `Shift+R` counter-clockwise. Without the
             // inversion a part could only be brought back by three more presses,
@@ -1000,6 +1014,9 @@ impl NativeElectronicsEditor {
             return true;
         }
         if input.key_pressed(shortcut::SELECT_TOOL) {
+            if input.modifiers.shift && self.active_surface == CadSurfaceKind::Pcb {
+                return self.apply_pcb_tool_command("electronics.pcb.via");
+            }
             self.set_tool(ElectronicsTool::Select);
             return true;
         }
@@ -1027,6 +1044,7 @@ impl NativeElectronicsEditor {
     }
 
     pub fn undo(&mut self) -> bool {
+        if self.undo_route_point() {return true;}
         if !self.history.undo(&mut self.schematic, &mut self.pcb) {
             return false;
         }
@@ -1097,6 +1115,9 @@ impl NativeElectronicsEditor {
             &self.pcb,
         )?;
         self.dirty = false;
+        // The retained workbench keys its status bar by ui_revision. Saving is
+        // not a CAD edit, but it must invalidate the Modified/Saved indicator.
+        self.touch_ui();
         Ok(())
     }
 
@@ -1138,11 +1159,7 @@ impl NativeElectronicsEditor {
         // it is the same press the user would have made to select, and the
         // inspector should not blank out because the drag began a wire.
         //
-        // When the pin cannot be resolved the press falls through to the ordinary
-        // drag below. That happens when pin snapping is off, and it is the right
-        // degradation: with snapping disabled the document has said that pins do
-        // not capture pointers, so a press on one keeps meaning "move this part"
-        // instead of arming a gesture that could never anchor.
+        // Grid snapping does not disable acquiring electrical terminals.
         if press_starts_pin_wire(self.tool, self.active_surface, Some(hit.selection.kind)) {
             if let Some((_, point, anchor)) = self.pin_endpoint_at(world) {
                 self.wire_start = Some(WireStart {
@@ -1171,6 +1188,7 @@ impl NativeElectronicsEditor {
                         .iter()
                         .find(|component| component.component_id == source_id)
                         .map(|component| (component.position, component.locked))
+                        .or_else(|| self.pcb.vias.iter().find(|via| via.id == source_id).map(|via| (via.position, false)))
                 };
                 match position_and_locked {
                     Some((position, false)) => {
@@ -1271,6 +1289,18 @@ impl NativeElectronicsEditor {
             self.schematic.sync_wire_anchors();
             DragOutcome::Moved
         } else {
+            if let Some(via) = self.pcb.vias.iter_mut().find(|via| via.id == component_id) {
+                let previous = via.position;
+                if previous.distance(target) <= f32::EPSILON { return DragOutcome::Unchanged; }
+                via.position = target;
+                for trace in self.pcb.traces.iter_mut().filter(|trace| trace.net == via.net) {
+                    for point in &mut trace.points {
+                        if point.distance(previous) <= 0.0001 { *point = target; }
+                    }
+                }
+                self.pcb.rebuild_airwires();
+                return DragOutcome::Moved;
+            }
             let Some(component) = self
                 .pcb
                 .components
@@ -1459,17 +1489,22 @@ impl NativeElectronicsEditor {
             router.release_pointer(PointerButton::Primary, owner);
             return;
         }
+        if self.route_physical_click(world) {
+            router.release_pointer(PointerButton::Primary, owner);
+            result.changed=true;result.request_redraw=true;
+            return;
+        }
         let tolerance = PICK_TOLERANCE_SCREEN / self.camera.zoom.max(MIN_ZOOM);
-        // The route tool keeps the legacy full pick on purpose: an airwire is a
-        // painted overlay and `pick_editable` rejects it by design so it can never
-        // steal a click from the copper underneath. Here the airwire IS the
-        // target, so this is the one place that must be picked explicitly.
+        // Clicking a guide arms its nearest endpoint. Quick routing remains an
+        // explicit context command; a missed pad must never author a whole trace.
         if let Some(hit) = pick(&self.scene, world, tolerance) {
             if hit.selection.kind == CadObjectKind::Airwire {
-                self.interaction.selected = Some(hit.selection);
-                if self.route_selected_airwire() {
-                    result.changed = true;
-                    result.request_redraw = true;
+                if let Some(object) = self.scene.objects.iter().find(|o| o.id == hit.selection.object_id) {
+                    if let Some(endpoint) = object.points.iter().copied().min_by(|a,b| a.distance_squared(world).total_cmp(&b.distance_squared(world))) {
+                        self.route_physical_click(endpoint);
+                        result.request_redraw = true;
+                        result.changed = true;
+                    }
                 }
             }
         }
@@ -1488,45 +1523,40 @@ impl NativeElectronicsEditor {
             return;
         }
         let point = self.snap_world(world);
-        if let Some(start) = self.board_outline_start.take() {
-            let min = start.min(point);
-            let max = start.max(point);
-            if (max.x - min.x).abs() >= 20.0 && (max.y - min.y).abs() >= 20.0 {
-                let before = self.snapshot();
-                self.pcb.board_outline.points = vec![
-                    Vec2::new(min.x, min.y),
-                    Vec2::new(max.x, min.y),
-                    Vec2::new(max.x, max.y),
-                    Vec2::new(min.x, max.y),
-                    Vec2::new(min.x, min.y),
-                ];
-                self.pcb.rebuild_airwires();
-                if self.history.record(before, &self.snapshot()) {
-                    self.dirty = true;
-                }
-                self.set_tool(ElectronicsTool::Select);
-                self.rebuild_scene();
-                result.changed = true;
-                result.request_redraw = true;
-            } else {
-                self.board_outline_start = Some(start);
-                self.touch_ui();
-            }
-        } else {
-            self.board_outline_start = Some(point);
-            self.touch_ui();
-            result.changed = true;
-            result.request_redraw = true;
+        if self.board_outline_start.is_none() {
+            self.board_outline_vertices.clear();
         }
+        // Closing is a screen-space target, independent of the manufacturing
+        // grid. At a 0.25 mm grid the old cap made it smaller than one pixel.
+        let close_radius = 8.0 / self.camera.zoom.max(MIN_ZOOM);
+        if self.board_outline_vertices.len() >= 3
+            && point.distance(self.board_outline_vertices[0]) <= close_radius
+        {
+            let mut points = self.board_outline_vertices.clone();
+            points.push(points[0]);
+            if raf_electronics::pcb::geometry_outline_is_simple(&points) {
+                let before = self.snapshot();
+                self.pcb.board_outline.points = points;
+                self.pcb.rebuild_airwires();
+                if self.history.record(before, &self.snapshot()) { self.dirty = true; }
+                self.set_tool(ElectronicsTool::Select);
+            } else {
+                self.push_surface_error_key("electronics.error.outline_invalid");
+            }
+        } else if self.board_outline_vertices.len() < 512 && self.board_outline_vertices.last().map_or(true, |last| last.distance(point) > 0.0001) {
+            self.board_outline_vertices.push(point);
+            self.board_outline_start = self.board_outline_vertices.first().copied();
+        }
+        self.rebuild_scene();
+        self.touch_ui();
+        result.changed = true;
+        result.request_redraw = true;
         router.release_pointer(PointerButton::Primary, owner);
     }
 
     pub(super) fn pin_endpoint_at(&self, point: Vec2) -> Option<(Uuid, Vec2, WireAnchor)> {
-        if !self.snap_enabled {
-            // Pin snapping used to be impossible to turn off, so a project that
-            // disabled grid snapping still got wires jumping onto pins.
-            return None;
-        }
+        // Grid snapping and electrical endpoint acquisition are independent.
+        // Turning off the grid must not make a visible terminal unconnectable.
         // The radius stays in screen pixels so a pin is as grabbable as it looks,
         // but it is capped in grid cells so a low zoom cannot turn "near" into
         // "several cells away" and make a distant route jump onto the pin.
@@ -1584,9 +1614,10 @@ impl NativeElectronicsEditor {
         let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
         self.ensure_camera(canvas);
         let local = pointer.and_then(|point| canvas.local_point(point));
-        let panel = crate::electronics_minimap::overlay_rect(size);
+        let minimap_panel = self.minimap_rects(size)
+            .map(|rects| rects.panel);
         let world = local
-            .filter(|point| !rect_contains(panel, *point))
+            .filter(|point| minimap_panel.map_or(true, |panel| !rect_contains(panel, *point)))
             .map(|point| self.camera.world_from_screen(Vec2::from(point), size));
         let changed = world.is_some_and(|world| self.place_component(world));
         self.placement_drag_active = false;
@@ -1607,9 +1638,10 @@ impl NativeElectronicsEditor {
         let size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
         let pointer = input.pointer_position;
         let local = pointer.and_then(|point| canvas.local_point(point));
-        let panel = crate::electronics_minimap::overlay_rect(size);
+        let minimap_panel = self.minimap_rects(size)
+            .map(|rects| rects.panel);
         let world = local
-            .filter(|point| !rect_contains(panel, *point))
+            .filter(|point| minimap_panel.map_or(true, |panel| !rect_contains(panel, *point)))
             .map(|point| {
                 self.ensure_camera(canvas);
                 self.snap_world(self.camera.world_from_screen(Vec2::from(point), size))
@@ -1697,6 +1729,12 @@ impl NativeElectronicsEditor {
         let before = self.snapshot();
         let mut changed = false;
         if self.active_surface == CadSurfaceKind::Pcb
+            && self.pcb.vias.iter().any(|via| via.id == selection.source_id)
+        {
+            self.pcb.vias.retain(|via| via.id != selection.source_id);
+            self.pcb.rebuild_airwires();
+            changed = true;
+        } else if self.active_surface == CadSurfaceKind::Pcb
             && matches!(
                 selection.kind,
                 ElectronicsSelectionKind::Component | ElectronicsSelectionKind::Pin
@@ -1778,7 +1816,7 @@ impl NativeElectronicsEditor {
             return false;
         };
         let before = self.snapshot();
-        if let Err(error) = self.pcb.try_route_airwire(index) {
+        if let Err(error) = self.pcb.try_route_airwire_with_options(index,self.pcb_route_layer,self.pcb_route_width) {
             self.push_surface_error(error);
             self.touch_ui();
             return false;
@@ -1898,6 +1936,7 @@ impl NativeElectronicsEditor {
     ) {
         self.wire_start = None;
         self.board_outline_start = None;
+        self.board_outline_vertices.clear();
         self.set_tool(ElectronicsTool::Select);
         router.release_pointer(PointerButton::Primary, owner);
         // The hover was suppressed for the whole run and has to come back with the
@@ -1914,6 +1953,9 @@ impl NativeElectronicsEditor {
     /// do. It must therefore never be reached from the capture-lost path, where
     /// the movement already reached the document and has to be committed.
     fn cancel_gesture(&mut self, router: &mut InputRouter, owner: InputOwner) {
+        self.clear_route_error();
+        if self.pcb_route_draft.is_some(){self.highlight_net=None;}
+        self.pcb_route_draft=None;
         if let Some(drag) = self.component_drag.take() {
             self.schematic = drag.before.schematic;
             self.pcb = drag.before.pcb;
@@ -1921,6 +1963,7 @@ impl NativeElectronicsEditor {
         }
         self.wire_start = None;
         self.board_outline_start = None;
+        self.board_outline_vertices.clear();
         self.secondary_pointer = None;
         self.pan_pointer = None;
         self.minimap_drag = false;
@@ -2038,6 +2081,111 @@ mod tests {
     }
 
     #[test]
+    fn escape_abandons_outline_after_pointer_leaves_canvas_without_editing_board() {
+        let mut editor = NativeElectronicsEditor::empty("Cancel outline");
+        editor.set_surface(CadSurfaceKind::Pcb);
+        editor.set_tool(ElectronicsTool::BoardOutline);
+        editor.camera_initialized = true;
+        editor.camera.zoom = 1.0;
+        let before = editor.pcb.board_outline.clone();
+        let mut router = InputRouter::default();
+        for input in [press_frame(Vec2::new(-100.0, -80.0), 1.0), release_frame(Vec2::new(-100.0, -80.0), 1.05)] {
+            router.reconcile_input(&input);
+            editor.process_input(&input, &mut router, test_canvas());
+            router.finish_frame(&input);
+        }
+        assert!(editor.has_pending_gesture());
+        let mut cancel = frame(Vec2::ZERO, 1.1);
+        cancel.pointer_position = Some([700.0, 40.0]);
+        cancel.keys_pressed.insert(InputKey::Escape);
+        router.reconcile_input(&cancel);
+        editor.process_input(&cancel, &mut router, test_canvas());
+        router.finish_frame(&cancel);
+        assert!(!editor.has_pending_gesture());
+        assert!(editor.board_outline_vertices.is_empty());
+        assert_eq!(editor.pcb.board_outline, before);
+        assert!(!editor.is_dirty());
+    }
+
+    #[test]
+    fn electronics_save_refreshes_retained_status_and_failure_keeps_dirty() {
+        let parent = std::env::temp_dir().join(format!("raf-save-status-{}", Uuid::new_v4()));
+        let project = Project::create("Status", raf_core::project::ProjectType::Electronics, &parent).unwrap();
+        let mut editor = NativeElectronicsEditor::from_project(&project);
+        editor.apply_ui_command("electronics.place.template.0");
+        assert!(editor.place_component(Vec2::ZERO));
+        editor.fabrication_status = Some("Previous fabrication failure".into());
+        let revision = editor.ui_revision();
+        editor.save(&project).unwrap();
+        assert!(!editor.is_dirty());
+        assert!(editor.ui_revision() > revision);
+        assert!(editor.fabrication_status().is_some(), "Saving must preserve the independent fabrication notice");
+        assert_eq!(NativeElectronicsEditor::from_project(&project).schematic.components.len(), 1);
+        assert!(editor.place_component(Vec2::new(100.0, 0.0)));
+        let revision = editor.ui_revision();
+        assert!(editor.save_to_session(&project, raf_core::session::SessionId(Uuid::new_v4())).is_err());
+        assert!(editor.is_dirty());
+        assert_eq!(editor.ui_revision(), revision);
+        assert!(parent.starts_with(std::env::temp_dir()));
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[test]
+    fn fine_pcb_grid_keeps_outline_close_target_eight_pixels_wide() {
+        let mut editor = NativeElectronicsEditor::empty("Outline target");
+        editor.set_surface(CadSurfaceKind::Pcb);
+        editor.set_tool(ElectronicsTool::BoardOutline);
+        editor.grid_step = 0.25;
+        editor.camera.zoom = 2.0;
+        let mut router = InputRouter::default();
+        let mut result = ElectronicsInputResult::default();
+        for point in [Vec2::ZERO, Vec2::new(20.0, 0.0), Vec2::new(20.0, 20.0), Vec2::new(0.0, 20.0)] {
+            editor.handle_board_outline_click(point, &mut router, InputOwner::ElectronicsCanvas, &mut result);
+        }
+        // Six screen pixels away from the first vertex. The old grid-capped
+        // radius (half a screen pixel) added a fifth point instead of closing.
+        editor.handle_board_outline_click(Vec2::new(3.0, 0.0), &mut router, InputOwner::ElectronicsCanvas, &mut result);
+        assert_eq!(editor.tool(), ElectronicsTool::Select);
+        assert_eq!(editor.pcb.board_outline.points.len(), 5);
+        assert_eq!(editor.pcb.board_outline.points.first(), editor.pcb.board_outline.points.last());
+    }
+
+    #[test]
+    fn heart_outline_closes_as_polygon_and_undo_restores_previous_board() {
+        let mut editor = NativeElectronicsEditor::empty("Heart regression");
+        editor.set_surface(CadSurfaceKind::Pcb);
+        editor.set_tool(ElectronicsTool::BoardOutline);
+        editor.camera.zoom = 1.0;
+        editor.camera_initialized = true;
+        editor.snap_enabled = false;
+        let before = editor.pcb.board_outline.clone();
+        let points = [Vec2::new(0.0, -40.0), Vec2::new(40.0,-80.0), Vec2::new(80.0,-40.0), Vec2::new(80.0,0.0), Vec2::new(0.0,80.0), Vec2::new(-80.0,0.0), Vec2::new(-80.0,-40.0), Vec2::new(-40.0,-80.0), Vec2::new(0.0,-40.0)];
+        let mut router = InputRouter::default();
+        let mut result = ElectronicsInputResult::default();
+        for point in points { editor.handle_board_outline_click(point, &mut router, InputOwner::ElectronicsCanvas, &mut result); }
+        assert_eq!(editor.pcb.board_outline.points, points);
+        assert!(editor.is_dirty());
+        assert!(editor.undo());
+        assert_eq!(editor.pcb.board_outline, before);
+        assert!(editor.redo());
+        assert_eq!(editor.pcb.board_outline.points, points);
+    }
+
+    #[test]
+    fn library_click_then_single_canvas_press_places_and_repeats() {
+        let mut editor = NativeElectronicsEditor::empty("Placement regression");
+        let mut router = InputRouter::default();
+        editor.camera_initialized = true;
+        editor.camera.zoom = 1.0;
+        for (i, at) in [Vec2::new(-200.0,-100.0), Vec2::new(-100.0,-100.0)].into_iter().enumerate() {
+            assert!(editor.apply_ui_command("electronics.place.template.0"));
+            editor.process_input(&press_frame(at, 1.0 + i as f64), &mut router, test_canvas());
+            editor.process_input(&release_frame(at, 1.1 + i as f64), &mut router, test_canvas());
+            assert_eq!(editor.schematic.components.len(), i+1);
+        }
+    }
+
+    #[test]
     fn only_the_chaining_tools_can_be_left_with_a_double_click() {
         assert!(chaining_tool(
             ElectronicsTool::Wire,
@@ -2112,6 +2260,24 @@ mod tests {
     }
 
     #[test]
+    fn native_pipeline_applies_final_drag_position_even_without_intermediate_frames() {
+        let mut editor = editor_with_two_resistors();
+        editor.snap_enabled = false;
+        let from = editor.schematic.components[0].position;
+        let to = from + Vec2::new(40.0, 40.0);
+        let mut router = InputRouter::default();
+        for input in [press_frame(from, 1.0), release_frame(to, 1.05)] {
+            router.reconcile_input(&input);
+            editor.process_input(&input, &mut router, test_canvas());
+            router.finish_frame(&input);
+        }
+        assert_eq!(editor.schematic.components[0].position, to);
+        assert!(!router.has_pointer_capture());
+        assert!(editor.undo());
+        assert_eq!(editor.schematic.components[0].position, from);
+    }
+
+    #[test]
     fn dragging_from_a_pin_to_another_pin_wires_them_without_the_wire_tool() {
         let mut editor = editor_with_two_resistors();
         let mut router = InputRouter::default();
@@ -2120,7 +2286,10 @@ mod tests {
         let to = pin_position(&editor, 1, 1);
         let before = editor.schematic.components[0].position;
 
-        editor.process_input(&press_frame(from, 1.0), &mut router, canvas);
+        let press = press_frame(from, 1.0);
+        router.reconcile_input(&press);
+        editor.process_input(&press, &mut router, canvas);
+        router.finish_frame(&press);
 
         assert!(
             editor.wire_start.is_some(),
@@ -2131,8 +2300,11 @@ mod tests {
             "the gesture must not move the part it started from"
         );
 
-        editor.process_input(&hold_frame(from.lerp(to, 0.5), 1.1), &mut router, canvas);
-        editor.process_input(&release_frame(to, 1.2), &mut router, canvas);
+        for input in [hold_frame(from.lerp(to, 0.5), 1.1), release_frame(to, 1.2)] {
+            router.reconcile_input(&input);
+            editor.process_input(&input, &mut router, canvas);
+            router.finish_frame(&input);
+        }
 
         assert_eq!(editor.schematic.wires.len(), 1);
         assert!(editor.can_undo(), "the wire is an undoable edit");
@@ -2395,7 +2567,7 @@ mod tests {
     }
 
     #[test]
-    fn disabling_grid_snap_also_releases_the_pin_snap() {
+    fn disabling_grid_snap_keeps_electrical_endpoints_connectable() {
         let mut editor = NativeElectronicsEditor::empty("Snap off");
         editor.snap_enabled = false;
         editor
@@ -2407,6 +2579,6 @@ mod tests {
             &editor.schematic.components[0],
             &editor.schematic.components[0].pins[0],
         );
-        assert!(editor.pin_endpoint_at(pin).is_none());
+        assert!(editor.pin_endpoint_at(pin).is_some());
     }
 }

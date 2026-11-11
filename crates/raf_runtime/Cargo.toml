@@ -6,6 +6,7 @@ license.workspace = true
 description = "Window-independent local game runtime"
 
 [dependencies]
+raf_ui.workspace = true
 raf_nodes = { workspace = true }
 raf_core.workspace = true
 raf_script.workspace = true

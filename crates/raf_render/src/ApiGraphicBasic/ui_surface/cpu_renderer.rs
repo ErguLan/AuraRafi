@@ -4,9 +4,10 @@
 //! recovery path for the same retained draw list, so low-end or incompatible
 //! systems do not need a separate UI implementation.
 
+use super::effects::{clip_coverage, rounded_distance, UiPaintEffects, UiPaintKey};
 use super::{
-    UiImageFit, UiRect, UiSurfaceDrawList, UiSurfaceImageQuad, UiSurfaceImageStore,
-    UiSurfacePaintCommand, UiSurfaceStroke, UiTextAtlas,
+    UiRect, UiSurfaceDrawList, UiSurfaceImageQuad, UiSurfaceImageStore, UiSurfacePaintCommand,
+    UiSurfaceStroke, UiTextAtlas,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -65,8 +66,13 @@ impl UiSurfaceCpuRenderer {
             match *command {
                 UiSurfacePaintCommand::Solid { index, .. } => {
                     if let Some(quad) = draw_list.solids.get(index) {
-                        let written =
-                            self.draw_solid(quad.rect, quad.clip_rect, quad.radius, quad.color);
+                        let written = self.draw_solid(
+                            quad.rect,
+                            quad.clip_rect,
+                            quad.radius,
+                            quad.color,
+                            draw_list.effects.get(&UiPaintKey::Solid(index)),
+                        );
                         metrics.solid_pixels += written;
                         if quad.color[3] > 0 && quad.color[3] < 255 {
                             metrics.translucent_solid_pixels += written;
@@ -75,18 +81,33 @@ impl UiSurfaceCpuRenderer {
                 }
                 UiSurfacePaintCommand::Stroke { index, .. } => {
                     if let Some(stroke) = draw_list.strokes.get(index) {
-                        metrics.stroke_pixels += self.draw_stroke(stroke);
+                        metrics.stroke_pixels += self
+                            .draw_stroke(stroke, draw_list.effects.get(&UiPaintKey::Stroke(index)));
                     }
                 }
                 UiSurfacePaintCommand::Text { index, .. } => {
                     if let Some(quad) = draw_list.text.get(index) {
-                        metrics.text_pixels += self.draw_text(quad, atlas);
+                        metrics.text_pixels += self.draw_text(
+                            quad,
+                            atlas,
+                            draw_list.effects.get(&UiPaintKey::Text(index)),
+                        );
                     }
                 }
                 UiSurfacePaintCommand::Image { index, .. } => {
                     if let Some(quad) = draw_list.images.get(index) {
                         if let Some(image) = images.get(&quad.source_key) {
-                            metrics.image_pixels += self.draw_image(quad, image);
+                            metrics.image_pixels += self.draw_image(
+                                quad,
+                                image,
+                                draw_list.effects.get(&UiPaintKey::Image(index)),
+                            );
+                        } else {
+                            metrics.image_pixels += self.draw_missing_image(
+                                quad,
+                                draw_list.effects.get(&UiPaintKey::Image(index)),
+                                images.resource_status(&quad.source_key),
+                            );
                         }
                     }
                 }
@@ -95,17 +116,95 @@ impl UiSurfaceCpuRenderer {
         metrics
     }
 
-    fn draw_solid(&mut self, rect: UiRect, clip_rect: UiRect, radius: f32, color: [u8; 4]) -> u64 {
-        let Some(bounds) = pixel_bounds(rect.intersection(clip_rect), self.size) else {
+    fn draw_solid(
+        &mut self,
+        rect: UiRect,
+        clip_rect: UiRect,
+        radius: f32,
+        color: [u8; 4],
+        effects: Option<&UiPaintEffects>,
+    ) -> u64 {
+        let padding = effects.map_or(0.0, |effect| effect.softness.max(0.0) * 0.5) + 1.0;
+        let paint_bounds = UiRect::new(
+            rect.x - padding,
+            rect.y - padding,
+            rect.width + 2.0 * padding,
+            rect.height + 2.0 * padding,
+        );
+        let Some(bounds) = pixel_bounds(paint_bounds.intersection(clip_rect), self.size) else {
             return 0;
         };
         let mut written = 0;
         for y in bounds.y_start..bounds.y_end {
             for x in bounds.x_start..bounds.x_end {
-                if !inside_rounded_rect(rect, radius, x as f32 + 0.5, y as f32 + 0.5) {
+                let point = [x as f32 + 0.5, y as f32 + 0.5];
+                let corners = effects.and_then(|e| e.corners).unwrap_or([radius; 4]);
+                let softness = effects.map_or(0.0, |e| e.softness).max(1.0);
+                let coverage = (0.5 - rounded_distance(rect, corners, point) / softness)
+                    .clamp(0.0, 1.0)
+                    * effects.map_or(1.0, |e| clip_coverage(&e.clips, point));
+                if coverage <= 0.0 {
                     continue;
                 }
-                if self.blend_pixel(x, y, color, 255) {
+                let mut fill = color;
+                if let Some(g) = effects.and_then(|e| e.gradient) {
+                    let d = g.direction;
+                    let denom = d[0].abs() + d[1].abs();
+                    let p = [
+                        (point[0] - rect.x) / rect.width.max(1.0),
+                        (point[1] - rect.y) / rect.height.max(1.0),
+                    ];
+                    let t = if denom > 0.0 {
+                        ((p[0] - 0.5) * d[0] + (p[1] - 0.5) * d[1]) / denom + 0.5
+                    } else {
+                        0.0
+                    };
+                    for c in 0..4 {
+                        fill[c] = (f32::from(g.start[c]) * (1.0 - t.clamp(0.0, 1.0))
+                            + f32::from(g.end[c]) * t.clamp(0.0, 1.0))
+                        .round() as u8;
+                    }
+                }
+                let mut wrote = false;
+                if let Some(e) =
+                    effects.filter(|e| e.border[3] > 0 && e.border_widths.iter().any(|w| *w > 0.0))
+                {
+                    let w = e.border_widths.map(|v| v.max(0.0));
+                    let inner = UiRect::new(
+                        rect.x + w[3],
+                        rect.y + w[0],
+                        (rect.width - w[1] - w[3]).max(0.0),
+                        (rect.height - w[0] - w[2]).max(0.0),
+                    );
+                    let inner_r = [
+                        (corners[0] - w[0].max(w[3])).max(0.0),
+                        (corners[1] - w[0].max(w[1])).max(0.0),
+                        (corners[2] - w[2].max(w[1])).max(0.0),
+                        (corners[3] - w[2].max(w[3])).max(0.0),
+                    ];
+                    let inside = if inner.is_empty() {
+                        0.0
+                    } else {
+                        (0.5 - rounded_distance(inner, inner_r, point)).clamp(0.0, 1.0)
+                    };
+                    let alpha =
+                        f32::from(e.border[3]) * (1.0 - inside) + f32::from(fill[3]) * inside;
+                    let mut mixed = [0; 4];
+                    mixed[3] = alpha.round() as u8;
+                    if alpha > 0.0 {
+                        for c in 0..3 {
+                            mixed[c] =
+                                ((f32::from(e.border[c]) * f32::from(e.border[3]) * (1.0 - inside)
+                                    + f32::from(fill[c]) * f32::from(fill[3]) * inside)
+                                    / alpha)
+                                    .round() as u8;
+                        }
+                    }
+                    wrote |= self.blend_pixel(x, y, mixed, (coverage * 255.0).round() as u8);
+                } else {
+                    wrote |= self.blend_pixel(x, y, fill, (coverage * 255.0).round() as u8);
+                }
+                if wrote {
                     written += 1;
                 }
             }
@@ -113,7 +212,7 @@ impl UiSurfaceCpuRenderer {
         written
     }
 
-    fn draw_stroke(&mut self, stroke: &UiSurfaceStroke) -> u64 {
+    fn draw_stroke(&mut self, stroke: &UiSurfaceStroke, effects: Option<&UiPaintEffects>) -> u64 {
         let half_width = stroke.width.max(0.0) * 0.5;
         if half_width <= 0.0 {
             return 0;
@@ -150,7 +249,8 @@ impl UiSurfaceCpuRenderer {
                     ((point[0] - closest[0]).powi(2) + (point[1] - closest[1]).powi(2)).sqrt();
                 // A small analytic coverage ramp keeps the CPU recovery path
                 // from turning diagonal ticks into hard stair steps.
-                let coverage = ((half_width + 0.75 - distance) / 1.5).clamp(0.0, 1.0);
+                let coverage = ((half_width + 0.75 - distance) / 1.5).clamp(0.0, 1.0)
+                    * effects.map_or(1.0, |e| clip_coverage(&e.clips, point));
                 if coverage <= 0.0 {
                     continue;
                 }
@@ -162,7 +262,12 @@ impl UiSurfaceCpuRenderer {
         written
     }
 
-    fn draw_text(&mut self, quad: &super::UiSurfaceTextQuad, atlas: &UiTextAtlas) -> u64 {
+    fn draw_text(
+        &mut self,
+        quad: &super::UiSurfaceTextQuad,
+        atlas: &UiTextAtlas,
+        effects: Option<&UiPaintEffects>,
+    ) -> u64 {
         let Some(bounds) = pixel_bounds(quad.rect.intersection(quad.clip_rect), self.size) else {
             return 0;
         };
@@ -188,6 +293,11 @@ impl UiSurfaceCpuRenderer {
                     local_x,
                     local_y,
                 );
+                let coverage = (f32::from(coverage)
+                    * effects.map_or(1.0, |e| {
+                        clip_coverage(&e.clips, [x as f32 + 0.5, y as f32 + 0.5])
+                    }))
+                .round() as u8;
                 if self.blend_pixel(x, y, quad.color, coverage) {
                     written += 1;
                 }
@@ -196,32 +306,120 @@ impl UiSurfaceCpuRenderer {
         written
     }
 
-    fn draw_image(&mut self, quad: &UiSurfaceImageQuad, image: &super::UiSurfaceImageData) -> u64 {
-        let destination = fitted_image_rect(quad.rect, image.size, quad.fit);
-        let Some(bounds) = pixel_bounds(
-            destination
-                .intersection(quad.rect)
-                .intersection(quad.clip_rect),
-            self.size,
-        ) else {
-            return 0;
-        };
-        if destination.is_empty() || image.size[0] == 0 || image.size[1] == 0 {
+    fn draw_image(
+        &mut self,
+        quad: &UiSurfaceImageQuad,
+        image: &super::UiSurfaceImageData,
+        effects: Option<&UiPaintEffects>,
+    ) -> u64 {
+        let options = effects
+            .and_then(|e| e.image.as_ref())
+            .cloned()
+            .unwrap_or_default();
+        let scale = effects.and_then(|e| e.image_scale).unwrap_or([1.0, 1.0]);
+        let logical = UiRect::new(
+            quad.rect.x / scale[0],
+            quad.rect.y / scale[1],
+            quad.rect.width / scale[0],
+            quad.rect.height / scale[1],
+        );
+        let patches = super::image_layout::image_patches(logical, image.size, quad.fit, &options);
+        let mut written = 0;
+        for patch in patches {
+            let destination = UiRect::new(
+                patch.destination.x * scale[0],
+                patch.destination.y * scale[1],
+                patch.destination.width * scale[0],
+                patch.destination.height * scale[1],
+            );
+            let Some(bounds) = pixel_bounds(
+                destination
+                    .intersection(quad.rect)
+                    .intersection(quad.clip_rect),
+                self.size,
+            ) else {
+                continue;
+            };
+            if destination.is_empty() || image.size[0] == 0 || image.size[1] == 0 {
+                continue;
+            }
+            for y in bounds.y_start..bounds.y_end {
+                let local_y =
+                    ((y as f32 + 0.5 - destination.y) / destination.height).clamp(0.0, 0.999_999);
+                for x in bounds.x_start..bounds.x_end {
+                    let local_x = ((x as f32 + 0.5 - destination.x) / destination.width)
+                        .clamp(0.0, 0.999_999);
+                    let u = patch.uv.x + local_x * patch.uv.width;
+                    let v = patch.uv.y + local_y * patch.uv.height;
+                    let nearest = options.sampling == raf_ui::UiImageSampling::Nearest
+                        || (options.sampling == raf_ui::UiImageSampling::Auto
+                            && quad.source_key.starts_with("builtin://icon/"));
+                    let mut color = if nearest {
+                        sample_rgba_nearest(&image.pixels, image.size, u, v)
+                    } else {
+                        sample_rgba(&image.pixels, image.size, u, v)
+                    };
+                    for channel in 0..4 {
+                        color[channel] = ((u16::from(color[channel])
+                            * u16::from(quad.tint[channel]))
+                            / 255) as u8;
+                    }
+                    let coverage = effects.map_or(1.0, |e| {
+                        clip_coverage(&e.clips, [x as f32 + 0.5, y as f32 + 0.5])
+                    });
+                    if self.blend_pixel(x, y, color, (coverage * 255.0).round() as u8) {
+                        written += 1;
+                    }
+                }
+            }
+        }
+        written
+    }
+
+    fn draw_missing_image(
+        &mut self,
+        quad: &UiSurfaceImageQuad,
+        effects: Option<&UiPaintEffects>,
+        status: raf_ui::UiImageResourceStatus,
+    ) -> u64 {
+        let mut placeholder = effects
+            .and_then(|e| e.image.as_ref())
+            .map(|i| i.placeholder)
+            .unwrap_or_default();
+        if placeholder == raf_ui::UiImagePlaceholder::Automatic
+            && status == raf_ui::UiImageResourceStatus::Pending
+        {
+            placeholder = raf_ui::UiImagePlaceholder::Skeleton;
+        }
+        if placeholder == raf_ui::UiImagePlaceholder::Hidden {
             return 0;
         }
+        let Some(bounds) = pixel_bounds(quad.rect.intersection(quad.clip_rect), self.size) else {
+            return 0;
+        };
         let mut written = 0;
         for y in bounds.y_start..bounds.y_end {
-            let local_y =
-                ((y as f32 + 0.5 - destination.y) / destination.height).clamp(0.0, 0.999_999);
             for x in bounds.x_start..bounds.x_end {
-                let local_x =
-                    ((x as f32 + 0.5 - destination.x) / destination.width).clamp(0.0, 0.999_999);
-                let mut color = sample_rgba(&image.pixels, image.size, local_x, local_y);
-                for channel in 0..4 {
-                    color[channel] =
-                        ((u16::from(color[channel]) * u16::from(quad.tint[channel])) / 255) as u8;
+                let p = [x as f32 + 0.5, y as f32 + 0.5];
+                let coverage = effects.map_or(1.0, |e| clip_coverage(&e.clips, p));
+                let light = ((x / 8 + y / 8) % 2) == 0;
+                let mut color = if light {
+                    [83, 87, 94, 255]
+                } else {
+                    [53, 57, 64, 255]
+                };
+                if placeholder == raf_ui::UiImagePlaceholder::Skeleton {
+                    color = [67, 71, 78, 255];
                 }
-                if self.blend_pixel(x, y, color, 255) {
+                if placeholder == raf_ui::UiImagePlaceholder::Automatic {
+                    let dx = (p[0] - quad.rect.x) / quad.rect.width.max(1.0);
+                    let dy = (p[1] - quad.rect.y) / quad.rect.height.max(1.0);
+                    if (dx - dy).abs() < 0.045 || (dx + dy - 1.0).abs() < 0.045 {
+                        color = [203, 73, 73, 255];
+                    }
+                }
+                color[3] = quad.tint[3];
+                if self.blend_pixel(x, y, color, (coverage * 255.0).round() as u8) {
                     written += 1;
                 }
             }
@@ -315,11 +513,18 @@ fn sample_plane(
     (top * (1.0 - ty) + bottom * ty).round().clamp(0.0, 255.0) as u8
 }
 
+fn sample_rgba_nearest(pixels: &[u8], size: [u32; 2], u: f32, v: f32) -> [u8; 4] {
+    let x = (u.clamp(0.0, 0.999_999) * size[0] as f32) as usize;
+    let y = (v.clamp(0.0, 0.999_999) * size[1] as f32) as usize;
+    let i = (y * size[0] as usize + x) * 4;
+    [pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3]]
+}
+
 fn sample_rgba(pixels: &[u8], size: [u32; 2], u: f32, v: f32) -> [u8; 4] {
     let width = size[0].max(1) as usize;
     let height = size[1].max(1) as usize;
-    let x = (u.clamp(0.0, 1.0) * width.saturating_sub(1) as f32).max(0.0);
-    let y = (v.clamp(0.0, 1.0) * height.saturating_sub(1) as f32).max(0.0);
+    let x = (u.clamp(0.0, 1.0) * width as f32 - 0.5).clamp(0.0, width.saturating_sub(1) as f32);
+    let y = (v.clamp(0.0, 1.0) * height as f32 - 0.5).clamp(0.0, height.saturating_sub(1) as f32);
     let x0 = x.floor() as usize;
     let y0 = y.floor() as usize;
     let x1 = (x0 + 1).min(width - 1);
@@ -340,48 +545,29 @@ fn sample_rgba(pixels: &[u8], size: [u32; 2], u: f32, v: f32) -> [u8; 4] {
     let bottom = at(x0, y1);
     let bottom_right = at(x1, y1);
     let mut color = [0; 4];
-    for channel in 0..4 {
-        let top_value = f32::from(top[channel]) * (1.0 - tx) + f32::from(top_right[channel]) * tx;
-        let bottom_value =
-            f32::from(bottom[channel]) * (1.0 - tx) + f32::from(bottom_right[channel]) * tx;
-        color[channel] = (top_value * (1.0 - ty) + bottom_value * ty)
-            .round()
-            .clamp(0.0, 255.0) as u8;
+    let samples = [
+        (top, (1.0 - tx) * (1.0 - ty)),
+        (top_right, tx * (1.0 - ty)),
+        (bottom, (1.0 - tx) * ty),
+        (bottom_right, tx * ty),
+    ];
+    let alpha = samples
+        .iter()
+        .map(|(p, w)| f32::from(p[3]) * w)
+        .sum::<f32>();
+    color[3] = alpha.round() as u8;
+    if alpha > 0.0 {
+        for c in 0..3 {
+            color[c] = (samples
+                .iter()
+                .map(|(p, w)| f32::from(p[c]) * f32::from(p[3]) * w)
+                .sum::<f32>()
+                / alpha)
+                .round()
+                .clamp(0.0, 255.0) as u8;
+        }
     }
     color
-}
-
-pub(super) fn fitted_image_rect(rect: UiRect, source_size: [u32; 2], fit: UiImageFit) -> UiRect {
-    if rect.is_empty() || source_size[0] == 0 || source_size[1] == 0 || fit == UiImageFit::Stretch {
-        return rect;
-    }
-    let source_aspect = source_size[0] as f32 / source_size[1] as f32;
-    let destination_aspect = rect.width / rect.height;
-    let scale = match fit {
-        UiImageFit::Contain => {
-            if source_aspect > destination_aspect {
-                rect.width / source_size[0] as f32
-            } else {
-                rect.height / source_size[1] as f32
-            }
-        }
-        UiImageFit::Cover => {
-            if source_aspect > destination_aspect {
-                rect.height / source_size[1] as f32
-            } else {
-                rect.width / source_size[0] as f32
-            }
-        }
-        UiImageFit::Stretch => unreachable!(),
-    };
-    let width = source_size[0] as f32 * scale;
-    let height = source_size[1] as f32 * scale;
-    UiRect::new(
-        rect.x + (rect.width - width) * 0.5,
-        rect.y + (rect.height - height) * 0.5,
-        width,
-        height,
-    )
 }
 
 struct PixelBounds {
@@ -407,22 +593,16 @@ fn pixel_bounds(rect: UiRect, size: [u32; 2]) -> Option<PixelBounds> {
     })
 }
 
-fn inside_rounded_rect(rect: UiRect, radius: f32, x: f32, y: f32) -> bool {
-    let radius = radius.max(0.0).min(rect.width * 0.5).min(rect.height * 0.5);
-    if radius <= 0.5 {
-        return true;
-    }
-    let center_x = x.clamp(rect.x + radius, rect.right() - radius);
-    let center_y = y.clamp(rect.y + radius, rect.bottom() - radius);
-    let dx = x - center_x;
-    let dy = y - center_y;
-    dx * dx + dy * dy <= radius * radius
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn rafui_alpha_weighted_filter_does_not_bleed_transparent_rgb() {
+        let sampled = super::sample_rgba(&[255, 0, 0, 255, 0, 0, 255, 0], [2, 1], 0.5, 0.5);
+        assert_eq!(&sampled[..3], &[255, 0, 0]);
+        assert_eq!(sampled[3], 128);
+    }
     use super::*;
-    use crate::api_graphic_basic::ui_surface::UiSurfaceQuad;
+    use crate::api_graphic_basic::ui_surface::{UiImageFit, UiSurfaceQuad};
 
     #[test]
     fn software_compositor_blends_a_solid_over_the_clear_color() {

@@ -542,7 +542,13 @@ impl InputRouter {
             PointerButton::Back,
             PointerButton::Forward,
         ] {
-            if input.button_pressed(button) || !input.button_down(button) {
+            // A release still belongs to the consumer that captured the press.
+            // finish_frame retires it after that consumer has committed its
+            // gesture. Only an idle stale capture or a replacement press is
+            // cleared before dispatch.
+            if input.button_pressed(button)
+                || (!input.button_down(button) && !input.button_released(button))
+            {
                 self.release_pointer_unchecked(button);
             }
         }
@@ -571,6 +577,28 @@ impl InputRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn release_reaches_captured_consumer_before_finish_frame_retires_it() {
+        let owner = InputOwner::ElectronicsCanvas;
+        let mut router = InputRouter::default();
+        assert!(router.try_capture_pointer(PointerButton::Primary, owner, CaptureMode::Exclusive, [10.0,10.0], 1.0));
+        let mut release = InputSnapshot::default();
+        release.pointer_released_buttons.insert(PointerButton::Primary);
+        router.reconcile_input(&release);
+        assert_eq!(router.pointer_owner(PointerButton::Primary), Some(owner));
+        assert_eq!(router.pointer_capture(PointerButton::Primary).unwrap().origin, [10.0,10.0]);
+        router.finish_frame(&release);
+        assert!(!router.has_pointer_capture());
+    }
+
+    #[test]
+    fn missing_release_still_retires_stale_capture_before_dispatch() {
+        let mut router = InputRouter::default();
+        router.try_capture_pointer(PointerButton::Primary, InputOwner::ElectronicsCanvas, CaptureMode::Exclusive, [0.0,0.0], 1.0);
+        router.reconcile_input(&InputSnapshot::default());
+        assert!(!router.has_pointer_capture());
+    }
 
     #[test]
     fn reconcile_input_releases_capture_when_a_new_press_replaces_a_stale_owner() {

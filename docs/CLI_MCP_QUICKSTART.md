@@ -64,17 +64,20 @@ preferred compact input for an external Agent: it includes the project,
 active session, revision, supported commands, bounded workspace counts, and a
 bounded Game scene outline when one is mounted.
 
-For visual feedback, an attached Game editor can expose the last rendered
-viewport without entering Play mode:
+For visual feedback, an attached Game editor can capture the rendered viewport
+or a framed scene angle without entering Play mode:
 
 ```text
 raf attach --project D:\Games\HorseDemo viewport capture --json
+raf attach --project D:\Games\HorseDemo viewport capture --json --params '{"view":"isometric","target":"Player","width":960,"height":540}'
+raf attach --project D:\Games\HorseDemo viewport capture --json --params '{"view":"front","frame":"scene"}'
 ```
 
 The response references a PNG saved inside the project at
-`.aura_rafi/agent_artifacts/`. This is an observation of the current rendered
-editor frame, not a new render request. The editor must have rendered the Game
-viewport at least once.
+`.aura_rafi/agent_artifacts/`. `view=current` reads the last rendered editor
+frame; named angles render a read-only offscreen capture. The MCP adapter
+returns the PNG as image content when the artifact is available, and the native
+Agent attaches it to its next model turn automatically.
 
 For layout perception without reading project files, query the semantic scene
 map:
@@ -96,6 +99,14 @@ raf attach --project D:\Games\HorseDemo scene design-audit --json --params '{"ro
 
 An audit failure is structured evidence for the next repair pass. It does not
 modify the scene by itself.
+
+For a Game foundation check that is stronger than geometry presence, call the
+gameplay audit. It reports renderable geometry, camera/startup camera, authored
+lighting, attached scripts, gameplay signals, enabled systems, and next actions:
+
+```text
+raf attach --project D:\Games\HorseDemo command project.gameplay_audit --json
+```
 
 Use `scene repair` only after an audit has identified concrete targets. It
 accepts explicit `scene_update`, `scene_reparent`, `scene_create`, or
@@ -179,13 +190,67 @@ the project:
 ```text
 raf attach --project D:\Games\HorseDemo command script.create --json --params '{"lang":"rhai","name":"horse_controller"}' --confirm
 
+raf attach --project D:\Games\HorseDemo command script.write --json --params '{"file":"scripts/horse_controller.rhai","content":"fn on_update(dt) { if is_key_pressed(\"w\") { owner().move_by(0.0, 0.0, 2.0 * dt); } }","overwrite":true}' --confirm
+
 raf attach --project D:\Games\HorseDemo command script.list --json
 raf attach --project D:\Games\HorseDemo command script.validate --json --params '{"file":"scripts/horse_controller.rhai"}' --confirm
 ```
 
-The external agent may also edit a project script directly through the normal
-workspace tools. The engine command remains useful for project-scoped
+`script.write` compiles the Rhai source before replacing the file, accepts only
+project-relative `.rhai` paths, and restores the previous file if the write
+fails. The external agent may also edit a project script directly through the
+normal workspace tools. The engine command remains useful for project-scoped
 creation, attachment, validation, and evidence.
+
+### Large parameter payloads
+
+`--params` remains inline JSON, but it also accepts `@FILE` and `-` for stdin.
+`--params-file FILE` is the explicit form; both paths are bounded to 8 MiB.
+
+```text
+raf attach --project D:\Games\HorseDemo command script.write --json --params-file payload.json --confirm
+raf attach --project D:\Games\HorseDemo command ui.document.apply --json --params @ui-payload.json --confirm
+```
+
+This avoids the Windows command-line length limit for complete script sources
+and multi-edit interface documents. Parameter files are capped at 8 MiB; the
+attached IPC frame itself remains bounded at 1 MiB, so split truly enormous
+documents into multiple commands.
+
+### Headless script smoke test
+
+`script.run` executes one script against a cloned scene without entering Play.
+The editor document is never mutated.
+
+```text
+raf attach --project D:\Games\HorseDemo command script.run --json --params '{"file":"scripts/player_controller.rhai","entity":"Player","ticks":120,"keys":["w","space"]}' --confirm
+```
+
+- `file` resolves like the other script commands.
+- `entity` is optional. When present, that entity stays the behavior owner and
+  its typed behavior parameters remain available. Without it, the script runs
+  on a temporary `__script_run__` root.
+- `ticks` (0..600) runs `on_update`, `on_fixed_update`, one bounded physics
+  step and `on_late_update` per tick.
+- `keys` (at most 16) supplies synthetic held keys; the first tick also reports
+  them as just-pressed. Use names such as `w`, `space`, `shift`, `arrow_left`.
+- The JSON result reports `status`, `owner`, `ticks`, `physics_steps`,
+  `final_position`, logs and every runtime error.
+
+This catches missing host functions and hook-level mistakes before a manual
+Play test. It does not mount game UI instances, render frames, or replace the
+native Play acceptance test.
+
+### Locate the project root
+
+```text
+raf project path --json
+```
+
+The CLI prints the explicit `--project`/positional path when provided,
+otherwise the single live attached editor's root. The MCP server exposes the
+same value as the `raf_project_path` tool, including a clean path without the
+Windows `\\?\` prefix.
 
 ## 6. Connect an MCP client
 
@@ -199,10 +264,11 @@ Codex, Claude Code, OpenCode, or another MCP client should launch that command
 as a local stdio server. The MCP adapter is thin: it forwards to the same
 command catalog and attached endpoint instead of implementing a second engine.
 It exposes `raf_context` and `raf_capabilities` in addition to the generic
-`raf_command`. It also exposes typed `raf_viewport_capture` and
-`raf_task_*` observation tools; attached results include readable text plus a
-structured `EngineCommandResponse` with compact model-facing lines and raw
-detail fields kept available to JSON callers.
+`raf_command`. It also exposes typed `raf_viewport_capture`, `raf_game_completion_audit`,
+`raf_lighting_*`, `raf_script_*` (including `raf_script_run`), `raf_project_path`,
+and `raf_task_*` tools; attached results include readable text plus a structured
+`EngineCommandResponse` with compact model-facing lines and raw detail fields kept
+available to JSON callers. Viewport captures also return the PNG as MCP image content.
 
 ## Safety rules
 

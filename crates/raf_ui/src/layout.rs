@@ -33,6 +33,8 @@ pub enum UiAlign {
     Center,
     End,
     Stretch,
+    /// Align the first text baseline in a row. Non-text items use their bottom edge.
+    Baseline,
 }
 
 impl Default for UiAlign {
@@ -162,6 +164,8 @@ pub enum UiPositionMode {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UiLayout {
+    #[serde(default)]
+    pub anchored: Option<crate::game_ui::UiAnchoredRect>,
     pub rect: Option<UiRect>,
     pub flow: UiFlow,
     pub padding: UiSpacing,
@@ -180,6 +184,9 @@ pub struct UiLayout {
     pub min_size: [f32; 2],
     #[serde(default)]
     pub max_size: [f32; 2],
+    /// Outer width / height. An explicit fixed or fill height takes priority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aspect_ratio: Option<f32>,
     #[serde(default)]
     pub justify_content: UiJustify,
     #[serde(default)]
@@ -205,6 +212,7 @@ impl Default for UiPositionMode {
 impl Default for UiLayout {
     fn default() -> Self {
         Self {
+            anchored: None,
             rect: None,
             flow: UiFlow::None,
             padding: UiSpacing::ZERO,
@@ -217,6 +225,7 @@ impl Default for UiLayout {
             z_index: 0,
             min_size: [0.0, 0.0],
             max_size: [0.0, 0.0],
+            aspect_ratio: None,
             justify_content: UiJustify::Start,
             align_items: UiAlign::Stretch,
             align_self: None,
@@ -300,6 +309,22 @@ impl UiLayout {
         self.basis[1] = height.max(0.0);
         self.height_mode = UiSizeMode::Fixed;
         self
+    }
+
+    pub fn with_aspect_ratio(mut self, ratio: f32) -> Self {
+        self.aspect_ratio = (ratio.is_finite() && ratio > 0.0).then_some(ratio);
+        self
+    }
+
+    /// Reserves height from the resolved outer width before image residency.
+    pub fn aspect_height(&self, width: f32) -> Option<f32> {
+        if !matches!(self.height_mode, UiSizeMode::Auto | UiSizeMode::FitContent) {
+            return None;
+        }
+        let ratio = self.aspect_ratio.filter(|ratio| ratio.is_finite() && *ratio > 0.0)?;
+        let mut height = (width.max(0.0) / ratio).max(self.min_size[1]);
+        if self.max_size[1] > 0.0 { height = height.min(self.max_size[1].max(self.min_size[1])); }
+        Some(height)
     }
 
     pub fn grow(mut self, grow: f32) -> Self {

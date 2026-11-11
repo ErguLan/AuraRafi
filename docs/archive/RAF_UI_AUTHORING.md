@@ -1,5 +1,10 @@
 # RafUI Authoring Guide
 
+> Historical material. The active contributor guide is
+> [Authoring RafUI in Rust](../RAF_UI_AUTHORING.md), with current contracts in
+> [RafUI](../RAF_UI.md). Paths and commands below describe the archived system
+> and are not current integration instructions.
+
 This guide is the practical contract for authoring a RafUI surface. Read it
 before adding a new retained editor surface, game UI document, dock, menu, or
 control.

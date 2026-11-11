@@ -5,6 +5,7 @@
 //! monolithic event handler.
 
 use super::*;
+use raf_core::InputOwner;
 use crate::console::LogLevel;
 use crate::native_editor_commands::{
     asset_duplicate_row, asset_file_row, asset_rename_row, asset_script_row,
@@ -27,6 +28,47 @@ impl NativeGameWorkbench {
     where
         F: FnMut(&str) -> String,
     {
+        self.popup_press_consumed = native_input.snapshot().button_pressed(raf_core::PointerButton::Primary)
+            && (self.toolbar_state.primitive_menu_open || self.toolbar_state.view_menu_open
+                || self.toolbar_state.shading_menu_open || self.toolbar_state.building_menu_open
+                || self.inspector_view.color_picker || self.inspector_view.dropdown.is_some());
+        let diagnostic_shortcut = native_input.snapshot();
+        if diagnostic_shortcut.window_focused && !matches!(router.keyboard_owner(), Some(InputOwner::Modal(_)))
+            && diagnostic_shortcut.modifiers.command_modifier() && diagnostic_shortcut.modifiers.shift
+            && diagnostic_shortcut.key_pressed(raf_core::InputKey::F12) {
+            self.handle_ui_performance_command("ui.performance");
+        }
+        let dropped_on_composer = native_input.snapshot().pointer_position.is_some_and(|point| {
+            self.host.layout_rect("agent.composer").is_some_and(|rect| rect.contains([point[0] - self.rect.x, point[1] - self.rect.y]))
+        });
+        if dropped_on_composer && native_input.snapshot().window_focused
+            && !matches!(router.keyboard_owner(), Some(InputOwner::Modal(_)))
+            && !self.search_surface.is_open() && !native_input.dropped_files().is_empty() {
+            self.agent_panel.borrow_mut().apply_action(AgentAction::AttachFiles(native_input.dropped_files().to_vec()), &mut self.agent_settings);
+        }
+        if native_input.snapshot().modifiers.command_modifier()
+            && native_input.snapshot().window_focused
+            && router.keyboard_owner() == Some(self.owner())
+            && native_input.snapshot().key_pressed(raf_core::InputKey::V)
+            && !native_input.has_clipboard_text()
+            && self.host.session().interaction.focus.has_focus("agent.input")
+        {
+            self.agent_panel.borrow_mut().apply_action(AgentAction::PasteImage, &mut self.agent_settings);
+        }
+        if self.electronics_workspace.pcb_menu.is_some() && native_input.snapshot().key_pressed(raf_core::InputKey::Escape) {
+            self.electronics_workspace.pcb_menu=None;self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+        }
+        if self.console.filters_open && native_input.snapshot().key_pressed(raf_core::InputKey::Escape) {self.console.filters_open=false;self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);}
+        let electronics_transform_had_focus = self.host.session().interaction.focus.focused.clone()
+            .filter(|id| id.starts_with("electronics.inspector.transform."));
+        let project_numeric_focus = native_input.snapshot()
+            .key_pressed(raf_core::InputKey::Escape)
+            .then(|| self.host.session().interaction.focus.focused.clone())
+            .flatten();
+        if native_input.snapshot().key_pressed(raf_core::InputKey::Escape) && self.host.session().interaction.focus.focused.as_deref().is_some_and(|id|id.starts_with("electronics.inspector.transform.")) {
+            self.host.session_mut().interaction.focus.clear_focus();
+            self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+        }
         let electronics_value_had_focus = self
             .host
             .session()
@@ -52,8 +94,7 @@ impl NativeGameWorkbench {
                     let dt = native_input.snapshot().delta_seconds.clamp(0.001, 0.05);
                     let controls = &mut self.host.session_mut().interaction.controls;
                     let next = controls.scroll_by("hierarchy.tree", [0.0, direction * 420.0 * dt]);
-                    self.hierarchy_scroll_offset = next[1];
-                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    self.note_hierarchy_scroll(next[1]);
                 }
             }
         }
@@ -110,13 +151,14 @@ impl NativeGameWorkbench {
             }
         }
         let mut actions = Vec::new();
+        self.interface_keyboard(native_input,router);
         if !search_open {
             // The compass is a true overlay. Give it the first chance to
             // consume a pointer press so an underlying toolbar control cannot
             // win when the two rectangles overlap in a compact viewport.
-            let compass_actions =
-                self.viewport_compass
-                    .process_input(native_input, router, &mut resolve);
+            let compass_actions = if self.interface.workspace.active(){Vec::new()}else{
+                self.viewport_compass.process_input(native_input, router, &mut resolve)
+            };
             let compass_clicked = compass_actions
                 .iter()
                 .any(|action| matches!(&action.action, UiAction::Command { .. }));
@@ -128,6 +170,35 @@ impl NativeGameWorkbench {
                 router.cancel_owner(self.owner());
             }
             actions.extend(compass_actions);
+            if self.electronics_overlay_active
+                && self.electronics_workspace.pcb_menu.as_deref().is_none_or(|menu| menu == "rules")
+                && !self.console.filters_open
+            {
+                let overlay_actions = self.electronics_overlay_host.process_routed_input(
+                    self.electronics_overlay_canvas.logical_size(),
+                    native_input.scale_factor() as f32,
+                    &mut resolve,
+                    native_input,
+                    router,
+                    raf_core::InputOwner::RetainedUi(raf_core::InputRegionId::from_static(
+                        "electronics.overlay",
+                    )),
+                    raf_ui::UiRect::new(
+                        self.electronics_overlay_canvas.x,
+                        self.electronics_overlay_canvas.y,
+                        self.electronics_overlay_canvas.width,
+                        self.electronics_overlay_canvas.height,
+                    ),
+                );
+                if overlay_actions
+                    .iter()
+                    .any(|action| matches!(&action.action, UiAction::Command { .. }))
+                {
+                    self.host.session_mut().interaction.focus.clear_focus();
+                    router.cancel_owner(self.owner());
+                }
+                actions.extend(overlay_actions);
+            }
             actions.extend(self.host.process_routed_input(
                 self.rect.logical_size(),
                 native_input.scale_factor() as f32,
@@ -137,6 +208,15 @@ impl NativeGameWorkbench {
                 self.owner(),
                 raf_ui::UiRect::new(self.rect.x, self.rect.y, self.rect.width, self.rect.height),
             ));
+        }
+        if electronics_transform_had_focus.is_some()
+            && electronics_transform_had_focus != self.host.session().interaction.focus.focused {
+            // An unsubmitted field reverts on focus loss. Re-seed the visible
+            // value even when the click did not mutate any document or toolbar.
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
+        if !search_open && project_numeric_focus.is_some() {
+            self.cancel_project_numeric_input(project_numeric_focus.as_deref());
         }
         if native_input
             .snapshot()
@@ -187,14 +267,30 @@ impl NativeGameWorkbench {
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
         for dispatched in &actions {
+            if self.handle_interface_action(&dispatched.action,native_input,scene,selected) {
+                continue;
+            }
+            if dispatched.target_id.starts_with("ui.designer.preview.") {continue;}
+            if self.handle_project_numeric_action(&dispatched.action, &mut intents) {
+                continue;
+            }
             if self.handle_lighting_action(&dispatched.action, scene, &mut intents) {
                 continue;
             }
             match &dispatched.action {
                 UiAction::SetText { key, value } => match key.as_str() {
-                    "application-bar.command-search.value" => {
-                        self.search_surface.set_query(value.clone());
+                    "electronics.footprint.query" => {
+                        self.footprint_chooser.set_query(value.clone());
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                    "electronics.footprint.import_path" => {
+                        self.footprint_chooser.set_import_path(value.clone());
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                    "application-bar.command-search.value" => {
+                        // The title-bar field is a live entry point into the
+                        // Search everywhere modal, never a silent sink.
+                        self.open_search_with_query(value.clone());
                     }
                     "assets.search" => {
                         self.assets_surface.query = value.clone();
@@ -220,6 +316,9 @@ impl NativeGameWorkbench {
                         self.nodes_host
                             .set_property_draft(key.to_string(), value.clone());
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                    key if key.starts_with("electronics.inspector.transform.") || key.starts_with("electronics.pcb.rule.") => {
+                        self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     "electronics.inspector.value" => {
                         if let Some(draft) = self.electronics_value_draft.as_mut() {
@@ -250,13 +349,6 @@ impl NativeGameWorkbench {
                     "agent.input" => {
                         self.agent_panel.borrow_mut().apply_action(
                             AgentAction::SetInput(value.clone()),
-                            &mut self.agent_settings,
-                        );
-                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
-                    }
-                    "agent.new-model.label" => {
-                        self.agent_panel.borrow_mut().apply_action(
-                            AgentAction::SetNewModelLabel(value.clone()),
                             &mut self.agent_settings,
                         );
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -398,11 +490,16 @@ impl NativeGameWorkbench {
                         }
                     }
                     if !open {
+                        let focus_target = if id == "viewport.toolbar.actions.more.menu" {
+                            "viewport.toolbar.actions.more.trigger"
+                        } else {
+                            id.as_str()
+                        };
                         self.host
                             .session_mut()
                             .interaction
                             .focus
-                            .request_focus(id.clone());
+                            .request_focus(focus_target.to_string());
                     }
                     match id.as_str() {
                         "agent.model.trigger" => {
@@ -425,6 +522,7 @@ impl NativeGameWorkbench {
                                 self.toolbar_state.shading_menu_open = false;
                                 self.toolbar_state.building_menu_open = false;
                                 self.toolbar_state.primitive_menu_open = false;
+                                self.toolbar_state.actions_menu_open = false;
                             }
                         }
                         "viewport.toolbar.shading.trigger" => {
@@ -433,6 +531,7 @@ impl NativeGameWorkbench {
                                 self.toolbar_state.view_menu_open = false;
                                 self.toolbar_state.building_menu_open = false;
                                 self.toolbar_state.primitive_menu_open = false;
+                                self.toolbar_state.actions_menu_open = false;
                             }
                         }
                         "viewport.toolbar.building-style" => {
@@ -440,6 +539,17 @@ impl NativeGameWorkbench {
                             if open {
                                 self.toolbar_state.view_menu_open = false;
                                 self.toolbar_state.shading_menu_open = false;
+                                self.toolbar_state.primitive_menu_open = false;
+                                self.toolbar_state.actions_menu_open = false;
+                            }
+                        }
+                        "viewport.toolbar.actions.more.trigger"
+                        | "viewport.toolbar.actions.more.menu" => {
+                            self.toolbar_state.actions_menu_open = open;
+                            if open {
+                                self.toolbar_state.view_menu_open = false;
+                                self.toolbar_state.shading_menu_open = false;
+                                self.toolbar_state.building_menu_open = false;
                                 self.toolbar_state.primitive_menu_open = false;
                             }
                         }
@@ -498,15 +608,19 @@ impl NativeGameWorkbench {
                 UiAction::ScrollTo { id, offset } if id == "hierarchy.tree" => {
                     let next = offset[1].max(0.0);
                     if (next - self.hierarchy_scroll_offset).abs() > f32::EPSILON {
-                        self.hierarchy_scroll_offset = next;
-                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        self.note_hierarchy_scroll(next);
                     }
                 }
                 UiAction::ScrollTo { id, offset } if id == ASSETS_GRID_ID => {
                     let next = offset[1].max(0.0);
                     if (next - self.assets_scroll_offset).abs() > f32::EPSILON {
+                        let projection_changed = crate::panels::assets_surface::asset_scroll_projection_changed(
+                            self.assets_scroll_offset, next, self.assets_surface.view,
+                        );
                         self.assets_scroll_offset = next;
-                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        if projection_changed {
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        }
                     }
                 }
                 UiAction::ScrollTo { id, offset } if id == "agent.history" => {
@@ -518,6 +632,61 @@ impl NativeGameWorkbench {
                     }
                 }
                 UiAction::Command { name } => {
+                    if let Some(target) = name.strip_prefix("electronics.pcb.rule.commit:") {
+                        let key = format!("electronics.pcb.rule.{target}");
+                        let raw = self.host.session().interaction.controls.text(&key).trim().replace(',', ".");
+                        if let Ok(value) = raw.parse::<f32>() {
+                            if value.is_finite() && value > 0.0 && value <= 10.0 {
+                                intents.push(NativeWorkbenchIntent::Command(format!("electronics.pcb.rule:{target}:{value}")));
+                                self.host.session_mut().interaction.focus.clear_focus();
+                            }
+                        }
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
+                    if let Some(target)=name.strip_prefix("electronics.inspector.transform.commit:") {
+                        let key=format!("electronics.inspector.transform.{target}");
+                        let raw=self.host.session().interaction.controls.text(&key).trim().replace(',',".");
+                        if let Ok(value)=raw.parse::<f32>() {
+                            if value.is_finite() && value.abs()<=1_000_000.0 {
+                                intents.push(NativeWorkbenchIntent::Command(format!("electronics.transform:{target}:{value}")));
+                                self.host.session_mut().interaction.focus.clear_focus();
+                            }
+                        }
+                        self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
+
+                    if name==crate::application_menu::command::PROJECT_SAVE {
+                        if let Err(error)=self.flush_interface_document(){self.interface.diagnostic=Some(error);self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);continue;}
+                    }
+                    if name=="assets.create-interface" {
+                        self.create_interface_asset();
+                        continue;
+                    }
+                    if self.project_type == ProjectType::Electronics {
+                        if matches!(name.as_str(), "electronics.analysis.drc" | "electronics.analysis.simulation" | "electronics.fabrication.export" | "electronics.fabrication.deliver") {
+                            crate::native_workbench::electronics_model::reveal_analysis(&mut self.bottom_dock, name);
+                            self.host.session_mut().interaction.controls.reset_scroll("electronics.analysis.lines");
+                            self.reset_input_state(router);
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        }
+                        let workspace_command = if name == crate::application_menu::command::VIEW_HIERARCHY {
+                            Some("electronics.workspace.library.toggle")
+                        } else if name == crate::application_menu::command::VIEW_INSPECTOR {
+                            Some("electronics.workspace.inspector.toggle")
+                        } else { None };
+                        if workspace_command.is_some_and(|command| self.handle_electronics_workspace_command(command)) {
+                            continue;
+                        }
+                    }
+                    if self.handle_electronics_workspace_command(name) {
+                        continue;
+                    }
+                    if self.handle_footprint_chooser_command(name, project, &mut intents) {
+                        continue;
+                    }
+                    if self.handle_ui_performance_command(name) { continue; }
                     if name=="authoring.notice.dismiss" {
                         self.authoring_notice=None;
                         self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
@@ -596,7 +765,7 @@ impl NativeGameWorkbench {
                         continue;
                     }
 
-                    if name.starts_with("runtime.") {
+                    if name.starts_with("runtime.") || name.starts_with("agent.lab.open.") {
                         intents.push(NativeWorkbenchIntent::Command(name.clone()));
                         continue;
                     }
@@ -714,24 +883,16 @@ impl NativeGameWorkbench {
                             tab,
                             "project" | "library" | "components" | "wires" | "objects" | "layers"
                         ) {
+                            if self.footprint_chooser.is_open() {self.footprint_chooser.close();}
                             self.electronics_navigator_tab = tab.to_string();
-                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
-                        }
-                        continue;
-                    }
-                    if let Some(key) = name.strip_prefix("project-settings.commit_numeric:") {
-                        let text = self
-                            .host
-                            .session()
-                            .interaction
-                            .controls
-                            .text(&format!("{key}.text"))
-                            .to_string();
-                        if let Ok(value) = text.trim().parse::<f32>() {
-                            intents.push(NativeWorkbenchIntent::ProjectSettingRange {
-                                key: key.to_string(),
-                                value,
-                            });
+                            if self.last_layout.is_some_and(|layout| layout.window.width < 980.0) {
+                                self.electronics_workspace.inspector_hidden = true;
+                            }
+                            if self.electronics_workspace.pcb_active {
+                                self.electronics_workspace.pcb_open = true;
+                            } else {
+                                self.electronics_workspace.schematic_collapsed = false;
+                            }
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         }
                         continue;
@@ -1175,6 +1336,7 @@ impl NativeGameWorkbench {
                         continue;
                     }
                     if let Some(tab) = name.strip_prefix("hierarchy.tab:") {
+                        self.interface_scene_view();
                         if matches!(
                             tab,
                             "hierarchy" | "assets" | "world" | "lighting" | "bookmarks" | "search"
@@ -1211,6 +1373,13 @@ impl NativeGameWorkbench {
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         }
                         continue;
+                    }
+                    if name=="console.filters.toggle" || name=="console.filters.close" {
+                        self.console.filters_open=name=="console.filters.toggle" && !self.console.filters_open;
+                        self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);continue;
+                    }
+                    if name.starts_with("console.filter.") {
+                        self.console.filters_open=false;self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     match name.as_str() {
                         "console.filter.all" => {
@@ -1250,9 +1419,9 @@ impl NativeGameWorkbench {
                                     "",
                                     4096,
                                 );
-                                intents.push(NativeWorkbenchIntent::Command(format!(
-                                    "console.submit:{text}"
-                                )));
+                                if !self.performance_console_submission(&text, project) {
+                                    intents.push(NativeWorkbenchIntent::Command(format!("console.submit:{text}")));
+                                }
                             }
                             continue;
                         }
@@ -1351,6 +1520,12 @@ impl NativeGameWorkbench {
                         }
                         "window.close" => {
                             intents.push(NativeWorkbenchIntent::Window(UiWindowCommand::Close));
+                            continue;
+                        }
+                        "window.system-menu" => {
+                            intents.push(NativeWorkbenchIntent::Window(
+                                UiWindowCommand::ShowSystemMenu,
+                            ));
                             continue;
                         }
                         "assets.create-menu.toggle" => {
@@ -1643,6 +1818,7 @@ impl NativeGameWorkbench {
                             "models" => AssetFilter::Models,
                             "audio" => AssetFilter::Audio,
                             "scripts" => AssetFilter::Scripts,
+                            "interfaces" => AssetFilter::Interfaces,
                             _ => AssetFilter::All,
                         };
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -1664,7 +1840,10 @@ impl NativeGameWorkbench {
                         .or_else(|| name.strip_prefix("assets.drag-start:"))
                     {
                         let entry = raf_assets::authoring_catalog::AuthoringAsset::from_path(row);
-                        if entry.class == raf_assets::authoring_catalog::AssetClass::Camera {
+                        if entry.class == raf_assets::authoring_catalog::AssetClass::Interface {
+                            self.interface.diagnostic=self.interface.insert_asset(row,self.agent_settings.language).err();
+                            self.activate_interface_authoring();
+                        } else if entry.class == raf_assets::authoring_catalog::AssetClass::Camera {
                             let parent = self
                                 .insertion_parent(scene)
                                 .map(|id| id.0.to_string())
@@ -1715,7 +1894,10 @@ impl NativeGameWorkbench {
                         continue;
                     }
                     if let Some(row) = name.strip_prefix("assets.open:") {
-                        if row == "builtin://camera" {
+                        if row.starts_with("builtin://interface/") || row.to_ascii_lowercase().ends_with(".ui.ron") {
+                            self.open_interface_asset(row);
+                            self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+                        } else if row == "builtin://camera" {
                             self.assets_surface.close_menus();
                             let parent=self.insertion_parent(scene).map(|id|id.0.to_string()).unwrap_or_else(||"root".into());
                             intents.push(NativeWorkbenchIntent::Command(format!("hierarchy.create-camera:{parent}")));
@@ -2118,7 +2300,9 @@ impl NativeGameWorkbench {
                     if name == "bottom.toggle-collapsed" {
                         self.bottom_dock.toggle_collapsed();
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
-                        intents.push(NativeWorkbenchIntent::Command(name.clone()));
+                        // The dock already consumed this chrome action. The
+                        // application synchronizes its layout after input;
+                        // forwarding it also dispatches a false domain error.
                         continue;
                     }
                     if let Some(raw_tab) = name.strip_prefix("bottom.tab.") {
@@ -2675,7 +2859,11 @@ impl NativeGameWorkbench {
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
             if self.inspector_view.dropdown.is_some() || self.inspector_view.color_picker {
-                let inside_inspector_popup = hovered.as_deref().is_some_and(|id| {
+                let inside_popup_bounds = snapshot.pointer_position.is_some_and(|point| {
+                    self.host.layout_rect("inspector.color.popover").is_some_and(|rect|
+                        rect.contains([point[0] - self.rect.x, point[1] - self.rect.y]))
+                });
+                let inside_inspector_popup = inside_popup_bounds || hovered.as_deref().is_some_and(|id| {
                     id.starts_with("inspector.")
                         && (id.contains("dropdown")
                             || id.contains("color")
@@ -2690,7 +2878,13 @@ impl NativeGameWorkbench {
                 }
             }
         }
+        let inside_toolbar_popup = snapshot.pointer_position.is_some_and(|point| {
+            ["viewport.toolbar.primitive-menu", "viewport.toolbar.view-menu", "viewport.toolbar.shading-menu", "viewport.toolbar.building-menu"]
+                .iter().any(|id| self.host.layout_rect(id).is_some_and(|rect|
+                    rect.contains([point[0] - self.rect.x, point[1] - self.rect.y])))
+        });
         if snapshot.button_pressed(raf_core::PointerButton::Primary)
+            && !inside_toolbar_popup
             && (self.toolbar_state.view_menu_open
                 || self.toolbar_state.shading_menu_open
                 || self.toolbar_state.primitive_menu_open
@@ -2869,17 +3063,9 @@ impl NativeGameWorkbench {
         intents: &mut Vec<NativeWorkbenchIntent>,
         reset_history: bool,
     ) {
-        let focus_new_model_label = matches!(&action, AgentAction::OpenAddModel);
         self.agent_panel
             .borrow_mut()
             .apply_action(action, &mut self.agent_settings);
-        if focus_new_model_label {
-            self.host
-                .session_mut()
-                .interaction
-                .focus
-                .request_focus("agent.new-model.label");
-        }
         if reset_history {
             self.agent_scroll_projection_offset = 0.0;
             self.host
@@ -2908,12 +3094,14 @@ pub(crate) fn parse_agent_action(name: &str, language: raf_core::Language) -> Op
         "agent.new-chat" => AgentAction::NewChat,
         "agent.model.toggle" => AgentAction::ToggleModelMenu,
         "agent.mode.toggle" => AgentAction::ToggleModeMenu,
-        "agent.model.add" => AgentAction::OpenAddModel,
-        "agent.model.cancel" => AgentAction::CloseAddModel,
         "agent.model.confirm" => AgentAction::AddModel,
         "agent.open-settings" => AgentAction::OpenSettings,
+        "agent.catalog.refresh" => AgentAction::RefreshModelCatalog,
+        "agent.account.usage" => AgentAction::OpenPlanUsage,
         "agent.tool-warning.dismiss" => AgentAction::DismissToolCallWarning,
         "agent.submit" => AgentAction::Submit,
+        "agent.image.paste" => AgentAction::PasteImage,
+        "agent.reasoning.cycle" => AgentAction::CycleReasoning,
         "agent.resume" => AgentAction::Resume,
         "agent.stop" => AgentAction::Stop,
         "agent.approve" => AgentAction::Approve,
@@ -2923,6 +3111,9 @@ pub(crate) fn parse_agent_action(name: &str, language: raf_core::Language) -> Op
         "agent.mode.passive" | "agent.mode.plan" => AgentAction::SetMode(AgentMode::Plan),
         "agent.mode.active" => AgentAction::SetMode(AgentMode::Active),
         _ => {
+            if let Some(file) = name.strip_prefix("agent.image.remove:") {
+                return Some(AgentAction::RemoveImage(file.into()));
+            }
             if let Some(id) = name.strip_prefix("agent.call.approve:") {
                 AgentAction::ApproveCall(id.to_string())
             } else if let Some(id) = name.strip_prefix("agent.call.deny:") {
@@ -2935,6 +3126,8 @@ pub(crate) fn parse_agent_action(name: &str, language: raf_core::Language) -> Op
                 AgentAction::DeleteSession(raw.parse().ok()?)
             } else if let Some(raw) = name.strip_prefix("agent.model.select:") {
                 AgentAction::SelectModel(raw.to_string())
+            } else if let Some(raw) = name.strip_prefix("agent.model.pin:") {
+                AgentAction::PinModel(raw.to_string())
             } else if let Some(key) = name.strip_prefix("agent.suggestion:") {
                 AgentAction::UseSuggestion(raf_core::i18n::t(key, language))
             } else {

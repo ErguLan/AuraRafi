@@ -77,15 +77,33 @@ impl EditorBottomDockHost {
             .iter_mut()
             .find(|group| group.tabs.iter().any(|candidate| candidate.id == tab))
             .is_some_and(|group| group.select_tab(tab));
-        self.layout_dirty |= changed;
-        changed
+        let opened = self.layout.collapsed
+            && self
+                .layout
+                .groups
+                .iter()
+                .any(|g| g.tabs.iter().any(|t| t.id == tab));
+        if opened {
+            self.layout.collapsed = false;
+        }
+        self.layout_dirty |= changed || opened;
+        changed || opened
     }
 
     pub fn select_in_group(&mut self, group_id: &str, tab: &str) -> bool {
         self.context_menu = None;
         let changed = self.layout.select_tab(group_id, tab);
-        self.layout_dirty |= changed;
-        changed
+        let opened = self.layout.collapsed
+            && self
+                .layout
+                .groups
+                .iter()
+                .any(|g| g.id == group_id && g.tabs.iter().any(|t| t.id == tab));
+        if opened {
+            self.layout.collapsed = false;
+        }
+        self.layout_dirty |= changed || opened;
+        changed || opened
     }
 
     pub fn active_tab(&self) -> &str {
@@ -538,6 +556,7 @@ impl EditorBottomDockHost {
 
     pub fn reset_group(&mut self, project_type: ProjectType) {
         self.layout = BottomDockLayout::new(default_groups_for_type(project_type));
+        self.layout.collapsed = false;
         self.layout_dirty = true;
         self.context_menu = None;
         self.drag = None;
@@ -562,6 +581,9 @@ impl EditorBottomDockHost {
 /// one crowded tab strip.
 fn default_groups_for_type(project_type: ProjectType) -> Vec<DockTabGroup> {
     let tabs = default_tabs_for_type(project_type);
+    if project_type == ProjectType::Electronics {
+        return vec![DockTabGroup::new("native.console", tabs)];
+    }
     let left_ids = if project_type == ProjectType::Game {
         ["console", "agent", "nodes", "project-settings"].as_slice()
     } else {
@@ -585,6 +607,9 @@ fn default_groups_for_type(project_type: ProjectType) -> Vec<DockTabGroup> {
 /// Older project-local layouts serialized every tab into `native.primary`.
 /// Preserve each tab's order while restoring the two-track workbench shape.
 fn split_legacy_single_group(group: DockTabGroup, project_type: ProjectType) -> Vec<DockTabGroup> {
+    if project_type == ProjectType::Electronics {
+        return vec![group];
+    }
     let defaults = default_groups_for_type(project_type);
     let right_ids = defaults
         .get(1)
@@ -621,6 +646,11 @@ fn default_tabs_for_type(project_type: ProjectType) -> Vec<DockTab> {
         DockTab::new("assets", "app.studio_assets", UiIconId::Assets),
     ];
     if project_type == ProjectType::Game {
+        tabs.push(DockTab::new(
+            "interfaces",
+            "ui.designer.title",
+            UiIconId::Frame,
+        ));
         tabs.push(DockTab::new("nodes", "nodes.tab", UiIconId::Node));
     } else {
         // The tab titles are localization keys. The previous literals "DRC" and
@@ -649,6 +679,26 @@ fn default_tabs_for_type(project_type: ProjectType) -> Vec<DockTab> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn electronics_reports_share_one_open_strip_and_reopen_on_explicit_selection() {
+        let mut host = EditorBottomDockHost::default();
+        host.reset_group(ProjectType::Electronics);
+        assert!(!host.is_collapsed());
+        assert_eq!(host.groups().len(), 1);
+        assert!(host.select("drc"));
+        assert!(!host.is_collapsed());
+        host.toggle_collapsed();
+        let group = host
+            .groups()
+            .iter()
+            .find(|g| g.tabs.iter().any(|t| t.id == "drc"))
+            .unwrap()
+            .id
+            .clone();
+        assert!(host.select_in_group(&group, "drc"));
+        assert!(!host.is_collapsed());
+    }
 
     #[test]
     fn native_dock_drag_reorders_tabs_without_flattening_the_layout() {

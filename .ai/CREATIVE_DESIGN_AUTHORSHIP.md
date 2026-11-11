@@ -138,3 +138,14 @@ As a developer or AI agent working on AuraRafi:
 * You are encouraged to propose and build innovative UI widgets: floating HUDs, zoom pills, mini-maps, waveform previews, radial menus where appropriate, interactive sliders, and animated transitions.
 * If a visual problem asks for a creative solution, embrace it with taste, craft, and pride.
 * Build tools that feel satisfying to use every single day.
+
+---
+
+## 6. Non-Negotiable Agent Directives
+
+1. **Never mention competitors in code or docs**: All architecture and nomenclature belong exclusively to AuraRafi.
+2. **Translate all UI strings with i18n**: All labels, tooltips, and dialogs must have entries in both `crates/raf_core/locales/en.json` and `crates/raf_core/locales/es.json`.
+3. **One-pass complete implementation**: Implement the entire feature directly across all files and modules in a single pass without fear or incremental hesitation.
+4. **Minimal tests only at the very end**: Run minimal, targeted tests only at the absolute conclusion of the task.
+5. **Do not touch or fix unrelated errors**: Do not repair compiler issues or broken code outside your task scope; someone may be working in parallel.
+6. **Strict modularity & zero hardcoding (anti-spaghetti & anti-god-code)**: AuraRafi is a complex, high-performance desktop engine—never treat it like a simple web landing page where shortcuts and hardcoding are acceptable. Eliminate magic numbers, inline layout hacks, and monster functions. You are explicitly authorized and expected to create as many dedicated modular files as needed to maintain clean separation of concerns and effortless code expansion.

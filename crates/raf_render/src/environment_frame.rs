@@ -16,6 +16,9 @@ pub struct EnvironmentFrame {
     pub sky_top: Vec3,
     pub sky_horizon: Vec3,
     pub sky_ground: Vec3,
+    /// Sky-only glow around the solar disk; additive, never lights bodies.
+    pub halo_strength: f32,
+    pub halo_cos: f32,
 }
 pub fn linear_color(color: [u8; 3]) -> Vec3 {
     Vec3::from_array(color.map(srgb_to_linear))
@@ -48,6 +51,7 @@ impl EnvironmentFrame {
         } else {
             0.0
         };
+        let halo_angle = settings.sun.angular_radius.max(0.00465) * 24.0;
         Some(Self {
             settings,
             inverse_view_projection: view_projection.inverse(),
@@ -57,6 +61,12 @@ impl EnvironmentFrame {
             sky_top: linear_color(settings.sky.top_color) * settings.sky.intensity,
             sky_horizon: linear_color(settings.sky.horizon_color) * settings.sky.intensity,
             sky_ground: linear_color(settings.sky.ground_color) * settings.sky.intensity,
+            halo_strength: if direct > 0.0 {
+                settings.sun.halo.clamp(0.0, 1.0)
+            } else {
+                0.0
+            },
+            halo_cos: halo_angle.cos(),
         })
     }
     pub fn sky_color(&self, direction: Vec3) -> Vec3 {
@@ -67,21 +77,41 @@ impl EnvironmentFrame {
         let top = self.sky_top;
         let horizon = self.sky_horizon;
         let ground = self.sky_ground;
+        // Haze compresses the gradient toward the horizon color. Current
+        // technology keeps the legacy linear ramp exactly.
         let mut color = if sky.mode == SkyMode::Solid {
             top
-        } else if direction.y >= 0.0 {
-            horizon.lerp(top, direction.y.clamp(0.0, 1.0))
         } else {
-            horizon.lerp(ground, (-direction.y).clamp(0.0, 1.0))
+            let vertical = direction.y.abs().clamp(0.0, 1.0);
+            let eased = if self.improved() {
+                vertical.powf(1.0 + 2.0 * sky.haze.clamp(0.0, 1.0))
+            } else {
+                vertical
+            };
+            if direction.y >= 0.0 {
+                horizon.lerp(top, eased)
+            } else {
+                horizon.lerp(ground, eased)
+            }
         };
         if sky.stars_enabled && sky.stars_density > 0.0 && sky.stars_intensity > 0.0 {
-            color += Vec3::new(0.72, 0.86, 1.0)
-                * if self.improved() {
-                    crate::sky_stars::brightness_filtered(direction, sky.stars_density, footprint)
-                } else {
-                    crate::sky_stars::brightness(direction, sky.stars_density)
-                }
-                * sky.stars_intensity;
+            let brightness = if self.improved() {
+                crate::sky_stars::brightness_filtered(direction, sky.stars_density, footprint)
+            } else {
+                crate::sky_stars::brightness(direction, sky.stars_density)
+            };
+            let chroma = if self.improved() {
+                crate::sky_stars::star_tint(direction, sky.stars_density)
+            } else {
+                Vec3::new(0.72, 0.86, 1.0)
+            };
+            color += chroma * brightness * sky.stars_intensity;
+        }
+        if self.improved() && self.halo_strength > 0.0 {
+            let glow = ((direction.dot(self.sun_direction) - self.halo_cos)
+                / (1.0 - self.halo_cos).max(1e-6))
+            .clamp(0.0, 1.0);
+            color += self.sun * (glow * glow) * self.halo_strength;
         }
         if self.settings.sun.enabled && self.settings.sun.disk_visible && self.sun_direction.y > 0.0
         {
@@ -216,5 +246,40 @@ mod tests {
         assert_eq!(frame.sun, Vec3::ZERO);
         assert!(frame.ambient.length() > 0.0);
         assert_ne!(frame.sky_color(Vec3::Y), frame.sky_color(-Vec3::Y));
+    }
+    #[test]
+    fn improved_sky_only_bounded_improvements_gate_haze_halo_and_star_chroma() {
+        use raf_core::environment::LightingTechnology;
+        let mut settings = EnvironmentSettings::default();
+        settings.mode = EnvironmentMode::Scene;
+        settings.technology = LightingTechnology::OptimizedCurrent;
+        let mut improved = settings;
+        improved.technology = LightingTechnology::OptimizedImproved;
+        let current = EnvironmentFrame::new(settings, Mat4::IDENTITY).unwrap();
+        let refined = EnvironmentFrame::new(improved, Mat4::IDENTITY).unwrap();
+        // Legacy stays transparent to haze and halo no matter their values.
+        let mut loud = settings;
+        loud.sky.haze = 1.0;
+        loud.sun.halo = 1.0;
+        let loud_current = EnvironmentFrame::new(loud, Mat4::IDENTITY).unwrap();
+        let low = Vec3::new(0.3, 0.12, 0.9).normalize();
+        assert_eq!(
+            current.sky_color(low),
+            loud_current.sky_color(low),
+            "current technology must ignore bounded improvements"
+        );
+        // Haze compresses the near-horizon ramp with improved and keeps the zenith.
+        assert_ne!(current.sky_color(low), refined.sky_color(low));
+        assert_eq!(current.sky_color(Vec3::Y), refined.sky_color(Vec3::Y));
+        // Halo adds energy toward the sun only when the sun is up.
+        assert!(refined.halo_strength > 0.0 && refined.halo_strength < 1.0);
+        let mut halo_off = improved;
+        halo_off.sun.halo = 0.0;
+        let halo_off = EnvironmentFrame::new(halo_off, Mat4::IDENTITY).unwrap();
+        // Sample just outside the solar disk but well inside the halo ring.
+        let axis = Vec3::Y.cross(refined.sun_direction).normalize();
+        let edge_sample = (glam::Mat3::from_axis_angle(axis, 0.02) * refined.sun_direction)
+            .normalize();
+        assert!(refined.sky_color(edge_sample) != halo_off.sky_color(edge_sample));
     }
 }

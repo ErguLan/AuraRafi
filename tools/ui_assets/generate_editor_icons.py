@@ -141,14 +141,32 @@ def folder(draw):
 
 
 def game(draw):
-    # A calm gamepad: rounded body, D-pad and two face buttons. The previous
-    # top "antennae" strokes made the silhouette read as an insect, so they are
-    # intentionally gone.
-    rounded(draw, (6, 24, 58, 50), 12, outline=WHITE, width=3)
-    line(draw, [(19, 30), (19, 44)], WHITE, 3)
-    line(draw, [(12, 37), (26, 37)], WHITE, 3)
-    draw.ellipse((43 * SCALE, 31 * SCALE, 49 * SCALE, 37 * SCALE), fill=ORANGE)
-    draw.ellipse((49 * SCALE, 38 * SCALE, 55 * SCALE, 44 * SCALE), fill=ORANGE)
+    # Outline controller with two grips, a D-pad and two face buttons. The
+    # earlier pill-shaped body read as a bar, so the silhouette now carries
+    # distinct grips while staying legible at 16px.
+    outline = [
+        (11, 27),
+        (22, 23),
+        (42, 23),
+        (53, 27),
+        (58, 33),
+        (59, 41),
+        (56, 48),
+        (50, 51),
+        (44, 49),
+        (40, 43),
+        (24, 43),
+        (20, 49),
+        (14, 51),
+        (8, 48),
+        (5, 41),
+        (6, 33),
+    ]
+    line(draw, outline + [outline[0]], WHITE, 4)
+    line(draw, [(15, 35), (23, 35)], WHITE, 4)
+    line(draw, [(19, 31), (19, 39)], WHITE, 4)
+    draw.ellipse((40 * SCALE, 30 * SCALE, 45 * SCALE, 35 * SCALE), fill=WHITE)
+    draw.ellipse((46 * SCALE, 37 * SCALE, 51 * SCALE, 42 * SCALE), fill=WHITE)
 
 
 def electronics(draw):
@@ -166,6 +184,33 @@ def project_type(draw):
     line(draw, [(18, 23), (46, 23)], MUTED, 2)
     line(draw, [(18, 32), (39, 32)], WHITE, 3)
     line(draw, [(18, 41), (32, 41)], ORANGE, 3)
+
+
+def sparkle(draw):
+    # Four-point AI sparkle used by the Hub creation field. The small
+    # companion dot keeps the mark readable at 16px.
+    points = [
+        (32, 6),
+        (38, 26),
+        (58, 32),
+        (38, 38),
+        (32, 58),
+        (26, 38),
+        (6, 32),
+        (26, 26),
+    ]
+    draw.polygon([(x * SCALE, y * SCALE) for x, y in points], fill=ORANGE)
+    draw.ellipse(
+        (45 * SCALE, 9 * SCALE, 51 * SCALE, 15 * SCALE),
+        fill=ORANGE,
+    )
+
+
+def submit_arrow(draw):
+    # Dark-ink arrow for the orange Hub primary action.
+    ink = (18, 18, 20, 255)
+    line(draw, [(14, 32), (50, 32)], ink, 5)
+    line(draw, [(37, 19), (50, 32), (37, 45)], ink, 5)
 
 
 def settings(draw):
@@ -352,6 +397,8 @@ def main():
     draw_icon("project_game.png", game)
     draw_icon("project_electronics.png", electronics)
     draw_icon("project_type_HUB.png", project_type)
+    draw_icon("sparkle.png", sparkle)
+    draw_icon("submit_arrow.png", submit_arrow)
     draw_icon("settings_HUB.png", settings)
     draw_icon("search_filter_HUB.png", search)
     draw_icon("open_HUB.png", open_icon)

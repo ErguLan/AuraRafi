@@ -134,13 +134,34 @@ pub(crate) fn build_workspace_surface_with_layout(
     review_open: bool,
     layout: &WorkspaceLayout,
 ) -> UiSurface {
+    build_workspace_surface_with_laboratory(
+        palette, service, projects, settings, size, scroll, step, evidence, review_open, layout,
+        service.selected_lab(None),
+    )
+}
+
+pub(crate) fn build_workspace_surface_with_laboratory(
+    palette: StudioUiPalette,
+    service: &AgentService,
+    projects: &[HubSurfaceProject],
+    settings: &EngineSettings,
+    size: [f32; 2],
+    scroll: f32,
+    step: u8,
+    evidence: EvidenceTab,
+    review_open: bool,
+    layout: &WorkspaceLayout,
+    laboratory: Option<&crate::electronics_controller::NativeElectronicsEditor>,
+) -> UiSurface {
     let tokens = workspace_tokens(palette);
     let width = size[0].max(1.0);
     let height = size[1].max(1.0);
     let ready = service.selected_workspace().filter(|w| !w.closing);
+    let is_lab = laboratory.is_some();
+    let lab_chat = laboratory.is_some_and(|editor| editor.lab.view == crate::electronics_lab::LabView::Chat);
     let geometry = layout.resolve(
         size,
-        review_open && ready.is_some(),
+        review_open && ready.is_some() && !is_lab,
         ready.is_some_and(|w| w.panel.borrow().sidebar_open),
     );
     let rail = geometry.projects;
@@ -159,13 +180,13 @@ pub(crate) fn build_workspace_surface_with_layout(
         })
         .with_child(button(
             "agent.workspace.back",
-            "agent_workspace.projects",
+            if is_lab { "lab.back" } else { "agent_workspace.projects" },
             "agent.workspace.back",
             &tokens,
         ))
         .with_child(
             UiNode::new("agent.workspace.title", UiNodeKind::Label)
-                .with_text_key("agent_workspace.title")
+                .with_text_key(if is_lab { "lab.title" } else { "agent_workspace.title" })
                 .with_event(UiEventBinding::command(
                     UiEventKind::DragStart,
                     "window.drag",
@@ -187,7 +208,7 @@ pub(crate) fn build_workspace_surface_with_layout(
         )
         .with_child(button(
             "agent.workspace.settings",
-            "app.settings_menu",
+                if is_lab { "lab.provider" } else { "app.settings_menu" },
             "agent.workspace.settings",
             &tokens,
         ))
@@ -213,6 +234,10 @@ pub(crate) fn build_workspace_surface_with_layout(
             preview.layout = UiLayout::fixed(34.0, 32.0);
             preview.disabled(ready.is_none())
         });
+    if is_lab {
+        header.children.retain(|child| !matches!(child.id.as_str(),
+            "agent.workspace.review" | "agent.workspace.preview" | "agent.workspace.editor"));
+    }
     header = header
         .with_child(window_button(
             "minimize",
@@ -446,7 +471,26 @@ pub(crate) fn build_workspace_surface_with_layout(
         .with_child(header)
         .with_child(rail_node);
     let mut rules = Vec::new();
-    if let Some(workspace) = ready {
+    if let Some(editor) = laboratory {
+        root = root.with_child(crate::electronics_lab_surface::tabs(
+            editor, UiRect::new(rail, 52.0, width - rail, 44.0), &tokens,
+        ));
+        if !lab_chat {
+            let body_height = (height - 140.0).max(1.0);
+            root = root.with_child(crate::electronics_lab_surface::body(
+                editor, UiRect::new(rail, 96.0, width - rail, body_height),
+                &tokens, settings.language,
+            ));
+            if let Some(workspace) = ready {
+                root = root.with_child(crate::electronics_lab_surface::assistant(
+                    &workspace.panel.borrow(), settings,
+                    UiRect::new(rail, 96.0 + body_height, width - rail, 44.0), &tokens,
+                ));
+            }
+        }
+    }
+    if let Some(workspace) = ready.filter(|_| !is_lab || lab_chat) {
+        let top = if is_lab { 96.0 } else { 52.0 };
         let panel = workspace.panel.borrow();
         let mut chat = crate::panels::agent_surface::build_workspace_agent_surface(
             palette,
@@ -454,15 +498,15 @@ pub(crate) fn build_workspace_surface_with_layout(
             settings,
             panel.readiness(settings),
             workspace.project.project_type,
-            [(width - rail - review).max(1.0), height - 52.0],
+            [(width - rail - review).max(1.0), (height - top).max(1.0)],
             scroll,
             geometry.sessions,
         );
         chat.root.layout = UiLayout::absolute(UiRect::new(
             rail,
-            52.0,
+            top,
             width - rail - review,
-            height - 52.0,
+            (height - top).max(1.0),
         ));
         root = root.with_child(chat.root);
         rules.extend(chat.style_sheet.rules);
@@ -495,7 +539,7 @@ pub(crate) fn build_workspace_surface_with_layout(
                 );
             }
         }
-    } else {
+    } else if !is_lab {
         let mut empty =
             UiNode::new("agent.workspace.empty", UiNodeKind::Panel).with_layout(UiLayout {
                 flow: UiFlow::Column,
@@ -549,7 +593,7 @@ pub(crate) fn build_workspace_surface_with_layout(
         }
         root = root.with_child(empty);
     }
-    for (divider, rect) in geometry.dividers() {
+    for (divider, rect) in geometry.dividers().into_iter().filter(|_| !is_lab) {
         let name = match divider {
             WorkspaceDivider::Projects => "projects",
             WorkspaceDivider::Sessions => "sessions",
@@ -592,6 +636,13 @@ pub(crate) fn build_workspace_surface_with_layout(
         );
     }
     let mut surface = UiSurface::new("editor.agent.workspace", palette, root);
+    if is_lab {
+        for class in ["lab.signal-target", "lab.nav", "lab.run-primary"] {
+            rules.push(UiStyleRule::new(UiStyleSelector::Class(class.into()), UiStylePatch {
+                fill: Some(tokens.surface_raised), ..Default::default()
+            }).when(UiStyleRuleState::Hovered));
+        }
+    }
     for class in ["agent-workspace-button", "agent-workspace-project"] {
         rules.push(
             UiStyleRule::new(

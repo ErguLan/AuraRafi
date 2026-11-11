@@ -46,6 +46,8 @@ pub struct SunSettings {
     pub intensity: f32,
     pub disk_visible: bool,
     pub angular_radius: f32,
+    /// Sky-only additive glow around the solar disk; bodies never receive it.
+    pub halo: f32,
     pub toon_enabled: bool,
     pub toon_steps: f32,
     pub toon_softness: f32,
@@ -61,6 +63,7 @@ impl Default for SunSettings {
             intensity: 0.7,
             disk_visible: true,
             angular_radius: 0.00465,
+            halo: 0.35,
             toon_enabled: false,
             toon_steps: 3.0,
             toon_softness: 0.35,
@@ -84,6 +87,8 @@ pub struct SkySettings {
     pub horizon_color: [u8; 3],
     pub ground_color: [u8; 3],
     pub intensity: f32,
+    /// How long the horizon color stretches into the sky before the gradient.
+    pub haze: f32,
     pub stars_enabled: bool,
     pub stars_density: f32,
     pub stars_intensity: f32,
@@ -96,6 +101,7 @@ impl Default for SkySettings {
             horizon_color: [200, 221, 240],
             ground_color: [90, 100, 115],
             intensity: 1.0,
+            haze: 0.35,
             stars_enabled: false,
             stars_density: 0.35,
             stars_intensity: 2.0,
@@ -377,6 +383,16 @@ pub const ENVIRONMENT_PROPERTIES: &[EnvironmentProperty] = &[
         },
     },
     EnvironmentProperty {
+        path: "sun.halo",
+        label: "lighting.sun_halo",
+        kind: Number {
+            min: 0.0,
+            max: 1.0,
+            display_scale: 1.0,
+            step: 0.05,
+        },
+    },
+    EnvironmentProperty {
         path: "ambient_color",
         label: "lighting.ambient_color",
         kind: Color,
@@ -417,6 +433,16 @@ pub const ENVIRONMENT_PROPERTIES: &[EnvironmentProperty] = &[
         kind: Number {
             min: 0.0,
             max: 4.0,
+            display_scale: 1.0,
+            step: 0.05,
+        },
+    },
+    EnvironmentProperty {
+        path: "sky.haze",
+        label: "lighting.sky_haze",
+        kind: Number {
+            min: 0.0,
+            max: 1.0,
             display_scale: 1.0,
             step: 0.05,
         },
@@ -490,7 +516,9 @@ impl EnvironmentSettings {
             self.sun.elevation,
             self.sun.intensity,
             self.sun.angular_radius,
+            self.sun.halo,
             self.sky.intensity,
+            self.sky.haze,
             self.ambient_intensity,
             self.clock.time_seconds,
             self.clock.north_offset,
@@ -545,6 +573,7 @@ impl EnvironmentSettings {
             "sun.intensity" => json!(self.sun.intensity),
             "sun.disk_visible" => json!(self.sun.disk_visible),
             "sun.angular_radius" => json!(self.sun.angular_radius),
+            "sun.halo" => json!(self.sun.halo),
             "ambient_color" => json!(self.ambient_color),
             "ambient_intensity" => json!(self.ambient_intensity),
             "sky.mode" => json!(self.sky.mode),
@@ -552,6 +581,7 @@ impl EnvironmentSettings {
             "sky.horizon_color" => json!(self.sky.horizon_color),
             "sky.ground_color" => json!(self.sky.ground_color),
             "sky.intensity" => json!(self.sky.intensity),
+            "sky.haze" => json!(self.sky.haze),
             "clock.running" => json!(self.clock.running),
             "clock.time_seconds" => json!(self.clock.time_seconds),
             "clock.day_duration" => json!(self.clock.day_duration),
@@ -708,10 +738,10 @@ mod tests {
     fn stylized_environment_migrates_bounds_and_invalidates_frame_keys() {
         let env = EnvironmentSettings::default();
         let mut legacy = serde_json::to_value(env).unwrap();
-        for key in ["toon_enabled", "toon_steps"] {
+        for key in ["toon_enabled", "toon_steps", "halo"] {
             legacy["sun"].as_object_mut().unwrap().remove(key);
         }
-        for key in ["stars_enabled", "stars_density", "stars_intensity"] {
+        for key in ["stars_enabled", "stars_density", "stars_intensity", "haze"] {
             legacy["sky"].as_object_mut().unwrap().remove(key);
         }
         let restored: EnvironmentSettings = serde_json::from_value(legacy).unwrap();
@@ -720,9 +750,11 @@ mod tests {
         for (path, value) in [
             ("sun.toon_enabled", serde_json::json!(true)),
             ("sun.toon_steps", serde_json::json!(4)),
+            ("sun.halo", serde_json::json!(0.5)),
             ("sky.stars_enabled", serde_json::json!(true)),
             ("sky.stars_density", serde_json::json!(0.9)),
             ("sky.stars_intensity", serde_json::json!(3.0)),
+            ("sky.haze", serde_json::json!(0.4)),
         ] {
             let patch = serde_json::Map::from_iter([(path.to_string(), value)]);
             let changed = env.patched(&patch).unwrap();
@@ -739,8 +771,11 @@ mod tests {
         for patch in [
             serde_json::json!({"sun.toon_steps":2.5}),
             serde_json::json!({"sun.toon_steps":7}),
+            serde_json::json!({"sun.halo":1.5}),
+            serde_json::json!({"sun.halo":-1.0}),
             serde_json::json!({"sky.stars_density":1.1}),
             serde_json::json!({"sky.stars_intensity":-1}),
+            serde_json::json!({"sky.haze":2.0}),
         ] {
             assert!(env.patched(patch.as_object().unwrap()).is_err());
         }

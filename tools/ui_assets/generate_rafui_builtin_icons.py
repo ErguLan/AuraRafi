@@ -1,14 +1,17 @@
 """Generate the RafUI white-line icon family.
 
-The SVG files are the editable masters. PNG files are the compact runtime
-representation consumed by ApiGraphicBasic, so the same artwork is shared by
-the WGPU and CPU paths without making surfaces depend on file paths.
+One vector description emits editable SVG and compact runtime PNG assets.
+Registered names come from the shared Rust catalog. ApiGraphicBasic consumes
+the PNG representation on GPU and CPU without exposing paths to surfaces.
+Edit the vector description before regeneration; runtime never invokes this tool.
 """
 
 from __future__ import annotations
 
 import math
 import argparse
+import re
+from dataclasses import dataclass
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -26,6 +29,74 @@ SCALE = 8
 STROKE = 3.8
 COLOR = "#F3F5F7"
 RGBA = (243, 245, 247, 255)
+
+
+@dataclass(frozen=True)
+class IconManifestEntry:
+    variant: str
+    key: str
+    master_svg: str
+    source_raster_size: tuple[int, int]
+    source_canvas_size: tuple[int, int]
+    optical_size_px: int
+    aliases: tuple[str, ...]
+
+
+ICON_ENTRY_RE = re.compile(
+    r'^[ \t]*(?P<variant>[A-Z][A-Za-z0-9_]*)\s*\{\s*'
+    r'key:\s*"(?P<key>[a-z0-9-]+)",\s*'
+    r'master_svg:\s*"(?P<master_svg>[^"]+)",\s*'
+    r'source_raster_size:\s*\[(?P<raster_width>\d+),\s*(?P<raster_height>\d+)\],\s*'
+    r'source_canvas_size:\s*\[(?P<canvas_width>\d+),\s*(?P<canvas_height>\d+)\],\s*'
+    r'optical_size_px:\s*(?P<optical_size_px>\d+),\s*'
+    r'aliases:\s*\[(?P<aliases>[^\]]*)\],?\s*\},',
+    re.MULTILINE | re.DOTALL,
+)
+
+
+def load_icon_manifest() -> tuple[IconManifestEntry, ...]:
+    catalog_path = ROOT / "crates" / "raf_ui" / "src" / "icon_catalog.rs"
+    catalog_source = catalog_path.read_text(encoding="utf-8")
+    entries = []
+    for match in ICON_ENTRY_RE.finditer(catalog_source):
+        aliases = tuple(re.findall(r'"([^"]+)"', match.group("aliases")))
+        entry = IconManifestEntry(
+            variant=match.group("variant"),
+            key=match.group("key"),
+            master_svg=match.group("master_svg"),
+            source_raster_size=(int(match.group("raster_width")), int(match.group("raster_height"))),
+            source_canvas_size=(int(match.group("canvas_width")), int(match.group("canvas_height"))),
+            optical_size_px=int(match.group("optical_size_px")),
+            aliases=aliases,
+        )
+        master_path = ROOT / entry.master_svg
+        if not master_path.is_file():
+            raise ValueError(f"Missing SVG master for {entry.key}: {entry.master_svg}")
+        if master_path.parent != RUNTIME_SVG_DIR:
+            raise ValueError(f"SVG master is outside the runtime icon directory: {entry.master_svg}")
+        if master_path.stem != entry.key:
+            raise ValueError(f"SVG master filename must match its stable key: {entry.master_svg}")
+        if any(size <= 0 for size in (*entry.source_raster_size, *entry.source_canvas_size, entry.optical_size_px)):
+            raise ValueError(f"Icon sizes must be positive for {entry.key}")
+        if entry.source_canvas_size != (SIZE, SIZE):
+            raise ValueError(f"The current vector artwork uses a {SIZE}x{SIZE} design grid: {entry.key}")
+        entries.append(entry)
+
+    if not entries:
+        raise ValueError(f"No icon records found in {catalog_path}")
+    keys = [entry.key for entry in entries]
+    variants = [entry.variant for entry in entries]
+    master_paths = [entry.master_svg for entry in entries]
+    aliases = [alias for entry in entries for alias in entry.aliases]
+    if len(set(keys)) != len(keys):
+        raise ValueError("Icon manifest contains duplicate stable keys")
+    if len(set(variants)) != len(variants):
+        raise ValueError("Icon manifest contains duplicate variants")
+    if len(set(master_paths)) != len(master_paths):
+        raise ValueError("Icon manifest contains duplicate SVG masters")
+    if len(set(aliases)) != len(aliases) or set(keys).intersection(aliases):
+        raise ValueError("Icon manifest contains duplicate or conflicting aliases")
+    return tuple(entries)
 
 
 class Icon:
@@ -101,11 +172,16 @@ class Icon:
             points.append((cx + math.cos(angle) * radius, cy + math.sin(angle) * radius))
         self.line(points)
 
-    def svg_text(self) -> str:
+    def svg_text(
+        self,
+        source_raster_size: tuple[int, int] = (SIZE, SIZE),
+        source_canvas_size: tuple[int, int] = (SIZE, SIZE),
+    ) -> str:
         body = "".join(self.svg)
         return (
-            '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64" '
-            'viewBox="0 0 64 64" fill="none">' + body + "</svg>\n"
+            f'<svg xmlns="http://www.w3.org/2000/svg" width="{source_raster_size[0]}" '
+            f'height="{source_raster_size[1]}" viewBox="0 0 {source_canvas_size[0]} {source_canvas_size[1]}" '
+            'fill="none">' + body + "</svg>\n"
         )
 
 
@@ -117,7 +193,17 @@ def draw_icon(name: str) -> Icon:
     P = icon.fill_polygon
     D = icon.dot
 
-    if name == "select":
+    if name == "camera":
+        L([(10,20),(38,20),(38,52),(10,52),(10,20)])
+        L([(38,30),(54,22),(54,50),(38,42)])
+        L([(15,20),(17,10),(29,10),(33,20)])
+        L([(15,36),(31,36)])
+    elif name == "scene-preview":
+        R(8,12,56,46,4)
+        P([(27,21),(42,29),(27,38)])
+        L([(23,54),(41,54)])
+        L([(32,46),(32,54)])
+    elif name == "select":
         P([(19, 10), (48, 36), (36, 37), (43, 52), (37, 55), (30, 39), (22, 48)])
         L([(19, 10), (22, 48)])
     elif name == "move":
@@ -353,6 +439,23 @@ def draw_icon(name: str) -> Icon:
         D(11, 32, 3.2)
         D(53, 32, 3.2)
         L([(11, 32), (22, 32), (32, 20), (42, 20), (53, 32)])
+    elif name == "cad-route":
+        # Copper routing has two endpoint pads and a chamfered path.
+        D(13, 49, 3.5)
+        L([(13, 49), (24, 35), (37, 35), (49, 16)], 3.6)
+        D(49, 16, 3.5)
+    elif name == "cad-outline":
+        R(13, 12, 51, 51, 7)
+    elif name == "cad-place":
+        # Two-pad placement reads independently of the schematic Add glyph.
+        R(22, 21, 42, 43, 3)
+        R(12, 25, 22, 39, 1)
+        R(42, 25, 52, 39, 1)
+    elif name == "cad-via":
+        C(32, 32, 16)
+        C(32, 32, 6)
+        L([(5, 32), (16, 32)])
+        L([(48, 32), (59, 32)])
     elif name == "route":
         D(11, 46, 3.2)
         D(53, 20, 3.2)
@@ -416,16 +519,9 @@ def draw_icon(name: str) -> Icon:
     return icon
 
 
-ICON_NAMES = [
-    "select", "move", "rotate", "scale", "focus", "undo", "redo", "grid",
-    "view-2d", "view-3d", "shaded", "wireframe", "folder", "scene", "entity",
-    "cube", "sphere", "plane", "cylinder", "eye", "eye-off", "lock", "unlock",
-    "chevron-left", "chevron-right", "chevron-down", "more", "search", "filter",
-    "add", "close", "play", "pause", "step-forward", "stop", "sun", "sky", "shadows", "clock", "console", "assets", "project", "node",
-    "agent", "schematic", "pcb", "settings", "menu", "warning", "error", "success",
-    "refresh", "trash", "wire", "route", "board-outline", "zoom-in", "zoom-out",
-    "script", "file", "external-link", "pencil", "copy", "magnet", "frame", "capsule",
-]
+ICON_MANIFEST = load_icon_manifest()
+ICON_BY_KEY = {entry.key: entry for entry in ICON_MANIFEST}
+ICON_NAMES = [entry.key for entry in ICON_MANIFEST]
 
 TOP_ICONS = {
     "file": "project",
@@ -440,23 +536,26 @@ TOP_ICONS = {
 }
 
 
-def write_icon(name: str, png_dir: Path, svg_dir: Path) -> None:
-    icon = draw_icon(name)
+def write_icon(entry: IconManifestEntry, png_dir: Path) -> None:
+    icon = draw_icon(entry.key)
     png_dir.mkdir(parents=True, exist_ok=True)
-    svg_dir.mkdir(parents=True, exist_ok=True)
-    raster_image(icon).save(png_dir / f"{name}.png")
-    (svg_dir / f"{name}.svg").write_text(icon.svg_text(), encoding="utf-8")
+    raster_image(icon, entry.source_raster_size).save(png_dir / f"{entry.key}.png")
+    master_path = ROOT / entry.master_svg
+    master_path.write_text(
+        icon.svg_text(entry.source_raster_size, entry.source_canvas_size),
+        encoding="utf-8",
+    )
 
 
-def raster_image(icon: Icon) -> Image.Image:
+def raster_image(icon: Icon, size: tuple[int, int] = (SIZE, SIZE)) -> Image.Image:
     """Downsample the alpha mask while keeping transparent RGB pixels white.
 
     Resizing straight-alpha RGBA can leak black RGB values into antialiased
     edges. The renderers blend the alpha channel, so a white RGB payload is
     the stable result for every partially covered stroke.
     """
-    alpha = icon.image.getchannel("A").resize((SIZE, SIZE), Image.Resampling.LANCZOS)
-    white = Image.new("L", (SIZE, SIZE), 255)
+    alpha = icon.image.getchannel("A").resize(size, Image.Resampling.LANCZOS)
+    white = Image.new("L", size, 255)
     return Image.merge("RGBA", (white, white, white, alpha))
 
 
@@ -467,35 +566,36 @@ def main() -> None:
     parser.add_argument("--preview", type=Path, help="Optional development contact sheet, never loaded by the engine.")
     args = parser.parse_args()
     if args.only:
+        selected_icons = [ICON_BY_KEY[name] for name in args.only]
         for name in args.only:
-            write_icon(name, RUNTIME_PNG_DIR, RUNTIME_SVG_DIR)
+            write_icon(ICON_BY_KEY[name], RUNTIME_PNG_DIR)
         if args.preview:
             preview = Image.new("RGB", (640, len(args.only) * 72), (16, 20, 28))
             draw = ImageDraw.Draw(preview)
             draw.rectangle((320, 0, 640, preview.height), fill=(240, 242, 245))
-            for index, name in enumerate(args.only):
+            for index, entry in enumerate(selected_icons):
                 for column, tint in [(0, (243,245,247)), (320, (35,40,48))]:
                     # Tint without changing the original antialiased alpha mask.
-                    alpha = raster_image(draw_icon(name)).getchannel("A")
-                    source = Image.new("RGBA", (SIZE,SIZE), (*tint,255))
+                    alpha = raster_image(draw_icon(entry.key), entry.source_raster_size).getchannel("A")
+                    source = Image.new("RGBA", entry.source_raster_size, (*tint,255))
                     source.putalpha(alpha)
-                    for x, size in [(12,48), (80,24), (126,16)]:
+                    for x, size in [(12,entry.optical_size_px), (80,24), (126,16)]:
                         icon = source.resize((size,size), Image.Resampling.LANCZOS)
                         preview.paste(icon, (column + x, index*72 + (72-size)//2), icon)
-                    draw.text((column+170, index*72+30), name, fill=tint)
+                    draw.text((column+170, index*72+30), entry.key, fill=tint)
             args.preview.parent.mkdir(parents=True, exist_ok=True)
             preview.save(args.preview)
         print(f"Generated {len(args.only)} selected runtime SVG/PNG icons.")
         return
-    for name in ICON_NAMES:
-        write_icon(name, RUNTIME_PNG_DIR, RUNTIME_SVG_DIR)
+    for entry in ICON_MANIFEST:
+        write_icon(entry, RUNTIME_PNG_DIR)
     for top_name, source_name in TOP_ICONS.items():
         source = draw_icon(source_name)
         TOP_PNG_DIR.mkdir(parents=True, exist_ok=True)
         TOP_SVG_DIR.mkdir(parents=True, exist_ok=True)
         raster_image(source).save(TOP_PNG_DIR / f"{top_name}.png")
         (TOP_SVG_DIR / f"{top_name}.svg").write_text(source.svg_text(), encoding="utf-8")
-    print(f"Generated {len(ICON_NAMES)} RafUI icons and {len(TOP_ICONS)} top-bar icons.")
+    print(f"Generated {len(ICON_MANIFEST)} RafUI icons and {len(TOP_ICONS)} top-bar icons.")
 
 
 if __name__ == "__main__":

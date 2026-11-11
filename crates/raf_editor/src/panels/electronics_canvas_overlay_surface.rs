@@ -1,10 +1,9 @@
-//! Retained RafUI artwork and labels for the native Electronics canvas.
+//! Retained RafUI labels for the native Electronics canvas.
 //!
-//! ApiGraphicBasic owns the CAD geometry. Native component artwork and labels
-//! remain a RafUI overlay so they use the same image/text compositor as the
-//! editor chrome and do not need a second presentation implementation inside
-//! the line renderer. The overlay is deliberately non-interactive: pointer
-//! ownership stays with the CAD controller.
+//! ApiGraphicBasic owns vector CAD geometry and symbol strokes. Text labels
+//! remain a RafUI overlay so they use the same compositor as editor chrome.
+//! The CAD controller owns drawing and minimap navigation. Only the explicit
+//! minimap fold button routes retained input through the overlay host.
 
 use glam::Vec2;
 use raf_core::{i18n, Language};
@@ -17,12 +16,13 @@ use raf_ui::{
 };
 
 use crate::editor_layout::EditorRect;
+#[path = "electronics_pcb_labels.rs"]
+mod pcb_labels;
 use crate::electronics_controller::{
     ElectronicsSelectionKind, ElectronicsTool, NativeElectronicsEditor,
 };
 use crate::electronics_minimap::{
-    self, minimap_empty_key, minimap_tooltip_key, surface_label_key, HEADER_HEIGHT,
-    IMAGE_KEY as MINIMAP_IMAGE_KEY,
+    self, minimap_tooltip_key, surface_label_key, HEADER_HEIGHT, IMAGE_KEY as MINIMAP_IMAGE_KEY,
 };
 use crate::panels::electronics_surface::{
     with_alpha, ELECTRONICS_BORDER_WIDTH, ELECTRONICS_CORNER_RADIUS, ELECTRONICS_ROW_MIN_TRACK,
@@ -122,6 +122,63 @@ impl ElectronicsCanvasOverlayParams {
     }
 }
 
+/// The rules occupy chrome outside the CAD input rectangle. Keep their paint
+/// in the camera-dependent overlay so panning never rebuilds the workbench.
+pub fn electronics_overlay_rect(pcb: bool, canvas: EditorRect) -> EditorRect {
+    use crate::panels::electronics_desktop_surface::{RULER_HEIGHT, RULER_WIDTH};
+    if pcb {
+        EditorRect::new(
+            canvas.x - RULER_WIDTH,
+            canvas.y - RULER_HEIGHT,
+            canvas.width + RULER_WIDTH,
+            canvas.height + RULER_HEIGHT,
+        )
+    } else {
+        canvas
+    }
+}
+
+pub fn build_electronics_framed_overlay_surface(
+    palette: StudioUiPalette,
+    editor: &NativeElectronicsEditor,
+    canvas: EditorRect,
+    params: ElectronicsCanvasOverlayParams,
+) -> UiSurface {
+    let mut surface = build_electronics_canvas_overlay_surface(palette, editor, canvas, params);
+    if editor.active_surface() == CadSurfaceKind::Pcb {
+        use crate::panels::electronics_desktop_surface::{
+            ruler_overlay, RULER_HEIGHT, RULER_WIDTH,
+        };
+        let content = surface.root;
+        surface.root = UiNode::new("electronics.canvas.framed-overlay", UiNodeKind::Overlay)
+            .with_layout(UiLayout {
+                overflow: UiOverflow::Clip,
+                ..UiLayout::fill(UiFlow::None)
+            })
+            .with_style(UiStyle::transparent())
+            .with_child(ruler_overlay(
+                editor,
+                Vec2::new(canvas.width, canvas.height),
+                crate::panels::electronics_surface::electronics_tokens(palette),
+            ))
+            .with_child(
+                UiNode::new("electronics.canvas.framed-content", UiNodeKind::Panel)
+                    .with_layout(UiLayout {
+                        overflow: UiOverflow::Clip,
+                        ..UiLayout::absolute(UiRect::new(
+                            RULER_WIDTH,
+                            RULER_HEIGHT,
+                            canvas.width,
+                            canvas.height,
+                        ))
+                    })
+                    .with_style(UiStyle::transparent())
+                    .with_child(content),
+            );
+    }
+    surface
+}
+
 /// Builds only the labels that are visible in the current CAD camera.
 ///
 /// The returned root is a canvas-local, clipped RafUI overlay. It is presented
@@ -133,7 +190,7 @@ pub fn build_electronics_canvas_overlay_surface(
     canvas: EditorRect,
     params: ElectronicsCanvasOverlayParams,
 ) -> UiSurface {
-    let tokens = palette.tokens();
+    let tokens = crate::panels::electronics_surface::electronics_tokens(palette);
     let canvas_size = Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0));
     let camera = editor.camera();
     let selected = editor.selection();
@@ -143,13 +200,14 @@ pub fn build_electronics_canvas_overlay_surface(
         .with_layout(root_layout)
         .with_style(UiStyle::transparent());
 
-    // Component artwork is a native PNG overlay. The CAD line stream keeps
-    // wires, pins and hit regions, while the symbol itself comes from the
-    // asset catalog so it stays crisp and does not depend on procedural
-    // line-by-line symbol geometry. Schematic symbols are white ink tinted by
-    // the theme; PCB bodies carry their own silkscreen artwork untinted.
+    // Schematic symbols and physical PCB geometry use vector CAD strokes.
+    // Keep the legacy artwork fallback only for PCB placements without a
+    // physical footprint; stretching a bitmap made schematic symbols blurry.
     let pcb_surface = editor.active_surface() == CadSurfaceKind::Pcb;
     for (index, object) in editor.scene().objects.iter().enumerate() {
+        if !pcb_surface {
+            continue;
+        }
         if object.kind != CadObjectKind::Component {
             continue;
         }
@@ -160,9 +218,12 @@ pub fn build_electronics_canvas_overlay_surface(
         let asset_key = match object.source_id {
             Some(source_id) => {
                 if pcb_surface {
+                    if editor.pcb_has_physical_footprint(source_id) {
+                        continue;
+                    }
                     editor.pcb_artwork_key(source_id)
                 } else {
-                    editor.schematic_artwork_key(source_id)
+                    continue;
                 }
             }
             None if is_placement_preview => editor
@@ -192,6 +253,7 @@ pub fn build_electronics_canvas_overlay_surface(
             UiNode::image(
                 format!("electronics.canvas.component-image.{index}"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(asset_key),
                     fit: UiImageFit::Stretch,
                     tint,
@@ -210,6 +272,14 @@ pub fn build_electronics_canvas_overlay_surface(
     }
 
     if editor.labels_visible() {
+        let physical_labels = if pcb_surface {
+            place_pcb_labels(editor, canvas_size)
+        } else {
+            std::collections::HashMap::new()
+        };
+        let mut labelled_pads = std::collections::HashSet::new();
+        let mut labelled_net_ids = std::collections::HashSet::new();
+        let mut labelled_net_names = std::collections::HashSet::new();
         for (index, object) in editor.scene().objects.iter().enumerate() {
             let Some(label) = object
                 .label
@@ -221,6 +291,40 @@ pub fn build_electronics_canvas_overlay_surface(
             let Some(world_anchor) = label_anchor(object) else {
                 continue;
             };
+            // The geometric severity marker remains on the canvas; its full
+            // report belongs in DRC. Repeating entire messages at pad centers
+            // hides copper and makes routing impossible at board scale.
+            if object.kind == CadObjectKind::DrcMarker {
+                continue;
+            }
+            if editor.active_surface() == CadSurfaceKind::Pcb && object.kind == CadObjectKind::Pad {
+                if object
+                    .rect
+                    .is_some_and(|rect| rect.size.min_element() * camera.zoom < 14.0)
+                {
+                    continue;
+                }
+            }
+            if object.kind == CadObjectKind::Pad
+                && !labelled_pads.insert((
+                    object.source_id,
+                    label.to_string(),
+                    world_anchor.x.to_bits(),
+                    world_anchor.y.to_bits(),
+                ))
+            {
+                continue;
+            }
+            if object.kind == CadObjectKind::NetLabel {
+                let first_for_net = if let Some(net_id) = object.net_id {
+                    labelled_net_ids.insert(net_id)
+                } else {
+                    labelled_net_names.insert(label.to_string())
+                };
+                if !first_for_net {
+                    continue;
+                }
+            }
             let screen = camera.screen_from_world(world_anchor, canvas_size);
             if screen.x < -MAX_LABEL_WIDTH
                 || screen.x > canvas.width + MAX_LABEL_WIDTH
@@ -230,19 +334,43 @@ pub fn build_electronics_canvas_overlay_surface(
                 continue;
             }
 
+            let physical_label = physical_labels.get(&index);
+            if pcb_surface && object.kind == CadObjectKind::Component
+                && object.source_id.is_some() && physical_label.is_none() {
+                continue;
+            }
+            let label = physical_label.map(|p| p.text.as_str()).unwrap_or(label);
+            if label.is_empty() {
+                continue;
+            }
+            let physical_component = physical_label.is_some();
+            let label_height = if physical_component {
+                physical_label.unwrap().rect.height
+            } else {
+                LABEL_HEIGHT
+            };
             let severity = drc_severity(object);
             let label_size = if matches!(object.kind, CadObjectKind::Component) {
-                COMPONENT_LABEL_SIZE
+                if physical_component {
+                    pcb_labels::FONT_SIZE
+                } else {
+                    COMPONENT_LABEL_SIZE
+                }
             } else {
                 DETAIL_LABEL_SIZE
             };
-            let width = label_track_width(label, label_size, severity);
+            let width = label
+                .lines()
+                .map(|line| label_track_width(line, label_size, severity))
+                .fold(0.0_f32, f32::max);
             let local_x = match object.kind {
                 CadObjectKind::Pin | CadObjectKind::Pad => screen.x + LABEL_GAP,
                 _ => screen.x - width * 0.5,
             };
             let local_y = match object.kind {
-                CadObjectKind::Component => screen.y - LABEL_HEIGHT - LABEL_GAP,
+                CadObjectKind::Component | CadObjectKind::NetLabel => {
+                    screen.y - label_height - LABEL_GAP
+                }
                 _ => screen.y - LABEL_HEIGHT * 0.5,
             };
             let x = local_x;
@@ -259,19 +387,30 @@ pub fn build_electronics_canvas_overlay_surface(
                             | (ElectronicsSelectionKind::Trace, CadObjectKind::Trace)
                     )
             });
-            let color = if selected_object {
+            let color = if physical_component {
+                if palette == StudioUiPalette::PaperLight {
+                    [116, 85, 5, 255]
+                } else {
+                    [243, 222, 96, 255]
+                }
+            } else if selected_object {
                 tokens.accent
             } else {
                 label_color(tokens, object.kind, severity)
             };
 
             let id = format!("electronics.canvas.label.{index}");
-            let label_rect = UiRect::new(x, y, width, LABEL_HEIGHT);
+            let label_rect = physical_label.map(|p| p.rect)
+                .unwrap_or_else(|| UiRect::new(x, y, width, label_height));
             let text_style = UiTextStyle {
                 role: UiTextRole::Label,
                 size_px: label_size,
-                line_height_px: LABEL_HEIGHT,
-                weight: if selected_object {
+                line_height_px: if physical_component {
+                    pcb_labels::LINE_HEIGHT
+                } else {
+                    LABEL_HEIGHT
+                },
+                weight: if selected_object || physical_component {
                     UiFontWeight::Bold
                 } else {
                     UiFontWeight::Regular
@@ -284,6 +423,7 @@ pub fn build_electronics_canvas_overlay_surface(
                     UiNode::new(id, UiNodeKind::Label)
                         .with_layout(UiLayout::absolute(label_rect).with_z_index(LABEL_Z_INDEX))
                         .with_text_value(label.to_string())
+                        .with_tooltip_value(object.label.clone().unwrap_or_else(|| label.to_string()))
                         // A canvas label is a runtime value, so the overflow
                         // policy is what keeps a long designator inside its
                         // own track instead of painting outside it.
@@ -331,11 +471,52 @@ pub fn build_electronics_canvas_overlay_surface(
         }
     }
 
-    root = root.with_child(build_minimap_chrome(palette, editor, canvas_size));
+    if let Some(minimap) = build_minimap_chrome(palette, editor, canvas_size) {
+        root = root.with_child(minimap);
+    }
 
     root = root.with_child(build_tool_hint(tokens, editor, canvas, params.hint_fade));
 
     UiSurface::new("electronics.canvas.labels", palette, root)
+}
+
+fn place_pcb_labels(
+    editor: &NativeElectronicsEditor, size: Vec2,
+) -> std::collections::HashMap<usize, pcb_labels::LabelPlacement> {
+    let (reference, value) = editor.pcb_label_visibility();
+    if !reference && !value { return std::collections::HashMap::new(); }
+    let components: std::collections::HashMap<_, _> = editor.pcb().components.iter()
+        .map(|c| (c.component_id, c)).collect();
+    let viewport = UiRect::new(0.0, 0.0, size.x, size.y);
+    let camera = editor.camera();
+    let requests = editor.scene().objects.iter().enumerate().filter_map(|(index, object)| {
+        if object.kind != CadObjectKind::Component || object.label.is_none() { return None; }
+        let id = object.source_id?;
+        let component = components.get(&id)?;
+        let rect = object.rect?;
+        let center = camera.screen_from_world(rect.center, size);
+        let (sin, cos) = object.rotation_degrees.to_radians().sin_cos();
+        let extent = Vec2::new(rect.size.x*cos.abs()+rect.size.y*sin.abs(),
+            rect.size.x*sin.abs()+rect.size.y*cos.abs()) * camera.zoom;
+        if !center.is_finite() || !extent.is_finite() { return None; }
+        let body = UiRect::new(center.x-extent.x*0.5-3.0, center.y-extent.y*0.5-3.0,
+            extent.x+6.0, extent.y+6.0);
+        if body.intersection(viewport).is_empty() { return None; }
+        let text = match (reference, value) {
+            (true,true) => format!("{}\n{}", component.designator, component.value),
+            (true,false) => component.designator.clone(),
+            _ => component.value.clone(),
+        };
+        let width = text.lines().map(|l| label_track_width(l, pcb_labels::FONT_SIZE, None))
+            .fold(0.0_f32, f32::max);
+        Some(pcb_labels::LabelRequest { index, body: body.intersection(viewport), text, width,
+            selected: editor.selection().is_some_and(|s| s.source_id==id) })
+    }).collect();
+    let mut reserved = Vec::new();
+    if let Some(bounds) = editor.minimap_rects(size) { reserved.push(bounds.panel); }
+    let hint_height = if editor.pcb_routing_hint().is_some() { 100.0 } else { 42.0 };
+    reserved.push(UiRect::new(0.0, (size.y-hint_height).max(0.0), size.x, hint_height));
+    pcb_labels::place_labels(requests, size, &reserved)
 }
 
 /// Canvas tool hint.
@@ -352,6 +533,60 @@ fn build_tool_hint(
     hint_fade: f32,
 ) -> UiNode {
     let max_width = hint_max_width(canvas);
+    if let Some((heading, body, warning)) = editor.pcb_routing_hint() {
+        let bottom = 12.0;
+        let width = max_width.min(600.0);
+        return UiNode::new("electronics.canvas.hint-dock", UiNodeKind::Panel)
+            .with_layout(
+                UiLayout::absolute(UiRect::new(
+                    HINT_INSET,
+                    (canvas.height - 80.0 - bottom).max(0.0),
+                    width,
+                    80.0,
+                ))
+                .with_z_index(HINT_Z_INDEX),
+            )
+            .with_style(UiStyle::transparent())
+            .with_child(
+                UiNode::new("electronics.canvas.route-guide", UiNodeKind::Panel)
+                    .with_layout(UiLayout {
+                        gap: 3.0,
+                        padding: UiSpacing::xy(10.0, 8.0),
+                        ..UiLayout::fill(UiFlow::Column)
+                    })
+                    .with_style(UiStyle {
+                        fill: tokens.surface_raised,
+                        border: if warning {
+                            tokens.warning
+                        } else {
+                            tokens.border
+                        },
+                        text: tokens.text,
+                        border_width: 1.0,
+                        radius: 6.0,
+                        opacity: 1.0,
+                    })
+                    .with_child(
+                        UiNode::new("electronics.canvas.route-source", UiNodeKind::Label)
+                            .with_text_value(heading)
+                            .with_layout(UiLayout::fixed(0.0, 20.0).fill_width())
+                            .with_text_style(UiTextStyle::button(tokens.text))
+                            .with_text_overflow(UiTextOverflow::Ellipsis),
+                    )
+                    .with_child(
+                        UiNode::new("electronics.canvas.tool-hint", UiNodeKind::Label)
+                            .with_text_value(body.clone())
+                            .with_tooltip_value(body)
+                            .with_layout(UiLayout::fixed(0.0, 36.0).fill_width())
+                            .with_text_style(UiTextStyle::body(if warning {
+                                tokens.warning
+                            } else {
+                                tokens.text_muted
+                            }))
+                            .with_text_overflow(UiTextOverflow::Wrap),
+                    ),
+            );
+    }
     UiNode::new("electronics.canvas.hint-dock", UiNodeKind::Panel)
         .with_layout(UiLayout {
             flow: UiFlow::Column,
@@ -384,7 +619,15 @@ fn build_tool_hint(
                     radius: ELECTRONICS_CORNER_RADIUS,
                     opacity: 0.96 * hint_fade.clamp(0.0, 1.0),
                 })
-                .with_text_key(tool_hint_key(editor.tool()))
+                .with_text_key(
+                    if editor.active_surface() == CadSurfaceKind::Pcb
+                        && editor.tool() == crate::electronics_controller::ElectronicsTool::Select
+                    {
+                        "electronics.hint.select_pcb"
+                    } else {
+                        tool_hint_key(editor.tool())
+                    },
+                )
                 .with_text_overflow(UiTextOverflow::Ellipsis)
                 .with_text_style(UiTextStyle {
                     role: UiTextRole::Body,
@@ -416,8 +659,8 @@ fn tool_hint_key(tool: ElectronicsTool) -> &'static str {
 }
 
 /// Builds the retained minimap chrome: panel shell, header with surface
-/// badge, raster preview, and empty state. Hit-testing uses the full panel
-/// rect; world mapping uses only the inner image rect.
+/// badge, and raster preview. Hit-testing uses the full panel rect; world
+/// mapping uses only the inner image rect.
 ///
 /// The panel is owned by the CAD input layer, not by RafUI: it is not focusable
 /// and therefore carries no accessibility role, because a role on a node that
@@ -426,13 +669,21 @@ fn build_minimap_chrome(
     palette: StudioUiPalette,
     editor: &NativeElectronicsEditor,
     canvas_size: Vec2,
-) -> UiNode {
-    let tokens = palette.tokens();
-    let panel = electronics_minimap::overlay_rect(canvas_size);
-    let image = electronics_minimap::image_rect(canvas_size);
+) -> Option<UiNode> {
+    let tokens = crate::panels::electronics_surface::electronics_tokens(palette);
+    let bounds = editor.minimap_rects(canvas_size)?;
+    let panel = bounds.panel;
+    let image = bounds.image;
+    let local_panel = UiRect::new(0.0, 0.0, panel.width, panel.height);
+    let local_image = UiRect::new(
+        image.x - panel.x,
+        image.y - panel.y,
+        image.width,
+        image.height,
+    );
     let header = UiNode::new("electronics.canvas.minimap.header", UiNodeKind::Toolbar)
         .with_layout(
-            UiLayout::absolute(UiRect::new(panel.x, panel.y, panel.width, HEADER_HEIGHT))
+            UiLayout::absolute(UiRect::new(0.0, 0.0, panel.width, HEADER_HEIGHT))
                 .with_z_index(MINIMAP_HEADER_Z_INDEX),
         )
         .with_style(UiStyle {
@@ -443,7 +694,16 @@ fn build_minimap_chrome(
             radius: ELECTRONICS_CORNER_RADIUS,
             opacity: 1.0,
         });
-    let (title_rect, badge) = minimap_header_split(palette, editor, panel);
+    let (title_rect, badge) = minimap_header_split(
+        palette,
+        editor,
+        UiRect::new(
+            0.0,
+            0.0,
+            (local_panel.width - 28.0).max(1.0),
+            local_panel.height,
+        ),
+    );
     let header = header
         .with_child(
             UiNode::new("electronics.canvas.minimap.title", UiNodeKind::Label)
@@ -452,14 +712,46 @@ fn build_minimap_chrome(
                 .with_text_overflow(UiTextOverflow::Ellipsis)
                 .with_text_style(UiTextStyle {
                     role: UiTextRole::Label,
-                    size_px: 11.0,
+                    size_px: 12.0,
                     line_height_px: HEADER_HEIGHT - 8.0,
                     weight: UiFontWeight::Medium,
                     color: tokens.text,
                     inherit_color: false,
                 }),
         )
-        .with_child(badge);
+        .with_child(badge)
+        .with_child(
+            UiNode::new("electronics.canvas.minimap.toggle", UiNodeKind::Button)
+                .with_layout(UiLayout::absolute(UiRect::new(
+                    (local_panel.width - 28.0).max(0.0),
+                    0.0,
+                    28.0,
+                    HEADER_HEIGHT,
+                )))
+                .with_icon(UiIcon::new(if editor.minimap_collapsed() {
+                    UiIconId::ChevronRight
+                } else {
+                    UiIconId::ChevronDown
+                }))
+                .with_style(UiStyle::transparent())
+                .with_accessibility_role(raf_ui::UiAccessibilityRole::Button)
+                .with_accessibility_label_key(if editor.minimap_collapsed() {
+                    "electronics.minimap.expand"
+                } else {
+                    "electronics.minimap.collapse"
+                })
+                .with_accessibility_expanded(!editor.minimap_collapsed())
+                .with_tooltip_key(if editor.minimap_collapsed() {
+                    "electronics.minimap.expand"
+                } else {
+                    "electronics.minimap.collapse"
+                })
+                .focusable()
+                .with_event(raf_ui::UiEventBinding::command(
+                    raf_ui::UiEventKind::Click,
+                    "electronics.minimap.toggle",
+                )),
+        );
 
     let mut panel_node = UiNode::new("electronics.canvas.minimap", UiNodeKind::Panel)
         .with_layout(UiLayout::absolute(panel).with_z_index(MINIMAP_Z_INDEX))
@@ -479,41 +771,47 @@ fn build_minimap_chrome(
             UiNode::image(
                 "electronics.canvas.minimap.image",
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(MINIMAP_IMAGE_KEY),
                     fit: UiImageFit::Contain,
                     tint: None,
                 },
             )
-            .with_layout(UiLayout::absolute(image).with_z_index(MINIMAP_CONTENT_Z_INDEX)),
+            .with_layout(UiLayout::absolute(local_image).with_z_index(MINIMAP_CONTENT_Z_INDEX)),
         );
 
-    if !electronics_minimap::has_document_content(editor.scene()) {
+    if editor.minimap_collapsed() {
+        panel_node
+            .children
+            .retain(|node| node.id != "electronics.canvas.minimap.image");
+        return Some(panel_node);
+    }
+    if let Some(viewport) =
+        electronics_minimap::viewport_rect(editor.scene(), editor.camera(), canvas_size)
+    {
         panel_node = panel_node.with_child(
-            UiNode::new("electronics.canvas.minimap.empty", UiNodeKind::Label)
+            UiNode::new("electronics.canvas.minimap.viewport", UiNodeKind::Panel)
                 .with_layout(
                     UiLayout::absolute(UiRect::new(
-                        image.x,
-                        image.y + image.height * 0.5 - 10.0,
-                        image.width,
-                        20.0,
+                        viewport.x - panel.x,
+                        viewport.y - panel.y,
+                        viewport.width,
+                        viewport.height,
                     ))
-                    .with_z_index(MINIMAP_CONTENT_Z_INDEX)
-                    .with_text_safe_area(true),
+                    .with_z_index(MINIMAP_CONTENT_Z_INDEX + 1),
                 )
-                .with_text_key(minimap_empty_key(editor.active_surface()))
-                .with_text_overflow(UiTextOverflow::Ellipsis)
-                .with_text_style(UiTextStyle {
-                    role: UiTextRole::Body,
-                    size_px: 11.0,
-                    line_height_px: 20.0,
-                    weight: UiFontWeight::Regular,
-                    color: tokens.text_muted,
-                    inherit_color: false,
+                .with_style(UiStyle {
+                    fill: [0, 0, 0, 0],
+                    border: with_alpha(tokens.text_muted, 160),
+                    border_width: 1.0,
+                    radius: 0.0,
+                    text: tokens.text,
+                    opacity: 1.0,
                 }),
         );
     }
 
-    panel_node
+    Some(panel_node)
 }
 
 /// Splits the minimap header into a title track and a surface badge.
@@ -525,10 +823,13 @@ fn minimap_header_split(
     editor: &NativeElectronicsEditor,
     panel: UiRect,
 ) -> (UiRect, UiNode) {
-    let badge_width = BADGE_MIN_WIDTH
-        .max(panel.width * BADGE_MAX_WIDTH_RATIO)
-        .min(panel.width - MINIMAP_HEADER_PAD * 2.0)
-        .max(1.0);
+    let badge_width = if editor.active_surface() == CadSurfaceKind::Pcb {
+        48.0_f32
+    } else {
+        78.0
+    }
+    .min(panel.width - 16.0)
+    .max(1.0);
     let badge_x = panel.x + panel.width - badge_width - MINIMAP_PAD;
     let title_x = panel.x + MINIMAP_HEADER_PAD;
     let title_width = (badge_x - MINIMAP_TITLE_GAP - title_x).max(1.0);
@@ -549,7 +850,15 @@ fn build_surface_badge(
     let label_key = surface_label_key(editor.active_surface());
     // The badge is the one accent-filled element of the minimap, so it reuses
     // the shared accent recipe instead of repeating its colors.
-    let accent = palette.accent_style();
+    let tokens = crate::panels::electronics_surface::electronics_tokens(palette);
+    let accent = raf_ui::UiStyle {
+        fill: tokens.surface,
+        border: tokens.border,
+        text: tokens.text_muted,
+        border_width: 1.0,
+        radius: 3.0,
+        opacity: 1.0,
+    };
     UiNode::new("electronics.canvas.minimap.badge", UiNodeKind::Panel)
         .with_layout(UiLayout {
             flow: UiFlow::Row,
@@ -591,10 +900,20 @@ fn build_surface_badge(
 }
 
 fn label_anchor(object: &CadObject) -> Option<Vec2> {
+    if object.kind == CadObjectKind::Component && !object.line_paths.is_empty() {
+        let mut points = object.line_paths.iter().flatten().copied();
+        let first = points.next()?;
+        let (min, max) = points.fold((first, first), |(min, max), point| {
+            (min.min(point), max.max(point))
+        });
+        return Some(Vec2::new((min.x + max.x) * 0.5, min.y));
+    }
     match object.kind {
-        CadObjectKind::Component => object
-            .rect
-            .map(|rect| rect.center + Vec2::new(0.0, -rect.size.y * 0.5)),
+        CadObjectKind::Component => object.rect.map(|rect| {
+            let (sin, cos) = object.rotation_degrees.to_radians().sin_cos();
+            let half_height = (rect.size.x * sin.abs() + rect.size.y * cos.abs()) * 0.5;
+            rect.center + Vec2::new(0.0, -half_height)
+        }),
         CadObjectKind::Pin | CadObjectKind::Pad | CadObjectKind::NetLabel => {
             object.rect.map(|rect| rect.center)
         }
@@ -689,6 +1008,14 @@ mod tests {
         (editor, surface)
     }
 
+    fn populated_editor(width: f32, height: f32) -> NativeElectronicsEditor {
+        let mut editor = NativeElectronicsEditor::empty("test");
+        let canvas = EditorRect::new(0.0, 0.0, width, height);
+        assert!(editor.begin_library_drag(0));
+        assert!(editor.finish_library_drag_at(Some([width * 0.5, height * 0.5]), canvas));
+        editor
+    }
+
     #[test]
     fn overlay_root_is_clipped_to_its_canvas_surface() {
         let (_, surface) = overlay(640.0, 480.0);
@@ -698,8 +1025,20 @@ mod tests {
     }
 
     #[test]
-    fn minimap_chrome_exposes_header_image_and_empty_state() {
+    fn empty_document_hides_the_minimap_panel() {
         let (_, surface) = overlay(640.0, 480.0);
+        assert!(surface.root.find("electronics.canvas.minimap").is_none());
+    }
+
+    #[test]
+    fn populated_document_exposes_the_compact_minimap() {
+        let editor = populated_editor(640.0, 480.0);
+        let surface = build_electronics_canvas_overlay_surface(
+            StudioUiPalette::IndustrialDark,
+            &editor,
+            EditorRect::new(0.0, 0.0, 640.0, 480.0),
+            ElectronicsCanvasOverlayParams::new(1.0, Language::English),
+        );
         let panel = surface
             .root
             .find("electronics.canvas.minimap")
@@ -717,15 +1056,16 @@ mod tests {
             .children
             .iter()
             .any(|child| child.id == "electronics.canvas.minimap.image"));
-        assert!(panel
+        assert!(!panel
             .children
             .iter()
             .any(|child| child.id == "electronics.canvas.minimap.empty"));
+        assert!(panel.layout.rect.unwrap().width <= 184.0);
         let panel_rect = panel.layout.rect.expect("panel rect");
         let header_rect = panel.children[0].layout.rect.expect("header rect");
         assert_eq!(
             header_rect,
-            UiRect::new(panel_rect.x, panel_rect.y, panel_rect.width, HEADER_HEIGHT)
+            UiRect::new(0.0, 0.0, panel_rect.width, HEADER_HEIGHT)
         );
     }
 
@@ -737,7 +1077,7 @@ mod tests {
             (1024.0, 768.0),
             (120.0, 120.0),
         ] {
-            let editor = NativeElectronicsEditor::empty("test");
+            let editor = populated_editor(width, height);
             let surface = build_electronics_canvas_overlay_surface(
                 StudioUiPalette::IndustrialDark,
                 &editor,
@@ -769,9 +1109,9 @@ mod tests {
     }
 
     #[test]
-    fn the_minimap_badge_keeps_the_shared_accent_recipe_in_both_themes() {
+    fn the_minimap_badge_keeps_a_quiet_readable_surface_in_both_themes() {
         for palette in [StudioUiPalette::IndustrialDark, StudioUiPalette::PaperLight] {
-            let editor = NativeElectronicsEditor::empty("test");
+            let editor = populated_editor(640.0, 480.0);
             let surface = build_electronics_canvas_overlay_surface(
                 palette,
                 &editor,
@@ -782,15 +1122,66 @@ mod tests {
                 .root
                 .find("electronics.canvas.minimap.badge")
                 .expect("minimap badge");
-            let accent = palette.accent_style();
-            assert_eq!(badge.style.fill, accent.fill);
-            assert_eq!(badge.style.text, accent.text);
+            let tokens = crate::panels::electronics_surface::electronics_tokens(palette);
+            assert_eq!(badge.style.fill, tokens.surface);
+            assert_eq!(badge.style.text, tokens.text_muted);
         }
     }
 
     #[test]
+    fn collapsed_minimap_releases_its_image_area_without_editing_the_document() {
+        let mut editor = populated_editor(800.0, 600.0);
+        let before = editor.is_dirty();
+        let size = Vec2::new(800.0, 600.0);
+        let expanded = editor.minimap_rects(size).unwrap();
+        let expanded_surface = build_electronics_canvas_overlay_surface(
+            StudioUiPalette::IndustrialDark, &editor,
+            EditorRect::new(0.0, 0.0, 800.0, 600.0),
+            ElectronicsCanvasOverlayParams::new(1.0, Language::English));
+        let mut host = raf_render::api_graphic_basic::ui_surface::CpuUiSurfaceHost::new(expanded_surface, [0, 0, 0, 0]);
+        host.render([800, 600], |key| i18n::t(key, Language::English));
+        assert!(editor.apply_ui_command("electronics.minimap.toggle"));
+        let collapsed = editor.minimap_rects(size).unwrap();
+        assert_eq!(collapsed.panel.height, HEADER_HEIGHT);
+        assert_eq!(collapsed.image.width, 0.0);
+        assert!(expanded.panel.height > collapsed.panel.height);
+        assert_eq!(editor.is_dirty(), before);
+        let surface = build_electronics_canvas_overlay_surface(
+            StudioUiPalette::IndustrialDark,
+            &editor,
+            EditorRect::new(0.0, 0.0, 800.0, 600.0),
+            ElectronicsCanvasOverlayParams::new(1.0, Language::English),
+        );
+        assert!(surface
+            .root
+            .find("electronics.canvas.minimap.image")
+            .is_none());
+        host.set_surface(surface.clone());
+        let frame = host.render([800, 600], |key| i18n::t(key, Language::English));
+        let old_image_point = [expanded.image.x + expanded.image.width * 0.5,
+            expanded.image.y + expanded.image.height * 0.5];
+        assert!(raf_ui::hit_test(&frame.frame.hit_regions, old_image_point,
+            raf_ui::UiHitTestMode::InteractiveOnly).is_none(),
+            "Collapsed minimap must release actual retained hit regions below its header");
+
+        assert!(
+            surface
+                .root
+                .find("electronics.canvas.minimap.toggle")
+                .unwrap()
+                .focusable
+        );
+    }
+
+    #[test]
     fn the_minimap_panel_does_not_claim_an_unreachable_role() {
-        let (_, surface) = overlay(640.0, 480.0);
+        let editor = populated_editor(640.0, 480.0);
+        let surface = build_electronics_canvas_overlay_surface(
+            StudioUiPalette::IndustrialDark,
+            &editor,
+            EditorRect::new(0.0, 0.0, 640.0, 480.0),
+            ElectronicsCanvasOverlayParams::new(1.0, Language::English),
+        );
         let panel = surface
             .root
             .find("electronics.canvas.minimap")
@@ -803,14 +1194,87 @@ mod tests {
     }
 
     #[test]
-    fn minimap_image_rect_sits_below_header_and_inside_panel() {
+    fn minimap_children_resolve_to_canvas_bounds_and_render_visible_pixels() {
+        use raf_render::api_graphic_basic::ui_surface::CpuUiSurfaceHost;
+
         let size = Vec2::new(640.0, 480.0);
-        let panel = electronics_minimap::overlay_rect(size);
-        let image = electronics_minimap::image_rect(size);
-        assert!(image.y >= panel.y + HEADER_HEIGHT - f32::EPSILON);
-        assert!(image.x >= panel.x - f32::EPSILON);
-        assert!(image.x + image.width <= panel.x + panel.width + f32::EPSILON);
-        assert!(image.y + image.height <= panel.y + panel.height + f32::EPSILON);
+        let editor = populated_editor(size.x, size.y);
+        let expected = electronics_minimap::visible_rects(editor.scene(), size)
+            .expect("visible content shares one image and hit region");
+        let palette = StudioUiPalette::IndustrialDark;
+        let surface = build_electronics_canvas_overlay_surface(
+            palette,
+            &editor,
+            EditorRect::new(0.0, 0.0, size.x, size.y),
+            ElectronicsCanvasOverlayParams::new(1.0, Language::English),
+        );
+        let (image_size, image_pixels) = electronics_minimap::build_scene_rgba(
+            electronics_minimap::MinimapColors::from_palette(palette),
+            editor.scene(),
+            editor.selection(),
+        );
+        let mut host = CpuUiSurfaceHost::new(surface, [0, 0, 0, 0]);
+        host.images_mut()
+            .insert_rgba(MINIMAP_IMAGE_KEY, image_size, image_pixels)
+            .expect("register the real minimap raster");
+        let frame = host.render([size.x as u32, size.y as u32], |key| {
+            i18n::t(key, Language::English)
+        });
+        let resolved_rect = |id: &str| {
+            frame
+                .frame
+                .layout_boxes
+                .iter()
+                .find(|layout| layout.id == id)
+                .unwrap_or_else(|| panic!("missing resolved minimap node {id}"))
+                .rect
+        };
+
+        let panel = resolved_rect("electronics.canvas.minimap");
+        let header = resolved_rect("electronics.canvas.minimap.header");
+        let title = resolved_rect("electronics.canvas.minimap.title");
+        let badge = resolved_rect("electronics.canvas.minimap.badge");
+        let image = resolved_rect("electronics.canvas.minimap.image");
+        assert_eq!(
+            panel, expected.panel,
+            "panel resolves in canvas coordinates"
+        );
+        assert_eq!(
+            header,
+            UiRect::new(panel.x, panel.y, panel.width, HEADER_HEIGHT)
+        );
+        assert_eq!(
+            image, expected.image,
+            "image resolves to the shared mapping rect"
+        );
+        assert!(title.x >= panel.x && title.right() <= panel.right());
+        assert!(badge.x >= panel.x && badge.right() <= panel.right());
+        assert!(title.y >= panel.y && title.bottom() <= header.bottom());
+        assert!(badge.y >= panel.y && badge.bottom() <= header.bottom());
+        assert!(
+            frame.metrics.image_pixels > 0,
+            "the minimap image paints real pixels"
+        );
+
+        let image_left = image.x.floor().max(0.0) as usize;
+        let image_top = image.y.floor().max(0.0) as usize;
+        let image_right = image.right().ceil().min(size.x) as usize;
+        let image_bottom = image.bottom().ceil().min(size.y) as usize;
+        let mut visible_colors = std::collections::HashSet::new();
+        for y in image_top..image_bottom {
+            for x in image_left..image_right {
+                let pixel = (y * size.x as usize + x) * 4;
+                visible_colors.insert([
+                    frame.pixels[pixel],
+                    frame.pixels[pixel + 1],
+                    frame.pixels[pixel + 2],
+                ]);
+            }
+        }
+        assert!(
+            visible_colors.len() > 2,
+            "the resolved image area contains raster detail, not just the panel fill"
+        );
     }
 
     #[test]
@@ -923,6 +1387,10 @@ mod tests {
     #[test]
     fn drc_severity_is_recovered_from_the_marker_palette() {
         let object = |color| CadObject {
+            shape: Default::default(),
+            rotation_degrees: 0.0,
+            drill: None,
+            stroke_width_world: None,
             id: "drc:test:0".to_string(),
             source_id: None,
             kind: CadObjectKind::DrcMarker,

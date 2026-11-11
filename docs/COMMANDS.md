@@ -1,5 +1,19 @@
 # AuraRafi Manual Commands
 
+## Native UI cost inspection
+
+`Ctrl+Shift+F12` or `/ui.performance` toggles a snapshot inspector in the native
+workbench. `/ui.performance refresh` captures recent observations;
+`/ui.performance clear` clears the bounded history; `/ui.performance close`
+closes the inspector. Console access respects the project console policy.
+The Console result contains structured measurements without writing a file.
+This is a native-workbench diagnostic, not a headless world-authoring command.
+Submission measurements are CPU preparation time, not GPU execution queries.
+
+Presentation source checks: `python -B tools/check_rafui_cost_contracts.py`.
+This catches direct blocking operations in the guarded modules only; it is
+not a proof about indirect calls, aliases, macros, or overall frame cost.
+
 ## Precise shape dimensions
 
 The shared shape catalog includes `capsule`: Y-aligned, centered, 1 m diameter
@@ -37,6 +51,11 @@ that activate Play. See [Runtime Services](RUNTIME_SERVICES.md). Internal
 `project-settings.*` UI intents are not advertised as public engine commands.
 
 ## Native Agent workspace
+
+Native Active mode grants execution permission without per-operation approvals;
+the legacy review toggle cannot override it. Inspect remains read-only and Plan
+previews without applying. External CLI/MCP confirmation requirements and the
+shared command gateway's project/revision/undo checks are unchanged.
 
 The optional `agent.workspace.tab.preview`, `agent.workspace.preview.fit`,
 `agent.workspace.preview.close` and divider actions are local presentation
@@ -158,11 +177,10 @@ history. `/` alone maps to `/help`.
 | `/session.rename session=<name-or-uuid> name=<name>` | Renames a session without changing its storage identity. |
 | `/session.duplicate source=<name-or-uuid> name=<name>` | Copies session documents into a new session. |
 | `/session.remove session=<name-or-uuid>` | Removes a non-active registry entry and retains files for recovery. |
-| `/ui.document.describe` | Describes the active session's empty-or-authored UI document. |
-| `/ui.node.add id=<id> kind=<kind> parent=root text_key=<i18n-key>` | Adds a user-authored UI node. |
-| `/ui.node.remove id=<id>` | Removes a non-root UI node. |
-| `/ui.document.set_space space=screen|world|camera` | Chooses where that user UI renders. |
-| `/ui.document.bind_camera camera=<key>` | Links a document to a camera by reference, not hierarchy ownership. |
+| `/ui.document.read path=<project-relative-ron>` | Reads a UI document and its exact revision. |
+| `/ui.document.create path=<project-relative-ron> name=<name>` | Creates a distinct blank UI document. |
+| `/ui.document.apply path=<project-relative-ron> revision=<revision> edits=<json-array>` | Applies validated atomic document edits, including presentation mounts. |
+| `/ui.document.undo path=<project-relative-ron> revision=<revision>` | Restores the previous saved document generation with a revision guard. |
 | `/asset.generate_image prompt="..." name=<asset> size=square|landscape|portrait transparent=true|false model=<optional-explicit-id>` | Starts an isolated image worker using the Agent's selected conversation provider/model unless explicitly overridden. No silent model fallback. |
 | `/asset.generate_local_png prompt="..." name=<asset> style=icon|badge|sprite|texture` | Starts the inexpensive local procedural PNG worker; no API key or network required. |
 | `/asset.studio_install` | Downloads the independently configured, trusted external studio; never overwrites an existing directory or installs dependencies. |
@@ -296,9 +314,17 @@ update/reparent/create/delete operations.
 
 Attached Agent observation and task commands:
 
-- `/viewport.capture` captures the last rendered Game viewport to a bounded PNG
-  artifact under `.aura_rafi/agent_artifacts/`. It never enters Play mode and
-  requires the native Game viewport to have rendered a frame.
+- `/viewport.capture` captures the Game scene to a bounded PNG artifact under
+  `.aura_rafi/agent_artifacts/`. `view=current` reads the last editor frame;
+  `front`, `back`, `left`, `right`, `top`, `bottom`, `isometric`, or `custom`
+  render a framed offscreen angle. `target`/`targets` frame entities, and
+  `frame=scene` fits the whole scene. It never enters Play mode. The native
+  Agent attaches successful captures to its next model turn when the model
+  accepts images; attached MCP clients receive the PNG as image content.
+- `/project.gameplay_audit` reports renderable geometry, camera/startup camera,
+  lighting, attached scripts, gameplay signals, enabled systems, missing pieces,
+  and next actions. It is a read-only attached observation and does not modify
+  the scene.
 - `/task.list`, `/task.get id=<task-id>`, `/task.events since=<sequence>`, and
   `/task.cancel id=<task-id>` expose the native Agent run lifecycle to an
   attached CLI/MCP client. Task progress is in-memory and bounded to the
@@ -328,13 +354,16 @@ PCB:
 
 Script (shared, all project types):
 
-- `/script.create`, `/script.attach`, `/script.detach`
+- `/script.create`, `/script.write`, `/script.attach`, `/script.detach`
 - `/script.list`, `/script.validate`, `/script.run`
 - `/script.compile_nodes`
 
 Script commands manage `.rhai` and `.cpp` files in `assets/scripts/`.
-`/script.create` writes a template file. `/script.attach` binds a file to
-a scene entity by name. The shared Rhai runtime session now exists in
+`/script.create` writes a template file. `/script.write file=... content=...
+overwrite=<bool>` validates complete Rhai source, stages the replacement in the
+same folder, and restores the previous file if the write fails. It accepts only
+project-relative `.rhai` paths and rejects path traversal. `/script.attach`
+binds a file to a scene entity by name. The shared Rhai runtime session now exists in
 `raf_script`; `/script.run` executes `on_start` once against a cloned scene so
 the editor document is not mutated.
 `/script.compile_nodes file=nodes.ron` validates a project-local graph and

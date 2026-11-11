@@ -383,6 +383,12 @@ Following the pattern in `docs/COMMANDS.md`, a new `script` domain is added.
     Creates assets/scripts/player_controller.rhai from template.
     Also supports lang=cpp (creates .cpp + Makefile stub).
 
+/script.write file=scripts/player_controller.rhai content="..." overwrite=true
+    Validates complete Rhai source, stages the replacement in the same folder,
+    and restores the previous file if the write fails. Only project-relative
+    .rhai paths are accepted; path traversal is rejected. This is the native
+    Agent/CLI/MCP authoring path for gameplay code.
+
 /script.attach file=player_controller.rhai entity="Player"
     Attaches script to entity by name. Uses SceneNode.scripts.
 

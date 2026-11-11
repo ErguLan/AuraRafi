@@ -368,6 +368,9 @@ impl NativeEditorApplication {
         );
         let result = match prepared {
             Some(Ok(Some((project, target)))) => {
+                // Opening a project is what makes it "recent". Without this,
+                // the Hub list would only reorder on create/duplicate.
+                crate::native_studio::remember_project(&project);
                 if self
                     .project
                     .as_ref()
@@ -413,6 +416,27 @@ impl NativeEditorApplication {
             match intent {
                 AgentWorkspaceIntent::Back => {
                     self.cancel_editor_project();
+                    let laboratory = self.agents.selected_lab_target()
+                        .map(|(path, session, _)| (path.to_owned(), session));
+                    if let Some((path, session)) = laboratory {
+                        if let Some(editor) = self.laboratory_editor_mut(&path, session) {
+                            editor.lab.leave();
+                        }
+                        if self.project.as_ref().is_some_and(|project| project.project_type == ProjectType::Electronics) {
+                            self.agents_open = false;
+                            if let Some(runtime) = self.runtime.as_mut() {
+                                runtime.input_router_mut().cancel_all();
+                                if let Some(surface) = self.agent_surface.as_mut() {
+                                    surface.reset(runtime.input_router_mut());
+                                }
+                                runtime.request_canvas_frame();
+                            }
+                            if let Some(window) = self.window.as_ref() { window.request_redraw(); }
+                        } else {
+                            self.request_editor_project(path);
+                        }
+                        continue;
+                    }
                     if self.project.is_some() {
                         self.return_to_hub(false);
                         continue;
@@ -435,7 +459,92 @@ impl NativeEditorApplication {
                     self.agents.start_all(projects.into_iter().map(|p| p.path));
                 }
                 AgentWorkspaceIntent::CloseProjects(target) => self.close_agent_projects(target),
+                AgentWorkspaceIntent::Laboratory(command) => self.apply_laboratory_command(&command),
+                AgentWorkspaceIntent::LeaveLaboratory(path, session) => {
+                    if let Some(editor) = self.laboratory_editor_mut(&path, session) {
+                        editor.lab.leave();
+                    }
+                }
             }
+        }
+    }
+
+    pub(super) fn focus_mounted_laboratory(&mut self) {
+        let Some(project) = self.project.as_ref() else { return };
+        if project.project_type != ProjectType::Electronics { return; }
+        let Some(workspace) = self.agents.workspace(&project.path) else { return };
+        let id = self.workbench.as_ref().map(NativeGameWorkbench::active_session_id)
+            .unwrap_or(workspace.registry.active_session);
+        if let Some(document) = workspace.documents.get(&id.0.to_string()) {
+            let mut panel = workspace.panel.borrow_mut();
+            if panel.document_id().is_some_and(|current| current != id) {
+                use crate::panels::ai_chat::AgentAction;
+                let action = panel.history.sessions.iter().position(|session| session.document_id == Some(id.0))
+                    .map(AgentAction::SelectSession).unwrap_or(AgentAction::NewChat);
+                panel.apply_action(action, &mut self.settings_state);
+            }
+            panel.bind_document(id, &document.session.name);
+        }
+    }
+
+    fn laboratory_editor_mut(&mut self, path: &Path, id: SessionId) -> Option<&mut NativeElectronicsEditor> {
+        if self.project.as_ref().is_some_and(|project| project.path == path)
+            && self.workbench.as_ref().map(NativeGameWorkbench::active_session_id)
+                .or_else(|| self.agents.workspace(path).map(|workspace| workspace.registry.active_session)) == Some(id)
+        {
+            return self.electronics_editor.as_mut();
+        }
+        self.agents.workspace_mut(path)?.documents.get_mut(&id.0.to_string())?.electronics.as_mut()
+    }
+
+    pub(super) fn apply_laboratory_command(&mut self, command: &str) {
+        let Some((path, session, schematic)) = self.agents.selected_lab_target()
+            .map(|(path, session, schematic)| (path.to_owned(), session, schematic.to_owned())) else { return };
+        let language = self.settings_state.language;
+        let Some(editor) = self.laboratory_editor_mut(&path, session) else { return };
+        editor.prepare_lab(&path, &schematic);
+        match command {
+            "simulate" => {
+                editor.lab.error = editor.start_lab_simulation(None, true).err();
+                editor.lab.touch();
+            }
+            "cancel" => editor.cancel_analysis(),
+            "ota" => {
+                if let Some(file) = crate::folder_picker::pick_firmware(&raf_core::i18n::t("lab.ota", language)) {
+                    if let Err(error) = editor.lab.prepare_ota(file) {
+                        editor.lab.error = Some(error);
+                        editor.lab.touch();
+                    }
+                }
+            }
+            "ota-save" => {
+                if let Some(folder) = crate::folder_picker::pick_output_folder(&raf_core::i18n::t("lab.ota_save", language)) {
+                    editor.lab.export_ota(folder);
+                }
+            }
+            _ => editor.lab.action(command),
+        }
+        if let Some(runtime) = self.runtime.as_mut() { runtime.request_ui_frame(); }
+        if let Some(window) = self.window.as_ref() { window.request_redraw(); }
+    }
+
+    pub(super) fn poll_electronics_laboratory(&mut self) {
+        let visible = self.agents_open && !self.settings_open;
+        let mut changed = self.agents.poll_laboratories(visible);
+        if let Some(editor) = self.electronics_editor.as_mut() {
+            let target = visible.then(|| self.agents.selected_lab_target()).flatten()
+                .filter(|(root, id, _)| {
+                    self.project.as_ref().is_some_and(|project| project.path == *root)
+                        && self.workbench.as_ref().is_some_and(|workbench| workbench.active_session_id() == *id)
+                });
+            if let Some((root, _, schematic)) = target { editor.prepare_lab(root, schematic); }
+            if target.is_some() || editor.lab.pending() || editor.lab.dc_requested {
+                changed |= editor.poll_lab(target.is_some());
+            }
+        }
+        if changed && self.agents_open {
+            if let Some(runtime) = self.runtime.as_mut() { runtime.request_ui_frame(); }
+            if let Some(window) = self.window.as_ref() { window.request_redraw(); }
         }
     }
 
@@ -671,9 +780,13 @@ mod tests {
     use super::*;
 
     fn loaded_application() -> (NativeEditorApplication, std::path::PathBuf, Project) {
+        loaded_application_for(ProjectType::Game)
+    }
+
+    fn loaded_application_for(kind: ProjectType) -> (NativeEditorApplication, std::path::PathBuf, Project) {
         let root = std::env::temp_dir().join(format!("raf-editor-route-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
-        let project = Project::create("Route", ProjectType::Game, &root).unwrap();
+        let project = Project::create("Route", kind, &root).unwrap();
         let mut app = NativeEditorApplication::default();
         app.agents.request(project.path.clone());
         let deadline = Instant::now() + Duration::from_secs(10);
@@ -687,6 +800,27 @@ mod tests {
             app.agents.error()
         );
         (app, root, project)
+    }
+
+    #[test]
+    fn electronics_laboratory_returns_to_the_mounted_document() {
+        let (mut app, root, project) = loaded_application_for(ProjectType::Electronics);
+        app.request_editor_project(project.path.clone());
+        app.poll_editor_open();
+        let session = app.agents.selected_workspace().unwrap().registry.active_session;
+        let fingerprint = app.electronics_editor.as_ref().unwrap().lab_fingerprint();
+        app.open_agents(None);
+        app.focus_mounted_laboratory();
+        app.apply_laboratory_command("device");
+        assert!(app.agents_open);
+        assert!(app.electronics_editor.as_ref().unwrap().lab.view == crate::electronics_lab::LabView::Device);
+        app.apply_agent_workspace_intents(vec![AgentWorkspaceIntent::Back]);
+        assert!(!app.agents_open);
+        assert_eq!(app.project.as_ref().unwrap().id, project.id);
+        assert_eq!(app.agents.selected_workspace().unwrap().registry.active_session, session);
+        assert_eq!(app.electronics_editor.as_ref().unwrap().lab_fingerprint(), fingerprint);
+        drop(app);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

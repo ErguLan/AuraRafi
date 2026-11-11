@@ -556,8 +556,8 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 - `DrcReport`: 8 built-in checks - floating pins, missing values, isolated components, unnamed nets, short circuits, LED current limiting, dangling wire endpoints, and component-pin bypass shorts
 - DC simulation engine: Modified Nodal Analysis, Gaussian elimination with partial pivoting, node voltages, branch currents, power dissipation
 - Export: SVG vector image (styled, rotation-aware), BOM CSV (grouped with quantities), text netlist
-- Gerber export structure for JLCPCB/PCBWay (manufacturer-specific layers
-  defined; the final writer remains incomplete and targets the 2D PCB layout)
+- [PCB fabrication workflow](#pcb-fabrication-workflow): physical footprints,
+  routing, manufacturing preflight and Gerber/Excellon output.
 - Circuit sharing: RON serialization for shareable compact strings
 - **Schematic document split**: Electronics projects now persist their editor document as `schematic.ron`; `scene.ron` remains only for game projects.
 - **Schematic editor modularization**: The active workflow is split between
@@ -628,7 +628,9 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 - `RobotState`: Unified sensor+actuator state snapshot with mode (Manual/Autonomous/ML/Calibration), exportable as ML training data
 - `TrainingConfig`: Parallel headless instances, JSON Lines / CSV export formats
 - `InferenceConfig`: Model path, input/output tensor shapes (structural placeholder)
-- Status: Data models and protocols defined, actual serial I/O pending (serialport crate)
+- The Electronics laboratory uses `raf_hardware::serial_session` for native
+  serial I/O via `serialport`. Its worker starts when connecting. See the
+  [laboratory protocol](AGENT_WORKSPACE.md#electronics-laboratory).
 
 ## Design Principles
 
@@ -673,7 +675,47 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
   - `pcb_layout.ron`: board outline, placements, traces, and unresolved airwires.
 - `Ctrl+S` / save now synchronizes PCB from the current schematic before writing the PCB document, preserving manual placement data while refreshing nets and missing/new components.
 - PCB routing is intentionally 2D-first. The current base supports board outline validation, physical footprint geometry, trace storage, and airwire regeneration without depending on any 3D board view.
-- The Gerber layer export path is still incomplete, but the placeholder now targets the PCB layout document instead of a hypothetical future 3D-only dependency.
+
+### PCB fabrication workflow
+
+1. In the PCB inspector, choose **Footprint → Change**. Pick a project
+   footprint, import a local `.kicad_mod`, or paste a direct official KiCad
+   repository URL. Remote import runs in the background, is limited to 4 MiB
+   and preserves source and license metadata.
+2. Review dimensions and explicitly map logical pins to physical pad numbers.
+   The PCB embeds the assigned geometry for offline use. Assignment and pin
+   mapping undo together. Tracks affected by changed pads are set aside for
+   review and can be discarded before rerouting. Legacy illustrative footprints
+   require resolved geometry before fabrication.
+3. Choose F.Cu or B.Cu and route between pads or tracks of the same net.
+   Clicking an airwire starts a draft from its nearest end. **Shift+V** places
+   a through via on the next click and continues on the other side. **Enter**
+   commits a partial route; **Esc** discards a draft. A completed route and
+   its vias undo together. Design Rules stores board limits and per-net
+   width and clearance overrides in the PCB document.
+4. Run DRC and choose **Export Manufacturing**. Preflight checks the outline,
+   footprint geometry, pin–pad mappings, physical clearances, connectivity
+   and schematic sync. Powered circuits also receive electrical checks.
+   Results go to a new `ElectricalAssets/Manufacturing/board-<id>` job.
+   The editor writes `COMPLETE` after the job files.
+
+Board geometry uses millimeters. Pads support SMD, plated and non-plated
+holes, including slots with offsets. Bottom footprints mirror X before
+rotation. Clearance uses a conservative outer bound and copper continuity
+uses an inner bound. The default 0.20 mm clearance and 0.10 mm minimum track
+width are editor rules. Set the rules for the intended process.
+
+`board-fabrication.zip` contains metric Gerber 4.6 copper, solder mask,
+silkscreen and outline files, plus metric Excellon PTH and NPTH files.
+All layers and drills share the same Y inversion. Board dimensions follow
+the outline centerline. The separate assembly export includes BOM, CPL and
+pin mapping. Verify part codes, centroid positions and rotations before
+ordering assembly. Review exporter warnings for omitted silkscreen text
+and line-style changes.
+
+The current PCB supports two copper layers and independent through vias.
+Copper pours, additional copper layers, solder-paste output and autorouting
+remain open. See [fabrication and interface QA](STABILIZATION_STATUS.md#electronics-beta-preview).
 
 ## AI Co-Developer Integration & Context Routing (v0.9.5+)
 

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Results of a DC simulation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct SimulationResults {
     /// Voltage at each net node (net_id -> volts).
     pub node_voltages: HashMap<usize, f64>,
@@ -23,6 +23,8 @@ pub struct SimulationResults {
     pub component_power: HashMap<usize, f64>,
     /// Whether the simulation converged successfully.
     pub converged: bool,
+    pub max_kcl_residual_amps: f64,
+    pub power_balance_watts: f64,
     /// Human-readable messages / warnings.
     pub messages: Vec<String>,
 }
@@ -34,6 +36,8 @@ impl Default for SimulationResults {
             component_currents: HashMap::new(),
             component_power: HashMap::new(),
             converged: false,
+            max_kcl_residual_amps: 0.0,
+            power_balance_watts: 0.0,
             messages: Vec::new(),
         }
     }
@@ -58,10 +62,28 @@ pub fn simulate_dc_cancellable(
     schematic: &Schematic,
     cancel: &AtomicBool,
 ) -> Option<SimulationResults> {
+    analyze_dc_cancellable(schematic, cancel).map(|(result, _)| result)
+}
+
+/// Return the exact netlist used for the solve so presentation can resolve
+/// measurements without rebuilding topology on the editor thread.
+pub fn analyze_dc_cancellable(
+    schematic: &Schematic,
+    cancel: &AtomicBool,
+) -> Option<(SimulationResults, Netlist)> {
+    let netlist = Netlist::from_schematic_cancellable(schematic, cancel)?;
+    let result = solve_dc(schematic, &netlist, cancel)?;
+    Some((result, netlist))
+}
+
+fn solve_dc(
+    schematic: &Schematic,
+    netlist: &Netlist,
+    cancel: &AtomicBool,
+) -> Option<SimulationResults> {
     const LED_R: f64 = 100.0;
     const LED_OFF_G: f64 = 1e-12;
     const SOURCE_R: f64 = 0.01;
-    let netlist = Netlist::from_schematic_cancellable(schematic, cancel)?;
     let mut results = SimulationResults::default();
     if netlist.nets.is_empty() || schematic.components.is_empty() {
         results
@@ -95,8 +117,15 @@ pub fn simulate_dc_cancellable(
             ));
         }
     }
-    let ground_node = find_ground_node(schematic, &netlist).unwrap_or(0);
-    if find_ground_node(schematic, &netlist).is_none() {
+    let explicit_ground = find_ground_node(schematic, &netlist);
+    let supply_return = schematic
+        .components
+        .iter()
+        .enumerate()
+        .filter(|(_, component)| matches!(component.sim_model, SimModel::DcSource { .. }))
+        .find_map(|(index, _)| netlist.net_for_pin(index, 1).map(|net| net.id));
+    let ground_node = explicit_ground.or(supply_return).unwrap_or(0);
+    if explicit_ground.is_none() {
         results.messages.push(format!(
             "No explicit ground; using '{}' as voltage reference.",
             netlist.nets[ground_node].name
@@ -234,7 +263,29 @@ pub fn simulate_dc_cancellable(
         results.component_currents.insert(ci, current);
         results.component_power.insert(ci, current * drop);
     }
-    results.converged = true;
+    let mut residual = HashMap::<usize, f64>::new();
+    for (ci, current) in &results.component_currents {
+        if let Some(net) = pin_nets[*ci].first().copied().flatten() {
+            *residual.entry(net).or_default() += current;
+        }
+        if let Some(net) = pin_nets[*ci].get(1).copied().flatten() {
+            *residual.entry(net).or_default() -= current;
+        }
+    }
+    results.max_kcl_residual_amps = residual
+        .values()
+        .fold(0.0_f64, |max, value| max.max(value.abs()));
+    results.power_balance_watts = results.component_power.values().sum();
+    let total_current: f64 = results.component_currents.values().map(|i| i.abs()).sum();
+    let total_power: f64 = results.component_power.values().map(|p| p.abs()).sum();
+    results.converged = results.max_kcl_residual_amps <= 1e-8 + total_current * 1e-6
+        && results.power_balance_watts.abs() <= 1e-8 + total_power * 1e-6;
+    if !results.converged {
+        results
+            .messages
+            .push("DC solution failed current or power balance verification.".into());
+        return Some(results);
+    }
     results.messages.push("DC simulation completed successfully. LEDs use a piecewise-linear 100 ohm forward model; sources have 0.01 ohm internal resistance.".into());
     Some(results)
 }

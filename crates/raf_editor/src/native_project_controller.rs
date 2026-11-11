@@ -19,6 +19,10 @@ pub(crate) fn game_capabilities(project_type: ProjectType) -> Vec<String> {
     }
     [
         "game.add",
+        "ui.document.read",
+        "ui.document.create",
+        "ui.document.apply",
+        "ui.document.undo",
         "game.select",
         "game.rename",
         "game.delete",
@@ -48,9 +52,15 @@ pub(crate) fn game_capabilities(project_type: ProjectType) -> Vec<String> {
         "behavior.parameter",
         "prefab.capture",
         "prefab.instantiate",
+        "script.create",
+        "script.write",
+        "script.attach",
+        "script.detach",
         "script.list",
         "script.validate",
+        "script.run",
         "script.compile_nodes",
+        "project.gameplay_audit",
     ]
     .into_iter()
     .map(str::to_string)

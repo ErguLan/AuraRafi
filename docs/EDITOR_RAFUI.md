@@ -144,6 +144,15 @@ La organizacion visual preferida es por secciones colapsables:
 - Metadata;
 - Debug.
 
+When interface authoring is active, Properties projects the selected UI element
+from the interface document through the same inspector shell. Sessions remains
+available. The interface document tree occupies the Hierarchy region, and the
+main editing view is over the scene. The bottom Interfaces tab is a launcher;
+the isolated canvas is an optional authoring view. These UI nodes are not scene
+entities. New game-interface elements use neutral/white defaults independently
+of the editor chrome palette. See [Game interfaces](GAME_UI.md) for the creator
+workflow and [RafUI authoring](RAF_UI_AUTHORING.md) for Rust integration.
+
 Transform debe priorizar campos numericos editables para precision y puede
 ofrecer sliders como control complementario. Position, Rotation y Scale deben
 mantener alineacion X/Y/Z, unidades consistentes y reset contextual.
@@ -180,6 +189,38 @@ Simulation no deben aparecer como paneles activos del workbench Game.
 Las tareas pesadas de DRC y Simulation deben conservar su ejecucion fuera del
 hilo de UI, con estado explicito de progreso, resultado, error y cancelacion.
 La UI no debe bloquear el viewport mientras espera resultados.
+
+### Distribución y controles CAD
+
+- La barra superior agrupa selección, colocación, ruteo, contorno y navegación.
+  En ventanas estrechas se usa la barra compacta. La pestaña del documento y los
+  controles de capa, ancho, cuadrícula y zoom quedan fuera del lienzo.
+- A la izquierda, Proyecto y Biblioteca separan documentos, inventario,
+  Componentes y Huellas. El catálogo físico se explora con o sin selección;
+  el inspector conserva la geometría, dimensiones, mapeo y destino de la
+  asignación mientras el lienzo permanece interactivo.
+- A la derecha, Propiedades, Apariencia y Redes tienen alcances explícitos.
+  X, Y y rotación aplican con Enter y se descartan con Esc. El inspector de
+  pista muestra red, ancho, longitud, capa y vértices. Referencia y valor
+  controlan la vista de toda la placa. Las etiquetas priorizan la selección
+  y evitan huellas, otras etiquetas y el minimapa. El inspector conserva
+  los datos completos cuando falta espacio en pantalla.
+- La barra inferior termina antes del inspector. Conserva las pestañas
+  guardadas, agrupa los filtros de consola en su cabecera y abre DRC o
+  Simulación con el resultado nuevo desde la primera fila.
+- El minimapa es plegable. El encuadre reserva su espacio cuando el lienzo
+  es lo bastante ancho. La imagen del minimapa reutiliza su caché durante
+  pan y zoom; el marco de cámara se actualiza por separado.
+
+`EditorFrameLayout::electronics_canvas_for_pcb` da el mismo rectángulo a
+render, cámara, etiquetas, encuadre e input. Las reglas y la cuadrícula ajustan
+su densidad al zoom. Electronics usa una base de texto de 14 px y respeta
+preferencias mayores. Games comparte el estilo de la barra inferior y la
+consola. El acceso a 3D sigue en beta.
+
+Ver [flujo físico de PCB](ARCHITECTURE.md#pcb-fabrication-workflow),
+[laboratorio](AGENT_WORKSPACE.md#electronics-laboratory) y
+[evidencia de QA](STABILIZATION_STATUS.md#electronics-beta-preview).
 
 ## Settings
 

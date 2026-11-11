@@ -101,7 +101,10 @@ the native Agent, attached CLI, and MCP adapter:
 - `assets.recommend`: transparent intent-based ranking of imported assets before
   the Agent falls back to procedural primitives;
 - `project.health` and `scene.verify`: focused identity, hierarchy, target,
-  transform, expected-name, count, and optional collision verification.
+  transform, expected-name, count, and optional collision verification;
+- `project.gameplay_audit`: camera, lighting, attached scripts, gameplay
+  signals, enabled systems, missing pieces, and next actions for a playable
+  foundation rather than geometry alone.
 
 These reads deliberately return semantic summaries, references, pagination,
 warnings, and verification status. Mesh vertices, renderer caches, and raw
@@ -198,8 +201,8 @@ not every engine subsystem.
 - batch transforms, colors, material references, and parent relationships;
 - instantiate reusable templates from primitives or existing entity groups;
 - import or generate project-scoped assets through existing asset workers;
-- create, attach, edit, and validate Rhai or C++ scripts through the scripting
-  host boundary;
+- create, attach, write, and validate Rhai scripts through the project-confined
+  scripting host boundary (`script.write` compiles source before replacement);
 - create/open/duplicate project sessions and save explicit checkpoints.
 
 ### Complex but still editor-only
@@ -254,11 +257,15 @@ and resume support remain part of the full v0.12 harness. The native Agent
 surface also projects the current tool, completed/total tools, turn, and elapsed
 time so provider waits and long mutation batches never look like a dead panel.
 
-The attached Game viewport also exposes `viewport.capture`. It reads the last
-frame already rendered by ApiGraphicBasic and stores a bounded PNG artifact in
-the project, so a vision-capable external agent can inspect the result without
-starting Play or Runtime. It is deliberately an observation, not a second
-renderer or a screenshot service.
+The attached Game viewport also exposes `viewport.capture`. `view=current`
+reads the last frame already rendered by ApiGraphicBasic; named views
+(`front`, `back`, `left`, `right`, `top`, `bottom`, `isometric`, `custom`) and
+`target`/`targets`/`frame=scene` produce a framed, read-only offscreen capture.
+It stores a bounded PNG artifact in the project. The native Agent automatically
+attaches successful captures to its next provider request when the model family
+accepts images, and MCP returns the PNG as image content. This lets an agent
+inspect its own work and iterate without starting Play or Runtime. It is an
+observation, not a second authoring renderer or a general screenshot service.
 
 ## Example: Horse-Riding Simulator Request
 

@@ -9,11 +9,15 @@ use raf_core::scene::Primitive;
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiIcon, UiIconId, UiIconSize, UiSurface,
 };
+use raf_ui::action_bar::{
+    action_bar_node, plan_action_bar, UiActionBarItem, UiActionBarPlan, UiActionPriority,
+};
+use raf_ui::components::{segmented_group, UiSegmentedOption, UiSegmentedOrientation};
 use raf_ui::{
     UiAccessibilityRole, UiAction, UiAlign, UiEventBinding, UiEventKind, UiFlow, UiJustify,
     UiLayout, UiNode, UiNodeKind, UiRect, UiSelect, UiSelectOption, UiSpacing, UiStyle,
     UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurfaceMaterial,
-    UiTextOverflow, UiTextStyle,
+    UiTextOverflow, UiTextStyle, UiThemeMetrics,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -48,6 +52,7 @@ pub struct ViewportToolbarState {
     pub primitive_menu_open: bool,
     pub building_style: BuildingStyle,
     pub building_menu_open: bool,
+    pub actions_menu_open: bool,
     pub compact: bool,
 }
 
@@ -90,7 +95,7 @@ pub fn build_viewport_toolbar_surface(
         .with_layout(UiLayout::fill(UiFlow::None))
         .with_style(UiStyle::transparent())
         .with_child(top_toolbar(palette, state))
-        .with_child(tool_rail(palette, state));
+        .with_child(tool_rail(palette, state, UiThemeMetrics::default()));
     if state.primitive_menu_open {
         root = root.with_child(primitive_menu(palette));
     }
@@ -98,6 +103,198 @@ pub fn build_viewport_toolbar_surface(
     let mut surface = UiSurface::new("editor.viewport.toolbar", palette, root);
     surface.style_sheet = viewport_toolbar_style_sheet(palette);
     surface
+}
+
+/// Plans the compactable viewport actions with the caller's localized text
+/// measurement and the active theme's typed component metrics.
+pub fn plan_viewport_toolbar_actions(
+    state: ViewportToolbarState,
+    toolbar_width: f32,
+    language: raf_core::Language,
+    theme: UiThemeMetrics,
+    measure_text: impl FnMut(&str) -> f32,
+) -> (Vec<UiActionBarItem>, UiActionBarPlan) {
+    let items = viewport_toolbar_action_items(state, language);
+    let view_width = if state.compact { 42.0 } else { 112.0 };
+    let shading_width = if state.compact { 42.0 } else { 96.0 };
+    let separator_width = 4.0;
+    let top_layout = top_toolbar_layout(toolbar_width);
+    let fixed_width = top_layout.padding.left
+        + top_layout.padding.right
+        + view_width
+        + shading_width
+        + separator_width * 2.0
+        + top_layout.gap * 4.0;
+    let available_width = (toolbar_width - fixed_width).max(0.0);
+    let plan = plan_action_bar(&items, available_width, theme, measure_text);
+    (items, plan)
+}
+
+/// Measured viewport toolbar entry point. The legacy builder remains available
+/// for hosts that have not yet adopted measured overflow lifecycle.
+pub fn build_viewport_toolbar_surface_measured(
+    palette: StudioUiPalette,
+    state: ViewportToolbarState,
+    toolbar_width: f32,
+    language: raf_core::Language,
+    theme: UiThemeMetrics,
+    measure_text: impl FnMut(&str) -> f32,
+    overflow_open: bool,
+) -> (UiSurface, Vec<UiActionBarItem>, UiActionBarPlan) {
+    let (items, plan) =
+        plan_viewport_toolbar_actions(state, toolbar_width, language, theme, measure_text);
+    let surface = build_viewport_toolbar_surface_from_plan(
+        palette,
+        state,
+        toolbar_width,
+        &items,
+        &plan,
+        overflow_open,
+        theme,
+    );
+    (surface, items, plan)
+}
+
+pub fn build_viewport_toolbar_surface_from_plan(
+    palette: StudioUiPalette,
+    state: ViewportToolbarState,
+    toolbar_width: f32,
+    items: &[UiActionBarItem],
+    plan: &UiActionBarPlan,
+    overflow_open: bool,
+    theme: UiThemeMetrics,
+) -> UiSurface {
+    let mut root = UiNode::new("viewport.toolbar.root", UiNodeKind::Panel)
+        .with_class("viewport-toolbar-root")
+        .with_layout(UiLayout::fill(UiFlow::None))
+        .with_style(UiStyle::transparent())
+        .with_child(top_toolbar_measured(
+            palette,
+            state,
+            toolbar_width,
+            items,
+            plan,
+            overflow_open,
+            theme,
+        ))
+        .with_child(tool_rail(palette, state, theme));
+    if state.primitive_menu_open {
+        root = root.with_child(primitive_menu(palette));
+    }
+
+    let mut surface = UiSurface::new("editor.viewport.toolbar", palette, root);
+    surface.style_sheet = viewport_toolbar_style_sheet(palette);
+    surface
+}
+
+fn viewport_toolbar_action_items(
+    state: ViewportToolbarState,
+    language: raf_core::Language,
+) -> Vec<UiActionBarItem> {
+    let labels_visible_key = if state.labels_visible {
+        "app.viewport_hide_labels"
+    } else {
+        "app.viewport_show_labels"
+    };
+    vec![
+        UiActionBarItem::new(
+            "viewport.toolbar.polygons",
+            "app.viewport_polygons",
+            raf_core::i18n::t("app.viewport_polygons", language),
+            Some(UiIconId::Wireframe),
+            UiAction::Command {
+                name: "viewport.toggle-polygons".to_string(),
+            },
+        )
+        .with_priority(UiActionPriority::OverflowFirst)
+        .with_group("viewport.overlays")
+        .with_active(state.polygons_visible),
+        UiActionBarItem::new(
+            "viewport.toolbar.grid",
+            "app.viewport_grid",
+            raf_core::i18n::t("app.viewport_grid", language),
+            Some(UiIconId::Grid),
+            UiAction::Command {
+                name: "viewport.toggle-grid".to_string(),
+            },
+        )
+        .with_priority(UiActionPriority::Secondary)
+        .with_group("viewport.overlays")
+        .with_active(state.grid_visible),
+        UiActionBarItem::new(
+            "viewport.toolbar.labels",
+            labels_visible_key,
+            raf_core::i18n::t(labels_visible_key, language),
+            Some(if state.labels_visible {
+                UiIconId::Eye
+            } else {
+                UiIconId::EyeOff
+            }),
+            UiAction::Command {
+                name: "viewport.toggle-labels".to_string(),
+            },
+        )
+        .with_priority(UiActionPriority::Primary)
+        .with_group("viewport.annotations")
+        .with_active(state.labels_visible),
+    ]
+}
+
+fn top_toolbar_layout(width: f32) -> UiLayout {
+    UiLayout {
+        flow: UiFlow::Row,
+        align_items: UiAlign::Center,
+        gap: 3.0,
+        padding: UiSpacing::xy(6.0, 0.0),
+        ..UiLayout::absolute(UiRect::new(0.0, 0.0, width, TOP_BAR_HEIGHT))
+    }
+}
+
+fn top_toolbar_measured(
+    palette: StudioUiPalette,
+    state: ViewportToolbarState,
+    toolbar_width: f32,
+    items: &[UiActionBarItem],
+    plan: &UiActionBarPlan,
+    overflow_open: bool,
+    theme: UiThemeMetrics,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let view_width = if state.compact { 42.0 } else { 112.0 };
+    let shading_width = if state.compact { 42.0 } else { 96.0 };
+    let mut row = UiNode::new("viewport.toolbar.top", UiNodeKind::Toolbar)
+        .with_class("viewport-toolbar-top")
+        .with_material(UiSurfaceMaterial::TranslucentChrome)
+        .with_layout(top_toolbar_layout(toolbar_width))
+        .with_style(UiStyle {
+            fill: tokens.surface_raised,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: 5.0,
+            opacity: 1.0,
+        })
+        .with_child(view_dropdown(palette, state, view_width))
+        .with_child(separator(
+            palette,
+            "viewport.toolbar.top.separator-view",
+            4.0,
+        ))
+        .with_child(shading_dropdown(palette, state, shading_width))
+        .with_child(separator(
+            palette,
+            "viewport.toolbar.top.separator-actions",
+            4.0,
+        ))
+        .with_child(action_bar_node(
+            "viewport.toolbar.actions",
+            items,
+            plan,
+            overflow_open,
+            palette,
+            theme,
+        ));
+    row
 }
 
 fn top_toolbar(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode {
@@ -232,21 +429,28 @@ fn toolbar_select_trigger(
             radius: 3.0,
             opacity: 1.0,
         })
-        .with_icon(
-            UiIcon::new(selected_icon)
-                .with_size(UiIconSize::Toolbar)
-                .with_tint(if open {
-                    [255, 247, 232, 255]
-                } else {
-                    tokens.text_muted
-                }),
-        )
         .with_tooltip_key(label_key)
         .with_accessibility_label_key(label_key)
         .with_accessibility_role(UiAccessibilityRole::Combobox)
         .with_accessibility_expanded(open)
         .focusable()
-        .with_text_overflow(UiTextOverflow::Ellipsis);
+        .with_text_overflow(UiTextOverflow::Ellipsis)
+        .with_child(
+            UiNode::new(format!("{id}.icon"), UiNodeKind::Label)
+                .with_icon(
+                    UiIcon::new(selected_icon)
+                        .with_size(UiIconSize::Toolbar)
+                        .with_tint(if open {
+                            [255, 247, 232, 255]
+                        } else {
+                            tokens.text_muted
+                        }),
+                )
+                .with_layout(UiLayout::fixed(
+                    f32::from(UiIconSize::Toolbar.logical_pixels()),
+                    f32::from(UiIconSize::Toolbar.logical_pixels()),
+                )),
+        );
     if !compact {
         trigger = trigger.with_child(
             UiNode::new(format!("{id}.label"), UiNodeKind::Label)
@@ -444,7 +648,11 @@ fn shading_dropdown(palette: StudioUiPalette, state: ViewportToolbarState, width
     group
 }
 
-fn tool_rail(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode {
+fn tool_rail(
+    palette: StudioUiPalette,
+    state: ViewportToolbarState,
+    theme: UiThemeMetrics,
+) -> UiNode {
     let mut rail = UiNode::new("viewport.toolbar.rail", UiNodeKind::Toolbar)
         .with_class("viewport-toolbar-rail")
         .with_material(UiSurfaceMaterial::TranslucentChrome)
@@ -463,46 +671,55 @@ fn tool_rail(palette: StudioUiPalette, state: ViewportToolbarState) -> UiNode {
             radius: 5.0,
             opacity: 1.0,
         });
-    rail = rail
-        .with_child(toolbar_button(
-            palette,
+    let tools = [
+        UiSegmentedOption::new(
             "viewport.toolbar.select",
             "app.viewport_select",
-            UiIconId::Select,
-            "viewport.select",
-            matches!(state.tool, ViewportTool::Select) || state.select_mode,
-            true,
-            RAIL_WIDTH - 8.0,
-        ))
-        .with_child(toolbar_button(
-            palette,
+            UiAction::Command {
+                name: "viewport.select".to_string(),
+            },
+        )
+        .with_icon(UiIconId::Select)
+        .with_selected(matches!(state.tool, ViewportTool::Select) || state.select_mode)
+        .with_icon_only(),
+        UiSegmentedOption::new(
             "viewport.toolbar.move",
             "app.viewport_move",
-            UiIconId::Move,
-            "viewport.move",
-            matches!(state.tool, ViewportTool::Move) && !state.select_mode,
-            true,
-            RAIL_WIDTH - 8.0,
-        ))
-        .with_child(toolbar_button(
-            palette,
+            UiAction::Command {
+                name: "viewport.move".to_string(),
+            },
+        )
+        .with_icon(UiIconId::Move)
+        .with_selected(matches!(state.tool, ViewportTool::Move) && !state.select_mode)
+        .with_icon_only(),
+        UiSegmentedOption::new(
             "viewport.toolbar.rotate",
             "app.viewport_rotate",
-            UiIconId::Rotate,
-            "viewport.rotate",
-            matches!(state.tool, ViewportTool::Rotate) && !state.select_mode,
-            true,
-            RAIL_WIDTH - 8.0,
-        ))
-        .with_child(toolbar_button(
-            palette,
+            UiAction::Command {
+                name: "viewport.rotate".to_string(),
+            },
+        )
+        .with_icon(UiIconId::Rotate)
+        .with_selected(matches!(state.tool, ViewportTool::Rotate) && !state.select_mode)
+        .with_icon_only(),
+        UiSegmentedOption::new(
             "viewport.toolbar.scale",
             "app.viewport_scale",
-            UiIconId::Scale,
-            "viewport.scale",
-            matches!(state.tool, ViewportTool::Scale) && !state.select_mode,
-            true,
-            RAIL_WIDTH - 8.0,
+            UiAction::Command {
+                name: "viewport.scale".to_string(),
+            },
+        )
+        .with_icon(UiIconId::Scale)
+        .with_selected(matches!(state.tool, ViewportTool::Scale) && !state.select_mode)
+        .with_icon_only(),
+    ];
+    rail = rail
+        .with_child(segmented_group(
+            "viewport.toolbar.tool-group",
+            tools,
+            UiSegmentedOrientation::Vertical,
+            palette,
+            theme,
         ))
         .with_child(separator(
             palette,
@@ -938,6 +1155,15 @@ pub fn parse_viewport_toolbar_select_action(
         ("viewport.building_style", "professional") => Some(
             ViewportToolbarAction::SetBuildingStyle(BuildingStyle::Organized),
         ),
+        ("viewport.toolbar.actions.more.selection", "viewport.toolbar.polygons") => {
+            Some(ViewportToolbarAction::TogglePolygons)
+        }
+        ("viewport.toolbar.actions.more.selection", "viewport.toolbar.grid") => {
+            Some(ViewportToolbarAction::ToggleGrid)
+        }
+        ("viewport.toolbar.actions.more.selection", "viewport.toolbar.labels") => {
+            Some(ViewportToolbarAction::ToggleLabels)
+        }
         _ => None,
     }
 }
@@ -971,6 +1197,7 @@ mod tests {
             primitive_menu_open: false,
             building_style: BuildingStyle::Free,
             building_menu_open: false,
+            actions_menu_open: false,
             compact,
         }
     }
@@ -985,7 +1212,8 @@ mod tests {
         assert_eq!(rail.layout.rect, Some(UiRect::new(0.0, 54.0, 42.0, 308.0)));
         assert!(find_node(&surface.root, "viewport.toolbar.select").is_some());
         assert!(find_node(&surface.root, "viewport.toolbar.view-mode").is_some());
-        assert_eq!(child_index(rail, "viewport.toolbar.select"), Some(0));
+        assert_eq!(child_index(rail, "viewport.toolbar.tool-group"), Some(0));
+        assert!(find_node(rail, "viewport.toolbar.select").is_some());
         assert_eq!(
             child_index(rail, "viewport.toolbar.building-style.group"),
             Some(rail.children.len() - 1),
@@ -1029,6 +1257,40 @@ mod tests {
         assert!(perspective.tooltip_key.is_some());
         assert!(shading.tooltip_key.is_some());
         assert!(show.tooltip_key.is_some());
+    }
+
+    #[test]
+    fn rafui_regression_view_selector_icon_label_and_chevron_do_not_overlap() {
+        for open in [false, true] {
+            let mut toolbar_state = state(false);
+            toolbar_state.view_menu_open = open;
+            let surface =
+                build_viewport_toolbar_surface(StudioUiPalette::IndustrialDark, toolbar_state);
+            let mut session =
+                raf_render::api_graphic_basic::ui_surface::UiSurfaceSession::default();
+            let frame = session.build_frame_with_resolved_text_at_scale(
+                &surface,
+                800,
+                600,
+                [0; 4],
+                1.25,
+                |key| match key {
+                    "app.viewport_3d_short" => "3D".into(),
+                    "app.viewport_2d_short" => "2D".into(),
+                    _ => key.to_owned(),
+                },
+            );
+            let bounds = |suffix: &str| {
+                frame
+                    .layout_boxes
+                    .iter()
+                    .find(|b| b.id == format!("viewport.toolbar.view-mode.trigger.{suffix}"))
+                    .unwrap()
+                    .rect
+            };
+            assert!(bounds("icon").right() <= bounds("label").x);
+            assert!(bounds("label").right() <= bounds("chevron").x);
+        }
     }
 
     #[test]

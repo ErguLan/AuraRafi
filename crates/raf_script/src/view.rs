@@ -11,6 +11,7 @@ pub enum ScriptRole {
 
 #[derive(Debug, Default)]
 pub struct RuntimeViewState {
+    pub game_ui: raf_ui::game_ui::UiGameRuntime,
     pub active_camera: Option<Uuid>,
     pub role: ScriptRole,
     pub services: crate::services::RuntimeServices,

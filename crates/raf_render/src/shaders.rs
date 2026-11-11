@@ -265,7 +265,8 @@ fn sample_base_color(uv: vec2<f32>, tint: vec4<f32>) -> vec4<f32> {
         srgb_channel_to_linear(tint.g),
         srgb_channel_to_linear(tint.b),
     );
-    return vec4<f32>(texel.rgb * tint_linear, texel.a * tint.a);
+    let rgb = select(texel.rgb, texel.rgb / max(texel.a, 0.0001), mesh_uniforms.params.y > 1.5);
+    return vec4<f32>(rgb * tint_linear, texel.a * tint.a);
 }
 
 @vertex
@@ -283,6 +284,7 @@ fn mesh_vs(input: MeshVertexInput) -> MeshVertexOutput {
 fn mesh_fs(input: MeshVertexOutput) -> @location(0) vec4<f32> {
     let lit = mesh_uniforms.params.x;
     let base_color = sample_base_color(input.uv, input.color);
+    if (base_color.a <= 0.001) { discard; }
     if (lit < 0.5) {
         return base_color;
     }
@@ -366,6 +368,9 @@ struct LineVertexInput {
 struct LineVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec4<f32>,
+    // Signed position across the stroke, -1 on one edge and +1 on the other.
+    @location(1) stroke_edge: f32,
+    @location(2) half_width_px: f32,
 };
 
 @group(0) @binding(0) var<uniform> line_uniforms: LineUniforms;
@@ -380,6 +385,7 @@ fn line_vs(input: LineVertexInput, @builtin(vertex_index) vertex_index: u32) -> 
     let direction_px = (end_ndc - start_ndc) * line_uniforms.viewport * 0.5;
     let direction_length = max(length(direction_px), 0.0001);
     let perpendicular = vec2<f32>(-direction_px.y, direction_px.x) / direction_length;
+    let half_width_px = max(input.width, 1.0) * 0.5;
     let half_width_ndc = perpendicular * (max(input.width, 1.0) / max(line_uniforms.viewport, vec2<f32>(1.0)));
     let at_end = vertex_index == 2u || vertex_index == 4u || vertex_index == 5u;
     let positive_side = vertex_index == 1u || vertex_index == 2u || vertex_index == 4u;
@@ -396,12 +402,20 @@ fn line_vs(input: LineVertexInput, @builtin(vertex_index) vertex_index: u32) -> 
     );
     output.clip_position = clip;
     output.color = input.color;
+    output.stroke_edge = select(-1.0, 1.0, positive_side);
+    output.half_width_px = half_width_px;
     return output;
 }
 
 @fragment
 fn line_fs(input: LineVertexOutput) -> @location(0) vec4<f32> {
-    return input.color;
+    // One-pixel analytic coverage fringe: distance to the nearest stroke edge
+    // in physical pixels, resolved as a box-filtered pixel coverage. The
+    // geometry keeps its authored width, but diagonal strokes now resolve
+    // with a soft edge instead of hard stair steps.
+    let distance_to_edge = (1.0 - abs(input.stroke_edge)) * input.half_width_px;
+    let coverage = clamp(distance_to_edge + 0.5, 0.0, 1.0);
+    return vec4<f32>(input.color.rgb, input.color.a * coverage);
 }
 
 struct OverlayUniforms {

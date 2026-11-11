@@ -36,6 +36,27 @@ fn default_opacity() -> f32 {
 }
 
 impl UiStyle {
+    pub fn with_fill(mut self, color: [u8; 4]) -> Self {
+        self.fill = color;
+        self
+    }
+    pub fn with_text(mut self, color: [u8; 4]) -> Self {
+        self.text = color;
+        self
+    }
+    pub fn with_border(mut self, color: [u8; 4], width: f32) -> Self {
+        self.border = color;
+        self.border_width = width.max(0.0);
+        self
+    }
+    pub fn with_radius(mut self, radius: f32) -> Self {
+        self.radius = radius.max(0.0);
+        self
+    }
+    pub fn with_opacity(mut self, opacity: f32) -> Self {
+        self.opacity = opacity.clamp(0.0, 1.0);
+        self
+    }
     pub fn transparent() -> Self {
         Self {
             fill: [0, 0, 0, 0],
@@ -96,6 +117,18 @@ pub struct UiVisualState<'a> {
 }
 
 impl<'a> UiVisualState<'a> {
+    /// All transient inputs consumed by style rules and interaction defaults.
+    /// Retained presenters can reuse a target style until this key changes.
+    pub fn style_state_key(self, node: &UiNode) -> u8 {
+        u8::from(self.is_hovered(&node.id))
+            | (u8::from(self.is_focused(&node.id)) << 1)
+            | (u8::from(self.is_active(&node.id)) << 2)
+            | (u8::from(node.disabled) << 3)
+            | (u8::from(self.is_selected(node)) << 4)
+            | (u8::from(self.is_open(node)) << 5)
+            | (u8::from(self.is_invalid(node)) << 6)
+    }
+
     pub fn from_focus(focus: &'a UiFocusState) -> Self {
         Self {
             hovered_id: focus.hovered.as_deref(),
@@ -136,12 +169,66 @@ impl<'a> UiVisualState<'a> {
     }
 }
 
+/// Effective semantic control carried by a node. Explicit control data takes
+/// precedence over the structural node kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiControlKind {
+    Button,
+    Image,
+    TextInput,
+    Toggle,
+    Range,
+    ColorPicker,
+    Select,
+    ScrollView,
+    Grid,
+    Skeleton,
+}
+
+impl UiControlKind {
+    fn from_node(node: &UiNode) -> Option<Self> {
+        match &node.control {
+            UiControl::Image(_) => Some(Self::Image),
+            UiControl::TextInput(_) => Some(Self::TextInput),
+            UiControl::Toggle(_) => Some(Self::Toggle),
+            UiControl::Range(_) => Some(Self::Range),
+            UiControl::ColorPicker(_) => Some(Self::ColorPicker),
+            UiControl::Select(_) => Some(Self::Select),
+            UiControl::ScrollView { .. } => Some(Self::ScrollView),
+            UiControl::Grid => Some(Self::Grid),
+            UiControl::Skeleton(_) => Some(Self::Skeleton),
+            UiControl::None => match node.kind {
+                UiNodeKind::Button => Some(Self::Button),
+                UiNodeKind::Image => Some(Self::Image),
+                UiNodeKind::TextInput => Some(Self::TextInput),
+                UiNodeKind::ScrollView => Some(Self::ScrollView),
+                UiNodeKind::Grid => Some(Self::Grid),
+                UiNodeKind::Skeleton => Some(Self::Skeleton),
+                _ => None,
+            },
+        }
+    }
+
+    fn has_interaction_states(self) -> bool {
+        matches!(
+            self,
+            Self::Button
+                | Self::TextInput
+                | Self::Toggle
+                | Self::Range
+                | Self::ColorPicker
+                | Self::Select
+        )
+    }
+}
+
 /// Small, deterministic selector vocabulary for Rust-authored UI documents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum UiStyleSelector {
     Id(String),
     Class(String),
     Kind(UiNodeKind),
+    Control(UiControlKind),
 }
 
 /// Optional pseudo-state for a style rule. `Always` is the normal cascade
@@ -181,11 +268,12 @@ impl UiStyleRuleState {
 }
 
 impl UiStyleSelector {
-    fn matches(&self, node: &UiNode) -> bool {
+    pub fn matches(&self, node: &UiNode) -> bool {
         match self {
             Self::Id(id) => node.id == *id,
             Self::Class(class_name) => node.classes.iter().any(|class| class == class_name),
             Self::Kind(kind) => node.kind == *kind,
+            Self::Control(kind) => UiControlKind::from_node(node) == Some(*kind),
         }
     }
 }
@@ -220,7 +308,88 @@ pub struct UiStyleSheet {
     pub rules: Vec<UiStyleRule>,
 }
 
+/// Semantic precedence group for author-provided style rules.
+///
+/// [`UiStyleLayers::compile`] orders these as base, component, variant, state,
+/// then explicit override. This keeps state rules above ordinary variants
+/// without changing the serialized `UiStyleSheet` shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UiStyleLayer {
+    Base,
+    Component,
+    Variant,
+    State,
+    Override,
+}
+
+/// Authoring-time style groups compiled into the existing ordered rule list.
+/// State rules outrank base/component/variant rules; the explicit `overrides`
+/// group is the only group with higher precedence than state rules.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UiStyleLayers {
+    pub base: Vec<UiStyleRule>,
+    pub component: Vec<UiStyleRule>,
+    pub variant: Vec<UiStyleRule>,
+    pub state: Vec<UiStyleRule>,
+    pub overrides: Vec<UiStyleRule>,
+}
+
+impl UiStyleLayers {
+    pub fn rules(&self, layer: UiStyleLayer) -> &[UiStyleRule] {
+        match layer {
+            UiStyleLayer::Base => &self.base,
+            UiStyleLayer::Component => &self.component,
+            UiStyleLayer::Variant => &self.variant,
+            UiStyleLayer::State => &self.state,
+            UiStyleLayer::Override => &self.overrides,
+        }
+    }
+
+    pub fn rules_mut(&mut self, layer: UiStyleLayer) -> &mut Vec<UiStyleRule> {
+        match layer {
+            UiStyleLayer::Base => &mut self.base,
+            UiStyleLayer::Component => &mut self.component,
+            UiStyleLayer::Variant => &mut self.variant,
+            UiStyleLayer::State => &mut self.state,
+            UiStyleLayer::Override => &mut self.overrides,
+        }
+    }
+
+    pub fn push(&mut self, layer: UiStyleLayer, rule: UiStyleRule) {
+        self.rules_mut(layer).push(rule);
+    }
+
+    pub fn extend(&mut self, layer: UiStyleLayer, rules: impl IntoIterator<Item = UiStyleRule>) {
+        self.rules_mut(layer).extend(rules);
+    }
+
+    /// Flattens semantic groups to the legacy rule representation in stable
+    /// low-to-high precedence order.
+    pub fn compile(&self) -> Vec<UiStyleRule> {
+        self.base
+            .iter()
+            .chain(&self.component)
+            .chain(&self.variant)
+            .chain(&self.state)
+            .chain(&self.overrides)
+            .cloned()
+            .collect()
+    }
+}
+
 impl UiStyleSheet {
+    /// Appends a rule group after existing rules, preserving its order.
+    /// Appended matching rules therefore have higher precedence.
+    pub fn append_layer(&mut self, rules: impl IntoIterator<Item = UiStyleRule>) {
+        self.rules.extend(rules);
+    }
+
+    /// Builder counterpart to [`Self::append_layer`].
+    pub fn with_layer(mut self, rules: impl IntoIterator<Item = UiStyleRule>) -> Self {
+        self.append_layer(rules);
+        self
+    }
+
     pub fn resolve(&self, node: &UiNode) -> UiStyle {
         self.resolve_with_state(node, UiVisualState::default())
     }
@@ -236,18 +405,44 @@ impl UiStyleSheet {
         // Text inputs need a usable interaction affordance even when a surface
         // did not author a dedicated `:hover` rule. Explicit rules still win;
         // this fallback only gives the retained control a quiet visual lift.
-        if node.control.text_input().is_some() {
-            if state.is_hovered(&node.id)
+        let has_interaction_defaults = UiControlKind::from_node(node)
+            .map(UiControlKind::has_interaction_states)
+            .unwrap_or(false);
+        if has_interaction_defaults {
+            if !node.disabled
+                && state.is_hovered(&node.id)
                 && !self.has_state_rule(node, state, UiStyleRuleState::Hovered)
             {
-                resolved.fill = lift_hover_color(resolved.fill, 8);
-                resolved.border = lift_hover_color(resolved.border, 24);
+                // A transparent authored fill must not turn into an opaque
+                // grey block when the control is hovered. Use a faint tint of
+                // the resolved ink instead, so the affordance stays quiet on
+                // any authored surface (including surface-less controls).
+                resolved.fill = if resolved.fill[3] == 0 {
+                    [resolved.text[0], resolved.text[1], resolved.text[2], 18]
+                } else {
+                    lift_hover_color(resolved.fill, 8)
+                };
+                resolved.border = if resolved.border[3] == 0 {
+                    [resolved.text[0], resolved.text[1], resolved.text[2], 44]
+                } else {
+                    lift_hover_color(resolved.border, 24)
+                };
                 resolved.border_width = resolved.border_width.max(1.0);
-            } else if state.is_focused(&node.id)
+            } else if !node.disabled
+                && state.is_focused(&node.id)
                 && !self.has_state_rule(node, state, UiStyleRuleState::Focused)
             {
                 resolved.border = lift_focus_color(resolved.border);
                 resolved.border_width = resolved.border_width.max(1.0);
+            }
+            if node.disabled && !self.has_state_rule(node, state, UiStyleRuleState::Disabled) {
+                resolved.opacity = resolved.opacity.min(0.56);
+            }
+            if !node.disabled
+                && state.is_active(&node.id)
+                && !self.has_state_rule(node, state, UiStyleRuleState::Active)
+            {
+                resolved.opacity = resolved.opacity.min(0.92);
             }
         }
         if state.is_invalid(node) && !self.has_state_rule(node, state, UiStyleRuleState::Invalid) {
@@ -326,6 +521,57 @@ pub struct UiThemeMetrics {
     pub corner_radius: f32,
     #[serde(default = "default_spacing")]
     pub spacing: f32,
+    #[serde(default)]
+    pub components: UiComponentMetrics,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiComponentMetricOverrides {
+    pub height: Option<f32>,
+    pub horizontal_padding: Option<f32>,
+    pub icon_gap: Option<f32>,
+    pub corner_radius: Option<f32>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct UiComponentMetrics {
+    pub button: UiComponentMetricOverrides,
+    pub image: UiComponentMetricOverrides,
+    pub text_input: UiComponentMetricOverrides,
+    pub toggle: UiComponentMetricOverrides,
+    pub range: UiComponentMetricOverrides,
+    pub color_picker: UiComponentMetricOverrides,
+    pub select: UiComponentMetricOverrides,
+    pub scroll_view: UiComponentMetricOverrides,
+    pub grid: UiComponentMetricOverrides,
+    pub skeleton: UiComponentMetricOverrides,
+}
+
+impl UiComponentMetrics {
+    pub fn overrides_for(self, kind: UiControlKind) -> UiComponentMetricOverrides {
+        match kind {
+            UiControlKind::Button => self.button,
+            UiControlKind::Image => self.image,
+            UiControlKind::TextInput => self.text_input,
+            UiControlKind::Toggle => self.toggle,
+            UiControlKind::Range => self.range,
+            UiControlKind::ColorPicker => self.color_picker,
+            UiControlKind::Select => self.select,
+            UiControlKind::ScrollView => self.scroll_view,
+            UiControlKind::Grid => self.grid,
+            UiControlKind::Skeleton => self.skeleton,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UiResolvedComponentMetrics {
+    pub height: f32,
+    pub horizontal_padding: f32,
+    pub icon_gap: f32,
+    pub corner_radius: f32,
 }
 
 fn default_theme_scale() -> f32 {
@@ -355,11 +601,45 @@ impl Default for UiThemeMetrics {
             control_height: default_control_height(),
             corner_radius: default_corner_radius(),
             spacing: default_spacing(),
+            components: UiComponentMetrics::default(),
+        }
+    }
+}
+
+impl UiThemeMetrics {
+    pub fn for_control(self, kind: UiControlKind) -> UiResolvedComponentMetrics {
+        let overrides = self.components.overrides_for(kind);
+        UiResolvedComponentMetrics {
+            height: overrides.height.unwrap_or(self.control_height),
+            horizontal_padding: overrides.horizontal_padding.unwrap_or(self.spacing),
+            icon_gap: overrides.icon_gap.unwrap_or(6.0),
+            corner_radius: overrides.corner_radius.unwrap_or(self.corner_radius),
         }
     }
 }
 
 impl UiTheme {
+    /// Neutral defaults for user-authored game interfaces, independent of editor chrome.
+    pub fn game_ui() -> Self {
+        let mut theme = Self::raf_ui();
+        theme.name = "Game UI".into();
+        for tokens in [&mut theme.dark, &mut theme.light] {
+            tokens.background = [0; 4];
+            tokens.canvas = [0; 4];
+            tokens.surface = [255; 4];
+            tokens.surface_raised = [255; 4];
+            tokens.surface_alt = [245, 245, 245, 255];
+            tokens.border = [200, 200, 200, 255];
+            tokens.text = [32, 32, 32, 255];
+            tokens.text_muted = [105, 105, 105, 255];
+            tokens.accent = [245, 245, 245, 255];
+            tokens.accent_hot = [220, 220, 220, 255];
+            tokens.focus = [96, 96, 96, 255];
+            tokens.selection = [128, 128, 128, 48];
+        }
+        theme
+    }
+
     pub fn raf_ui() -> Self {
         Self {
             name: "RafUI".to_string(),
@@ -457,6 +737,7 @@ impl StudioUiPalette {
     pub fn tokens(self) -> UiTokens {
         match self {
             Self::IndustrialDark => UiTokens {
+                chrome: None,
                 background: [8, 11, 15, 255],
                 surface: [13, 17, 22, 255],
                 surface_alt: [18, 23, 29, 255],
@@ -476,6 +757,7 @@ impl StudioUiPalette {
                 skeleton: [48, 48, 48, 255],
             },
             Self::PaperLight => UiTokens {
+                chrome: None,
                 background: [250, 250, 250, 255],
                 surface: [255, 255, 255, 250],
                 surface_alt: [238, 238, 238, 255],
@@ -575,6 +857,8 @@ impl StudioUiPalette {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UiTokens {
+    #[serde(default)]
+    pub chrome: Option<crate::visual::UiChromeTokens>,
     pub background: [u8; 4],
     pub surface: [u8; 4],
     pub surface_alt: [u8; 4],
@@ -595,6 +879,30 @@ pub struct UiTokens {
     pub warning: [u8; 4],
     pub danger: [u8; 4],
     pub skeleton: [u8; 4],
+}
+
+impl UiTokens {
+    pub fn chrome(self) -> crate::visual::UiChromeTokens {
+        self.chrome
+            .unwrap_or_else(|| crate::visual::UiChromeTokens {
+                icon: self.text,
+                icon_muted: self.text_muted,
+                icon_accent: self.accent,
+                icon_on_accent: self.background,
+                icon_disabled: [
+                    self.text_muted[0],
+                    self.text_muted[1],
+                    self.text_muted[2],
+                    140,
+                ],
+                divider: self.border,
+                scrollbar: self.text_muted,
+                scrollbar_hover: self.accent,
+                focus_ring: self.focus,
+                shadow: [0, 0, 0, 85],
+                overlay_scrim: [0, 0, 0, 128],
+            })
+    }
 }
 
 #[cfg(test)]
@@ -681,5 +989,100 @@ mod tests {
         assert_ne!(hovered.fill, base.fill);
         assert_ne!(hovered.border, base.border);
         assert_eq!(hovered.border_width, 1.0);
+    }
+
+    #[test]
+    fn control_selector_matches_effective_control_data_and_layer_order() {
+        let node = UiNode::toggle("visibility", crate::UiToggle::new("visible", true));
+        let first_layer = vec![UiStyleRule::new(
+            UiStyleSelector::Control(UiControlKind::Toggle),
+            UiStylePatch {
+                fill: Some([20, 30, 40, 255]),
+                ..UiStylePatch::default()
+            },
+        )];
+        let second_layer = vec![UiStyleRule::new(
+            UiStyleSelector::Control(UiControlKind::Toggle),
+            UiStylePatch {
+                fill: Some([40, 50, 60, 255]),
+                ..UiStylePatch::default()
+            },
+        )];
+        let sheet = UiStyleSheet::default()
+            .with_layer(first_layer)
+            .with_layer(second_layer);
+
+        assert_eq!(sheet.resolve(&node).fill, [40, 50, 60, 255]);
+    }
+
+    #[test]
+    fn named_style_layers_compile_in_semantic_precedence_order() {
+        let selector = UiStyleSelector::Class("primary".to_string());
+        let make_rule = |color, state| UiStyleRule {
+            selector: selector.clone(),
+            patch: UiStylePatch {
+                fill: Some(color),
+                ..UiStylePatch::default()
+            },
+            state,
+        };
+        let mut layers = UiStyleLayers {
+            base: vec![make_rule([10, 0, 0, 255], UiStyleRuleState::Always)],
+            component: vec![make_rule([20, 0, 0, 255], UiStyleRuleState::Always)],
+            variant: vec![make_rule([30, 0, 0, 255], UiStyleRuleState::Always)],
+            state: vec![make_rule([40, 0, 0, 255], UiStyleRuleState::Hovered)],
+            overrides: Vec::new(),
+        };
+        let node = UiNode::new("launch", UiNodeKind::Button).with_class("primary");
+        let state = UiVisualState {
+            hovered_id: Some("launch"),
+            ..UiVisualState::default()
+        };
+
+        let compiled = layers.compile();
+        let compiled_fills: Vec<_> = compiled.iter().filter_map(|rule| rule.patch.fill).collect();
+        assert_eq!(
+            compiled_fills,
+            vec![
+                [10, 0, 0, 255],
+                [20, 0, 0, 255],
+                [30, 0, 0, 255],
+                [40, 0, 0, 255]
+            ]
+        );
+        assert_eq!(
+            UiStyleSheet { rules: compiled }
+                .resolve_with_state(&node, state)
+                .fill,
+            [40, 0, 0, 255]
+        );
+
+        layers.push(
+            UiStyleLayer::Override,
+            make_rule([50, 0, 0, 255], UiStyleRuleState::Always),
+        );
+        assert_eq!(layers.rules(UiStyleLayer::Override).len(), 1);
+        assert_eq!(
+            UiStyleSheet {
+                rules: layers.compile()
+            }
+            .resolve_with_state(&node, state)
+            .fill,
+            [50, 0, 0, 255]
+        );
+    }
+
+    #[test]
+    fn component_metrics_use_theme_defaults_with_typed_overrides() {
+        let mut metrics = UiThemeMetrics::default();
+        metrics.components.button.height = Some(36.0);
+        metrics.components.button.icon_gap = Some(9.0);
+
+        let button = metrics.for_control(UiControlKind::Button);
+        let text_input = metrics.for_control(UiControlKind::TextInput);
+        assert_eq!(button.height, 36.0);
+        assert_eq!(button.icon_gap, 9.0);
+        assert_eq!(text_input.height, default_control_height());
+        assert_eq!(text_input.horizontal_padding, default_spacing());
     }
 }

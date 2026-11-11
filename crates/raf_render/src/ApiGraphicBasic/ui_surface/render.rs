@@ -12,6 +12,7 @@ use super::{
 /// GPU UI compositors.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiSurfaceFrame {
+    pub tokens: raf_ui::UiTokens,
     pub layout_boxes: Vec<UiLayoutBox>,
     pub hit_regions: Vec<UiHitRegion>,
     pub text_requests: Vec<UiTextAtlasRequest>,
@@ -33,6 +34,9 @@ pub struct UiScrollMetrics {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiLayoutBox {
+    pub focused: bool,
+    pub visual: raf_ui::UiVisual,
+    pub rounded_clips: Vec<super::effects::UiRoundedClip>,
     pub id: String,
     pub kind: UiNodeKind,
     pub text_key: Option<String>,
@@ -129,7 +133,15 @@ pub(super) fn build_surface_frame_with_intrinsic_sizes(
         intrinsic_sizes,
     );
 
+    let visual_indices = boxes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id.clone(), i))
+        .collect::<HashMap<_, _>>();
+    apply_visual_tree(root, &mut boxes, &visual_indices, &[]);
+    apply_inherited_text(root, &mut boxes, &mut text_requests, &visual_indices, None);
     UiSurfaceFrame {
+        tokens: raf_ui::StudioUiPalette::IndustrialDark.tokens(),
         layout_boxes: boxes,
         hit_regions,
         text_requests,
@@ -139,11 +151,93 @@ pub(super) fn build_surface_frame_with_intrinsic_sizes(
     }
 }
 
-fn effective_accessibility_role(node: &UiNode) -> UiAccessibilityRole {
+fn apply_visual_tree(
+    node: &UiNode,
+    boxes: &mut [UiLayoutBox],
+    indices: &HashMap<String, usize>,
+    ancestors: &[super::effects::UiRoundedClip],
+) {
+    if node.hidden {
+        return;
+    }
+    let Some(&index) = indices.get(&node.id) else {
+        return;
+    };
+    let overlay = matches!(
+        node.kind,
+        UiNodeKind::Overlay | UiNodeKind::Menu | UiNodeKind::Tooltip | UiNodeKind::FloatingPanel
+    );
+    let mut clips = if overlay {
+        Vec::new()
+    } else {
+        ancestors.to_vec()
+    };
+    boxes[index].rounded_clips = clips.clone();
+    if node.visual.clip_children {
+        clips.push(super::effects::UiRoundedClip {
+            rect: boxes[index].rect,
+            corners: node
+                .visual
+                .corners
+                .unwrap_or([boxes[index].style.radius; 4]),
+        });
+    }
+    for child in &node.children {
+        apply_visual_tree(child, boxes, indices, &clips);
+    }
+}
+
+pub(super) fn resolve_inherited_text(frame: &mut UiSurfaceFrame, root: &UiNode) {
+    let indices = frame
+        .layout_boxes
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (b.id.clone(), i))
+        .collect::<HashMap<_, _>>();
+    apply_visual_tree(root, &mut frame.layout_boxes, &indices, &[]);
+    apply_inherited_text(
+        root,
+        &mut frame.layout_boxes,
+        &mut frame.text_requests,
+        &indices,
+        None,
+    );
+}
+
+fn apply_inherited_text(
+    node: &UiNode,
+    boxes: &mut [UiLayoutBox],
+    requests: &mut [UiTextAtlasRequest],
+    indices: &HashMap<String, usize>,
+    parent: Option<[u8; 4]>,
+) {
+    let Some(&index) = indices.get(&node.id) else {
+        return;
+    };
+    if node.visual.inherit_text {
+        if let Some(color) = parent {
+            boxes[index].style.text = color;
+            if node.text_style.is_none_or(|style| style.inherit_color) {
+                if let Some(request) = requests.iter_mut().find(|r| r.node_id == node.id) {
+                    request.style.color = apply_opacity(color, boxes[index].style.opacity);
+                }
+            }
+        }
+    }
+    let color = boxes[index].style.text;
+    for child in &node.children {
+        apply_inherited_text(child, boxes, requests, indices, Some(color));
+    }
+}
+
+pub(super) fn effective_accessibility_role(node: &UiNode) -> UiAccessibilityRole {
     if node.accessibility_role != UiAccessibilityRole::Generic {
         return node.accessibility_role;
     }
     match &node.control {
+        UiControl::Image(image) if image.options.alt_text_key.is_some() => {
+            UiAccessibilityRole::Image
+        }
         UiControl::TextInput(_) => UiAccessibilityRole::Textbox,
         UiControl::Toggle(_) => UiAccessibilityRole::Checkbox,
         UiControl::Range(_) => UiAccessibilityRole::Slider,
@@ -155,7 +249,7 @@ fn effective_accessibility_role(node: &UiNode) -> UiAccessibilityRole {
     }
 }
 
-fn record_node(
+pub(super) fn record_node(
     node: &UiNode,
     style_sheet: &UiStyleSheet,
     visual_state: UiVisualState<'_>,
@@ -172,6 +266,9 @@ fn record_node(
     text_scale: f32,
     intrinsic_sizes: &HashMap<String, [f32; 2]>,
 ) {
+    if node.hidden {
+        return;
+    }
     let resolved_layout = node.layout.resolved_for(assigned_rect.width);
     let has_text =
         node.text_key.is_some() || node.text_value.is_some() || node.control.text_input().is_some();
@@ -194,7 +291,9 @@ fn record_node(
     } else {
         resolved_layout
     };
-    let rect = match layout.rect {
+    let rect = if let Some(anchor) = layout.anchored {
+        anchor.resolve(assigned_rect, &layout)
+    } else { match layout.rect {
         Some(explicit_rect) if layout.position_mode == UiPositionMode::Absolute => constrain_rect(
             &layout,
             UiRect::new(
@@ -210,7 +309,7 @@ fn record_node(
         // children, so a compressed parent cannot make a later sibling paint
         // over them.
         None => constrain_assigned_rect(&layout, assigned_rect, node, intrinsic_sizes),
-    };
+    }};
     let z_index = parent_z_index.saturating_add(layout.z_index);
     let style = style_sheet.resolve_with_state(node, visual_state);
     let accessibility_role = effective_accessibility_role(node);
@@ -260,6 +359,9 @@ fn record_node(
             .filter(|value| !value.is_empty())
     });
     boxes.push(UiLayoutBox {
+        focused: visual_state.focused_id == Some(node.id.as_str()),
+        visual: node.visual.clone(),
+        rounded_clips: Vec::new(),
         id: node.id.clone(),
         kind: node.kind,
         text_key: node.text_key.clone(),
@@ -274,7 +376,12 @@ fn record_node(
         focusable: node.focusable,
         disabled: node.disabled,
         invalid: node.invalid,
-        accessibility_label_key: node.accessibility_label_key.clone(),
+        accessibility_label_key: node.accessibility_label_key.clone().or_else(|| {
+            match &node.control {
+                UiControl::Image(image) => image.options.alt_text_key.clone(),
+                _ => None,
+            }
+        }),
         accessibility_role,
         accessibility_description_key: node.accessibility_description_key.clone(),
         accessibility_expanded,
@@ -333,7 +440,7 @@ fn record_node(
         }
         let icon_inset = node
             .icon
-            .map(|icon| 6.0 + f32::from(icon.size.logical_pixels()) + 6.0)
+            .map(|icon| f32::from(icon.size.logical_pixels()) + node.visual.content.gap.max(0.0))
             .unwrap_or(0.0);
         let available_text_width = content_rect.width - icon_inset;
         // A fit/max-content width must be measured from the natural line
@@ -378,7 +485,10 @@ fn record_node(
     let content = content_rect;
     let child_clip = if breaks_ancestor_clip {
         rect
-    } else if layout.overflow.clips_children() || node.control.scroll_axis().is_some() {
+    } else if node.visual.clip_children
+        || layout.overflow.clips_children()
+        || node.control.scroll_axis().is_some()
+    {
         parent_clip.intersection(content)
     } else {
         parent_clip
@@ -402,6 +512,7 @@ fn record_node(
                 &layout,
                 false,
                 Some(intrinsic_sizes),
+                child_content.width,
             ));
         }
         if axis.scrolls_horizontally() && flow == UiFlow::Row {
@@ -410,6 +521,7 @@ fn record_node(
                 &layout,
                 true,
                 Some(intrinsic_sizes),
+                child_content.width,
             ));
         }
         let measured_max_offset = [
@@ -453,7 +565,7 @@ fn record_node(
     }
     match flow {
         UiFlow::None => {
-            for child in &node.children {
+            for child in node.children.iter().filter(|child| !child.hidden) {
                 let child_rect = explicit_child_container(child, child_content);
                 record_node(
                     child,
@@ -555,6 +667,7 @@ fn record_node(
 /// receive their containing content rectangle so `record_node` can resolve the
 /// authored offset relative to that parent.
 fn explicit_child_container(child: &UiNode, parent_content: UiRect) -> UiRect {
+    if child.layout.anchored.is_some() { return parent_content; }
     match (child.layout.position_mode, child.layout.rect) {
         (UiPositionMode::Absolute, Some(_)) => parent_content,
         (_, Some(rect)) => rect,
@@ -674,6 +787,9 @@ fn push_scrollbar_box(
     z_index: i16,
 ) {
     boxes.push(UiLayoutBox {
+        focused: false,
+        visual: raf_ui::UiVisual::default(),
+        rounded_clips: Vec::new(),
         id: id.clone(),
         kind: UiNodeKind::Panel,
         text_key: None,
@@ -740,7 +856,7 @@ fn record_flow_children(
     let flow_children = node
         .children
         .iter()
-        .filter(|child| child.layout.rect.is_none())
+        .filter(|child| !child.hidden && child.layout.rect.is_none() && child.layout.anchored.is_none())
         .map(|node| FlowChild {
             layout: node.layout.resolved_for(content.width),
             intrinsic: intrinsic_sizes.get(&node.id).copied(),
@@ -754,7 +870,8 @@ fn record_flow_children(
         .max(0.0)
         .min(available_main / gap_count.max(1) as f32);
     let item_space = (available_main - base_gap * gap_count as f32).max(0.0);
-    let main_sizes = resolve_flow_main_sizes(&flow_children, row, item_space, intrinsic_sizes);
+    let main_sizes =
+        resolve_flow_main_sizes(&flow_children, row, item_space, content.width, intrinsic_sizes);
     let occupied = main_sizes.iter().sum::<f32>() + base_gap * gap_count as f32;
     let (offset, gap) = resolve_justify(
         parent_layout.justify_content,
@@ -765,22 +882,45 @@ fn record_flow_children(
     );
     let mut cursor = if row { content.x } else { content.y } + offset;
     let mut flow_index = 0;
+    let baseline = if row && parent_layout.align_items == UiAlign::Baseline {
+        flow_children
+            .iter()
+            .map(|child| {
+                let height = child
+                    .intrinsic
+                    .map(|v| v[1])
+                    .unwrap_or_else(|| requested_cross_size(&child.layout, true, content.height));
+                node_baseline(child.node, &child.layout, height, text_scale)
+            })
+            .fold(0.0_f32, f32::max)
+    } else {
+        0.0
+    };
 
-    for child in &node.children {
-        let child_rect = if child.layout.rect.is_some() {
+    for child in node.children.iter().filter(|child| !child.hidden) {
+        let child_rect = if child.layout.rect.is_some() || child.layout.anchored.is_some() {
             explicit_child_container(child, content)
         } else {
             let main = main_sizes[flow_index];
             let child_layout = &flow_children[flow_index].layout;
+            let child_intrinsic = flow_children[flow_index].intrinsic;
             flow_index += 1;
-            let rect = aligned_flow_rect(
+            let mut rect = aligned_flow_rect(
                 cursor,
                 main,
                 content,
                 row,
                 parent_layout.align_items,
                 child_layout,
+                child_intrinsic,
             );
+            if row
+                && child_layout.align_self.unwrap_or(parent_layout.align_items) == UiAlign::Baseline
+            {
+                rect.y = content.y
+                    + (baseline - node_baseline(child, child_layout, rect.height, text_scale))
+                        .max(0.0);
+            }
             cursor += main + gap;
             rect
         };
@@ -829,7 +969,7 @@ fn record_wrapped_children(
     for child in node
         .children
         .iter()
-        .filter(|child| child.layout.rect.is_none())
+        .filter(|child| !child.hidden && child.layout.rect.is_none() && child.layout.anchored.is_none())
     {
         let layout = child.layout.resolved_for(content.width);
         let main = wrap_main_size(&layout, available, intrinsic_sizes.get(&child.id).copied());
@@ -893,8 +1033,8 @@ fn record_wrapped_children(
         }
     }
 
-    for child in &node.children {
-        let child_rect = if child.layout.rect.is_some() {
+    for child in node.children.iter().filter(|child| !child.hidden) {
+        let child_rect = if child.layout.rect.is_some() || child.layout.anchored.is_some() {
             explicit_child_container(child, content)
         } else {
             layout_by_id
@@ -953,7 +1093,7 @@ fn record_grid_children(
     let flow_children = node
         .children
         .iter()
-        .filter(|child| child.layout.rect.is_none())
+        .filter(|child| !child.hidden && child.layout.rect.is_none() && child.layout.anchored.is_none())
         .collect::<Vec<_>>();
     let row_height = parent_layout
         .grid
@@ -979,8 +1119,8 @@ fn record_grid_children(
             ),
         );
     }
-    for child in &node.children {
-        let child_rect = if child.layout.rect.is_some() {
+    for child in node.children.iter().filter(|child| !child.hidden) {
+        let child_rect = if child.layout.rect.is_some() || child.layout.anchored.is_some() {
             explicit_child_container(child, content)
         } else {
             grid_rects
@@ -1027,12 +1167,12 @@ fn resolve_compact_flow(
     let child_count = node
         .children
         .iter()
-        .filter(|child| child.layout.rect.is_none())
+        .filter(|child| !child.hidden && child.layout.rect.is_none() && child.layout.anchored.is_none())
         .count();
     let requested = node
         .children
         .iter()
-        .filter(|child| child.layout.rect.is_none())
+        .filter(|child| !child.hidden && child.layout.rect.is_none() && child.layout.anchored.is_none())
         .map(|child| {
             let child_layout = child.layout.resolved_for(content.width);
             intrinsic_sizes
@@ -1052,7 +1192,7 @@ fn resolve_compact_flow(
             let can_wrap = node
                 .children
                 .iter()
-                .filter(|child| child.layout.rect.is_none())
+                .filter(|child| !child.hidden && child.layout.rect.is_none() && child.layout.anchored.is_none())
                 .all(|child| {
                     let child_layout = child.layout.resolved_for(content.width);
                     intrinsic_sizes
@@ -1095,6 +1235,20 @@ fn resolve_justify(
     }
 }
 
+fn node_baseline(node: &UiNode, layout: &UiLayout, height: f32, text_scale: f32) -> f32 {
+    if node.text_key.is_none() && node.text_value.is_none() && node.control.text_input().is_none() {
+        return height;
+    }
+    let style = node
+        .text_style
+        .unwrap_or_else(|| UiTextStyle::body(node.style.text))
+        .scaled_for_ui(text_scale);
+    let metrics = super::text_atlas::baseline_metrics(&style);
+    layout.padding.top
+        + (height - layout.padding.top - layout.padding.bottom - metrics[1]).max(0.0) * 0.5
+        + metrics[0]
+}
+
 fn aligned_flow_rect(
     cursor: f32,
     main: f32,
@@ -1102,9 +1256,24 @@ fn aligned_flow_rect(
     row: bool,
     parent_align: UiAlign,
     child_layout: &UiLayout,
+    intrinsic: Option<[f32; 2]>,
 ) -> UiRect {
     let available_cross = if row { content.height } else { content.width };
-    let cross = requested_cross_size(child_layout, row, available_cross);
+    let mode = if row {
+        child_layout.height_mode
+    } else {
+        child_layout.width_mode
+    };
+    let cross = if matches!(
+        mode,
+        UiSizeMode::FitContent | UiSizeMode::MinContent | UiSizeMode::MaxContent
+    ) {
+        intrinsic
+            .map(|v| v[if row { 1 } else { 0 }])
+            .unwrap_or_else(|| requested_cross_size(child_layout, row, available_cross))
+    } else {
+        requested_cross_size(child_layout, row, available_cross)
+    };
     let alignment = child_layout.align_self.unwrap_or(parent_align);
     let actual_cross =
         if alignment == UiAlign::Stretch && child_layout.basis[if row { 1 } else { 0 }] <= 0.0 {
@@ -1159,7 +1328,7 @@ fn requested_cross_size(layout: &UiLayout, row: bool, available: f32) -> f32 {
 
 fn align_offset(align: UiAlign, available: f32, size: f32) -> f32 {
     match align {
-        UiAlign::Start | UiAlign::Stretch => 0.0,
+        UiAlign::Start | UiAlign::Stretch | UiAlign::Baseline => 0.0,
         UiAlign::Center => ((available - size) * 0.5).max(0.0),
         UiAlign::End => (available - size).max(0.0),
     }
@@ -1186,6 +1355,7 @@ fn resolve_flow_main_sizes(
     children: &[FlowChild<'_>],
     row: bool,
     available: f32,
+    container_width: f32,
     intrinsic_sizes: &HashMap<String, [f32; 2]>,
 ) -> Vec<f32> {
     if children.is_empty() {
@@ -1201,6 +1371,7 @@ fn resolve_flow_main_sizes(
                 row,
                 child.intrinsic,
                 Some(intrinsic_sizes),
+                container_width,
             )
         })
         .collect::<Vec<_>>();
@@ -1209,36 +1380,15 @@ fn resolve_flow_main_sizes(
         if requested_total <= f32::EPSILON {
             return vec![available / children.len() as f32; children.len()];
         }
-        let rigid = children
+        let floors = children
             .iter()
             .enumerate()
             .map(|(index, child)| {
-                flow_track_is_rigid(&child.layout, axis).then_some(requested[index])
+                if flow_track_is_rigid(&child.layout, axis) { requested[index] }
+                else { child.layout.min_size[axis].max(0.0) }
             })
             .collect::<Vec<_>>();
-        let rigid_total = rigid.iter().flatten().sum::<f32>();
-        if rigid_total > available {
-            // The content itself is taller/wider than the host. Let the
-            // parent overflow/scroll it instead of returning rectangles that
-            // are smaller than the dimensions their children will resolve to.
-            return requested;
-        }
-        let flexible_total = requested_total - rigid_total;
-        if flexible_total <= f32::EPSILON {
-            return requested;
-        }
-        let flexible_scale = (available - rigid_total).max(0.0) / flexible_total;
-        return requested
-            .iter()
-            .enumerate()
-            .map(|(index, size)| {
-                if rigid[index].is_some() {
-                    *size
-                } else {
-                    *size * flexible_scale
-                }
-            })
-            .collect();
+        return super::flow_sizing::compress_tracks(&requested, &floors, available);
     }
 
     let mut sizes = requested;
@@ -1249,7 +1399,7 @@ fn resolve_flow_main_sizes(
             .enumerate()
             .filter_map(|(index, child)| {
                 let maximum = child.layout.max_size[axis];
-                let can_grow = child.layout.grow > 0.0
+                let can_grow = child.layout.grow > 0.0 && !flow_track_is_rigid(&child.layout, axis)
                     && (maximum <= 0.0 || sizes[index] < maximum.max(child.layout.min_size[axis]));
                 can_grow.then_some((index, child.layout.grow))
             })
@@ -1301,8 +1451,9 @@ fn flow_main_requirement_with_map(
     row: bool,
     intrinsic: Option<[f32; 2]>,
     intrinsic_sizes: Option<&HashMap<String, [f32; 2]>>,
+    container_width: f32,
 ) -> f32 {
-    flow_dimension_requirement_with_map(node, layout, row, intrinsic, intrinsic_sizes, true)
+    flow_dimension_requirement_with_map(node, layout, row, intrinsic, intrinsic_sizes, true, container_width)
 }
 
 fn flow_cross_requirement_with_map(
@@ -1311,8 +1462,9 @@ fn flow_cross_requirement_with_map(
     row: bool,
     intrinsic: Option<[f32; 2]>,
     intrinsic_sizes: Option<&HashMap<String, [f32; 2]>>,
+    container_width: f32,
 ) -> f32 {
-    flow_dimension_requirement_with_map(node, layout, row, intrinsic, intrinsic_sizes, false)
+    flow_dimension_requirement_with_map(node, layout, row, intrinsic, intrinsic_sizes, false, container_width)
 }
 
 fn flow_dimension_requirement_with_map(
@@ -1322,19 +1474,29 @@ fn flow_dimension_requirement_with_map(
     intrinsic: Option<[f32; 2]>,
     intrinsic_sizes: Option<&HashMap<String, [f32; 2]>>,
     collapse_growing_main_axis: bool,
+    container_width: f32,
 ) -> f32 {
     let axis = if row { 0 } else { 1 };
-    let explicit = layout.basis[axis].max(layout.min_size[axis]).max(0.0);
-    if explicit > f32::EPSILON || (collapse_growing_main_axis && layout.grow > 0.0) {
-        return explicit;
+    if axis == 1 && layout.aspect_ratio.is_some() {
+        let width = if layout.basis[0] > 0.0 { layout.basis[0] } else { container_width };
+        let width = constrain_dimension(width, layout.min_size[0], layout.max_size[0]);
+        if let Some(height) = layout.aspect_height(width) { return height; }
+    }
+    let mode = if row { layout.width_mode } else { layout.height_mode };
+    let constrain = |value| constrain_dimension(value, layout.min_size[axis], layout.max_size[axis]);
+    let explicit = layout.basis[axis].max(0.0);
+    if explicit > f32::EPSILON || (collapse_growing_main_axis && layout.grow > 0.0
+        && matches!(mode, UiSizeMode::Auto | UiSizeMode::Fill)) {
+        return constrain(explicit);
     }
 
     if let Some(intrinsic) = intrinsic.map(|size| size[if row { 0 } else { 1 }]) {
-        return intrinsic.max(0.0);
+        return constrain(intrinsic);
     }
-    let child_intrinsic = intrinsic_flow_size_with_map(node, layout, row, intrinsic_sizes);
+    let child_intrinsic =
+        intrinsic_flow_size_with_map(node, layout, row, intrinsic_sizes, container_width);
     if child_intrinsic > f32::EPSILON {
-        return child_intrinsic;
+        return constrain(child_intrinsic);
     }
 
     // Text leaves do not have children from which an intrinsic flow size can
@@ -1342,11 +1504,12 @@ fn flow_dimension_requirement_with_map(
     // every label at the same y coordinate, and a row does not give a label a
     // zero-width wrapping box that rasterizes one character per line.
     if node.text_key.is_some() || node.text_value.is_some() || node.control.text_input().is_some() {
-        return if row {
+        return constrain(if row {
             let horizontal_padding = layout.padding.left + layout.padding.right;
             let icon_inset =
                 if node.icon.is_some() && (node.text_key.is_some() || node.text_value.is_some()) {
-                    6.0 + f32::from(node.icon.expect("icon checked").size.logical_pixels()) + 6.0
+                    f32::from(node.icon.expect("icon checked").size.logical_pixels())
+                        + node.visual.content.gap.max(0.0)
                 } else {
                     0.0
                 };
@@ -1355,10 +1518,19 @@ fn flow_dimension_requirement_with_map(
             node.text_style
                 .map(|style| style.line_height_px.max(18.0))
                 .unwrap_or(18.0)
-        };
+        });
     }
 
-    0.0
+    constrain(node.icon
+        .map(|icon| {
+            f32::from(icon.size.logical_pixels())
+                + if row {
+                    layout.padding.left + layout.padding.right
+                } else {
+                    layout.padding.top + layout.padding.bottom
+                }
+        })
+        .unwrap_or(0.0))
 }
 
 fn intrinsic_flow_size_with_map(
@@ -1366,7 +1538,19 @@ fn intrinsic_flow_size_with_map(
     layout: &UiLayout,
     row: bool,
     intrinsic_sizes: Option<&HashMap<String, [f32; 2]>>,
+    container_width: f32,
 ) -> f32 {
+    let empty = HashMap::new();
+    let sizes = intrinsic_sizes.unwrap_or(&empty);
+    let content_width = (container_width - layout.padding.left - layout.padding.right).max(0.0);
+    let effective_flow = resolve_compact_flow(node, layout,
+        UiRect::new(0.0, 0.0, content_width, 0.0), sizes);
+    if effective_flow != layout.flow {
+        let mut compact_layout = layout.clone();
+        compact_layout.flow = effective_flow;
+        compact_layout.compact = UiCompactMode::None;
+        return intrinsic_flow_size_with_map(node, &compact_layout, row, intrinsic_sizes, container_width);
+    }
     let main_axis = matches!(
         (layout.flow, row),
         (UiFlow::Row, true) | (UiFlow::Column, false)
@@ -1375,6 +1559,32 @@ fn intrinsic_flow_size_with_map(
         (layout.flow, row),
         (UiFlow::Row, false) | (UiFlow::Column, true)
     );
+    if layout.flow == UiFlow::RowWrap {
+        if !row {
+            let content_width = container_width - layout.padding.left - layout.padding.right;
+            if content_width <= 0.0 {
+                // Width is not authoritative yet: reserve one row so siblings
+                // and scroll extents still clear the tallest wrapped child.
+                let fallback = node
+                    .children
+                    .iter()
+                    .filter(|child| !child.hidden && child.layout.rect.is_none() && child.layout.anchored.is_none())
+                    .map(|child| {
+                        requested_cross_size(
+                            &child.layout.resolved_for(f32::MAX),
+                            true,
+                            WRAP_TRACK_HEIGHT_PLACEHOLDER,
+                        )
+                    })
+                    .fold(0.0_f32, f32::max);
+                return fallback + layout.padding.top + layout.padding.bottom;
+            }
+            return wrap_track_height(node, layout, content_width, intrinsic_sizes);
+        }
+        // The row axis sums children like a plain row; wrapping only shrinks
+        // the occupied width below this bound.
+        return wrap_track_main_width(node, layout, intrinsic_sizes);
+    }
     if !main_axis && !cross_axis {
         return 0.0;
     }
@@ -1382,7 +1592,7 @@ fn intrinsic_flow_size_with_map(
     let children = node
         .children
         .iter()
-        .filter(|child| child.layout.rect.is_none())
+        .filter(|child| !child.hidden && child.layout.rect.is_none() && child.layout.anchored.is_none())
         .collect::<Vec<_>>();
     if children.is_empty() {
         return 0.0;
@@ -1393,12 +1603,41 @@ fn intrinsic_flow_size_with_map(
     } else {
         layout.padding.top + layout.padding.bottom
     };
-    let child_sizes = children.iter().map(|child| {
+    // Measure a row's cross-axis after distributing its actual widths. A
+    // responsive image inside a growing column must not reserve height as
+    // though it owned the entire parent's width.
+    let width_dependent_children = children.iter().any(|child|
+        !child.children.is_empty() || child.layout.aspect_ratio.is_some());
+    let widths = if layout.flow == UiFlow::Row && !row && width_dependent_children {
+        let tracks = children.iter().map(|child| FlowChild {
+            node: child, layout: child.layout.resolved_for(content_width),
+            intrinsic: sizes.get(&child.id).copied(),
+        }).collect::<Vec<_>>();
+        resolve_flow_main_sizes(&tracks, true,
+            (content_width - layout.gap.max(0.0) * children.len().saturating_sub(1) as f32).max(0.0),
+            content_width, sizes)
+    } else { Vec::new() };
+    let child_sizes = children.iter().enumerate().map(|(index, child)| {
         let intrinsic = intrinsic_sizes.and_then(|sizes| sizes.get(&child.id).copied());
+        let child_width = widths.get(index).copied().unwrap_or(content_width);
         if main_axis {
-            flow_main_requirement_with_map(child, &child.layout, row, intrinsic, intrinsic_sizes)
+            flow_main_requirement_with_map(
+                child,
+                &child.layout,
+                row,
+                intrinsic,
+                intrinsic_sizes,
+                child_width,
+            )
         } else {
-            flow_cross_requirement_with_map(child, &child.layout, row, intrinsic, intrinsic_sizes)
+            flow_cross_requirement_with_map(
+                child,
+                &child.layout,
+                row,
+                intrinsic,
+                intrinsic_sizes,
+                child_width,
+            )
         }
     });
     let children_size = if main_axis {
@@ -1407,6 +1646,78 @@ fn intrinsic_flow_size_with_map(
         child_sizes.fold(0.0, f32::max)
     };
     children_size + padding
+}
+
+/// Row-axis bound for wrapped groups: the unwrapped child sum plus gaps.
+fn wrap_track_main_width(
+    node: &UiNode,
+    layout: &UiLayout,
+    intrinsic_sizes: Option<&HashMap<String, [f32; 2]>>,
+) -> f32 {
+    let children = node
+        .children
+        .iter()
+        .filter(|child| !child.hidden && child.layout.rect.is_none() && child.layout.anchored.is_none())
+        .collect::<Vec<_>>();
+    if children.is_empty() {
+        return 0.0;
+    }
+    let child_sizes = children.iter().map(|child| {
+        let intrinsic = intrinsic_sizes.and_then(|sizes| sizes.get(&child.id).copied());
+        let child_layout = child.layout.resolved_for(f32::MAX);
+        match intrinsic {
+            Some(measured) => wrap_main_size(&child_layout, measured[0].max(1.0), Some(measured)),
+            None => child_layout.basis[0].max(child_layout.min_size[0]).max(1.0),
+        }
+    });
+    child_sizes.sum::<f32>() + layout.gap.max(0.0) * children.len().saturating_sub(1) as f32
+        + layout.padding.left
+        + layout.padding.right
+}
+
+/// Placeable height estimate: `record_wrapped_children` uses the same greedy
+/// row packing, so a fit-content RowWrap container reserves enough vertical
+/// track for its final wrapped layout instead of collapsing to zero and
+/// painting chips over the next sibling.
+const WRAP_TRACK_HEIGHT_PLACEHOLDER: f32 = 40.0;
+fn wrap_track_height(
+    node: &UiNode,
+    layout: &UiLayout,
+    available: f32,
+    intrinsic_sizes: Option<&HashMap<String, [f32; 2]>>,
+) -> f32 {
+    let gap = layout.gap.max(0.0);
+    let mut rows: Vec<f32> = Vec::new();
+    let mut widths: Vec<f32> = Vec::new();
+    for child in node
+        .children
+        .iter()
+        .filter(|child| !child.hidden && child.layout.rect.is_none() && child.layout.anchored.is_none())
+    {
+        let child_layout = child.layout.resolved_for(available);
+        let intrinsic = intrinsic_sizes.and_then(|sizes| sizes.get(&child.id).copied());
+        let main = wrap_main_size(&child_layout, available, intrinsic);
+        if rows.is_empty() {
+            rows.push(0.0);
+            widths.push(0.0);
+        }
+        let index = rows.len() - 1;
+        let with_gap = if widths[index] > 0.0 { gap } else { 0.0 };
+        if widths[index] > 0.0 && widths[index] + with_gap + main > available {
+            rows.push(0.0);
+            widths.push(0.0);
+        }
+        let index = rows.len() - 1;
+        rows[index] = rows[index]
+            .max(requested_cross_size(
+                &child_layout,
+                true,
+                WRAP_TRACK_HEIGHT_PLACEHOLDER,
+            ));
+        widths[index] += if widths[index] > 0.0 { gap } else { 0.0 } + main;
+    }
+    let padding = layout.padding.top + layout.padding.bottom;
+    rows.iter().sum::<f32>() + gap * rows.len().saturating_sub(1) as f32 + padding
 }
 
 fn constrain_rect(layout: &super::UiLayout, rect: UiRect) -> UiRect {
@@ -1424,11 +1735,14 @@ fn constrain_assigned_rect(
     node: &UiNode,
     intrinsic_sizes: &HashMap<String, [f32; 2]>,
 ) -> UiRect {
+    let width = resolve_intrinsic_dimension(layout, node, rect.width, 0, rect.height, intrinsic_sizes);
+    let height = layout.aspect_height(width).unwrap_or_else(||
+        resolve_intrinsic_dimension(layout, node, rect.height, 1, width, intrinsic_sizes));
     UiRect::new(
         rect.x,
         rect.y,
-        resolve_intrinsic_dimension(layout, node, rect.width, 0, intrinsic_sizes),
-        resolve_intrinsic_dimension(layout, node, rect.height, 1, intrinsic_sizes),
+        width,
+        height,
     )
 }
 
@@ -1437,6 +1751,7 @@ fn resolve_intrinsic_dimension(
     node: &UiNode,
     assigned: f32,
     axis: usize,
+    opposite_axis_size: f32,
     intrinsic_sizes: &HashMap<String, [f32; 2]>,
 ) -> f32 {
     let mode = if axis == 0 {
@@ -1447,7 +1762,13 @@ fn resolve_intrinsic_dimension(
     let requested = match mode {
         UiSizeMode::Fixed if layout.basis[axis] > 0.0 => layout.basis[axis],
         UiSizeMode::FitContent | UiSizeMode::MinContent | UiSizeMode::MaxContent => {
-            intrinsic_node_dimension(node, layout, axis, intrinsic_sizes)
+            intrinsic_node_dimension(
+                node,
+                layout,
+                axis,
+                opposite_axis_size,
+                intrinsic_sizes,
+            )
         }
         _ => assigned,
     };
@@ -1458,6 +1779,7 @@ fn intrinsic_node_dimension(
     node: &UiNode,
     layout: &super::UiLayout,
     axis: usize,
+    opposite_axis_size: f32,
     intrinsic_sizes: &HashMap<String, [f32; 2]>,
 ) -> f32 {
     let padding = if axis == 0 {
@@ -1469,7 +1791,13 @@ fn intrinsic_node_dimension(
     // cross-axis content is the largest child. Without the cross-axis case a
     // fit-content row can reserve zero height while its children still paint,
     // allowing the next sibling to occupy the same vertical track.
-    let child_extent = intrinsic_flow_size_with_map(node, layout, axis == 0, Some(intrinsic_sizes));
+    let child_extent = intrinsic_flow_size_with_map(
+        node,
+        layout,
+        axis == 0,
+        Some(intrinsic_sizes),
+        opposite_axis_size,
+    );
     if child_extent > 0.0 {
         return child_extent;
     }
@@ -1488,6 +1816,9 @@ fn intrinsic_node_dimension(
         } else {
             64.0 + padding
         };
+    }
+    if let Some(icon) = node.icon {
+        return f32::from(icon.size.logical_pixels()) + padding;
     }
     layout.basis[axis].max(layout.min_size[axis]).max(0.0) + padding
 }
@@ -1522,6 +1853,42 @@ mod tests {
     use super::*;
 
     #[test]
+    fn rafui_regression_icon_only_segments_reserve_both_axes() {
+        use raf_ui::components::{segmented_group, UiSegmentedOption, UiSegmentedOrientation};
+        let palette = raf_ui::StudioUiPalette::IndustrialDark;
+        let group = segmented_group(
+            "tools",
+            ["select", "move", "rotate", "scale"].map(|id| {
+                UiSegmentedOption::new(id, id, raf_ui::UiAction::Command { name: id.into() })
+                    .with_icon(raf_ui::UiIconId::Move)
+                    .with_icon_only()
+            }),
+            UiSegmentedOrientation::Vertical,
+            palette,
+            raf_ui::UiThemeMetrics::default(),
+        );
+        let surface = super::super::UiSurface::new(
+            "rail",
+            palette,
+            UiNode::new("root", UiNodeKind::Root)
+                .with_layout(UiLayout { align_items: UiAlign::Center, ..UiLayout::fill(UiFlow::Column) })
+                .with_child(group)
+                .with_child(UiNode::new("next", UiNodeKind::Button).with_layout(UiLayout::fixed(32.0, 32.0))),
+        );
+        let mut session = super::super::UiSurfaceSession::default();
+        let frame = session.build_frame_with_resolved_text(&surface, 50, 400, [0; 4], str::to_owned);
+        let bounds = |id: &str| frame.layout_boxes.iter().find(|b| b.id == id).unwrap().rect;
+        let icon_size = f32::from(raf_ui::UiIconSize::Toolbar.logical_pixels());
+        for id in ["select", "move", "rotate", "scale"] {
+            let content = frame.layout_boxes.iter().find(|b| b.id == id).unwrap().content_rect;
+            assert!(content.width >= icon_size);
+            assert!(content.height >= icon_size);
+        }
+        assert!(bounds("tools").width >= icon_size);
+        assert!(bounds("next").y >= bounds("scale").bottom());
+    }
+
+    #[test]
     fn intrinsic_column_size_keeps_flow_rows_visible_inside_scroll_surfaces() {
         let section = UiNode::new("section", UiNodeKind::Panel)
             .with_layout(UiLayout {
@@ -1537,8 +1904,45 @@ mod tests {
             );
 
         assert_eq!(
-            intrinsic_flow_size_with_map(&section, &section.layout, false, None),
+            intrinsic_flow_size_with_map(&section, &section.layout, false, None, f32::MAX),
             120.0
+        );
+    }
+
+    #[test]
+    fn row_wrap_groups_reserve_their_wrapped_track_and_never_overlap_siblings() {
+        let group = UiNode::new("choices", UiNodeKind::Panel)
+            .with_layout(UiLayout {
+                flow: UiFlow::RowWrap,
+                gap: 4.0,
+                ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+            })
+            .with_child(
+                UiNode::new("first", UiNodeKind::Button)
+                    .with_layout(UiLayout::fixed(140.0, 30.0).with_width_mode(UiSizeMode::FitContent)),
+            )
+            .with_child(
+                UiNode::new("second", UiNodeKind::Button)
+                    .with_layout(UiLayout::fixed(160.0, 30.0).with_width_mode(UiSizeMode::FitContent)),
+            )
+            .with_child(
+                UiNode::new("third", UiNodeKind::Button)
+                    .with_layout(UiLayout::fixed(90.0, 30.0).with_width_mode(UiSizeMode::FitContent)),
+            );
+        // 140 + 4 + 160 + 4 + 90 = 398: two rows wrap by both container widths.
+        assert_eq!(
+            intrinsic_flow_size_with_map(&group, &group.layout, false, None, 320.0),
+            30.0 + 4.0 + 30.0
+        );
+        // One row fits when the container is wide enough.
+        assert_eq!(
+            intrinsic_flow_size_with_map(&group, &group.layout, false, None, 400.0),
+            30.0
+        );
+        // Sum tracks the row axis like a plain row.
+        assert_eq!(
+            intrinsic_flow_size_with_map(&group, &group.layout, true, None, 400.0),
+            398.0
         );
     }
 

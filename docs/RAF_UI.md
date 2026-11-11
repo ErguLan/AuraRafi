@@ -26,11 +26,97 @@ HTML runtime and it does not embed a browser. Documents are serializable Rust
 data, the renderer is ApiGraphicBasic, and platform hosts only provide window,
 input, assets, and a target texture.
 
+## Reading routes
+
+- Engine contributors: this document explains current contracts and the source
+  map below. Use [RafUI authoring](RAF_UI_AUTHORING.md) for the practical Rust
+  surface/host workflow, including the layout replacement pitfall.
+- Editor integration: [Editor RafUI](EDITOR_RAFUI.md) owns workbench composition,
+  interaction and domain boundaries.
+- Game creators: [Game interfaces](GAME_UI.md) owns the visual authoring and
+  game-only scripting tutorial. Gameplay scripts cannot address editor UI.
+- Graphics contributors: [ApiGraphicBasic](APIGRAPHICBASIC.md) owns compilation,
+  text/image presentation, resource admission and GPU/CPU execution.
+
+## Current layers and source map
+
+RafUI is an engine-owned retained UI system, not a wrapper around the graphics
+backend. Its vocabulary is data: nodes, controls, layout constraints, style
+rules, text/image requests and semantic actions. Its public model has no GPU
+resource dependency. Similar layout vocabulary does not imply an HTML runtime
+or a browser layout implementation.
+
+```text
+Domain state -> compact view model -> UiSurface / UiDocument tree
+                                    |
+                              retained host/session
+                                    |
+                        UiSurfaceFrame -> UiSurfaceDrawList
+                                    |
+                              ApiGraphicBasic
+                                    |
+                       private GPU executor / CPU recovery
+
+Input -> UiAction -> application/command boundary -> domain state
+```
+
+Winit supplies native windows and input. ApiGraphicBasic currently owns the
+private WGPU executor. Text measurement and glyph rasterization use the owned
+text-atlas module and its font registry; `ab_glyph` is the current outline
+rasterizer. These layers do not choose a panel's visual hierarchy or layout.
+
+| Responsibility | Current source |
+| --- | --- |
+| Serializable nodes, controls and persistent documents | [`node.rs`](../crates/raf_ui/src/node.rs), [`controls.rs`](../crates/raf_ui/src/controls.rs), [`document.rs`](../crates/raf_ui/src/document.rs) |
+| Layout vocabulary and component recipes | [`layout.rs`](../crates/raf_ui/src/layout.rs), [`components.rs`](../crates/raf_ui/src/components.rs), [`action_bar.rs`](../crates/raf_ui/src/action_bar.rs) |
+| Safe node composition, complete recipes and text drafts | [`composition.rs`](../crates/raf_ui/src/composition.rs), [`components/kit.rs`](../crates/raf_ui/src/components/kit.rs), [`editing.rs`](../crates/raf_ui/src/editing.rs) |
+| On-demand layout/style/resource inspection | [`inspection.rs`](../crates/raf_render/src/ApiGraphicBasic/ui_surface/inspection.rs) |
+| Themes, styles, geometry effects and typography requests | [`style.rs`](../crates/raf_ui/src/style.rs), [`visual.rs`](../crates/raf_ui/src/visual.rs), [`text.rs`](../crates/raf_ui/src/text.rs) |
+| Transient controls, focus, actions and overlays | [`state.rs`](../crates/raf_ui/src/state.rs), [`interaction.rs`](../crates/raf_ui/src/interaction.rs), [`overlays.rs`](../crates/raf_ui/src/overlays.rs) |
+| Surface compilation, layout and paint reuse | [`ui_surface/mod.rs`](../crates/raf_render/src/ApiGraphicBasic/ui_surface/mod.rs), [`compilation.rs`](../crates/raf_render/src/ApiGraphicBasic/ui_surface/compilation.rs) |
+| Text, images and their resource lifecycle | [`text_atlas.rs`](../crates/raf_render/src/ApiGraphicBasic/ui_surface/text_atlas.rs), [`images.rs`](../crates/raf_render/src/ApiGraphicBasic/ui_surface/images.rs) |
+| Editor surface composition and action routing | [`native_workbench_surface.rs`](../crates/raf_editor/src/native_workbench_surface.rs), [`native_workbench_input.rs`](../crates/raf_editor/src/native_workbench_input.rs) |
+| Game UI editing, local instances and presentation | [`interface_surface.rs`](../crates/raf_editor/src/panels/interface_surface.rs), [`game_ui.rs`](../crates/raf_ui/src/game_ui.rs), [`player/game_ui.rs`](../crates/raf_player/src/game_ui.rs) |
+
 ## Authoring status
+
+The Game editor now includes the session-based Interfaces designer and Assets
+insertion. Its authoring, runtime presentation, scripting, and resource contracts
+are documented in [`GAME_UI.md`](GAME_UI.md). This uses the retained document
+directly and does not restore the retired inspection/recipe helper.
 
 RafUI's retained document, layout, style, text, input, and renderer-neutral
 contracts remain available. The old inspection/recipe/snapshot helper is not
 currently part of the public crate while the editor surface is being rebuilt.
+
+## Native accessibility
+
+The Windows editor includes an owned UI Automation provider, enabled by default
+through `native_accessibility_enabled` in Appearance / Accessibility settings.
+It is an accessibility bridge for local tools, not a security sandbox: disabling
+it does not prevent screen capture or ordinary operating-system input.
+
+The provider answers `WM_GETOBJECT` and projects cached RafUI geometry and the
+current visible document into immutable semantic snapshots. Active modals take
+precedence over underlying surfaces. Password and API-key fields do not publish
+their contents, including when the visual reveal control is enabled.
+
+Platform callbacks read snapshots and queue bounded, expiring semantic requests.
+The normal retained host processes those requests into existing `UiAction`
+values on the application thread. Stale or cancelled requests cannot execute
+later. No provider callback traverses a scene, rebuilds layout or invokes domain
+commands directly. The host only updates snapshots after presentation when a
+local accessibility client has recently requested information; settled documents
+do not introduce a polling or rendering timer.
+
+The initial patterns cover invocation, editable nonsecret values, ranges,
+toggles, selection items, expansion of selects, focus, hit testing and tree
+navigation. Text is exposed as bounded visible text elements. Full TextPattern,
+offscreen virtual-item realization, semantic canvas objects and platform backends
+other than Windows remain outside this initial implementation.
+
+Native client interaction and performance acceptance must be reported separately
+from focused semantic/DPI tests.
 
 ## Goals
 
@@ -43,8 +129,11 @@ currently part of the public crate while the editor surface is being rebuilt.
 
 ## Theme Model
 
-`UiTheme::raf_ui()` is the default theme for every new document. It provides a
+`UiTheme::raf_ui()` is the editor theme. It provides a
 near-black dark surface, a clean light surface, and a warm orange accent.
+New user-authored game documents use `UiTheme::game_ui()` with neutral focus
+and accent tokens. White element defaults and authoring chrome are scoped to
+game interfaces; saved document themes and colors are not migrated implicitly.
 Theme tokens are semantic rather than panel-specific:
 
 - `background`, `surface`, `surface_alt`, `surface_raised`, and `canvas`
@@ -177,18 +266,23 @@ truthful empty states instead of sample rows.
 
 ## Commands
 
-`/ui.node.add` accepts the base node fields plus retained controls and layout:
+The active native document command adapter supports these operations:
 
 ```text
-/ui.node.add id=search kind=input parent=root value_key=ui.search placeholder_key=ui.search_placeholder width=260
-/ui.node.add id=assets kind=grid parent=root min_column_width=180 responsive_max_width=640 responsive_flow=column
-/ui.node.add id=project_logo kind=image parent=root source=ui.project_logo fit=contain width=96 height=96
-/ui.node.add id=loading kind=skeleton parent=root shape=rectangle width=220 height=20
+/ui.document.read path=assets/ui/menu.ui.ron
+/ui.document.create path=assets/ui/menu.ui.ron name=Menu
 ```
 
-The `flow`, `gap`, `grow`, `width`, `height`, `justify`, `align`, `compact`,
-`columns`, and responsive arguments are intentionally declarative. They work
-for user-created game UI as well as future editor surfaces.
+`ui.document.apply` accepts a structured batch of edits and requires the exact
+document revision returned by read; `ui.document.undo` uses the same revision
+guard. See [Game interfaces](GAME_UI.md#agent-cli-and-mcp-authoring) for the
+payload and the shared command-gateway contract.
+
+The catalog still contains older `ui.node.*`, `ui.document.describe`,
+`ui.document.set_space` and `ui.document.bind_camera` descriptions. They are not
+the supported operations of `commands/ui.rs`; catalog presence alone is not
+evidence of a connected native action. Use document edits and `UiMount` for
+the current authoring route.
 
 ## Surface Hosts
 
@@ -220,6 +314,58 @@ adjacent compatible paint runs without reordering UI layers. Metrics expose
 cache hits, upload bytes, paint runs, and draw calls. Do not recreate a
 `UiSurfaceFrame`, draw list, vertex buffer, or texture merely because the
 window requested another idle present.
+
+Paint refresh preserves the retained physical text width: DPI is applied once,
+not multiplied again on hover, focus, or animation. Caret and selection belong
+to paint keys, not geometry keys. A provisional layout built for input must
+still complete its intrinsic measurement before presentation, even if a prior
+paint-only update was pending. Icon-only content reserves its icon dimensions
+and authored padding on both axes. Fixed diagnostic labels patch their own
+retained text request without refreshing unrelated node styles.
+
+Interaction transitions retain per-node target styles: only changed visual
+state re-resolves that node's rules, while tween frames interpolate the cached
+target. Hierarchy and Assets update scroll coordinates on every event but
+materialize another document only when their virtual row window changes.
+Hierarchy view persistence uses one coalesced worker slot and a 300 ms quiet
+period; serialization and durable file synchronization never run in the UI
+frame. Session changes and explicit layout persistence drain that slot before
+reading or leaving the previous session.
+
+### Native cost guard
+
+`raf_ui::performance` owns bounded, backend-neutral observations and cooperative
+optional-work allowances. ApiGraphicBasic supplies timings for input, layout,
+text, CPU paint preparation and submission; hosts report document construction.
+The current advisory slow-stage default is 4 ms. This is configurable through
+`UiWorkLimits`, not an FPS cap, preemption deadline or performance guarantee.
+History retains at most 128 region identities and 256 compact samples per host;
+advisory tracing warnings are rate-limited. A native snapshot inspector opens
+with `Ctrl+Shift+F12`; refresh is explicit, so it creates no idle repaint loop.
+Region identifiers are engine IDs, not localized labels. Submission is CPU work,
+never an inferred GPU duration. Native canvas execution remains owned separately.
+
+Independent absolute root regions reuse layout and CPU paint preparation using
+their actual subtree, scoped controls, visual state, density, intrinsic sizes,
+styles and text-atlas slots. Flow-dependent parents retain the ordinary layout
+path. Regions merge in original painter order into the same draw list; they do
+not allocate another GPU renderer or presentation target. Layout and paint
+caches each bound region count, node count and retained text estimates. These
+are cache admission bounds, not a claim to cap the entire process heap.
+
+The workbench additionally reuses the authored Hierarchy document when its view,
+selection, scene revision, theme, geometry and settings agree. Transient editing
+and drag states bypass that cache. Other builders can still run on a workbench
+revision; region layout/paint reuse must not be described as eliminating all
+editor document construction.
+
+Project-image admission uses count, byte and elapsed-time allowances. At least
+one bounded resource may make progress; an oversized first item is reported by
+the observation contract rather than starved forever. Deferred pixels are kept
+in one slot, cancelled with the project, and request another necessary frame.
+This policy never drops clicks or changes authored quality. The direct-blocking
+source guard and focused `ui_cost_guard` tests complement native GPU, DPI and
+low-end acceptance; they do not replace those checks.
 
 ### Texto largo, scroll y atlas
 
@@ -454,11 +600,12 @@ called by the editor at runtime.
 
 ## Boundaries
 
-RafUI does not add runtime gameplay UI templates, a browser engine, PBR,
-shadows, post processing, or runtime scripting. Those remain separate phases.
-The retained UI layer is designed so those systems can later supply textures,
-world/camera bindings, and render targets without rewriting layout, input, or
-theme data.
+RafUI itself owns presentation data and interaction contracts. Game UI authoring
+and local runtime instances are implemented in the editor/player layers described
+in [Game interfaces](GAME_UI.md); the game script API is isolated from editor UI.
+An empty game document still receives no HUD or gameplay template automatically.
+Scene shading, PBR, world shadows and post-processing remain renderer/domain
+responsibilities. UI geometry effects do not implement those scene features.
 
 ## RafUI Frontier Core
 
@@ -538,5 +685,161 @@ an ID, class, or node kind in a specific state. `UiStylePatch` can override
 fill, border, text, opacity, radius, and border width for one control without
 forking the renderer. Use semantic `UiTheme` tokens as defaults and local
 overrides only when a component genuinely needs a different color.
+
+## Document and presentation craftsmanship contract
+
+The current document version is 4. `UiDocument` persists its root, theme,
+`UiStyleSheet`, presentation mounts and value bindings;
+`UiSurface::from_document` preserves the tree, theme and stylesheet. Mounts and
+bindings are consumed by the game instance layer, not by that surface constructor.
+Version 1, 2 and 3 documents migrate through additive defaults and validation. Future versions
+are rejected without mutating the original document. Focus, scroll, edit
+drafts, decoded images and backend handles are never persisted in that tree.
+
+`UiDocumentUpdate` provides typed text, visibility, enablement and image
+updates. A host still decides when an update is accepted and when layout is
+invalidated; these updates do not grant authority to mutate scene state.
+Hidden nodes do not participate in layout, hit testing or focus order.
+
+### Authoring and styles
+
+`UiNode` sizing/spacing builders and `map_layout` modify the existing layout;
+`with_layout` remains a complete replacement. `UiComponents` provides themed
+buttons, inputs, Select triggers, property fields and adaptive bars as ordinary
+nodes, with one explicit shared state stylesheet. Author rules may override it.
+The neutral interface-authoring chrome uses these recipes; other consumers may
+still use the compatible older recipes.
+
+`UiTextStyle::for_role`, `label`, `toolbar` and `with_size` centralize semantic
+metrics while keeping role/weight and proportional leading. They do not add
+full text shaping. `UiImageView` exposes fit/crop/alt/placeholder options through
+the existing image contract. Optional `UiLayout::aspect_ratio` reserves height
+from resolved width before image loading; fixed or fill height remains explicit.
+
+`UiTextDraftBank` belongs to a host, never to the saved document. Scoped value
+reconciliation preserves dirty drafts and IME while clean fields follow model
+updates. Cancel restores the latest model value; domain validation still decides
+whether Enter commits. The interface inspector uses this contract.
+
+Intrinsic sizing follows compact layout and distributed row widths. Flexible
+tracks cannot compress below their minima, and grow weights do not replace an
+intrinsic size on the opposite axis. An impossible minimum set remains overflow.
+`inspect_surface` provides bounded, on-demand boxes/style/resource snapshots and
+authoring issues from the compiled frame; it has no idle polling or new native
+inspector panel. `component_gallery` exercises shared controls and resource states
+through the existing hosts. See [RafUI authoring](RAF_UI_AUTHORING.md) for usage.
+
+- `UiNode::row`, `column`, `with_children` and scoped child identities simplify
+  ordinary Rust construction; no parser or second widget system is required.
+- `UiStyleLayers` compiles base, component, variant, state and explicit
+  overrides to the existing ordered rules. Legacy rule order remains valid.
+- `UiStyleSelector::Control` addresses effective controls without requiring
+  `UiNodeKind` to duplicate their payload type.
+- `UiThemeMetrics::for_control` resolves component metric overrides.
+  `UiTokens::chrome` derives component colors unless the theme overrides them.
+- `UiVisual` requests per-corner radii, per-side border widths, a linear
+  gradient, bounded analytic shadow falloff, a focus ring and optional child
+  clipping. Text/icon color inheritance is explicit through `inherit_text`;
+  geometry, borders and isolated group opacity are not inherited.
+- Icon and label placement share a measured content group with configurable
+  alignment, gap and start/end icon placement. Intrinsic width includes both.
+- `UiAlign::Baseline` and `inline_text_row` align ordinary styled text nodes.
+  Inline runs are a single row, not a rich paragraph/wrapping engine.
+- Numeric edit sessions retain incomplete drafts and emit begin, commit,
+  reject and cancel intents. Domain validation and undo remain host-owned.
+- `plan_action_bar` uses localized, caller-measured labels and component
+  metrics. Semantic groups retain separators and every overflow action stays
+  reachable through the shared Select popup contract. Pinned actions expose
+  `fits = false` when even the minimum row cannot fit; they are not discarded.
+
+Hosts distinguish geometry changes from paint updates. Hover, focus, selection,
+caret movement, enablement and fixed-size text updates refresh retained paint
+without rebuilding layout. Intrinsic text, visibility and resource replacement
+invalidate geometry conservatively. Short state transitions stop when settled
+and obey reduced motion; disabling tooltips does not disable other transitions.
+This is bounded paint-list invalidation, not a dirty-rectangle renderer.
+
+`UiNumericEditBank` infers numeric text/range pairs from the authored controls;
+it does not duplicate their bounds in a host-specific table. Units are explicit
+form metadata. Engine Settings and the native Project Settings dock share that
+transient contract. Incomplete drafts survive projection and tab changes;
+Enter confirms a field, Escape restores its latest authoritative value, and a
+slider replaces that field's draft. Engine Settings Save/Apply validates all
+enabled pending fields before committing any of them. Project Settings keeps
+its existing per-field intent/persistence boundary; an unfinished draft is not
+project data. Specialized scene/CAD property editors retain their existing
+domain contracts rather than being blindly converted into generic fields.
+
+This host-side API does not expose internal RafUI mutation to gameplay scripting.
+The separate game interface API and visual authoring are implemented; their
+presentations, role checks and remaining acceptance limits are documented in
+[Game interfaces](GAME_UI.md).
+
+### Images and resources
+
+`UiImageOptions` describes a normalized source region, focal point, source-pixel
+nine-slice insets, per-use sampling, alternative text and placeholder policy.
+Both compositors use `image_layout` for destination/UV patches. Image content
+respects padding and rounded clipping; its border is painted in the foreground.
+Declared child clip masks have a validated depth limit of eight, with one extra
+mask available for the image's own rounded edge. Overlay layers reset ancestor
+clipping. Pointer hit testing honors the same ancestor masks.
+
+Project images accept `assets://ui/logo.png` or
+`project://assets/ui/logo.png`. Resolution is project-confined after
+canonicalization, including symlink checks. The existing bounded decoder runs
+on a worker with bounded request/completion queues. Hosts register resources,
+pump a bounded number of completions and cancel the loader on replacement.
+An optional completion wakeup requests a redraw; no polling repaint loop is
+needed. Pending, missing and failed images have explicit runtime states and
+visible placeholders unless the document deliberately requests `Hidden`.
+
+The decoded CPU store has a byte budget and recent-use eviction. CPU pixels
+remain straight-alpha; interpolation is alpha-weighted. GPU image uploads
+premultiply in linear light, generate matching mip levels and use a matching
+image blend pipeline. Text and solid paint retain their separate contracts.
+
+`icon_catalog.rs` is the shared semantic registry for icon IDs, stable keys,
+PNG inclusion and the development generator. Missing registered PNGs fail
+compilation; decoding and nonempty alpha are covered separately. Per-icon
+procedural copies are retired. The GPU packs built-in icons into bounded pages
+with padded regions and preserves painter order; an atlas does not promise a
+single draw call across different clips or interleaved paint kinds.
+
+`UiIconId::descriptor()` exposes the existing SVG master, source raster size,
+design canvas, declared logical display size and intentional lookup aliases.
+The logical size is an authoring recommendation, not evidence of per-icon
+optical tuning. Stable keys and serde variant names remain compatible. Alias
+image URIs normalize to the canonical key before paint/cache lookup, so two
+spellings do not require duplicate pixel storage or GPU atlas entries. The
+development generator consumes this same manifest without runtime filesystem
+access.
+
+`DirectUiSurfaceHost::register_external_image` accepts an AGB texture view for
+GPU-produced previews without CPU readback. The host owns presentation and must
+unregister stale keys. Views must be filterable 2D targets with premultiplied
+sampled RGB; CPU recovery requires a separately supplied raster source. Normal
+textures, icon pages and external views share residency accounting. The existing
+GPU cache may exceed its soft target for an active frame rather than thrash;
+diagnostics report that condition. This is not an unconditional GPU memory cap.
+
+Project image registration is explicit. Adding a new source key after loading a
+document requires the host to register its updated resource set; the loader is
+not a filesystem watcher. The shared text layout has bounded caching, word wrap,
+fallback glyphs and baseline metrics, but does not implement full bidirectional
+shaping or a rich paragraph model.
+
+### Quality and acceptance
+
+`UiSurfaceDrawList` remains the only paint payload. Its effect metadata is
+shared by GPU and CPU for hollow borders, corner geometry, gradients and clips.
+This does not enable MSAA, framebuffer blur or isolated compositing layers.
+`craftsmanship_gallery` is a real retained fixture consumable by the existing
+native host or CPU density matrix, not an alternate visual implementation.
+
+Source tests and offscreen captures do not establish native GPU appearance,
+input behavior or performance. Acceptance still requires real dark/light,
+fractional-DPI, resize, keyboard, reduced-motion and low-end checks. No measured
+performance improvement should be inferred merely from the new cache or atlas.
 
 > Developed by Yoll. More info: [yoll.site](https://yoll.site).

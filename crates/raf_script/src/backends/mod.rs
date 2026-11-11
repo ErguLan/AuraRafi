@@ -15,6 +15,7 @@ mod rhai_environment_api;
 mod rhai_physics_api;
 mod rhai_scene_api;
 mod rhai_services_api;
+mod rhai_ui_api;
 pub mod wasm_backend;
 pub mod wasm_contract;
 pub mod wasm_host;

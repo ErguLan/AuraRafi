@@ -6,11 +6,11 @@
 
 use super::*;
 use crate::panels::agent_surface::build_dock_agent_surface;
-use crate::panels::console_surface::build_console_surface;
 use crate::panels::electronics_context_menu_surface::{
     build_electronics_context_menu_surface, ELECTRONICS_CONTEXT_MENU_HEIGHT,
     ELECTRONICS_CONTEXT_MENU_WIDTH,
 };
+use crate::panels::electronics_footprint_surface::build_electronics_footprint_surface;
 use crate::panels::electronics_surface::{
     build_electronics_analysis_surface, build_electronics_delete_backdrop_surface,
     build_electronics_delete_modal_surface, ElectronicsAnalysisMotion,
@@ -22,6 +22,9 @@ use crate::panels::nodes_surface::{
     NODES_PALETTE_POPUP_HEIGHT, NODES_PALETTE_POPUP_WIDTH,
 };
 use crate::panels::project_surface::build_project_surface;
+use crate::panels::viewport_toolbar_surface::build_viewport_toolbar_surface_measured;
+use raf_render::api_graphic_basic::ui_surface::UiTextAtlasRequest;
+use raf_ui::{UiTextOverflow, UiTextStyle};
 
 impl NativeGameWorkbench {
     pub(super) fn build_surface(
@@ -113,36 +116,42 @@ impl NativeGameWorkbench {
                 }
             }
         }
+        if self.project_type == ProjectType::Electronics {
+            application_bar = electronics_layout::compact_application_bar(application_bar, layout.window.width);
+        }
+        let electronics_menu_anchor = self.open_menu.as_deref().and_then(|menu| electronics_layout::menu_anchor(&application_bar, menu));
         append(application_bar, layout.application_bar);
 
         let menu = build_application_menu(ApplicationMenuState {
             project_type: self.project_type,
-            active_view: ApplicationView::Scene,
-            grid_visible: self.toolbar_state.grid_visible,
-            hierarchy_visible: layout.left_panel.is_some(),
+            active_view: if self.project_type == ProjectType::Electronics {
+                if electronics.is_some_and(|e| e.active_surface() == raf_electronics::CadSurfaceKind::Pcb) { ApplicationView::Pcb } else { ApplicationView::Schematic }
+            } else { ApplicationView::Scene },
+            grid_visible: electronics.map_or(self.toolbar_state.grid_visible, NativeElectronicsEditor::grid_visible),
+            hierarchy_visible: layout.left_panel.is_some_and(|left| self.project_type != ProjectType::Electronics || left.width > crate::editor_layout::ELECTRONICS_RAIL_WIDTH + 0.5),
             inspector_visible: layout.right_panel.is_some(),
-            undo_available: can_undo,
-            redo_available: can_redo,
-            selection_available: !selected.is_empty(),
-            select_all_available: !scene.roots().is_empty(),
-            copy_available: !selected.is_empty(),
+            undo_available: electronics.map_or(can_undo, NativeElectronicsEditor::can_undo),
+            redo_available: electronics.map_or(can_redo, NativeElectronicsEditor::can_redo),
+            selection_available: electronics.map_or(!selected.is_empty(), |e| e.selection().is_some()),
+            select_all_available: electronics.map_or(!scene.roots().is_empty(), |e| !e.scene().objects.is_empty()),
+            copy_available: electronics.map_or(!selected.is_empty(), |e| e.selection().is_some()),
             paste_available: can_paste,
         });
         if let Some(open_menu) = self.open_menu.as_deref() {
             if let Some(menu) = menu.menus.iter().find(|menu| menu.id == open_menu) {
-                let menu_x =
-                    match open_menu {
+                let menu_x = if self.project_type == ProjectType::Electronics { electronics_menu_anchor.unwrap_or(8.0) } else {
+                    (match open_menu {
                         "file" => 238.0,
                         "edit" => 294.0,
                         "view" => 350.0,
                         "project" => 410.0,
                         "help" => 486.0,
                         _ => 238.0,
-                    } - if self.project_type == ProjectType::Game && layout.window.width < 1100.0 {
+                    }) - if self.project_type == ProjectType::Game && layout.window.width < 1100.0 {
                         40.0
                     } else {
                         0.0
-                    };
+                    } };
                 append(
                     build_application_menu_popup_surface_with_submenu(
                         self.palette,
@@ -184,7 +193,7 @@ impl NativeGameWorkbench {
             if self.project_type == ProjectType::Electronics {
                 let data = electronics_model::ElectronicsWorkbenchData::from_editor(electronics);
                 append(
-                    build_electronics_navigator_surface(
+                    if left.width <= crate::editor_layout::ELECTRONICS_RAIL_WIDTH + 0.5 { self.build_electronics_rail() } else { crate::panels::electronics_navigator_surface::build_electronics_navigator_surface_with_state(
                         self.palette,
                         &self.electronics_navigator_tab,
                         &self.electronics_library_query,
@@ -198,7 +207,15 @@ impl NativeGameWorkbench {
                             NativeElectronicsEditor::active_surface,
                         ),
                         data.layer_visibility,
-                    ),
+                        crate::panels::electronics_navigator_surface::NavigatorDesktopState {
+                            collapsed: Some(&self.electronics_workspace.collapsed_categories),
+                            footprints_open: self.footprint_chooser.is_open(),
+                            footprints: self
+                                .footprint_chooser
+                                .is_open()
+                                .then_some(&self.footprint_chooser.model),
+                        },
+                    ) },
                     left,
                 );
             } else {
@@ -216,45 +233,15 @@ impl NativeGameWorkbench {
                 let requested_scroll = self.hierarchy_scroll_offset;
                 sync_hierarchy_scroll_state(&mut self.host.session_mut().interaction.controls, &mut self.hierarchy_scroll_offset, requested_scroll, max_scroll);
                 append(
-                    if self.hierarchy_active_tab == "lighting" {
+                    if self.interface.workspace.active() {
+                        crate::panels::interface_surface::build_interface_hierarchy(self.palette,&self.interface,[left.width,left.height])
+                    } else if self.hierarchy_active_tab == "lighting" {
                         crate::panels::lighting_surface::navigation(
                             self.palette,
                             &self.lighting_section,
                         )
                     } else {
-                        self.decorate_hierarchy_surface(
-                            build_hierarchy_surface(
-                                self.palette,
-                                &view,
-                                selected,
-                                self.hierarchy_renaming
-                                    .as_ref()
-                                    .map(|(id, value)| (*id, value.as_str())),
-                                hierarchy_menu_target,
-                                self.hierarchy_empty_menu_open,
-                                self.hierarchy_primitive_menu_open,
-                                hierarchy_menu_label,
-                                self.hierarchy_menu_position,
-                                [left.width, left.height],
-                                hierarchy_row_height,
-                                self.agent_settings.hierarchy_indent_width,
-                                self.agent_settings.hierarchy_show_icons,
-                                self.agent_settings.hierarchy_show_visibility,
-                                self.agent_settings.hierarchy_show_locked,
-                                1.0,
-                                self.hierarchy_drag
-                                    .as_ref()
-                                    .map(|drag| (drag.label.as_str(), drag.pointer)),
-                                self.hierarchy_drag.as_ref().and_then(|drag| drag.target),
-                                None,
-                                can_paste,
-                                left.width < 540.0,
-                                &self.hierarchy_active_tab,
-                                self.hierarchy_bookmarks,
-                                Some(&search_results),
-                            ),
-                            scene,
-                        )
+                        self.build_hierarchy_document(&view, selected, scene, left, can_paste, &search_results)
                     },
                     left,
                 );
@@ -274,6 +261,9 @@ impl NativeGameWorkbench {
             }
         }
 
+        if self.project_type==ProjectType::Game && !self.interface.workspace.active() && self.interface_overlay_visible() {
+            append(crate::panels::interface_surface::build_interface_canvas(self.palette,&self.interface,[layout.canvas.width,layout.canvas.height]),layout.canvas);
+        }
         append(
             if self.project_type == ProjectType::Electronics {
                 build_electronics_toolbar_surface(
@@ -290,14 +280,66 @@ impl NativeGameWorkbench {
                     electronics.is_some_and(NativeElectronicsEditor::can_redo),
                     electronics.is_some_and(|editor| editor.selection().is_some()),
                     electronics.is_some_and(NativeElectronicsEditor::can_rotate_selection),
-                    layout.canvas.width,
+                    layout.window.width,
                 )
+            } else if self.interface.workspace.active() {
+                crate::panels::interface_surface::build_interface_canvas(self.palette,&self.interface,[layout.canvas.width,layout.canvas.height])
             } else {
-                build_viewport_toolbar_surface(self.palette, self.toolbar_state)
+                let compact = self.toolbar_state.compact || layout.canvas.width < 396.0;
+                let toolbar_state = crate::panels::viewport_toolbar_surface::ViewportToolbarState {
+                    compact,
+                    ..self.toolbar_state
+                };
+                let toolbar_width = (if compact { 230.0_f32 } else { 396.0_f32 })
+                    .min(layout.canvas.width.max(0.0));
+                let theme = self.host.surface().theme.metrics;
+                let text_scale = self.host.session().text_scale();
+                let text_style = UiTextStyle::button(self.palette.tokens().text_muted)
+                    .scaled_for_ui(text_scale);
+                let atlas = &self.host.session().text_atlas;
+                let measure_text = |text: &str| {
+                    let request = UiTextAtlasRequest::new(
+                        "viewport.toolbar.measure",
+                        text,
+                        text_style,
+                        1024.0,
+                    )
+                    .with_overflow(UiTextOverflow::Clip)
+                    .with_single_line(true);
+                    atlas.measure_prefix_width(&request, text, text.chars().count())
+                };
+                build_viewport_toolbar_surface_measured(
+                    self.palette,
+                    toolbar_state,
+                    toolbar_width,
+                    self.agent_settings.language,
+                    theme,
+                    measure_text,
+                    toolbar_state.actions_menu_open,
+                )
+                .0
             },
-            layout.canvas,
+            if self.project_type == ProjectType::Electronics {layout.electronics_toolbar_rect()} else {layout.canvas},
         );
+        if self.project_type==ProjectType::Game && !self.interface.workspace.active() {
+            append(crate::panels::interface_surface::build_interface_entry(self.palette,layout.canvas.width),layout.canvas);
+        }
         if self.project_type == ProjectType::Electronics {
+            {
+                if let Some(editor) = electronics {
+                    append(crate::panels::electronics_desktop_surface::build_electronics_document_chrome(self.palette, editor, layout.canvas), layout.canvas);
+                }
+                if let Some(editor)=electronics.filter(|e|e.active_surface()==raf_electronics::CadSurfaceKind::Pcb) {
+                    let width=(layout.canvas.width-crate::panels::electronics_desktop_surface::TOOL_RAIL_WIDTH).max(0.0);
+                    let height=crate::panels::pcb_tool_options_surface::pcb_tool_options_height(width);
+                    append(crate::panels::pcb_tool_options_surface::build_pcb_tool_options_surface_with_zoom(self.palette,editor.pcb_route_layer(),editor.pcb_route_width(),editor.grid_step(),editor.camera().zoom*25.4/96.0*100.0,width,self.agent_settings.language,self.electronics_workspace.pcb_menu.as_deref()),
+                        crate::editor_layout::EditorRect{x:layout.canvas.x+crate::panels::electronics_desktop_surface::TOOL_RAIL_WIDTH,y:layout.canvas.y+crate::panels::electronics_desktop_surface::DOCUMENT_HEIGHT,width,height});
+                    if editor.removed_trace_count()>0 {
+                        append(crate::panels::pcb_tool_options_surface::build_pcb_parked_traces_surface(self.palette,editor.removed_trace_count(),width,self.agent_settings.language),
+                            crate::editor_layout::EditorRect{x:layout.electronics_canvas_for_pcb(true).x+10.0,y:layout.electronics_canvas_for_pcb(true).y+24.0,width:width.min(if width<340.0 {184.0}else{340.0}),height:if width<340.0 {64.0}else{36.0}});
+                    }
+                }
+            }
             if let Some(position) =
                 electronics.and_then(NativeElectronicsEditor::context_menu_position)
             {
@@ -373,6 +415,21 @@ impl NativeGameWorkbench {
 
         if let Some(right) = layout.right_panel {
             if self.project_type == ProjectType::Electronics {
+                if self.electronics_workspace.pcb_menu.as_deref() == Some("rules") {
+                    if let Some(editor) = electronics {
+                        append(crate::panels::electronics_rules_surface::build_rules_surface(
+                            self.palette, editor.pcb(), editor.pcb_rule_net().as_deref()), right);
+                    }
+                } else if self.footprint_chooser.is_open() {
+                    append(
+                        crate::panels::electronics_footprint_surface::build_footprint_inspector_surface(
+                            self.palette,
+                            &self.footprint_chooser.model,
+                            right.width,
+                        ),
+                        right,
+                    );
+                } else {
                 let data = electronics
                     .and_then(electronics_model::inspector_data)
                     .unwrap_or(electronics_model::ElectronicsInspectorData {
@@ -384,16 +441,19 @@ impl NativeGameWorkbench {
                         pins: Vec::new(),
                     });
                 append(
-                    build_electronics_inspector_surface(
+                    crate::panels::electronics_inspector_surface::build_electronics_inspector_surface_with_page(
                         self.palette,
                         &data.title,
                         &data.fields,
                         &data.pins,
                         &self.inspector_sessions,
-                        self.inspector_view.tab,
+                        &self.electronics_workspace.inspector_page,
+                        electronics.and_then(|editor| editor.fabrication_status()),
+                        self.inspector_footprint_presentation.as_ref(),
                     ),
                     right,
                 );
+                }
             } else {
                 append(
                     if self.hierarchy_active_tab == "lighting" {
@@ -404,6 +464,11 @@ impl NativeGameWorkbench {
                             self.lighting_preview_neutral,
                             self.lighting_error,
                         )
+                    } else if self.interface.workspace.active() && self.inspector_view.tab==crate::panels::inspector_surface::InspectorTab::Properties {
+                        let properties=crate::panels::interface_surface::build_interface_inspector(self.palette,&self.interface,[(right.width-12.0).max(1.0),right.height]);
+                        let mut inspector=crate::panels::inspector_surface::build_inspector_with_content(self.palette,1.0,self.inspector_view,properties.root);
+                        inspector.style_sheet.rules.extend(properties.style_sheet.rules);
+                        inspector
                     } else {
                         build_inspector_surface_with_assets(
                             self.palette,
@@ -421,7 +486,7 @@ impl NativeGameWorkbench {
             }
         }
 
-        if layout.left_panel.is_some() {
+        if layout.left_panel.is_some_and(|left| self.project_type != ProjectType::Electronics || left.width > crate::editor_layout::ELECTRONICS_RAIL_WIDTH + 0.5) {
             append(
                 build_editor_splitter_surface(self.palette, EditorSplitterKind::LeftPanel),
                 EditorRect::new(
@@ -481,11 +546,12 @@ impl NativeGameWorkbench {
             };
             let tab_height = group_rect.height.min(34.0).max(1.0);
             append(
-                build_tab_strip_surface(
+                crate::panels::editor_bottom_dock_surface::build_tab_strip_surface_sized(
                     self.palette,
                     group,
                     group_rect.height <= 34.0,
                     drag_preview.as_ref(),
+                    group_rect.width,
                 ),
                 EditorRect::new(group_rect.x, group_rect.y, group_rect.width, tab_height),
             );
@@ -513,8 +579,12 @@ impl NativeGameWorkbench {
                 content_rect.height,
             );
             match group.active_tab.as_str() {
+                "interfaces" => append(
+                    crate::panels::interface_surface::build_interface_surface(self.palette,&self.interface,[content_rect.width,content_rect.height]),
+                    content_rect,
+                ),
                 "console" => append(
-                    build_console_surface(
+                    crate::panels::console_surface::build_console_table_surface(
                         self.palette,
                         &self.console,
                         project.map_or(self.agent_settings.command_console_enabled, |project| {
@@ -945,6 +1015,46 @@ impl NativeGameWorkbench {
             append(UiSurface::new("authoring.notice",self.palette,notice),EditorRect::new(
                 layout.canvas.x+12.0,layout.canvas.y+48.0,(layout.canvas.width-24.0).clamp(120.0,520.0),52.0));
         }
+        if self.project_type==ProjectType::Electronics {
+            if let (Some(menu),Some(editor))=(self.electronics_workspace.pcb_menu.as_deref().filter(|menu| *menu != "rules"),electronics.filter(|e|e.active_surface()==raf_electronics::CadSurfaceKind::Pcb)) {
+                let mut popup=crate::panels::pcb_tool_options_surface::build_pcb_options_menu(self.palette,menu,self.agent_settings.language,editor.pcb_route_layer(),editor.pcb_route_width(),editor.grid_step(),editor.camera().zoom*25.4/96.0*100.0);
+                let mut rect=crate::panels::pcb_tool_options_surface::pcb_menu_anchor(layout.canvas,menu);
+                rect.height=popup.root.children.len()as f32*30.0+8.0;
+                if let Some(anchor)=self.host.layout_rect(&format!("electronics.pcb.options.{menu}")) {
+                    rect.x=anchor.x;rect.y=anchor.y+anchor.height+3.0;rect.width=anchor.width.max(140.0);
+                }
+                let backdrop=UiNode::new("electronics.pcb.menu.backdrop",UiNodeKind::Panel)
+                    .with_layout(UiLayout::fill(UiFlow::None)).with_style(UiStyle::transparent())
+                    .with_event(raf_ui::UiEventBinding::command(raf_ui::UiEventKind::Click,"electronics.pcb.menu.close"));
+                append(UiSurface::new("electronics.pcb.menu.backdrop",self.palette,backdrop),layout.window);
+                popup.root.layout=UiLayout{flow:UiFlow::Column,padding:raf_ui::UiSpacing::same(4.0),..UiLayout::fill(UiFlow::Column)};
+                append(popup,rect);
+            }
+        }
+        if self.console.filters_open {
+            if let Some((_,rect))=dock_group_rects.iter().find(|(id,_)|dock_groups.iter().any(|g|&g.id==id && g.active_tab=="console")) {
+                let backdrop=UiNode::new("console.filters.backdrop",UiNodeKind::Panel).with_layout(UiLayout::fill(UiFlow::None))
+                    .with_style(UiStyle::transparent()).with_event(raf_ui::UiEventBinding::command(raf_ui::UiEventKind::Click,"console.filters.close"));
+                append(UiSurface::new("console.filters.backdrop",self.palette,backdrop),layout.window);
+                append(crate::panels::console_surface::build_console_filters_surface(self.palette,&self.console),
+                    EditorRect::new((rect.x+rect.width-246.0).max(rect.x), (rect.y-254.0).max(layout.workspace.y),238.0,254.0));
+            }
+        }
+        if self.project_type==ProjectType::Game && self.interface.workspace.active() && self.interface.workspace.insert_open {
+            let trigger=self.host.layout_rect("ui.designer.insert").unwrap_or(UiRect::new(layout.canvas.x+8.0,layout.canvas.y+8.0,30.0,30.0));
+            let placement=raf_ui::overlays::place_overlay(trigger,crate::panels::interface_surface::INSERT_MENU_SIZE,
+                UiRect::new(layout.window.x,layout.window.y,layout.window.width,layout.window.height),raf_ui::overlays::UiPlacement::BottomStart,4.0).rect;
+            append(crate::panels::interface_surface::build_interface_insert_menu(self.palette),EditorRect::new(placement.x,placement.y,placement.width,placement.height));
+        }
+        if self.ui_performance.open {
+            let selected_rect = self.ui_performance.selected
+                .and_then(|index| self.ui_performance.snapshot.regions.get(index))
+                .and_then(|region| self.host.layout_rect(&region.id));
+            append(crate::panels::ui_performance_surface::build_ui_performance_surface(
+                self.palette, &self.ui_performance.snapshot, self.ui_performance.selected,
+                [layout.window.width, layout.window.height], selected_rect,
+            ), layout.window);
+        }
         let root = UiNode::new("editor.native.workbench.root", UiNodeKind::Root)
             .with_layout(UiLayout::fill(UiFlow::None))
             .with_style(UiStyle::transparent());
@@ -979,15 +1089,14 @@ fn electronics_analysis_lines(
         ];
     };
     let mut lines = electronics_model::analysis_lines(editor, panel, language);
-    for notice in electronics_model::notice_lines(editor, language) {
-        lines.push(
-            crate::panels::electronics_surface::ElectronicsAnalysisLine::with_tone(
-                notice,
-                crate::panels::electronics_surface::ElectronicsAnalysisTone::Failed,
-            ),
-        );
+    let mut notices = electronics_model::notice_lines(editor, language);
+    if panel == electronics_model::ElectronicsAnalysisPanel::Drc && editor.fabrication_status().is_some() {
+        notices.extend(lines);
+        notices
+    } else {
+        lines.extend(notices);
+        lines
     }
-    lines
 }
 
 /// Clamps an Assets overlay to the window so a menu, popover or modal is
@@ -1067,14 +1176,8 @@ fn status_items(
                     editor
                         .sync_is_stale()
                         .then(|| translate("electronics.sync.pcb_stale"))
-                });
-                first.unwrap_or_else(|| {
-                    if editor.is_dirty() {
-                        translate("app.electronics_modified")
-                    } else {
-                        translate("app.electronics_saved")
-                    }
-                })
+                }).or_else(||editor.fabrication_status().map(str::to_string));
+                first.unwrap_or_default()
             })
             .unwrap_or_default();
         vec![
@@ -1088,11 +1191,16 @@ fn status_items(
             ),
             format!("{}: {nets}", translate("app.schematic_nets")),
             format!(
-                "{}: {:.0} mm",
+                "{}: {:.2} mm",
                 translate("app.electronics_grid_status"),
                 grid_step
             ),
-            notices,
+            if electronics.is_some_and(NativeElectronicsEditor::is_dirty) {
+                translate("app.electronics_modified")
+            } else {
+                translate("app.electronics_saved")
+            },
+            notices.chars().take(160).collect(),
         ]
     } else {
         vec![

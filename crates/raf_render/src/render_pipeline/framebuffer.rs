@@ -17,9 +17,12 @@ pub struct Framebuffer {
     color: Vec<u32>,
     /// Per-pixel depth values. Length = width * height. Initialized to f32::MAX.
     depth: Vec<f32>,
+    depth_test: bool,
+    depth_write: bool,
 }
 
 impl Framebuffer {
+    pub(crate) fn set_depth_policy(&mut self, test: bool, write: bool) { self.depth_test = test; self.depth_write = write; }
     /// Create a new framebuffer with the given dimensions.
     pub fn new(width: u32, height: u32) -> Self {
         let pixel_count = (width * height) as usize;
@@ -28,6 +31,8 @@ impl Framebuffer {
             height,
             color: vec![0; pixel_count],
             depth: vec![f32::MAX; pixel_count],
+            depth_test: true,
+            depth_write: true,
         }
     }
 
@@ -60,11 +65,11 @@ impl Framebuffer {
         let idx = (y * self.width + x) as usize;
 
         // Depth test: closer pixels (smaller z) pass
-        if z >= self.depth[idx] {
+        if a == 0 || (self.depth_test && z >= self.depth[idx]) {
             return false;
         }
 
-        self.depth[idx] = z;
+        if self.depth_write { self.depth[idx] = z; }
         self.color[idx] = pack_rgba(r, g, b, a);
         true
     }
@@ -109,8 +114,8 @@ impl Framebuffer {
     pub fn write_pixel_unchecked(&mut self, idx: usize, z: f32, packed: u32) {
         unsafe {
             let depth = self.depth.get_unchecked_mut(idx);
-            if z < *depth {
-                *depth = z;
+            if !self.depth_test || z < *depth {
+                if self.depth_write { *depth = z; }
                 *self.color.get_unchecked_mut(idx) = packed;
             }
         }
@@ -152,7 +157,7 @@ impl Framebuffer {
         let idx = (y * self.width + x) as usize;
 
         // Depth test: same as opaque, closer pixels pass
-        if z >= self.depth[idx] {
+        if a == 0 || (self.depth_test && z >= self.depth[idx]) {
             return false;
         }
 
@@ -168,7 +173,7 @@ impl Framebuffer {
         );
 
         // Only update depth for fully opaque pixels
-        if a == 255 {
+        if a == 255 && self.depth_write {
             self.depth[idx] = z;
         }
 

@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
 use std::sync::{Arc, Condvar, Mutex};
 
-use raf_electronics::{CadSurfaceKind, DrcReport, PcbLayout, Schematic, SimulationResults};
+use raf_electronics::{CadSurfaceKind, DrcReport, Netlist, PcbLayout, Schematic, SimulationResults};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum AnalysisKind {
@@ -13,7 +13,7 @@ pub(super) enum AnalysisKind {
 
 pub(super) enum AnalysisResult {
     Drc(DrcReport),
-    Simulation(SimulationResults),
+    Simulation(SimulationResults, Netlist),
 }
 
 pub(super) struct AnalysisTask {
@@ -72,11 +72,11 @@ impl AnalysisWorker {
                     }
                     .map(AnalysisResult::Drc),
                     AnalysisKind::Simulation => {
-                        raf_electronics::simulation::simulate_dc_cancellable(
+                        raf_electronics::simulation::analyze_dc_cancellable(
                             &job.schematic,
                             &job.cancel,
                         )
-                        .map(AnalysisResult::Simulation)
+                        .map(|(result, netlist)| AnalysisResult::Simulation(result, netlist))
                     }
                 };
                 if !job.cancel.load(Ordering::Acquire) {

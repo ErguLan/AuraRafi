@@ -64,6 +64,9 @@ pub enum AiProvider {
     OpenRouter,
     /// OpenAI GPT models.
     OpenAI,
+    /// OpenCode Console and its separate Go subscription use API keys.
+    OpenCode,
+    OpenCodeGo,
     /// Google Gemini models.
     GenAI,
     /// Anthropic Claude models.
@@ -77,6 +80,8 @@ impl AiProvider {
             Self::Puerto => "Puerto (OpenClawd bridge)",
             Self::OpenRouter => "OpenRouter",
             Self::OpenAI => "OpenAI",
+            Self::OpenCode => "OpenCode Console",
+            Self::OpenCodeGo => "OpenCode Go",
             Self::GenAI => "GenAI (Google)",
             Self::Claude => "Claude (Anthropic)",
         }
@@ -88,6 +93,8 @@ impl AiProvider {
             Self::Puerto => "Bridge to OpenClawd / OpenClaw gateways on localhost:18789",
             Self::OpenRouter => "Multi-model API gateway",
             Self::OpenAI => "GPT models via OpenAI API",
+            Self::OpenCode => "OpenCode Console, charged per request",
+            Self::OpenCodeGo => "OpenCode Go subscription",
             Self::GenAI => "Google Gemini models",
             Self::Claude => "Anthropic Claude models",
         }
@@ -99,6 +106,8 @@ impl AiProvider {
             Self::Puerto => "Puente a gateways OpenClawd / OpenClaw en localhost:18789",
             Self::OpenRouter => "Gateway multi-modelo",
             Self::OpenAI => "Modelos GPT via OpenAI",
+            Self::OpenCode => "OpenCode Console, pago por uso",
+            Self::OpenCodeGo => "Suscripcion OpenCode Go",
             Self::GenAI => "Modelos Google Gemini",
             Self::Claude => "Modelos Anthropic Claude",
         }
@@ -112,6 +121,8 @@ impl AiProvider {
             AiProvider::Puerto,
             AiProvider::OpenRouter,
             AiProvider::OpenAI,
+            AiProvider::OpenCode,
+            AiProvider::OpenCodeGo,
             AiProvider::GenAI,
             AiProvider::Claude,
         ]
@@ -119,25 +130,12 @@ impl AiProvider {
 
     /// Providers with a verified editor transport in the current release.
     pub fn editor_supported() -> &'static [AiProvider] {
-        &[AiProvider::OpenRouter, AiProvider::OpenAI]
+        &[AiProvider::OpenRouter, AiProvider::OpenAI, AiProvider::OpenCode, AiProvider::OpenCodeGo]
     }
 
     pub fn is_editor_supported(self) -> bool {
         Self::editor_supported().contains(&self)
     }
-}
-
-/// Configuration for a user-defined AI model shortcut.
-/// These are stored globally so the user does not have to remember or type
-/// provider-specific model ids every time.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct AiModelShortcut {
-    /// Display label chosen by the user.
-    pub label: String,
-    /// Provider that owns this model.
-    pub provider: AiProvider,
-    /// Model id sent to the provider API.
-    pub model_id: String,
 }
 
 /// Configuration for an AI provider.
@@ -146,53 +144,45 @@ pub struct AiProviderConfig {
     pub provider: AiProvider,
     /// Base API URL for this provider.
     pub base_url: String,
-    /// Model name to use.
+    /// Model name to use. This is the single source of truth for the active
+    /// model id; every picker writes it directly.
     pub model: String,
     /// API key or token. Empty for local/no-auth providers.
     pub api_key: String,
     /// Whether this provider is enabled in the UI.
     pub enabled: bool,
+    /// Model ids the user pinned in a model picker. They lead the picker list
+    /// wherever the same provider card is edited, without a second model list.
+    #[serde(default)]
+    pub pinned_models: Vec<String>,
+    /// Whether the sanitized model catalog has been fetched for this provider.
+    #[serde(default)]
+    pub catalog_models: Vec<String>,
 }
 
 impl AiProviderConfig {
     /// Default configuration for a specific provider.
     pub fn for_provider(provider: AiProvider) -> Self {
-        match provider {
-            AiProvider::Puerto => Self {
-                provider,
-                base_url: "http://localhost:18789".to_string(),
-                model: String::new(),
-                api_key: String::new(),
-                enabled: false,
-            },
-            AiProvider::OpenRouter => Self {
-                provider,
-                base_url: "https://openrouter.ai/api/v1".to_string(),
-                model: String::new(),
-                api_key: String::new(),
-                enabled: true,
-            },
-            AiProvider::OpenAI => Self {
-                provider,
-                base_url: "https://api.openai.com/v1".to_string(),
-                model: String::new(),
-                api_key: String::new(),
-                enabled: false,
-            },
-            AiProvider::GenAI => Self {
-                provider,
-                base_url: "https://generativelanguage.googleapis.com/v1beta".to_string(),
-                model: String::new(),
-                api_key: String::new(),
-                enabled: false,
-            },
-            AiProvider::Claude => Self {
-                provider,
-                base_url: "https://api.anthropic.com".to_string(),
-                model: String::new(),
-                api_key: String::new(),
-                enabled: false,
-            },
+        let (base_url, enabled) = match provider {
+            AiProvider::Puerto => ("http://localhost:18789".to_string(), false),
+            AiProvider::OpenRouter => ("https://openrouter.ai/api/v1".to_string(), true),
+            AiProvider::OpenAI => ("https://api.openai.com/v1".to_string(), false),
+            AiProvider::OpenCode => ("https://opencode.ai/inference/openai/v1".into(), false),
+            AiProvider::OpenCodeGo => ("https://opencode.ai/inference/go/openai/v1".into(), false),
+            AiProvider::GenAI => (
+                "https://generativelanguage.googleapis.com/v1beta".to_string(),
+                false,
+            ),
+            AiProvider::Claude => ("https://api.anthropic.com".to_string(), false),
+        };
+        Self {
+            provider,
+            base_url,
+            model: String::new(),
+            api_key: String::new(),
+            enabled,
+            pinned_models: Vec::new(),
+            catalog_models: Vec::new(),
         }
     }
 }

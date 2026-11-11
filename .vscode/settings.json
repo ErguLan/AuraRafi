@@ -1,0 +1,29 @@
+{
+  "files.exclude": {
+    "**/target": true,
+    "**/target_*/": true,
+    "**/target_gnu": true,
+    "**/artifacts": true,
+    "**/.codex-run-logs": true,
+    "**/__pycache__": true
+  },
+  "search.exclude": {
+    "**/target": true,
+    "**/target_*/": true,
+    "**/target_gnu": true,
+    "**/artifacts": true,
+    "**/.codex-run-logs": true,
+    "**/*.rs.bk": true
+  },
+  "files.watcherExclude": {
+    "**/target/**": true,
+    "**/target_*/**": true,
+    "**/target_gnu/**": true,
+    "**/artifacts/**": true,
+    "**/.codex-run-logs/**": true,
+    "**/.git/objects/**": true
+  },
+  "git.autoRepositoryDetection": false,
+  "git.scanRepositories": [],
+  "explorer.excludeGitIgnore": false
+}

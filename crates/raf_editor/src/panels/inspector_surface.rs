@@ -176,6 +176,12 @@ pub fn build_inspector_surface_with_assets(
     display_unit: DisplayUnit,
     project_assets: &[String],
 ) -> UiSurface {
+    let body=content(palette,scene,selected,sessions,view,display_unit,project_assets);
+    build_inspector_with_content(palette,transition,view,body)
+}
+
+/// Shared inspector shell for scene properties and contextual document properties.
+pub fn build_inspector_with_content(palette:StudioUiPalette,transition:f32,view:InspectorViewState,body:UiNode)->UiSurface {
     let mut root_style = palette.panel_style();
     root_style.opacity = (0.55 + transition.clamp(0.0, 1.0) * 0.45).clamp(0.0, 1.0);
     let root = UiNode::new("inspector.root", UiNodeKind::Root)
@@ -190,15 +196,7 @@ pub fn build_inspector_surface_with_assets(
         .with_style(root_style)
         .with_child(header(palette))
         .with_child(tabs(palette, view.tab))
-        .with_child(content(
-            palette,
-            scene,
-            selected,
-            sessions,
-            view,
-            display_unit,
-            project_assets,
-        ));
+        .with_child(body);
 
     let mut surface = UiSurface::new("editor.inspector", palette, root);
     surface.style_sheet = inspector_style_sheet(palette);
@@ -1691,6 +1689,7 @@ fn color_picker_visual(palette: StudioUiPalette, hsv: crate::color_math::HsvColo
             UiNode::image(
                 "inspector.color.visual.image",
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(format!(
                         "builtin://color-picker/hsv/{:.0}",
                         hsv.hue

@@ -47,6 +47,7 @@ pub struct ConsoleSubmission {
 pub struct ConsolePanel {
     pub entries: Vec<LogEntry>,
     pub auto_scroll: bool,
+    pub filters_open: bool,
     pub filter_level: Option<LogLevel>,
     input: String,
     pub command_history: Vec<String>,
@@ -68,6 +69,7 @@ impl Default for ConsolePanel {
                 block: None,
             }],
             auto_scroll: true,
+            filters_open: false,
             filter_level: None,
             input: String::new(),
             command_history: Vec::new(),

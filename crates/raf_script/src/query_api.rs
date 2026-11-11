@@ -136,7 +136,7 @@ impl ScriptContext<'_> {
         Ok(hits)
     }
 }
-fn ray_box(origin: Vec3, direction: Vec3, limit: f32, bounds: Aabb) -> Option<(f32, Vec3)> {
+pub fn ray_box(origin: Vec3, direction: Vec3, limit: f32, bounds: Aabb) -> Option<(f32, Vec3)> {
     let mut near = 0.0_f32;
     let mut far = limit;
     let mut normal = Vec3::ZERO;

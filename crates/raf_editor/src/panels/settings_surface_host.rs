@@ -11,8 +11,9 @@ use raf_render::api_graphic_basic::EditorUiLayer;
 
 use crate::editor_layout::EditorRect;
 use crate::settings_surface::{
-    build_settings_surface_with_state_and_api_keys, provider_id, SettingsSection,
+    account_controls, account_welcome, build_settings_surface_with_state_and_api_keys, provider_id, SettingsSection,
 };
+use raf_ui::numeric::{UiNumericDraftIssue, UiNumericEditAction, UiNumericEditBank, UiNumericUnit};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsSurfaceIntent {
@@ -35,6 +36,12 @@ pub struct SettingsSurfaceHost {
     search_query: String,
     open_select: Option<String>,
     revealed_api_keys: Vec<AiProvider>,
+    ai_model_filter: String,
+    catalog_fingerprint: String,
+    catalog_loading: bool,
+    numeric_edits: UiNumericEditBank,
+    account_view: raf_ai::chatgpt_auth::AuthView,
+    activate_plan_after_auth: Option<u64>,
 }
 
 const MODAL_MARGIN: f32 = 24.0;
@@ -122,6 +129,7 @@ impl SettingsSurfaceHost {
                     "",
                     None,
                     &[],
+                    "",
                 ),
                 [0, 0, 0, 0],
             ),
@@ -136,7 +144,14 @@ impl SettingsSurfaceHost {
             search_query: String::new(),
             open_select: None,
             revealed_api_keys: Vec::new(),
+            ai_model_filter: String::new(),
+            catalog_fingerprint: String::new(),
+            catalog_loading: false,
+            numeric_edits: UiNumericEditBank::default(),
+            account_view: raf_ai::chatgpt_auth::AuthView::default(),
+            activate_plan_after_auth: None,
         };
+        host.refresh_numeric_bindings();
         host.seed_numeric_inputs();
         host
     }
@@ -154,6 +169,7 @@ impl SettingsSurfaceHost {
         self.resize_anchor = None;
         self.open_select = None;
         self.revealed_api_keys.clear();
+        self.ai_model_filter.clear();
         self.host
             .session_mut()
             .interaction
@@ -169,6 +185,9 @@ impl SettingsSurfaceHost {
         self.search_query.clear();
         self.open_select = None;
         self.revealed_api_keys.clear();
+        self.ai_model_filter.clear();
+        self.numeric_edits.cancel_all();
+        self.refresh_numeric_bindings();
         self.surface_dirty = true;
     }
 
@@ -190,6 +209,9 @@ impl SettingsSurfaceHost {
         self.search_query.clear();
         self.open_select = None;
         self.revealed_api_keys.clear();
+        self.ai_model_filter.clear();
+        self.numeric_edits.cancel_all();
+        self.refresh_numeric_bindings();
         self.surface_dirty = true;
     }
 
@@ -217,8 +239,38 @@ impl SettingsSurfaceHost {
         self.host.cursor_hint()
     }
 
+    pub fn has_interactive_hover(&self) -> bool {
+        self.host.has_interactive_hover()
+    }
+
     pub fn has_active_text_repeat(&self) -> bool {
-        self.host.has_active_text_repeat()
+        self.host.has_active_text_repeat() || self.account_view.busy || self.catalog_loading
+    }
+
+    pub fn account_command(&mut self, name: &str) -> bool {
+        let activates_plan = name == "settings.account.connect"
+            || name.starts_with("settings.account.reconnect:") || name.starts_with("settings.account.select:");
+        let result = if name == "settings.account.connect" {
+            raf_ai::chatgpt_auth::begin_sign_in(None, self.draft.language)
+        } else if let Some(index) = name.strip_prefix("settings.account.reconnect:").and_then(|v| v.parse::<usize>().ok()) {
+            raf_ai::chatgpt_auth::begin_sign_in(Some(index), self.draft.language)
+        } else if let Some(index) = name.strip_prefix("settings.account.select:").and_then(|v| v.parse::<usize>().ok()) {
+            raf_ai::chatgpt_auth::select_account(index).and_then(|()| raf_ai::chatgpt_auth::begin_model_refresh())
+        } else if name == "settings.account.refresh" {
+            raf_ai::chatgpt_auth::begin_model_refresh()
+        } else if name == "settings.account.signout" {
+            raf_ai::chatgpt_auth::begin_sign_out()
+        } else if name == "settings.account.welcome_ack" {
+            raf_ai::chatgpt_auth::acknowledge_welcome()
+        } else if name == "settings.account.usage" {
+            if crate::script_support::open_url("https://chatgpt.com/settings/usage") { Ok(()) }
+            else { Err("Could not open account usage settings.".into()) }
+        } else { return false; };
+        if result.is_ok() && activates_plan { self.activate_plan_after_auth = Some(self.account_view.generation); }
+        if let Some(view) = raf_ai::chatgpt_auth::snapshot() { self.account_view = view; }
+        if let Err(error) = result { self.account_view.message = Some(error); }
+        self.surface_dirty = true;
+        true
     }
 
     pub fn set_select_open(&mut self, id: &str, open: bool) {
@@ -267,74 +319,138 @@ impl SettingsSurfaceHost {
     }
 
     pub fn commit_numeric_drafts(&mut self) -> bool {
-        const NUMERIC_KEYS: [&str; 25] = [
-            "settings.runtime.max_instances",
-            "settings.runtime.width",
-            "settings.runtime.height",
-            "settings.runtime.fps_limit",
-            "settings.runtime.script_budget_ms",
-            "settings.runtime.script_operation_limit",
-            "settings.theme_experimental",
-            "settings.font_size",
-            "settings.ui_scale",
-            "settings.fps_limit",
-            "settings.grid_size",
-            "settings.grid_load_distance",
-            "settings.electronics_grid_step_mm",
-            "settings.electronics_grid_opacity",
-            "settings.auto_save",
-            "settings.hierarchy_row_height",
-            "settings.hierarchy_indent_width",
-            "settings.wasd_speed",
-            "settings.gizmo_growth_scale",
-            "settings.move_sensitivity",
-            "settings.rotate_sensitivity",
-            "settings.scale_sensitivity",
-            "settings.script_timeout_ms",
-            "settings.agent_max_response_tokens",
-            "settings.agent_max_tool_calls",
-        ];
-        let mut changed = false;
-        for key in NUMERIC_KEYS {
-            if !self.numeric_input_enabled(key) {
-                continue;
-            }
-            let text = self.text(&format!("{key}.text"));
-            let Ok(value) = text.trim().parse::<f32>() else {
-                continue;
-            };
-            let before = self.draft.clone();
-            if crate::native_workbench::apply_settings_range(&mut self.draft, key, value)
-                && self.draft != before
-            {
-                changed = true;
-            }
-        }
-        if changed {
-            self.draft_dirty = true;
-        }
-        changed
+        let before = self.draft.clone();
+        self.try_commit_numeric_drafts() && self.draft != before
     }
 
-    fn numeric_input_enabled(&self, key: &str) -> bool {
-        if key == "settings.fps_limit" && self.draft.fps_limit == 0 {
+    /// Validates every enabled numeric draft first, then applies all of them
+    /// to a cloned settings value so invalid fields cannot partially mutate
+    /// the modal draft.
+    pub fn try_commit_numeric_drafts(&mut self) -> bool {
+        self.refresh_numeric_bindings();
+        let values = match self.numeric_edits.pending_values() {
+            Ok(values) => values,
+            Err(issues) => {
+                self.mark_numeric_issues(&issues);
+                return false;
+            }
+        };
+
+        let mut next_draft = self.draft.clone();
+        for value in &values {
+            if !crate::native_workbench::apply_settings_range(
+                &mut next_draft,
+                &value.key,
+                value.value,
+            ) {
+                self.numeric_edits.mark_rejected(&value.key);
+                self.set_numeric_invalid(&value.key, true);
+                return false;
+            }
+        }
+
+        if let Err(issues) = self.numeric_edits.commit_pending() {
+            self.mark_numeric_issues(&issues);
             return false;
         }
-        if key == "settings.ui_scale" && self.draft.auto_ui_scale {
-            return false;
+
+        if self.draft != next_draft {
+            self.draft = next_draft;
+            self.draft_dirty = true;
         }
-        if key == "settings.agent_max_tool_calls" && !self.draft.agent_tool_call_limit_enabled {
-            return false;
-        }
-        if self.draft.simple_mode
-            && matches!(
-                key,
-                "settings.grid_size" | "settings.grid_load_distance" | "settings.auto_save"
-            )
-        {
-            return false;
-        }
+        self.surface_dirty = true;
         true
+    }
+
+    /// Read-only validation hook for callers that need to guard Save/Apply.
+    pub fn numeric_drafts_valid(&self) -> bool {
+        let Ok(values) = self.numeric_edits.pending_values() else {
+            return false;
+        };
+        let mut candidate = self.draft.clone();
+        values.iter().all(|value| {
+            crate::native_workbench::apply_settings_range(&mut candidate, &value.key, value.value)
+        })
+    }
+
+    pub fn is_numeric_text_key(&self, key: &str) -> bool {
+        self.numeric_edits.binding_for_text_key(key).is_some()
+    }
+
+    fn mark_numeric_issues(&mut self, issues: &[UiNumericDraftIssue]) {
+        for issue in issues {
+            self.numeric_edits.mark_rejected(&issue.key);
+            self.set_numeric_invalid(&issue.key, true);
+        }
+    }
+
+    fn refresh_numeric_bindings(&mut self) {
+        let palette = self.host.surface().palette;
+        for section in SettingsSection::ALL {
+            let surface = build_settings_surface_with_state_and_api_keys(
+                palette,
+                &self.draft,
+                section,
+                self.modal_rect,
+                "",
+                None,
+                &self.revealed_api_keys,
+                &self.ai_model_filter,
+            );
+            self.numeric_edits.merge_tree(&surface.root);
+        }
+        // Runtime width is authored in pixels; the range remains the source
+        // of truth for its numeric bounds.
+        self.numeric_edits
+            .set_unit("settings.runtime.width", UiNumericUnit::Pixels);
+    }
+
+    fn set_numeric_invalid(&mut self, key: &str, invalid: bool) {
+        let Some(node_id) = self
+            .numeric_edits
+            .bindings()
+            .find(|binding| binding.key == key)
+            .map(|binding| binding.node_id.clone())
+        else {
+            return;
+        };
+        if self
+            .host
+            .surface()
+            .root
+            .find(&node_id)
+            .is_some_and(|node| node.invalid != invalid)
+        {
+            if let Some(node) = self.host.surface_mut().root.find_mut(&node_id) {
+                node.invalid = invalid;
+            }
+        }
+    }
+
+    fn sync_numeric_invalid_markers(&mut self) {
+        let states = self
+            .numeric_edits
+            .bindings()
+            .map(|binding| {
+                (
+                    binding.node_id.clone(),
+                    self.numeric_edits.is_invalid(&binding.key),
+                )
+            })
+            .collect::<Vec<_>>();
+        for (node_id, invalid) in states {
+            if self
+                .host
+                .surface()
+                .root
+                .find(&node_id)
+                .is_some_and(|node| node.invalid != invalid)
+            {
+                if let Some(node) = self.host.surface_mut().root.find_mut(&node_id) {
+                    node.invalid = invalid;
+                }
+            }
+        }
     }
 
     pub fn accept(&mut self) -> EngineSettings {
@@ -347,10 +463,13 @@ impl SettingsSurfaceHost {
 
     pub fn cancel(&mut self, committed: &EngineSettings) {
         self.draft = committed.clone();
+        self.numeric_edits.cancel_all();
+        self.refresh_numeric_bindings();
         self.draft_dirty = false;
         self.drag_anchor = None;
         self.resize_anchor = None;
         self.revealed_api_keys.clear();
+        self.ai_model_filter.clear();
         self.surface_dirty = true;
     }
 
@@ -384,8 +503,62 @@ impl SettingsSurfaceHost {
         section: SettingsSection,
         rect: EditorRect,
     ) {
+        self.catalog_loading = false;
+        if section == SettingsSection::Ai {
+            if self.draft.agent_openai_use_plan { raf_ai::chatgpt_auth::ensure_models_requested(); }
+            if let Some(view) = raf_ai::chatgpt_auth::snapshot() {
+                if view != self.account_view {
+                    if self.activate_plan_after_auth.is_some_and(|generation| generation != view.generation)
+                        && !view.busy && view.accounts.iter().any(|a| a.active && a.connected) {
+                        self.draft.agent_openai_use_plan = true;
+                        self.draft.default_ai_provider = AiProvider::OpenAI;
+                        if let Some(provider) = self.draft.ai_providers.iter_mut().find(|p| p.provider == AiProvider::OpenAI) { provider.enabled = true; }
+                        self.draft_dirty = true;
+                    }
+                    if !view.busy { self.activate_plan_after_auth = None; }
+                    // Discovery never silently changes a user's selected model.
+                    self.account_view = view;
+                    self.surface_dirty = true;
+                }
+            }
+            // The displayed provider card refreshes its model catalog on
+            // demand; the fingerprint turns a finished fetch into a surface
+            // rebuild so rows appear without reopening the picker.
+            if let Some(provider) =
+                self.draft
+                    .ai_providers
+                    .iter()
+                    .find(|config| config.provider == self.draft.default_ai_provider)
+                    .cloned()
+            {
+                if !(provider.provider == AiProvider::OpenAI && self.draft.agent_openai_use_plan) && matches!(
+                    provider.provider,
+                    AiProvider::OpenRouter
+                        | AiProvider::OpenAI
+                        | AiProvider::OpenCode
+                        | AiProvider::OpenCodeGo
+                ) {
+                    let base_url = match provider.provider {
+                        AiProvider::OpenRouter | AiProvider::OpenAI => provider.base_url.clone(),
+                        _ => String::new(),
+                    };
+                    let trigger = format!("settings.ai-provider.{}.model.trigger", provider_id(provider.provider));
+                    if self.open_select.as_deref() == Some(trigger.as_str()) {
+                        raf_ai::provider_catalog::ensure_requested(provider.provider, &base_url, &provider.api_key);
+                    }
+                    let view = raf_ai::provider_catalog::snapshot_for(provider.provider, &base_url, &provider.api_key);
+                    self.catalog_loading = view.loading;
+                    let fingerprint = format!("{:?}{:?}{}{}", view.models, view.error, view.loading, view.fetched);
+                    if fingerprint != self.catalog_fingerprint {
+                        self.catalog_fingerprint = fingerprint;
+                        self.surface_dirty = true;
+                    }
+                }
+            }
+        }
         if !self.draft_dirty && self.draft != *settings {
             self.draft = settings.clone();
+            self.refresh_numeric_bindings();
             self.surface_dirty = true;
         }
         if self.section != section {
@@ -398,124 +571,57 @@ impl SettingsSurfaceHost {
         }
         self.rect = rect;
         if self.surface_dirty {
-            self.host
-                .set_surface(build_settings_surface_with_state_and_api_keys(
+            let mut surface = build_settings_surface_with_state_and_api_keys(
+                palette,
+                &self.draft,
+                self.section,
+                self.modal_rect,
+                &self.search_query,
+                self.open_select.as_deref(),
+                &self.revealed_api_keys,
+                &self.ai_model_filter,
+            );
+            if self.section == SettingsSection::Ai {
+                // The ChatGPT account block is reachable as soon as the AI
+                // section opens: the auth button must not depend on which
+                // provider card is currently selected.
+                let account = account_controls(
                     palette,
                     &self.draft,
-                    self.section,
-                    self.modal_rect,
-                    &self.search_query,
+                    &self.account_view,
                     self.open_select.as_deref(),
-                    &self.revealed_api_keys,
-                ));
+                );
+                if let Some(card) = surface.root.find_mut("settings.ai-provider.openai") {
+                    card.children.insert(2.min(card.children.len()), account);
+                } else if let Some(section_card) = surface.root.find_mut("settings.ai_providers") {
+                    section_card
+                        .children
+                        .insert(3.min(section_card.children.len()), account);
+                }
+                if self.account_view.needs_welcome {
+                    surface.root.children.push(account_welcome(palette, self.modal_rect));
+                }
+            }
+            self.numeric_edits.merge_tree(&surface.root);
+            self.host.set_surface(surface);
             self.seed_numeric_inputs();
+            self.sync_numeric_invalid_markers();
             self.last_rect = Some(rect);
             self.surface_dirty = false;
         }
     }
 
     fn seed_numeric_inputs(&mut self) {
+        let numeric_values = self
+            .numeric_edits
+            .bindings()
+            .filter_map(|binding| {
+                self.numeric_edits
+                    .draft_text(&binding.key)
+                    .map(|text| (binding.text_key.clone(), text.to_string()))
+            })
+            .collect::<Vec<_>>();
         let values = [
-            (
-                "settings.runtime.max_instances.text",
-                self.draft.runtime.max_instances.to_string(),
-            ),
-            (
-                "settings.runtime.width.text",
-                self.draft.runtime.window_size[0].to_string(),
-            ),
-            (
-                "settings.runtime.height.text",
-                self.draft.runtime.window_size[1].to_string(),
-            ),
-            (
-                "settings.runtime.fps_limit.text",
-                self.draft.runtime.fps_limit.to_string(),
-            ),
-            (
-                "settings.runtime.script_budget_ms.text",
-                self.draft.runtime.script_budget_ms.to_string(),
-            ),
-            (
-                "settings.runtime.script_operation_limit.text",
-                self.draft.runtime.script_operation_limit.to_string(),
-            ),
-            (
-                "settings.theme_experimental.text",
-                format!("{:.0}", self.draft.theme_experimental),
-            ),
-            (
-                "settings.font_size.text",
-                format!("{:.0}", self.draft.font_size),
-            ),
-            (
-                "settings.ui_scale.text",
-                format!("{:.1}", self.draft.ui_scale),
-            ),
-            (
-                "settings.fps_limit.text",
-                self.draft.fps_limit.max(15).to_string(),
-            ),
-            (
-                "settings.grid_size.text",
-                format!("{:.1}", self.draft.grid_size),
-            ),
-            (
-                "settings.grid_load_distance.text",
-                format!("{:.1}", self.draft.grid_load_distance),
-            ),
-            (
-                "settings.electronics_grid_step_mm.text",
-                format!("{:.0}", self.draft.electronics_grid_step_mm),
-            ),
-            (
-                "settings.electronics_grid_opacity.text",
-                format!("{:.2}", self.draft.electronics_grid_opacity),
-            ),
-            (
-                "settings.auto_save.text",
-                self.draft.auto_save_interval_seconds.to_string(),
-            ),
-            (
-                "settings.hierarchy_row_height.text",
-                format!("{:.0}", self.draft.hierarchy_row_height),
-            ),
-            (
-                "settings.hierarchy_indent_width.text",
-                format!("{:.0}", self.draft.hierarchy_indent_width),
-            ),
-            (
-                "settings.wasd_speed.text",
-                format!("{:.2}", self.draft.wasd_speed),
-            ),
-            (
-                "settings.gizmo_growth_scale.text",
-                format!("{:.0}", self.draft.gizmo_growth_scale),
-            ),
-            (
-                "settings.move_sensitivity.text",
-                format!("{:.2}", self.draft.move_gizmo_sensitivity),
-            ),
-            (
-                "settings.rotate_sensitivity.text",
-                format!("{:.2}", self.draft.rotate_gizmo_sensitivity),
-            ),
-            (
-                "settings.scale_sensitivity.text",
-                format!("{:.2}", self.draft.scale_gizmo_sensitivity),
-            ),
-            (
-                "settings.script_timeout_ms.text",
-                self.draft.script_timeout_ms.to_string(),
-            ),
-            (
-                "settings.agent_max_response_tokens.text",
-                self.draft.agent_max_response_tokens.to_string(),
-            ),
-            (
-                "settings.agent_max_tool_calls.text",
-                self.draft.agent_max_tool_calls.to_string(),
-            ),
             (
                 "settings.script_external_editor.text",
                 self.draft.script_external_editor_cmd.clone(),
@@ -525,6 +631,7 @@ impl SettingsSurfaceHost {
                 self.draft.script_external_editor_cmd.clone(),
             ),
             ("settings.search", self.search_query.clone()),
+            ("settings.ai.model.filter", self.ai_model_filter.clone()),
         ];
         let ai_values = raf_core::ai::AiProvider::all()
             .iter()
@@ -553,10 +660,14 @@ impl SettingsSurfaceHost {
             .flatten()
             .collect::<Vec<_>>();
         let controls = &mut self.host.session_mut().interaction.controls;
+        for (key, value) in numeric_values {
+            controls.set_text(key, value, 32);
+        }
         for (key, value) in values {
             let max_length = match key {
                 "settings.search" => 256,
                 "settings.script_external_editor.text" | "settings.script_external_editor" => 256,
+                "settings.ai.model.filter" => 256,
                 _ => 32,
             };
             controls.set_text(key, value, max_length);
@@ -565,12 +676,19 @@ impl SettingsSurfaceHost {
             controls.set_text(key, value, 512);
         }
         for (field, value) in [
-            ("repository_url", &self.draft.external_asset_studio.repository_url),
+            (
+                "repository_url",
+                &self.draft.external_asset_studio.repository_url,
+            ),
             ("directory", &self.draft.external_asset_studio.directory),
             ("program", &self.draft.external_asset_studio.program),
             ("entry_point", &self.draft.external_asset_studio.entry_point),
         ] {
-            controls.set_text(format!("settings.external_studio.{field}"), value.clone(), 512);
+            controls.set_text(
+                format!("settings.external_studio.{field}"),
+                value.clone(),
+                512,
+            );
         }
     }
 
@@ -590,8 +708,146 @@ impl SettingsSurfaceHost {
             raf_ui::UiRect::new(self.rect.x, self.rect.y, self.rect.width, self.rect.height),
         );
 
+        let mut returned_actions = Vec::with_capacity(actions.len() + 1);
+        for dispatched in actions.iter().cloned() {
+            match &dispatched.action {
+                // The model picker search box is host-owned presentation
+                // state; it never reaches the settings draft.
+                UiAction::SetText { key, value }
+                    if key == "settings.ai.model.filter" =>
+                {
+                    let value = value.clone();
+                    if self.ai_model_filter != value {
+                        self.ai_model_filter = value;
+                        self.surface_dirty = true;
+                    }
+                }
+                UiAction::SetText { key, value }
+                    if self.numeric_edits.binding_for_text_key(key).is_some() =>
+                {
+                    let numeric_key = self
+                        .numeric_edits
+                        .binding_for_text_key(key)
+                        .map(|binding| binding.key.clone())
+                        .expect("numeric binding was checked above");
+                    self.numeric_edits.edit_text(key, value.clone());
+                    self.draft_dirty = true;
+                    let invalid = self.numeric_edits.is_invalid(&numeric_key);
+                    self.set_numeric_invalid(&numeric_key, invalid);
+                    returned_actions.push(dispatched);
+                }
+                UiAction::SetRange { key, value }
+                    if self
+                        .numeric_edits
+                        .bindings()
+                        .any(|binding| binding.key.as_str() == key.as_str()) =>
+                {
+                    self.numeric_edits.cancel(key);
+                    let text = self
+                        .numeric_edits
+                        .format_value(key, *value)
+                        .unwrap_or_else(|| value.to_string());
+                    self.numeric_edits.sync_committed(key, *value, text.clone());
+                    if let Some(binding) = self
+                        .numeric_edits
+                        .bindings()
+                        .find(|binding| binding.key.as_str() == key.as_str())
+                    {
+                        self.host.session_mut().interaction.controls.set_text(
+                            binding.text_key.clone(),
+                            text,
+                            32,
+                        );
+                    }
+                    self.set_numeric_invalid(key, false);
+                    returned_actions.push(dispatched);
+                }
+                UiAction::Command { name }
+                    if self
+                        .numeric_edits
+                        .binding_for_submit_command(name)
+                        .is_some() =>
+                {
+                    let numeric_key = self
+                        .numeric_edits
+                        .binding_for_submit_command(name)
+                        .map(|binding| binding.key.clone())
+                        .expect("numeric binding was checked above");
+                    match self.numeric_edits.commit_for_submit(name) {
+                        Some(UiNumericEditAction::Committed { key, value }) => {
+                            let text = self
+                                .numeric_edits
+                                .format_value(&key, value)
+                                .unwrap_or_else(|| value.to_string());
+                            self.numeric_edits.sync_committed(&key, value, text.clone());
+                            if let Some(text_key) = self
+                                .numeric_edits
+                                .bindings()
+                                .find(|binding| binding.key.as_str() == key.as_str())
+                                .map(|binding| binding.text_key.clone())
+                            {
+                                self.host
+                                    .session_mut()
+                                    .interaction
+                                    .controls
+                                    .set_text(text_key, text, 32);
+                            }
+                            self.set_numeric_invalid(&key, false);
+                            returned_actions.push(UiDispatchedAction {
+                                target_id: dispatched.target_id.clone(),
+                                event: dispatched.event.clone(),
+                                action: UiAction::SetRange { key, value },
+                            });
+                        }
+                        Some(UiNumericEditAction::Rejected { .. }) | None => {
+                            self.set_numeric_invalid(&numeric_key, true);
+                        }
+                        _ => {}
+                    }
+                }
+                UiAction::Command { name } if name == "settings.numeric.cancel" => {
+                    let numeric_key = self
+                        .numeric_edits
+                        .binding_for_node(&dispatched.target_id)
+                        .map(|binding| binding.key.clone());
+                    if let Some(numeric_key) = numeric_key {
+                        if let Some(UiNumericEditAction::Cancelled { restored_text, .. }) =
+                            self.numeric_edits.cancel(&numeric_key)
+                        {
+                            let text_key = self
+                                .numeric_edits
+                                .bindings()
+                                .find(|binding| binding.key.as_str() == numeric_key.as_str())
+                                .map(|binding| binding.text_key.clone());
+                            if let Some(text_key) = text_key {
+                                self.host.session_mut().interaction.controls.set_text(
+                                    text_key,
+                                    restored_text,
+                                    32,
+                                );
+                            }
+                            self.set_numeric_invalid(&numeric_key, false);
+                            returned_actions.push(UiDispatchedAction {
+                                target_id: dispatched.target_id.clone(),
+                                event: dispatched.event.clone(),
+                                action: UiAction::Command {
+                                    name: "settings.numeric.cancelled".to_string(),
+                                },
+                            });
+                        }
+                    }
+                }
+                UiAction::Command { name }
+                    if matches!(name.as_str(), "settings.apply" | "settings.save") =>
+                {
+                    returned_actions.push(dispatched);
+                }
+                _ => returned_actions.push(dispatched),
+            }
+        }
+
         let pointer = self.host.session().interaction.pointer_position();
-        for dispatched in &actions {
+        for dispatched in &returned_actions {
             let UiAction::Command { name } = &dispatched.action else {
                 continue;
             };
@@ -636,7 +892,7 @@ impl SettingsSurfaceHost {
                 _ => {}
             }
         }
-        actions
+        returned_actions
     }
 
     pub fn compositor_layer(

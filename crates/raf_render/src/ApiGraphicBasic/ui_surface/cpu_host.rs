@@ -3,15 +3,19 @@
 //! It has no WGPU dependency. A caller can upload its borrowed RGBA output
 //! through `DirectCanvasPresenter` only when a CPU fallback is active.
 
-use super::compilation::{UiSurfaceCompilationCache, UiSurfaceCompileMetrics};
+use super::compilation::{
+    update_surface_node, UiSurfaceCompilationCache, UiSurfaceCompileMetrics, UiSurfaceUpdateImpact,
+};
 use super::{
-    UiDispatchedAction, UiInputState, UiSurface, UiSurfaceCpuMetrics, UiSurfaceCpuRenderer,
-    UiSurfaceDiagnostics, UiSurfaceDrawList, UiSurfaceFrame, UiSurfaceImageStore, UiSurfaceSession,
+    UiDispatchedAction, UiDocumentUpdate, UiDocumentUpdateError, UiInputState, UiSurface,
+    UiSurfaceCpuMetrics, UiSurfaceCpuRenderer, UiSurfaceDiagnostics, UiSurfaceDrawList,
+    UiSurfaceFrame, UiSurfaceImageStore, UiSurfaceSession,
 };
 
 pub struct CpuUiSurfaceHost {
     surface: UiSurface,
     surface_revision: u64,
+    paint_revision: u64,
     session: UiSurfaceSession,
     compositor: UiSurfaceCpuRenderer,
     images: UiSurfaceImageStore,
@@ -27,6 +31,7 @@ impl CpuUiSurfaceHost {
         Self {
             surface,
             surface_revision: 0,
+            paint_revision: 0,
             session: UiSurfaceSession::default(),
             compositor: UiSurfaceCpuRenderer::new(),
             images: UiSurfaceImageStore::default(),
@@ -44,6 +49,7 @@ impl CpuUiSurfaceHost {
 
     pub fn surface_mut(&mut self) -> &mut UiSurface {
         self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
+        self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
         &mut self.surface
     }
 
@@ -51,11 +57,38 @@ impl CpuUiSurfaceHost {
         if self.surface != surface {
             self.surface = surface;
             self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
+            self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
         }
+    }
+
+    /// Applies a typed UI document update while preserving cached geometry
+    /// for paint-only changes such as enabled state and image options.
+    pub fn update_node(
+        &mut self,
+        id: &str,
+        update: UiDocumentUpdate,
+    ) -> Result<bool, UiDocumentUpdateError> {
+        let impact = update_surface_node(&mut self.surface, id, update)?;
+        if impact == UiSurfaceUpdateImpact::NoChange {
+            return Ok(false);
+        }
+        if impact == UiSurfaceUpdateImpact::Layout {
+            self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
+        } else {
+            self.compilation.invalidate_paint_snapshot();
+        }
+        self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
+        Ok(true)
     }
 
     pub fn session(&self) -> &UiSurfaceSession {
         &self.session
+    }
+
+    pub fn performance_snapshot(&self) -> raf_ui::UiPerformanceSnapshot {
+        let mut snapshot = self.session.performance.snapshot();
+        snapshot.append(self.images.performance_snapshot());
+        snapshot
     }
 
     /// Mutable access to transient focus, text, and scroll state. This keeps
@@ -134,13 +167,14 @@ impl CpuUiSurfaceHost {
         F: FnMut(&str) -> String,
     {
         let raster_scale = raster_scale.clamp(1.0, 4.0);
-        let compiled = self.compilation.compile(
+        let compiled = self.compilation.compile_with_paint_revision(
             &self.surface,
             &mut self.session,
             self.surface_revision,
             logical_size,
             raster_scale,
             self.clear_color,
+            self.paint_revision,
             |key| resolve(key),
         );
         for quad in &compiled.draw_list.images {
@@ -150,12 +184,23 @@ impl CpuUiSurfaceHost {
             target_size[0].max(1) as f32 / logical_size[0].max(1) as f32,
             target_size[1].max(1) as f32 / logical_size[1].max(1) as f32,
         );
+        let submission_started = std::time::Instant::now();
         self.last_metrics = self.compositor.render(
             &draw_list,
             &self.session.text_atlas,
             &self.images,
             target_size,
             self.clear_color,
+        );
+        super::cost_observation::observe(
+            &mut self.session.performance,
+            &self.surface.id,
+            raf_ui::UiWorkPhase::Submission,
+            raf_ui::UiWorkCause::Explicit,
+            submission_started.elapsed(),
+            compiled.frame.layout_boxes.len(),
+            0,
+            false,
         );
         self.last_frame = Some((*compiled.frame).clone());
         self.last_draw_list = Some(draw_list);

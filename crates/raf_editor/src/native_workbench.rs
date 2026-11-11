@@ -60,17 +60,15 @@ use crate::panels::assets_surface_host::AssetsSurfaceHost;
 use crate::panels::editor_bottom_dock_host::EditorBottomDockHost;
 use crate::panels::editor_bottom_dock_surface::{
     build_dock_splitter_surface, build_drop_preview_surface, build_tab_context_menu_surface,
-    build_tab_strip_surface, BottomTabDragPreview,
+    BottomTabDragPreview,
 };
 use crate::panels::editor_panel_splitter_surface::{
     build_editor_splitter_surface, EditorSplitterKind,
 };
 use crate::panels::editor_status_surface::build_status_surface;
 use crate::panels::electronics_canvas_overlay_surface::{
-    build_electronics_canvas_overlay_surface, ElectronicsCanvasOverlayParams,
+    ElectronicsCanvasOverlayParams,
 };
-use crate::panels::electronics_inspector_surface::build_electronics_inspector_surface;
-use crate::panels::electronics_navigator_surface::build_electronics_navigator_surface;
 use crate::panels::electronics_toolbar_surface::build_electronics_toolbar_surface;
 use crate::panels::hierarchy_model::HierarchyModel;
 use crate::panels::hierarchy_surface::{
@@ -95,16 +93,28 @@ use crate::settings_surface::SettingsSection;
 use raf_core::project::BuildingStyle;
 
 #[path = "native_workbench_electronics.rs"]
-mod electronics_model;
+pub(crate) mod electronics_model;
 #[path = "native_workbench_helpers.rs"]
 mod helpers;
 #[path = "native_workbench_hierarchy.rs"]
 mod hierarchy_state;
+#[path = "native_workbench_performance.rs"]
+mod performance;
+#[path = "native_workbench_regions.rs"]
+mod regions;
 #[path = "native_workbench_input.rs"]
 mod input;
+#[path = "native_workbench_interfaces.rs"]
+mod interfaces;
+#[path = "native_workbench_footprints.rs"]
+mod footprints;
+#[path = "native_workbench_electronics_layout.rs"]
+pub(crate) mod electronics_layout;
 pub(crate) use input::parse_agent_action;
 #[path = "native_workbench_lighting.rs"]
 mod lighting;
+#[path = "native_workbench_numeric.rs"]
+mod numeric;
 #[path = "native_workbench_settings.rs"]
 mod settings;
 #[path = "native_workbench_surface.rs"]
@@ -218,6 +228,9 @@ struct HierarchyDragState {
 }
 
 pub struct NativeGameWorkbench {
+    interface: crate::panels::interface_surface_host::InterfaceSurfaceHost,
+    ui_performance: performance::UiPerformanceView,
+    hierarchy_document_cache: Option<(regions::HierarchyDocumentKey, UiSurface)>,
     region: InputRegionId,
     rect: EditorRect,
     host: DirectUiSurfaceHost,
@@ -225,6 +238,7 @@ pub struct NativeGameWorkbench {
     electronics_images_registered: bool,
     electronics_overlay_images_registered: bool,
     electronics_overlay_key: Option<(u64, u64, [u32; 2], bool, StudioUiPalette, Language, f32)>,
+    electronics_minimap_cache: electronics_minimap::RasterCache,
     electronics_overlay_canvas: EditorRect,
     electronics_overlay_active: bool,
     search_surface: SearchSurfaceHost,
@@ -237,6 +251,8 @@ pub struct NativeGameWorkbench {
     agent_readiness: AgentReadiness,
     agent_canvas_changed: bool,
     settings_section: SettingsSection,
+    project_numeric_edits: raf_ui::numeric::UiNumericEditBank,
+    project_numeric_scope: Option<uuid::Uuid>,
     project_catalog: ProjectCatalog,
     last_catalog_revision: u64,
     assets_surface: AssetsSurfaceHost,
@@ -261,11 +277,13 @@ pub struct NativeGameWorkbench {
     hierarchy_state_path: Option<PathBuf>,
     hierarchy_pending_state: Option<crate::panels::hierarchy_model::details::HierarchyViewState>,
     hierarchy_state_dirty: bool,
+    hierarchy_state_writer: hierarchy_state::HierarchyStateWriter,
     lighting_section: String,
     lighting_preview_neutral: bool,
     lighting_error: bool,
     electronics_navigator_tab: String,
     electronics_library_query: String,
+    electronics_workspace: electronics_layout::ElectronicsWorkspaceState,
     /// Entrance sample for Electronics menus and the canvas-local overlay.
     /// 1.0 means settled closed, 0.0 means fully open.
     electronics_menu_motion: UiTween,
@@ -286,6 +304,9 @@ pub struct NativeGameWorkbench {
     /// pointer so the hint never competes with the menu it would sit under.
     electronics_hint_motion: UiTween,
     electronics_value_draft: Option<electronics_model::InspectorValueDraft>,
+    footprint_chooser: footprints::FootprintChooserState,
+    inspector_footprint_signature: String,
+    inspector_footprint_presentation: Option<crate::panels::electronics_inspector_surface::ElectronicsInspectorPresentation>,
     inspector_session_name: String,
     hierarchy_bookmarks: [bool; 3],
     hierarchy_renaming: Option<(SceneNodeId, String)>,
@@ -294,6 +315,7 @@ pub struct NativeGameWorkbench {
     inspector_view: InspectorViewState,
     inspector_transform_drag_active: bool,
     toolbar_state: ViewportToolbarState,
+    popup_press_consumed: bool,
     runtime_toolbar: raf_player::surface::RuntimeToolbarState,
     bottom_dock: EditorBottomDockHost,
     inspector_sessions: ProjectSessionRegistry,
@@ -354,6 +376,11 @@ pub struct NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
+    pub(crate) fn flush_interface_document(&mut self)->Result<(),String>{
+        self.interface.finish_gesture();
+        if self.interface.dirty {self.interface.save()?;self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);}
+        Ok(())
+    }
     pub fn new(
         graphics: &NativeGraphicsContext<'_>,
         palette: StudioUiPalette,
@@ -381,12 +408,15 @@ impl NativeGameWorkbench {
         let electronics_overlay_host = graphics.create_ui_host(overlay_surface, WORKBENCH_CLEAR);
         Self {
             region: InputRegionId::from_static("native.editor.workbench"),
+            ui_performance: Default::default(),
+            hierarchy_document_cache: None,
             rect,
             host,
             electronics_overlay_host,
             electronics_images_registered: false,
             electronics_overlay_images_registered: false,
             electronics_overlay_key: None,
+            electronics_minimap_cache: Default::default(),
             electronics_overlay_canvas: EditorRect::default(),
             electronics_overlay_active: false,
             search_surface: SearchSurfaceHost::new(graphics, rect, palette),
@@ -399,6 +429,8 @@ impl NativeGameWorkbench {
             agent_readiness: AgentReadiness::ProviderDisabled,
             agent_canvas_changed: false,
             settings_section: SettingsSection::Appearance,
+            project_numeric_edits: Default::default(),
+            project_numeric_scope: None,
             project_catalog: ProjectCatalog::default(),
             last_catalog_revision: 0,
             assets_surface: AssetsSurfaceHost::default(),
@@ -414,6 +446,7 @@ impl NativeGameWorkbench {
             palette,
             project_name: DEFAULT_PROJECT_NAME.to_string(),
             project_type: ProjectType::Game,
+            interface: crate::panels::interface_surface_host::InterfaceSurfaceHost::default(),
             hierarchy_model: HierarchyModel::default(),
             script_relationships: crate::script_relationships::ScriptRelationshipIndex::default(),
             hierarchy_folder_ids: HashSet::new(),
@@ -423,11 +456,13 @@ impl NativeGameWorkbench {
             hierarchy_state_path: None,
             hierarchy_pending_state: None,
             hierarchy_state_dirty: false,
+            hierarchy_state_writer: hierarchy_state::HierarchyStateWriter::default(),
             lighting_section: "overview".into(),
             lighting_preview_neutral: false,
             lighting_error: false,
             electronics_navigator_tab: "library".to_string(),
             electronics_library_query: String::new(),
+            electronics_workspace: Default::default(),
             electronics_menu_motion: UiTween::new(1.0, UiMotionSpec::dock()),
             electronics_tab_motion: UiTween::new(1.0, UiMotionSpec::dock()),
             electronics_menu_open: false,
@@ -436,6 +471,9 @@ impl NativeGameWorkbench {
             electronics_analysis_phase: 0.0,
             electronics_hint_motion: UiTween::new(1.0, UiMotionSpec::dock()),
             electronics_value_draft: None,
+            footprint_chooser: footprints::FootprintChooserState::default(),
+            inspector_footprint_signature: String::new(),
+            inspector_footprint_presentation: None,
             inspector_session_name: String::new(),
             hierarchy_bookmarks: [false; 3],
             hierarchy_renaming: None,
@@ -444,6 +482,7 @@ impl NativeGameWorkbench {
             inspector_view: InspectorViewState::default(),
             inspector_transform_drag_active: false,
             toolbar_state: default_toolbar_state(),
+            popup_press_consumed: false,
             runtime_toolbar: raf_player::surface::RuntimeToolbarState::default(),
             bottom_dock: EditorBottomDockHost::default(),
             inspector_sessions: ProjectSessionRegistry::new(ProjectType::Game),
@@ -587,6 +626,18 @@ impl NativeGameWorkbench {
         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
     }
 
+    /// Live link from the title-bar command field: every keystroke lands in
+    /// the unified Search everywhere modal, which already spans commands,
+    /// files, assets, and scene entities. Focus moves to the modal input, so
+    /// the user keeps typing there instead of in the stub field.
+    pub fn open_search_with_query(&mut self, query: impl Into<String>) {
+        self.search_restore_focus = self.host.session().interaction.focus.focused.clone();
+        self.host.session_mut().interaction.focus.clear_focus();
+        self.search_surface.set_query(query);
+        self.search_surface.open();
+        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+    }
+
     pub fn restore_search_focus(&mut self) {
         if let Some(id) = self.search_restore_focus.take() {
             self.host.session_mut().interaction.focus.request_focus(id);
@@ -643,7 +694,7 @@ impl NativeGameWorkbench {
     }
 
     pub fn has_interactive_hover(&self) -> bool {
-        self.host.has_interactive_hover() || self.viewport_compass.has_interactive_hover()
+        self.popup_press_consumed || self.host.has_interactive_hover() || self.viewport_compass.has_interactive_hover() || (self.electronics_overlay_active && self.electronics_overlay_host.has_interactive_hover())
     }
 
     pub(crate) fn authoring_status(&mut self, key:&str) {
@@ -654,7 +705,9 @@ impl NativeGameWorkbench {
         self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
     }
     pub fn log_console_output(&mut self, mut output: crate::commands::CommandOutput) {
+        if output.title.starts_with("ui."){output.title=raf_core::i18n::t(&output.title,self.agent_settings.language);}
         for line in &mut output.lines {
+            if line.starts_with("ui."){*line=raf_core::i18n::t(line,self.agent_settings.language);}
             if line.starts_with("commands.error.dimensions_") { *line=raf_core::i18n::t(line,self.agent_settings.language); }
         }
         if output.title==raf_core::i18n::t("authoring.edit_pending",self.agent_settings.language) {
@@ -762,7 +815,14 @@ impl NativeGameWorkbench {
         environment.high_contrast = self.agent_settings.high_contrast;
         environment.reduce_transparency = self.agent_settings.reduce_transparency
             || self.agent_settings.render_quality == RenderQuality::Potato;
-        environment.font_size = self.agent_settings.font_size.clamp(10.0, 24.0);
+        environment.font_size = self.agent_settings.font_size.clamp(
+            if self.project_type == ProjectType::Electronics {
+                14.0
+            } else {
+                10.0
+            },
+            24.0,
+        );
         environment.theme_experimental = self.agent_settings.theme_experimental.clamp(0.0, 100.0);
         environment.ui_scale = if self.agent_settings.auto_ui_scale {
             1.0
@@ -790,7 +850,14 @@ impl NativeGameWorkbench {
         environment.high_contrast = self.agent_settings.high_contrast;
         environment.reduce_transparency = self.agent_settings.reduce_transparency
             || self.agent_settings.render_quality == RenderQuality::Potato;
-        environment.font_size = self.agent_settings.font_size.clamp(10.0, 24.0);
+        environment.font_size = self.agent_settings.font_size.clamp(
+            if self.project_type == ProjectType::Electronics {
+                14.0
+            } else {
+                10.0
+            },
+            24.0,
+        );
         environment.theme_experimental = self.agent_settings.theme_experimental.clamp(0.0, 100.0);
         environment.ui_scale = if self.agent_settings.auto_ui_scale {
             1.0
@@ -814,6 +881,7 @@ impl NativeGameWorkbench {
         }
         self.project_name = name;
         self.project_type = project_type;
+        self.set_viewport_size([self.rect.width, self.rect.height]);
         self.electronics_overlay_key = None;
         self.electronics_overlay_canvas = EditorRect::default();
         self.electronics_overlay_active = false;
@@ -852,7 +920,7 @@ impl NativeGameWorkbench {
             register_electronics_images(self.electronics_overlay_host.images_mut());
             self.electronics_overlay_images_registered = true;
         }
-        self.electronics_overlay_canvas = canvas;
+        self.electronics_overlay_canvas = crate::panels::electronics_canvas_overlay_surface::electronics_overlay_rect(editor.active_surface()==raf_electronics::CadSurfaceKind::Pcb,canvas);
         // The overlay document is retained RafUI, so its cache key must cover
         // every input that can change the resolved document: scene revision,
         // retained UI revision, canvas size, label visibility, and the two
@@ -872,20 +940,20 @@ impl NativeGameWorkbench {
             self.electronics_overlay_active = true;
             return;
         }
-        let (minimap_size, minimap_pixels) = electronics_minimap::build_rgba(
-            electronics_minimap::MinimapColors::from_palette(self.palette),
-            editor.scene(),
-            editor.camera(),
-            glam::Vec2::new(canvas.width.max(1.0), canvas.height.max(1.0)),
-            editor.selection(),
-        );
-        let _ = self.electronics_overlay_host.images_mut().insert_rgba(
-            electronics_minimap::IMAGE_KEY,
-            minimap_size,
-            minimap_pixels,
-        );
+        if electronics_minimap::has_document_content(editor.scene()) {
+            if self.electronics_overlay_host.images().get(electronics_minimap::IMAGE_KEY).is_none() {
+                self.electronics_minimap_cache.invalidate();
+            }
+            if let Some((size, pixels)) = self.electronics_minimap_cache.update(
+                editor.overview_revision(), self.palette, editor.scene(), editor.selection()) {
+                if self.electronics_overlay_host.images_mut().insert_rgba(
+                    electronics_minimap::IMAGE_KEY, size, pixels).is_err() {
+                    self.electronics_minimap_cache.invalidate();
+                }
+            }
+        }
         self.electronics_overlay_host
-            .set_surface(build_electronics_canvas_overlay_surface(
+            .set_surface(crate::panels::electronics_canvas_overlay_surface::build_electronics_framed_overlay_surface(
                 self.palette,
                 editor,
                 canvas,
@@ -918,6 +986,11 @@ impl NativeGameWorkbench {
         electronics: Option<&NativeElectronicsEditor>,
     ) {
         self.rect = layout.window;
+        if self.footprint_chooser.sync(project, electronics) {
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
+        self.sync_footprint_preview(electronics);
+        self.sync_inspector_footprint_preview(electronics);
         if self.asset_previews.sync(project.map(|p|p.path.as_path()), self.project_catalog.revision(), self.host.images_mut()) {
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
@@ -928,7 +1001,7 @@ impl NativeGameWorkbench {
             self.palette,
             layout.canvas,
             compass,
-            self.project_type == ProjectType::Game,
+            self.project_type == ProjectType::Game && !self.interface.workspace.active(),
         );
         self.agent_readiness =
             self.agent_panel.borrow_mut()
@@ -1010,6 +1083,12 @@ impl NativeGameWorkbench {
                     .log(crate::console::LogLevel::Warning, diagnostic);
             }
         }
+        let numeric_scope = project.map(|project| project.id);
+        if self.project_numeric_scope != numeric_scope {
+            self.project_numeric_edits = Default::default();
+            self.project_numeric_scope = numeric_scope;
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
         let session_key = project.map(|project| (project.path.clone(), project.project_type));
         if self.inspector_sessions_key != session_key {
             self.inspector_sessions = project
@@ -1021,6 +1100,13 @@ impl NativeGameWorkbench {
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
         self.sync_hierarchy_state(scene, project);
+        self.host.images_mut().pump_project_images(4);
+        self.interface.set_viewport([layout.canvas.width, layout.canvas.height]);
+        if let Some((project, session)) = project.zip(self.inspector_sessions.active()) {
+            if self.interface.sync(&project.path, &session.ui_document_file) {
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            }
+        }
         if let Some(style) = project.map(|project| project.settings.building_style) {
             if self.toolbar_state.building_style != style {
                 self.toolbar_state.building_style = style;
@@ -1056,6 +1142,11 @@ impl NativeGameWorkbench {
         let status_refresh_due = self.last_status_text.is_empty()
             || now_seconds - self.last_status_refresh_seconds >= 0.25;
         let status_text = status_refresh_due.then(|| self.performance_status_text());
+        if status_refresh_due {
+            // Sampling has its own cadence even when the displayed value is
+            // unchanged; do not keep formatting telemetry on every frame.
+            self.last_status_refresh_seconds = now_seconds;
+        }
         let status_fps_changed = status_text
             .as_ref()
             .is_some_and(|status_text| status_text != &self.last_status_text);
@@ -1082,6 +1173,13 @@ impl NativeGameWorkbench {
             || !self.electronics_menu_motion.is_settled()
             || !self.electronics_tab_motion.is_settled()
             || self.nodes_host.is_animating();
+        if self.project_type==ProjectType::Electronics {
+            if let Some(editor)=electronics {
+                let percent=editor.camera().zoom*25.4/96.0*100.0;
+                let caption=raf_core::i18n::t("electronics.desktop.zoom",self.agent_settings.language);
+                self.host.patch_text_value("electronics.pcb.options.zoom.value",if self.last_layout.is_some_and(|l|l.canvas.width-crate::panels::electronics_desktop_surface::TOOL_RAIL_WIDTH>=760.0) {format!("{percent:.0}%")}else{format!("{caption}: {percent:.0}%")});
+            }
+        }
         if !surface_changed {
             if status_fps_changed && self.project_type == ProjectType::Game {
                 self.host
@@ -1091,7 +1189,9 @@ impl NativeGameWorkbench {
             }
             return;
         }
-        let surface = self.build_surface(
+        let document_started = std::time::Instant::now();
+        let document_cause = self.workbench_change_cause(layout, fingerprint, selected);
+        let mut surface = self.build_surface(
             layout,
             scene,
             selected,
@@ -1106,7 +1206,55 @@ impl NativeGameWorkbench {
             project,
             electronics,
         );
+        self.sync_project_numeric_fields(&mut surface);
+        if self.project_type==ProjectType::Electronics {
+            fn validate_fields(node:&mut UiNode, focus:&raf_ui::UiFocusState, controls:&raf_ui::UiControlState) {
+                if node.id.starts_with("electronics.pcb.rule.") && node.kind==UiNodeKind::TextInput && focus.has_focus(&node.id) {
+                    let raw=controls.text(&node.id).trim().replace(',',".");
+                    node.invalid=raw.parse::<f32>().map_or(true,|v|!v.is_finite() || v<=0.0 || v>10.0);
+                }
+                if node.id.starts_with("electronics.inspector.transform.") && node.kind==UiNodeKind::TextInput && focus.has_focus(&node.id) {
+                    let raw=controls.text(&node.id).trim().replace(',',".");
+                    node.invalid=raw.parse::<f32>().map_or(true,|v|!v.is_finite() || v.abs()>1_000_000.0);
+                }
+                for child in &mut node.children {validate_fields(child,focus,controls);}
+            }
+            let state=&self.host.session().interaction;
+            validate_fields(&mut surface.root,&state.focus,&state.controls);
+        }
         self.host.set_surface(surface);
+        if self.project_type == ProjectType::Electronics {
+            fn rule_fields(node: &UiNode, fields: &mut Vec<(String, String)>) {
+                if node.kind == UiNodeKind::TextInput && node.id.starts_with("electronics.pcb.rule.") {
+                    fields.push((node.id.clone(), node.text_value.clone().unwrap_or_default()));
+                }
+                for child in &node.children { rule_fields(child, fields); }
+            }
+            let mut fields = Vec::new();
+            rule_fields(&self.host.surface().root, &mut fields);
+            for (id, value) in fields {
+                if !self.host.session().interaction.focus.has_focus(&id) {
+                    self.host.session_mut().interaction.controls.set_text(&id, value, 16);
+                }
+            }
+        }
+        self.interface.seed(&mut self.host.session_mut().interaction.controls);
+        if self.interface.take_image_changes() {
+            if let Some(root)=&self.interface.project_root {
+                self.host.images_mut().register_project_images_with_wakeup(root,&self.interface.document.root,self.asset_previews.wakeup.clone());
+            }
+        }
+        self.host.images_mut().pump_project_images(4);
+        self.host.record_document_work(document_started.elapsed(), document_cause);
+        if let Some(focus_id) = self.footprint_chooser.take_focus_after_sync() {
+            if self.host.surface().root.find(&focus_id).is_some() {
+                self.host
+                    .session_mut()
+                    .interaction
+                    .focus
+                    .request_focus(focus_id);
+            }
+        }
         self.host.session_mut().interaction.controls.set_text(
             "nodes.search",
             self.nodes_host.query(),
@@ -1160,6 +1308,24 @@ impl NativeGameWorkbench {
             &self.electronics_library_query,
             256,
         );
+        self.host.session_mut().interaction.controls.set_text(
+            "electronics.footprint.query",
+            &self.footprint_chooser.model.query,
+            192,
+        );
+        self.host.session_mut().interaction.controls.set_text(
+            "electronics.footprint.import_path",
+            &self.footprint_chooser.model.import_path,
+            2048,
+        );
+        if let Some((target,position,rotation,_))=electronics.and_then(NativeElectronicsEditor::inspector_transform) {
+            for (axis,value) in [("x",position.x),("y",position.y),("rotation",rotation)] {
+                let key=format!("electronics.inspector.transform.{target}:{axis}");
+                if !self.host.session().interaction.focus.has_focus(&key) {
+                    self.host.session_mut().interaction.controls.set_text(&key,format!("{value:.3}"),24);
+                }
+            }
+        }
         let electronics_component = electronics.and_then(|editor| {
             let selection = editor.selection()?;
             editor
@@ -1227,11 +1393,6 @@ impl NativeGameWorkbench {
             "agent.input",
             &self.agent_panel.borrow_mut().input_text,
             16_384,
-        );
-        self.host.session_mut().interaction.controls.set_text(
-            "agent.new-model.label",
-            &self.agent_panel.borrow_mut().new_model_label,
-            256,
         );
         self.host.session_mut().interaction.controls.set_text(
             "agent.new-model.id",
@@ -1830,6 +1991,7 @@ impl NativeGameWorkbench {
     }
     pub fn needs_ui_frame(&self) -> bool {
         self.toolbar_revision != self.last_toolbar_revision
+            || self.has_pending_footprint_import()
             || self.agent_panel.borrow_mut().has_live_output()
             || self.has_active_ui_motion()
             || self.has_active_text_repeat()
@@ -1985,7 +2147,7 @@ impl NativeGameWorkbench {
             raster_scale,
         };
         let mut layers = vec![main];
-        if self.viewport_compass.active() {
+        if self.viewport_compass.active() && !self.interface.workspace.active() {
             layers.push(
                 self.viewport_compass
                     .compositor_layer(scale_factor, target_size),
@@ -2001,6 +2163,7 @@ impl NativeGameWorkbench {
                 raster_scale,
             });
         }
+        if self.electronics_overlay_active && (self.electronics_workspace.pcb_menu.as_deref().is_some_and(|menu| menu != "rules") || self.console.filters_open) {let main=layers.remove(0);layers.push(main);}
         if self.search_surface.is_open() {
             layers.push(
                 self.search_surface
@@ -2014,7 +2177,7 @@ impl NativeGameWorkbench {
         if self.search_surface.is_open() {
             true
         } else {
-            self.host.captures_keyboard_input() || self.viewport_compass.captures_keyboard_input()
+            self.interface.workspace.active() || self.host.captures_keyboard_input() || self.viewport_compass.captures_keyboard_input() || (self.electronics_overlay_active && self.electronics_overlay_host.captures_keyboard_input())
         }
     }
 
@@ -2168,6 +2331,11 @@ impl NativeGameWorkbench {
             ),
         ];
         for (key, node_id, value) in values {
+            // Numeric drafts are seeded by the shared edit bank. A rebuild or
+            // focus change must not replace an unfinished number with model text.
+            if self.project_numeric_edits.binding_for_text_key(key).is_some() {
+                continue;
+            }
             if !controls.has_text(key) || focused.as_deref() != Some(node_id) {
                 controls.set_text(
                     key,

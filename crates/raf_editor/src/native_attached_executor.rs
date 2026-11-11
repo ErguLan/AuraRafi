@@ -19,6 +19,9 @@ use serde_json::Value;
 use std::path::Path;
 
 use crate::agent_artifacts::capture_viewport_artifact;
+use crate::agent_context::{resolve_target, AgentObservationContext};
+use crate::agent_executor::{capture_request, capture_target_values};
+use crate::agent_scene_capture::capture_scene_angle;
 use crate::attached::{AttachedCommandHost, PendingAttachedCommand};
 use crate::commands::game::{
     GameCommandContext, GameViewportPort, HeadlessGameViewportPort, SceneSelectionState,
@@ -54,7 +57,9 @@ pub(crate) struct AttachedPollResult {
 
 impl ParsedCommandExecutor for NativeElectronicsUiCommandExecutor<'_> {
     fn execute_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
-        match command.name.as_str() {
+        let ui_command = command.structured_arg("ui_command").and_then(Value::as_str)
+            .unwrap_or_else(|| command.raw.trim_start_matches('/'));
+        match ui_command {
             "electronics.analysis.drc" => {
                 self.editor.start_drc_analysis();
                 return CommandOutput::changed(
@@ -81,16 +86,41 @@ impl ParsedCommandExecutor for NativeElectronicsUiCommandExecutor<'_> {
             }
             _ => {}
         }
-        if self.editor.apply_ui_command(&command.name) {
+        if ui_command == "electronics.fabrication.deliver" {
+            let Some(folder) = crate::folder_picker::pick_output_folder(&t("electronics.fabrication.deliver", self.editor.language())) else {
+                return CommandOutput::info("PCB", Vec::new(), serde_json::json!({"ok":true,"cancelled":true}));
+            };
+            return match self.editor.deliver_fabrication_zip(&folder) {
+                Ok(path) => CommandOutput::info("PCB", vec![path.display().to_string()], serde_json::json!({"ok":true,"path":path})),
+                Err(error) => CommandOutput::error("PCB", error),
+            };
+        }
+        if ui_command=="electronics.fabrication.export" {
+            return match self.editor.export_physical_pcb() {
+                Ok(path)=>CommandOutput::info("PCB manufacturing files",vec![path.display().to_string()],serde_json::json!({"ok":true,"path":path,"format":"gerber-excellon","assembly_ready":false})),
+                Err(error)=>CommandOutput::error("PCB manufacturing files",error),
+            };
+        }
+        if let Some(payload)=ui_command.strip_prefix("electronics.footprint.assign_for:") {
+            return match self.editor.execute_footprint_assignment(payload) {
+                Ok(changed)=> {
+                    let mut output=CommandOutput::info("PCB footprint",Vec::new(),serde_json::json!({"ok":true}));
+                    output.changed=changed;
+                    output
+                }
+                Err(error)=>CommandOutput::error("PCB footprint",error),
+            };
+        }
+        if self.editor.apply_ui_command(ui_command) {
             CommandOutput::changed(
                 "Electronics UI command",
-                vec![format!("Applied {}", command.name)],
-                serde_json::json!({"ok": true, "command": command.name}),
+                vec![format!("Applied {ui_command}")],
+                serde_json::json!({"ok": true, "command": ui_command}),
             )
         } else {
             CommandOutput::error(
                 "Electronics UI command",
-                format!("Unknown native Electronics UI command: {}", command.name),
+                format!("Unknown native Electronics UI command: {ui_command}"),
             )
         }
     }
@@ -107,8 +137,10 @@ pub(crate) fn execute_native_ui_intent(
         ledger: std::mem::take(ledger),
     };
     let response = gateway.execute(EngineCommandRequest::new(
-        command_name,
-        Value::Null,
+        // Names carry verbs; data stays in structured arguments so spaces,
+        // Unicode and capitalization in document identities survive transport.
+        command_name.split(':').next().unwrap_or(command_name),
+        serde_json::json!({"ui_command": command_name}),
         CommandSource::RafUi,
     ));
     *ledger = gateway.ledger;
@@ -122,6 +154,16 @@ impl ParsedCommandExecutor for NativeElectronicsCommandExecutor<'_> {
 }
 
 impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
+    fn verify_output(&self, command: &ParsedCommand, output: &CommandOutput) -> Option<raf_core::VerificationSummary> {
+        if !output.changed || !matches!(command.name.as_str(), "game.build" | "game.batch" | "game.reconcile" | "game.repair" | "game.add" | "game.update") { return None; }
+        let params = command.structured_args.as_ref()?;
+        let failures = crate::agent_executor::verify_postconditions(&command.name, params, &output.json, self.scene);
+        Some(raf_core::VerificationSummary {
+            status: if failures.is_empty() { "passed" } else { "failed" }.into(),
+            checks: vec!["Effective scene values checked against the requested operation.".into()], failures,
+        })
+    }
+
     fn scene_entity_count(&self) -> Option<usize> {
         Some(self.scene.all_live_ids().len())
     }
@@ -130,9 +172,19 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
         if command.name.starts_with("lighting.") {
             return crate::commands::lighting::execute(command, self.scene);
         }
+        if crate::commands::ui::supports(&command.name) {
+            return crate::commands::ui::execute(command, self.assets_root.as_deref(), false);
+        }
         if matches!(
             command.name.as_str(),
-            "script.list" | "script.validate" | "script.compile_nodes"
+            "script.list"
+                | "script.validate"
+                | "script.run"
+                | "script.compile_nodes"
+                | "script.create"
+                | "script.write"
+                | "script.attach"
+                | "script.detach"
         ) {
             let mut context = crate::commands::script::ScriptCommandContext {
                 scene: self.scene,
@@ -157,18 +209,40 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
 
     fn preview_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
         let mut scene = self.scene.clone();
+        if crate::commands::ui::supports(&command.name) {
+            return crate::commands::ui::execute(command, self.assets_root.as_deref(), true);
+        }
         if command.name.starts_with("lighting.") {
             return crate::commands::lighting::execute(command, &mut scene);
         }
         if matches!(
             command.name.as_str(),
-            "script.list" | "script.validate" | "script.compile_nodes"
+            "script.list" | "script.validate" | "script.run" | "script.compile_nodes"
         ) {
             let mut context = crate::commands::script::ScriptCommandContext {
                 scene: &mut scene,
                 assets_root: self.assets_root.as_deref(),
             };
             return crate::commands::script::execute(&command.name, command, &mut context);
+        }
+        if command.name == "script.write" {
+            return crate::commands::script::preview_write(command);
+        }
+        if matches!(
+            command.name.as_str(),
+            "script.create" | "script.attach" | "script.detach"
+        ) {
+            let mut output = CommandOutput::changed(
+                format!("Preview {}", command.name),
+                vec!["No project script or file was written.".to_string()],
+                serde_json::json!({
+                    "command": command.name,
+                    "params": command.args,
+                    "preview": true
+                }),
+            );
+            output.changed = false;
+            return output;
         }
         if command.name.starts_with("behavior.") || command.name.starts_with("prefab.") {
             let mut context = crate::commands::script::ScriptCommandContext {
@@ -245,10 +319,40 @@ pub(crate) fn poll_attached_commands(
             let response = execute_attached_viewport_capture(
                 &command.request,
                 runtime.as_deref_mut(),
+                scene,
                 project,
+                &selected,
                 attached_ledger.revision(),
                 language,
             );
+            attached_host.respond(command, response);
+            continue;
+        }
+        if is_gameplay_audit_command(&command.request.name) {
+            let selection = SceneSelectionState {
+                selected_node: selected.first().copied(),
+                selected_nodes: selected.clone(),
+            };
+            let context = AgentObservationContext {
+                scene,
+                selection: &selection,
+                project,
+                assets: project_assets,
+                active_session: "attached",
+                revision: attached_ledger.revision(),
+                catalog_pending,
+                catalog_error,
+            };
+            let result = context.game_completion_audit();
+            let mut response = metadata_response(
+                command.request.id,
+                &result.summary,
+                result.details.clone(),
+                result.data.clone(),
+                attached_ledger.revision(),
+            );
+            response.ok = result.ok;
+            response.warnings = result.warnings;
             attached_host.respond(command, response);
             continue;
         }
@@ -485,6 +589,13 @@ fn is_viewport_capture_command(name: &str) -> bool {
     )
 }
 
+fn is_gameplay_audit_command(name: &str) -> bool {
+    matches!(
+        name.trim_start_matches('/').to_ascii_lowercase().as_str(),
+        "project.gameplay_audit" | "game.completion_audit" | "gameplay.audit"
+    )
+}
+
 fn is_task_command(name: &str) -> bool {
     matches!(
         name.trim_start_matches('/').to_ascii_lowercase().as_str(),
@@ -610,30 +721,99 @@ fn parse_task_id(params: &Value) -> Option<raf_core::AgentTaskId> {
 
 fn execute_attached_viewport_capture(
     request: &EngineCommandRequest,
-    runtime: Option<&mut NativeEditorRuntime>,
+    mut runtime: Option<&mut NativeEditorRuntime>,
+    scene: &SceneGraph,
     project: Option<&Project>,
+    selected: &[SceneNodeId],
     revision: u64,
     language: Language,
 ) -> EngineCommandResponse {
-    let Some(runtime) = runtime else {
+    let mut view = request
+        .params
+        .get("view")
+        .and_then(Value::as_str)
+        .unwrap_or("current")
+        .trim()
+        .to_ascii_lowercase();
+    let frame_scene = request
+        .params
+        .get("frame")
+        .and_then(Value::as_str)
+        .is_some_and(|value| value.eq_ignore_ascii_case("scene"))
+        || request
+            .params
+            .get("target")
+            .and_then(Value::as_str)
+            .is_some_and(|value| value.eq_ignore_ascii_case("scene"));
+    let requested_targets = capture_target_values(&request.params);
+    let selection = SceneSelectionState {
+        selected_node: selected.first().copied(),
+        selected_nodes: selected.to_vec(),
+    };
+    let mut focus = Vec::new();
+    let mut unresolved = Vec::new();
+    if frame_scene {
+        focus = scene.all_live_ids();
+    } else {
+        for target in &requested_targets {
+            match resolve_target(scene, &selection, target) {
+                Some(id) => focus.push(id),
+                None => unresolved.push(target.clone()),
+            }
+        }
+    }
+    if !requested_targets.is_empty() && focus.is_empty() && !frame_scene {
         return EngineCommandResponse::error(
             request.id,
             "Viewport capture",
-            "The native editor surface is not ready yet.",
+            format!("Capture targets were not found: {}.", unresolved.join(", ")),
         );
-    };
+    }
+    let angle_requested = view != "current"
+        || frame_scene
+        || !focus.is_empty()
+        || request.params.get("yaw_deg").is_some()
+        || request.params.get("pitch_deg").is_some()
+        || request.params.get("distance").is_some();
     let refresh_requested = request
         .params
         .get("refresh")
         .and_then(Value::as_bool)
         .unwrap_or(true);
-    if refresh_requested {
-        // The command is serviced before the next compositor tick. Requesting
-        // the document frame here makes the capture fresh on the following
-        // tick while preserving the synchronous IPC contract.
-        runtime.request_canvas_frame();
-    }
-    let result = capture_viewport_artifact(runtime.graphics(), project, language);
+    let had_runtime = runtime.is_some();
+    let result = if !angle_requested {
+        match runtime.as_deref_mut() {
+            Some(runtime) => {
+                if refresh_requested {
+                    // The command is serviced before the next compositor tick.
+                    // Requesting the document frame makes the capture fresh on
+                    // the following tick while preserving synchronous IPC.
+                    runtime.request_canvas_frame();
+                }
+                capture_viewport_artifact(runtime.graphics(), project, language)
+            }
+            None => {
+                view = "isometric".to_string();
+                let capture = capture_request(&request.params, &view);
+                capture_scene_angle(None, scene, project, selected, &focus, &capture, language)
+            }
+        }
+    } else {
+        if view == "current" {
+            view = "isometric".to_string();
+        }
+        let capture = capture_request(&request.params, &view);
+        let graphics = runtime.as_deref_mut().map(|runtime| runtime.graphics_mut());
+        capture_scene_angle(
+            graphics,
+            scene,
+            project,
+            selected,
+            &focus,
+            &capture,
+            language,
+        )
+    };
     let mut response = metadata_response(
         request.id,
         &result.summary,
@@ -643,6 +823,12 @@ fn execute_attached_viewport_capture(
     );
     response.ok = result.ok;
     response.warnings = result.warnings;
+    if !unresolved.is_empty() {
+        response.warnings.push(format!(
+            "Some capture targets were not found and were not framed: {}.",
+            unresolved.join(", ")
+        ));
+    }
     if let Some(object) = response.data.as_object_mut() {
         object.insert(
             "refresh_requested".to_string(),
@@ -650,10 +836,10 @@ fn execute_attached_viewport_capture(
         );
         object.insert(
             "capture_is_last_completed_frame".to_string(),
-            Value::Bool(refresh_requested),
+            Value::Bool(refresh_requested && !angle_requested && had_runtime),
         );
     }
-    if refresh_requested {
+    if refresh_requested && !angle_requested && had_runtime {
         response.warnings.push(
             "A fresh viewport frame was requested; the artifact is the last completed frame available to this synchronous call.".to_string(),
         );

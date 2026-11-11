@@ -26,20 +26,20 @@ The sidebar can be toggled open/closed with the `<` / `>` button.
 
 1. Open **Settings > AI Providers**.
 2. Choose the provider you want to use:
-   - **OpenRouter**: enter your API key and pick a model id (or add a model
-     shortcut in the Agent panel).
-   - **OpenAI**: enter the API key and model id.
-   - **OpenRouter**: enter the API key and model id, or use a compatible
-     gateway URL.
+   - **OpenRouter**: enter your API key and choose a model from the catalog.
+   - **OpenAI API**: enter your API key, refresh its catalog and choose a model.
+   - **ChatGPT plan**: connect an eligible account, enable its plan route and
+     choose a model returned by that account's live catalog. API-key billing is
+     separate. Missing access does not trigger an automatic API fallback.
    - Puerto, GenAI and Claude remain readable as legacy provider values, but
      are not exposed as verified native editor transports in this release.
-3. Set that provider as the default with **Set as default**.
+3. Choose the active provider in the selector and apply the Settings draft.
 4. Select the **Agent mode**:
    - **Inspect**: native project reads only; mutation tools are hidden.
    - **Plan**: reads run normally and mutations are previewed without changing the project.
    - **Active**: mutations run immediately through the shared command gateway.
-5. (Optional) Open the **Agent** panel and click **+ Add model** to create
-   shortcuts for the models you use most. These are saved globally.
+5. (Optional) Pin favorites in the shared model picker. A custom API model id
+   can be entered explicitly; plan model ids must come from account discovery.
 6. Open or create a project.
 7. Type a request in the Agent input and press **Send** or `Ctrl+Enter`.
 
@@ -71,6 +71,11 @@ conversations or start fresh ones.
 - For electronics, ask the Agent to run `electronics.drc` or `electronics.simulate`
   after building a circuit.
 - For large scenes, ask it to use prefabs and arrange them in a grid.
+- For gameplay, ask it to write and attach a Rhai script, then validate it. The
+  Agent has a project-confined `script.write` tool; it does not need a shell.
+- After building, ask it to run `game_completion_audit` and capture at least two
+  angles (`isometric` and `front`, for example). Captures are attached to its
+  next model turn automatically when the model accepts images.
 - The Agent cannot read arbitrary files outside the active project folder.
 
 ## Troubleshooting

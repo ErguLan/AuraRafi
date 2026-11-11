@@ -20,7 +20,8 @@ use raf_core::{
 use serde_json::{Map, Value};
 
 use crate::agent_artifacts::capture_viewport_artifact;
-use crate::agent_context::AgentObservationContext;
+use crate::agent_context::{resolve_target, AgentObservationContext};
+use crate::agent_scene_capture::{capture_scene_angle, SceneCaptureRequest};
 use crate::commands::{
     catalog::{CommandCatalog, CommandDefinition},
     game::{
@@ -111,9 +112,63 @@ impl AgentToolPack {
 /// provider budget. Low-level convenience commands remain reachable through
 /// `scene_batch`, but must not displace the tools that let the model see scale,
 /// bounds and structure before it acts.
+pub(crate) fn capture_target_values(arguments: &Value) -> Vec<String> {
+    if let Some(targets) = arguments.get("targets").and_then(Value::as_array) {
+        return targets
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::trim)
+            .filter(|target| !target.is_empty())
+            .take(64)
+            .map(str::to_string)
+            .collect();
+    }
+    arguments
+        .get("target")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|target| !target.is_empty() && !target.eq_ignore_ascii_case("scene"))
+        .map(|target| vec![target.to_string()])
+        .unwrap_or_default()
+}
+
+pub(crate) fn capture_request(arguments: &Value, view: &str) -> SceneCaptureRequest {
+    let number = |key: &str, default: f64| {
+        arguments
+            .get(key)
+            .and_then(Value::as_f64)
+            .unwrap_or(default)
+    };
+    SceneCaptureRequest {
+        view: view.to_string(),
+        yaw_deg: number("yaw_deg", 45.0) as f32,
+        pitch_deg: number("pitch_deg", 30.0) as f32,
+        distance: arguments
+            .get("distance")
+            .and_then(Value::as_f64)
+            .filter(|distance| distance.is_finite() && *distance > 0.0)
+            .map(|distance| distance as f32),
+        padding: (number("padding", 1.15) as f32).clamp(1.0, 3.0),
+        width: number("width", 960.0).clamp(128.0, 1_024.0) as u32,
+        height: number("height", 540.0).clamp(128.0, 1_024.0) as u32,
+        highlight_selection: arguments
+            .get("highlight_selection")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        label: arguments
+            .get("label")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    }
+}
+
 fn order_contextual_tools(tools: &mut Vec<OpenAiTool>) {
     const PRIORITY: &[&str] = &[
+        "capabilities_search",
         "project_summary",
+        "electronics_lab_simulate",
+        "electronics_lab_probe",
+        "electronics_lab_signals",
         "scene_outline",
         "scene_query",
         "scene_spatial_map",
@@ -123,6 +178,9 @@ fn order_contextual_tools(tools: &mut Vec<OpenAiTool>) {
         "scene_inspect",
         "selection_get",
         "viewport_capture",
+        "lighting_inspect",
+        "lighting_set",
+        "lighting_reset",
         "assets_catalog",
         "asset_generate_local_png",
         "asset_generate_image",
@@ -132,6 +190,7 @@ fn order_contextual_tools(tools: &mut Vec<OpenAiTool>) {
         "asset_inspect",
         "scripts_catalog",
         "project_health",
+        "game_completion_audit",
         "scene_verify",
         "game_validate_layout",
         "scene_build",
@@ -158,9 +217,11 @@ fn order_contextual_tools(tools: &mut Vec<OpenAiTool>) {
 
 #[derive(Debug, Clone, Copy, Default)]
 struct PromptIntent {
+    game_ui: bool,
     lighting: bool,
     authoring: bool,
     scripting: bool,
+    gameplay: bool,
     pcb: bool,
     capabilities: bool,
     layout: bool,
@@ -212,7 +273,13 @@ impl AgentToolExecutor<'_> {
 
         match project_type {
             Some(ProjectType::Game) => {
-                for &name in if intent.lighting {
+                if intent.game_ui {
+                    for name in ["ui.document.read","ui.document.create","ui.document.apply","ui.document.undo"] {
+                        let kind=if name=="ui.document.read"{AgentToolKind::Read}else{AgentToolKind::Mutation};
+                        if kind==AgentToolKind::Read || mode!=AgentMode::Inspect {if let Some(command)=catalog.find(name){pack.push_catalog(command,language,kind);}}
+                    }
+                }
+                for &name in if intent.lighting || intent.authoring {
                     &["lighting.inspect", "lighting.set", "lighting.reset"][..]
                 } else {
                     &[][..]
@@ -233,12 +300,14 @@ impl AgentToolExecutor<'_> {
                 if mode != AgentMode::Inspect && intent.authoring {
                     add_game_mutation_tools(&mut pack, intent);
                 }
-                if intent.scripting {
+                if intent.scripting || intent.gameplay {
                     for name in [
                         "script.create",
+                        "script.write",
                         "script.attach",
                         "script.detach",
                         "script.validate",
+                        "script.run",
                         "behavior.attach",
                         "behavior.detach",
                         "behavior.parameter",
@@ -246,7 +315,7 @@ impl AgentToolExecutor<'_> {
                         "prefab.instantiate",
                     ] {
                         if let Some(command) = catalog.find(name) {
-                            let kind = if name == "script.validate" {
+                            let kind = if matches!(name, "script.validate" | "script.run") {
                                 AgentToolKind::Read
                             } else {
                                 AgentToolKind::Mutation
@@ -259,6 +328,15 @@ impl AgentToolExecutor<'_> {
                 }
             }
             Some(ProjectType::Electronics) => {
+                pack.push_native("electronics_lab_simulate",
+                    "Run cancellable DC analysis of the current schematic. Returns currents and pin voltages with convergence evidence.",
+                    serde_json::json!({"type":"object","properties":{},"additionalProperties":false}), AgentToolKind::Read, None);
+                pack.push_native("electronics_lab_probe",
+                    "Read a page of DC measurements. Optionally filter by component reference or UUID. Check stale before comparing.",
+                    serde_json::json!({"type":"object","properties":{"component":{"type":"string"},"offset":{"type":"integer","minimum":0}},"additionalProperties":false}), AgentToolKind::Read, None);
+                pack.push_native("electronics_lab_signals",
+                    "Inspect serial status and latest measured channels for the active Electronics document.",
+                    serde_json::json!({"type":"object","properties":{},"additionalProperties":false}), AgentToolKind::Read, None);
                 let names: &[&str] = if mode != AgentMode::Inspect && intent.authoring {
                     if intent.pcb {
                         &[
@@ -301,7 +379,34 @@ impl AgentToolExecutor<'_> {
         // Provider quality degrades sharply when every command is advertised.
         // Keep the contextual pack bounded and deterministic.
         order_contextual_tools(&mut pack.tools);
-        const MAX_CONTEXTUAL_TOOLS: usize = 26;
+        // Intent-critical scripting must survive the contextual tool budget.
+        // Stable sorting retains the perception/scene order within each group.
+        if intent.scripting || intent.gameplay {
+            pack.tools.sort_by_key(|tool| {
+                !(matches!(
+                    tool.function.name.as_str(),
+                    "script_write"
+                        | "script_create"
+                        | "script_attach"
+                        | "script_detach"
+                        | "script_validate"
+                        | "script_run"
+                        | "behavior_attach"
+                        | "behavior_detach"
+                        | "behavior_parameter"
+                        | "prefab_capture"
+                        | "prefab_instantiate"
+                ) || (intent.authoring
+                    && matches!(
+                        tool.function.name.as_str(),
+                        "scene_build" | "scene_reconcile" | "scene_batch" | "scene_verify"
+                    )))
+            });
+        }
+        // Perception, gameplay, lighting, and capture must coexist for a
+        // complete game request. The pack stays bounded, but 26 was too small
+        // to keep scripting and the visual loop in the same turn.
+        const MAX_CONTEXTUAL_TOOLS: usize = 36;
         if pack.tools.len() > MAX_CONTEXTUAL_TOOLS {
             pack.tools.truncate(MAX_CONTEXTUAL_TOOLS);
             let visible = pack
@@ -492,7 +597,10 @@ fn native_agent_budget() -> ExecutionBudget {
         max_milliseconds: None,
         max_scene_operations: Some(512),
         max_scene_entities: Some(2_048),
-        max_result_bytes: Some(65_536),
+        // Internal verification consumes the complete receipt. The model-facing
+        // result is bounded separately by AgentToolResult::model_content.
+        // A transport truncation must never become a failed postcondition.
+        max_result_bytes: None,
         profile: Some("native-agent-balanced".to_string()),
     }
 }
@@ -518,10 +626,16 @@ impl ToolExecutor for AgentToolExecutor<'_> {
             .ok()
     }
     fn is_pending(&self, call_id: &str) -> bool {
-        self.asset_tools.is_pending(call_id)
+        self.asset_tools.is_pending(call_id) || self.electronics.as_deref()
+            .is_some_and(|editor| editor.lab.pending_dc_tool(call_id))
     }
 
     fn poll_pending(&mut self, call_id: &str) -> Option<Result<AgentToolResult, String>> {
+        if let Some(editor) = self.electronics.as_deref_mut().filter(|editor| editor.lab.pending_dc_tool(call_id)) {
+            editor.poll_lab(false);
+            let result = editor.lab.take_dc_tool(call_id)?;
+            return Some(result.map(|run| laboratory_probe(&run, editor.lab_fingerprint(), &Value::Null)));
+        }
         self.asset_tools.poll(call_id, self.language)
     }
 
@@ -543,9 +657,39 @@ impl ToolExecutor for AgentToolExecutor<'_> {
             .routes
             .get(name)
             .cloned()
-            .ok_or_else(|| format!("Unknown Agent tool: {name}"))?;
+            .ok_or_else(|| {
+                let mut available = self.routes.keys().cloned().collect::<Vec<_>>();
+                available.sort();
+                format!("Unknown Agent tool: {name}. Available in this turn: {}. Use an exact advertised name; unavailable tools were not executed.", available.join(", "))
+            })?;
         if route.kind == AgentToolKind::Mutation && mode == ToolExecutionMode::Inspect {
             return Err(format!("Tool '{name}' is unavailable in Inspect mode."));
+        }
+
+        if matches!(name, "electronics_lab_simulate" | "electronics_lab_probe" | "electronics_lab_signals") {
+            let editor = self.electronics.as_deref_mut().ok_or("Electronics document is not mounted.")?;
+            return match name {
+                "electronics_lab_simulate" => {
+                    editor.start_lab_simulation(Some(call_id.to_owned()), mode == ToolExecutionMode::Apply)?;
+                    Ok(AgentToolResult::success("DC analysis queued.", serde_json::json!({"state":"queued"})))
+                }
+                "electronics_lab_probe" => {
+                    let run = editor.lab.run().ok_or("Run a DC analysis first.")?;
+                    Ok(laboratory_probe(run, editor.lab_fingerprint(), &arguments))
+                }
+                _ => {
+                    editor.poll_lab(false);
+                    let Some(serial) = editor.lab.serial.as_ref() else {
+                        return Ok(AgentToolResult::success("No connected serial device.", serde_json::json!({"connected":false})));
+                    };
+                    let channels: Vec<_> = serial.latest.values().take(16).collect();
+                    Ok(AgentToolResult::success("Latest serial measurements.", serde_json::json!({
+                        "source":"measured", "connected":serial.state == raf_hardware::serial_session::LinkState::Open,
+                        "device":serial.device.as_ref().map(|device| &device.board), "port":editor.lab.port,
+                        "received":serial.received, "invalid":serial.invalid, "evicted":serial.evicted, "channels":channels,
+                    })))
+                }
+            };
         }
 
         if matches!(
@@ -569,34 +713,114 @@ impl ToolExecutor for AgentToolExecutor<'_> {
         }
 
         if name == "viewport_capture" {
-            let Some(graphics) = self.graphics.as_deref_mut() else {
+            let mut view = arguments
+                .get("view")
+                .and_then(Value::as_str)
+                .unwrap_or("current")
+                .trim()
+                .to_ascii_lowercase();
+            let frame_scene = arguments
+                .get("frame")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.eq_ignore_ascii_case("scene"))
+                || arguments
+                    .get("target")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.eq_ignore_ascii_case("scene"));
+            let requested_targets = capture_target_values(&arguments);
+            let mut unresolved = Vec::new();
+            let mut focus = Vec::new();
+            if frame_scene {
+                focus = self.scene.all_live_ids();
+            } else {
+                for target in &requested_targets {
+                    match resolve_target(self.scene, self.selection, target) {
+                        Some(id) => focus.push(id),
+                        None => unresolved.push(target.clone()),
+                    }
+                }
+            }
+            if !requested_targets.is_empty() && focus.is_empty() && !frame_scene {
                 let mut result = AgentToolResult::success(
-                    t("agent_workspace.no_viewport", self.language),
-                    serde_json::json!({"available": false, "reason": "viewport_not_mounted"}),
+                    "The requested capture targets were not found.",
+                    serde_json::json!({
+                        "error": {"code": "target_not_found", "targets": unresolved},
+                        "available": false,
+                    }),
                 );
                 result.ok = false;
                 result.revision = Some(self.ledger.revision());
                 return Ok(result);
+            }
+            let angle_requested = view != "current"
+                || frame_scene
+                || !focus.is_empty()
+                || arguments.get("yaw_deg").is_some()
+                || arguments.get("pitch_deg").is_some()
+                || arguments.get("distance").is_some();
+            let mut result = if !angle_requested {
+                match self.graphics.as_deref_mut() {
+                    Some(graphics) => {
+                        let refresh_requested = arguments
+                            .get("refresh")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(true);
+                        if refresh_requested {
+                            graphics.request_frame(
+                                raf_render::api_graphic_basic::FrameInvalidation::DOCUMENT
+                                    | raf_render::api_graphic_basic::FrameInvalidation::UI,
+                            );
+                        }
+                        let mut result =
+                            capture_viewport_artifact(graphics, self.project_info, self.language);
+                        result.data["refresh_requested"] = Value::Bool(refresh_requested);
+                        result.data["capture_is_last_completed_frame"] =
+                            Value::Bool(refresh_requested);
+                        if refresh_requested {
+                            result.warnings.push(
+                                "A fresh viewport frame was requested; this synchronous tool call returns the last completed frame.".to_string(),
+                            );
+                        }
+                        result
+                    }
+                    // The Hub workspace has no live viewport, but an offscreen
+                    // capture still gives the Agent real visual evidence.
+                    None => {
+                        view = "isometric".to_string();
+                        let request = capture_request(&arguments, &view);
+                        capture_scene_angle(
+                            self.graphics.as_deref_mut(),
+                            self.scene,
+                            self.project_info,
+                            &self.selection.selected_nodes,
+                            &focus,
+                            &request,
+                            self.language,
+                        )
+                    }
+                }
+            } else {
+                if view == "current" {
+                    view = "isometric".to_string();
+                }
+                let request = capture_request(&arguments, &view);
+                capture_scene_angle(
+                    self.graphics.as_deref_mut(),
+                    self.scene,
+                    self.project_info,
+                    &self.selection.selected_nodes,
+                    &focus,
+                    &request,
+                    self.language,
+                )
             };
-            let refresh_requested = arguments
-                .get("refresh")
-                .and_then(Value::as_bool)
-                .unwrap_or(true);
-            if refresh_requested {
-                graphics.request_frame(
-                    raf_render::api_graphic_basic::FrameInvalidation::DOCUMENT
-                        | raf_render::api_graphic_basic::FrameInvalidation::UI,
-                );
+            if !unresolved.is_empty() {
+                result.warnings.push(format!(
+                    "Some capture targets were not found and were not framed: {}.",
+                    unresolved.join(", ")
+                ));
             }
-            let mut result = capture_viewport_artifact(graphics, self.project_info, self.language);
             result.revision = Some(self.ledger.revision());
-            result.data["refresh_requested"] = Value::Bool(refresh_requested);
-            result.data["capture_is_last_completed_frame"] = Value::Bool(refresh_requested);
-            if refresh_requested {
-                result.warnings.push(
-                    "A fresh viewport frame was requested; this synchronous tool call returns the last completed frame.".to_string(),
-                );
-            }
             return Ok(result);
         }
 
@@ -726,6 +950,30 @@ impl ToolExecutor for AgentToolExecutor<'_> {
     }
 }
 
+fn laboratory_probe(run: &crate::electronics_lab::DcRun, fingerprint: u64, args: &Value) -> AgentToolResult {
+    let component = args.get("component").and_then(Value::as_str);
+    let uuid = component.and_then(|target| uuid::Uuid::parse_str(target).ok());
+    let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0).min(512) as usize;
+    let mut page = run.values.iter().filter(|value| component.is_none_or(|target| {
+        value.designator.eq_ignore_ascii_case(target) || uuid == Some(value.component)
+    })).skip(offset).take(17).collect::<Vec<_>>();
+    let more = page.len() > 16;
+    page.truncate(16);
+    let stale = run.fingerprint != fingerprint;
+    let mut result = AgentToolResult::success(if run.converged { "DC analysis converged." } else { "DC analysis did not converge." },
+        serde_json::json!({
+            "source":"simulated", "analysis":"dc", "run":run.id, "revision":format!("{:016x}",run.fingerprint),
+            "stale":stale, "converged":run.converged, "kcl_residual_a":run.kcl_residual_a,
+            "power_residual_w":run.power_residual_w, "warnings":run.messages, "values":page,
+            "values_truncated":run.values_truncated, "next_offset":more.then_some(offset + 16),
+        }));
+    result.ok = run.converged && !stale;
+    result.references = page.iter().map(|value| value.component.to_string()).collect();
+    result.references.sort_unstable();
+    result.references.dedup();
+    result
+}
+
 struct AgentParsedExecutor<'a> {
     scene: &'a mut SceneGraph,
     selection: &'a mut SceneSelectionState,
@@ -737,6 +985,10 @@ struct AgentParsedExecutor<'a> {
 
 impl AgentParsedExecutor<'_> {
     fn execute_live(&mut self, command: &ParsedCommand) -> CommandOutput {
+        if crate::commands::ui::supports(&command.name) {
+            let assets=self.project.map(|p|p.root.join("assets"));
+            return crate::commands::ui::execute(command,assets.as_deref(),false);
+        }
         if command.name.starts_with("lighting.") {
             return crate::commands::lighting::execute(command, self.scene);
         }
@@ -808,6 +1060,10 @@ impl ParsedCommandExecutor for AgentParsedExecutor<'_> {
     }
 
     fn preview_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
+        if crate::commands::ui::supports(&command.name) {
+            let assets=self.project.map(|p|p.root.join("assets"));
+            return crate::commands::ui::execute(command,assets.as_deref(),true);
+        }
         if command.name.starts_with("lighting.") {
             return crate::commands::lighting::execute(command, &mut self.scene.clone());
         }
@@ -819,6 +1075,9 @@ impl ParsedCommandExecutor for AgentParsedExecutor<'_> {
                 assets_root: assets_root.as_deref(),
             };
             return crate::commands::behavior::execute(command, &mut context, true);
+        }
+        if command.name == "script.write" {
+            return crate::commands::script::preview_write(command);
         }
         if command.name.starts_with("game.") {
             let mut scene = self.scene.clone();
@@ -1011,12 +1270,73 @@ fn add_project_read_tools(
         );
         pack.push_native(
             "viewport_capture",
-            "Capture the Game viewport as a PNG artifact for visual inspection. Set refresh=true to request a fresh editor frame; this never starts Play mode or changes the scene.",
+            "Capture the Game scene as a PNG artifact for visual inspection. Use view=current for the last editor frame or front/back/left/right/top/bottom/isometric/custom to render a framed angle. Targets default to the current selection; frame=scene fits the whole scene. The image is automatically attached to your next model turn when the model accepts images. This never starts Play mode or changes the scene.",
             object_schema(
-                Map::from_iter([(
-                    "refresh".to_string(),
-                    boolean_schema("Request a fresh document frame before the capture."),
-                )]),
+                Map::from_iter([
+                    (
+                        "refresh".to_string(),
+                        boolean_schema("Request a fresh live frame before the capture."),
+                    ),
+                    (
+                        "view".to_string(),
+                        enum_schema(
+                            "Capture angle. current preserves the last editor frame; other values frame the target or selection offscreen.",
+                            &[
+                                "current", "front", "back", "left", "right", "top", "bottom",
+                                "isometric", "custom",
+                            ],
+                        ),
+                    ),
+                    (
+                        "frame".to_string(),
+                        enum_schema("Capture scope.", &["selection", "scene"]),
+                    ),
+                    (
+                        "target".to_string(),
+                        string_schema("Entity, group, UUID, path, or stable key to frame."),
+                    ),
+                    (
+                        "targets".to_string(),
+                        serde_json::json!({
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "maxItems": 64,
+                            "description": "Entities or groups to frame together. Omit to use the selection."
+                        }),
+                    ),
+                    (
+                        "yaw_deg".to_string(),
+                        number_schema("Custom horizontal angle in degrees.", -360.0, 360.0),
+                    ),
+                    (
+                        "pitch_deg".to_string(),
+                        number_schema("Custom vertical angle in degrees.", -89.0, 89.0),
+                    ),
+                    (
+                        "distance".to_string(),
+                        number_schema("Optional explicit camera distance in metres.", 0.1, 100_000.0),
+                    ),
+                    (
+                        "padding".to_string(),
+                        number_schema("Framing padding multiplier.", 1.0, 3.0),
+                    ),
+                    (
+                        "width".to_string(),
+                        integer_schema("Image width in pixels.", 128, 1_024),
+                    ),
+                    (
+                        "height".to_string(),
+                        integer_schema("Image height in pixels.", 128, 1_024),
+                    ),
+                    (
+                        "highlight_selection".to_string(),
+                        boolean_schema("Outline the framed selection in the capture."),
+                    ),
+                    (
+                        "label".to_string(),
+                        string_schema("Optional human-readable evidence label."),
+                    ),
+                ]),
                 &[],
             ),
             AgentToolKind::Read,
@@ -1071,7 +1391,7 @@ fn add_project_read_tools(
             None,
         );
     }
-    if intent.scripting || !intent.authoring {
+    if intent.scripting || intent.gameplay || !intent.authoring {
         pack.push_native(
             "scripts_catalog",
             "List project scripts and the scene entities that reference each script.",
@@ -1091,6 +1411,13 @@ fn add_project_read_tools(
                 ]),
                 &[],
             ),
+            AgentToolKind::Read,
+            None,
+        );
+        pack.push_native(
+            "game_completion_audit",
+            "Audit whether the Game foundation is actually playable rather than geometry alone. Reports renderable geometry, camera/startup camera, authored lighting, attached scripts, gameplay signals, enabled systems, missing pieces, and the next required actions. Call this after a gameplay build and before claiming completion.",
+            object_schema(Map::new(), &[]),
             AgentToolKind::Read,
             None,
         );
@@ -1136,7 +1463,7 @@ fn add_project_read_tools(
             None,
         );
     }
-    if intent.capabilities {
+    if intent.capabilities || project_type.is_some() {
         pack.push_native(
             "capabilities_search",
             "Search the Agent tools currently available for this project, intent, and permission mode.",
@@ -1296,7 +1623,10 @@ fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIntent) {
                 ("target".to_string(), string_schema("Entity target.")),
                 ("name".to_string(), string_schema("Optional new name.")),
                 ("transform".to_string(), transform),
-                ("size".to_string(), vec3_schema("Local dimensions X/Y/Z in metres; do not combine with scale.")),
+                (
+                    "size".to_string(),
+                    vec3_schema("Local dimensions X/Y/Z in metres; do not combine with scale."),
+                ),
                 (
                     "color_rgba".to_string(),
                     color_schema("Optional RGBA channels from 0 to 255."),
@@ -1822,7 +2152,7 @@ fn collect_reference_field(value: &Value, key: &str, output: &mut Vec<String>) {
     }
 }
 
-fn verify_postconditions(
+pub(crate) fn verify_postconditions(
     command_name: &str,
     params: &Value,
     data: &Value,
@@ -2253,10 +2583,25 @@ fn verify_entity_postcondition(params: &Value, entity: &Value, scene: &SceneGrap
                 None
             }
         };
+        // Command receipts use parent_id; semantic inspections use parent.ref.
+        // Neither presentation shape is authoritative over the live document.
         let actual_id = entity
-            .get("parent_id")
+            .get("id")
             .and_then(Value::as_u64)
-            .map(|id| id as usize);
+            .and_then(|id| scene.get(raf_core::scene::SceneNodeId(id as usize)))
+            .map(|node| node.parent.map(|id| id.0))
+            .unwrap_or_else(|| {
+                entity
+                    .get("parent_id")
+                    .and_then(Value::as_u64)
+                    .or_else(|| {
+                        entity
+                            .get("parent")
+                            .and_then(|p| p.get("id"))
+                            .and_then(Value::as_u64)
+                    })
+                    .map(|id| id as usize)
+            });
         if expected_id != actual_id {
             failures.push(format!(
                 "parent_id is {:?}, expected {:?}.",
@@ -2472,6 +2817,7 @@ fn classify_prompt(prompt: &str) -> PromptIntent {
     let prompt = prompt.to_lowercase();
     let contains_any = |terms: &[&str]| terms.iter().any(|term| prompt.contains(term));
     PromptIntent {
+        game_ui: contains_any(&["interfaz","interfaces","hud","billboard","responsive","label"," ui ","ui.","game ui","menu","menú"]),
         lighting: contains_any(&[
             "lighting",
             "sun",
@@ -2514,6 +2860,13 @@ fn classify_prompt(prompt: &str) -> PromptIntent {
             "organiza",
             "modifica",
             "cambia",
+            "arregla",
+            "corrige",
+            "fix",
+            "broken",
+            "no funciona",
+            "debug",
+            "depura",
             // Continuation prompts are authoring intent too. They commonly
             // arrive after a previous Agent turn and omit an explicit
             // "create" verb (for example: "continua y termina la tienda").
@@ -2557,10 +2910,54 @@ fn classify_prompt(prompt: &str) -> PromptIntent {
             "rhai",
             "codigo",
             "código",
-            "código",
             "code",
             "controller",
             "controlador",
+        ]),
+        gameplay: contains_any(&[
+            "juego",
+            "juega",
+            "game",
+            "jugador",
+            "player",
+            "puntos",
+            "puntaje",
+            "score",
+            "salta",
+            "salto",
+            "jump",
+            "enemigo",
+            "enemy",
+            "nivel",
+            "level",
+            "mapa",
+            "map",
+            "recolecta",
+            "collect",
+            "moneda",
+            "coin",
+            "vida",
+            "health",
+            "mecánica",
+            "mecanica",
+            "mechanic",
+            "gana",
+            "win",
+            "pierde",
+            "lose",
+            "habilidad",
+            "ability",
+            "dispara",
+            "shoot",
+            "puerta",
+            "door",
+            "meta",
+            "objetivo",
+            "goal",
+            "carrera",
+            "race",
+            "rompecabezas",
+            "puzzle",
         ]),
         pcb: contains_any(&["pcb", "placa", "board", "route", "airwire"]),
         capabilities: contains_any(&[
@@ -2634,6 +3031,7 @@ fn classify_prompt(prompt: &str) -> PromptIntent {
 fn catalog_tool_kind(command: &CommandDefinition) -> AgentToolKind {
     let name = command.name.as_str();
     if name.ends_with(".describe")
+        || name=="ui.document.read"
         || name.ends_with(".netlist")
         || name.ends_with(".bom")
         || name.ends_with(".validate")
@@ -2746,6 +3144,15 @@ fn command_to_openai_tool(
                 {"type":"number"},{"type":"boolean"},{"type":"string","maxLength":32},
                 {"type":"array","items":{"type":"integer","minimum":0,"maximum":255},"minItems":3,"maxItems":3}
             ]});
+        }
+        if command.name == "ui.document.apply" && parameter.name == "edits" {
+            schema=serde_json::json!({"type":"array","description":description,"maxItems":128,
+                "items":{"type":"object","properties":{
+                    "op":{"type":"string","enum":["insert","add","patch","remove","rename","reparent","mount","bind"]},
+                    "parent":{"type":"string"},"id":{"type":"string"},"node":{},"kind":{"type":"string","enum":["frame","label","image","button","input"]},
+                    "text":{"type":"string"},"rect":{"type":"object","properties":{"x":{"type":"number"},"y":{"type":"number"},"width":{"type":"number"},"height":{"type":"number"}},"required":["x","y","width","height"]},
+                    "patch":{"type":"object"},"mount":{"type":"object"},"binding":{"type":"object"}
+                },"required":["op"]}});
         }
         if command.name == "lighting.set" && parameter.name == "patch" {
             schema =
@@ -3249,7 +3656,7 @@ mod tests {
                 "missing {name}"
             );
         }
-        assert!(active.tools.len() <= 26);
+        assert!(active.tools.len() <= 36);
         let inspect = AgentToolExecutor::build_tool_pack(
             &catalog,
             Language::English,
@@ -3275,7 +3682,7 @@ mod tests {
             "Create a detailed store shelf",
         );
 
-        assert!(pack.tools.len() <= 26);
+        assert!(pack.tools.len() <= 36);
         assert!(pack
             .tools
             .iter()
@@ -3312,6 +3719,36 @@ mod tests {
             .tools
             .iter()
             .any(|tool| tool.function.name.starts_with("electronics_")));
+    }
+
+    #[test]
+    fn gameplay_prompt_exposes_lighting_scripting_and_visual_completion_tools() {
+        let catalog = CommandCatalog::builtin();
+        let pack = AgentToolExecutor::build_tool_pack(
+            &catalog,
+            Language::English,
+            Some(ProjectType::Game),
+            AgentMode::Active,
+            "Crea un mapa enorme de un desierto con un muro que se debe saltar y si se salta te da puntos",
+        );
+        for name in [
+            "script_write",
+            "script_attach",
+            "script_validate",
+            "lighting_inspect",
+            "lighting_set",
+            "viewport_capture",
+            "game_completion_audit",
+        ] {
+            assert!(
+                pack.tools.iter().any(|tool| tool.function.name == name),
+                "missing {name}: {:?}",
+                pack.tools
+                    .iter()
+                    .map(|tool| tool.function.name.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
@@ -3490,6 +3927,80 @@ mod tests {
         assert!(failures
             .iter()
             .any(|failure| failure.contains("color_rgba")));
+    }
+
+    #[test]
+    fn harness_parent_verification_reads_live_graph_for_semantic_inspection() {
+        let mut scene = SceneGraph::new();
+        let parent = scene.add_root_folder("Building");
+        let child = scene.add_child(parent, "Door");
+        let inspection = raf_core::agent_context::scene_inspect(
+            &scene,
+            &serde_json::json!({"target": child.0.to_string()}),
+            &[],
+        );
+        let expected = serde_json::json!({"parent": "Building"});
+        let entity = &inspection.data["entity"];
+        assert!(!entity.is_null());
+        assert!(verify_entity_postcondition(&expected, entity, &scene).is_empty());
+        scene.reparent_node(child, None);
+        assert!(!verify_entity_postcondition(&expected, entity, &scene).is_empty());
+    }
+
+    #[test]
+    fn harness_scripting_survives_a_mixed_world_build_request() {
+        let pack = AgentToolExecutor::build_tool_pack(
+            &CommandCatalog::builtin(),
+            Language::English,
+            Some(ProjectType::Game),
+            AgentMode::Active,
+            "Create a world with scripts, lighting, image assets, prefabs and grid layout",
+        );
+        assert!(pack.tools.len() <= 36);
+        for name in [
+            "script_create",
+            "script_attach",
+            "script_validate",
+            "scene_build",
+            "scene_verify",
+            "capabilities_search",
+        ] {
+            assert!(pack.routes.contains_key(name), "missing {name}");
+        }
+    }
+
+    #[test]
+    fn harness_large_batch_is_verified_before_model_compaction() {
+        use crate::commands::game::HeadlessGameViewportPort;
+        let mut scene = SceneGraph::new();
+        let mut selection = SceneSelectionState::default();
+        let mut viewport = HeadlessGameViewportPort::default();
+        let mut actions = Vec::new();
+        let params = serde_json::json!({"operations": (0..38).map(|i|
+            serde_json::json!({"name":"game.add", "params":{
+                "primitive":"sphere", "name":format!("Object_{i}"), "position":[i,0,0]
+            }})).collect::<Vec<_>>()});
+        let executor = AgentParsedExecutor {
+            scene: &mut scene,
+            selection: &mut selection,
+            viewport: &mut viewport,
+            electronics: None,
+            project: None,
+            editor_actions: &mut actions,
+        };
+        let mut gateway = CommandGateway::new(executor);
+        let mut request =
+            EngineCommandRequest::new("game.batch", params.clone(), CommandSource::Agent);
+        request.confirm = true;
+        request.budget = Some(native_agent_budget());
+        let response = gateway.execute(request);
+        assert!(response.ok, "{:?}", response);
+        assert!(response.data.get("truncated").is_none());
+        assert!(native_agent_budget().max_result_bytes.is_none());
+        let data = response.data;
+        drop(gateway);
+        assert!(verify_postconditions("game.batch", &params, &data, &scene).is_empty());
+        assert_eq!(scene.all_live_ids().len(), 38);
     }
 
     #[test]

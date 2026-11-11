@@ -153,10 +153,10 @@ GPU execution when available and CPU recovery for constrained hardware:
 - [x] Automatic net naming (union-find netlist builder assigns N001, N002... or wire labels)
 - [x] Design Rule Check (DRC) - topology checks for floating pins, missing values, isolated components, unnamed nets, short circuits, LED current limiting, dangling wire endpoints, and component-pin bypass shorts
 - [x] BOM (Bill of Materials) generation (CSV export with grouping and quantity counting)
-- [ ] Gerber file export (JLCPCB/PCBWay) - structure ready, now staged around synced PCB layout rather than a mandatory 3D board path
-- [ ] PCB layout view (basic 3D)
+- [x] Fabrication export from the synchronized 2D PCB: Gerber copper, solder mask, silkscreen and outline, plus Excellon drills.
+- [ ] PCB layout view (basic 3D). The preview entry remains in beta.
 - [x] PCB layout view (2D synchronized workspace): electronics projects now include a dedicated PCB canvas with placements, airwires, trace creation, board outline drafting, and `pcb_layout.ron` persistence.
-- [ ] Final Gerber layer writer: the export path now validates the synced PCB layout document and outline status, but still needs real copper/mask/silk/drill emission.
+- [x] Fabrication preflight and ZIP packaging for the CAM files.
 - [x] Magnet component with field simulation (N/S poles, Tesla strength, parse 'Weak'/'Strong'/'Neodymium')
 - [ ] Hot-reload of circuit values (live update)
 - [x] SVG vector export of schematics (rotation-aware, styled with theme colors)
@@ -305,14 +305,22 @@ The 0.9.0 target establishes the editor IDE as the native "home" for the AI agen
 - [ ] AI-generated textures applied as materials
 - [ ] Procedural terrain via mesh provider (algorithmic, no AI needed)
 
-## v0.10.0 - Hardware & IoT
+## v0.10.0 - Hardware & IoT (Beta Preview)
 
-- [ ] Serial port communication (serialport crate)
-- [ ] Arduino/ESP32 auto-detection
-- [ ] Real-time sensor data visualization
-- [ ] Actuator control panel in editor
-- [ ] Hardware debugging tools
-- [ ] OTA firmware upload preparation
+**Status: Beta Preview scope implemented.** The
+[Electronics laboratory](AGENT_WORKSPACE.md#electronics-laboratory) opens inside the Agent workspace
+and returns to the active editor document.
+
+- [x] DC analysis of the project schematic with a signal map, voltage and current probes, saved runs and Electronics Agent tools.
+- [x] Native serial communication through `serialport`, with port selection and background I/O.
+- [x] USB serial port discovery and Arduino/ESP32 identification through the handshake with compatible firmware. A reference sketch is included.
+- [x] Live sensor plots, binding measured channels to schematic probes, recording and capture playback.
+- [x] Actuator controls for outputs advertised by the device, with acknowledgements, rejections and timeouts.
+- [x] Hardware diagnostics for connection state, firmware identity, reported channels and output acknowledgements.
+- [x] OTA preparation for compatible devices: image size check, SHA-256 and manifest export. Installation is handled by the device firmware updater.
+- [x] PCB fabrication preview milestone: JLCPCB's quote page rendered both sides of the exported heart and detected its two layers and 334.75 × 212.25 mm dimensions.
+- [ ] Hardware acceptance on physical Arduino and ESP32 boards: discovery, telemetry, actuator acknowledgement, disconnect/reconnect and OTA preparation.
+- [ ] Native performance acceptance during a sustained serial session and while returning between the laboratory and editor.
 
 ## v0.11.0 - Cloud & Streaming
 

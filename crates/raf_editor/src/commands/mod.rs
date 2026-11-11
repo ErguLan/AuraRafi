@@ -17,6 +17,7 @@ pub mod parser;
 pub mod script;
 pub mod sessions;
 pub mod workspace;
+pub mod ui;
 
 pub use catalog::{CommandCatalog, CommandDefinition};
 pub use gateway::{CommandGateway, HeadlessCommandMode, ParsedCommandExecutor};

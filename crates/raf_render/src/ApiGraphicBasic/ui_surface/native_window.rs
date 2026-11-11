@@ -110,9 +110,9 @@ pub struct NativeUiWindowHost {
     _instance: wgpu::Instance,
     surface: wgpu::Surface<'static>,
     adapter: wgpu::Adapter,
-    device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
-    configuration: wgpu::SurfaceConfiguration,
+    pub(super) device: Arc<wgpu::Device>,
+    pub(super) queue: Arc<wgpu::Queue>,
+    pub(super) configuration: wgpu::SurfaceConfiguration,
     host_config: NativeUiWindowConfig,
     ui_shared: Arc<UiSurfaceGpuSharedResources>,
 }

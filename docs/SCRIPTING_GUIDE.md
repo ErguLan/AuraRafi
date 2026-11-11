@@ -200,6 +200,9 @@ write is not a completed save; a loaded record does not restore entities itself.
 
 - Nothing happens: confirm the file is saved, attached, Rhai enabled, and inspect
   runtime diagnostics. Empty optional hooks are valid and do nothing.
+- Runtime-only failure: use attached `script.run` with `entity`, `ticks` and
+  `keys` to exercise the hooks on a cloned scene before pressing Play. See
+  [Raf CLI and MCP Quickstart](CLI_MCP_QUICKSTART.md).
 - Parameter seems ignored: check exact source path, spelling, type and scope.
   Stop and Play again to copy authoring changes into a fresh runtime snapshot.
 - New top-level variable after hot reload: Stop and Play; accepted reload keeps

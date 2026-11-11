@@ -14,6 +14,7 @@ pub struct NativeUiInputBridge {
     snapshot: InputSnapshot,
     scale_factor: f64,
     clipboard_paste: Option<String>,
+    dropped_files: Vec<std::path::PathBuf>,
     /// Text-editing key presses are kept as events in addition to the bitset
     /// snapshot. Winit can deliver two quick press/release cycles before the
     /// next redraw; a bitset would collapse them into one `Delete` press.
@@ -26,12 +27,19 @@ impl Default for NativeUiInputBridge {
             snapshot: InputSnapshot::default(),
             scale_factor: 1.0,
             clipboard_paste: None,
+            dropped_files: Vec::new(),
             pending_text_key_presses: Vec::new(),
         }
     }
 }
 
 impl NativeUiInputBridge {
+    /// Explicit image paste, read on the attachment worker only.
+    pub fn read_clipboard_rgba() -> Option<(u32, u32, Vec<u8>)> {
+        let image = Clipboard::new().ok()?.get_image().ok()?;
+        if image.width == 0 || image.height == 0 || image.width.checked_mul(image.height)? > 16 * 1024 * 1024 { return None; }
+        Some((u32::try_from(image.width).ok()?, u32::try_from(image.height).ok()?, image.bytes.into_owned()))
+    }
     /// Raw device events must only be forwarded by the focused runtime host.
     pub fn ingest_relative_motion(&mut self, delta: (f64, f64)) {
         if self.snapshot.window_focused && delta.0.is_finite() && delta.1.is_finite() {
@@ -45,11 +53,16 @@ impl NativeUiInputBridge {
     pub fn begin_frame(&mut self) {
         self.snapshot.clear_transient();
         self.clipboard_paste = None;
+        self.dropped_files.clear();
         self.pending_text_key_presses.clear();
     }
 
     pub fn ingest(&mut self, event: &WindowEvent) -> bool {
         match event {
+            WindowEvent::DroppedFile(path) => {
+                if self.dropped_files.len() < 16 { self.dropped_files.push(path.clone()); }
+                true
+            }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 self.scale_factor = scale_factor.max(0.25);
                 true
@@ -141,7 +154,7 @@ impl NativeUiInputBridge {
                         if !self.snapshot.modifiers.command_modifier()
                             && !self.snapshot.modifiers.alt
                         {
-                            self.snapshot.text_input.push_str(text);
+                            self.snapshot.text_input.extend(text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')));
                         }
                     }
                 }
@@ -170,7 +183,7 @@ impl NativeUiInputBridge {
                 true
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
-                self.snapshot.text_input.push_str(text);
+                self.snapshot.text_input.extend(text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')));
                 self.snapshot.ime_preedit.clear();
                 true
             }
@@ -311,6 +324,13 @@ impl NativeUiInputBridge {
         }
     }
 
+    /// Text paste wins over image paste when the clipboard exposes text.
+    pub fn has_clipboard_text(&self) -> bool {
+        self.clipboard_paste.is_some()
+    }
+
+    pub fn dropped_files(&self) -> &[std::path::PathBuf] { &self.dropped_files }
+
     pub fn write_clipboard(&self, text: &str) {
         if text.is_empty() {
             return;
@@ -344,6 +364,30 @@ fn pointer_pairs() -> [(RafiPointerButton, UiPointerButton); 3] {
 mod tests {
     use super::*;
     use raf_core::{CaptureMode, InputRegionId, InputRouter, PointerButton};
+
+    #[test]
+    fn cad_release_does_not_leak_into_the_overlapping_retained_workbench() {
+        let mut bridge = NativeUiInputBridge::default();
+        bridge.snapshot_mut().pointer_position = Some([400.0, 200.0]);
+        bridge.snapshot_mut().pointer_released_buttons.insert(PointerButton::Primary);
+        let mut router = InputRouter::default();
+        router.try_capture_pointer(PointerButton::Primary, InputOwner::ElectronicsCanvas,
+            CaptureMode::Exclusive, [100.0,100.0], 1.0);
+        router.reconcile_input(bridge.snapshot());
+        let workbench = InputOwner::RetainedUi(InputRegionId::from_static("test.workbench"));
+        let state = bridge.ui_state_for_owner(UiRect::new(0.0,0.0,800.0,600.0), workbench, &router);
+        assert!(state.pointer_released_buttons.is_empty());
+        assert_eq!(router.pointer_owner(PointerButton::Primary), Some(InputOwner::ElectronicsCanvas));
+        router.finish_frame(bridge.snapshot());
+        assert!(!router.has_pointer_capture());
+    }
+
+    #[test]
+    fn native_text_does_not_insert_backspace_or_nul_as_project_name_characters() {
+        let mut bridge = NativeUiInputBridge::default();
+        bridge.ingest(&WindowEvent::Ime(Ime::Commit("\u{8}Soak\0_LED\n".into())));
+        assert_eq!(bridge.snapshot().text_input, "Soak_LED\n");
+    }
 
     #[test]
     fn native_wheel_down_becomes_a_positive_retained_scroll_offset() {

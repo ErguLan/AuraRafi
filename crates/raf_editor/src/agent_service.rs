@@ -209,6 +209,12 @@ impl AgentService {
                 workspace.panel.borrow_mut().cancel_all();
                 workspace.assets.borrow_mut().cancel_abandoned(&[]);
                 workspace.catalog.sync_project(None);
+                for document in workspace.documents.values_mut() {
+                    if let Some(editor) = document.electronics.as_mut() {
+                        editor.lab.leave();
+                        if editor.lab.dc_requested { editor.cancel_analysis(); }
+                    }
+                }
                 workspace.closing = true;
             }
             Some(WorkspaceSlot::Loading { cancelled, .. }) => *cancelled = true,
@@ -238,10 +244,14 @@ impl AgentService {
                 continue;
             }
             let mut pending = false;
-            for document in workspace.documents.values() {
+            for document in workspace.documents.values_mut() {
                 let mut save = document.save.borrow_mut();
                 changed |= save.poll();
                 pending |= save.is_pending();
+                if let Some(editor) = document.electronics.as_mut() {
+                    changed |= editor.poll_lab(false);
+                    pending |= editor.lab.pending();
+                }
             }
             if !pending {
                 match workspace.panel.borrow_mut().finish_history_writes() {
@@ -311,6 +321,51 @@ impl AgentService {
 
     pub fn selected_workspace(&self) -> Option<&AgentWorkspace> {
         self.workspace(self.selected.as_deref()?)
+    }
+
+    pub(crate) fn selected_lab_target(&self) -> Option<(&Path, SessionId, &Path)> {
+        let workspace = self.selected_workspace()
+            .filter(|workspace| !workspace.closing && workspace.project.project_type == ProjectType::Electronics)?;
+        let session = workspace.panel.borrow().document_id().unwrap_or(workspace.registry.active_session);
+        let document = workspace.documents.get(&session.0.to_string())?;
+        Some((&workspace.project.path, session, &document.session.schematic_file))
+    }
+
+    pub(crate) fn selected_lab<'a>(
+        &'a self,
+        mounted: Option<(&Path, SessionId, &'a NativeElectronicsEditor)>,
+    ) -> Option<&'a NativeElectronicsEditor> {
+        let (path, session, _) = self.selected_lab_target()?;
+        if let Some((_, _, editor)) = mounted.filter(|(root, id, _)| *root == path && *id == session) {
+            return Some(editor);
+        }
+        self.selected_workspace()?.documents.get(&session.0.to_string())?.electronics.as_ref()
+    }
+
+    pub(crate) fn has_lab_work(&self) -> bool {
+        self.entries.values().any(|slot| match slot {
+            WorkspaceSlot::Ready(workspace) => workspace.documents.values().any(|document|
+                document.electronics.as_ref().is_some_and(|editor| editor.lab.pending() || editor.lab.dc_requested)),
+            _ => false,
+        })
+    }
+
+    pub(crate) fn poll_laboratories(&mut self, visible: bool) -> bool {
+        let target = visible.then(|| self.selected_lab_target()
+            .map(|(path, session, _)| (path.to_owned(), session))).flatten();
+        let mut changed = false;
+        for (path, slot) in &mut self.entries {
+            let WorkspaceSlot::Ready(workspace) = slot else { continue };
+            for document in workspace.documents.values_mut() {
+                let Some(editor) = document.electronics.as_mut() else { continue };
+                let visible = target.as_ref().is_some_and(|(root, id)| root == path && *id == document.session.id);
+                if visible { editor.prepare_lab(path, &document.session.schematic_file); }
+                if visible || editor.lab.pending() || editor.lab.dc_requested {
+                    changed |= editor.poll_lab(visible);
+                }
+            }
+        }
+        changed
     }
     pub fn is_selected(&self, path: &Path) -> bool {
         let path = self.aliases.get(path).map(PathBuf::as_path).unwrap_or(path);
@@ -493,10 +548,12 @@ impl AgentService {
             }
             changed |= save_changed;
             changed |= workspace.catalog.poll();
+            let panel_revision_before = workspace.panel.borrow().visual_revision();
             workspace
                 .panel
                 .borrow_mut()
                 .prepare(settings, Some(&workspace.project), catalog);
+            changed |= workspace.panel.borrow().visual_revision() != panel_revision_before;
             if !save_changed && !workspace.panel.borrow().has_live_output() {
                 continue;
             }
@@ -789,6 +846,7 @@ pub(crate) fn poll_conversation(
     catalog_error: Option<&str>,
     history: &mut SceneHistory,
 ) -> Vec<AgentEditorAction> {
+    panel.sync_execution_permissions(settings.agent_mode);
     save.poll();
     panel.set_save_state(save.saved_revision, save.error.clone(), save.is_running());
     if panel.defer_context_open() || save.error.is_some() {
@@ -887,7 +945,6 @@ pub(crate) fn poll_conversation(
             AgentDecision::Deny(id) => panel.runtime.decide_call(&id, false),
         }
     }
-    panel.runtime.set_review_mutations(panel.review_writes);
     panel.poll(&mut executor);
     drop(executor);
     viewport.set_selected_ids(selection.selected_nodes);
@@ -948,6 +1005,11 @@ impl ToolExecutor for DurableExecutor<'_> {
     ) -> Result<AgentToolResult, String> {
         if self.save.is_pending() {
             return Err("agent_workspace.save_pending".into());
+        }
+        if name == "electronics_lab_simulate" && mode == ToolExecutionMode::Apply {
+            if let (Some(project), Some(editor)) = (&self.inner.project, self.inner.electronics.as_deref_mut()) {
+                editor.prepare_lab(&project.root, &self.session.schematic_file);
+            }
         }
         let before = (mode == ToolExecutionMode::Apply
             && self.inner.kind(name) == AgentToolKind::Mutation)

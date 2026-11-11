@@ -23,9 +23,10 @@ use crate::editor_layout::{EditorFrameLayout, EditorRect};
 use crate::folder_picker;
 use crate::settings_surface::SettingsSection;
 use crate::studio_surface::{
-    build_hub_surface_with_model, clamp_context_menu_position, hub_visible_featured,
-    hub_visible_projects, hub_visible_recent, HubProjectCreateError, HubSurfaceFilter,
-    HubSurfaceModel, HubSurfaceProject, HUB_CONTEXT_MENU_SIZE,
+    build_hub_surface_with_model, clamp_context_menu_position, clamp_menu_position,
+    hub_visible_featured, hub_visible_projects, hub_visible_recent, HubPendingAdopt,
+    HubProjectCreateError, HubSurfaceFilter, HubSurfaceModel, HubSurfaceProject,
+    HUB_CONTEXT_MENU_SIZE, HUB_GET_IN_MENU_SIZE,
 };
 use raf_ui::UiWindowCommand;
 
@@ -44,6 +45,11 @@ pub enum NativeStudioIntent {
     Open(PathBuf),
     Duplicate(PathBuf),
     Forget(PathBuf),
+    AdoptProject {
+        path: PathBuf,
+        name: String,
+        project_type: ProjectType,
+    },
     Create {
         name: String,
         parent: PathBuf,
@@ -62,6 +68,11 @@ pub struct NativeStudioSurface {
     palette: raf_render::api_graphic_basic::ui_surface::StudioUiPalette,
     language: Language,
     discovery: Option<Receiver<HubSurfaceModel>>,
+    /// Kept so a background refresh can wake the event loop when it finishes.
+    wakeup: Option<EventLoopProxy<()>>,
+    /// What the create-path field currently displays. The full path is shown
+    /// while editing; a middle-elided path is shown at rest.
+    last_path_display: Option<String>,
     reduced_motion: bool,
     motion_started: std::time::Instant,
 }
@@ -75,21 +86,14 @@ impl NativeStudioSurface {
     ) -> Self {
         let mut model = HubSurfaceModel::default();
         model.create_path = default_project_location().to_string_lossy().to_string();
+        model.create_path_is_project =
+            is_project_directory(std::path::Path::new(&model.create_path));
         model.create_active = true;
-        let (sender, discovery) = mpsc::channel();
-        std::thread::Builder::new()
-            .name("raf-hub-discovery".to_string())
-            .spawn(move || {
-                let _ = sender.send(discover_hub_model());
-                if let Some(wakeup) = wakeup {
-                    let _ = wakeup.send_event(());
-                }
-            })
-            .ok();
+        model.discovery_pending = true;
         let surface = build_hub_surface_with_model(palette, &model);
         let mut host = graphics.create_ui_host(surface, HUB_CLEAR);
         load_hub_images(host.images_mut());
-        Self {
+        let mut studio = Self {
             region: InputRegionId::from_static("native.editor.studio"),
             rect,
             host,
@@ -98,10 +102,14 @@ impl NativeStudioSurface {
             pointer_position: None,
             palette,
             language: Language::English,
-            discovery: Some(discovery),
+            discovery: None,
+            wakeup,
+            last_path_display: None,
             reduced_motion: false,
             motion_started: std::time::Instant::now(),
-        }
+        };
+        studio.start_discovery();
+        studio
     }
 
     pub fn owner(&self) -> InputOwner {
@@ -125,6 +133,33 @@ impl NativeStudioSurface {
         }
         self.rect = layout.window;
         self.model.window_size = [layout.window.width, layout.window.height];
+        let name_focused =
+            self.host.session().interaction.focus.active.as_deref() == Some("hub.create.name");
+        if self.model.create_name_focused != name_focused {
+            self.model.create_name_focused = name_focused;
+            self.last_model = None;
+        }
+        let hovered = self.host.session().interaction.focus.hovered.as_deref();
+        let name_hovered = hovered == Some("hub.create.name");
+        let path_hovered = hovered == Some("hub.create.path");
+        if self.model.create_name_hovered != name_hovered
+            || self.model.create_path_hovered != path_hovered
+        {
+            self.model.create_name_hovered = name_hovered;
+            self.model.create_path_hovered = path_hovered;
+            self.last_model = None;
+        }
+        // The path field shows the full path while it is being edited and a
+        // middle-elided version at rest, so the leaf folder stays readable.
+        let path_display = self.create_path_display();
+        if self.last_path_display.as_deref() != Some(path_display.as_str()) {
+            self.host.session_mut().interaction.controls.set_text(
+                "hub.create.path",
+                &path_display,
+                MAX_TEXT_LENGTH,
+            );
+            self.last_path_display = Some(path_display.clone());
+        }
         let palette_changed = self.palette != palette;
         self.palette = palette;
         if self.last_model.as_ref() == Some(&self.model) && !palette_changed {
@@ -139,7 +174,7 @@ impl NativeStudioSurface {
         );
         self.host.session_mut().interaction.controls.set_text(
             "hub.create.path",
-            &self.model.create_path,
+            &path_display,
             MAX_TEXT_LENGTH,
         );
         self.host.session_mut().interaction.controls.set_text(
@@ -147,12 +182,27 @@ impl NativeStudioSurface {
             &self.model.search_query,
             MAX_TEXT_LENGTH,
         );
+        self.last_path_display = Some(path_display);
         self.last_model = Some(self.model.clone());
+    }
+
+    fn create_path_display(&self) -> String {
+        let focused =
+            self.host.session().interaction.focus.active.as_deref() == Some("hub.create.path");
+        if focused {
+            self.model.create_path.clone()
+        } else {
+            elide_middle_path(&self.model.create_path)
+        }
     }
 
     pub fn set_environment(&mut self, environment: raf_ui::UiEnvironment) {
         self.reduced_motion = environment.prefers_reduced_motion;
         self.host.set_environment(environment);
+    }
+
+    pub fn has_interactive_hover(&self) -> bool {
+        self.host.has_interactive_hover()
     }
 
     pub fn set_language(&mut self, language: Language) {
@@ -184,23 +234,35 @@ impl NativeStudioSurface {
     }
 
     pub fn reset_for_hub(&mut self, open_create: bool) {
-        // Returning to the Hub must be a UI-state transition, not a filesystem
-        // discovery pass. The initial model was already discovered at startup;
-        // In-memory project mutations update the cached model; returning here
-        // never performs an implicit filesystem scan. A missing or slow
-        // project path therefore cannot stall the editor event loop.
+        // Returning to the Hub refreshes the project list in the background.
+        // The scan never runs on the event-loop thread, so a slow or network
+        // path cannot stall the editor while the cached list stays visible.
         self.model.create_error = None;
         self.model.filter = HubSurfaceFilter::All;
+        self.model.search_query.clear();
         self.model.context_project = None;
         self.model.context_menu_position = None;
+        self.model.context_confirm_forget = false;
         self.model.hovered_project_path = None;
         self.model.create_type_menu_open = false;
+        self.model.get_in_menu_open = false;
+        self.model.get_in_menu_position = None;
+        self.model.pending_adopt = None;
+        self.model.pending_open_error = None;
         if self.model.create_path.trim().is_empty() {
             self.model.create_path = default_project_location().to_string_lossy().to_string();
         }
+        self.refresh_create_path_target();
         self.model.create_active = open_create;
         self.last_model = None;
+        self.last_path_display = None;
         self.pointer_position = None;
+        self.start_discovery();
+    }
+
+    fn refresh_create_path_target(&mut self) {
+        self.model.create_path_is_project =
+            is_project_directory(std::path::Path::new(self.model.create_path.trim()));
     }
 
     pub fn model_snapshot(&self) -> HubSurfaceModel {
@@ -218,6 +280,32 @@ impl NativeStudioSurface {
                 && !self.reduced_motion)
     }
 
+    /// Starts a background project scan. Discovery is asynchronous on purpose:
+    /// returning to the Hub must refresh the list without blocking the event
+    /// loop on slow or network filesystems.
+    fn start_discovery(&mut self) {
+        if self.discovery.is_some() {
+            return;
+        }
+        let (sender, receiver) = mpsc::channel();
+        let wakeup = self.wakeup.clone();
+        let spawned = std::thread::Builder::new()
+            .name("raf-hub-discovery".to_string())
+            .spawn(move || {
+                let _ = sender.send(discover_hub_model());
+                if let Some(wakeup) = wakeup {
+                    let _ = wakeup.send_event(());
+                }
+            });
+        if spawned.is_ok() {
+            self.discovery = Some(receiver);
+            self.model.discovery_pending = true;
+            self.last_model = None;
+        } else {
+            self.model.discovery_pending = false;
+        }
+    }
+
     fn poll_discovery(&mut self) {
         let Some(receiver) = self.discovery.as_ref() else {
             return;
@@ -230,10 +318,15 @@ impl NativeStudioSurface {
                 self.model.featured_project = discovered.featured_project;
                 self.model.recent_activity = discovered.recent_activity;
                 self.model.projects = discovered.projects;
+                self.model.discovery_pending = false;
                 self.last_model = None;
                 self.discovery = None;
             }
-            Err(TryRecvError::Disconnected) => self.discovery = None,
+            Err(TryRecvError::Disconnected) => {
+                self.model.discovery_pending = false;
+                self.last_model = None;
+                self.discovery = None;
+            }
             Err(TryRecvError::Empty) => {}
         }
     }
@@ -249,6 +342,7 @@ impl NativeStudioSurface {
     ) -> Vec<NativeStudioIntent> {
         self.pointer_position = input.snapshot().pointer_position;
         self.dismiss_context_menu_outside_press(input);
+        self.dismiss_get_in_menu_outside_press(input);
         let model = &self.model;
         let language = self.language;
         let actions = self.host.process_routed_input(
@@ -266,12 +360,19 @@ impl NativeStudioSurface {
             self.handle_action(action, &mut intents);
         }
         if input.snapshot().key_pressed(raf_core::InputKey::Escape) {
-            if self.model.opening_project.is_some() {
-                intents.push(NativeStudioIntent::CancelOpen);
+            if self.model.pending_open_error.is_some() {
+                self.model.pending_open_error = None;
+            } else if self.model.pending_adopt.is_some() {
+                self.model.pending_adopt = None;
+            } else {
+                if self.model.opening_project.is_some() {
+                    intents.push(NativeStudioIntent::CancelOpen);
+                }
+                self.model.create_type_menu_open = false;
+                self.close_context_menu();
+                self.close_get_in_menu();
+                self.model.search_query.clear();
             }
-            self.model.create_type_menu_open = false;
-            self.model.context_project = None;
-            self.model.context_menu_position = None;
             self.last_model = None;
         }
         if had_actions {
@@ -293,9 +394,138 @@ impl NativeStudioSurface {
         }
     }
 
+    fn forget_project_local(&mut self, path: &std::path::Path) {
+        self.model
+            .projects
+            .retain(|item| item.path.as_path() != path);
+        self.model
+            .recent_activity
+            .retain(|item| item.path.as_path() != path);
+        if self
+            .model
+            .featured_project
+            .as_ref()
+            .is_some_and(|item| item.path.as_path() == path)
+        {
+            self.model.featured_project = self.model.projects.first().cloned();
+        }
+        self.model.total_projects = self.model.projects.len();
+        self.model.game_projects = self
+            .model
+            .projects
+            .iter()
+            .filter(|item| item.project_type == ProjectType::Game)
+            .count();
+        self.model.electronics_projects = self
+            .model
+            .total_projects
+            .saturating_sub(self.model.game_projects);
+    }
+
     fn close_context_menu(&mut self) {
         self.model.context_project = None;
         self.model.context_menu_position = None;
+        self.model.context_confirm_forget = false;
+    }
+
+    fn close_get_in_menu(&mut self) {
+        self.model.get_in_menu_open = false;
+        self.model.get_in_menu_position = None;
+    }
+
+    pub(crate) fn set_open_error(&mut self, detail: impl Into<String>) {
+        self.model.pending_adopt = None;
+        self.model.pending_open_error = Some(detail.into());
+        self.last_model = None;
+    }
+
+    fn begin_open_folder(&mut self, path: PathBuf, intents: &mut Vec<NativeStudioIntent>) {
+        if !path.is_dir() {
+            self.set_open_error(t("app.hub_open_error_missing_folder", self.language));
+            return;
+        }
+        self.model.create_path = path.to_string_lossy().to_string();
+        self.refresh_create_path_target();
+        if path.join(Project::META_FILE).is_file() {
+            match Project::load(&path) {
+                Ok(_) => intents.push(NativeStudioIntent::Open(path)),
+                Err(error) => self.set_open_error(format!(
+                    "{} {error}",
+                    t("app.hub_open_error_unreadable", self.language)
+                )),
+            }
+            return;
+        }
+        let Some(name) = path
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .filter(|name| !name.is_empty())
+        else {
+            self.set_open_error(t("app.hub_open_error_invalid_project", self.language));
+            return;
+        };
+        self.model.pending_adopt = Some(HubPendingAdopt {
+            path,
+            name,
+            project_type: self.model.create_project_type,
+        });
+        self.last_model = None;
+    }
+
+    fn begin_open_ron(&mut self, file: PathBuf, intents: &mut Vec<NativeStudioIntent>) {
+        let is_project_meta = file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(Project::META_FILE));
+        let Some(parent) = file.parent().map(|parent| parent.to_path_buf()) else {
+            self.set_open_error(t("app.hub_open_error_invalid_project", self.language));
+            return;
+        };
+        if !is_project_meta {
+            self.set_open_error(t("app.hub_open_error_invalid_project", self.language));
+            return;
+        }
+        match Project::load(&parent) {
+            Ok(_) => {
+                self.model.create_path = parent.to_string_lossy().to_string();
+                self.refresh_create_path_target();
+                intents.push(NativeStudioIntent::Open(parent));
+            }
+            Err(error) => self.set_open_error(format!(
+                "{} {error}",
+                t("app.hub_open_error_unreadable", self.language)
+            )),
+        }
+    }
+
+    /// A press anywhere outside the placed "Get in" menu dismisses it.
+    fn dismiss_get_in_menu_outside_press(&mut self, input: &NativeUiInputBridge) {
+        if !self.model.get_in_menu_open {
+            return;
+        }
+        if input.snapshot().pointer_pressed_buttons.is_empty() {
+            return;
+        }
+        let Some(pointer) = input.snapshot().pointer_position else {
+            return;
+        };
+        let Some(anchor) = self.model.get_in_menu_position else {
+            return;
+        };
+        // The trigger lives in the top bar; a press there is a toggle, not an
+        // outside dismissal.
+        if pointer[1] < 64.0 {
+            return;
+        }
+        let placed = clamp_menu_position(anchor, self.model.window_size, HUB_GET_IN_MENU_SIZE);
+        let inside = pointer[0] >= placed[0]
+            && pointer[1] >= placed[1]
+            && pointer[0] <= placed[0] + HUB_GET_IN_MENU_SIZE[0]
+            && pointer[1] <= placed[1] + HUB_GET_IN_MENU_SIZE[1];
+        if !inside {
+            self.close_get_in_menu();
+            self.last_model = None;
+        }
     }
 
     /// A press anywhere outside the placed context menu dismisses it, matching
@@ -321,6 +551,7 @@ impl NativeStudioSurface {
         if !inside {
             self.model.context_project = None;
             self.model.context_menu_position = None;
+            self.model.context_confirm_forget = false;
             self.last_model = None;
         }
     }
@@ -342,6 +573,32 @@ impl NativeStudioSurface {
             }
             return;
         }
+        if self.model.pending_adopt.is_some() {
+            match &dispatched.action {
+                UiAction::Command { name } if name == "hub.adopt.confirm" => {
+                    if let Some(adopt) = self.model.pending_adopt.take() {
+                        intents.push(NativeStudioIntent::AdoptProject {
+                            path: adopt.path,
+                            name: adopt.name,
+                            project_type: adopt.project_type,
+                        });
+                    }
+                }
+                UiAction::Command { name } if name == "hub.adopt.cancel" => {
+                    self.model.pending_adopt = None;
+                }
+                _ => {}
+            }
+            return;
+        }
+        if self.model.pending_open_error.is_some() {
+            if let UiAction::Command { name } = &dispatched.action {
+                if name == "hub.open-error.close" {
+                    self.model.pending_open_error = None;
+                }
+            }
+            return;
+        }
         match dispatched.action {
             UiAction::SetText { key, value } => match key.as_str() {
                 "hub.create.name" => {
@@ -351,6 +608,7 @@ impl NativeStudioSurface {
                 "hub.create.path" => {
                     self.model.create_path = value;
                     self.model.create_error = None;
+                    self.refresh_create_path_target();
                 }
                 "hub.search" => self.model.search_query = value,
                 _ => {}
@@ -366,21 +624,62 @@ impl NativeStudioSurface {
                     intents.push(NativeStudioIntent::Window(UiWindowCommand::ToggleMaximize))
                 }
                 "window.close" => intents.push(NativeStudioIntent::Window(UiWindowCommand::Close)),
-                "hub.settings" => intents.push(NativeStudioIntent::OpenSettings {
-                    section: SettingsSection::Appearance,
-                }),
-                "hub.agents" => intents.push(NativeStudioIntent::OpenAgents(None)),
+                "window.system-menu" => {
+                    intents.push(NativeStudioIntent::Window(UiWindowCommand::ShowSystemMenu))
+                }
+                "hub.settings" => {
+                    self.close_get_in_menu();
+                    intents.push(NativeStudioIntent::OpenSettings {
+                        section: SettingsSection::Appearance,
+                    });
+                }
+                "hub.agents" => {
+                    self.close_get_in_menu();
+                    intents.push(NativeStudioIntent::OpenAgents(None));
+                }
                 "hub.create.agent-toggle" => {
                     self.model.create_with_agent = !self.model.create_with_agent
                 }
                 "hub.new" => {
+                    if self.model.get_in_menu_open {
+                        self.close_get_in_menu();
+                    } else {
+                        self.close_context_menu();
+                        self.model.get_in_menu_open = true;
+                        let anchor = self.pointer_position.unwrap_or([0.0, 0.0]);
+                        // Drop the menu below the trigger instead of covering it.
+                        let anchor = [anchor[0], anchor[1] + 28.0];
+                        self.model.get_in_menu_position = Some(clamp_menu_position(
+                            anchor,
+                            self.model.window_size,
+                            HUB_GET_IN_MENU_SIZE,
+                        ));
+                    }
+                }
+                "hub.getin.new" => {
+                    self.close_get_in_menu();
                     self.model.create_active = true;
                     self.model.create_error = None;
+                    self.model.create_type_menu_open = false;
                     self.host
                         .session_mut()
                         .interaction
                         .focus
                         .request_focus("hub.create.name");
+                }
+                "hub.getin.open-folder" => {
+                    self.close_get_in_menu();
+                    let current = self.model.create_path.clone();
+                    if let Some(path) = folder_picker::pick_project_folder(&current) {
+                        self.begin_open_folder(path, intents);
+                    }
+                }
+                "hub.getin.open-file" => {
+                    self.close_get_in_menu();
+                    let current = self.model.create_path.clone();
+                    if let Some(file) = folder_picker::pick_project_file(&current) {
+                        self.begin_open_ron(file, intents);
+                    }
                 }
                 "hub.new-game" => {
                     self.model.create_active = true;
@@ -397,8 +696,8 @@ impl NativeStudioSurface {
                 "hub.projects" | "hub.view-all" => {
                     self.model.filter = HubSurfaceFilter::All;
                     self.model.create_active = false;
-                    self.model.context_project = None;
-                    self.model.context_menu_position = None;
+                    self.close_context_menu();
+                    self.close_get_in_menu();
                 }
                 "hub.filter-all" => self.model.filter = HubSurfaceFilter::All,
                 "hub.filter-games" => self.model.filter = HubSurfaceFilter::Game,
@@ -407,45 +706,26 @@ impl NativeStudioSurface {
                     if let Some(project) = self.model.context_project.take() {
                         intents.push(NativeStudioIntent::Open(project.path));
                     }
-                    self.model.context_menu_position = None;
+                    self.close_context_menu();
                 }
                 "hub.context-duplicate" => {
                     if let Some(project) = self.model.context_project.take() {
                         intents.push(NativeStudioIntent::Duplicate(project.path));
                     }
-                    self.model.context_menu_position = None;
+                    self.close_context_menu();
                 }
                 "hub.context-forget" => {
-                    if let Some(project) = self.model.context_project.take() {
-                        let path = project.path.clone();
-                        self.model.projects.retain(|item| item.path != path);
-                        self.model.recent_activity.retain(|item| item.path != path);
-                        if self
-                            .model
-                            .featured_project
-                            .as_ref()
-                            .is_some_and(|item| item.path == path)
-                        {
-                            self.model.featured_project = self.model.projects.first().cloned();
-                        }
-                        self.model.total_projects = self.model.projects.len();
-                        self.model.game_projects = self
-                            .model
-                            .projects
-                            .iter()
-                            .filter(|item| item.project_type == ProjectType::Game)
-                            .count();
-                        self.model.electronics_projects = self
-                            .model
-                            .total_projects
-                            .saturating_sub(self.model.game_projects);
+                    if !self.model.context_confirm_forget {
+                        self.model.context_confirm_forget = true;
+                    } else if let Some(project) = self.model.context_project.take() {
+                        let path = project.path;
+                        self.forget_project_local(&path);
+                        self.close_context_menu();
                         intents.push(NativeStudioIntent::Forget(path));
                     }
-                    self.model.context_menu_position = None;
                 }
                 "hub.context-close" => {
-                    self.model.context_project = None;
-                    self.model.context_menu_position = None;
+                    self.close_context_menu();
                 }
                 "hub.create.type-menu" => {
                     self.model.create_type_menu_open = !self.model.create_type_menu_open;
@@ -464,25 +744,34 @@ impl NativeStudioSurface {
                     if let Some(path) = folder_picker::pick_folder(&current) {
                         self.model.create_path = path.to_string_lossy().to_string();
                         self.model.create_error = None;
+                        self.refresh_create_path_target();
                     }
                 }
                 "hub.create.submit" => {
-                    let name = self.model.create_name.trim().to_string();
                     let parent = PathBuf::from(self.model.create_path.trim());
-                    if name.is_empty() {
-                        self.model.create_error = Some(HubProjectCreateError::NameRequired);
-                    } else if !valid_project_name(&name) {
-                        self.model.create_error = Some(HubProjectCreateError::NameInvalid);
-                    } else if parent.as_os_str().is_empty() {
-                        self.model.create_error = Some(HubProjectCreateError::LocationRequired);
-                    } else {
+                    // The same row doubles as the "open existing project"
+                    // entry point: a project folder opens, anything else
+                    // creates a new project inside that parent folder.
+                    if self.model.create_path_is_project {
                         self.model.create_error = None;
-                        intents.push(NativeStudioIntent::Create {
-                            name,
-                            parent,
-                            project_type: self.model.create_project_type,
-                            with_agent: self.model.create_with_agent,
-                        });
+                        intents.push(NativeStudioIntent::Open(parent));
+                    } else {
+                        let name = self.model.create_name.trim().to_string();
+                        if name.is_empty() {
+                            self.model.create_error = Some(HubProjectCreateError::NameRequired);
+                        } else if !valid_project_name(&name) {
+                            self.model.create_error = Some(HubProjectCreateError::NameInvalid);
+                        } else if parent.as_os_str().is_empty() {
+                            self.model.create_error = Some(HubProjectCreateError::LocationRequired);
+                        } else {
+                            self.model.create_error = None;
+                            intents.push(NativeStudioIntent::Create {
+                                name,
+                                parent,
+                                project_type: self.model.create_project_type,
+                                with_agent: self.model.create_with_agent,
+                            });
+                        }
                     }
                 }
                 _ => {}
@@ -506,8 +795,13 @@ impl NativeStudioSurface {
                         intents.push(NativeStudioIntent::Duplicate(path));
                     }
                     Some("forget") => {
-                        self.close_context_menu();
-                        intents.push(NativeStudioIntent::Forget(path));
+                        if !self.model.context_confirm_forget {
+                            self.model.context_confirm_forget = true;
+                        } else {
+                            self.forget_project_local(&path);
+                            self.close_context_menu();
+                            intents.push(NativeStudioIntent::Forget(path));
+                        }
                     }
                     Some("hover") => {
                         self.model.hovered_project_path = Some(path);
@@ -518,6 +812,7 @@ impl NativeStudioSurface {
                         }
                     }
                     Some("menu") => {
+                        self.close_get_in_menu();
                         self.model.context_project = self
                             .model
                             .projects
@@ -528,6 +823,7 @@ impl NativeStudioSurface {
                         let window_size = self.model.window_size;
                         self.model.context_menu_position =
                             Some(clamp_context_menu_position(anchor, window_size));
+                        self.model.context_confirm_forget = false;
                         self.model.hovered_project_path = Some(path);
                     }
                     _ => {}
@@ -607,7 +903,7 @@ pub(crate) fn forget_project(path: &std::path::Path) {
         return;
     };
     let mut recent = RecentProjects::load(&config_root);
-    recent.projects.retain(|entry| entry.path != path);
+    recent.dismiss(path);
     if let Err(error) = recent.save(&config_root) {
         tracing::warn!(%error, "could not persist native Hub project removal");
     }
@@ -632,6 +928,36 @@ fn project_from_loaded(project: Project, last_opened_label: Option<String>) -> H
     }
 }
 
+fn is_project_directory(path: &std::path::Path) -> bool {
+    !path.as_os_str().is_empty() && path.join(Project::META_FILE).is_file()
+}
+
+/// Middle-elides a path so the leaf folder stays visible when the path field
+/// is not being edited. The full path is kept in the model and in the tooltip.
+fn elide_middle_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() || trimmed.chars().count() <= 28 {
+        return trimmed.to_string();
+    }
+    let separator = if trimmed.contains('\\') { '\\' } else { '/' };
+    let parts: Vec<&str> = trimmed
+        .split(['\\', '/'])
+        .filter(|part| !part.is_empty())
+        .collect();
+    let leaf = parts.last().copied().unwrap_or(trimmed);
+    if parts.len() <= 2 || trimmed.starts_with("\\\\") {
+        return format!("…{separator}{leaf}");
+    }
+    let root = parts.first().copied().unwrap_or_default();
+    let parent = parts.get(parts.len() - 2).copied().unwrap_or_default();
+    let detailed = format!("{root}{separator}…{separator}{parent}{separator}{leaf}");
+    if detailed.chars().count() <= 28 {
+        detailed
+    } else {
+        format!("…{separator}{leaf}")
+    }
+}
+
 fn discover_hub_model() -> HubSurfaceModel {
     let projects = discover_hub_projects(&default_project_location());
     let total_projects = projects.len();
@@ -653,6 +979,7 @@ fn discover_hub_model() -> HubSurfaceModel {
 
 fn discover_hub_projects(root: &std::path::Path) -> Vec<HubSurfaceProject> {
     let recent = recent_projects();
+    let dismissed: std::collections::HashSet<PathBuf> = recent.dismissed.iter().cloned().collect();
     let mut projects = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
@@ -665,7 +992,10 @@ fn discover_hub_projects(root: &std::path::Path) -> Vec<HubSurfaceProject> {
         // older schema. Keep directory-backed entries visible and let the
         // open action report a repair/load error instead of silently turning
         // the Hub into "No projects found".
-        if !entry.path.is_dir() || !seen.insert(entry.path.clone()) {
+        if !entry.path.is_dir()
+            || dismissed.contains(&entry.path)
+            || !seen.insert(entry.path.clone())
+        {
             continue;
         }
         let row = if entry.path.join(Project::META_FILE).is_file() {
@@ -701,7 +1031,7 @@ fn discover_hub_projects(root: &std::path::Path) -> Vec<HubSurfaceProject> {
     }
 
     for path in directories {
-        if !seen.insert(path.clone()) {
+        if dismissed.contains(&path) || !seen.insert(path.clone()) {
             continue;
         }
         if let Ok(project) = Project::load(&path) {
@@ -718,11 +1048,42 @@ fn valid_project_name(name: &str) -> bool {
         && name != "."
         && name != ".."
         && !name.chars().any(|character| {
-            matches!(
-                character,
-                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
-            )
+            character.is_control()
+                || matches!(
+                    character,
+                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+                )
         })
+}
+
+#[cfg(test)]
+mod project_name_regressions {
+    #[test]
+    fn invisible_controls_are_rejected_before_filesystem_creation() {
+        assert!(super::valid_project_name("Soak_ElectronicCodex"));
+        for invalid in ["\u{8}Soak", "Soak\nLED", "Soak\0", "Soak\tLED"] {
+            assert!(!super::valid_project_name(invalid));
+        }
+    }
+}
+
+#[cfg(test)]
+mod path_display_regressions {
+    #[test]
+    fn middle_elision_keeps_the_leaf_folder_visible() {
+        let elided =
+            super::elide_middle_path(r"C:\Users\erick\OneDrive\Documentos\AuraRafi Projects");
+
+        assert!(elided.ends_with("AuraRafi Projects"));
+        assert!(elided.contains('…'));
+        assert!(!elided.contains("Users"));
+    }
+
+    #[test]
+    fn short_paths_are_preserved() {
+        assert_eq!(super::elide_middle_path("C:/Projects"), "C:/Projects");
+        assert_eq!(super::elide_middle_path(""), "");
+    }
 }
 
 fn load_hub_images(store: &mut UiSurfaceImageStore) {
@@ -787,6 +1148,18 @@ fn load_hub_images(store: &mut UiSurfaceImageStore) {
         (
             "editor.hub.context-open",
             include_bytes!("../../../editor/assets/ui_icons/open_HUB.png").as_slice(),
+        ),
+        (
+            "editor.hub.project-file",
+            include_bytes!("../../../editor/assets/ui_icons/project_type_HUB.png").as_slice(),
+        ),
+        (
+            "editor.hub.sparkle",
+            include_bytes!("../../../editor/assets/ui_icons/sparkle.png").as_slice(),
+        ),
+        (
+            "editor.hub.submit-arrow",
+            include_bytes!("../../../editor/assets/ui_icons/submit_arrow.png").as_slice(),
         ),
         (
             "editor.hub.context-duplicate",
@@ -867,6 +1240,14 @@ pub fn resolve_hub_text(key: &str, model: &HubSurfaceModel, language: Language) 
             .context_project
             .as_ref()
             .map(|project| project.name.clone())
+            .unwrap_or_default(),
+        "hub.adopt.type" => model
+            .pending_adopt
+            .as_ref()
+            .map(|adopt| match adopt.project_type {
+                ProjectType::Game => t("app.hub_type_game_label", language),
+                ProjectType::Electronics => t("app.hub_type_electronics_label", language),
+            })
             .unwrap_or_default(),
         _ => resolve_dynamic_project_text(key, model, language).unwrap_or_else(|| t(key, language)),
     }

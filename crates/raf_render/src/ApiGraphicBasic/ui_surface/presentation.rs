@@ -6,6 +6,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use super::effects::{UiPaintEffects, UiPaintKey, UiRoundedClip, UiSurfaceEffects};
 use super::text_atlas::visual_line_ranges;
 use super::{
     images::builtin_icon_key, UiControl, UiImageFit, UiRect, UiSkeletonShape, UiStyle,
@@ -90,7 +91,7 @@ impl UiSurfacePaintCommand {
         }
     }
 
-    fn sequence(self) -> u32 {
+    pub(super) fn sequence(self) -> u32 {
         match self {
             Self::Solid { sequence, .. }
             | Self::Stroke { sequence, .. }
@@ -102,6 +103,7 @@ impl UiSurfacePaintCommand {
 
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct UiSurfaceDrawList {
+    pub effects: UiSurfaceEffects,
     pub solids: Vec<UiSurfaceQuad>,
     pub strokes: Vec<UiSurfaceStroke>,
     pub text: Vec<UiSurfaceTextQuad>,
@@ -179,6 +181,7 @@ impl UiSurfaceDrawList {
         let mut strokes = Vec::new();
         let mut text = Vec::new();
         let mut images = Vec::new();
+        let mut effects = UiSurfaceEffects::new();
         let mut paint_order = Vec::with_capacity(frame.layout_boxes.len() * 3);
         let mut sequence = 0_u32;
         let text_request_index = frame
@@ -189,294 +192,302 @@ impl UiSurfaceDrawList {
             .collect::<HashMap<_, _>>();
 
         for layout in &frame.layout_boxes {
-            let first_solid = solids.len();
-            let style = skeleton_style(&layout.control, &layout.style, layout.rect);
-            append_style_quads(
-                &mut solids,
-                layout.rect,
-                layout.clip_rect,
-                &style,
-                layout.z_index,
-            );
-            for index in first_solid..solids.len() {
-                paint_order.push(UiSurfacePaintCommand::Solid {
-                    index,
-                    z_index: solids[index].z_index,
-                    sequence,
-                });
-                sequence = sequence.wrapping_add(1);
-            }
-
-            let first_control_solid = solids.len();
-            let first_control_stroke = strokes.len();
-            append_control_quads(
-                &mut solids,
-                &mut strokes,
-                layout.content_rect,
-                layout.clip_rect,
-                &layout.control,
-                &layout.style,
-                layout.z_index.saturating_add(1),
-            );
-            for index in first_control_solid..solids.len() {
-                paint_order.push(UiSurfacePaintCommand::Solid {
-                    index,
-                    z_index: solids[index].z_index,
-                    sequence,
-                });
-                sequence = sequence.wrapping_add(1);
-            }
-            for index in first_control_stroke..strokes.len() {
-                paint_order.push(UiSurfacePaintCommand::Stroke {
-                    index,
-                    z_index: strokes[index].z_index,
-                    sequence,
-                });
-                sequence = sequence.wrapping_add(1);
-            }
-
-            if let UiControl::Image(image) = &layout.control {
-                let index = images.len();
-                images.push(UiSurfaceImageQuad {
-                    rect: layout.rect,
-                    clip_rect: layout.clip_rect,
-                    source_key: image.source.key.clone(),
-                    fit: image.fit,
-                    tint: image.tint.unwrap_or([255, 255, 255, 255]),
-                    z_index: layout.z_index,
-                });
-                paint_order.push(UiSurfacePaintCommand::Image {
-                    index,
-                    z_index: layout.z_index,
-                    sequence,
-                });
-                sequence = sequence.wrapping_add(1);
-            }
-
-            let has_text = text_request_index.contains_key(layout.id.as_str());
-            let content_rect = layout.content_rect;
-            let content_clip = layout.clip_rect.intersection(content_rect);
-            if let Some(icon) = layout.icon {
-                let icon_size = f32::from(icon.size.logical_pixels());
-                let icon_x = if has_text {
-                    content_rect.x
-                } else {
-                    content_rect.x + ((content_rect.width - icon_size) * 0.5).max(0.0)
-                };
-                let icon_rect = UiRect::new(
-                    icon_x,
-                    content_rect.y + ((content_rect.height - icon_size) * 0.5).max(0.0),
-                    icon_size.min(content_rect.width),
-                    icon_size.min(content_rect.height),
-                );
-                let index = images.len();
-                images.push(UiSurfaceImageQuad {
-                    rect: icon_rect,
-                    clip_rect: content_clip,
-                    source_key: builtin_icon_key(icon.id),
-                    fit: UiImageFit::Contain,
-                    tint: icon.tint.unwrap_or_else(|| {
-                        let mut tint = layout.style.text;
-                        tint[3] = ((f32::from(tint[3]) * layout.style.opacity).round()) as u8;
-                        tint
-                    }),
-                    z_index: layout.z_index.saturating_add(1),
-                });
-                paint_order.push(UiSurfacePaintCommand::Image {
-                    index,
-                    z_index: layout.z_index.saturating_add(1),
-                    sequence,
-                });
-                sequence = sequence.wrapping_add(1);
-            }
-
-            let Some(&request_index) = text_request_index.get(layout.id.as_str()) else {
-                continue;
-            };
-            let Some((request, resolved)) = frame
-                .text_requests
-                .get(request_index)
-                .zip(resolved_text.get(request_index))
-            else {
-                continue;
-            };
-            if let Some(slot) = atlas.slot_for(request, resolved.as_str()) {
-                let text_width = f32::from(slot.rect.width) / raster_scale;
-                let text_height = f32::from(slot.rect.height) / raster_scale;
-                let symbol_button = request.style.role == UiTextRole::Button
-                    && resolved.chars().count() <= 2
-                    && layout.icon.is_none();
-                let text_origin_x = if symbol_button {
-                    content_rect.x + ((content_rect.width - text_width) * 0.5).max(0.0)
-                } else {
-                    text_origin_x_for_layout(layout, request, resolved, atlas, raster_scale)
-                };
-                let text_rect = UiRect::new(
-                    text_origin_x,
-                    content_rect.y + ((content_rect.height - text_height) * 0.5).max(0.0),
-                    text_width,
-                    text_height,
-                );
-                if let Some(edit) = layout.text_edit {
-                    let selection = edit.selection();
-                    if selection.start < selection.end {
-                        let characters = resolved.chars().collect::<Vec<_>>();
-                        let lines = visual_line_ranges(request, resolved);
-                        let line_height = (request.style.line_height_px / raster_scale).max(1.0);
-                        let text_y = text_rect.y;
-                        let selection_color =
-                            apply_opacity([58, 121, 226, 150], layout.style.opacity);
-                        for (line_index, line) in lines.iter().enumerate() {
-                            let start = selection.start.max(line.start);
-                            let end = selection.end.min(line.end);
-                            if start >= end || start >= characters.len() {
-                                continue;
-                            }
-                            let line_text = characters[line.start..line.end.min(characters.len())]
-                                .iter()
-                                .collect::<String>();
-                            let start_x = text_origin_x
-                                + atlas.measure_prefix_width(
-                                    request,
-                                    &line_text,
-                                    start.saturating_sub(line.start),
-                                ) / raster_scale;
-                            let end_x = text_origin_x
-                                + atlas.measure_prefix_width(
-                                    request,
-                                    &line_text,
-                                    end.saturating_sub(line.start),
-                                ) / raster_scale;
-                            let selection_rect = UiRect::new(
-                                start_x.min(end_x),
-                                text_y + line_index as f32 * line_height,
-                                (end_x - start_x).abs().max(1.0),
-                                line_height,
-                            )
-                            .intersection(content_clip);
-                            if selection_rect.is_empty() {
-                                continue;
-                            }
-                            let index = solids.len();
-                            solids.push(UiSurfaceQuad {
-                                rect: selection_rect,
-                                clip_rect: content_clip,
-                                color: selection_color,
-                                // Keep the highlight in the text layer: it is
-                                // emitted after the input fill and before the
-                                // glyph command below.
-                                z_index: layout.z_index,
-                                radius: 1.0,
-                            });
-                            paint_order.push(UiSurfacePaintCommand::Solid {
-                                index,
-                                z_index: layout.z_index,
-                                sequence,
-                            });
-                            sequence = sequence.wrapping_add(1);
-                        }
-                    }
-                }
-                let index = text.len();
-                text.push(UiSurfaceTextQuad {
-                    rect: text_rect,
-                    clip_rect: content_clip,
-                    atlas_rect: UiRect::new(
-                        f32::from(slot.rect.x),
-                        f32::from(slot.rect.y),
-                        f32::from(slot.rect.width),
-                        f32::from(slot.rect.height),
-                    ),
-                    color: request.style.color,
-                    z_index: layout.z_index,
-                });
-                paint_order.push(UiSurfacePaintCommand::Text {
-                    index,
-                    z_index: layout.z_index,
-                    sequence,
-                });
-                sequence = sequence.wrapping_add(1);
-            }
-
-            if let Some(edit) = layout.text_edit {
-                let (caret_line, prefix_width) =
-                    text_cursor_metrics(request, resolved, edit.cursor, atlas, raster_scale);
-                let text_origin_x =
-                    text_origin_x_for_layout(layout, request, resolved, atlas, raster_scale);
-                let caret_width = 1.0;
-                let caret_x = (text_origin_x + prefix_width).clamp(
-                    content_rect.x,
-                    (content_rect.right() - caret_width).max(content_rect.x),
-                );
-                let line_height = (request.style.line_height_px / raster_scale).max(1.0);
-                let text_height = atlas
-                    .slot_for(request, resolved)
-                    .map(|slot| f32::from(slot.rect.height) / raster_scale)
-                    .unwrap_or(line_height);
-                let text_y = content_rect.y + ((content_rect.height - text_height) * 0.5).max(0.0);
-                let caret_y =
-                    (text_y + caret_line as f32 * line_height + 2.0).min(content_rect.bottom());
-                let caret_rect = UiRect::new(
-                    caret_x,
-                    caret_y,
-                    caret_width.min(content_rect.width),
-                    (if request.single_line {
-                        content_rect.height - 4.0
-                    } else {
-                        line_height - 3.0
-                    })
-                    .max(1.0)
-                    .min((content_rect.bottom() - caret_y).max(1.0)),
-                );
-                if !content_clip.is_empty() && !caret_rect.is_empty() {
-                    let mut caret_color = layout.style.border;
-                    if caret_color[3] == 0 {
-                        caret_color = layout.style.text;
-                    }
-                    caret_color = apply_opacity(caret_color, layout.style.opacity);
-                    let index = solids.len();
-                    solids.push(UiSurfaceQuad {
-                        rect: caret_rect,
-                        clip_rect: content_clip,
-                        color: caret_color,
-                        z_index: layout.z_index.saturating_add(2),
-                        radius: 0.0,
-                    });
+            let starts = [solids.len(), strokes.len(), text.len(), images.len()];
+            'paint: {
+                let first_solid = solids.len();
+                let style = skeleton_style(&layout.control, &layout.style, layout.rect);
+                append_visual_quads(&mut solids, &mut effects, layout, &style, frame.tokens);
+                for index in first_solid..solids.len() {
                     paint_order.push(UiSurfacePaintCommand::Solid {
                         index,
-                        z_index: layout.z_index.saturating_add(2),
+                        z_index: solids[index].z_index,
                         sequence,
                     });
                     sequence = sequence.wrapping_add(1);
                 }
-                if layout
-                    .ime_preedit
-                    .as_deref()
-                    .is_some_and(|value| !value.is_empty())
-                {
-                    let preedit_width = atlas.measure_prefix_width(
-                        request,
-                        layout.ime_preedit.as_deref().unwrap_or_default(),
-                        layout
-                            .ime_preedit
-                            .as_deref()
-                            .unwrap_or_default()
-                            .chars()
-                            .count(),
-                    ) / raster_scale;
-                    let underline = UiRect::new(
-                        (text_origin_x + prefix_width).max(content_rect.x),
-                        (caret_y + line_height - 3.0).min(content_rect.bottom() - 1.0),
-                        preedit_width.max(2.0),
-                        1.0,
-                    )
-                    .intersection(content_clip);
-                    if !underline.is_empty() {
+
+                let first_control_solid = solids.len();
+                let first_control_stroke = strokes.len();
+                append_control_quads(
+                    &mut solids,
+                    &mut strokes,
+                    layout.content_rect,
+                    layout.clip_rect,
+                    &layout.control,
+                    &layout.style,
+                    layout.z_index.saturating_add(1),
+                    frame.tokens,
+                );
+                for index in first_control_solid..solids.len() {
+                    paint_order.push(UiSurfacePaintCommand::Solid {
+                        index,
+                        z_index: solids[index].z_index,
+                        sequence,
+                    });
+                    sequence = sequence.wrapping_add(1);
+                }
+                for index in first_control_stroke..strokes.len() {
+                    paint_order.push(UiSurfacePaintCommand::Stroke {
+                        index,
+                        z_index: strokes[index].z_index,
+                        sequence,
+                    });
+                    sequence = sequence.wrapping_add(1);
+                }
+
+                if let UiControl::Image(image) = &layout.control {
+                    let index = images.len();
+                    images.push(UiSurfaceImageQuad {
+                        rect: layout.content_rect,
+                        clip_rect: layout.clip_rect,
+                        source_key: super::images::canonical_builtin_icon_uri(&image.source.key)
+                            .into_owned(),
+                        fit: image.fit,
+                        tint: apply_opacity(
+                            image.tint.unwrap_or([255, 255, 255, 255]),
+                            layout.style.opacity,
+                        ),
+                        z_index: layout.z_index,
+                    });
+                    let mut clips = layout.rounded_clips.clone();
+                    clips.push(UiRoundedClip {
+                        rect: layout.content_rect,
+                        corners: layout.visual.corners.unwrap_or([layout.style.radius; 4]),
+                    });
+                    effects.insert(
+                        UiPaintKey::Image(index),
+                        UiPaintEffects {
+                            clips,
+                            image: Some(image.options.clone()),
+                            ..Default::default()
+                        },
+                    );
+                    paint_order.push(UiSurfacePaintCommand::Image {
+                        index,
+                        z_index: layout.z_index,
+                        sequence,
+                    });
+                    sequence = sequence.wrapping_add(1);
+                }
+
+                let has_text = text_request_index.contains_key(layout.id.as_str());
+                let content_rect = layout.content_rect;
+                let content_clip = layout.clip_rect.intersection(content_rect);
+                if let Some(icon) = layout.icon {
+                    let icon_size = f32::from(icon.size.logical_pixels());
+                    let icon_x = if has_text {
+                        let measured = text_request_index
+                            .get(layout.id.as_str())
+                            .and_then(|index| {
+                                frame
+                                    .text_requests
+                                    .get(*index)
+                                    .zip(resolved_text.get(*index))
+                            })
+                            .and_then(|(request, value)| atlas.slot_for(request, value))
+                            .map(|slot| f32::from(slot.rect.width) / raster_scale)
+                            .unwrap_or(0.0);
+                        content_origins(layout, measured).0
+                    } else {
+                        content_rect.x + ((content_rect.width - icon_size) * 0.5).max(0.0)
+                    };
+                    let icon_rect = UiRect::new(
+                        icon_x,
+                        content_rect.y + ((content_rect.height - icon_size) * 0.5).max(0.0),
+                        icon_size.min(content_rect.width),
+                        icon_size.min(content_rect.height),
+                    );
+                    let index = images.len();
+                    images.push(UiSurfaceImageQuad {
+                        rect: icon_rect,
+                        clip_rect: content_clip,
+                        source_key: builtin_icon_key(icon.id),
+                        fit: UiImageFit::Contain,
+                        tint: apply_opacity(
+                            icon.tint.unwrap_or_else(|| {
+                                let colors = frame.tokens.chrome();
+                                if icon.state == raf_ui::UiIconState::Disabled {
+                                    return colors.icon_disabled;
+                                }
+                                if icon.state == raf_ui::UiIconState::Active {
+                                    return colors.icon_accent;
+                                }
+                                if icon.state == raf_ui::UiIconState::Hovered {
+                                    return colors.icon;
+                                }
+                                match icon.tone {
+                                    raf_ui::UiIconTone::Inherit => layout.style.text,
+                                    raf_ui::UiIconTone::Normal => colors.icon,
+                                    raf_ui::UiIconTone::Muted => colors.icon_muted,
+                                    raf_ui::UiIconTone::Accent => colors.icon_accent,
+                                    raf_ui::UiIconTone::OnAccent => colors.icon_on_accent,
+                                    raf_ui::UiIconTone::Disabled => colors.icon_disabled,
+                                }
+                            }),
+                            layout.style.opacity,
+                        ),
+                        z_index: layout.z_index.saturating_add(1),
+                    });
+                    paint_order.push(UiSurfacePaintCommand::Image {
+                        index,
+                        z_index: layout.z_index.saturating_add(1),
+                        sequence,
+                    });
+                    sequence = sequence.wrapping_add(1);
+                }
+
+                let Some(&request_index) = text_request_index.get(layout.id.as_str()) else {
+                    break 'paint;
+                };
+                let Some((request, resolved)) = frame
+                    .text_requests
+                    .get(request_index)
+                    .zip(resolved_text.get(request_index))
+                else {
+                    break 'paint;
+                };
+                if let Some(slot) = atlas.slot_for(request, resolved.as_str()) {
+                    let text_width = f32::from(slot.rect.width) / raster_scale;
+                    let text_height = f32::from(slot.rect.height) / raster_scale;
+                    let symbol_button = request.style.role == UiTextRole::Button
+                        && resolved.chars().count() <= 2
+                        && layout.icon.is_none();
+                    let text_origin_x = if symbol_button {
+                        content_rect.x + ((content_rect.width - text_width) * 0.5).max(0.0)
+                    } else {
+                        text_origin_x_for_layout(layout, request, resolved, atlas, raster_scale)
+                    };
+                    let text_rect = UiRect::new(
+                        text_origin_x,
+                        content_rect.y + ((content_rect.height - text_height) * 0.5).max(0.0),
+                        text_width,
+                        text_height,
+                    );
+                    if let Some(edit) = layout.text_edit {
+                        let selection = edit.selection();
+                        if selection.start < selection.end {
+                            let characters = resolved.chars().collect::<Vec<_>>();
+                            let lines = visual_line_ranges(request, resolved);
+                            let line_height =
+                                (request.style.line_height_px / raster_scale).max(1.0);
+                            let text_y = text_rect.y;
+                            let selection_color =
+                                apply_opacity([58, 121, 226, 150], layout.style.opacity);
+                            for (line_index, line) in lines.iter().enumerate() {
+                                let start = selection.start.max(line.start);
+                                let end = selection.end.min(line.end);
+                                if start >= end || start >= characters.len() {
+                                    continue;
+                                }
+                                let line_text = characters
+                                    [line.start..line.end.min(characters.len())]
+                                    .iter()
+                                    .collect::<String>();
+                                let start_x = text_origin_x
+                                    + atlas.measure_prefix_width(
+                                        request,
+                                        &line_text,
+                                        start.saturating_sub(line.start),
+                                    ) / raster_scale;
+                                let end_x = text_origin_x
+                                    + atlas.measure_prefix_width(
+                                        request,
+                                        &line_text,
+                                        end.saturating_sub(line.start),
+                                    ) / raster_scale;
+                                let selection_rect = UiRect::new(
+                                    start_x.min(end_x),
+                                    text_y + line_index as f32 * line_height,
+                                    (end_x - start_x).abs().max(1.0),
+                                    line_height,
+                                )
+                                .intersection(content_clip);
+                                if selection_rect.is_empty() {
+                                    continue;
+                                }
+                                let index = solids.len();
+                                solids.push(UiSurfaceQuad {
+                                    rect: selection_rect,
+                                    clip_rect: content_clip,
+                                    color: selection_color,
+                                    // Keep the highlight in the text layer: it is
+                                    // emitted after the input fill and before the
+                                    // glyph command below.
+                                    z_index: layout.z_index,
+                                    radius: 1.0,
+                                });
+                                paint_order.push(UiSurfacePaintCommand::Solid {
+                                    index,
+                                    z_index: layout.z_index,
+                                    sequence,
+                                });
+                                sequence = sequence.wrapping_add(1);
+                            }
+                        }
+                    }
+                    let index = text.len();
+                    text.push(UiSurfaceTextQuad {
+                        rect: text_rect,
+                        clip_rect: content_clip,
+                        atlas_rect: UiRect::new(
+                            f32::from(slot.rect.x),
+                            f32::from(slot.rect.y),
+                            f32::from(slot.rect.width),
+                            f32::from(slot.rect.height),
+                        ),
+                        color: request.style.color,
+                        z_index: layout.z_index,
+                    });
+                    paint_order.push(UiSurfacePaintCommand::Text {
+                        index,
+                        z_index: layout.z_index,
+                        sequence,
+                    });
+                    sequence = sequence.wrapping_add(1);
+                }
+
+                if let Some(edit) = layout.text_edit {
+                    let (caret_line, prefix_width) =
+                        text_cursor_metrics(request, resolved, edit.cursor, atlas, raster_scale);
+                    let text_origin_x =
+                        text_origin_x_for_layout(layout, request, resolved, atlas, raster_scale);
+                    let caret_width = 1.0;
+                    let caret_x = (text_origin_x + prefix_width).clamp(
+                        content_rect.x,
+                        (content_rect.right() - caret_width).max(content_rect.x),
+                    );
+                    let line_height = (request.style.line_height_px / raster_scale).max(1.0);
+                    let text_height = atlas
+                        .slot_for(request, resolved)
+                        .map(|slot| f32::from(slot.rect.height) / raster_scale)
+                        .unwrap_or(line_height);
+                    let text_y =
+                        content_rect.y + ((content_rect.height - text_height) * 0.5).max(0.0);
+                    let caret_y =
+                        (text_y + caret_line as f32 * line_height + 2.0).min(content_rect.bottom());
+                    let caret_rect = UiRect::new(
+                        caret_x,
+                        caret_y,
+                        caret_width.min(content_rect.width),
+                        (if request.single_line {
+                            content_rect.height - 4.0
+                        } else {
+                            line_height - 3.0
+                        })
+                        .max(1.0)
+                        .min((content_rect.bottom() - caret_y).max(1.0)),
+                    );
+                    if !content_clip.is_empty() && !caret_rect.is_empty() {
+                        let mut caret_color = layout.style.border;
+                        if caret_color[3] == 0 {
+                            caret_color = layout.style.text;
+                        }
+                        caret_color = apply_opacity(caret_color, layout.style.opacity);
                         let index = solids.len();
                         solids.push(UiSurfaceQuad {
-                            rect: underline,
+                            rect: caret_rect,
                             clip_rect: content_clip,
-                            color: apply_opacity([232, 133, 28, 255], layout.style.opacity),
+                            color: caret_color,
                             z_index: layout.z_index.saturating_add(2),
                             radius: 0.0,
                         });
@@ -487,12 +498,100 @@ impl UiSurfaceDrawList {
                         });
                         sequence = sequence.wrapping_add(1);
                     }
+                    if layout
+                        .ime_preedit
+                        .as_deref()
+                        .is_some_and(|value| !value.is_empty())
+                    {
+                        let preedit_width = atlas.measure_prefix_width(
+                            request,
+                            layout.ime_preedit.as_deref().unwrap_or_default(),
+                            layout
+                                .ime_preedit
+                                .as_deref()
+                                .unwrap_or_default()
+                                .chars()
+                                .count(),
+                        ) / raster_scale;
+                        let underline = UiRect::new(
+                            (text_origin_x + prefix_width).max(content_rect.x),
+                            (caret_y + line_height - 3.0).min(content_rect.bottom() - 1.0),
+                            preedit_width.max(2.0),
+                            1.0,
+                        )
+                        .intersection(content_clip);
+                        if !underline.is_empty() {
+                            let index = solids.len();
+                            solids.push(UiSurfaceQuad {
+                                rect: underline,
+                                clip_rect: content_clip,
+                                color: apply_opacity([232, 133, 28, 255], layout.style.opacity),
+                                z_index: layout.z_index.saturating_add(2),
+                                radius: 0.0,
+                            });
+                            paint_order.push(UiSurfacePaintCommand::Solid {
+                                index,
+                                z_index: layout.z_index.saturating_add(2),
+                                sequence,
+                            });
+                            sequence = sequence.wrapping_add(1);
+                        }
+                    }
                 }
+            }
+            for key in (starts[0]..solids.len())
+                .map(UiPaintKey::Solid)
+                .chain((starts[1]..strokes.len()).map(UiPaintKey::Stroke))
+                .chain((starts[2]..text.len()).map(UiPaintKey::Text))
+                .chain((starts[3]..images.len()).map(UiPaintKey::Image))
+            {
+                effects.entry(key).or_insert_with(|| UiPaintEffects {
+                    clips: layout.rounded_clips.clone(),
+                    ..Default::default()
+                });
+            }
+            if matches!(layout.control, UiControl::Image(_))
+                && layout.style.border[3] > 0
+                && layout
+                    .visual
+                    .border_widths
+                    .unwrap_or([layout.style.border_width; 4])
+                    .iter()
+                    .any(|width| *width > 0.0)
+            {
+                let index = solids.len();
+                solids.push(UiSurfaceQuad {
+                    rect: layout.rect,
+                    clip_rect: layout.clip_rect,
+                    color: [0; 4],
+                    z_index: layout.z_index.saturating_add(3),
+                    radius: layout.style.radius,
+                });
+                effects.insert(
+                    UiPaintKey::Solid(index),
+                    UiPaintEffects {
+                        corners: layout.visual.corners,
+                        border: apply_opacity(layout.style.border, layout.style.opacity),
+                        border_widths: layout
+                            .visual
+                            .border_widths
+                            .unwrap_or([layout.style.border_width; 4]),
+                        clips: layout.rounded_clips.clone(),
+                        ..Default::default()
+                    },
+                );
+                paint_order.push(UiSurfacePaintCommand::Solid {
+                    index,
+                    z_index: layout.z_index.saturating_add(3),
+                    sequence,
+                });
+                sequence = sequence.wrapping_add(1);
             }
         }
         paint_order.sort_by_key(|command| (command.z_index(), command.sequence()));
 
         Self {
+            effects,
             solids,
             strokes,
             text,
@@ -564,6 +663,11 @@ impl UiSurfaceDrawList {
             )
         };
         Self {
+            effects: self
+                .effects
+                .iter()
+                .map(|(key, effect)| (*key, effect.scaled(scale_x, scale_y)))
+                .collect(),
             solids: self
                 .solids
                 .iter()
@@ -616,6 +720,108 @@ impl UiSurfaceDrawList {
     }
 }
 
+fn append_visual_quads(
+    solids: &mut Vec<UiSurfaceQuad>,
+    effects: &mut UiSurfaceEffects,
+    layout: &super::UiLayoutBox,
+    style: &UiStyle,
+    tokens: raf_ui::UiTokens,
+) {
+    let corners = layout.visual.corners.unwrap_or([style.radius; 4]);
+    if let Some(shadow) = layout.visual.shadow {
+        let spread = shadow.spread.clamp(0.0, 24.0);
+        let index = solids.len();
+        solids.push(UiSurfaceQuad {
+            rect: UiRect::new(
+                layout.rect.x + shadow.offset[0] - spread,
+                layout.rect.y + shadow.offset[1] - spread,
+                layout.rect.width + spread * 2.0,
+                layout.rect.height + spread * 2.0,
+            ),
+            clip_rect: layout.clip_rect,
+            color: apply_opacity(shadow.color, style.opacity),
+            z_index: layout.z_index,
+            radius: style.radius + spread,
+        });
+        effects.insert(
+            UiPaintKey::Solid(index),
+            UiPaintEffects {
+                corners: Some(corners.map(|r| r + spread)),
+                softness: shadow.softness.clamp(0.0, 24.0),
+                clips: layout.rounded_clips.clone(),
+                ..Default::default()
+            },
+        );
+    }
+    if style.fill[3] > 0 || style.border[3] > 0 || layout.visual.gradient.is_some() {
+        let index = solids.len();
+        solids.push(UiSurfaceQuad {
+            rect: layout.rect,
+            clip_rect: layout.clip_rect,
+            color: apply_opacity(style.fill, style.opacity),
+            z_index: layout.z_index,
+            radius: style.radius,
+        });
+        let image = matches!(layout.control, UiControl::Image(_));
+        effects.insert(
+            UiPaintKey::Solid(index),
+            UiPaintEffects {
+                corners: Some(corners),
+                border: if image {
+                    [0; 4]
+                } else {
+                    apply_opacity(style.border, style.opacity)
+                },
+                border_widths: layout
+                    .visual
+                    .border_widths
+                    .unwrap_or([style.border_width; 4]),
+                gradient: layout.visual.gradient.map(|mut g| {
+                    g.start = apply_opacity(g.start, style.opacity);
+                    g.end = apply_opacity(g.end, style.opacity);
+                    g
+                }),
+                clips: layout.rounded_clips.clone(),
+                ..Default::default()
+            },
+        );
+    }
+    let focus_ring = layout.visual.focus_ring.or_else(|| {
+        (layout.focused && layout.focusable).then_some(raf_ui::UiFocusRing {
+            width: 1.5,
+            offset: 2.0,
+            color: tokens.chrome().focus_ring,
+        })
+    });
+    if let Some(ring) = focus_ring.filter(|_| layout.focused) {
+        let offset = ring.offset.max(0.0);
+        let width = ring.width.clamp(0.0, 8.0);
+        let index = solids.len();
+        solids.push(UiSurfaceQuad {
+            rect: UiRect::new(
+                layout.rect.x - offset - width,
+                layout.rect.y - offset - width,
+                layout.rect.width + 2.0 * (offset + width),
+                layout.rect.height + 2.0 * (offset + width),
+            ),
+            clip_rect: layout.clip_rect,
+            color: [0; 4],
+            z_index: layout.z_index.saturating_add(4),
+            radius: style.radius + offset + width,
+        });
+        effects.insert(
+            UiPaintKey::Solid(index),
+            UiPaintEffects {
+                corners: Some(corners.map(|r| r + offset + width)),
+                border: apply_opacity(ring.color, style.opacity),
+                border_widths: [width; 4],
+                clips: layout.rounded_clips.clone(),
+                ..Default::default()
+            },
+        );
+    }
+}
+
 fn skeleton_style(control: &UiControl, style: &UiStyle, rect: UiRect) -> UiStyle {
     let UiControl::Skeleton(skeleton) = control else {
         return style.clone();
@@ -654,22 +860,23 @@ fn append_control_quads(
     control: &UiControl,
     style: &UiStyle,
     z_index: i16,
+    tokens: raf_ui::UiTokens,
 ) {
-    const ACCENT: [u8; 4] = [232, 133, 28, 255];
-    const TRACK: [u8; 4] = [48, 55, 66, 255];
-    const THUMB: [u8; 4] = [232, 236, 242, 255];
+    let accent = tokens.accent;
+    let track = tokens.surface_alt;
+    let thumb = tokens.text;
 
     if rect.width <= 0.0 || rect.height <= 0.0 || style.opacity <= 0.0 {
         return;
     }
 
     let border = if style.border[3] == 0 {
-        TRACK
+        track
     } else {
         style.border
     };
     let text = if style.text[3] == 0 {
-        THUMB
+        thumb
     } else {
         style.text
     };
@@ -692,7 +899,7 @@ fn append_control_quads(
                     // near-white in dark themes and near-black in light themes.
                     // `style.text` comes from the active RafUI theme token.
                     color: color(if style.text[3] == 0 {
-                        THUMB
+                        thumb
                     } else {
                         style.text
                     }),
@@ -700,9 +907,9 @@ fn append_control_quads(
                     radius: 2.0,
                 });
                 let inner_color = if toggle.value {
-                    ACCENT
+                    accent
                 } else if style.fill[3] == 0 {
-                    TRACK
+                    track
                 } else {
                     style.fill
                 };
@@ -736,7 +943,7 @@ fn append_control_quads(
                     width,
                     height,
                 );
-                let track_color = if toggle.value { ACCENT } else { border };
+                let track_color = if toggle.value { accent } else { border };
                 solids.push(UiSurfaceQuad {
                     rect: track_rect,
                     clip_rect,
@@ -798,7 +1005,7 @@ fn append_control_quads(
                         solids.push(UiSurfaceQuad {
                             rect: progress,
                             clip_rect,
-                            color: color(ACCENT),
+                            color: color(accent),
                             z_index: z_index.saturating_add(1),
                             radius: track_height * 0.5,
                         });
@@ -844,7 +1051,7 @@ fn append_control_quads(
                         solids.push(UiSurfaceQuad {
                             rect: progress,
                             clip_rect,
-                            color: color(ACCENT),
+                            color: color(accent),
                             z_index: z_index.saturating_add(1),
                             radius: track_width * 0.5,
                         });
@@ -909,109 +1116,35 @@ fn append_checkbox_checkmark(
     ]);
 }
 
-fn append_style_quads(
-    solids: &mut Vec<UiSurfaceQuad>,
-    rect: UiRect,
-    clip_rect: UiRect,
-    style: &UiStyle,
-    z_index: i16,
-) {
-    if rect.width <= 0.0 || rect.height <= 0.0 || style.opacity <= 0.0 {
-        return;
-    }
-    let fill = apply_opacity(style.fill, style.opacity);
-    let border = apply_opacity(style.border, style.opacity);
-    let border_width = style
-        .border_width
-        .max(0.0)
-        .min(rect.width * 0.5)
-        .min(rect.height * 0.5);
-    if border[3] == 0 || border_width <= 0.0 {
-        if fill[3] != 0 {
-            solids.push(UiSurfaceQuad {
-                rect,
-                clip_rect,
-                color: fill,
-                z_index,
-                radius: style.radius.min(rect.width * 0.5).min(rect.height * 0.5),
-            });
-        }
-        return;
-    }
-
-    if fill[3] != 0 {
-        let outer_radius = style.radius.min(rect.width * 0.5).min(rect.height * 0.5);
-        solids.push(UiSurfaceQuad {
-            rect,
-            clip_rect,
-            color: border,
-            z_index,
-            radius: outer_radius,
-        });
-        let inner_rect = UiRect::new(
-            rect.x + border_width,
-            rect.y + border_width,
-            (rect.width - border_width * 2.0).max(0.0),
-            (rect.height - border_width * 2.0).max(0.0),
-        );
-        if inner_rect.width > 0.0 && inner_rect.height > 0.0 {
-            solids.push(UiSurfaceQuad {
-                rect: inner_rect,
-                clip_rect,
-                color: fill,
-                z_index,
-                radius: (outer_radius - border_width).max(0.0),
-            });
-        }
-        return;
-    }
-
-    let border_z = z_index;
-    solids.extend([
-        UiSurfaceQuad {
-            rect: UiRect::new(rect.x, rect.y, rect.width, border_width),
-            clip_rect,
-            color: border,
-            z_index: border_z,
-            radius: 0.0,
-        },
-        UiSurfaceQuad {
-            rect: UiRect::new(
-                rect.x,
-                rect.bottom() - border_width,
-                rect.width,
-                border_width,
-            ),
-            clip_rect,
-            color: border,
-            z_index: border_z,
-            radius: 0.0,
-        },
-        UiSurfaceQuad {
-            rect: UiRect::new(rect.x, rect.y, border_width, rect.height),
-            clip_rect,
-            color: border,
-            z_index: border_z,
-            radius: 0.0,
-        },
-        UiSurfaceQuad {
-            rect: UiRect::new(
-                rect.right() - border_width,
-                rect.y,
-                border_width,
-                rect.height,
-            ),
-            clip_rect,
-            color: border,
-            z_index: border_z,
-            radius: 0.0,
-        },
-    ]);
-}
-
 fn apply_opacity(mut color: [u8; 4], opacity: f32) -> [u8; 4] {
     color[3] = ((f32::from(color[3]) * opacity.clamp(0.0, 1.0)).round()) as u8;
     color
+}
+
+fn content_origins(layout: &super::UiLayoutBox, text_width: f32) -> (f32, f32) {
+    let content = layout.content_rect;
+    let icon_width = layout
+        .icon
+        .map(|i| f32::from(i.size.logical_pixels()))
+        .unwrap_or(0.0);
+    let gap = if icon_width > 0.0 && text_width > 0.0 {
+        layout.visual.content.gap.max(0.0)
+    } else {
+        0.0
+    };
+    let width = icon_width + gap + text_width;
+    let free = (content.width - width).max(0.0);
+    let origin = content.x
+        + match layout.visual.content.align {
+            raf_ui::UiContentAlign::Start => 0.0,
+            raf_ui::UiContentAlign::Center => free * 0.5,
+            raf_ui::UiContentAlign::End => free,
+        };
+    if layout.visual.content.icon_placement == raf_ui::UiIconPlacement::End {
+        (origin + text_width + gap, origin)
+    } else {
+        (origin, origin + icon_width + gap)
+    }
 }
 
 pub(super) fn text_origin_x_for_layout(
@@ -1021,11 +1154,11 @@ pub(super) fn text_origin_x_for_layout(
     atlas: &UiTextAtlas,
     raster_scale: f32,
 ) -> f32 {
-    let icon_inset = layout
-        .icon
-        .map(|icon| 6.0 + f32::from(icon.size.logical_pixels()) + 6.0)
+    let measured = atlas
+        .slot_for(request, resolved)
+        .map(|slot| f32::from(slot.rect.width) / raster_scale)
         .unwrap_or(0.0);
-    let base = layout.content_rect.x + icon_inset;
+    let base = content_origins(layout, measured).1;
     let Some(edit) = layout.text_edit else {
         return base;
     };
@@ -1113,6 +1246,41 @@ mod tests {
         StudioUiPalette, UiFlow, UiLayout, UiNode, UiNodeKind, UiRange, UiSpacing, UiTextInput,
         UiTextStyle, UiToggle,
     };
+
+    #[test]
+    fn builtin_image_aliases_compile_to_one_canonical_resource_key() {
+        let image = |id: &str, key: &str| {
+            UiNode::image(
+                id,
+                raf_ui::UiImage {
+                    source: raf_ui::UiImageSource::new(key),
+                    fit: UiImageFit::Contain,
+                    tint: None,
+                    options: Default::default(),
+                },
+            )
+            .with_layout(UiLayout::fixed(24.0, 24.0))
+        };
+        let surface = UiSurface::new(
+            "aliases",
+            StudioUiPalette::IndustrialDark,
+            UiNode::row(
+                "root",
+                [
+                    image("canonical", "builtin://icon/undo"),
+                    image("alias", "builtin://icon/Undo"),
+                ],
+            ),
+        );
+        let mut session = super::super::UiSurfaceSession::default();
+        let frame = session.build_frame(&surface, 100, 40, [0; 4]);
+        let list = UiSurfaceDrawList::build(&frame, &session.text_atlas, str::to_owned);
+        assert_eq!(list.images.len(), 2);
+        assert!(list
+            .images
+            .iter()
+            .all(|quad| quad.source_key == "builtin://icon/undo"));
+    }
 
     #[test]
     fn draw_list_contains_rasterized_text_quad() {
@@ -1280,6 +1448,7 @@ mod tests {
                 &control,
                 &palette.root_style(),
                 1,
+                palette.tokens(),
             );
 
             assert_eq!(solids[0].color, palette.tokens().text);
@@ -1378,7 +1547,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_draw_list_emits_fill_and_border_geometry() {
+    fn direct_draw_list_encodes_fill_and_border_in_one_analytic_quad() {
         let mut style = StudioUiPalette::IndustrialDark.panel_style();
         style.border_width = 2.0;
         let surface = UiSurface::new(
@@ -1390,7 +1559,10 @@ mod tests {
         let frame = session.build_frame(&surface, 160, 80, [0, 0, 0, 255]);
         let list = UiSurfaceDrawList::build(&frame, &session.text_atlas, |key| key.to_string());
 
-        assert_eq!(list.solids.len(), 2);
+        assert_eq!(list.solids.len(), 1);
+        let effects = &list.effects[&UiPaintKey::Solid(0)];
+        assert_eq!(effects.border_widths, [2.0; 4]);
+        assert!(effects.border[3] > 0);
     }
 
     #[test]

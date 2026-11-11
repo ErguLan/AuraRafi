@@ -4,7 +4,7 @@
 //! editor preferences, and project defaults. Serialized to RON
 //! for human-readable config files.
 
-use crate::ai::{AgentMode, AiModelShortcut, AiProvider, AiProviderConfig};
+use crate::ai::{AgentMode, AiProvider, AiProviderConfig};
 use crate::units::DisplayUnit;
 use serde::{Deserialize, Serialize};
 
@@ -127,6 +127,10 @@ fn default_agent_message_page_size() -> u32 {
 }
 
 fn default_agent_streaming_enabled() -> bool {
+    true
+}
+
+fn default_agent_show_reasoning() -> bool {
     true
 }
 
@@ -302,6 +306,9 @@ pub struct EngineSettings {
     /// Raises foreground and border contrast across retained UI surfaces.
     #[serde(default)]
     pub high_contrast: bool,
+    /// Publishes native controls to local accessibility clients on demand.
+    #[serde(default = "default_true")]
+    pub native_accessibility_enabled: bool,
     /// Replaces translucent editor chrome with opaque semantic surfaces.
     #[serde(default)]
     pub reduce_transparency: bool,
@@ -485,6 +492,9 @@ pub struct EngineSettings {
     /// file. This is enabled by default so provider setup survives restarts.
     #[serde(default = "default_ai_persist_credentials")]
     pub ai_persist_credentials: bool,
+    /// Explicitly use an authorized account plan for the OpenAI provider.
+    #[serde(default)]
+    pub agent_openai_use_plan: bool,
 
     /// Optional external image studio, installed independently of the engine.
     #[serde(default)]
@@ -498,10 +508,6 @@ pub struct EngineSettings {
     /// Active executes them immediately after warning the user.
     #[serde(default)]
     pub agent_mode: AgentMode,
-
-    /// User-defined model shortcuts shown in the Agent model selector.
-    #[serde(default = "default_agent_model_shortcuts")]
-    pub agent_model_shortcuts: Vec<AiModelShortcut>,
 
     /// Retained compatibility preference from the former manual page control.
     /// Native Agent rendering is now automatic and scroll-driven.
@@ -517,6 +523,18 @@ pub struct EngineSettings {
     /// for each Agent response.
     #[serde(default = "default_agent_max_response_tokens")]
     pub agent_max_response_tokens: u32,
+    /// False delegates output length to the provider instead of a local ceiling.
+    #[serde(default)]
+    pub agent_response_limit_enabled: bool,
+    /// Explicit provider override; empty preserves the provider/model default.
+    #[serde(default)]
+    pub agent_reasoning_effort: String,
+    /// Display the reasoning text returned by the provider in the transcript.
+    #[serde(default = "default_agent_show_reasoning")]
+    pub agent_show_reasoning: bool,
+    /// User confirmation that the selected model supports image input.
+    #[serde(default)]
+    pub agent_vision_enabled: bool,
 
     /// Whether the native Agent should enforce `agent_max_tool_calls` for a
     /// single run. Disabled by default for large, iterative workflows.
@@ -526,11 +544,6 @@ pub struct EngineSettings {
     /// Maximum native tool calls per Agent run when the optional limit is on.
     #[serde(default = "default_agent_max_tool_calls")]
     pub agent_max_tool_calls: u32,
-
-    /// Label of the model shortcut selected by default. "provider_default"
-    /// means the raw model configured in the active provider card.
-    #[serde(default)]
-    pub default_agent_model: String,
 
     // -- Window state (persisted) --
     pub window_width: u32,
@@ -686,8 +699,14 @@ fn default_ai_providers() -> Vec<AiProviderConfig> {
         .collect()
 }
 
-fn default_agent_model_shortcuts() -> Vec<AiModelShortcut> {
-    Vec::new()
+/// Keeps the persisted sanitized catalog bounded and free of control
+/// characters so a corrupted provider list can never bloat settings files.
+fn catalog_sanitize(models: &mut Vec<String>) {
+    models.retain(|id| {
+        !id.trim().is_empty() && id.len() <= 160 && !id.chars().any(char::is_control)
+    });
+    models.sort();
+    models.dedup();
 }
 
 impl Default for EngineSettings {
@@ -697,6 +716,7 @@ impl Default for EngineSettings {
             theme_experimental: 0.0,
             prefers_reduced_motion: false,
             high_contrast: false,
+            native_accessibility_enabled: true,
             reduce_transparency: false,
             font_size: 14.0,
             ui_scale: 1.0,
@@ -759,16 +779,19 @@ impl Default for EngineSettings {
             script_external_editor_cmd: "code".to_string(),
             ai_providers: default_ai_providers(),
             ai_persist_credentials: true,
+            agent_openai_use_plan: false,
             external_asset_studio: crate::ai::ExternalAssetStudio::default(),
             default_ai_provider: AiProvider::OpenRouter,
             agent_mode: AgentMode::Plan,
-            agent_model_shortcuts: default_agent_model_shortcuts(),
             agent_message_page_size: AGENT_MESSAGE_PAGE_SIZE_DEFAULT,
             agent_streaming_enabled: true,
             agent_max_response_tokens: AGENT_MAX_RESPONSE_TOKENS_DEFAULT,
+            agent_response_limit_enabled: false,
+            agent_reasoning_effort: String::new(),
+            agent_show_reasoning: true,
+            agent_vision_enabled: false,
             agent_tool_call_limit_enabled: false,
             agent_max_tool_calls: AGENT_MAX_TOOL_CALLS_DEFAULT,
-            default_agent_model: String::new(),
             window_width: 1280,
             window_height: 720,
             window_maximized: false,
@@ -833,7 +856,7 @@ impl EngineSettings {
                 }
                 settings.normalize_ai_providers();
                 settings.normalize_agent_message_page_size();
-                settings.normalize_agent_max_response_tokens();
+                settings.normalize_agent_response_settings();
                 settings.normalize_agent_max_tool_calls();
                 settings.viewport_render_mode = settings.viewport_render_mode.normalized();
                 settings
@@ -855,8 +878,14 @@ impl EngineSettings {
                     .push(AiProviderConfig::for_provider(*provider));
             }
         }
-        self.agent_model_shortcuts
-            .retain(|shortcut| shortcut.provider.is_editor_supported());
+        // Pinned catalogs written by older builds lose their list; the model
+        // itself is the truth that survives the migration.
+        for provider in &mut self.ai_providers {
+            provider
+                .pinned_models
+                .retain(|id| !id.trim().is_empty() && id.len() <= 160);
+            catalog_sanitize(&mut provider.catalog_models);
+        }
         if !self.default_ai_provider.is_editor_supported() {
             self.default_ai_provider = AiProvider::OpenRouter;
         }
@@ -868,7 +897,10 @@ impl EngineSettings {
             .clamp(AGENT_MESSAGE_PAGE_SIZE_MIN, AGENT_MESSAGE_PAGE_SIZE_MAX);
     }
 
-    fn normalize_agent_max_response_tokens(&mut self) {
+    fn normalize_agent_response_settings(&mut self) {
+        if !matches!(self.agent_reasoning_effort.as_str(), "" | "none" | "low" | "medium" | "high" | "max") {
+            self.agent_reasoning_effort.clear();
+        }
         self.agent_max_response_tokens = self
             .agent_max_response_tokens
             .clamp(AGENT_MAX_RESPONSE_TOKENS_MIN, AGENT_MAX_RESPONSE_TOKENS_MAX);

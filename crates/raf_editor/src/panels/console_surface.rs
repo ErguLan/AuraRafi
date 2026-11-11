@@ -16,14 +16,50 @@ pub fn build_console_surface(
     expanded_blocks: &[ConsoleEntryId],
     visible_range: Option<(usize, usize)>,
 ) -> UiSurface {
+    build_console_document(
+        palette,
+        console,
+        input_enabled,
+        expanded_blocks,
+        visible_range,
+        true,
+    )
+}
+
+/// The dock header owns its filters; the report itself starts at its columns.
+pub fn build_console_table_surface(
+    palette: StudioUiPalette,
+    console: &ConsolePanel,
+    input_enabled: bool,
+    expanded_blocks: &[ConsoleEntryId],
+    visible_range: Option<(usize, usize)>,
+) -> UiSurface {
+    build_console_document(
+        palette,
+        console,
+        input_enabled,
+        expanded_blocks,
+        visible_range,
+        false,
+    )
+}
+
+fn build_console_document(
+    palette: StudioUiPalette,
+    console: &ConsolePanel,
+    input_enabled: bool,
+    expanded_blocks: &[ConsoleEntryId],
+    visible_range: Option<(usize, usize)>,
+    toolbar: bool,
+) -> UiSurface {
     let tokens = palette.tokens();
     let mut log_scroll = UiNode::scroll_view("console.log-scroll", UiScrollAxis::Vertical)
         .with_class("console-log-scroll")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
             grow: 1.0,
-            gap: 2.0,
-            padding: UiSpacing::xy(6.0, 4.0),
+            gap: 0.0,
+            padding: UiSpacing::xy(0.0, 0.0),
             overflow: UiOverflow::ScrollY,
             ..UiLayout::default()
         });
@@ -141,8 +177,20 @@ pub fn build_console_surface(
     let mut root = UiNode::new("console.root", UiNodeKind::Panel)
         .with_class("bottom-panel")
         .with_layout(UiLayout::fill(UiFlow::Column))
-        .with_style(palette.panel_style())
-        .with_child(console_toolbar(palette, console, filtered_count));
+        .with_style(palette.panel_style());
+    if toolbar {
+        root = root.with_child(console_toolbar(palette, console, filtered_count));
+    }
+    root = root.with_child(raf_ui::table::table_heading(
+        "console.columns",
+        &[
+            ("electronics.desktop.severity", 84.0),
+            ("electronics.desktop.time", 76.0),
+            ("electronics.desktop.source", 88.0),
+            ("electronics.desktop.message", 0.0),
+        ],
+        tokens,
+    ));
     if filtered_count == 0 {
         root = root.with_child(console_empty_state(palette));
     } else {
@@ -161,14 +209,16 @@ pub fn build_console_surface(
                 .with_text_style(UiTextStyle::body(tokens.text_muted)),
         );
     }
-    root = root.with_child(input);
+    if input_enabled || toolbar {
+        root = root.with_child(input);
+    }
 
     let mut surface = UiSurface::new("editor.bottom.console", palette, root);
     surface.style_sheet = bottom_style_sheet(palette);
     surface
 }
 
-const CONSOLE_ROW_ESTIMATE: f32 = 26.0;
+const CONSOLE_ROW_ESTIMATE: f32 = 30.0;
 
 pub fn console_visible_range(
     console: &ConsolePanel,
@@ -199,7 +249,16 @@ fn console_toolbar(
             align_items: UiAlign::Center,
             gap: 4.0,
             padding: UiSpacing::xy(6.0, 2.0),
-            overflow: UiOverflow::ScrollX,
+            overflow: UiOverflow::Clip,
+            responsive: vec![raf_ui::UiResponsiveRule {
+                max_width: 460.0,
+                flow: Some(UiFlow::RowWrap),
+                basis: Some([0.0, 60.0]),
+                padding: None,
+                gap: None,
+                compact: None,
+                grid_columns: None,
+            }],
             ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
         });
 
@@ -265,6 +324,38 @@ fn console_toolbar(
                 ..UiLayout::fit_content().with_text_safe_area(true)
             }),
     )
+}
+
+pub fn build_console_filters_surface(
+    palette: StudioUiPalette,
+    console: &ConsolePanel,
+) -> UiSurface {
+    let mut root = console_toolbar(palette, console, console.filtered_entries().count());
+    root.id = "console.filters.menu".into();
+    root.layout = UiLayout {
+        flow: UiFlow::Column,
+        gap: 5.0,
+        padding: UiSpacing::same(8.0),
+        ..UiLayout::fill(UiFlow::Column)
+    };
+    for child in &mut root.children {
+        child.layout = UiLayout::fixed(0.0, 28.0).fill_width();
+        child.text_style = Some(UiTextStyle {
+            size_px: 13.0,
+            line_height_px: 18.0,
+            ..UiTextStyle::body(palette.tokens().text)
+        });
+        if child.id == "console.separator" {
+            child.layout = UiLayout::fixed(0.0, 1.0).fill_width();
+        }
+    }
+    let mut surface = UiSurface::new(
+        "console.filters.menu",
+        palette,
+        root.with_style(palette.panel_style()),
+    );
+    surface.style_sheet = bottom_style_sheet(palette);
+    surface
 }
 
 fn console_level_counts(console: &ConsolePanel) -> (usize, usize, usize) {
@@ -395,6 +486,9 @@ fn console_entry(
             gap: 1.0,
             ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         });
+    if id % 2 == 0 {
+        row = row.with_style(raf_ui::UiStyle::transparent().with_fill(tokens.surface_alt));
+    }
     if let Some(extra) = row_extra_class {
         row = row.with_class(extra);
     }
@@ -408,22 +502,32 @@ fn console_entry(
             padding: UiSpacing::xy(6.0, 2.0),
             align_self: Some(UiAlign::Stretch),
             overflow: UiOverflow::Clip,
-            ..UiLayout::fixed(0.0, 24.0).with_width_mode(UiSizeMode::Fill)
+            ..UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)
         })
         .with_child(
             UiNode::new(format!("console.entry.{id}.level"), UiNodeKind::Label)
                 .with_class("console-level-icon")
+                .with_text_key(match entry.level {
+                    LogLevel::Info => "app.info",
+                    LogLevel::Warning => "app.warn",
+                    LogLevel::Error => "app.error",
+                })
+                .with_text_style(UiTextStyle {
+                    size_px: 12.0,
+                    line_height_px: 18.0,
+                    ..UiTextStyle::body(color)
+                })
                 .with_icon(
                     UiIcon::new(level_icon)
-                        .with_size(UiIconSize::Small)
+                        .with_size(UiIconSize::Custom(20))
                         .with_tint(color),
                 )
-                .with_layout(UiLayout::fixed(16.0, 18.0)),
+                .with_layout(UiLayout::fixed(84.0, 22.0)),
         )
         .with_child(
             UiNode::new(format!("console.entry.{id}.timestamp"), UiNodeKind::Label)
                 .with_text_value(entry.timestamp.clone())
-                .with_layout(UiLayout::fixed(56.0, 18.0).with_text_safe_area(true))
+                .with_layout(UiLayout::fixed(76.0, 22.0).with_text_safe_area(false))
                 .with_text_style(UiTextStyle {
                     role: UiTextRole::Monospace,
                     size_px: 10.0,
@@ -437,7 +541,7 @@ fn console_entry(
         header = header.with_child(
             UiNode::new(format!("console.entry.{id}.sender"), UiNodeKind::Label)
                 .with_text_value(sender.clone())
-                .with_layout(UiLayout::fixed(60.0, 18.0).with_text_safe_area(true))
+                .with_layout(UiLayout::fixed(88.0, 22.0).with_text_safe_area(false))
                 .with_text_style(UiTextStyle::button(tokens.accent_hot)),
         );
     } else {
@@ -446,7 +550,7 @@ fn console_entry(
                 format!("console.entry.{id}.sender-empty"),
                 UiNodeKind::Panel,
             )
-            .with_layout(UiLayout::fixed(60.0, 18.0)),
+            .with_layout(UiLayout::fixed(88.0, 22.0)),
         );
     }
     header = header.with_child(
@@ -454,13 +558,17 @@ fn console_entry(
             .with_text_value(entry.message.clone())
             .with_layout(UiLayout {
                 grow: 1.0,
-                min_size: [60.0, 18.0],
+                min_size: [60.0, 22.0],
                 overflow: UiOverflow::Clip,
-                ..UiLayout::fixed(0.0, 18.0)
+                ..UiLayout::fixed(0.0, 22.0)
                     .with_width_mode(UiSizeMode::Fill)
-                    .with_text_safe_area(true)
+                    .with_text_safe_area(false)
             })
-            .with_text_style(UiTextStyle::body(color)),
+            .with_text_style(UiTextStyle {
+                size_px: 13.0,
+                line_height_px: 18.0,
+                ..UiTextStyle::body(color)
+            }),
     );
     if entry.block.is_some() {
         header = header.with_child(
@@ -546,7 +654,7 @@ fn console_entry(
 fn command_button(id: &str, text_key: &str, icon: UiIconId, command: &str) -> UiNode {
     UiNode::new(id, UiNodeKind::Button)
         .with_class("console-command-button")
-        .with_layout(UiLayout::fixed(68.0, 24.0).with_text_safe_area(true))
+        .with_layout(UiLayout::fixed(68.0, 24.0).with_text_safe_area(false))
         .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
         .with_text_key(text_key)
         .with_text_style(UiTextStyle::button([196, 201, 209, 255]))
@@ -625,10 +733,39 @@ mod tests {
 
         assert_eq!(message.layout.grow, 1.0);
         assert_eq!(message.layout.min_size[0], 60.0);
-        assert_eq!(message.layout.basis[1], 18.0);
+        assert_eq!(message.layout.basis[1], 22.0);
         assert_eq!(
             child(entry, "console.entry.1.sender").layout.basis,
-            [60.0, 18.0]
+            [88.0, 22.0]
+        );
+    }
+
+    #[test]
+    fn report_columns_align_with_rows_and_leave_full_height_for_message_glyphs() {
+        let surface = build_console_surface(
+            StudioUiPalette::IndustrialDark,
+            &ConsolePanel::default(),
+            false,
+            &[],
+            None,
+        );
+        let frame = surface.build_frame(1000, 220, [0, 0, 0, 255]);
+        let rect = |id: &str| frame.layout_boxes.iter().find(|b| b.id == id).unwrap().rect;
+        for (heading, cell) in [
+            ("console.columns.0", "console.entry.0.level"),
+            ("console.columns.1", "console.entry.0.timestamp"),
+            ("console.columns.2", "console.entry.0.sender-empty"),
+            ("console.columns.3", "console.entry.0.message"),
+        ] {
+            assert!(
+                (rect(heading).x - rect(cell).x).abs() < 1.0,
+                "{heading} vs {cell}"
+            );
+        }
+        let message = surface.root.find("console.entry.0.message").unwrap();
+        assert!(
+            message.layout.basis[1] - message.layout.padding.top - message.layout.padding.bottom
+                >= message.text_style.unwrap().line_height_px
         );
     }
 

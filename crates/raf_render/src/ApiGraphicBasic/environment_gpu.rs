@@ -15,6 +15,7 @@ struct Uniforms {
     sun: [f32; 4],
     direction: [f32; 4],
     params: [f32; 4],
+    atmosphere: [f32; 4],
 }
 impl From<EnvironmentFrame> for Uniforms {
     fn from(env: EnvironmentFrame) -> Self {
@@ -44,6 +45,12 @@ impl From<EnvironmentFrame> for Uniforms {
                     0.0
                 },
                 sky.stars_intensity,
+            ],
+            atmosphere: [
+                sky.haze.clamp(0.0, 1.0),
+                env.halo_strength,
+                env.halo_cos,
+                0.0,
             ],
         }
     }
@@ -159,7 +166,7 @@ pub(super) fn prepare(
 }
 const SKY_SHADER: &str = r#"
 // STAR_FUNCTIONS
-struct Environment { inverse_vp: mat4x4<f32>, top: vec4<f32>, horizon: vec4<f32>, ground: vec4<f32>, sun: vec4<f32>, direction: vec4<f32>, params: vec4<f32> };
+struct Environment { inverse_vp: mat4x4<f32>, top: vec4<f32>, horizon: vec4<f32>, ground: vec4<f32>, sun: vec4<f32>, direction: vec4<f32>, params: vec4<f32>, atmosphere: vec4<f32> };
 @group(0) @binding(0) var<uniform> env: Environment;
 struct Vertex { @builtin(position) position: vec4<f32>, @location(0) ndc: vec2<f32> };
 @vertex fn vs_main(@builtin(vertex_index) index: u32) -> Vertex {
@@ -175,13 +182,21 @@ struct Vertex { @builtin(position) position: vec4<f32>, @location(0) ndc: vec2<f
     if env.top.w > 0.5 { footprint=length(fwidth(ray))*10.0; }
     var color = env.top.rgb;
     if env.params.x > 0.5 {
-        color = mix(env.horizon.rgb, select(env.ground.rgb, env.top.rgb, ray.y >= 0.0), clamp(abs(ray.y), 0.0, 1.0));
+        let vertical = clamp(abs(ray.y),0.0,1.0);
+        let eased = select(vertical, pow(vertical, 1.0+2.0*env.atmosphere.x), env.top.w > 0.5);
+        color = mix(env.horizon.rgb, select(env.ground.rgb, env.top.rgb, ray.y >= 0.0), eased);
     }
     if env.params.z > 0.0 && env.params.w > 0.0 {
         var stars=0.0;
         if env.top.w > 0.5 { stars=star_brightness_filtered(ray,env.params.z,footprint); }
         else { stars=star_brightness(ray,env.params.z); }
-        color += vec3<f32>(0.72,0.86,1.0)*stars*env.params.w;
+        var chroma = vec3<f32>(0.72,0.86,1.0);
+        if env.top.w > 0.5 { chroma = star_tint(ray,env.params.z); }
+        color += chroma*stars*env.params.w;
+    }
+    if env.top.w > 0.5 && env.atmosphere.y > 0.0 {
+        let halo_t = clamp((dot(ray,env.direction.xyz)-env.atmosphere.z)/max(1.0-env.atmosphere.z,0.0000001),0.0,1.0);
+        color += env.sun.rgb*halo_t*halo_t*env.atmosphere.y;
     }
     if env.params.y > 0.5 {
         let disk_base = (dot(ray,env.direction.xyz)-env.direction.w) / max(1.0-env.direction.w,0.0000001);

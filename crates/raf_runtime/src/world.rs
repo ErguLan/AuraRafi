@@ -62,6 +62,7 @@ pub struct RuntimeWorld {
     last_reload: Instant,
     focus_paused: bool,
     fallback_services: raf_script::services::RuntimeServices,
+    fallback_ui: raf_ui::game_ui::UiGameRuntime,
     storage_config: Option<crate::storage::StorageConfig>,
     storage: Option<crate::storage::StorageWorker>,
     services_enabled: bool,
@@ -140,6 +141,7 @@ impl RuntimeWorld {
             last_reload: Instant::now(),
             focus_paused: false,
             fallback_services: raf_script::services::RuntimeServices::default(),
+            fallback_ui: raf_ui::game_ui::UiGameRuntime::default(),
             storage_config: None,
             storage: None,
             services_enabled: false,
@@ -163,6 +165,12 @@ impl RuntimeWorld {
     }
     pub fn project_settings(&self) -> &ProjectSettings {
         &self.settings
+    }
+    pub fn game_ui(&self) -> &raf_ui::game_ui::UiGameRuntime {
+        self.scripts.as_ref().map(|s| &s.view.game_ui).unwrap_or(&self.fallback_ui)
+    }
+    pub fn game_ui_mut(&mut self) -> &mut raf_ui::game_ui::UiGameRuntime {
+        self.scripts.as_mut().map(|s| &mut s.view.game_ui).unwrap_or(&mut self.fallback_ui)
     }
     pub fn services(&self) -> &raf_script::services::RuntimeServices {
         self.scripts
@@ -718,6 +726,37 @@ impl Drop for RuntimeWorld {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn game_ui_rhai_nodes_and_events_operate_on_isolated_instances() {
+        let fixture=Fixture::new(r#"
+fn on_start() {
+    ui_text(ui_element("main","status"),"Ready");
+    ui_clone("main","copy"); ui_show("copy",false);
+}
+fn on_event(name,value) {
+    if name=="menu.accept" {ui_text(ui_element("main","status"),"Accepted");}
+}
+"#);
+        let mut scene=SceneGraph::new();let controller=scene.add_root("Controller");
+        scene.get_mut(controller).unwrap().scripts.push("scripts/main.rhai".into());
+        let mut world=fixture.world(scene);
+        let mut document=raf_ui::UiDocument::blank("HUD");
+        for id in ["status","node_status"]{document.add_node("root",raf_ui::UiNode::new(id,raf_ui::UiNodeKind::Label)).unwrap();}
+        world.game_ui_mut().mount_document(&document).unwrap();
+        let mut graph=raf_nodes::NodeGraph::new("HUD");
+        let start=graph_node(&mut graph,"on-start",&[]);
+        let text=graph_node(&mut graph,"ui-text",&[("ui_instance","main"),("ui_node","node_status"),("ui_text","Nodes ready")]);
+        graph_link(&mut graph,start,"Out",text,"In");world.attach_graph(&graph).unwrap();
+        world.start();
+        assert_eq!(world.status().phase,RuntimePhase::Running,"{:?}",world.status().last_error);
+        assert_eq!(world.game_ui().instances()["main"].document.find_node("status").unwrap().text_value.as_deref(),Some("Ready"));
+        assert_eq!(world.game_ui().instances()["main"].document.find_node("node_status").unwrap().text_value.as_deref(),Some("Nodes ready"));
+        assert!(!world.game_ui().instances()["copy"].mount.visible);
+        world.emit_ui_event("menu.accept",raf_script::ScriptValue::None).unwrap();world.advance(0.05,&InputSnapshot::default());
+        assert_eq!(world.game_ui().instances()["main"].document.find_node("status").unwrap().text_value.as_deref(),Some("Accepted"));
+        assert_eq!(document.find_node("status").unwrap().text_value,None);
+        world.stop();
+    }
     #[test]
     fn runtime_services_fixed_input_rhai_nodes_and_queries_share_the_host_api() {
         let fixture = Fixture::new(

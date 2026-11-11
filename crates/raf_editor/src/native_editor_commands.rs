@@ -236,7 +236,10 @@ fn apply_console_command(
         selected_node: runtime.game_viewport().selected.first().copied(),
         selected_nodes: runtime.game_viewport().selected.clone(),
     };
-    let output = if parsed.name.starts_with("lighting.") {
+    let output = if crate::commands::ui::supports(&parsed.name) {
+        let assets=project.map(|p|p.path.join("assets"));
+        crate::commands::ui::execute(&parsed,assets.as_deref(),false)
+    } else if parsed.name.starts_with("lighting.") {
         let before = scene.clone();
         let output = crate::commands::lighting::execute(&parsed, scene);
         if output.changed {
@@ -253,7 +256,10 @@ fn apply_console_command(
             viewport: viewport as &mut dyn GameViewportPort,
         };
         crate::commands::game::execute(&parsed.name, &parsed, &mut context)
-    } else if parsed.name == "script.compile_nodes" {
+    } else if matches!(
+        parsed.name.as_str(),
+        "script.compile_nodes" | "script.run" | "script.validate" | "script.list"
+    ) {
         let assets = project.map(|p| p.path.join("assets"));
         let mut context = crate::commands::script::ScriptCommandContext {
             scene,

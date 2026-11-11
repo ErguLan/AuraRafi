@@ -18,6 +18,7 @@ fn decorate_asset_card(
     visual: Option<&AssetVisual>,
     view: AssetViewMode,
     language: raf_core::Language,
+    palette: StudioUiPalette,
 ) -> UiNode {
     use crate::asset_previews::PreviewState;
     let Some(visual) = visual else {
@@ -31,30 +32,58 @@ fn decorate_asset_card(
         {
             icon.layout.basis[1] = 64.0;
         }
-        let icon = match &visual.preview {
-            PreviewState::Loading => Some(UiIconId::Refresh),
-            PreviewState::Error(_) => Some(UiIconId::Warning),
-            _ => None,
+        let badge = match &visual.preview {
+            PreviewState::Loading => Some((
+                "assets.preview_loading",
+                raf_ui::components::UiStatusTone::Info,
+                UiIconId::Refresh,
+            )),
+            PreviewState::Error(_) => Some((
+                "assets.preview_error",
+                raf_ui::components::UiStatusTone::Error,
+                UiIconId::Warning,
+            )),
+            PreviewState::Unavailable(key) => Some((
+                *key,
+                raf_ui::components::UiStatusTone::Warning,
+                UiIconId::Warning,
+            )),
+            PreviewState::Ready { .. } => None,
         };
-        if let Some(icon) = icon {
-            card.children.push(
-                UiNode::new(format!("{}.preview-state", card.id), UiNodeKind::Label)
-                    .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
-                    .with_layout(UiLayout {
-                        position_mode: raf_ui::UiPositionMode::Absolute,
-                        rect: Some(raf_ui::UiRect::new(88.0, 8.0, 16.0, 16.0)),
-                        z_index: 1,
-                        ..Default::default()
-                    }),
+        if let Some((label_key, tone, icon)) = badge {
+            let theme = raf_ui::UiThemeMetrics::default();
+            let metrics = theme.for_control(raf_ui::style::UiControlKind::Button);
+            let mut badge = raf_ui::components::status_badge(
+                format!("{}.preview-state", card.id),
+                label_key,
+                tone,
+                palette,
+                theme,
             );
+            badge.icon = Some(UiIcon::new(icon).with_size(UiIconSize::Small));
+            badge.layout.position_mode = raf_ui::UiPositionMode::Absolute;
+            badge.layout.rect = Some(raf_ui::UiRect::new(8.0, 8.0, 0.0, metrics.height));
+            badge.layout.width_mode = raf_ui::UiSizeMode::FitContent;
+            badge.layout.height_mode = raf_ui::UiSizeMode::Fixed;
+            badge.layout.basis = [0.0, metrics.height];
+            badge.layout.z_index = 1;
+            card.children.push(badge);
         }
     }
-    if let raf_assets::authoring_catalog::AssetClass::Shape(shape)=visual.entry.class {
-        if let Some(label)=card.children.iter_mut().find(|node|node.id.ends_with(".label")) {
-            label.text_value=None;
-            label.text_key=Some(shape.descriptor().label_key.to_string());
+    if let raf_assets::authoring_catalog::AssetClass::Shape(shape) = visual.entry.class {
+        if let Some(label) = card
+            .children
+            .iter_mut()
+            .find(|node| node.id.ends_with(".label"))
+        {
+            label.text_value = None;
+            label.text_key = Some(shape.descriptor().label_key.to_string());
         }
-        card.accessibility_label_key=Some(shape.descriptor().label_key.to_string());
+        card.accessibility_label_key = Some(shape.descriptor().label_key.to_string());
+    }
+    if let Some(kind)=visual.entry.path.strip_prefix("builtin://interface/") {
+        if let Some(label)=card.children.iter_mut().find(|n|n.id.ends_with(".label")){label.text_value=None;label.text_key=Some(format!("ui.element.{kind}"));}
+        card.accessibility_label_key=Some(format!("ui.element.{kind}"));
     }
     let mut info = format!(
         "{}\n{}: {}",
@@ -65,16 +94,14 @@ fn decorate_asset_card(
     let (state, detail) = match &visual.preview {
         PreviewState::Ready { key, dimensions } => {
             if let Some(icon) = card.children.iter_mut().find(|n| n.id.ends_with(".icon")) {
-                let layout = icon.layout.clone();
-                *icon = UiNode::image(
-                    icon.id.clone(),
-                    raf_ui::UiImage {
-                        source: raf_ui::UiImageSource::new(key),
-                        fit: raf_ui::UiImageFit::Contain,
-                        tint: None,
-                    },
-                )
-                .with_layout(layout);
+                raf_ui::components::set_thumbnail_image(
+                    icon,
+                    key.clone(),
+                    raf_ui::UiImageFit::Contain,
+                    raf_ui::UiThemeMetrics::default()
+                        .for_control(raf_ui::style::UiControlKind::Image)
+                        .corner_radius,
+                );
                 if view == AssetViewMode::Grid {
                     icon.layout.basis[1] = 64.0;
                 }
@@ -102,6 +129,9 @@ fn append_asset_actions(bar: &mut UiNode, visual: &AssetVisual, palette: StudioU
     use raf_assets::authoring_catalog::AssetClass;
     let entry = &visual.entry;
     let mut actions = Vec::new();
+    if entry.class == AssetClass::Image {
+        actions.push(("ui.designer.use_image",UiIconId::Frame,format!("ui.designer.asset-image:{}",entry.path)));
+    }
     if entry.insertable() {
         actions.push((
             "assets.insert",
@@ -158,6 +188,7 @@ pub enum AssetFilter {
     Models,
     Audio,
     Scripts,
+    Interfaces,
 }
 
 impl AssetFilter {
@@ -168,6 +199,7 @@ impl AssetFilter {
             Self::Models => "app.models",
             Self::Audio => "app.audio",
             Self::Scripts => "app.scripts_filter",
+            Self::Interfaces => "ui.designer.title",
         }
     }
 
@@ -178,6 +210,7 @@ impl AssetFilter {
             Self::Models => "app.assets_empty_models",
             Self::Audio => "app.assets_empty_audio",
             Self::Scripts => "app.assets_empty_scripts",
+            Self::Interfaces => "ui.designer.empty",
         }
     }
 }
@@ -325,13 +358,18 @@ pub enum AssetsIntent {
 /// Virtual assets that are always available in a Game project. They are
 /// authoring shortcuts, not files on disk; opening or dropping one still
 /// executes the real scene-creation path in the application boundary.
-pub const BUILTIN_ASSET_ROWS: [&str; 6] = [
+pub const BUILTIN_ASSET_ROWS: [&str; 11] = [
     "builtin://primitive/cube",
     "builtin://primitive/sphere",
     "builtin://primitive/cylinder",
     "builtin://primitive/capsule",
     "builtin://primitive/plane",
     "builtin://camera",
+    "builtin://interface/frame",
+    "builtin://interface/label",
+    "builtin://interface/image",
+    "builtin://interface/button",
+    "builtin://interface/input",
 ];
 
 pub fn asset_rows_with_builtins(asset_rows: &[String]) -> Vec<String> {
@@ -339,6 +377,7 @@ pub fn asset_rows_with_builtins(asset_rows: &[String]) -> Vec<String> {
         .into_iter()
         .map(|shape| shape.descriptor().source.to_string())
         .chain(std::iter::once("builtin://camera".to_string()))
+        .chain(BUILTIN_ASSET_ROWS.iter().filter(|s|s.starts_with("builtin://interface/")).map(|s|s.to_string()))
         .chain(asset_rows.iter().cloned())
         .collect()
 }
@@ -377,6 +416,19 @@ pub const ASSETS_DELETE_MODAL_HEIGHT: f32 = 168.0;
 /// so the estimate must follow the active view mode.
 const ASSET_CARD_PITCH: f32 = ASSET_CARD_HEIGHT + ASSET_CARD_GAP;
 const ASSET_LIST_PITCH: f32 = ASSET_LIST_ROW_HEIGHT + ASSET_LIST_ROW_GAP;
+
+pub(crate) fn asset_scroll_projection_changed(
+    before: f32,
+    after: f32,
+    view: AssetViewMode,
+) -> bool {
+    let pitch = match view {
+        AssetViewMode::Grid => ASSET_CARD_PITCH,
+        AssetViewMode::List => ASSET_LIST_PITCH,
+    }
+    .max(1.0);
+    (before.max(0.0) / pitch).floor() != (after.max(0.0) / pitch).floor()
+}
 
 pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
     let AssetsSurfaceParams {
@@ -465,6 +517,7 @@ pub fn build_assets_surface(params: AssetsSurfaceParams<'_>) -> UiSurface {
             visuals.and_then(|v| v.get(row.as_str())),
             view,
             language,
+            palette,
         ));
     }
     if end < total_rows {
@@ -916,6 +969,7 @@ fn asset_sidebar(
         ("images", UiIconId::Shaded, "app.images"),
         ("audio", UiIconId::Play, "app.audio"),
         ("scripts", UiIconId::Script, "app.scripts_filter"),
+        ("interfaces", UiIconId::Frame, "ui.designer.title"),
     ] {
         sidebar = sidebar.with_child(asset_category_row(
             palette,
@@ -929,6 +983,7 @@ fn asset_sidebar(
                     | ("images", AssetFilter::Images)
                     | ("audio", AssetFilter::Audio)
                     | ("scripts", AssetFilter::Scripts)
+                    | ("interfaces", AssetFilter::Interfaces)
             ),
         ));
     }
@@ -1517,6 +1572,7 @@ fn extension_label(extension: &str) -> String {
 }
 
 pub fn asset_file_name(row: &str) -> String {
+    if let Some(kind)=row.strip_prefix("builtin://interface/"){return format!("ui.element.{kind}");}
     if row == "builtin://camera" {
         return "Camera".into();
     }
@@ -1605,6 +1661,7 @@ pub fn build_assets_backdrop_surface(palette: StudioUiPalette) -> UiSurface {
 pub fn build_assets_create_menu_surface(palette: StudioUiPalette) -> UiSurface {
     let mut root = overlay_menu_root(palette, "assets.create-menu", "app.assets_create");
     for (id, icon, label_key, command) in [
+        ("interface",UiIconId::Frame,"ui.designer.title","assets.create-interface"),
         (
             "script",
             UiIconId::Script,
@@ -2857,6 +2914,7 @@ fn asset_matches(row: &str, query: &str, filter: AssetFilter) -> bool {
         .map(|extension| extension.to_ascii_lowercase());
     match filter {
         AssetFilter::All => true,
+        AssetFilter::Interfaces => row.starts_with("builtin://interface/") || lower.ends_with(".ui.ron"),
         AssetFilter::Images => matches!(
             extension.as_deref(),
             Some("png")
@@ -2894,6 +2952,7 @@ fn asset_matches(row: &str, query: &str, filter: AssetFilter) -> bool {
 }
 
 fn asset_icon(name: &str) -> UiIconId {
+    if name.starts_with("builtin://interface/") || name.to_ascii_lowercase().ends_with(".ui.ron"){return UiIconId::Frame;}
     if name == "builtin://camera" {
         return UiIconId::Camera;
     }
@@ -2931,6 +2990,26 @@ fn spacer(id: &str, height: f32) -> UiNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rafui_interaction_assets_rebuilds_only_when_virtual_rows_change() {
+        for view in [AssetViewMode::Grid, AssetViewMode::List] {
+            let pitch = match view {
+                AssetViewMode::Grid => ASSET_CARD_PITCH,
+                AssetViewMode::List => ASSET_LIST_PITCH,
+            };
+            assert!(!asset_scroll_projection_changed(
+                pitch + 0.25,
+                pitch + 0.75,
+                view
+            ));
+            assert!(asset_scroll_projection_changed(
+                pitch - 0.25,
+                pitch + 0.25,
+                view
+            ));
+        }
+    }
 
     fn params<'a>(palette: StudioUiPalette, rows: &'a [String]) -> AssetsSurfaceParams<'a> {
         AssetsSurfaceParams {

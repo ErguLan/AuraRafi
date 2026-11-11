@@ -71,6 +71,7 @@ pub fn build_application_bar_surface(
             UiNode::image(
                 "application-bar.logo",
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new("editor.top.logo"),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -153,6 +154,14 @@ pub fn build_application_bar_surface(
                 .with_event(UiEventBinding::command(
                     UiEventKind::DragStart,
                     "window.drag",
+                ))
+                .with_event(UiEventBinding::command(
+                    UiEventKind::DoubleClick,
+                    "window.maximize",
+                ))
+                .with_event(UiEventBinding::command(
+                    UiEventKind::ContextMenu,
+                    "window.system-menu",
                 )),
         )
         .with_child(command_search(palette))
@@ -628,6 +637,7 @@ fn labeled_content(
             UiNode::image(
                 format!("{id}.icon"),
                 UiImage {
+                    options: Default::default(),
                     source: UiImageSource::new(source),
                     fit: UiImageFit::Contain,
                     tint: None,
@@ -645,8 +655,13 @@ fn labeled_content(
 }
 
 fn window_button(id: &str, command: &str, tooltip: &str) -> UiNode {
+    let class = if command == "window.close" {
+        "application-bar-window-button application-bar-window-button-close"
+    } else {
+        "application-bar-window-button"
+    };
     UiNode::new(id, UiNodeKind::Button)
-        .with_class("application-bar-window-button")
+        .with_class(class)
         .with_layout(UiLayout::fixed(28.0, 28.0))
         .with_tooltip_key(tooltip)
         .with_accessibility_label_key(tooltip)
@@ -661,6 +676,7 @@ fn window_button(id: &str, command: &str, tooltip: &str) -> UiNode {
                     UiNode::image(
                         format!("{id}.icon"),
                         UiImage {
+                            options: Default::default(),
                             source: UiImageSource::new(format!(
                                 "editor.top.{}",
                                 command.trim_start_matches("window.")
@@ -819,6 +835,23 @@ fn application_bar_style_sheet(palette: StudioUiPalette) -> raf_ui::UiStyleSheet
                 raf_ui::UiStylePatch {
                     fill: Some(hover_tint(tokens.surface_raised, tokens.accent)),
                     border: Some(tokens.accent),
+                    border_width: Some(1.0),
+                    ..raf_ui::UiStylePatch::default()
+                },
+            )
+            .when(raf_ui::UiStyleRuleState::Hovered),
+            // Destructive affordance: closing the window illuminates with the
+            // danger token instead of the shared warm accent.
+            raf_ui::UiStyleRule::new(
+                raf_ui::UiStyleSelector::Class("application-bar-window-button-close".to_string()),
+                raf_ui::UiStylePatch {
+                    fill: Some([
+                        tokens.danger[0],
+                        tokens.danger[1],
+                        tokens.danger[2],
+                        96,
+                    ]),
+                    border: Some(tokens.danger),
                     border_width: Some(1.0),
                     ..raf_ui::UiStylePatch::default()
                 },

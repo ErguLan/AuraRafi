@@ -14,6 +14,7 @@ use super::parser::ParsedCommand;
 
 pub trait ParsedCommandExecutor {
     fn execute_parsed(&mut self, command: &ParsedCommand) -> CommandOutput;
+    fn verify_output(&self, _command: &ParsedCommand, _output: &CommandOutput) -> Option<raf_core::VerificationSummary> { None }
 
     /// Current live scene count for hosts that can preflight a construction
     /// budget. Non-scene domains keep the default and are not constrained by
@@ -64,6 +65,7 @@ impl<E: ParsedCommandExecutor> CommandEndpoint for CommandGateway<E> {
         }
         let name = request.name.trim_start_matches('/').to_ascii_lowercase();
         if (name.starts_with("behavior.")
+            || matches!(name.as_str(),"ui.document.create"|"ui.document.apply"|"ui.document.undo")
             || name.starts_with("prefab.")
             || matches!(name.as_str(), "lighting.set" | "lighting.reset"))
             && !request.dry_run
@@ -163,7 +165,10 @@ impl<E: ParsedCommandExecutor> CommandEndpoint for CommandGateway<E> {
         let started = Instant::now();
         let output = self.executor.execute_parsed(&command);
         let changed = output.changed;
+        // Verify against full domain output before any transport compaction.
+        let verification = self.executor.verify_output(&command, &output);
         let mut response = response_from_output(id, output);
+        response.verification = verification;
         if response.ok {
             let record = self.ledger.record_without_undo(
                 request.transaction_id.unwrap_or_else(TransactionId::new),
@@ -180,6 +185,12 @@ impl<E: ParsedCommandExecutor> CommandEndpoint for CommandGateway<E> {
             // a retry would be reported as a successful replay and the Agent
             // could stop repairing after the first validation error.
             response.revision = self.ledger.revision();
+        }
+        if let Some(verification) = &response.verification {
+            if !verification.failures.is_empty() {
+                response.ok = false;
+                response.warnings.extend(verification.failures.clone());
+            }
         }
         apply_result_budget(&mut response, request.budget.as_ref(), started.elapsed());
         response

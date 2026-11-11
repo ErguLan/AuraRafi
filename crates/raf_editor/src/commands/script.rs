@@ -11,7 +11,7 @@ use std::path::Path;
 
 use raf_core::config::ScriptLanguage;
 use raf_core::scene::{Primitive, SceneGraph};
-use raf_script::{RhaiScriptRuntime, ScriptRuntimeOptions};
+use raf_script::{InputSnapshot, RhaiScriptRuntime, ScriptRuntimeOptions};
 
 use crate::commands::output::CommandOutput;
 use crate::commands::parser::ParsedCommand;
@@ -31,6 +31,7 @@ pub fn execute(
 ) -> CommandOutput {
     match command_name {
         "script.create" => create_script(command, ctx),
+        "script.write" => write_script(command, ctx),
         "script.attach" => attach_script(command, ctx),
         "script.detach" => detach_script(command, ctx),
         "script.list" => list_scripts(ctx),
@@ -144,6 +145,209 @@ fn create_script_file(
         ],
         serde_json::json!({"path": relative, "language": language}),
     )
+}
+
+/// Create or replace a project-confined Rhai source file.
+///
+/// The source is compiled before it reaches disk, the write is staged in the
+/// same directory, and a failed replacement restores the previous file. This
+/// is the native authoring path that lets the internal Agent write gameplay
+/// code without a shell or arbitrary filesystem access.
+fn write_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> CommandOutput {
+    let Some(assets_root) = ctx.assets_root else {
+        return CommandOutput::error("Write script", "No assets folder for this project.");
+    };
+    let Some(file) = command.arg("file") else {
+        return CommandOutput::error("Write script", "Missing file=<relative .rhai path>.");
+    };
+    let Some(content) = command.arg("content") else {
+        return CommandOutput::error("Write script", "Missing content=<Rhai source>.");
+    };
+    let overwrite = matches!(
+        command.arg("overwrite").map(|value| value.to_ascii_lowercase()),
+        Some(value) if matches!(value.as_str(), "true" | "1" | "yes")
+    );
+    if content.len() > 262_144 {
+        return CommandOutput::error(
+            "Write script",
+            "Script source exceeds the 256 KiB authoring limit.",
+        );
+    }
+    let relative = match normalize_write_path(file) {
+        Ok(relative) => relative,
+        Err(error) => return CommandOutput::error("Write script", error),
+    };
+    let engine = raf_script::backends::rhai_backend::create_engine(100_000);
+    let compiled =
+        match raf_script::backends::rhai_backend::compile_source(&engine, &relative, content) {
+            Ok(compiled) => compiled,
+            Err(error) => {
+                return CommandOutput::error(
+                    "Write script",
+                    format!("Rhai validation failed: {error}"),
+                )
+            }
+        };
+    let root = match assets_root.canonicalize() {
+        Ok(root) => root,
+        Err(error) => return CommandOutput::error("Write script", error.to_string()),
+    };
+    let target = assets_root.join(&relative);
+    let Some(parent) = target.parent() else {
+        return CommandOutput::error("Write script", "The script path has no parent folder.");
+    };
+    if let Err(error) = std::fs::create_dir_all(parent) {
+        return CommandOutput::error("Write script", error.to_string());
+    }
+    let parent = match parent.canonicalize() {
+        Ok(parent) if parent.starts_with(&root) => parent,
+        Ok(_) => {
+            return CommandOutput::error(
+                "Write script",
+                "Script paths must stay inside the project assets folder.",
+            )
+        }
+        Err(error) => return CommandOutput::error("Write script", error.to_string()),
+    };
+    let target = parent.join(
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("script.rhai"),
+    );
+    if target.exists() && !overwrite {
+        return CommandOutput::error(
+            "Write script",
+            format!("File already exists: {relative}. Pass overwrite=true to replace it."),
+        );
+    }
+    let previous = if target.exists() {
+        std::fs::read(&target).ok()
+    } else {
+        None
+    };
+    let temporary = parent.join(format!(
+        ".{}.{}.tmp",
+        target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("script"),
+        uuid::Uuid::new_v4()
+    ));
+    if let Err(error) = std::fs::write(&temporary, content) {
+        return CommandOutput::error("Write script", error.to_string());
+    }
+    if target.exists() {
+        let _ = std::fs::remove_file(&target);
+    }
+    if let Err(error) = std::fs::rename(&temporary, &target) {
+        let _ = std::fs::remove_file(&temporary);
+        if let Some(previous) = previous {
+            let _ = std::fs::write(&target, previous);
+        }
+        return CommandOutput::error("Write script", error.to_string());
+    }
+    CommandOutput::changed(
+        "Script written",
+        vec![
+            format!("Path: {relative}"),
+            format!(
+                "Hooks: {}{}{}",
+                if compiled.has_on_start { "on_start " } else { "" },
+                if compiled.has_on_update { "on_update " } else { "" },
+                if compiled.has_on_destroy { "on_destroy " } else { "" },
+            )
+            .trim_end()
+            .to_string(),
+            format!("Bytes: {}", content.len()),
+        ],
+        serde_json::json!({
+            "path": relative,
+            "language": "Rhai",
+            "overwritten": overwrite,
+            "bytes": content.len(),
+            "has_on_start": compiled.has_on_start,
+            "has_on_update": compiled.has_on_update,
+            "has_on_destroy": compiled.has_on_destroy,
+            "status": "ready",
+        }),
+    )
+}
+
+/// Validate `script.write` source without touching the project.
+pub fn preview_write(command: &ParsedCommand) -> CommandOutput {
+    let Some(file) = command.arg("file") else {
+        return CommandOutput::error("Preview script.write", "Missing file=<relative .rhai path>.");
+    };
+    let Some(content) = command.arg("content") else {
+        return CommandOutput::error("Preview script.write", "Missing content=<Rhai source>.");
+    };
+    if content.len() > 262_144 {
+        return CommandOutput::error(
+            "Preview script.write",
+            "Script source exceeds the 256 KiB authoring limit.",
+        );
+    }
+    let relative = match normalize_write_path(file) {
+        Ok(relative) => relative,
+        Err(error) => return CommandOutput::error("Preview script.write", error),
+    };
+    let engine = raf_script::backends::rhai_backend::create_engine(100_000);
+    match raf_script::backends::rhai_backend::compile_source(&engine, &relative, content) {
+        Ok(compiled) => CommandOutput::changed(
+            "Preview script.write",
+            vec![
+                format!("Path: {relative}"),
+                format!("Bytes: {}", content.len()),
+                "No file was written.".to_string(),
+            ],
+            serde_json::json!({
+                "file": relative,
+                "bytes": content.len(),
+                "has_on_start": compiled.has_on_start,
+                "has_on_update": compiled.has_on_update,
+                "has_on_destroy": compiled.has_on_destroy,
+                "status": "validated",
+                "preview": true,
+            }),
+        ),
+        Err(error) => CommandOutput::error(
+            "Preview script.write",
+            format!("Rhai validation failed: {error}"),
+        ),
+    }
+}
+
+fn normalize_write_path(file: &str) -> Result<String, String> {
+    let path = Path::new(file);
+    if path.is_absolute() {
+        return Err("Script paths must be relative to the project assets folder.".into());
+    }
+    let mut segments = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => {
+                let value = value.to_string_lossy();
+                if value.is_empty() {
+                    continue;
+                }
+                segments.push(value.to_string());
+            }
+            std::path::Component::CurDir => {}
+            _ => return Err("Script paths cannot contain '..' or a drive prefix.".into()),
+        }
+    }
+    let mut relative = segments.join("/");
+    if relative.is_empty() {
+        return Err("Missing script file name.".into());
+    }
+    if !relative.starts_with("scripts/") {
+        relative = format!("scripts/{relative}");
+    }
+    if !relative.to_ascii_lowercase().ends_with(".rhai") {
+        return Err("script.write accepts .rhai sources; use script.create for other stubs.".into());
+    }
+    Ok(relative)
 }
 
 fn sanitize_script_name(value: &str) -> String {
@@ -386,14 +590,41 @@ fn validate_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) 
     }
 }
 
-/// Run a script's on_start once in the editor (testing).
-/// Runs against a cloned scene so the editor document is not mutated.
+/// Run one script on a cloned scene without entering Play.
+///
+/// The editor document is never mutated. An explicit `entity` keeps that
+/// entity as the behavior owner (including its typed parameters); otherwise
+/// the script runs on a temporary `__script_run__` root. Optional `ticks` and
+/// `keys` exercise update, fixed-update, bounded physics and late-update with a
+/// synthetic input snapshot so missing runtime functions are reported before a
+/// manual Play test.
 fn run_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> CommandOutput {
     let Some(file) = command.arg("file") else {
         return CommandOutput::error("Run script", "Missing file=<relative path>.");
     };
 
     let relative = normalize_script_path(file);
+    let ticks = match command.arg("ticks") {
+        Some(raw) => match raw.parse::<usize>() {
+            Ok(value) if value <= 600 => value,
+            _ => {
+                return CommandOutput::error(
+                    "Run script",
+                    "ticks must be an integer between 0 and 600.",
+                )
+            }
+        },
+        None => 0,
+    };
+    let keys = match run_keys(command) {
+        Ok(keys) => keys,
+        Err(error) => return CommandOutput::error("Run script", error),
+    };
+    let target = command
+        .arg("entity")
+        .or_else(|| command.arg("target"))
+        .map(str::to_string);
+
     let mut runtime_scene = ctx.scene.clone();
     for id in runtime_scene.all_valid_ids() {
         if let Some(node) = runtime_scene.get_mut(id) {
@@ -401,10 +632,24 @@ fn run_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> Co
         }
     }
 
-    let runner = runtime_scene.add_root_with_primitive("__script_run__", Primitive::Empty);
-    if let Some(node) = runtime_scene.get_mut(runner) {
-        node.scripts.push(relative.clone());
-    }
+    let owner_id = match target.as_deref() {
+        Some(reference) => match crate::commands::behavior::resolve(&runtime_scene, reference) {
+            Ok(id) => {
+                if let Some(node) = runtime_scene.get_mut(id) {
+                    node.scripts.push(relative.clone());
+                }
+                id
+            }
+            Err(error) => return CommandOutput::error("Run script", error),
+        },
+        None => {
+            let runner = runtime_scene.add_root_with_primitive("__script_run__", Primitive::Empty);
+            if let Some(node) = runtime_scene.get_mut(runner) {
+                node.scripts.push(relative.clone());
+            }
+            runner
+        }
+    };
 
     let (mut runtime, load_report) = RhaiScriptRuntime::load_from_scene(
         &runtime_scene,
@@ -418,44 +663,148 @@ fn run_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) -> Co
         Default::default()
     };
 
-    let mut lines = vec![
-        format!("Target: {}", relative),
-        format!("Loaded scripts: {}", loaded_scripts),
-        "Executed on a cloned scene; editor scene was not mutated.".to_string(),
-    ];
-    lines.extend(load_report.logs.clone());
-    lines.extend(start_report.logs.clone());
-    lines.extend(
-        load_report
-            .errors
-            .iter()
-            .chain(start_report.errors.iter())
-            .map(|error| format!("Error: {}", error)),
-    );
-
-    let errors: Vec<String> = load_report
+    let mut errors: Vec<String> = load_report
         .errors
         .into_iter()
         .chain(start_report.errors)
         .collect();
-    let logs: Vec<String> = load_report
+    let mut logs: Vec<String> = load_report
         .logs
         .into_iter()
         .chain(start_report.logs)
         .collect();
+    let mut physics_steps = 0usize;
+    let mut physics_error: Option<String> = None;
+
+    if ticks > 0 && loaded_scripts > 0 && errors.is_empty() {
+        match raf_runtime::physics::PhysicsWorld::prepare(&runtime_scene) {
+            Ok(mut physics) => {
+                let dt = 1.0f32 / 60.0;
+                for tick in 0..ticks {
+                    let mut input = InputSnapshot::default();
+                    input.keys_held = keys.clone();
+                    if tick == 0 {
+                        input.keys_pressed = keys.clone();
+                    }
+                    let update = runtime.update(&mut runtime_scene, dt, &input);
+                    errors.extend(update.errors);
+                    logs.extend(update.logs);
+                    let fixed = runtime.fixed_update(&mut runtime_scene, dt, &input);
+                    errors.extend(fixed.errors);
+                    logs.extend(fixed.logs);
+                    if let Err(error) = physics.step(&mut runtime_scene, dt) {
+                        physics_error = Some(error.clone());
+                        errors.push(format!("physics: {error}"));
+                        break;
+                    }
+                    physics_steps += 1;
+                    let late = runtime.late_update(&mut runtime_scene, dt, &input);
+                    errors.extend(late.errors);
+                    logs.extend(late.logs);
+                }
+            }
+            Err(error) => {
+                let detail = error.join("; ");
+                physics_error = Some(detail.clone());
+                errors.push(format!("physics preparation: {detail}"));
+            }
+        }
+    }
+
+    let owner_name = runtime_scene
+        .get(owner_id)
+        .map(|node| node.name.clone())
+        .unwrap_or_default();
+    let final_position = runtime_scene
+        .world_matrix(owner_id)
+        .w_axis
+        .truncate()
+        .to_array()
+        .map(|value| (value * 1000.0).round() / 1000.0);
+
+    let mut lines = vec![
+        format!("Target: {relative}"),
+        format!("Owner: {owner_name} ({})", owner_id.0),
+        format!("Loaded scripts: {loaded_scripts}"),
+        format!(
+            "Ticks: {ticks}, physics steps: {physics_steps}, keys: {}",
+            if keys.is_empty() {
+                "none".to_string()
+            } else {
+                keys.join(",")
+            }
+        ),
+        "Executed on a cloned scene; editor scene was not mutated.".to_string(),
+    ];
+    lines.extend(logs.clone());
+    lines.extend(errors.iter().map(|error| format!("Error: {error}")));
+
+    let status = if errors.is_empty() { "ok" } else { "error" };
     let json = serde_json::json!({
         "file": relative,
-        "status": if errors.is_empty() { "ok" } else { "error" },
+        "status": status,
+        "entity": target,
+        "owner": owner_name,
+        "owner_id": owner_id.0,
         "loaded_scripts": loaded_scripts,
+        "ticks": ticks,
+        "physics_steps": physics_steps,
+        "keys": keys,
+        "final_position": final_position,
+        "physics_error": physics_error,
         "logs": logs,
         "errors": errors,
     });
 
-    if json["status"] == "ok" {
+    if status == "ok" {
         CommandOutput::info("Run script", lines, json)
     } else {
         CommandOutput::warning("Run script", lines, json)
     }
+}
+
+fn run_keys(command: &ParsedCommand) -> Result<Vec<String>, String> {
+    let mut keys = Vec::new();
+    if let Some(value) = command.structured_arg("keys") {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    let Some(value) = value.as_str() else {
+                        return Err("keys must contain only strings.".to_string());
+                    };
+                    keys.push(value.to_string());
+                }
+            }
+            serde_json::Value::String(value) => {
+                keys.extend(value.split(',').map(str::to_string));
+            }
+            _ => return Err("keys must be an array of strings or a comma list.".to_string()),
+        }
+    } else if let Some(raw) = command.arg("keys") {
+        keys.extend(raw.split(',').map(str::to_string));
+    }
+
+    let mut normalized = Vec::new();
+    for key in keys {
+        let key = key.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        if key.len() > 32
+            || !key
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+        {
+            return Err("keys accepts lowercase key names such as w, space, shift or arrow_left.".to_string());
+        }
+        if !normalized.contains(&key) {
+            normalized.push(key);
+        }
+    }
+    if normalized.len() > 16 {
+        return Err("keys supports at most 16 entries.".to_string());
+    }
+    Ok(normalized)
 }
 
 /// Compile a node graph flow to Rhai source.
@@ -645,6 +994,65 @@ mod tests {
     use uuid::Uuid;
 
     #[test]
+    fn script_write_validates_confines_and_preserves_existing_source() {
+        use std::collections::BTreeMap;
+
+        let project_root =
+            std::env::temp_dir().join(format!("raf_script_write_{}", Uuid::new_v4()));
+        let assets = project_root.join("assets");
+        fs::create_dir_all(&assets).unwrap();
+        let mut scene = SceneGraph::new();
+        let mut ctx = ScriptCommandContext {
+            scene: &mut scene,
+            assets_root: Some(&assets),
+        };
+        let command = |args: &[(&str, &str)]| ParsedCommand {
+            raw: String::new(),
+            name: "script.write".into(),
+            args: args
+                .iter()
+                .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+                .collect::<BTreeMap<_, _>>(),
+            positional: Vec::new(),
+            structured_args: None,
+        };
+
+        let valid = command(&[
+            ("file", "player.rhai"),
+            (
+                "content",
+                "fn on_update(dt) { owner().move_by(0.0, 0.0, 2.0 * dt); }",
+            ),
+        ]);
+        let output = execute("script.write", &valid, &mut ctx);
+        assert_eq!(output.level, CommandLevel::Info);
+        assert!(output.changed);
+        assert!(assets.join("scripts/player.rhai").exists());
+
+        let duplicate = execute("script.write", &valid, &mut ctx);
+        assert_eq!(duplicate.level, CommandLevel::Error);
+        let previous = fs::read_to_string(assets.join("scripts/player.rhai")).unwrap();
+        let invalid = command(&[
+            ("file", "player.rhai"),
+            ("content", "fn on_update("),
+            ("overwrite", "true"),
+        ]);
+        let failed = execute("script.write", &invalid, &mut ctx);
+        assert_eq!(failed.level, CommandLevel::Error);
+        assert_eq!(
+            fs::read_to_string(assets.join("scripts/player.rhai")).unwrap(),
+            previous
+        );
+
+        let escape = command(&[("file", "../escape.rhai"), ("content", "fn on_start() {}")]);
+        let rejected = execute("script.write", &escape, &mut ctx);
+        assert_eq!(rejected.level, CommandLevel::Error);
+        assert!(!project_root.join("escape.rhai").exists());
+
+        let _ = fs::remove_dir_all(project_root);
+    }
+
+    #[test]
     fn run_script_executes_on_clone_without_mutating_editor_scene() {
         let project_root =
             std::env::temp_dir().join(format!("raf_script_command_{}", Uuid::new_v4()));
@@ -678,6 +1086,55 @@ fn on_start() {
         assert_eq!(output.level, CommandLevel::Info);
         assert_eq!(output.json["status"], "ok");
         assert_eq!(ctx.scene.get(body).unwrap().position, Vec3::ZERO);
+
+        let _ = fs::remove_dir_all(project_root);
+    }
+
+    #[test]
+    fn run_script_targets_an_entity_and_exercises_ticks_with_synthetic_keys() {
+        let project_root =
+            std::env::temp_dir().join(format!("raf_script_ticks_{}", Uuid::new_v4()));
+        let script_dir = project_root.join("assets").join("scripts");
+        fs::create_dir_all(&script_dir).unwrap();
+        fs::write(
+            script_dir.join("tick.rhai"),
+            r#"
+fn on_fixed_update(dt) {
+    if is_key_pressed("w") {
+        print("tick");
+    }
+    owner().set_property("angle", atan2(-1.0, -1.0) + dt * 0.0);
+}
+"#,
+        )
+        .unwrap();
+
+        let mut scene = SceneGraph::new();
+        let body = scene.add_root_with_primitive("Body", Primitive::Cube);
+        let ParsedInput::Command(command) =
+            parse_console_input("/script.run file=tick.rhai entity=Body ticks=2 keys=w").unwrap()
+        else {
+            panic!("expected command");
+        };
+        let mut ctx = ScriptCommandContext {
+            scene: &mut scene,
+            assets_root: Some(&project_root.join("assets")),
+        };
+
+        let output = execute("script.run", &command, &mut ctx);
+
+        assert_eq!(output.level, CommandLevel::Info, "{:?}", output.lines);
+        assert_eq!(output.json["status"], "ok");
+        assert_eq!(output.json["owner"], "Body");
+        assert_eq!(output.json["ticks"], 2);
+        assert_eq!(output.json["physics_steps"], 2);
+        assert!(output.json["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|log| log.as_str())
+            .any(|log| log.ends_with(": tick")));
+        assert!(ctx.scene.get(body).unwrap().get_variable("angle").is_none());
 
         let _ = fs::remove_dir_all(project_root);
     }

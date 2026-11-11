@@ -14,3 +14,10 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 ureq = { workspace = true }
 ron = { workspace = true }
+base64 = "0.22"
+ring = "0.17"
+url = "2"
+dirs-next = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security_Cryptography", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }

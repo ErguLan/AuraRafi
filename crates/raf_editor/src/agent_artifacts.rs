@@ -114,18 +114,26 @@ pub(crate) fn capture_viewport_artifact(
         .snapshot()
         .active_backend
         .map(|backend| format!("{backend:?}"));
+    let label = t(language, "agent.viewport_capture.label");
     let mut result = AgentToolResult::success(
         t(language, "agent.viewport_capture.saved"),
         json!({
             "artifact": {
                 "id": artifact_id,
                 "kind": "image/png",
-                "uri": uri,
-                "label": t(language, "agent.viewport_capture.label"),
+                "uri": uri.clone(),
+                "label": label.clone(),
             },
             "width": capture.width,
             "height": capture.height,
             "backend": backend,
+            "view": "current",
+            "visual_evidence": [{
+                "file": uri,
+                "width": capture.width,
+                "height": capture.height,
+                "label": label,
+            }],
         }),
     );
     result.references.push(relative_path.replace('\\', "/"));

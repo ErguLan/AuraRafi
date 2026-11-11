@@ -79,6 +79,12 @@ Current implementation profile:
 
 ## Documentation
 
+- [RafUI internals](docs/RAF_UI.md) - Retained data model, rendering boundary,
+  resource lifecycle, invalidation and current source map
+- [RafUI authoring](docs/RAF_UI_AUTHORING.md) - Rust panels, controls, events,
+  layout pitfalls and native integration
+- [Game interfaces](docs/GAME_UI.md) - Visual editing, interface assets,
+  game-only scripting and runtime presentations
 - [Programming in AuraRafi](docs/SCRIPTING_GUIDE.md) - Rhai, Inspector references,
   cameras, reactions and reusable subtrees; explicit verification limits
 - [Scripting internals](docs/SCRIPTING_INTERNALS.md) - Runtime lifecycle, Host API,

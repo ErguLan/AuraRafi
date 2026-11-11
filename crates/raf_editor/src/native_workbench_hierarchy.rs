@@ -1,8 +1,32 @@
 //! Session-local tree state and contextual navigation.
 use super::*;
 use crate::panels::hierarchy_model::details::HierarchyViewState;
+#[path = "hierarchy_state_store.rs"]
+mod state_store;
+pub(super) use state_store::HierarchyStateWriter;
+
+pub(super) fn hierarchy_scroll_projection_changed(
+    before: f32,
+    after: f32,
+    row_height: f32,
+) -> bool {
+    let row_height = row_height.max(1.0);
+    (before.max(0.0) / row_height).floor() != (after.max(0.0) / row_height).floor()
+}
 
 impl NativeGameWorkbench {
+    pub(super) fn note_hierarchy_scroll(&mut self, next: f32) {
+        if hierarchy_scroll_projection_changed(
+            self.hierarchy_scroll_offset,
+            next,
+            self.agent_settings.hierarchy_row_height,
+        ) {
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
+        // The retained scroll state still follows every input event. Only a
+        // changed virtual row window needs another authored document.
+        self.hierarchy_scroll_offset = next;
+    }
     pub(crate) fn decorate_hierarchy_surface(
         &self,
         mut surface: UiSurface,
@@ -135,7 +159,8 @@ impl NativeGameWorkbench {
             self.hierarchy_pending_state = Some(state);
             self.hierarchy_state_dirty = true;
         }
-        // Commit only after a completed interaction; idle frames perform no writes.
+        // Queue the latest view only. Serialization and durable writes run
+        // after a quiet interval on the bounded worker, never inside this frame.
         if self.hierarchy_drag.is_none()
             && !self
                 .host
@@ -146,11 +171,16 @@ impl NativeGameWorkbench {
                 .as_deref()
                 .is_some_and(|id| id.contains("search") || id.contains("rename"))
         {
-            self.flush_hierarchy_state();
+            self.queue_hierarchy_state();
         }
     }
 
     pub(crate) fn flush_hierarchy_state(&mut self) {
+        self.queue_hierarchy_state();
+        self.hierarchy_state_writer.flush();
+    }
+
+    fn queue_hierarchy_state(&mut self) {
         if !self.hierarchy_state_dirty {
             return;
         }
@@ -161,17 +191,26 @@ impl NativeGameWorkbench {
         else {
             return;
         };
-        let result = ron::ser::to_string(state)
-            .map_err(|e| e.to_string())
-            .and_then(|text| {
-                if let Some(parent) = path.parent() {
-                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-                }
-                raf_core::project_store::write_atomic(path, text.as_bytes())
-            });
+        let result = self
+            .hierarchy_state_writer
+            .submit(path.clone(), state.clone());
         if let Err(error) = result {
             tracing::warn!(%error, "Hierarchy view state save failed");
+            return;
         }
         self.hierarchy_state_dirty = false;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rafui_interaction_hierarchy_rebuilds_only_when_virtual_rows_change() {
+        assert!(!hierarchy_scroll_projection_changed(53.0, 76.0, 26.0));
+        assert!(hierarchy_scroll_projection_changed(76.0, 78.0, 26.0));
+        assert!(hierarchy_scroll_projection_changed(78.0, 76.0, 26.0));
+        assert!(!hierarchy_scroll_projection_changed(0.0, 0.5, 0.0));
     }
 }

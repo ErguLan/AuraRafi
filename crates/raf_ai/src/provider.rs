@@ -4,4 +4,4 @@
 //! moved to `raf_core::ai` so that `EngineSettings` can store provider
 //! configurations without creating a crate dependency cycle.
 
-pub use raf_core::ai::{AgentMode, AiModelShortcut, AiProvider, AiProviderConfig};
+pub use raf_core::ai::{AgentMode, AiProvider, AiProviderConfig};

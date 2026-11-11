@@ -184,10 +184,10 @@ impl ShadowGpuState {
             push_constant_ranges: &[],
         });
         let pipelines = [
-            create_scene_mesh_pipeline(device, &receiver, &receiver_layout, format, false, false),
-            create_scene_mesh_pipeline(device, &receiver, &receiver_layout, format, false, true),
-            create_scene_mesh_pipeline(device, &receiver, &receiver_layout, format, true, false),
-            create_scene_mesh_pipeline(device, &receiver, &receiver_layout, format, true, true),
+            create_scene_mesh_pipeline(device, &receiver, &receiver_layout, format, false, false, None),
+            create_scene_mesh_pipeline(device, &receiver, &receiver_layout, format, false, true, None),
+            create_scene_mesh_pipeline(device, &receiver, &receiver_layout, format, true, false, None),
+            create_scene_mesh_pipeline(device, &receiver, &receiver_layout, format, true, true, None),
         ];
         let depth_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Shadow.DepthShader"),

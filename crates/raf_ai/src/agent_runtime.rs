@@ -9,9 +9,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use crate::chat::{ChatMessage, MessageRole};
+use crate::chat::{ChatMessage, MessageRole, ProviderReasoning};
 use crate::openai_client::{
-    FunctionCall, OpenAiClient, OpenAiConfig, OpenAiMessage, OpenAiTool, ToolCall,
+    FunctionCall, OpenAiClient, OpenAiConfig, OpenAiMessage, OpenAiTool, StreamDelta, ToolCall,
 };
 use chrono::Utc;
 use raf_core::{AgentTaskEvent, AgentTaskId, AgentTaskManager, AgentTaskSnapshot, AgentTaskStatus};
@@ -249,7 +249,7 @@ pub enum AgentEvent {
 /// Shared cell for passing background-thread results back to the runtime.
 struct PendingResponse {
     result: Arc<Mutex<Option<Result<OpenAiMessage, String>>>>,
-    stream_rx: mpsc::Receiver<String>,
+    stream_rx: mpsc::Receiver<StreamDelta>,
     _handle: JoinHandle<()>,
     tools: Vec<OpenAiTool>,
     execution_mode: ToolExecutionMode,
@@ -286,6 +286,10 @@ pub struct AgentRuntime {
     /// run starts. It is sent once to the provider and is intentionally not
     /// persisted as a fake chat exchange.
     request_context: Vec<OpenAiMessage>,
+    /// Project-scoped PNG evidence produced by observation tools. It is sent
+    /// once on the next provider request and never persisted as user content.
+    evidence_images: Vec<crate::chat_media::ChatImage>,
+    pub media_root: Option<std::path::PathBuf>,
     streaming_message_index: Option<usize>,
     message_revision: u64,
     task_manager: AgentTaskManager,
@@ -316,6 +320,8 @@ impl AgentRuntime {
             pending: None,
             pending_tool_execution: None,
             request_context: Vec::new(),
+            evidence_images: Vec::new(),
+            media_root: None,
             streaming_message_index: None,
             message_revision: 0,
             task_manager: AgentTaskManager::new(),
@@ -339,6 +345,7 @@ impl AgentRuntime {
         self.run_started_at = None;
         self.pending_tool_execution = None;
         self.request_context.clear();
+        self.evidence_images.clear();
         self.streaming_message_index = None;
         self.cancel_active_task();
         if had_messages {
@@ -388,12 +395,18 @@ impl AgentRuntime {
                 },
             }]),
             tool_call_id: None,
+            reasoning_content: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
         };
         let tool = OpenAiMessage {
             role: "tool".to_string(),
             content: Value::String(result.model_content(self.max_tool_result_chars)),
             tool_calls: None,
             tool_call_id: Some(call_id),
+            reasoning_content: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
         };
         self.request_context = vec![assistant, tool];
     }
@@ -407,6 +420,13 @@ impl AgentRuntime {
         tools: &[OpenAiTool],
         execution_mode: ToolExecutionMode,
     ) {
+        self.start_run_with_images(user_message, Vec::new(), tools, execution_mode);
+    }
+
+    pub fn start_run_with_images(
+        &mut self, user_message: impl Into<String>, images: Vec<crate::chat_media::ChatImage>,
+        tools: &[OpenAiTool], execution_mode: ToolExecutionMode,
+    ) {
         let content = user_message.into();
         self.cancel_background();
         self.pending_calls.clear();
@@ -418,9 +438,12 @@ impl AgentRuntime {
         self.last_tool_execution = None;
         self.run_started_at = Some(Instant::now());
         self.streaming_message_index = None;
+        self.evidence_images.clear();
         self.start_task();
         self.repair_orphaned_tool_call_history();
-        self.push_message(ChatMessage::user(&content));
+        let mut user = ChatMessage::user(&content);
+        user.images = images;
+        self.push_message(user);
         self.spawn_next_request(tools, execution_mode);
         self.sync_task();
     }
@@ -462,19 +485,22 @@ impl AgentRuntime {
 
     /// Check if the background thread is done and process the response.
     fn check_pending(&mut self, executor: Option<&mut dyn ToolExecutor>) -> AgentStatus {
-        let deltas = self
-            .pending
-            .as_ref()
-            .map(|pending| pending.stream_rx.try_iter().collect::<Vec<_>>())
-            .unwrap_or_default();
-        for delta in deltas {
-            self.append_stream_delta(&delta);
-        }
-
-        let Some(pending) = self.pending.as_ref() else {
+        const MAX_DELTAS_PER_POLL: usize = 32;
+        if self.pending.is_none() {
             self.status = AgentStatus::Done;
             return AgentStatus::Done;
-        };
+        }
+        let mut stream_ended = false;
+        for _ in 0..MAX_DELTAS_PER_POLL {
+            match self.pending.as_ref().unwrap().stream_rx.try_recv() {
+                Ok(StreamDelta::Text(text)) => self.append_stream_delta(&text),
+                Ok(StreamDelta::Reasoning(text)) => self.append_reasoning_delta(&text),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => { stream_ended = true; break; }
+            }
+        }
+        if !stream_ended { return AgentStatus::Thinking; }
+        let pending = self.pending.as_ref().unwrap();
 
         let result_lock = pending.result.lock().unwrap();
         let result = match result_lock.as_ref() {
@@ -493,6 +519,7 @@ impl AgentRuntime {
         match result {
             Ok(message) => self.handle_assistant_message(message, executor, &tools, execution_mode),
             Err(error) => {
+                let error = friendly_provider_error(error);
                 self.last_error = Some(error.clone());
                 self.status = AgentStatus::Error;
                 let error_message = format!("Error: {}", error);
@@ -500,6 +527,7 @@ impl AgentRuntime {
                     let updated = if let Some(message) = self.messages.get_mut(index) {
                         message.content = error_message;
                         message.tool_calls = None;
+                        message.reasoning = None;
                         true
                     } else {
                         false
@@ -524,6 +552,18 @@ impl AgentRuntime {
         tools: &[OpenAiTool],
         execution_mode: ToolExecutionMode,
     ) -> AgentStatus {
+        let reasoning_text = message.reasoning_content.clone().or(message.reasoning.clone())
+            .unwrap_or_else(|| message.reasoning_details.iter().filter_map(|detail|
+                detail.get("text").or_else(|| detail.get("summary")).and_then(Value::as_str)
+            ).collect::<Vec<_>>().join(""));
+        let completed_reasoning = (!reasoning_text.is_empty() || !message.reasoning_details.is_empty())
+            .then(|| ProviderReasoning {
+                endpoint: self.client.config.base_url.clone(),
+                model: self.client.config.model.clone(),
+                transport: self.client.config.reasoning_transport(),
+                text: reasoning_text,
+                details: message.reasoning_details.clone(),
+            });
         let text = match &message.content {
             Value::String(text) => text.clone(),
             Value::Null => String::new(),
@@ -535,6 +575,7 @@ impl AgentRuntime {
                 text,
                 Some(serde_json::to_value(&tool_calls).unwrap_or_else(|_| serde_json::Value::Null)),
             );
+            self.set_last_reasoning(completed_reasoning);
 
             if let Some(max_tool_calls) = self.max_tool_calls {
                 let remaining_calls = max_tool_calls.saturating_sub(self.tool_calls_executed);
@@ -621,6 +662,7 @@ impl AgentRuntime {
             }
         } else {
             self.upsert_assistant_message(text, None);
+            self.set_last_reasoning(completed_reasoning);
             self.status = AgentStatus::Done;
             self.emit(AgentEvent::StatusChanged(AgentStatus::Done, None));
             AgentStatus::Done
@@ -631,30 +673,103 @@ impl AgentRuntime {
     fn spawn_next_request(&mut self, tools: &[OpenAiTool], execution_mode: ToolExecutionMode) {
         self.turn_count += 1;
         if self.turn_count > self.max_turns {
-            let error = "I reached the maximum number of steps for this request.".to_string();
+            let error = "Step safety limit reached; this task is not complete. Continue to inspect the saved state and resume without replaying completed mutations.".to_string();
             self.last_error = Some(error.clone());
             self.push_message(ChatMessage::assistant(&error));
-            self.status = AgentStatus::Done;
-            self.emit(AgentEvent::StatusChanged(AgentStatus::Done, None));
+            self.status = AgentStatus::Error;
+            self.emit(AgentEvent::StatusChanged(AgentStatus::Error, Some(error)));
             return;
         }
 
-        let mut openai_messages: Vec<OpenAiMessage> =
-            self.messages.iter().map(message_to_openai).collect();
+        let mut openai_messages: Vec<OpenAiMessage> = self.messages.iter().map(|message| {
+            let mut outbound = message_to_openai(message);
+            if message.reasoning.as_ref().is_some_and(|reasoning|
+                reasoning.endpoint != self.client.config.base_url || reasoning.model != self.client.config.model
+                    || reasoning.transport != self.client.config.reasoning_transport()
+            ) {
+                outbound.reasoning_content = None;
+                outbound.reasoning = None;
+                outbound.reasoning_details.clear();
+            }
+            outbound
+        }).collect();
         openai_messages.extend(std::mem::take(&mut self.request_context));
 
+        if self.client.is_deepseek() && !tools.is_empty() {
+            for message in &mut openai_messages {
+                if message.role == "assistant" && message.reasoning_content.is_none() {
+                    message.reasoning_content = Some(String::new());
+                }
+            }
+        }
+
         let client = self.client.clone();
+        let media_root = self.media_root.clone();
+        // Only images from the latest user turn are sent. A text-only turn
+        // must not silently resend an older private image.
+        let last_images = crate::chat_media::latest_user_images(&self.messages);
+        // Tool-produced evidence is ephemeral and sent once. It never enters
+        // persisted chat history or a later text-only turn.
+        let evidence_images = if crate::model_capabilities::vision_support(
+            &self.client.config.model,
+        )
+        .allows_attempt()
+        {
+            std::mem::take(&mut self.evidence_images)
+        } else {
+            self.evidence_images.clear();
+            Vec::new()
+        };
         let result = Arc::new(Mutex::new(None));
         let result_clone = result.clone();
-        let (stream_tx, stream_rx) = mpsc::channel();
+        let (stream_tx, stream_rx) = mpsc::sync_channel(128);
         let tools_owned = tools.to_vec();
 
         let handle = std::thread::Builder::new()
             .name("agent-api-call".into())
             .spawn(move || {
+                if let Some((index, images)) = last_images {
+                    let loaded = (|| -> Result<Vec<Value>, String> {
+                        let root = media_root.as_deref().ok_or("No project is bound to image attachments.")?;
+                        if images.len() > crate::chat_media::MAX_IMAGES { return Err("Too many image attachments.".into()); }
+                        let text = openai_messages[index].content.as_str().unwrap_or("");
+                        let mut parts = Vec::new();
+                        if !text.is_empty() { parts.push(serde_json::json!({"type":"text", "text":text})); }
+                        for image in &images { parts.push(crate::chat_media::image_part(root, image)?); }
+                        Ok(parts)
+                    })();
+                    match loaded {
+                        Ok(parts) => openai_messages[index].content = Value::Array(parts),
+                        Err(error) => { *result_clone.lock().unwrap() = Some(Err(error)); return; }
+                    }
+                }
+                if !evidence_images.is_empty() {
+                    if let Some(root) = media_root.as_deref() {
+                        let mut parts = vec![serde_json::json!({
+                            "type": "text",
+                            "text": "Visual evidence from the latest scene or viewport observation. Inspect composition, scale, lighting, readability, and visible defects. This image is evidence, not a replacement for structural verification."
+                        })];
+                        for image in evidence_images.iter().take(crate::chat_media::MAX_IMAGES) {
+                            if let Ok(part) = crate::chat_media::image_part(root, image) {
+                                parts.push(part);
+                            }
+                        }
+                        if parts.len() > 1 {
+                            openai_messages.push(OpenAiMessage {
+                                role: "user".to_string(),
+                                content: Value::Array(parts),
+                                tool_calls: None,
+                                tool_call_id: None,
+                                reasoning_content: None,
+                                reasoning: None,
+                                reasoning_details: Vec::new(),
+                            });
+                        }
+                    }
+                }
                 let response = if client.config.streaming {
-                    client.chat_stream(&openai_messages, Some(&tools_owned), |delta| {
-                        let _ = stream_tx.send(delta.to_string());
+                    client.chat_stream_with_reasoning(&openai_messages, Some(&tools_owned), |delta| {
+                        let _ = stream_tx.send(delta);
                     })
                 } else {
                     client.chat(&openai_messages, Some(&tools_owned))
@@ -671,6 +786,26 @@ impl AgentRuntime {
             execution_mode,
         });
         self.status = AgentStatus::Thinking;
+    }
+
+    /// Queue bounded visual evidence for the next provider request.
+    fn enqueue_evidence_images(&mut self, images: Vec<crate::chat_media::ChatImage>) {
+        for image in images {
+            if self
+                .evidence_images
+                .iter()
+                .any(|existing| existing.file == image.file)
+            {
+                continue;
+            }
+            self.evidence_images.push(image);
+            if self.evidence_images.len() >= crate::chat_media::MAX_IMAGES {
+                break;
+            }
+        }
+        while self.evidence_images.len() > crate::chat_media::MAX_IMAGES {
+            self.evidence_images.remove(0);
+        }
     }
 
     /// Cancel any running background request.
@@ -727,6 +862,20 @@ impl AgentRuntime {
 
     pub fn set_review_mutations(&mut self, required: bool) {
         self.review_mutations = required;
+        // Disabling review must also release an already suspended queue.
+        // Discard only unapproved review snapshots; explicit decisions retain
+        // their revision guard and denied operations remain denied.
+        if !required && self.status == AgentStatus::AwaitingApproval {
+            for call in &mut self.pending_calls {
+                if call.result.is_none() && call.approved.is_none() {
+                    call.expected_revision = None;
+                    call.review_preview = None;
+                }
+            }
+            self.status = AgentStatus::ExecutingTools;
+            self.emit(AgentEvent::StatusChanged(AgentStatus::ExecutingTools, None));
+            self.sync_task();
+        }
     }
 
     /// Resume the retained operation queue after one scoped decision.
@@ -767,6 +916,38 @@ impl AgentRuntime {
         }
     }
 
+    fn append_reasoning_delta(&mut self, delta: &str) {
+        if delta.is_empty() { return; }
+        let index = if let Some(index) = self.streaming_message_index {
+            index
+        } else {
+            self.push_message(ChatMessage::assistant(""));
+            let index = self.messages.len().saturating_sub(1);
+            self.streaming_message_index = Some(index);
+            index
+        };
+        if let Some(message) = self.messages.get_mut(index) {
+            let reasoning = message.reasoning.get_or_insert_with(|| ProviderReasoning {
+                endpoint: self.client.config.base_url.clone(),
+                model: self.client.config.model.clone(),
+                transport: self.client.config.reasoning_transport(),
+                text: String::new(),
+                details: Vec::new(),
+            });
+            reasoning.text.push_str(delta);
+            self.bump_message_revision();
+        }
+    }
+
+    fn set_last_reasoning(&mut self, reasoning: Option<ProviderReasoning>) {
+        if let Some(message) = self.messages.last_mut() {
+            if message.role == MessageRole::Assistant && message.reasoning != reasoning {
+                message.reasoning = reasoning;
+                self.bump_message_revision();
+            }
+        }
+    }
+
     fn upsert_assistant_message(&mut self, text: String, tool_calls: Option<Value>) {
         if let Some(index) = self.streaming_message_index.take() {
             if index < self.messages.len() {
@@ -788,6 +969,8 @@ impl AgentRuntime {
             id: Uuid::new_v4(),
             role: MessageRole::Assistant,
             content: text,
+            images: Vec::new(),
+            reasoning: None,
             timestamp: Utc::now(),
             tool_calls,
         });
@@ -862,26 +1045,32 @@ impl AgentRuntime {
             .iter_mut()
             .find(|call| call.result.is_none())
             .and_then(|call| {
-                let result = if call.approved == Some(false) {
-                    "Denied by user.".to_string()
+                let (result, images) = if call.approved == Some(false) {
+                    ("Denied by user.".to_string(), Vec::new())
                 } else if let Some(error) = call.argument_error.as_deref() {
-                    serde_json::json!({
-                        "ok": false,
-                        "summary": "The provider returned malformed tool arguments.",
-                        "error": {
-                            "code": "invalid_tool_json",
-                            "message": error,
-                            "suggestion": "Retry the tool call with one JSON object that matches the advertised schema."
-                        }
-                    })
-                    .to_string()
+                    (
+                        serde_json::json!({
+                            "ok": false,
+                            "summary": "The provider returned malformed tool arguments.",
+                            "error": {
+                                "code": "invalid_tool_json",
+                                "message": error,
+                                "suggestion": "Retry the tool call with one JSON object that matches the advertised schema."
+                            }
+                        })
+                        .to_string(),
+                        Vec::new(),
+                    )
                 } else {
                     if execution_mode == ToolExecutionMode::Inspect
                         && executor.kind(&call.name) == AgentToolKind::Mutation
                     {
-                        format!(
-                            "{{\"ok\":false,\"summary\":\"Tool '{}' is not available in Inspect mode.\"}}",
-                            call.name
+                        (
+                            format!(
+                                "{{\"ok\":false,\"summary\":\"Tool '{}' is not available in Inspect mode.\"}}",
+                                call.name
+                            ),
+                            Vec::new(),
                         )
                     } else {
                         let output = if executor.is_pending(&call.id) {
@@ -898,17 +1087,21 @@ impl AgentRuntime {
                             output
                         };
                         match output {
-                            Ok(output) => output.model_content(max_tool_result_chars),
-                            Err(error) => format!("Error: {}", error),
+                            Ok(output) => (
+                                output.model_content(max_tool_result_chars),
+                                visual_evidence_from_result(&output),
+                            ),
+                            Err(error) => (format!("Error: {}", error), Vec::new()),
                         }
                     }
                 };
                 let result = truncate_tool_result(result, max_tool_result_chars);
                 call.result = Some(result.clone());
-                Some((call.id.clone(), result))
+                Some((call.id.clone(), result, images))
             });
-        if let Some((id, result)) = executed {
+        if let Some((id, result, images)) = executed {
             self.tool_calls_executed = self.tool_calls_executed.saturating_add(1);
+            self.enqueue_evidence_images(images);
             self.emit(AgentEvent::ToolResult { id, result });
             return AgentStatus::ExecutingTools;
         }
@@ -945,6 +1138,8 @@ impl AgentRuntime {
                 id: Uuid::new_v4(),
                 role: MessageRole::Tool,
                 content: result,
+                images: Vec::new(),
+                reasoning: None,
                 timestamp: Utc::now(),
                 tool_calls: Some(serde_json::json!({
                     "tool_call_id": id,
@@ -1303,7 +1498,52 @@ fn message_to_openai(message: &ChatMessage) -> OpenAiMessage {
         content,
         tool_calls,
         tool_call_id,
+        reasoning_content: message.reasoning.as_ref().filter(|r| (r.endpoint.trim_end_matches('/').starts_with("https://api.deepseek.com") || r.endpoint.starts_with("https://opencode.ai/inference/")) && r.details.is_empty()).map(|r| r.text.clone()),
+        reasoning: message.reasoning.as_ref().filter(|r| r.endpoint.starts_with("https://openrouter.ai/") && r.details.is_empty()).map(|r| r.text.clone()),
+        reasoning_details: message.reasoning.as_ref().map(|r| r.details.clone()).unwrap_or_default(),
     }
+}
+
+fn friendly_provider_error(error: String) -> String {
+    if crate::model_capabilities::is_image_rejection(&error) {
+        format!(
+            "The selected model rejected image input. Structural tools and artifacts remain available; choose a vision-capable model to inspect captures. Provider detail: {error}"
+        )
+    } else {
+        error
+    }
+}
+
+fn visual_evidence_from_result(result: &AgentToolResult) -> Vec<crate::chat_media::ChatImage> {
+    let Some(items) = result.data.get("visual_evidence").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut images = Vec::new();
+    for item in items {
+        let Some(file) = item.get("file").and_then(Value::as_str) else {
+            continue;
+        };
+        if !file.ends_with(".png") {
+            continue;
+        }
+        let width = item.get("width").and_then(Value::as_u64).unwrap_or(0) as u32;
+        let height = item.get("height").and_then(Value::as_u64).unwrap_or(0) as u32;
+        if images
+            .iter()
+            .any(|image: &crate::chat_media::ChatImage| image.file == file)
+        {
+            continue;
+        }
+        images.push(crate::chat_media::ChatImage {
+            file: file.to_string(),
+            width,
+            height,
+        });
+        if images.len() >= crate::chat_media::MAX_IMAGES {
+            break;
+        }
+    }
+    images
 }
 
 fn truncate_tool_result(mut result: String, max_chars: usize) -> String {
@@ -1380,6 +1620,9 @@ pub fn assistant_with_tool_calls(text: &str, calls: &[ToolCall]) -> OpenAiMessag
         content: serde_json::json!(text),
         tool_calls: Some(calls.to_vec()),
         tool_call_id: None,
+        reasoning_content: None,
+        reasoning: None,
+        reasoning_details: Vec::new(),
     }
 }
 
@@ -1387,6 +1630,25 @@ pub fn assistant_with_tool_calls(text: &str, calls: &[ToolCall]) -> OpenAiMessag
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn capture_visual_evidence_is_bounded_and_deduplicated() {
+        let result = AgentToolResult::success(
+            "captured",
+            serde_json::json!({
+                "visual_evidence": [
+                    {"file": ".aura_rafi/agent_artifacts/front.png", "width": 960, "height": 540},
+                    {"file": ".aura_rafi/agent_artifacts/front.png", "width": 960, "height": 540},
+                    {"file": ".aura_rafi/agent_artifacts/side.png", "width": 960, "height": 540},
+                    {"file": "notes.txt", "width": 960, "height": 540}
+                ]
+            }),
+        );
+        let images = visual_evidence_from_result(&result);
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0].file, ".aura_rafi/agent_artifacts/front.png");
+        assert_eq!(images[1].file, ".aura_rafi/agent_artifacts/side.png");
+    }
 
     #[derive(Default)]
     struct RecordingExecutor {
@@ -1407,6 +1669,108 @@ mod tests {
                 Value::Null,
             ))
         }
+    }
+
+    #[test]
+    fn active_permissions_apply_without_review_and_keep_inspect_plan_boundaries() {
+        #[derive(Default)]
+        struct PermissionExecutor {
+            modes: Vec<ToolExecutionMode>,
+            previews: usize,
+        }
+        impl ToolExecutor for PermissionExecutor {
+            fn preview_for_review(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: Value,
+            ) -> Option<AgentToolResult> {
+                self.previews += 1;
+                None
+            }
+            fn execute(
+                &mut self,
+                _: &str,
+                _: &str,
+                _: Value,
+                mode: ToolExecutionMode,
+            ) -> Result<AgentToolResult, String> {
+                self.modes.push(mode);
+                Ok(AgentToolResult::success("executed", Value::Null))
+            }
+        }
+        for mode in [
+            ToolExecutionMode::Apply,
+            ToolExecutionMode::Inspect,
+            ToolExecutionMode::Preview,
+        ] {
+            let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+            runtime.set_tool_execution_interval(Duration::ZERO);
+            runtime.set_review_mutations(false);
+            runtime.pending_calls = vec![PendingToolCall::new(
+                "op",
+                "scene_create",
+                serde_json::json!({}),
+            )];
+            runtime.begin_tool_execution(&[], mode);
+            let mut executor = PermissionExecutor::default();
+            assert_eq!(
+                runtime.poll(Some(&mut executor)),
+                AgentStatus::ExecutingTools
+            );
+            assert_eq!(executor.previews, 0);
+            if mode == ToolExecutionMode::Inspect {
+                assert!(executor.modes.is_empty());
+                assert!(runtime.pending_calls[0]
+                    .result
+                    .as_deref()
+                    .unwrap()
+                    .contains("not available in Inspect"));
+            } else {
+                assert_eq!(executor.modes, vec![mode]);
+                assert!(runtime.pending_calls[0].approved.is_none());
+            }
+            runtime.cancel();
+        }
+    }
+
+    #[test]
+    fn active_permissions_resume_pending_review_without_replaying_or_ignoring_denials() {
+        let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+        runtime.set_tool_execution_interval(Duration::ZERO);
+        runtime.set_review_mutations(true);
+        runtime.pending_calls = vec![
+            PendingToolCall::new("pending", "scene_create", serde_json::json!({})),
+            PendingToolCall::new("denied", "scene_delete", serde_json::json!({})),
+            PendingToolCall::new("completed", "scene_update", serde_json::json!({})),
+        ];
+        runtime.pending_calls[1].approved = Some(false);
+        runtime.pending_calls[2].result = Some("already completed".into());
+        runtime.begin_tool_execution(&[], ToolExecutionMode::Apply);
+        let mut executor = RecordingExecutor::default();
+        assert_eq!(
+            runtime.poll(Some(&mut executor)),
+            AgentStatus::AwaitingApproval
+        );
+        runtime.pending_calls[0].expected_revision = Some(4);
+        runtime.pending_calls[0].review_preview =
+            Some(AgentToolResult::success("old preview", Value::Null));
+        runtime.set_review_mutations(false);
+        assert_eq!(runtime.status, AgentStatus::ExecutingTools);
+        assert!(runtime.pending_calls[0].expected_revision.is_none());
+        assert!(runtime.pending_calls[0].review_preview.is_none());
+        runtime.poll(Some(&mut executor));
+        runtime.poll(Some(&mut executor));
+        assert_eq!(executor.calls, vec!["scene_create"]);
+        assert_eq!(
+            runtime.pending_calls[1].result.as_deref(),
+            Some("Denied by user.")
+        );
+        assert_eq!(
+            runtime.pending_calls[2].result.as_deref(),
+            Some("already completed")
+        );
+        runtime.cancel();
     }
 
     #[test]
@@ -1621,6 +1985,17 @@ mod tests {
     }
 
     #[test]
+    fn harness_step_guard_never_reports_a_completed_task() {
+        let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+        runtime.set_run_limits(1, None, 512);
+        runtime.turn_count = 1;
+        runtime.spawn_next_request(&[], ToolExecutionMode::Inspect);
+        assert_eq!(runtime.status, AgentStatus::Error);
+        assert!(runtime.last_error.as_ref().unwrap().contains("not complete"));
+        assert!(runtime.pending.is_none());
+    }
+
+    #[test]
     fn tool_call_budget_rejects_an_oversized_model_plan() {
         let mut runtime = AgentRuntime::new(OpenAiConfig::default());
         runtime.set_run_limits(4, Some(1), 512);
@@ -1705,6 +2080,9 @@ mod tests {
                 content: serde_json::json!("Hola mundo"),
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
+                reasoning: None,
+                reasoning_details: Vec::new(),
             },
             None,
             &[],

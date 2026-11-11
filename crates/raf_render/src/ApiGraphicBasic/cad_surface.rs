@@ -6,6 +6,7 @@ use glam::{Mat4, Quat, Vec2, Vec3};
 use raf_electronics::{
     CadLayerKind, CadObject, CadObjectKind, CadPickPriority, CadRect, CadScene, CadSurfaceKind,
 };
+use raf_electronics::cad_scene::{CadDrillShape, CadShape};
 
 use crate::api_graphic_basic::command_list::BasicCommandList;
 use crate::api_graphic_basic::mesh::BasicMesh;
@@ -76,13 +77,9 @@ const HOVER_WIDTH_BONUS: f32 = 1.0;
 /// distinguishable when both are visible on the same object.
 const HOVER_COLOR: [u8; 4] = [150, 186, 224, 255];
 
-/// Alpha of the net label plate. The overlay owns the text; the canvas only has
-/// to lift it off the wire it names without hiding that wire.
-const NET_LABEL_PLATE_ALPHA: u8 = 40;
-
-/// Alpha of the net label anchor tick, derived from the `NetLabel` border token.
+/// Alpha of the short leader connecting a net name to its wire.
 const NET_LABEL_ANCHOR_COLOR: [u8; 4] = [212, 119, 26, 255];
-const NET_LABEL_ANCHOR_ALPHA: u8 = 200;
+const NET_LABEL_ANCHOR_ALPHA: u8 = 172;
 
 /// Alpha of a PCB component body.
 ///
@@ -102,6 +99,8 @@ const DRC_MARKER_BORDER_WIDTH: f32 = 1.5;
 
 #[derive(Debug, Clone)]
 pub struct CadSurfaceOptions {
+    /// A bounded point grid for physical board drafting.
+    pub dotted_grid: bool,
     pub clear_color: [u8; 4],
     pub world_bounds: Option<[f32; 4]>,
     pub show_grid: bool,
@@ -143,6 +142,7 @@ pub struct CadSurfaceOptions {
 impl Default for CadSurfaceOptions {
     fn default() -> Self {
         Self {
+            dotted_grid:false,
             clear_color: [10, 10, 11, 255],
             world_bounds: None,
             show_grid: true,
@@ -295,6 +295,9 @@ pub fn build_cad_surface_frame(
 ) -> CadSurfaceFrame {
     let mut commands = BasicCommandList::new();
     commands.clear(options.clear_color);
+    // CAD is a two-dimensional instrument. The Y-down projection must not
+    // cull its filled pads and silhouettes as back-facing 3D geometry.
+    commands.set_pipeline(crate::api_graphic_basic::pipeline::BasicPipelineKind::FlatColorTwoSided);
     let quad_id = commands.register_mesh(unit_quad_mesh());
     let bounds = options
         .world_bounds
@@ -332,9 +335,21 @@ pub fn build_cad_surface_frame(
             .objects
             .iter()
             .any(|object| object.kind == CadObjectKind::DrcMarker))
-        || wire_count >= 2;
+        || wire_count >= 2
+        || scene.objects.iter().any(|object| {
+            object.kind == CadObjectKind::Pad
+                && (matches!(
+                    object.shape,
+                    CadShape::Circle | CadShape::Oval | CadShape::RoundRect { .. }
+                ) || object.drill.is_some())
+        });
     let disc_id = needs_disc.then(|| commands.register_mesh(disc_mesh()));
 
+    if !schematic {
+        if let Some(board) = scene.objects.iter().find(|object| object.id == "board_outline" && object.kind == CadObjectKind::BoardOutline) {
+            super::cad_board_surface::record_board_material(&mut commands, &board.points, bounds, [width, height], options.clear_color);
+        }
+    }
     if options.show_grid {
         record_grid(&mut commands, &options, bounds, density);
     }
@@ -347,6 +362,8 @@ pub fn build_cad_surface_frame(
         HashMap::new()
     };
 
+    let mut anchored_net_ids = std::collections::HashSet::new();
+    let mut anchored_net_names = std::collections::HashSet::new();
     let mut visible_entities = 0u32;
     for (index, object) in sorted.iter().enumerate() {
         if !cad_object_intersects_bounds(object, bounds) {
@@ -354,6 +371,17 @@ pub fn build_cad_surface_frame(
         }
         visible_entities = visible_entities.saturating_add(1);
         let emphasis = object_emphasis(object, &options);
+        let draw_net_label_anchor = if object.kind != CadObjectKind::NetLabel {
+            false
+        } else if let Some(net_id) = object.net_id {
+            anchored_net_ids.insert(net_id)
+        } else {
+            object
+                .net
+                .as_deref()
+                .or(object.label.as_deref())
+                .is_some_and(|name| anchored_net_names.insert(name.to_string()))
+        };
         record_object(
             object,
             quad_id,
@@ -363,6 +391,7 @@ pub fn build_cad_surface_frame(
             schematic,
             density,
             emphasis,
+            draw_net_label_anchor,
         );
         if object_is_selected(object, &options) {
             record_selection_outline(object, &options, &mut commands, density);
@@ -449,7 +478,7 @@ fn cad_object_intersects_bounds(object: &CadObject, bounds: [f32; 4]) -> bool {
     }
 
     let mut bounds: Option<(glam::Vec2, glam::Vec2)> = object.rect.map(|rect| {
-        let half = rect.size.abs() * 0.5;
+        let half = rotated_half_extent(rect.size, object.rotation_degrees.to_radians());
         (rect.center - half, rect.center + half)
     });
 
@@ -576,19 +605,19 @@ fn record_selection_outline(
         return;
     }
     if let Some(rect) = object.rect {
-        record_border(
-            commands,
+        record_object_outline(
+            object,
             rect,
             z,
             halo,
             options.selection_color,
             density,
-            0.0,
+            commands,
         );
         return;
     }
 
-    let base_width = object_line_width(object, options);
+    let base_width = object_line_width(object, options, density);
     let width = base_width.max(1.0) + halo * 2.0;
     for segment in object.points.windows(2) {
         record_line(
@@ -644,19 +673,33 @@ fn record_hover_outline(
     }
     if let Some(rect) = object.rect {
         let outset = density.world(2.0);
-        record_border(
-            commands,
-            outset_rect(rect, outset),
-            z,
-            1.0,
-            HOVER_COLOR,
-            density,
-            0.0,
-        );
+        let expanded = outset_rect(rect, outset);
+        if object.kind == CadObjectKind::Pad && object.shape != CadShape::Rectangle {
+            record_shape_outline(
+                commands,
+                expanded,
+                expanded_shape(object.shape, outset),
+                object.rotation_degrees.to_radians(),
+                z,
+                1.0,
+                HOVER_COLOR,
+                density,
+            );
+        } else {
+            record_border(
+                commands,
+                expanded,
+                z,
+                1.0,
+                HOVER_COLOR,
+                density,
+                object.rotation_degrees.to_radians(),
+            );
+        }
         return;
     }
 
-    let base_width = object_line_width(object, options);
+    let base_width = object_line_width(object, options, density);
     for segment in object.points.windows(2) {
         record_line(
             commands,
@@ -689,7 +732,7 @@ fn record_grid(
     bounds: [f32; 4],
     density: Density,
 ) {
-    let base_step = options.grid_step.max(1.0);
+    let base_step = options.grid_step.max(0.05);
     let [left, right, top, bottom] = bounds;
     if right <= left || bottom <= top {
         return;
@@ -708,6 +751,18 @@ fn record_grid(
     let start_y = (top / step).floor() as i32 - 1;
     let end_y = (bottom / step).ceil() as i32 + 1;
 
+    if options.dotted_grid {
+        // visual_grid_step enforces >=12px spacing: a 4K canvas stays bounded.
+        for ix in start_x..=end_x {
+            for iy in start_y..=end_y {
+                let point=Vec2::new(ix as f32*step,iy as f32*step);
+                let major=ix.rem_euclid(5)==0 && iy.rem_euclid(5)==0;
+                let color=if major {options.major_grid_color}else{options.grid_color};
+                record_line(commands,point,point+Vec2::new(0.75*density.world_per_pixel,0.0),0.95,if major {1.7}else{1.0},color,density);
+            }
+        }
+        return;
+    }
     for ix in start_x..=end_x {
         let x = ix as f32 * step;
         let color = grid_line_color(ix, options);
@@ -748,7 +803,7 @@ fn visual_grid_step(base_step: f32, screen_step: f32) -> f32 {
             multiplier * 2.0
         };
     }
-    (base_step.max(1.0) * multiplier).max(base_step.max(1.0))
+    (base_step.max(0.05) * multiplier).max(base_step.max(0.05))
 }
 
 fn grid_line_color(index: i32, options: &CadSurfaceOptions) -> [u8; 4] {
@@ -770,6 +825,7 @@ fn record_object(
     schematic: bool,
     density: Density,
     emphasis: Emphasis,
+    draw_net_label_anchor: bool,
 ) {
     if object.kind == CadObjectKind::DrcMarker && !options.show_drc_markers {
         return;
@@ -793,34 +849,39 @@ fn record_object(
         return;
     }
 
-    // Schematic component bodies and pin plates belong to the retained editor
-    // overlay: it draws the symbol artwork and the labels with the same text
-    // compositor as the rest of the chrome. Net labels are the exception, they
-    // need the subtle plate below so the overlay text does not sit directly on
-    // the wire it names.
+    // Schematic text belongs to the retained editor overlay. Symbol strokes,
+    // wires and anchors stay in AGB so they share the canvas camera and scale.
     let body_owned_by_overlay =
         schematic && matches!(object.kind, CadObjectKind::Component | CadObjectKind::Pin);
     if !body_owned_by_overlay {
         if let Some(rect) = object.rect {
             if object.kind == CadObjectKind::NetLabel {
-                let anchor = paint(with_alpha(NET_LABEL_ANCHOR_COLOR, NET_LABEL_ANCHOR_ALPHA));
-                record_net_label_plate(
+                if options.show_labels && draw_net_label_anchor {
+                    let anchor = paint(with_alpha(NET_LABEL_ANCHOR_COLOR, NET_LABEL_ANCHOR_ALPHA));
+                    record_net_label_anchor(commands, rect, z, anchor, density);
+                }
+            } else if object.kind == CadObjectKind::Pad {
+                record_pad_geometry(
                     commands,
                     quad_id,
-                    rect,
+                    disc_id,
+                    object,
                     z,
-                    paint(object.color_rgba),
-                    anchor,
                     density,
+                    paint(object_fill(object)),
+                    paint(object_border(object)),
+                    object_border_width(object),
+                    options.clear_color,
                 );
             } else {
+                let rotation = object.rotation_degrees.to_radians();
                 record_quad(
                     commands,
                     quad_id,
                     rect.center,
                     rect.size,
                     z,
-                    0.0,
+                    rotation,
                     paint(object_fill(object)),
                 );
                 let border = object_border(object);
@@ -832,7 +893,7 @@ fn record_object(
                         object_border_width(object),
                         paint(border),
                         density,
-                        0.0,
+                        rotation,
                     );
                 }
             }
@@ -840,7 +901,7 @@ fn record_object(
     }
 
     if object.points.len() >= 2 {
-        let logical_width = object_line_width(object, options);
+        let logical_width = object_line_width(object, options, density);
         let line_color = paint(object_line_color(object));
         let line_z = z - 0.02;
         if object.kind == CadObjectKind::Airwire {
@@ -909,33 +970,354 @@ fn record_object(
     }
 }
 
-/// Subtle plate under a net label.
-///
-/// The overlay owns the text and draws it centred on this rect, but it draws no
-/// background of its own, so the canvas supplies a barely-there plate plus an
-/// anchor tick. An opaque card here would cover the wire underneath, which is
-/// the one thing the label exists to identify.
-fn record_net_label_plate(
+fn record_pad_geometry(
     commands: &mut BasicCommandList,
     quad_id: usize,
+    disc_id: Option<usize>,
+    object: &CadObject,
+    z: f32,
+    density: Density,
+    fill: [u8; 4],
+    border: [u8; 4],
+    border_width: f32,
+    bore_color: [u8; 4],
+) {
+    let Some(rect) = object.rect else {
+        return;
+    };
+    let rotation = object.rotation_degrees.to_radians();
+    record_shape_fill(
+        commands,
+        quad_id,
+        disc_id,
+        rect.center,
+        rect.size,
+        object.shape,
+        z,
+        rotation,
+        fill,
+    );
+    record_shape_outline(
+        commands,
+        rect,
+        object.shape,
+        rotation,
+        z - 0.01,
+        border_width,
+        border,
+        density,
+    );
+
+    if let Some(drill) = object.drill {
+        let drill_center = rect.center + rotate_vec2(drill.offset, rotation);
+        let drill_shape = match drill.shape {
+            CadDrillShape::Circle => CadShape::Circle,
+            CadDrillShape::Oval => CadShape::Oval,
+        };
+        record_shape_fill(
+            commands,
+            quad_id,
+            disc_id,
+            drill_center,
+            drill.size,
+            drill_shape,
+            z - 0.012,
+            rotation,
+            bore_color,
+        );
+        let bore_border = if drill.plated && border[3] != 0 {
+            with_alpha(border, 210)
+        } else {
+            [116, 126, 134, 220]
+        };
+        record_shape_outline(
+            commands,
+            CadRect::new(drill_center, drill.size),
+            drill_shape,
+            rotation,
+            z - 0.014,
+            0.7,
+            bore_border,
+            density,
+        );
+    }
+}
+
+fn record_shape_fill(
+    commands: &mut BasicCommandList,
+    quad_id: usize,
+    disc_id: Option<usize>,
+    center: Vec2,
+    size: Vec2,
+    shape: CadShape,
+    z: f32,
+    rotation: f32,
+    color: [u8; 4],
+) {
+    if color[3] == 0 || size.min_element() <= 0.0 || !size.is_finite() {
+        return;
+    }
+    let half = size.abs() * 0.5;
+    match shape {
+        CadShape::Rectangle => record_quad(commands, quad_id, center, size, z, rotation, color),
+        CadShape::Circle => {
+            if let Some(disc_id) = disc_id {
+                record_disc(commands, disc_id, center, half.min_element(), z, color);
+            } else {
+                record_quad(commands, quad_id, center, size, z, rotation, color);
+            }
+        }
+        CadShape::Oval => {
+            let radius = half.min_element();
+            if half.x >= half.y {
+                let cap_offset = Vec2::new((half.x - radius).max(0.0), 0.0);
+                let bar_size = Vec2::new((size.x - radius * 2.0).max(0.0), size.y);
+                record_quad(commands, quad_id, center, bar_size, z, rotation, color);
+                if let Some(disc_id) = disc_id {
+                    for side in [-1.0, 1.0] {
+                        record_disc(
+                            commands,
+                            disc_id,
+                            center + rotate_vec2(cap_offset * side, rotation),
+                            radius,
+                            z,
+                            color,
+                        );
+                    }
+                }
+            } else {
+                let cap_offset = Vec2::new(0.0, (half.y - radius).max(0.0));
+                let bar_size = Vec2::new(size.x, (size.y - radius * 2.0).max(0.0));
+                record_quad(commands, quad_id, center, bar_size, z, rotation, color);
+                if let Some(disc_id) = disc_id {
+                    for side in [-1.0, 1.0] {
+                        record_disc(
+                            commands,
+                            disc_id,
+                            center + rotate_vec2(cap_offset * side, rotation),
+                            radius,
+                            z,
+                            color,
+                        );
+                    }
+                }
+            }
+        }
+        CadShape::RoundRect { corner_radius } => {
+            let radius = safe_corner_radius(corner_radius, half);
+            if radius <= f32::EPSILON {
+                record_quad(commands, quad_id, center, size, z, rotation, color);
+                return;
+            }
+            record_quad(
+                commands,
+                quad_id,
+                center,
+                Vec2::new((size.x - 2.0 * radius).max(0.0), size.y),
+                z,
+                rotation,
+                color,
+            );
+            record_quad(
+                commands,
+                quad_id,
+                center,
+                Vec2::new(size.x, (size.y - 2.0 * radius).max(0.0)),
+                z,
+                rotation,
+                color,
+            );
+            if let Some(disc_id) = disc_id {
+                let corner = Vec2::new(half.x - radius, half.y - radius);
+                for x in [-1.0, 1.0] {
+                    for y in [-1.0, 1.0] {
+                        record_disc(
+                            commands,
+                            disc_id,
+                            center + rotate_vec2(corner * Vec2::new(x, y), rotation),
+                            radius,
+                            z,
+                            color,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn record_object_outline(
+    object: &CadObject,
     rect: CadRect,
     z: f32,
+    width: f32,
     color: [u8; 4],
+    density: Density,
+    commands: &mut BasicCommandList,
+) {
+    let rotation = object.rotation_degrees.to_radians();
+    if object.kind == CadObjectKind::Pad && object.shape != CadShape::Rectangle {
+        record_shape_outline(
+            commands,
+            rect,
+            object.shape,
+            rotation,
+            z,
+            width,
+            color,
+            density,
+        );
+    } else {
+        record_border(commands, rect, z, width, color, density, rotation);
+    }
+}
+
+fn record_shape_outline(
+    commands: &mut BasicCommandList,
+    rect: CadRect,
+    shape: CadShape,
+    rotation: f32,
+    z: f32,
+    width: f32,
+    color: [u8; 4],
+    density: Density,
+) {
+    if color[3] == 0 || width <= 0.0 || rect.size.min_element() <= 0.0 {
+        return;
+    }
+    let points = shape_outline_points(rect.size.abs(), shape);
+    for segment in points.windows(2) {
+        record_line(
+            commands,
+            rect.center + rotate_vec2(segment[0], rotation),
+            rect.center + rotate_vec2(segment[1], rotation),
+            z,
+            width,
+            color,
+            density,
+        );
+    }
+}
+
+fn shape_outline_points(size: Vec2, shape: CadShape) -> Vec<Vec2> {
+    const CIRCLE_SEGMENTS: usize = 48;
+    const ARC_SEGMENTS: usize = 12;
+    let half = size * 0.5;
+    match shape {
+        CadShape::Rectangle => vec![
+            Vec2::new(-half.x, -half.y),
+            Vec2::new(half.x, -half.y),
+            Vec2::new(half.x, half.y),
+            Vec2::new(-half.x, half.y),
+            Vec2::new(-half.x, -half.y),
+        ],
+        CadShape::Circle => (0..=CIRCLE_SEGMENTS)
+            .map(|step| {
+                let angle = step as f32 / CIRCLE_SEGMENTS as f32 * std::f32::consts::TAU;
+                Vec2::new(angle.cos(), angle.sin()) * half.min_element()
+            })
+            .collect(),
+        CadShape::Oval => capsule_outline_points(size, ARC_SEGMENTS),
+        CadShape::RoundRect { corner_radius } => {
+            let radius = safe_corner_radius(corner_radius, half);
+            if radius <= f32::EPSILON {
+                return shape_outline_points(size, CadShape::Rectangle);
+            }
+            let centers = [
+                (Vec2::new(half.x - radius, -half.y + radius), -90.0),
+                (Vec2::new(half.x - radius, half.y - radius), 0.0),
+                (Vec2::new(-half.x + radius, half.y - radius), 90.0),
+                (Vec2::new(-half.x + radius, -half.y + radius), 180.0),
+            ];
+            let mut points = Vec::with_capacity(centers.len() * (ARC_SEGMENTS + 1) + 1);
+            for (center, start_degrees) in centers {
+                for step in 0..=ARC_SEGMENTS {
+                    let angle = (start_degrees + 90.0 * step as f32 / ARC_SEGMENTS as f32)
+                        .to_radians();
+                    points.push(center + Vec2::new(angle.cos(), angle.sin()) * radius);
+                }
+            }
+            points.push(points[0]);
+            points
+        }
+    }
+}
+
+fn capsule_outline_points(size: Vec2, arc_segments: usize) -> Vec<Vec2> {
+    let half = size.abs() * 0.5;
+    let radius = half.min_element();
+    let mut points = Vec::with_capacity(2 * (arc_segments + 1) + 1);
+    if half.x >= half.y {
+        let cap = (half.x - radius).max(0.0);
+        append_arc(&mut points, Vec2::new(-cap, 0.0), radius, 90.0, 270.0, arc_segments);
+        append_arc(&mut points, Vec2::new(cap, 0.0), radius, 270.0, 450.0, arc_segments);
+    } else {
+        let cap = (half.y - radius).max(0.0);
+        append_arc(&mut points, Vec2::new(0.0, -cap), radius, 0.0, 180.0, arc_segments);
+        append_arc(&mut points, Vec2::new(0.0, cap), radius, 180.0, 360.0, arc_segments);
+    }
+    points.push(points[0]);
+    points
+}
+
+fn append_arc(
+    points: &mut Vec<Vec2>,
+    center: Vec2,
+    radius: f32,
+    start_degrees: f32,
+    end_degrees: f32,
+    segments: usize,
+) {
+    for step in 0..=segments {
+        let angle = (start_degrees
+            + (end_degrees - start_degrees) * step as f32 / segments.max(1) as f32)
+            .to_radians();
+        points.push(center + Vec2::new(angle.cos(), angle.sin()) * radius);
+    }
+}
+
+fn expanded_shape(shape: CadShape, amount: f32) -> CadShape {
+    match shape {
+        CadShape::RoundRect { corner_radius } => CadShape::RoundRect {
+            corner_radius: corner_radius + amount,
+        },
+        other => other,
+    }
+}
+
+fn safe_corner_radius(radius: f32, half: Vec2) -> f32 {
+    if radius.is_finite() {
+        radius.clamp(0.0, half.min_element())
+    } else {
+        0.0
+    }
+}
+
+fn rotated_half_extent(size: Vec2, rotation: f32) -> Vec2 {
+    let half = size.abs() * 0.5;
+    let (sin, cos) = rotation.sin_cos();
+    Vec2::new(cos.abs() * half.x + sin.abs() * half.y, sin.abs() * half.x + cos.abs() * half.y)
+}
+
+/// Small leader between a net name and the wire it identifies.
+///
+/// Net names render above the wire in the retained text overlay. Keeping only
+/// this short line avoids painting a card over every orthogonal wire segment.
+fn record_net_label_anchor(
+    commands: &mut BasicCommandList,
+    rect: CadRect,
+    z: f32,
     anchor_color: [u8; 4],
     density: Density,
 ) {
-    if color[3] == 0 || rect.size.x <= 0.0 || rect.size.y <= 0.0 {
+    if anchor_color[3] == 0 || rect.size.x <= 0.0 || rect.size.y <= 0.0 {
         return;
     }
-    let plate = with_alpha(color, NET_LABEL_PLATE_ALPHA.min(color[3]));
-    record_quad(commands, quad_id, rect.center, rect.size, z, 0.0, plate);
-
-    let min = rect.center - rect.size * 0.5;
-    let max = rect.center + rect.size * 0.5;
+    let leader_world = density.world(density.pixels(4.0));
     record_line(
         commands,
-        Vec2::new(min.x, max.y),
-        Vec2::new(max.x, max.y),
+        rect.center,
+        rect.center - Vec2::Y * leader_world,
         z - 0.005,
         1.0,
         anchor_color,
@@ -1050,6 +1432,11 @@ fn record_drc_marker(
     let Some(center) = object.rect.map(|rect| rect.center) else {
         return;
     };
+    // Keep the physical pad visible under a finding. The short leader still
+    // identifies its exact location at every zoom level.
+    let location = center;
+    let center = center + Vec2::new(density.world(10.0), -density.world(14.0));
+    record_line(commands, location, center, z + 0.005, 0.8, with_alpha(object.color_rgba, 150), density);
     let shape = drc_shape(object);
     let size = Vec2::splat(density.world(DRC_MARKER_PIXELS));
     let fill = with_alpha(object.color_rgba, DRC_MARKER_FILL_ALPHA);
@@ -1424,7 +1811,7 @@ fn record_junction_marks(
         object_line_color(object)
     };
     let diameter = density
-        .world(density.pixels(object_line_width(object, options)) * JUNCTION_DIAMETER_RATIO)
+        .world(density.pixels(object_line_width(object, options, density)) * JUNCTION_DIAMETER_RATIO)
         .max(density.world(MIN_DEVICE_WIDTH));
     let z = object_z(object) - 0.024;
     for point in points {
@@ -1434,7 +1821,10 @@ fn record_junction_marks(
 
 fn cad_hit_region(object: &CadObject, options: &CadSurfaceOptions) -> Option<CadSurfaceHitRegion> {
     let bounds = if let Some(rect) = object.rect {
-        rect
+        CadRect::new(
+            rect.center,
+            rotated_half_extent(rect.size, object.rotation_degrees.to_radians()) * 2.0,
+        )
     } else {
         polyline_bounds(object, object_pick_width(object, options))?
     };
@@ -1466,6 +1856,7 @@ fn polyline_bounds(object: &CadObject, width: f32) -> Option<CadRect> {
 }
 
 fn object_pick_width(object: &CadObject, options: &CadSurfaceOptions) -> f32 {
+    if let Some(width)=object.stroke_width_world.filter(|w|w.is_finite() && *w>0.0) {return width;}
     match object.kind {
         CadObjectKind::Trace => options.trace_width,
         CadObjectKind::Airwire => 4.0,
@@ -1476,15 +1867,16 @@ fn object_pick_width(object: &CadObject, options: &CadSurfaceOptions) -> f32 {
 
 /// Authoring width of one conductor, in logical points.
 ///
-/// `PcbTrace::width` still lives only in the PCB document: `CadObject` has no
-/// width field, so every trace is drawn with `options.trace_width` and a 6-unit
-/// power run is indistinguishable from a 6-unit signal run. The single match arm
-/// below is where the per-object width becomes authoritative once the field
-/// exists; nothing else in this module needs to change for that.
-fn object_line_width(object: &CadObject, options: &CadSurfaceOptions) -> f32 {
+/// Physical PCB widths convert through the same camera density as pad geometry.
+/// Legacy and schematic marks retain their screen-space presentation width.
+fn object_line_width(object: &CadObject, options: &CadSurfaceOptions, density:Density) -> f32 {
+    if let Some(width)=object.stroke_width_world.filter(|w|w.is_finite() && *w>0.0) {
+        return width/(density.world_per_pixel*density.raster_scale);
+    }
     match object.kind {
         CadObjectKind::Trace => options.trace_width,
         CadObjectKind::Airwire => AIRWIRE_LOGICAL_WIDTH,
+        CadObjectKind::BoardOutline => 1.4,
         _ => options.wire_width,
     }
 }
@@ -1493,7 +1885,8 @@ fn object_fill(object: &CadObject) -> [u8; 4] {
     match object.kind {
         // Silhouette, not a lid. Copper is read through the footprint outline.
         CadObjectKind::Component => with_alpha(object.color_rgba, PCB_BODY_ALPHA),
-        CadObjectKind::Pin | CadObjectKind::Pad => [212, 119, 26, 255],
+        CadObjectKind::Pin => [212, 119, 26, 255],
+        CadObjectKind::Pad => object.color_rgba,
         CadObjectKind::NetLabel => [18, 18, 20, 220],
         CadObjectKind::DrcMarker => object.color_rgba,
         CadObjectKind::BoardOutline
@@ -1510,7 +1903,9 @@ fn object_line_color(object: &CadObject) -> [u8; 4] {
 fn object_border(object: &CadObject) -> [u8; 4] {
     match object.kind {
         CadObjectKind::Component => [245, 245, 246, 180],
-        CadObjectKind::Pin | CadObjectKind::Pad => [245, 180, 65, 255],
+        CadObjectKind::Pin => [245, 180, 65, 255],
+        CadObjectKind::Pad if object.color_rgba[3] == 0 => [0, 0, 0, 0],
+        CadObjectKind::Pad => copper_edge_color(object.color_rgba),
         CadObjectKind::NetLabel => [212, 119, 26, 220],
         CadObjectKind::DrcMarker => [245, 245, 246, 220],
         _ => object.color_rgba,
@@ -1520,10 +1915,20 @@ fn object_border(object: &CadObject) -> [u8; 4] {
 fn object_border_width(object: &CadObject) -> f32 {
     match object.kind {
         CadObjectKind::DrcMarker => 2.0,
-        CadObjectKind::Component | CadObjectKind::Pin | CadObjectKind::Pad => 1.25,
+        CadObjectKind::Component | CadObjectKind::Pin => 1.25,
+        CadObjectKind::Pad => 0.85,
         CadObjectKind::NetLabel => 1.0,
         _ => 0.0,
     }
+}
+
+fn copper_edge_color(copper: [u8; 4]) -> [u8; 4] {
+    [
+        copper[0].saturating_add(34),
+        copper[1].saturating_add(29),
+        copper[2].saturating_add(22),
+        copper[3],
+    ]
 }
 
 fn object_z(object: &CadObject) -> f32 {
@@ -1576,7 +1981,7 @@ fn unit_quad_mesh() -> Arc<BasicMesh> {
 /// A 16-gon fan wound counter-clockwise in local XY, matching the unit quad, so
 /// back-face culling keeps behaving identically on both executors.
 fn disc_mesh() -> Arc<BasicMesh> {
-    const SEGMENTS: usize = 16;
+    const SEGMENTS: usize = 48;
     static UNIT_DISC: OnceLock<Arc<BasicMesh>> = OnceLock::new();
     UNIT_DISC
         .get_or_init(|| {
@@ -1639,6 +2044,7 @@ mod tests {
 
     use super::*;
     use crate::api_graphic_basic::command_list::BasicLine;
+    use crate::api_graphic_basic::device::{BasicDevice, BasicDeviceConfig};
 
     fn options_at(width: u32, height: u32) -> CadSurfaceOptions {
         CadSurfaceOptions {
@@ -1703,6 +2109,9 @@ mod tests {
             layer: CadLayerKind::Overlay,
             pick_priority: CadPickPriority::Overlay,
             rect: None,
+            shape: CadShape::Rectangle,
+            rotation_degrees: 0.0,
+            drill: None, stroke_width_world: None,
             points: Vec::new(),
             line_paths: Vec::new(),
             label: None,
@@ -1710,6 +2119,52 @@ mod tests {
             net_id: None,
             color_rgba: color,
         }
+    }
+
+    #[test]
+    fn physical_conductor_width_tracks_camera_scale_and_dpi() {
+        let mut object=manual_object("trace",CadObjectKind::Trace,[255;4]);
+        object.stroke_width_world=Some(0.25);
+        for scale in [1.0,2.0] {
+            let options=CadSurfaceOptions{raster_scale:scale,..Default::default()};
+            let density=Density::new(&options,(1000.0*scale) as u32,(1000.0*scale) as u32,[0.0,10.0,0.0,10.0]);
+            let pixels=density.pixels(object_line_width(&object,&options,density));
+            assert!((pixels-25.0*scale).abs()<0.001);
+        }
+    }
+
+    fn physical_capture_scene() -> CadScene {
+        let asset = raf_electronics::pcb::parse_kicad_footprint(
+            r#"(footprint "CanvasCapture"
+              (pad "1" thru_hole circle (at -16 0) (size 7 7) (drill 3) (layers "*.Cu" "*.Mask"))
+              (pad "2" smd roundrect (at 16 0 25) (size 7 5) (roundrect_rratio 0.22) (layers "F.Cu" "F.Mask"))
+              (pad "3" smd oval (at 0 17 90) (size 5 12) (layers "F.Cu" "F.Mask")))"#,
+        )
+        .expect("the physical PCB capture footprint parses");
+        let footprint_id = asset.id.clone();
+        let component_id = ElectronicComponent::resistor("10k").id;
+        let mut layout = PcbLayout::new("CAD offscreen evidence");
+        layout.footprint_assets.insert(footprint_id.clone(), asset);
+        layout.components.push(PcbComponentPlacement {
+            component_id,
+            designator: "J1".to_string(),
+            value: "Header".to_string(),
+            footprint: footprint_id,
+            position: Vec2::new(90.0, 55.0),
+            rotation: 0.0,
+            layer: PcbLayer::TopCopper,
+            locked: false,
+            image_asset: None,
+            pad_nets: vec!["GND".to_string(), "SIG".to_string(), "VCC".to_string()],
+        });
+        layout.traces.push(PcbTrace {
+            id: component_id,
+            net: "VCC".to_string(),
+            layer: PcbLayer::BottomCopper,
+            width: 2.0,
+            points: vec![Vec2::new(28.0, 84.0), Vec2::new(60.0, 84.0)],
+        });
+        CadScene::from_pcb(&layout)
     }
 
     #[test]
@@ -1834,8 +2289,8 @@ mod tests {
     }
 
     #[test]
-    fn cad_surface_leaves_schematic_symbol_artwork_to_the_native_overlay() {
-        let mut schematic = Schematic::new("Native symbol overlay");
+    fn cad_surface_paints_compact_vector_schematic_symbols() {
+        let mut schematic = Schematic::new("Vector schematic symbols");
         let mut resistor = ElectronicComponent::resistor("10k");
         resistor.position = Vec2::new(80.0, 60.0);
         schematic.add_component(resistor);
@@ -1848,11 +2303,17 @@ mod tests {
             .filter(|line| line.color == [245, 245, 246, 255])
             .collect::<Vec<_>>();
 
-        assert!(symbol_lines.is_empty());
+        assert!(symbol_lines.len() >= 3, "the resistor is rendered from model paths");
+        assert!(symbol_lines.iter().all(|line| {
+            (line.start.truncate() - Vec2::new(80.0, 60.0)).length() < 32.0
+                && (line.end.truncate() - Vec2::new(80.0, 60.0)).length() < 32.0
+        }), "symbol ink stays compact around the component center");
     }
 
     #[test]
     fn visual_grid_step_uses_stable_density_levels() {
+        assert_eq!(visual_grid_step(0.25, 25.0), 0.25);
+        assert_eq!(visual_grid_step(0.05, 20.0), 0.05);
         assert_eq!(visual_grid_step(20.0, 20.0), 20.0);
         assert_eq!(visual_grid_step(20.0, 6.0), 40.0);
         assert_eq!(visual_grid_step(20.0, 2.5), 100.0);
@@ -2000,6 +2461,58 @@ mod tests {
         assert!(!mesh_colors(&frame)
             .iter()
             .any(|color| *color == [34, 34, 38, 255]));
+    }
+
+    #[test]
+    fn pcb_offscreen_renderer_captures_physical_pad_geometry() {
+        let scene = physical_capture_scene();
+        let frame = build_cad_surface_frame(
+            &scene,
+            840,
+            560,
+            CadSurfaceOptions {
+                world_bounds: Some([0.0, 420.0, 0.0, 280.0]),
+                raster_scale: 2.0,
+                ..CadSurfaceOptions::default()
+            },
+        );
+        assert!(mesh_colors(&frame).contains(&[207, 150, 91, 255]));
+        assert!(lines_of(&frame)
+            .iter()
+            .any(|line| line.color == [104, 158, 194, 255]));
+
+        let mut device = BasicDevice::new(BasicDeviceConfig {
+            allow_gpu: false,
+            force_cpu: true,
+            ..BasicDeviceConfig::default()
+        });
+        device.execute_scene_frame(&frame.frame);
+        let capture = device
+            .capture_last_scene_rgba()
+            .expect("capture comes from the executed CAD renderer frame");
+        assert_eq!((capture.width, capture.height), (840, 560));
+        let pixel = |x:usize,y:usize| &capture.rgba8[(y*840+x)*4..(y*840+x)*4+4];
+        assert_eq!(pixel(212,110), &[207,150,91,255], "The pad interior must be filled, not just an outline");
+        assert_eq!(pixel(148,110), &[10,10,11,255], "The plated bore remains a real gap");
+        let non_background = capture
+            .rgba8
+            .chunks_exact(4)
+            .filter(|pixel| *pixel != [10, 10, 11, 255])
+            .count();
+        assert!(non_background > 3_000, "captured board is visibly rendered");
+
+        if let Some(directory) = std::env::var_os("RAF_PCB_CAD_CAPTURE_DIR") {
+            let directory = std::path::PathBuf::from(directory);
+            std::fs::create_dir_all(&directory).expect("capture folder is writable");
+            image::save_buffer(
+                directory.join("pcb-cad-offscreen.png"),
+                &capture.rgba8,
+                capture.width,
+                capture.height,
+                image::ColorType::Rgba8,
+            )
+            .expect("genuine renderer output saves as PNG");
+        }
     }
 
     #[test]
@@ -2159,25 +2672,34 @@ mod tests {
     }
 
     #[test]
-    fn net_labels_get_a_subtle_plate_instead_of_an_opaque_card() {
+    fn net_labels_use_a_short_leader_without_painting_a_plate() {
         let mut schematic = Schematic::new("Net label plate");
         schematic.add_wire(Vec2::new(10.0, 20.0), Vec2::new(80.0, 20.0), "SIGNAL_A");
+        schematic.add_wire(Vec2::new(80.0, 20.0), Vec2::new(140.0, 20.0), "SIGNAL_A");
         let scene = CadScene::from_schematic(&schematic);
         let frame = build_cad_surface_frame(&scene, 160, 120, options_at(160, 120));
-        let colors = mesh_colors(&frame);
+        let leaders = lines_of(&frame)
+            .into_iter()
+            .filter(|line| {
+                line.color == [212, 119, 26, NET_LABEL_ANCHOR_ALPHA]
+                    && (line.start.truncate() - line.end.truncate()).length() <= 4.01
+            })
+            .count();
+        assert_eq!(leaders, 1, "a net with multiple wire segments gets one short leader");
+        assert!(!mesh_colors(&frame).iter().any(|color| color[3] == 40));
 
-        assert!(
-            colors.iter().any(|color| color[3] == NET_LABEL_PLATE_ALPHA),
-            "the overlay text needs a plate to sit on"
+        let labels_hidden = build_cad_surface_frame(
+            &scene,
+            160,
+            120,
+            CadSurfaceOptions {
+                show_labels: false,
+                ..options_at(160, 120)
+            },
         );
-        assert!(
-            !colors.iter().any(|color| *color == [18, 18, 20, 220]),
-            "the old opaque label card must be gone"
-        );
-        assert!(
-            !colors.iter().any(|color| *color == [18, 18, 20, 210]),
-            "the displaced label placeholder must be gone"
-        );
+        assert!(!lines_of(&labels_hidden)
+            .iter()
+            .any(|line| line.color == [212, 119, 26, NET_LABEL_ANCHOR_ALPHA]));
     }
 
     #[test]

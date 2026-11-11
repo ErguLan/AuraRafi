@@ -64,6 +64,10 @@ impl LoadingSurfaceHost {
         }
     }
 
+    pub fn has_interactive_hover(&self) -> bool {
+        self.host.has_interactive_hover()
+    }
+
     pub fn sync(
         &mut self,
         rect: EditorRect,

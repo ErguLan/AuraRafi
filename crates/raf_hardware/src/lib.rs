@@ -19,6 +19,7 @@ pub mod ml;
 pub mod robot;
 pub mod sensor;
 pub mod serial;
+pub mod serial_session;
 
 pub use actuator::{ActuatorCommand, ActuatorType};
 pub use sensor::{SensorData, SensorType};

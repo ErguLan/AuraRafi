@@ -29,7 +29,8 @@ pub enum UiTextRole {
 
 /// Overflow policy for a retained text request. The renderer remains free to
 /// choose its raster implementation, but every backend receives the same
-/// single-line/wrap contract.
+/// single-line/wrap contract. `Wrap` prefers word boundaries and hard-breaks
+/// only when a single token is wider than the available line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum UiTextOverflow {
     Wrap,
@@ -55,6 +56,32 @@ pub struct UiTextStyle {
 }
 
 impl UiTextStyle {
+    /// Shared semantic typography; panels should not recreate role metrics.
+    pub fn for_role(role: UiTextRole, color: [u8; 4]) -> Self {
+        let mut style = match role {
+            UiTextRole::Button | UiTextRole::Toolbar => Self::button(color),
+            UiTextRole::PanelTitle => Self::panel_title(color),
+            UiTextRole::Label | UiTextRole::Tooltip => Self {
+                role, size_px: 12.0, line_height_px: 16.0,
+                weight: UiFontWeight::Regular, color, inherit_color: false,
+            },
+            _ => Self::body(color),
+        };
+        style.role = role;
+        style
+    }
+
+    pub fn label(color: [u8; 4]) -> Self { Self::for_role(UiTextRole::Label, color) }
+
+    pub fn toolbar(color: [u8; 4]) -> Self { Self::for_role(UiTextRole::Toolbar, color) }
+
+    /// Changes type size while keeping the authored line-height proportion.
+    pub fn with_size(self, size: f32) -> Self {
+        if !size.is_finite() || size <= 0.0 { return self; }
+        let ratio = self.line_height_px / self.size_px.max(1.0);
+        Self { size_px: size, line_height_px: size * ratio, ..self }
+    }
+
     pub fn body(color: [u8; 4]) -> Self {
         Self {
             role: UiTextRole::Body,
@@ -105,6 +132,41 @@ impl UiTextStyle {
         style.size_px = (style.size_px * scale).max(1.0);
         style.line_height_px = (style.line_height_px * scale).max(1.0);
         style
+    }
+}
+
+/// Source for one styled fragment in a rendered inline text row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UiTextRunContent {
+    /// Resolve this value through the surface's translation callback.
+    Key(String),
+    /// Render this literal runtime value without translation.
+    Value(String),
+}
+
+/// One styled fragment consumed by `components::inline_text_row`.
+///
+/// Fragments are ordinary retained text nodes. The row does not wrap between
+/// runs; callers that need wrapping should author separate rows explicitly.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UiTextRun {
+    pub content: UiTextRunContent,
+    pub style: UiTextStyle,
+}
+
+impl UiTextRun {
+    pub fn key(key: impl Into<String>, style: UiTextStyle) -> Self {
+        Self {
+            content: UiTextRunContent::Key(key.into()),
+            style,
+        }
+    }
+
+    pub fn value(value: impl Into<String>, style: UiTextStyle) -> Self {
+        Self {
+            content: UiTextRunContent::Value(value.into()),
+            style,
+        }
     }
 }
 

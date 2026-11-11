@@ -129,6 +129,7 @@ pub struct BasicCommandList {
     commands: Vec<GraphicCommand>,
     meshes: Vec<Arc<BasicMesh>>,
     textures: Vec<Arc<CpuTexture>>,
+    gpu_textures: Vec<super::device::GpuTextureView>,
     texture_ids: std::collections::HashMap<PathBuf, usize>,
     mesh_ids: std::collections::HashMap<usize, usize>,
     mesh_cacheable: Vec<bool>,
@@ -159,6 +160,7 @@ impl BasicCommandList {
             commands: Vec::with_capacity(command_capacity),
             meshes: Vec::with_capacity(mesh_capacity),
             textures: Vec::new(),
+            gpu_textures: Vec::new(),
             texture_ids: std::collections::HashMap::new(),
             mesh_ids: std::collections::HashMap::with_capacity(mesh_capacity),
             mesh_cacheable: Vec::with_capacity(mesh_capacity),
@@ -200,6 +202,17 @@ impl BasicCommandList {
         self.mesh_cacheable.push(false);
         id
     }
+
+    /// Register a decoded scene texture once for this frame.
+    pub fn register_gpu_texture(&mut self, texture: super::device::GpuTextureView) -> usize {
+        let id = usize::MAX - self.gpu_textures.len();
+        self.gpu_textures.push(texture);
+        id
+    }
+    pub fn gpu_texture(&self, id: usize) -> Option<&super::device::GpuTextureView> {
+        self.gpu_textures.get(usize::MAX - id)
+    }
+    pub fn gpu_textures(&self) -> impl Iterator<Item=&super::device::GpuTextureView> { self.gpu_textures.iter() }
 
     /// Register a decoded scene texture once for this frame.
     pub fn register_texture(&mut self, texture: Arc<CpuTexture>) -> usize {
@@ -487,6 +500,7 @@ impl BasicCommandList {
         self.commands.clear();
         self.meshes.clear();
         self.textures.clear();
+        self.gpu_textures.clear();
         self.texture_ids.clear();
         self.mesh_ids.clear();
         self.mesh_cacheable.clear();

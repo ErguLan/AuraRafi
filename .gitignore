@@ -1,10 +1,18 @@
-# Build output
+# Build output — never commit cargo caches.
+# The only valid dir is target_gnu/ (see .cargo/config.toml).
+# Forbidden to create target_ai/, target_check/, target_fix/, etc.
 /target/
 /target_gnu/
 /target_*/
+target/
+target_*/
+target_gnu/
+**/target/
+**/target_*/
 
 # IDE
-.vscode/
+.vscode/*
+!.vscode/settings.json
 .idea/
 *.swp
 *.swo
@@ -29,6 +37,8 @@ desktop.ini
 /check_errors.txt
 /err.txt
 /tmp_*.py
+*-run.log
+target_*.log
 
 # Agent run logs
 /.codex-run-logs/

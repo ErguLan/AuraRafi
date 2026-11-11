@@ -22,6 +22,34 @@ pub struct NativeElectronicsCanvas {
     host: DirectCadSurfaceHost,
     frame_revision: u64,
     size: [u32; 2],
+    cached_layer: Option<CachedCadLayer>,
+}
+
+struct CachedCadLayer {
+    frame_revision: u64,
+    device_generation: u64,
+    surface_generation: u64,
+    layer: EditorCanvasLayer,
+}
+
+impl CachedCadLayer {
+    fn reuse(
+        &self,
+        frame_revision: u64,
+        device_generation: u64,
+        surface_generation: u64,
+        target_rect: CanvasTargetRect,
+    ) -> Option<EditorCanvasLayer> {
+        if self.frame_revision != frame_revision
+            || self.device_generation != device_generation
+            || self.surface_generation != surface_generation
+        {
+            return None;
+        }
+        let mut layer = self.layer.clone();
+        layer.target_rect = target_rect;
+        Some(layer)
+    }
 }
 
 impl NativeElectronicsCanvas {
@@ -39,6 +67,7 @@ impl NativeElectronicsCanvas {
             host: graphics.create_cad_host(clear_color),
             frame_revision: 0,
             size: [1, 1],
+            cached_layer: None,
         }
     }
 
@@ -82,13 +111,67 @@ impl NativeElectronicsCanvas {
         runtime: &mut RenderRuntime,
         target_rect: CanvasTargetRect,
     ) -> Option<EditorCanvasLayer> {
-        let frame = self.host.frame()?;
         runtime.activate_surface(self.surface);
+        let snapshot = runtime.snapshot();
+        if let Some(layer) = self.cached_layer.as_ref().and_then(|cached| {
+            cached.reuse(
+                self.frame_revision,
+                snapshot.device_generation,
+                snapshot.surface_generation,
+                target_rect,
+            )
+        }) {
+            return Some(layer);
+        }
+        let frame = self.host.frame()?;
         let output = runtime.render_scene_frame(&frame.frame);
-        Some(EditorCanvasLayer {
+        let layer = EditorCanvasLayer {
             output: Arc::new(output),
             source_size: [frame.frame.width, frame.frame.height],
             target_rect,
-        })
+        };
+        self.cached_layer = Some(CachedCadLayer {
+            frame_revision: self.frame_revision,
+            device_generation: snapshot.device_generation,
+            surface_generation: snapshot.surface_generation,
+            layer: layer.clone(),
+        });
+        Some(layer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raf_render::api_graphic_basic::device::SceneFrameOutput;
+
+    #[test]
+    fn electronics_ui_frames_reuse_the_executed_cad_output() {
+        let cached = CachedCadLayer {
+            frame_revision: 2,
+            device_generation: 3,
+            surface_generation: 4,
+            layer: EditorCanvasLayer {
+                output: Arc::new(SceneFrameOutput::CpuPixels(vec![0; 16])),
+                source_size: [2, 2],
+                target_rect: CanvasTargetRect::new(0, 0, 2, 2),
+            },
+        };
+        let moved = CanvasTargetRect::new(52, 80, 2, 2);
+        let reused = cached.reuse(2, 3, 4, moved).unwrap();
+        assert!(Arc::ptr_eq(&cached.layer.output, &reused.output));
+        assert_eq!(reused.target_rect, moved);
+        assert!(
+            cached.reuse(5, 3, 4, moved).is_none(),
+            "CAD geometry/camera changed"
+        );
+        assert!(
+            cached.reuse(2, 5, 4, moved).is_none(),
+            "graphics device changed"
+        );
+        assert!(
+            cached.reuse(2, 3, 5, moved).is_none(),
+            "another surface used the shared target"
+        );
     }
 }

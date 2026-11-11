@@ -15,20 +15,24 @@
 //! **Status**: Agent runtime + OpenAI-compatible client wired. Director/AssetGen/MeshProvider prepared but not connected.
 
 pub mod agent_history;
-pub mod agent_model_registry;
 pub mod agent_runtime;
 pub mod asset_gen;
 pub mod chat;
+pub mod chat_media;
+pub mod chatgpt_auth;
+pub mod curated_models;
+pub mod provider_catalog;
+mod chatgpt_responses;
 pub mod director;
 pub mod image_worker;
 pub mod mesh_provider;
+pub mod model_capabilities;
 pub mod openai_client;
 pub mod provider;
 pub mod puerto;
 pub mod tool_registry;
 
 pub use agent_history::{AgentHistory, AgentSession};
-pub use agent_model_registry::AgentModelRegistry;
 pub use agent_runtime::{AgentEvent, AgentRuntime, AgentStatus, ToolExecutor};
 pub use asset_gen::{
     AssetGenCache, AssetGenConfig, AssetGenHandle, AssetGenRequest, GeneratedMesh,
@@ -42,7 +46,7 @@ pub use image_worker::{
 };
 pub use mesh_provider::{MeshChunk, MeshProviderConfig, MeshProviderState, MeshProviderType};
 pub use openai_client::{OpenAiClient, OpenAiConfig, DEFAULT_MAX_TOKENS};
-pub use provider::{AgentMode, AiModelShortcut, AiProvider, AiProviderConfig};
+pub use provider::{AgentMode, AiProvider, AiProviderConfig};
 pub use puerto::{ConnectionStatus, PuertoClient, PuertoConfig};
 pub use raf_core::{
     AgentTaskEvent, AgentTaskHandle, AgentTaskId, AgentTaskManager, AgentTaskProgress,

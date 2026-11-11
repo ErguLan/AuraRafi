@@ -8,9 +8,11 @@
 //! canvas hosts. The engine and renderer remain independent.
 
 pub(crate) mod agent_artifacts;
+mod agent_scene_capture;
 mod agent_asset_tools;
 mod agent_project_store;
 mod agent_preview;
+mod agent_media;
 mod agent_service;
 mod agent_workspace_layout;
 mod agent_workspace_surface;
@@ -32,11 +34,18 @@ pub mod editor_viewport_app;
 pub mod electronics_action;
 pub mod electronics_assets;
 pub mod electronics_controller;
+mod electronics_lab;
+mod electronics_lab_field;
+mod electronics_lab_surface;
 pub mod electronics_history;
+#[cfg(test)]
+mod electronics_workspace_qa;
 pub(crate) mod electronics_minimap;
 pub mod folder_picker;
 pub mod game_runtime;
 pub mod native_application;
+#[cfg(windows)]
+mod native_accessibility;
 pub(crate) mod native_attached_executor;
 pub(crate) mod native_behavior_authoring;
 pub(crate) mod native_editor_commands;
@@ -64,3 +73,4 @@ pub mod settings_surface;
 pub mod studio_surface;
 pub mod theme;
 pub mod ui_atoms;
+mod ui_document_store;

@@ -1,4 +1,5 @@
 # Estado De Estabilizacion
+no leer ESTE ARCHIVO SON ANOTARIAS DEL ESTADO DE DESARROLLIO INTERNO Y SOLO PERDERIAS TIEMPO, NO HAY NADA RELEVANTE AQUI
 
 Fecha: 2026-08-23
 
@@ -1635,10 +1636,12 @@ Criterio de cierre:
 
 #### Sistema de scripting (esta sesion)
 
-- **Nuevo crate af_script**: arquitectura completa de scripting con 3 tiers.
+- **Nuevo crate 
+af_script**: arquitectura completa de scripting con 3 tiers.
   - Tier 1 (Rhai): backend completo con Host API registrado via thread-local. Compila y pasa 4 tests.
   - Tier 2 (WASM Native Module): stub documentado. Reemplaza el approach de C++ FFI crudo por WASM con AuraRafi Host ABI propio.
-  - Tier 3 (Visual Nodes): backend que puentea af_nodes::executor al Host API.
+  - Tier 3 (Visual Nodes): backend que puentea 
+af_nodes::executor al Host API.
 - **Host API**: ScriptContext, NodeHandle (opaco, estilo Roblox), ScriptValue (dinamico).
 - **Configuracion**: EngineSettings (script_runtime_enabled, default_script_language, script_hot_reload, script_timeout_ms, script_external_editor_cmd) y ProjectSettings (enable_scripting, allowed_script_languages, script_execution_mode, auto_attach_scripts).
 - **UI**: nueva seccion "Scripting" en settings_panel y nueva card "Scripting" en project_settings.

@@ -6,6 +6,7 @@ license.workspace = true
 description = "Scripting runtime and Host API for AuraRafi (Rhai + WASM + Visual Nodes)"
 
 [dependencies]
+raf_ui.workspace = true
 raf_core = { workspace = true }
 raf_nodes = { workspace = true }
 rhai = { workspace = true }
@@ -14,3 +15,6 @@ serde_json = { workspace = true }
 glam = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+ron.workspace = true

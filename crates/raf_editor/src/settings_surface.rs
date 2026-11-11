@@ -253,6 +253,7 @@ pub fn build_settings_surface(
         "",
         None,
         &[],
+        "",
     )
 }
 
@@ -272,6 +273,7 @@ pub fn build_settings_surface_with_api_keys(
         "",
         None,
         revealed_api_keys,
+        "",
     )
 }
 
@@ -291,6 +293,7 @@ pub fn build_settings_surface_with_state(
         search_query,
         open_select,
         &[],
+        "",
     )
 }
 
@@ -302,6 +305,7 @@ pub(crate) fn build_settings_surface_with_state_and_api_keys(
     search_query: &str,
     open_select: Option<&str>,
     revealed_api_keys: &[AiProvider],
+    model_filter: &str,
 ) -> UiSurface {
     let tokens = palette.tokens();
     let root = UiNode::new("settings.root", UiNodeKind::Root)
@@ -333,6 +337,7 @@ pub(crate) fn build_settings_surface_with_state_and_api_keys(
             search_query,
             open_select,
             revealed_api_keys,
+            model_filter,
         ));
 
     let mut surface = UiSurface::new("editor.engine-settings", palette, root);
@@ -348,6 +353,7 @@ fn modal(
     search_query: &str,
     open_select: Option<&str>,
     revealed_api_keys: &[AiProvider],
+    model_filter: &str,
 ) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new("settings.modal", UiNodeKind::FloatingPanel)
@@ -385,6 +391,7 @@ fn modal(
                     active,
                     open_select,
                     revealed_api_keys,
+                    model_filter,
                 )),
         )
         .with_child(modal_footer(palette))
@@ -557,6 +564,7 @@ fn workspace(
     section: SettingsSection,
     open_select: Option<&str>,
     revealed_api_keys: &[AiProvider],
+    model_filter: &str,
 ) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new("settings.workspace", UiNodeKind::Panel)
@@ -617,6 +625,7 @@ fn workspace(
                     section,
                     open_select,
                     revealed_api_keys,
+                    model_filter,
                 )),
         )
 }
@@ -712,6 +721,7 @@ fn section_content(
     section: SettingsSection,
     open_select: Option<&str>,
     revealed_api_keys: &[AiProvider],
+    model_filter: &str,
 ) -> UiNode {
     match section {
         SettingsSection::Appearance => appearance(palette, settings),
@@ -721,7 +731,13 @@ fn section_content(
         SettingsSection::Electronics => electronics(palette, settings),
         SettingsSection::Scripting => scripting(palette, settings, open_select),
         SettingsSection::Runtime => runtime_preferences(palette, settings, open_select),
-        SettingsSection::Ai => ai(palette, settings, open_select, revealed_api_keys),
+        SettingsSection::Ai => ai(
+            palette,
+            settings,
+            open_select,
+            revealed_api_keys,
+            model_filter,
+        ),
         SettingsSection::Platform => platform(palette, settings, open_select),
     }
 }
@@ -794,6 +810,10 @@ fn appearance(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
     ));
 
     node = node.with_child(group_label(palette, "settings.group.accessibility"));
+    node = node.with_child(toggle_row_with_description(
+        palette, "settings.native-accessibility", "settings.native_accessibility_enabled",
+        settings.native_accessibility_enabled, "settings.native_accessibility_desc",
+    ));
     node = node.with_child(toggle_row_with_description(
         palette,
         "settings.prefers-reduced-motion",
@@ -1426,6 +1446,7 @@ fn ai(
     settings: &EngineSettings,
     open_select: Option<&str>,
     revealed_api_keys: &[AiProvider],
+    model_filter: &str,
 ) -> UiNode {
     let tokens = palette.tokens();
     let provider_options = settings
@@ -1463,10 +1484,20 @@ fn ai(
             "settings.ai_provider_default_desc",
         ));
 
-    for config in &settings.ai_providers {
+    // One focused provider editor instead of five credential forms at once.
+    // The selector above is also the switch to another provider's editor.
+    for config in settings
+        .ai_providers
+        .iter()
+        .filter(|config| config.provider == settings.default_ai_provider)
+    {
         let provider = config.provider;
         let id = provider_id(provider);
         let card_id = format!("settings.ai-provider.{id}");
+        let has_catalog = matches!(
+            provider,
+            AiProvider::OpenRouter | AiProvider::OpenAI | AiProvider::OpenCode | AiProvider::OpenCodeGo
+        );
         root = root.with_child(
             UiNode::new(card_id.clone(), UiNodeKind::Panel)
                 .with_class("settings-ai-provider-card")
@@ -1482,6 +1513,32 @@ fn ai(
                         .with_text_style(UiTextStyle::panel_title(tokens.text))
                         .with_layout(UiLayout::fit_content()),
                 )
+                .with_child(
+                    UiNode::new(format!("{card_id}.status"), UiNodeKind::Label)
+                        .with_text_key(
+                            if provider == AiProvider::OpenAI && settings.agent_openai_use_plan {
+                                "settings.account.plan_selected"
+                            } else if !matches!(
+                                provider,
+                                AiProvider::OpenAI | AiProvider::OpenRouter | AiProvider::OpenCode | AiProvider::OpenCodeGo | AiProvider::Puerto
+                            ) {
+                                "settings.ai_provider_status_unsupported"
+                            } else if !config.enabled {
+                                "settings.ai_provider_status_disabled"
+                            } else if config.base_url.trim().is_empty()
+                                || config.model.trim().is_empty()
+                                || (provider != AiProvider::Puerto
+                                    && config.api_key.trim().is_empty())
+                            {
+                                "settings.ai_provider_status_incomplete"
+                            } else {
+                                "settings.ai_provider_status_configured"
+                            },
+                        )
+                        .with_text_overflow(UiTextOverflow::Wrap)
+                        .with_text_style(UiTextStyle::body(tokens.text_muted))
+                        .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+                )
                 .with_child(toggle_row_with_key(
                     palette,
                     format!("{card_id}.enabled"),
@@ -1489,54 +1546,49 @@ fn ai(
                     format!("settings.ai_provider.{id}"),
                     config.enabled,
                 ))
-                .with_child(ai_provider_text_row(
+                .with_child(ai_model_picker_row(
                     palette,
-                    &format!("{card_id}.base-url"),
-                    "settings.ai_provider_base_url",
-                    &format!("settings.ai_provider.{id}.base_url"),
-                    false,
-                    None,
-                    None,
+                    settings,
+                    &card_id,
+                    config,
+                    has_catalog,
+                    open_select,
+                    model_filter,
                 ))
-                .with_child(ai_provider_text_row(
-                    palette,
-                    &format!("{card_id}.model"),
-                    "settings.ai_provider_model",
-                    &format!("settings.ai_provider.{id}.model"),
-                    false,
-                    None,
-                    None,
-                ))
-                .with_child(ai_provider_text_row(
-                    palette,
-                    &format!("{card_id}.api-key"),
-                    "settings.ai_provider_api_key",
-                    &format!("settings.ai_provider.{id}.api_key"),
-                    !revealed_api_keys.contains(&provider),
-                    Some(format!("settings.ai_provider.reveal.{id}")),
-                    Some(format!("settings.ai_provider.clear.{id}")),
-                ))
-                .with_child(command_button(
-                    palette,
-                    &format!("{card_id}.set-default"),
-                    "settings.ai_provider_set_default",
-                    &format!("settings.ai_provider.default.{id}"),
-                    "settings-secondary-button",
-                    136.0,
-                )),
+                .with_child(if provider == AiProvider::OpenAI && settings.agent_openai_use_plan {
+                    UiNode::new(format!("{card_id}.plan-note"), UiNodeKind::Label)
+                        .with_text_key("ai_models.plan_only")
+                        .with_text_overflow(UiTextOverflow::Wrap)
+                        .with_text_style(UiTextStyle::body(tokens.text_muted))
+                        .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill))
+                } else {
+                    ai_api_credentials(palette, config, revealed_api_keys)
+                }),
         );
     }
 
     root = root
         .with_child(group_label(palette, "settings.external_studio.title"))
-        .with_child(toggle_row_with_description(palette, "settings.external-studio.enabled",
-            "settings.external_studio.enabled", settings.external_asset_studio.enabled,
-            "settings.external_studio.description"));
+        .with_child(toggle_row_with_description(
+            palette,
+            "settings.external-studio.enabled",
+            "settings.external_studio.enabled",
+            settings.external_asset_studio.enabled,
+            "settings.external_studio.description",
+        ));
     for field in ["repository_url", "directory", "program", "entry_point"] {
-        if !settings.external_asset_studio.enabled { break; }
-        root = root.with_child(ai_provider_text_row(palette, &format!("settings.external-studio.{field}"),
-            &format!("settings.external_studio.{field}"), &format!("settings.external_studio.{field}"),
-            false, None, None));
+        if !settings.external_asset_studio.enabled {
+            break;
+        }
+        root = root.with_child(ai_provider_text_row(
+            palette,
+            &format!("settings.external-studio.{field}"),
+            &format!("settings.external_studio.{field}"),
+            &format!("settings.external_studio.{field}"),
+            false,
+            None,
+            None,
+        ));
     }
     root = root
         .with_child(group_label(palette, "settings.group.agent"))
@@ -1576,83 +1628,382 @@ fn ai(
             settings.agent_tool_call_limit_enabled,
             "settings.agent_tool_call_limit_enabled_desc",
         ))
-        .with_child(range_row_disabled_with_description(
-            palette,
-            "settings.agent-max-tool-calls",
-            "settings.agent_max_tool_calls",
-            settings.agent_max_tool_calls as f32,
-            raf_core::config::AGENT_MAX_TOOL_CALLS_MIN as f32,
-            raf_core::config::AGENT_MAX_TOOL_CALLS_MAX as f32,
-            1.0,
-            settings.agent_max_tool_calls.to_string(),
-            !settings.agent_tool_call_limit_enabled,
-            "settings.agent_max_tool_calls_desc",
-        ))
-        .with_child(range_row(
-            palette,
-            "settings.agent-max-response-tokens",
-            "settings.agent_max_response_tokens",
-            settings.agent_max_response_tokens as f32,
-            raf_core::config::AGENT_MAX_RESPONSE_TOKENS_MIN as f32,
-            raf_core::config::AGENT_MAX_RESPONSE_TOKENS_MAX as f32,
-            256.0,
-            settings.agent_max_response_tokens.to_string(),
-        ))
-        .with_child(group_label(palette, "settings.group.shortcuts"));
-    for (index, shortcut) in settings.agent_model_shortcuts.iter().enumerate() {
-        let selected = shortcut.label == settings.default_agent_model;
-        let mut shortcut_row = UiNode::new(
-            format!("settings.ai-models.row.{index}"),
-            UiNodeKind::Toolbar,
-        )
-        .with_class("settings-ai-shortcut-row")
-        .with_layout(UiLayout {
-            flow: UiFlow::Row,
-            align_items: UiAlign::Center,
-            gap: 6.0,
-            ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill)
+        .with_child(if settings.agent_tool_call_limit_enabled {
+            range_row_disabled_with_description(
+                palette,
+                "settings.agent-max-tool-calls",
+                "settings.agent_max_tool_calls",
+                settings.agent_max_tool_calls as f32,
+                raf_core::config::AGENT_MAX_TOOL_CALLS_MIN as f32,
+                raf_core::config::AGENT_MAX_TOOL_CALLS_MAX as f32,
+                1.0,
+                settings.agent_max_tool_calls.to_string(),
+                !settings.agent_tool_call_limit_enabled,
+                "settings.agent_max_tool_calls_desc",
+            )
+        } else {
+            UiNode::new("settings.agent-max-tool-calls.hidden", UiNodeKind::Panel)
+                .with_style(UiStyle::transparent())
+                .with_layout(UiLayout::fixed(0.0, 0.0))
         })
-        .with_child(
-            UiNode::new(format!("settings.ai-models.{index}"), UiNodeKind::Label)
-                .with_text_value(format!(
-                    "{}  |  {}  |  {}",
-                    shortcut.label,
-                    shortcut.provider.display_name(),
-                    shortcut.model_id
-                ))
-                .with_text_style(UiTextStyle::body(if selected {
-                    tokens.accent
-                } else {
-                    tokens.text_muted
-                }))
-                .with_text_overflow(UiTextOverflow::Ellipsis)
-                .with_layout(UiLayout {
-                    grow: 1.0,
-                    ..UiLayout::fit_content()
-                }),
-        )
-        .with_child(command_button(
+        .with_child(toggle_row_with_description(
             palette,
-            &format!("settings.ai-models.use.{index}"),
-            "settings.ai_model_use",
-            &format!("settings.ai_model.default:{index}"),
-            "settings-secondary-button",
-            72.0,
+            "settings.agent-response-limit",
+            "settings.agent_response_limit_enabled",
+            settings.agent_response_limit_enabled,
+            "settings.agent_response_limit_enabled_desc",
         ))
-        .with_child(command_button(
+        .with_child(if settings.agent_response_limit_enabled {
+            range_row_disabled_with_description(
+                palette,
+                "settings.agent-max-response-tokens",
+                "settings.agent_max_response_tokens",
+                settings.agent_max_response_tokens as f32,
+                raf_core::config::AGENT_MAX_RESPONSE_TOKENS_MIN as f32,
+                raf_core::config::AGENT_MAX_RESPONSE_TOKENS_MAX as f32,
+                256.0,
+                settings.agent_max_response_tokens.to_string(),
+                !settings.agent_response_limit_enabled,
+                "settings.agent_response_limit_enabled_desc",
+            )
+        } else {
+            UiNode::new(
+                "settings.agent-max-response-tokens.hidden",
+                UiNodeKind::Panel,
+            )
+            .with_style(UiStyle::transparent())
+            .with_layout(UiLayout::fixed(0.0, 0.0))
+        })
+        .with_child(select_row_with_description(
             palette,
-            &format!("settings.ai-models.remove.{index}"),
-            "settings.surface.remove",
-            &format!("settings.ai_model.remove:{index}"),
-            "settings-secondary-button",
-            72.0,
+            "settings.agent-reasoning",
+            "settings.agent_reasoning_effort",
+            "settings.agent_reasoning_effort",
+            vec![
+                UiSelectOption::new("", "settings.reasoning.auto"),
+                UiSelectOption::new("none", "settings.reasoning.none"),
+                UiSelectOption::new("low", "settings.reasoning.low"),
+                UiSelectOption::new("medium", "settings.reasoning.medium"),
+                UiSelectOption::new("high", "settings.reasoning.high"),
+                UiSelectOption::new("max", "settings.reasoning.max"),
+            ],
+            ["", "none", "low", "medium", "high", "max"]
+                .iter()
+                .position(|v| *v == settings.agent_reasoning_effort)
+                .unwrap_or(0),
+            open_select,
+            "settings.agent_reasoning_effort_desc",
+        ))
+        .with_child(toggle_row_with_description(
+            palette,
+            "settings.agent-show-reasoning",
+            "settings.agent_show_reasoning",
+            settings.agent_show_reasoning,
+            "settings.agent_show_reasoning_desc",
         ));
-        if selected {
-            shortcut_row = shortcut_row.with_class("settings-ai-shortcut-selected");
-        }
-        root = root.with_child(shortcut_row);
+    root
+}
+
+/// The provider card model picker: a trigger with the active model id and a
+/// searchable popup built from the shared picker data. Сustom ids stay in the
+/// advanced text row beneath it.
+fn ai_api_credentials(palette: StudioUiPalette, config: &raf_core::ai::AiProviderConfig, revealed: &[AiProvider]) -> UiNode {
+    let provider = config.provider;
+    let id = provider_id(provider);
+    let card = format!("settings.ai-provider.{id}");
+    let mut root = UiNode::new(format!("{card}.api-fields"), UiNodeKind::Panel)
+        .with_layout(UiLayout { flow: UiFlow::Column, gap: 6.0, ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill) })
+        .with_child(group_label(palette, "settings.ai_advanced"));
+    for (field, key) in [("base-url", "base_url"), ("custom-model", "model"), ("api-key", "api_key")] {
+        let secret = key == "api_key";
+        root = root.with_child(ai_provider_text_row(palette, &format!("{card}.{field}"),
+            &format!("settings.ai_provider_{key}"), &format!("settings.ai_provider.{id}.{key}"),
+            secret && !revealed.contains(&provider),
+            secret.then(|| format!("settings.ai_provider.reveal.{id}")),
+            secret.then(|| format!("settings.ai_provider.clear.{id}"))));
     }
     root
+}
+
+fn ai_model_picker_row(
+    palette: StudioUiPalette,
+    settings: &EngineSettings,
+    card_id: &str,
+    config: &raf_core::ai::AiProviderConfig,
+    has_catalog: bool,
+    open_select: Option<&str>,
+    model_filter: &str,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let language = settings.language;
+    let trigger_id = format!("{card_id}.model.trigger");
+    let is_open = open_select == Some(trigger_id.as_str());
+    let paint = crate::panels::ai_model_options::ModelRowPaint {
+        text: tokens.text,
+        muted: tokens.text_muted,
+        accent_hot: tokens.accent_hot,
+    };
+    let actions = crate::panels::ai_model_options::ModelRowActions {
+        node_prefix: "settings.ai-model.".to_string(),
+        select_key: "settings.ai.model".to_string(),
+        pin_command_prefix: "settings.ai_model.pin:".to_string(),
+        close_select_id: Some(trigger_id.clone()),
+    };
+    let current = config.model.trim().to_string();
+    if !is_open {
+        let mut trigger = UiNode::new(trigger_id.clone(), UiNodeKind::Button)
+            .with_class("settings-select-trigger settings-model-trigger")
+            .with_layout(UiLayout {
+                grow: 1.0,
+                min_size: [SETTINGS_CONTROL_MIN_WIDTH, 32.0],
+                max_size: [CONTROL_WIDTH, 32.0],
+                ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill)
+            })
+            .with_icon(raf_ui::UiIcon::new(raf_ui::UiIconId::ChevronDown).with_size(raf_ui::UiIconSize::Small))
+            .with_accessibility_label_key("settings.ai_provider_model")
+            .with_accessibility_role(raf_ui::UiAccessibilityRole::Combobox)
+            .with_accessibility_expanded(false)
+            .focusable()
+            .with_event(UiEventBinding {
+                event: UiEventKind::Click,
+                action: raf_ui::UiAction::SetSelectOpen {
+                    id: trigger_id.clone(),
+                    open: true,
+                },
+            });
+        if current.is_empty() {
+            trigger = trigger.with_text_key("settings.ai_provider_model_unset");
+        } else {
+            trigger = trigger.with_text_value(current.clone());
+        }
+        trigger = trigger.with_text_overflow(UiTextOverflow::Ellipsis);
+        return row(palette, format!("{card_id}.model"), "settings.ai_provider_model".to_string(), None, trigger);
+    }
+
+    let (state, items) =
+        crate::panels::ai_model_options::collect_items(settings, config.provider, model_filter);
+    let mut rows = Vec::new();
+    if has_catalog {
+        rows.push(
+            UiNode::new(format!("{card_id}.model.refresh"), UiNodeKind::Button)
+                .with_class("settings-select-option settings-model-refresh")
+                .with_layout(
+                    UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill),
+                )
+                .with_text_key("settings.ai_provider_refresh_models")
+                .with_text_style(UiTextStyle::button(tokens.accent_hot))
+                .with_accessibility_role(raf_ui::UiAccessibilityRole::MenuItem)
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    format!("settings.ai_provider.refresh_catalog.{}", provider_id(config.provider)),
+                )),
+        );
+        let status = crate::panels::ai_model_options::model_status_text(&state, language);
+        if !status.is_empty() {
+            rows.push(
+                UiNode::new(format!("{card_id}.model.status"), UiNodeKind::Label)
+                    .with_layout(UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill).padding_xy(10.0, 4.0))
+                    .with_text_value(status)
+                    .with_text_overflow(UiTextOverflow::Ellipsis)
+                    .with_text_style(UiTextStyle::button(tokens.text_muted)),
+            );
+        }
+    }
+    rows.push(
+        UiNode::text_input(
+            format!("{card_id}.model.filter"),
+            raf_ui::UiTextInput {
+                value_key: "settings.ai.model.filter".to_string(),
+                placeholder_key: Some("ai_models.search_placeholder".to_string()),
+                max_length: 256,
+                multiline: false,
+                password: false,
+                submit_command: None,
+            },
+        )
+        .with_class("settings-text-input")
+        .with_accessibility_label_key("ai_models.search_placeholder")
+        .with_layout(UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill)),
+    );
+    let mut last_lane = 0u8;
+    if items.is_empty() {
+        rows.push(UiNode::new(format!("{card_id}.model.empty"), UiNodeKind::Label)
+            .with_text_key("ai_models.empty")
+            .with_text_overflow(UiTextOverflow::Wrap)
+            .with_text_style(UiTextStyle::body(tokens.text_muted))
+            .with_layout(UiLayout::fixed(0.0, 48.0).with_width_mode(UiSizeMode::Fill)));
+    }
+    for item in &items {
+        let lane = if item.value.starts_with("account:") {
+            3u8
+        } else if item.pinned {
+            1u8
+        } else if item.custom {
+            4u8
+        } else {
+            2u8
+        };
+        if lane != last_lane {
+            let header_key = match lane {
+                1 => "ai_models.pinned",
+                2 => "ai_models.catalog",
+                3 => "ai_models.plan",
+                _ => "ai_models.custom",
+            };
+            rows.push(crate::panels::ai_model_options::model_header_row(
+                &paint,
+                header_key,
+                language,
+            ));
+            last_lane = lane;
+        }
+        rows.push(crate::panels::ai_model_options::model_option_row(
+            item,
+            &paint,
+            &actions,
+            "settings-select-option",
+        ));
+    }
+    let menu_height = (rows.len() as f32 * 30.0).max(60.0).min(340.0);
+    let mut menu = UiNode::new(format!("{card_id}.model.menu"), UiNodeKind::Menu)
+        .with_class("settings-select-menu settings-model-menu")
+        .with_material(UiSurfaceMaterial::TranslucentRaised)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            ..UiLayout::absolute(UiRect::new(0.0, 36.0, CONTROL_WIDTH, menu_height))
+                .with_z_index(30)
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface_raised,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: 6.0,
+            opacity: 1.0,
+        });
+    let mut scroll = UiNode::scroll_view(format!("{card_id}.model.scroll"), UiScrollAxis::Vertical)
+        .with_layout(UiLayout::fill(UiFlow::Column));
+    for row_node in rows { scroll = scroll.with_child(row_node); }
+    menu = menu.with_child(scroll);
+    let trigger = UiNode::new(trigger_id.clone(), UiNodeKind::Button)
+        .with_class("settings-select-trigger settings-model-trigger")
+        .with_layout(UiLayout {
+            grow: 1.0,
+            min_size: [SETTINGS_CONTROL_MIN_WIDTH, 32.0],
+            max_size: [CONTROL_WIDTH, 32.0],
+            ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_icon(raf_ui::UiIcon::new(raf_ui::UiIconId::ChevronDown).with_size(raf_ui::UiIconSize::Small))
+        .with_accessibility_label_key("settings.ai_provider_model")
+        .with_accessibility_role(raf_ui::UiAccessibilityRole::Combobox)
+        .with_accessibility_expanded(true)
+        .focusable()
+        .with_event(UiEventBinding {
+            event: UiEventKind::Click,
+            action: raf_ui::UiAction::SetSelectOpen {
+                id: trigger_id.clone(),
+                open: false,
+            },
+        });
+    let trigger = if current.is_empty() {
+        trigger.with_text_key("settings.ai_provider_model_unset")
+    } else {
+        trigger.with_text_value(current)
+    };
+    let trigger = trigger.with_text_overflow(UiTextOverflow::Ellipsis);
+    let control = UiNode::new(format!("{card_id}.model.wrap"), UiNodeKind::Panel)
+        .with_class("settings-select-wrap")
+        .with_layout(UiLayout {
+            grow: 1.0,
+            min_size: [SETTINGS_CONTROL_MIN_WIDTH, 32.0],
+            max_size: [CONTROL_WIDTH, 32.0],
+            ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(trigger)
+        .with_child(menu);
+    row(
+        palette,
+        format!("{card_id}.model"),
+        "settings.ai_provider_model".to_string(),
+        None,
+        control,
+    )
+}
+
+/// Account data are supplied by the host; credentials stay in the provider layer.
+pub(crate) fn account_controls(
+    palette: StudioUiPalette,
+    settings: &EngineSettings,
+    view: &raf_ai::chatgpt_auth::AuthView,
+    _open_select: Option<&str>,
+) -> UiNode {
+    let tokens = palette.tokens();
+    let mut root = UiNode::new("settings.account.controls", UiNodeKind::Panel)
+        .with_layout(UiLayout { flow: UiFlow::Column, gap: 6.0, ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill) })
+        .with_child(toggle_row_with_description(palette, "settings.account.plan", "settings.agent_openai_use_plan",
+            settings.agent_openai_use_plan, "settings.account.plan_description"));
+    let active = view.accounts.iter().any(|account| account.active && account.connected);
+    root = root.with_child(UiNode::new("settings.account.status", UiNodeKind::Label)
+        .with_text_key(if view.busy { "settings.account.connecting" } else if active { "settings.account.connected" } else { "settings.account.disconnected" })
+        .with_text_style(UiTextStyle::body(tokens.text_muted))
+        .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)));
+    for (index, account) in view.accounts.iter().enumerate() {
+        let label = format!("{} · {}", account.label, index + 1);
+        root = root.with_child(UiNode::new(format!("settings.account.profile.{index}"), UiNodeKind::Toolbar)
+            .with_layout(UiLayout { flow: UiFlow::Row, align_items: UiAlign::Center, gap: 6.0,
+                ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill) })
+            .with_child(UiNode::new(format!("settings.account.profile.{index}.label"), UiNodeKind::Label)
+                .with_text_value(label).with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_text_style(UiTextStyle::body(if account.active { tokens.accent } else { tokens.text_muted }))
+                .with_layout(UiLayout { grow: 1.0, ..UiLayout::fit_content() }))
+            .with_child(command_button(palette, &format!("settings.account.profile.{index}.action"),
+                if account.connected { "settings.account.select" } else { "settings.account.reconnect" },
+                &format!("settings.account.{}:{index}", if account.connected { "select" } else { "reconnect" }),
+                "settings-secondary-button", 105.0).disabled(view.busy)));
+    }
+    root = root.with_child(UiNode::new("settings.account.actions", UiNodeKind::Toolbar)
+        .with_layout(UiLayout { flow: UiFlow::RowWrap, gap: 6.0, ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill) })
+        .with_child(command_button(palette, "settings.account.connect", "settings.account.connect",
+            "settings.account.connect", "settings-secondary-button", 184.0).disabled(view.busy))
+        .with_child(command_button(palette, "settings.account.refresh", "settings.account.refresh",
+            "settings.account.refresh", "settings-secondary-button", 124.0).disabled(view.busy || !active))
+        .with_child(command_button(palette, "settings.account.signout", "settings.account.signout",
+            "settings.account.signout", "settings-secondary-button", 124.0).disabled(view.busy || !active))
+        .with_child(command_button(palette, "settings.account.usage", "settings.account.usage",
+            "settings.account.usage", "settings-secondary-button", 135.0)));
+    if let Some(message) = &view.message {
+        root = root.with_child(UiNode::new("settings.account.error", UiNodeKind::Label)
+            .with_text_key("settings.account.error_summary").with_tooltip_value(message.clone()).with_text_overflow(UiTextOverflow::Wrap)
+            .with_text_style(UiTextStyle::body(tokens.warning))
+            .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)));
+    }
+    root
+}
+
+pub(crate) fn account_welcome(palette: StudioUiPalette, rect: UiRect) -> UiNode {
+    let tokens = palette.tokens();
+    let width = 430.0_f32.min((rect.width - 32.0).max(1.0));
+    let height = 170.0_f32.min((rect.height - 32.0).max(1.0));
+    let mut layout = UiLayout::absolute(UiRect::new(rect.x + (rect.width - width) * 0.5,
+        rect.y + (rect.height - height) * 0.5, width, height));
+    layout.flow = UiFlow::Column;
+    layout.gap = 10.0;
+    layout.padding = UiSpacing::same(18.0);
+    UiNode::new("settings.account.welcome", UiNodeKind::Overlay)
+        .with_class("settings-ai-provider-card")
+        .with_material(UiSurfaceMaterial::ModalSurface)
+        .with_layout(layout.with_z_index(120))
+        .with_accessibility_role(UiAccessibilityRole::Dialog)
+        .with_accessibility_label_key("settings.account.welcome_title")
+        .with_child(UiNode::new("settings.account.welcome.title", UiNodeKind::Label)
+            .with_text_key("settings.account.welcome_title").with_text_style(UiTextStyle::panel_title(tokens.text))
+            .with_layout(UiLayout::fit_content()))
+        .with_child(UiNode::new("settings.account.welcome.body", UiNodeKind::Label)
+            .with_text_key("settings.account.welcome_body").with_text_overflow(UiTextOverflow::Wrap)
+            .with_text_style(UiTextStyle::body(tokens.text)).with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)))
+        .with_child(command_button(palette, "settings.account.welcome.ok", "settings.account.welcome_ok",
+            "settings.account.welcome_ack", "settings-primary-button", 112.0))
 }
 
 fn ai_provider_text_row(
@@ -1692,6 +2043,7 @@ fn ai_provider_text_row(
                 },
             )
             .with_class("settings-text-input")
+            .with_accessibility_label_key(label_key)
             .with_layout(UiLayout {
                 grow: 1.0,
                 min_size: [SETTINGS_CONTROL_MIN_WIDTH, 30.0],
@@ -1874,6 +2226,8 @@ pub(crate) fn provider_id(provider: AiProvider) -> &'static str {
         AiProvider::Puerto => "puerto",
         AiProvider::OpenRouter => "openrouter",
         AiProvider::OpenAI => "openai",
+        AiProvider::OpenCode => "opencode",
+        AiProvider::OpenCodeGo => "opencode_go",
         AiProvider::GenAI => "genai",
         AiProvider::Claude => "claude",
     }
@@ -2078,6 +2432,10 @@ fn range_row_disabled_with_description(
             )
             .with_class("settings-numeric-input")
             .with_layout(UiLayout::fixed(78.0, 28.0))
+            .with_event(UiEventBinding::command(
+                UiEventKind::KeyPress("escape".to_string()),
+                "settings.numeric.cancel",
+            ))
             .disabled(disabled),
         );
     let row = if has_description {
@@ -2743,6 +3101,62 @@ fn settings_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_redesign_plan_hides_api_fields_and_picker_scrolls() {
+        let mut settings = EngineSettings::default();
+        settings.default_ai_provider = AiProvider::OpenAI;
+        settings.agent_openai_use_plan = true;
+        let palette = StudioUiPalette::IndustrialDark;
+        let plan = ai(palette, &settings, Some("settings.ai-provider.openai.model.trigger"), &[], "");
+        assert!(find_node(&plan, "settings.ai-provider.openai.api-fields").is_none());
+        assert!(find_node(&plan, "settings.ai-provider.openai.plan-note").is_some());
+        assert!(find_node(&plan, "settings.ai-provider.openai.model.scroll").is_some());
+        settings.agent_openai_use_plan = false;
+        let api = ai(palette, &settings, None, &[], "");
+        assert!(find_node(&api, "settings.ai-provider.openai.api-fields").is_some());
+        fn unique(node: &UiNode, ids: &mut std::collections::HashSet<String>) {
+            assert!(ids.insert(node.id.clone()), "duplicate node id: {}", node.id);
+            for child in &node.children { unique(child, ids); }
+        }
+        unique(&api, &mut std::collections::HashSet::new());
+    }
+
+    #[test]
+    fn harness_ai_settings_focus_one_provider_and_hide_inactive_limits() {
+        let mut settings = EngineSettings::default();
+        let palette = StudioUiPalette::IndustrialDark;
+        let root = ai(palette, &settings, None, &[], "");
+        for provider in &settings.ai_providers {
+            assert_eq!(
+                find_node(
+                    &root,
+                    &format!(
+                        "settings.ai-provider.{}.title",
+                        provider_id(provider.provider)
+                    )
+                )
+                .is_some(),
+                provider.provider == settings.default_ai_provider
+            );
+        }
+        for id in [
+            "settings.agent-max-tool-calls.slider",
+            "settings.agent-max-response-tokens.slider",
+        ] {
+            assert!(find_node(&root, id).is_none());
+        }
+        settings.agent_tool_call_limit_enabled = true;
+        settings.agent_response_limit_enabled = true;
+        let root = ai(palette, &settings, None, &[], "");
+        for id in [
+            "settings.agent-max-tool-calls.slider",
+            "settings.agent-max-response-tokens.slider",
+        ] {
+            let slider = find_node(&root, id).expect("enabled manual limit control");
+            assert!(!slider.disabled);
+        }
+    }
     use raf_render::api_graphic_basic::ui_surface::{UiInputState, UiSurfaceSession};
 
     fn find_node<'a>(node: &'a UiNode, id: &str) -> Option<&'a UiNode> {

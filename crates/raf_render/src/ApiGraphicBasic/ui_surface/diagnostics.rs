@@ -10,6 +10,8 @@ use super::{UiDensityContract, UiEnvironment, UiSurfaceFrame};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct UiSurfaceDiagnostics {
+    pub rounded_clip_regions: usize,
+    pub excessive_clip_depth: usize,
     pub layout_boxes: usize,
     pub interactive_regions: usize,
     pub focusable_regions: usize,
@@ -42,6 +44,16 @@ impl UiSurfaceDiagnostics {
             .filter(|layout| !seen_ids.insert(layout.id.as_str()))
             .count();
         Self {
+            rounded_clip_regions: frame
+                .layout_boxes
+                .iter()
+                .filter(|b| !b.rounded_clips.is_empty())
+                .count(),
+            excessive_clip_depth: frame
+                .layout_boxes
+                .iter()
+                .filter(|b| b.rounded_clips.len() > 8)
+                .count(),
             layout_boxes: frame.layout_boxes.len(),
             interactive_regions: frame
                 .hit_regions
@@ -130,6 +142,7 @@ impl UiSurfaceDiagnostics {
 
     pub fn has_layout_warnings(self) -> bool {
         self.zero_sized_boxes > 0
+            || self.excessive_clip_depth > 0
             || self.invalid_clip_regions > 0
             || self.duplicate_ids > 0
             || self.missing_accessibility_labels > 0

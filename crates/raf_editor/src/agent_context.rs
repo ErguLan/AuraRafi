@@ -5,6 +5,7 @@
 //! a renderer/window type.
 
 use std::collections::{BTreeSet, HashSet};
+use std::path::Path;
 
 use raf_ai::agent_runtime::AgentToolResult;
 use raf_core::agent_context::{
@@ -14,12 +15,13 @@ use raf_core::agent_context::{
     scripts_catalog as core_scripts_catalog, world_bounds, AgentObservationResult,
 };
 use raf_core::project::{Project, ProjectType};
-use raf_core::scene::graph::{SceneGraph, SceneNode, SceneNodeId};
+use raf_core::scene::graph::{Primitive, SceneGraph, SceneNode, SceneNodeId};
 use raf_core::{i18n::t, Language};
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::commands::game::SceneSelectionState;
+use crate::script_support::scan_script_catalog;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AgentProjectSnapshot {
@@ -179,6 +181,7 @@ impl AgentObservationContext<'_> {
             "asset_inspect" => Some(self.asset_inspect(arguments)),
             "scripts_catalog" => Some(self.scripts_catalog(arguments)),
             "project_health" => Some(self.project_health(arguments)),
+            "game_completion_audit" => Some(self.game_completion_audit()),
             "scene_verify" => Some(self.scene_verify(arguments)),
             "game_validate_layout" => Some(self.validate_layout()),
             _ => None,
@@ -434,6 +437,211 @@ impl AgentObservationContext<'_> {
         }));
         result
     }
+
+    /// Evidence-oriented completion audit for game authoring.
+    ///
+    /// It does not claim that a game is fun or finished. It checks the
+    /// objective foundation an Agent must not skip: visible geometry, a
+    /// camera, authored lighting state, attached scripts, and gameplay
+    /// signals in those scripts.
+    pub(crate) fn game_completion_audit(&self) -> AgentToolResult {
+        let live = self.scene.all_live_ids();
+        let mut renderable = 0usize;
+        let mut camera_nodes = 0usize;
+        let mut attached_scripts = 0usize;
+        let mut source_asset_entities = 0usize;
+        for id in &live {
+            let Some(node) = self.scene.get(*id) else {
+                continue;
+            };
+            if !node.is_folder && node.visible && node.primitive != Primitive::Empty {
+                renderable += 1;
+            }
+            if node.game_camera.is_some() {
+                camera_nodes += 1;
+            }
+            if node.source_asset.is_some() {
+                source_asset_entities += 1;
+            }
+            attached_scripts += node.scripts.len();
+        }
+        let startup_camera = self
+            .project
+            .and_then(|project| project.settings.runtime.active_camera)
+            .and_then(|uuid| {
+                live.iter().copied().find(|id| {
+                    self.scene
+                        .get(*id)
+                        .is_some_and(|node| node.uuid == uuid && node.game_camera.is_some())
+                })
+            });
+        let scripts = self
+            .project
+            .map(|project| {
+                let assets = project.path.join("assets");
+                let mut reports = Vec::new();
+                for entry in scan_script_catalog(&assets).into_iter().take(64) {
+                    let source = bounded_source(&entry.absolute_path, 64 * 1024);
+                    // Templates contain commented examples. Only executable
+                    // lines count as gameplay evidence.
+                    let active = source
+                        .lines()
+                        .filter(|line| !line.trim_start().starts_with("//"))
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                        .to_ascii_lowercase();
+                    let signals = GAMEPLAY_SIGNALS
+                        .iter()
+                        .copied()
+                        .filter(|marker| active.contains(marker))
+                        .collect::<Vec<_>>();
+                    reports.push(serde_json::json!({
+                        "path": entry.relative_path,
+                        "language": entry.language.label(),
+                        "has_on_start": entry.has_on_start,
+                        "has_on_update": entry.has_on_update,
+                        "gameplay_signals": signals,
+                    }));
+                }
+                reports
+            })
+            .unwrap_or_default();
+        let gameplay_scripts = scripts
+            .iter()
+            .filter(|script| {
+                script
+                    .get("gameplay_signals")
+                    .and_then(Value::as_array)
+                    .is_some_and(|signals| !signals.is_empty())
+            })
+            .count();
+        let environment = self.scene.environment();
+        let lighting = serde_json::json!({
+            "mode": match environment.mode {
+                raf_core::environment::EnvironmentMode::Neutral => "neutral",
+                raf_core::environment::EnvironmentMode::Scene => "scene",
+            },
+            "sun_enabled": environment.sun.enabled,
+            "sun_intensity": environment.sun.intensity,
+            "shadows_enabled": environment.shadows.enabled,
+            "ambient_intensity": environment.ambient_intensity,
+        });
+        let physics = self
+            .project
+            .map(|project| project.settings.enable_physics)
+            .unwrap_or(false);
+        let audio = self
+            .project
+            .map(|project| project.settings.enable_audio)
+            .unwrap_or(false);
+        let mut missing = Vec::new();
+        if renderable == 0 {
+            missing.push("renderable_geometry");
+        }
+        if startup_camera.is_none() && camera_nodes == 0 {
+            missing.push("camera");
+        }
+        if attached_scripts == 0 {
+            missing.push("attached_script");
+        } else if gameplay_scripts == 0 {
+            missing.push("gameplay_signal");
+        }
+        let verdict = if renderable == 0 {
+            "empty_scene"
+        } else if startup_camera.is_none() && camera_nodes == 0 {
+            "needs_camera"
+        } else if attached_scripts == 0 {
+            "geometry_only"
+        } else if gameplay_scripts == 0 {
+            "scripted_without_gameplay_signals"
+        } else {
+            "playable_foundation"
+        };
+        let mut next_actions = Vec::new();
+        if renderable == 0 {
+            next_actions.push("Create the scene envelope and visible geometry first.");
+        }
+        if startup_camera.is_none() && camera_nodes == 0 {
+            next_actions.push("Add a Camera entity and set it as the startup camera.");
+        }
+        if attached_scripts == 0 {
+            next_actions.push("Write a Rhai gameplay script and attach it to the controller entity.");
+        } else if gameplay_scripts == 0 {
+            next_actions.push("Add input, movement, collision, scoring, or event logic to the attached script.");
+        }
+        if environment.mode == raf_core::environment::EnvironmentMode::Neutral {
+            next_actions.push("If the game needs authored light, set lighting mode to Scene and tune Sun/Sky/Shadows.");
+        }
+        next_actions.push("Capture at least two angles with viewport_capture, inspect the images, and repair what the images reveal.");
+        let passed = missing.is_empty();
+        let summary = if passed {
+            "Gameplay foundation detected: geometry, camera, and a script with gameplay signals are present. Visual review is still required.".to_string()
+        } else {
+            format!(
+                "Gameplay foundation is incomplete ({}). This is evidence for the next pass, not a finished game.",
+                missing.join(", ")
+            )
+        };
+        let mut result = AgentToolResult::success(
+            summary,
+            serde_json::json!({
+                "verdict": verdict,
+                "counts": {
+                    "live_entities": live.len(),
+                    "renderable": renderable,
+                    "camera_components": camera_nodes,
+                    "attached_scripts": attached_scripts,
+                    "scripts_with_gameplay_signals": gameplay_scripts,
+                    "imported_assets": self.assets.len(),
+                    "entities_with_source_asset": source_asset_entities,
+                },
+                "startup_camera": startup_camera.and_then(|id| node_summary(self.scene, id, false)).unwrap_or(Value::Null),
+                "lighting": lighting,
+                "systems": {"physics_enabled": physics, "audio_enabled": audio},
+                "scripts": scripts,
+                "missing": missing,
+                "next_actions": next_actions,
+            }),
+        );
+        result.ok = passed;
+        result.verification = Some(serde_json::json!({
+            "status": if passed { "foundation_present" } else { "incomplete" },
+            "verdict": verdict,
+        }));
+        result
+    }
+}
+
+const GAMEPLAY_SIGNALS: &[&str] = &[
+    "is_key_pressed",
+    "is_key_down",
+    "move_by",
+    "set_world_position",
+    "velocity",
+    "jump",
+    "score",
+    "points",
+    "send_event",
+    "collision",
+    "physics",
+    "spawn",
+    "health",
+    "lives",
+    "get_axis",
+    "input_axis",
+    "set_velocity",
+];
+
+fn bounded_source(path: &Path, limit: u64) -> String {
+    use std::io::Read;
+    let Ok(file) = std::fs::File::open(path) else {
+        return String::new();
+    };
+    let mut bytes = Vec::new();
+    if file.take(limit + 1).read_to_end(&mut bytes).is_err() || bytes.len() as u64 > limit {
+        return String::new();
+    }
+    String::from_utf8(bytes).unwrap_or_default()
 }
 
 fn observation_to_tool_result(observation: AgentObservationResult) -> AgentToolResult {
@@ -632,7 +840,7 @@ fn is_reachable(scene: &SceneGraph, id: SceneNodeId) -> bool {
     false
 }
 
-fn resolve_target(
+pub(crate) fn resolve_target(
     scene: &SceneGraph,
     selection: &SceneSelectionState,
     target: &str,
@@ -858,6 +1066,75 @@ mod tests {
             .expect("scene_verify tool");
         assert!(!mismatch.ok);
         assert_eq!(mismatch.verification.unwrap()["status"], "failed");
+    }
+
+    #[test]
+    fn game_completion_audit_separates_geometry_from_playable_foundation() {
+        let root = std::env::temp_dir().join(format!(
+            "raf-game-audit-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut project = Project::create("Audit", ProjectType::Game, &root).unwrap();
+        let scripts = project.path.join("assets/scripts");
+        std::fs::create_dir_all(&scripts).unwrap();
+        std::fs::write(
+            scripts.join("player.rhai"),
+            "fn on_update(dt) { if is_key_pressed(\"w\") { owner().move_by(0.0, 0.0, dt); } }",
+        )
+        .unwrap();
+        let mut scene = SceneGraph::new();
+        let player = scene.add_root_with_primitive("Player", Primitive::Cube);
+        let camera = scene.add_root_with_primitive("Camera", Primitive::Empty);
+        scene.get_mut(camera).unwrap().game_camera =
+            Some(raf_core::runtime_config::GameCamera::default());
+        project.settings.runtime.active_camera = Some(scene.get(camera).unwrap().uuid);
+        scene
+            .get_mut(player)
+            .unwrap()
+            .scripts
+            .push("scripts/player.rhai".to_string());
+        let selection = SceneSelectionState::default();
+        let context = AgentObservationContext {
+            scene: &scene,
+            selection: &selection,
+            project: Some(&project),
+            assets: &["scripts/player.rhai".to_string()],
+            active_session: "Main",
+            revision: 2,
+            catalog_pending: false,
+            catalog_error: None,
+        };
+
+        let result = context
+            .execute("game_completion_audit", &serde_json::json!({}))
+            .expect("game completion audit");
+        assert!(result.ok, "{}", result.summary);
+        assert_eq!(result.data["verdict"], "playable_foundation");
+        assert_eq!(result.data["counts"]["attached_scripts"], 1);
+        assert_eq!(
+            result.data["counts"]["scripts_with_gameplay_signals"],
+            1
+        );
+
+        scene.get_mut(player).unwrap().scripts.clear();
+        let context = AgentObservationContext {
+            scene: &scene,
+            selection: &selection,
+            project: Some(&project),
+            assets: &["scripts/player.rhai".to_string()],
+            active_session: "Main",
+            revision: 2,
+            catalog_pending: false,
+            catalog_error: None,
+        };
+        let incomplete = context
+            .execute("game_completion_audit", &serde_json::json!({}))
+            .expect("game completion audit");
+        assert!(!incomplete.ok);
+        assert_eq!(incomplete.data["verdict"], "geometry_only");
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

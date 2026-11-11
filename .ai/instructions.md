@@ -3,6 +3,7 @@
 This file defines the strict, non-negotiable rules for code quality, behavior, and modular design. All AI Agents must adhere to these policies.
 
 ## 1. Syntax & Language Standards
+* **NEVER MENTION COMPETITORS IN CODE OR DOCS**: Do not mention or reference competing software, external game engines, or competitor companies in source code, variable names, comments, documentation, or commit logs. All naming, metaphors, and architecture belong strictly to AuraRafi.
 * **NO EMOJIS IN CODE**: Do not use graphical emoji characters in code files, comment lines, or structural documentation.
 * **ENGLISH ONLY FOR SOURCE CODE**: Write all code, structural variables, function names, types, comments, and internal documentation in English.
 * **i18n STRINGS MULTILINGUAL RULES**: Never use inline string localizations like `if is_es { "Texto" } else { "Text" }`. All UI strings must be routed through `t("namespace.key", self.lang)` mapping. Every new key added must have entries configured in both:
@@ -12,6 +13,11 @@ This file defines the strict, non-negotiable rules for code quality, behavior, a
 ---
 
 ## 2. Structural & Architectural Modularity
+* **SERIOUS ENGINE ARCHITECTURE & ANTI-SPAGHETTI / ANTI-HARDCODING**:
+  * AuraRafi is a serious, complex creative desktop engine—not a simplistic web landing page. Spaghetti code, lazy shortcuts, and hardcoded structures are strictly forbidden.
+  * Zero hardcoding: Never hardcode arbitrary offsets, magic values, or rigid inline blocks that hinder expandability.
+  * Anti-God-Functions & Anti-God-Files: Never write bloated monster functions or giant monolithic files. Decompose logic into clean, focused, composable units.
+  * Proactive modular file creation: The AI is explicitly authorized and expected to create as many dedicated files (helpers, sub-surfaces, hosts, models) as needed to maintain high modularity and clean architectural growth.
 * **SLIM NATIVE HOSTS AND RAFUI-FIRST PROTOCOL**: Do not write raw drawing
   calls, menu trees, or panel-specific business logic into a monolithic editor
   coordinator. The active boundary is the native Winit application,
@@ -45,10 +51,10 @@ This file defines the strict, non-negotiable rules for code quality, behavior, a
 
 ---
 
-## 4. Feature Development Flow & Verification
-* **COMPLETE IMPLEMENTATION BEFORE VERIFICATION TEST**: When any feature is requested, first program everything completely across all necessary modules and files. Implement all logical branches, structures, and tests.
-* **RUN TESTS ONLY AT THE VERY END**: Do not run checks or test executions midway. Only run `cargo test` (or cargo checks under specific request) *at the absolute end* of the complete implementation process to verify system integrity.
-* **DO NOT AUTO-FIX OR TOUCH UNRELATED COMPILER ERRORS**: If a compilation error is encountered from unfinished user work or unrelated code sections, **do not attempt to fix it, modify it, or run automatic repairs**. Report comments cleanly and preserve the files exactly as they are.
+## 4. Feature Development Flow & Minimal Verification
+* **ONE-PASS COMPLETE IMPLEMENTATION (DIRECT & BOLD)**: Never waste time with hesitation, partial steps, or piecemeal back-and-forth. Program everything completely across all necessary modules, files, handlers, and branches in a single direct pass without fear ("sin miedo al exito"). Do not halt midway for trivial confirmations.
+* **MINIMAL TESTS ONLY AT THE VERY END (NO CUSTOM TARGET-DIR)**: Do not run checks or test executions midway. Only run minimal, targeted tests (`cargo test -p <crate> --lib`, single crate, no `--workspace`) *at the absolute end* of the complete implementation process to verify system integrity. FORBIDDEN custom `--target-dir target_*` (`target_ai`, `target_check`, `target_fix`, ...): the only valid target is `target_gnu/` from `.cargo/config.toml`. Do not create `target*` inside the repo; isolation only via `CARGO_TARGET_DIR` outside the repo.
+* **DO NOT AUTO-FIX OR TOUCH UNRELATED COMPILER ERRORS**: If a compilation error, broken test, or warning is encountered from unfinished user work or unrelated code sections, **do not attempt to fix it, modify it, or run automatic repairs**. Someone may be working in parallel. Report comments cleanly and preserve the files exactly as they are.
 
 ---
 

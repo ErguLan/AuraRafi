@@ -6,7 +6,6 @@
 //! message window so long conversations do not turn into a per-frame layout
 //! workload.
 
-use raf_ai::agent_model_registry::AgentModelRegistry;
 use raf_ai::agent_runtime::{AgentStatus, AgentToolResult};
 use raf_ai::chat::{ChatMessage, MessageRole};
 use raf_core::ai::AgentMode;
@@ -15,10 +14,10 @@ use raf_core::i18n::t;
 use raf_core::project::ProjectType;
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAccessibilityRole, UiAction, UiAlign, UiEventBinding, UiEventKind, UiFlow,
-    UiIcon, UiIconId, UiIconSize, UiJustify, UiLayout, UiNode, UiNodeKind, UiOverflow, UiRect,
-    UiScrollAxis, UiSelect, UiSelectOption, UiSizeMode, UiSpacing, UiStyle, UiStylePatch,
-    UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurface, UiSurfaceMaterial,
-    UiTextOverflow, UiTextStyle, UiVirtualRange,
+    UiFontWeight, UiIcon, UiIconId, UiIconSize, UiJustify, UiLayout, UiNode, UiNodeKind,
+    UiOverflow, UiRect, UiScrollAxis, UiSelect, UiSelectOption, UiSizeMode, UiSpacing, UiStyle,
+    UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet, UiSurface,
+    UiSurfaceMaterial, UiTextOverflow, UiTextRole, UiTextStyle, UiVirtualRange,
 };
 
 use super::ai_chat::{AgentPanel, AgentReadiness};
@@ -42,7 +41,7 @@ enum AgentSurfaceVariant {
 const DOCK_TOOL_ROW_HEIGHT: f32 = 34.0;
 const DOCK_TOOL_ROW_GAP: f32 = 4.0;
 const DOCK_MESSAGE_CHROME_HEIGHT: f32 = 50.0;
-const DOCK_COMPOSER_HEIGHT: f32 = 108.0;
+const DOCK_COMPOSER_HEIGHT: f32 = 132.0;
 const APPROVAL_COMPOSER_HEIGHT: f32 = 208.0;
 const REVIEW_CHIP_WIDTH: f32 = 148.0;
 const SESSION_DOT_SIZE: f32 = 7.0;
@@ -382,10 +381,32 @@ fn build_main(
         .effective_provider(settings)
         .map(|provider| provider.provider.display_name().to_string())
         .unwrap_or_else(|| t("app.agent_provider_default", settings.language));
-    let model_label = if panel.selected_model == AgentModelRegistry::PROVIDER_DEFAULT {
-        t("app.agent_provider_default_short", settings.language)
-    } else {
-        short_text(&panel.selected_model, 32)
+    let model_label = {
+        let current = panel
+            .effective_provider(settings)
+            .map(|provider| provider.model.clone())
+            .unwrap_or_default();
+        if settings.agent_openai_use_plan && settings.default_ai_provider == raf_ai::provider::AiProvider::OpenAI
+        {
+            raf_ai::chatgpt_auth::snapshot()
+                .and_then(|view| {
+                    view.models
+                        .into_iter()
+                        .find(|model| model.slug == current)
+                        .map(|model| model.label)
+                })
+                .unwrap_or_else(|| {
+                    if current.is_empty() {
+                        t("app.agent_provider_default_short", settings.language)
+                    } else {
+                        short_text(&current, 32)
+                    }
+                })
+        } else if current.is_empty() {
+            t("app.agent_provider_default_short", settings.language)
+        } else {
+            short_text(&current, 32)
+        }
     };
     let mode_key = match settings.agent_mode {
         AgentMode::Inspect => "app.agent_mode_inspect",
@@ -419,7 +440,9 @@ fn build_main(
     let mut content = UiNode::new("agent.content", UiNodeKind::Panel)
         .with_class("agent-content")
         .with_layout(content_layout)
-        .with_child(build_status_strip(palette, panel, settings, readiness, variant));
+        .with_child(build_status_strip(
+            palette, panel, settings, readiness, variant,
+        ));
 
     let visible_messages = panel
         .runtime
@@ -429,13 +452,13 @@ fn build_main(
             message.role != MessageRole::System
                 && !(message.role == MessageRole::Assistant
                     && message.content.trim().is_empty()
-                    && message.tool_calls.is_some())
+                    && message.tool_calls.is_some()
+                    && (!panel.show_reasoning || message.reasoning.as_ref().is_none_or(|r| r.text.is_empty())))
         })
         .collect::<Vec<_>>();
     let history_width = (width - 22.0).max(180.0);
-    let tool_expansion = |message: &ChatMessage| {
-        panel.expanded_tools.contains(&message.id.to_string())
-    };
+    let tool_expansion =
+        |message: &ChatMessage| panel.expanded_tools.contains(&message.id.to_string());
     content = content.with_child(build_history(
         palette,
         panel,
@@ -463,13 +486,8 @@ fn build_main(
     if panel.model_menu_open {
         main = main.with_child(build_model_menu(palette, panel, settings, width, variant));
     }
-            if panel.mode_menu_open {
-            main = main.with_child(build_mode_menu(palette, settings, width, variant));
-        }
-    if panel.add_model_open {
-        main = main.with_child(build_add_model_menu(
-            palette, panel, settings, width, height,
-        ));
+    if panel.mode_menu_open {
+        main = main.with_child(build_mode_menu(palette, settings, width, variant));
     }
     main
 }
@@ -534,8 +552,6 @@ fn build_header(
     header = header
         .with_child(model_selector_button(
             "agent.model.trigger",
-            &panel.model_registry,
-            &panel.selected_model,
             &model_label,
             &provider_label,
             panel.model_menu_open,
@@ -548,7 +564,10 @@ fn build_header(
             panel.mode_menu_open,
             mode_width,
         ));
-    if variant == AgentSurfaceVariant::Dock && width >= 560.0 {
+    if variant == AgentSurfaceVariant::Dock
+        && width >= 560.0
+        && settings.agent_mode != AgentMode::Active
+    {
         header = header.with_child(review_chip(palette, panel, REVIEW_CHIP_WIDTH));
     }
     header = header.with_child(icon_button(
@@ -663,7 +682,7 @@ fn build_status_strip(
         strip = strip.with_child(
             UiNode::new("agent.context.document", UiNodeKind::Label)
                 .with_text_value(format!(
-                    "{} Â· {}",
+                    "{} \u{00b7} {}",
                     panel.document_name,
                     if panel.saving {
                         Some(t("agent_workspace.saving", settings.language))
@@ -736,16 +755,15 @@ fn build_status_strip(
     }
 
     if settings.agent_mode == AgentMode::Active {
-        let mut warning =
-            UiNode::new("agent.active-warning", UiNodeKind::Label)
-                .with_class("agent-active-warning")
-                .with_text_key("app.agent_active_mode_warning")
-                .with_text_style(UiTextStyle::body(tokens.warning))
-                .with_icon(UiIcon::new(UiIconId::Warning).with_size(UiIconSize::Small))
-                .with_layout(UiLayout {
-                    padding: UiSpacing::xy(8.0, 6.0),
-                    ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-                });
+        let mut warning = UiNode::new("agent.active-warning", UiNodeKind::Label)
+            .with_class("agent-active-warning")
+            .with_text_key("app.agent_active_mode_warning")
+            .with_text_style(UiTextStyle::body(tokens.warning))
+            .with_icon(UiIcon::new(UiIconId::Warning).with_size(UiIconSize::Small))
+            .with_layout(UiLayout {
+                padding: UiSpacing::xy(8.0, 6.0),
+                ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+            });
         if variant == AgentSurfaceVariant::Dock {
             warning = warning
                 .with_text_overflow(UiTextOverflow::Ellipsis)
@@ -802,7 +820,8 @@ fn build_status_strip(
                 }
             }
         }
-        AgentStatus::AwaitingApproval if variant == AgentSurfaceVariant::Dock => {
+        AgentStatus::AwaitingApproval
+            if settings.agent_mode == AgentMode::Active || variant == AgentSurfaceVariant::Dock => {
         }
         AgentStatus::AwaitingApproval => {
             if let Some(call) = panel
@@ -847,7 +866,7 @@ fn build_status_strip(
                         .with_child(
                             UiNode::new("agent.approval.operation.target", UiNodeKind::Label)
                                 .with_text_value(format!(
-                                    "{}: {} Â· {operation_count} {}",
+                                    "{}: {} \u{00b7} {operation_count} {}",
                                     t("agent_workspace.target", settings.language),
                                     short_text(&target, 180),
                                     t("agent_workspace.operations", settings.language)
@@ -864,7 +883,7 @@ fn build_status_strip(
                                     t("agent_workspace.revision", settings.language),
                                     call.expected_revision
                                         .map(|r| r.to_string())
-                                        .unwrap_or_else(|| "â€”".into())
+                                        .unwrap_or_else(|| "\u{2014}".into())
                                 ))
                                 .with_text_style(UiTextStyle::body(tokens.text_muted))
                                 .with_layout(UiLayout::fit_content()),
@@ -1220,6 +1239,105 @@ fn format_elapsed(seconds: u64) -> String {
     format!("{minutes:02}:{seconds:02}")
 }
 
+#[derive(Debug, PartialEq)]
+enum HistoryEntry {
+    Message(usize),
+    Reasoning(usize),
+    Activity {
+        first: usize,
+        count: usize,
+        expanded: bool,
+    },
+}
+
+/// Presentation-only grouping. Domain messages and tool-call order are untouched.
+/// Errors stay outside collapsed details; the final answer always stays visible.
+fn history_entries(
+    messages: &[&ChatMessage],
+    expanded: &std::collections::HashSet<String>,
+) -> Vec<HistoryEntry> {
+    let mut entries = Vec::new();
+    let mut cursor = 0;
+    while cursor < messages.len() {
+        if messages[cursor].role == MessageRole::User {
+            entries.push(HistoryEntry::Message(cursor));
+            cursor += 1;
+            continue;
+        }
+        let first = cursor;
+        while cursor < messages.len() && messages[cursor].role != MessageRole::User {
+            cursor += 1;
+        }
+        let segment = &messages[first..cursor];
+        let count = segment
+            .iter()
+            .filter(|m| m.role == MessageRole::Tool)
+            .count();
+        if count < 2 {
+            entries.extend((first..cursor).map(HistoryEntry::Message));
+            continue;
+        }
+        let open = expanded.contains(&format!("group:{}", messages[first].id));
+        entries.push(HistoryEntry::Activity {
+            first,
+            count,
+            expanded: open,
+        });
+        let last_tool = (first..cursor)
+            .rfind(|&i| messages[i].role == MessageRole::Tool)
+            .unwrap();
+        for index in first..cursor {
+            if open
+                || index > last_tool
+                || expanded.contains(&messages[index].id.to_string())
+                || (messages[index].role == MessageRole::Tool
+                    && tool_needs_attention(messages[index]))
+            {
+                entries.push(HistoryEntry::Message(index));
+            }
+        }
+    }
+    entries
+}
+
+fn activity_group(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    message: &ChatMessage,
+    count: usize,
+    expanded: bool,
+) -> UiNode {
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
+    UiNode::new(format!("agent.activity.{}", message.id), UiNodeKind::Button)
+        .with_class("agent-tool-row")
+        .with_icon(
+            UiIcon::new(if expanded {
+                UiIconId::ChevronDown
+            } else {
+                UiIconId::ChevronRight
+            })
+            .with_size(UiIconSize::Small),
+        )
+        .with_text_value(format!(
+            "{count} {}",
+            t("agent.activity.group", panel.language)
+        ))
+        .with_text_style(UiTextStyle::button(tokens.text_muted))
+        .with_layout(UiLayout {
+            padding: UiSpacing::xy(8.0, 4.0),
+            ..UiLayout::fixed(0.0, DOCK_TOOL_ROW_HEIGHT).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_accessibility_role(UiAccessibilityRole::Button)
+        .with_accessibility_expanded(expanded)
+        .with_accessibility_label_key("agent.activity.details")
+        .with_tooltip_key("agent.activity.details")
+        .focusable()
+        .with_event(UiEventBinding::command(
+            UiEventKind::Click,
+            format!("agent.tool.toggle:group:{}", message.id),
+        ))
+}
+
 fn build_history(
     palette: StudioUiPalette,
     panel: &AgentPanel,
@@ -1231,15 +1349,35 @@ fn build_history(
     tool_expansion: impl Fn(&ChatMessage) -> bool,
 ) -> UiNode {
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
-    let message_heights = messages
+    let mut entries = Vec::new();
+    for entry in history_entries(messages, &panel.expanded_tools) {
+        if let HistoryEntry::Message(index) = entry {
+            let message = messages[index];
+            if panel.show_reasoning && message.reasoning.as_ref().is_some_and(|r| !r.text.is_empty()) {
+                entries.push(HistoryEntry::Reasoning(index));
+            }
+            if message.role == MessageRole::Assistant && message.content.trim().is_empty()
+                && (message.tool_calls.is_some() || message.reasoning.is_some()) { continue; }
+            entries.push(HistoryEntry::Message(index));
+        } else {
+            entries.push(entry);
+        }
+    }
+    let message_heights = entries
         .iter()
-        .map(|message| {
-            estimated_message_height_with_variant(
-                message,
+        .map(|entry| match entry {
+            HistoryEntry::Activity { .. } => DOCK_TOOL_ROW_HEIGHT,
+            HistoryEntry::Reasoning(index) => {
+                if panel.expanded_tools.contains(&format!("reasoning:{}", messages[*index].id)) {
+                    DOCK_TOOL_ROW_HEIGHT + 126.0
+                } else { DOCK_TOOL_ROW_HEIGHT }
+            }
+            HistoryEntry::Message(index) => estimated_message_height_with_variant(
+                messages[*index],
                 width,
                 variant,
-                tool_expansion(message),
-            )
+                tool_expansion(messages[*index]),
+            ),
         })
         .collect::<Vec<_>>();
     let range = visible_message_range(&message_heights, scroll_offset, HISTORY_VIEWPORT_ESTIMATE);
@@ -1269,16 +1407,14 @@ fn build_history(
                     align_items: UiAlign::Center,
                     ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
                 })
-                .with_child(
-                    if variant == AgentSurfaceVariant::Embedded {
-                        UiNode::new("agent.composer.hint", UiNodeKind::Label)
-                            .with_text_key("app.agent_enter_to_send")
-                            .with_text_style(UiTextStyle::body(tokens.text_muted))
-                            .with_layout(UiLayout::fit_content())
-                    } else {
-                        spacer("agent.composer.hint.hidden", 0.0)
-                    },
-                )
+                .with_child(if variant == AgentSurfaceVariant::Embedded {
+                    UiNode::new("agent.composer.hint", UiNodeKind::Label)
+                        .with_text_key("app.agent_enter_to_send")
+                        .with_text_style(UiTextStyle::body(tokens.text_muted))
+                        .with_layout(UiLayout::fit_content())
+                } else {
+                    spacer("agent.composer.hint.hidden", 0.0)
+                })
                 .with_child(
                     UiNode::new("agent.empty.subtitle", UiNodeKind::Label)
                         .with_text_key(match project_type {
@@ -1294,7 +1430,7 @@ fn build_history(
         );
     } else {
         let mut message_top = top_height + if top_height > 0.0 { 8.0 } else { 0.0 };
-        for (index, message) in messages
+        for (entry_index, entry) in entries
             .iter()
             .enumerate()
             .skip(range.start)
@@ -1302,16 +1438,24 @@ fn build_history(
         {
             let viewport =
                 MessageViewport::for_message(scroll_offset, HISTORY_VIEWPORT_ESTIMATE, message_top);
-            scroll = scroll.with_child(message_card_with_variant(
-                palette,
-                message,
-                width,
-                index,
-                viewport,
-                variant,
-                tool_expansion(message),
-            ));
-            message_top += message_heights[index] + 8.0;
+            scroll = scroll.with_child(match entry {
+                HistoryEntry::Activity {
+                    first,
+                    count,
+                    expanded,
+                } => activity_group(palette, panel, messages[*first], *count, *expanded),
+                HistoryEntry::Reasoning(index) => reasoning_entry(palette, panel, messages[*index]),
+                HistoryEntry::Message(index) => message_card_with_variant(
+                    palette,
+                    messages[*index],
+                    width,
+                    *index,
+                    viewport,
+                    variant,
+                    tool_expansion(messages[*index]),
+                ),
+            });
+            message_top += message_heights[entry_index] + 8.0;
         }
     }
     if bottom_height > 0.0 {
@@ -1321,6 +1465,38 @@ fn build_history(
         return scroll;
     }
     scroll
+}
+
+fn reasoning_entry(palette: StudioUiPalette, panel: &AgentPanel, message: &ChatMessage) -> UiNode {
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
+    let trace = message.reasoning.as_ref().map(|r| r.text.as_str()).unwrap_or("");
+    let key = format!("reasoning:{}", message.id);
+    let expanded = panel.expanded_tools.contains(&key);
+    let title = format!("{} · {}", t("agent.reasoning.trace", panel.language), short_text(trace, 120));
+    let button = UiNode::new(format!("agent.reasoning.{}.toggle", message.id), UiNodeKind::Button)
+        .with_class("agent-tool-row")
+        .with_icon(UiIcon::new(if expanded { UiIconId::ChevronDown } else { UiIconId::ChevronRight }).with_size(UiIconSize::Small))
+        .with_text_value(title)
+        .with_text_overflow(UiTextOverflow::Ellipsis)
+        .with_text_style(UiTextStyle::button(tokens.text_muted))
+        .with_accessibility_role(UiAccessibilityRole::Button)
+        .with_accessibility_label_key("agent.reasoning.trace")
+        .with_accessibility_expanded(expanded)
+        .with_tooltip_key("agent.reasoning.trace_hint")
+        .focusable()
+        .with_layout(UiLayout::fixed(0.0, DOCK_TOOL_ROW_HEIGHT).with_width_mode(UiSizeMode::Fill))
+        .with_event(UiEventBinding::command(UiEventKind::Click, format!("agent.tool.toggle:{key}")));
+    if !expanded { return button; }
+    UiNode::new(format!("agent.reasoning.{}", message.id), UiNodeKind::Panel)
+        .with_layout(UiLayout { flow: UiFlow::Column, gap: 4.0, overflow: UiOverflow::Clip, ..UiLayout::fixed(0.0, DOCK_TOOL_ROW_HEIGHT + 126.0).with_width_mode(UiSizeMode::Fill) })
+        .with_child(button)
+        .with_child(UiNode::new(format!("agent.reasoning.{}.text", message.id), UiNodeKind::Label)
+            .with_text_value(bounded_text(trace, 2048))
+            .with_text_style(UiTextStyle::body(tokens.text_muted))
+            .with_text_overflow(UiTextOverflow::Wrap)
+            .selectable_text()
+            .with_layout(UiLayout { overflow: UiOverflow::Clip, ..UiLayout::fixed(0.0, 88.0).with_width_mode(UiSizeMode::Fill) }))
+        .with_child(copy_message_button(format!("agent.reasoning.{}.copy", message.id), trace))
 }
 
 fn build_suggestions(palette: StudioUiPalette, project_type: ProjectType) -> UiNode {
@@ -1384,6 +1560,7 @@ fn build_composer(
 ) -> UiNode {
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     if variant == AgentSurfaceVariant::Dock
+        && settings.agent_mode != AgentMode::Active
         && panel.runtime.status == AgentStatus::AwaitingApproval
         && !panel.runtime.pending_calls.is_empty()
     {
@@ -1403,9 +1580,9 @@ fn build_composer(
             ..UiLayout::fixed(
                 0.0,
                 if variant == AgentSurfaceVariant::Dock && !narrow {
-                    DOCK_COMPOSER_HEIGHT
+                    DOCK_COMPOSER_HEIGHT + composer_media_height(panel)
                 } else {
-                    if width < 500.0 { 164.0 } else { 152.0 }
+                    (if width < 500.0 { 180.0 } else { 168.0 }) + composer_media_height(panel)
                 },
             )
             .with_width_mode(UiSizeMode::Fill)
@@ -1447,8 +1624,9 @@ fn build_composer(
                     action_button("agent.stop", "app.agent_stop", "agent.stop", false)
                         .with_icon(UiIcon::new(UiIconId::Stop).with_size(UiIconSize::Small))
                 } else {
-                    action_button("agent.send", "app.agent_send", "agent.submit", true)
-                        .disabled(!matches!(readiness, AgentReadiness::Ready))
+                    action_button("agent.send", "app.agent_send", "agent.submit", true).disabled(
+                        !matches!(readiness, AgentReadiness::Ready) || panel.media_pending(),
+                    )
                 }),
         )
         .with_child(
@@ -1461,20 +1639,83 @@ fn build_composer(
                     ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
                 })
                 .with_child(
+                    icon_button(
+                        "agent.image.paste",
+                        UiIconId::Add,
+                        "agent.media.paste",
+                        "agent.image.paste",
+                    )
+                    .disabled(running || panel.media_pending()),
+                )
+                .with_child(if settings.agent_openai_use_plan
+                    && settings.default_ai_provider == raf_ai::provider::AiProvider::OpenAI
+                    && raf_ai::chatgpt_auth::active_connected() {
+                    UiNode::new("agent.account.usage", UiNodeKind::Button)
+                        .with_class("agent-button")
+                        .with_text_key("agent.account.using_plan")
+                        .with_tooltip_key("settings.account.usage")
+                        .with_accessibility_role(UiAccessibilityRole::Button)
+                        .with_text_overflow(UiTextOverflow::Ellipsis)
+                        .with_layout(UiLayout::fixed(120.0, 30.0))
+                        .focusable().with_event(UiEventBinding::command(UiEventKind::Click, "agent.account.usage"))
+                } else {
+                    UiNode::new("agent.account.hidden", UiNodeKind::Panel).with_style(UiStyle::transparent()).with_layout(UiLayout::fixed(0.0, 0.0))
+                })
+                .with_child(
+                    UiNode::new("agent.reasoning.cycle", UiNodeKind::Button)
+                        .with_class("agent-button")
+                        .with_text_value(format!(
+                            "{}: {}",
+                            t("agent.reasoning.short", settings.language),
+                            t(
+                                match settings.agent_reasoning_effort.as_str() {
+                                    "low" => "settings.reasoning.low",
+                                    "medium" => "settings.reasoning.medium",
+                                    "high" => "settings.reasoning.high",
+                                    "none" => "settings.reasoning.none",
+                                    "max" => "settings.reasoning.max",
+                                    _ => "settings.reasoning.auto",
+                                },
+                                settings.language
+                            )
+                        ))
+                        .with_tooltip_key("agent.reasoning.cycle")
+                        .with_text_overflow(UiTextOverflow::Ellipsis)
+                        .with_accessibility_label_key("agent.reasoning.cycle")
+                        .with_accessibility_role(UiAccessibilityRole::Button)
+                        .focusable()
+                        .disabled(running)
+                        .with_layout(UiLayout::fixed(116.0, 30.0))
+                        .with_event(UiEventBinding::command(
+                            UiEventKind::Click,
+                            "agent.reasoning.cycle",
+                        )),
+                )
+                .with_child(
                     UiNode::new("agent.composer.metrics", UiNodeKind::Label)
                         .with_class("agent-metrics")
                         .with_text_value(metrics_text(
                             panel,
                             settings.language,
-                            settings.agent_max_response_tokens,
+                            if settings.agent_response_limit_enabled {
+                                settings.agent_max_response_tokens
+                            } else {
+                                0
+                            },
                             message_count,
                         ))
                         .with_text_style(UiTextStyle::body(tokens.text_muted))
-                        .with_layout(UiLayout::fit_content()),
+                        .with_text_overflow(UiTextOverflow::Ellipsis)
+                        .with_layout(UiLayout {
+                            grow: 1.0,
+                            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                        }),
                 ),
         )
         .with_child({
-            if variant == AgentSurfaceVariant::Dock && !narrow {
+            if settings.agent_mode == AgentMode::Active
+                || (variant == AgentSurfaceVariant::Dock && !narrow)
+            {
                 UiNode::new("agent.composer.review.hidden", UiNodeKind::Panel)
                     .with_style(UiStyle::transparent())
                     .with_layout(UiLayout::fixed(0.0, 0.0))
@@ -1491,7 +1732,85 @@ fn build_composer(
                 )
             }
         });
-    composer
+    composer.with_child(composer_media(palette, panel, running))
+}
+
+fn composer_media_height(panel: &AgentPanel) -> f32 {
+    let count = panel
+        .history
+        .active_session()
+        .map_or(0, |s| s.draft_images.len());
+    (count.min(raf_ai::chat_media::MAX_IMAGES) as f32 * 30.0)
+        + if panel.media_pending() || panel.media_error.is_some() {
+            38.0
+        } else {
+            0.0
+        }
+}
+
+fn composer_media(palette: StudioUiPalette, panel: &AgentPanel, running: bool) -> UiNode {
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
+    let mut list = UiNode::new("agent.composer.media", UiNodeKind::Panel).with_layout(UiLayout {
+        flow: UiFlow::Column,
+        gap: 2.0,
+        ..UiLayout::fixed(0.0, composer_media_height(panel)).with_width_mode(UiSizeMode::Fill)
+    });
+    if let Some(session) = panel.history.active_session() {
+        for (index, image) in session
+            .draft_images
+            .iter()
+            .take(raf_ai::chat_media::MAX_IMAGES)
+            .enumerate()
+        {
+            list = list.with_child(
+                UiNode::new(format!("agent.image.{index}"), UiNodeKind::Toolbar)
+                    .with_layout(UiLayout {
+                        flow: UiFlow::Row,
+                        align_items: UiAlign::Center,
+                        gap: 6.0,
+                        ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
+                    })
+                    .with_child(
+                        UiNode::new(format!("agent.image.{index}.label"), UiNodeKind::Label)
+                            .with_icon(UiIcon::new(UiIconId::Assets).with_size(UiIconSize::Small))
+                            .with_text_value(format!(
+                                "{} {} · PNG · {} × {}",
+                                t("agent.media.attachment", panel.language),
+                                index + 1,
+                                image.width,
+                                image.height
+                            ))
+                            .with_text_style(UiTextStyle::body(tokens.text_muted))
+                            .with_layout(UiLayout {
+                                grow: 1.0,
+                                ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                            }),
+                    )
+                    .with_child(
+                        icon_button(
+                            &format!("agent.image.{index}.remove"),
+                            UiIconId::Close,
+                            "agent.media.remove",
+                            &format!("agent.image.remove:{}", image.file),
+                        )
+                        .disabled(running || panel.media_pending()),
+                    ),
+            );
+        }
+    }
+    if panel.media_pending() || panel.media_error.is_some() {
+        let label = UiNode::new("agent.image.status", UiNodeKind::Label)
+            .with_accessibility_role(UiAccessibilityRole::Status)
+            .with_text_style(UiTextStyle::body(tokens.text_muted))
+            .with_text_overflow(UiTextOverflow::Wrap)
+            .with_layout(UiLayout::fixed(0.0, 36.0).with_width_mode(UiSizeMode::Fill));
+        list = list.with_child(if let Some(error) = &panel.media_error {
+            label.with_text_value(error)
+        } else {
+            label.with_text_key("agent.media.preparing")
+        });
+    }
+    list
 }
 
 fn dock_approval_composer(
@@ -1534,11 +1853,7 @@ fn dock_approval_composer(
                         "{}\n{}",
                         preview.summary,
                         short_text(
-                            &preview
-                                .diff
-                                .as_ref()
-                                .unwrap_or(&preview.data)
-                                .to_string(),
+                            &preview.diff.as_ref().unwrap_or(&preview.data).to_string(),
                             preview_chars,
                         )
                     )
@@ -1617,26 +1932,26 @@ fn dock_approval_composer(
             .with_child(
                 UiNode::new("agent.approval.operation.target", UiNodeKind::Label)
                     .with_text_value(format!(
-                        "{}: {} Â· {operation_count} {} Â· {} {}",
+                        "{}: {} \u{00b7} {operation_count} {} \u{00b7} {} {}",
                         t("agent_workspace.target", settings.language),
                         short_text(&target, 120),
                         t("agent_workspace.operations", settings.language),
                         t("agent_workspace.revision", settings.language),
                         call.expected_revision
                             .map(|r| r.to_string())
-                            .unwrap_or_else(|| "â€”".into())
+                            .unwrap_or_else(|| "\u{2014}".into())
                     ))
                     .with_text_style(UiTextStyle::body(tokens.text_muted))
                     .with_text_overflow(UiTextOverflow::Ellipsis)
                     .with_tooltip_value(format!(
-                        "{}: {} Â· {operation_count} {} Â· {} {}",
+                        "{}: {} \u{00b7} {operation_count} {} \u{00b7} {} {}",
                         t("agent_workspace.target", settings.language),
                         target,
                         t("agent_workspace.operations", settings.language),
                         t("agent_workspace.revision", settings.language),
                         call.expected_revision
                             .map(|r| r.to_string())
-                            .unwrap_or_else(|| "â€”".into())
+                            .unwrap_or_else(|| "\u{2014}".into())
                     ))
                     .with_layout(UiLayout {
                         width_mode: UiSizeMode::Fill,
@@ -1672,19 +1987,17 @@ fn dock_approval_composer(
                 basis: [0.0, 30.0],
                 ..UiLayout::default()
             })
-            .with_child(
-                match call {
-                    Some(call) => action_button(
-                        "agent.approval.once",
-                        "agent_workspace.approve_once",
-                        &format!("agent.call.approve:{}", call.id),
-                        false,
-                    ),
-                    None => UiNode::new("agent.approval.once", UiNodeKind::Panel)
-                        .with_style(UiStyle::transparent())
-                        .with_layout(UiLayout::fixed(0.0, 0.0)),
-                },
-            )
+            .with_child(match call {
+                Some(call) => action_button(
+                    "agent.approval.once",
+                    "agent_workspace.approve_once",
+                    &format!("agent.call.approve:{}", call.id),
+                    false,
+                ),
+                None => UiNode::new("agent.approval.once", UiNodeKind::Panel)
+                    .with_style(UiStyle::transparent())
+                    .with_layout(UiLayout::fixed(0.0, 0.0)),
+            })
             .with_child(match call {
                 Some(call) => action_button(
                     "agent.approval.skip",
@@ -1707,14 +2020,51 @@ fn build_model_menu(
     variant: AgentSurfaceVariant,
 ) -> UiNode {
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
-    let labels = panel.model_registry.selector_labels();
-    let options = labels
+    let provider = panel
+        .effective_provider(settings)
+        .map(|config| config.provider)
+        .unwrap_or(settings.default_ai_provider);
+    let plan_owned = settings.agent_openai_use_plan
+        && provider == raf_ai::provider::AiProvider::OpenAI;
+    let has_catalog = plan_owned
+        || matches!(
+            provider,
+            raf_ai::provider::AiProvider::OpenRouter
+                | raf_ai::provider::AiProvider::OpenAI
+                | raf_ai::provider::AiProvider::OpenCode
+                | raf_ai::provider::AiProvider::OpenCodeGo
+        );
+    let (state, items) = crate::panels::ai_model_options::collect_items(settings, provider, "");
+    let paint = crate::panels::ai_model_options::ModelRowPaint {
+        text: tokens.text,
+        muted: tokens.text_muted,
+        accent_hot: tokens.accent_hot,
+    };
+    let actions = crate::panels::ai_model_options::ModelRowActions {
+        node_prefix: "agent.model.".to_string(),
+        select_key: "agent.model".to_string(),
+        pin_command_prefix: "agent.model.pin:".to_string(),
+        close_select_id: Some("agent.model.trigger".to_string()),
+    };
+    let status = crate::panels::ai_model_options::model_status_text(&state, settings.language);
+    let pinned_count = items.iter().filter(|item| item.pinned).count();
+    let custom_count = items.iter().filter(|item| item.custom).count();
+    let plan_count = items
         .iter()
-        .cloned()
-        .map(|label| UiSelectOption::new(label.clone(), label))
-        .collect::<Vec<_>>();
+        .filter(|item| item.value.starts_with("account:"))
+        .count();
+    let catalog_count = items.iter().filter(|item| !item.pinned && !item.custom && !item.value.starts_with("account:")).count();
+    let custom_rows = if plan_owned { 0 } else { 3 };
+    let row_total = usize::from(has_catalog)
+        + usize::from(!status.is_empty())
+        + items.len()
+        + usize::from(pinned_count > 0)
+        + usize::from(plan_count > 0)
+        + usize::from(catalog_count > 0)
+        + usize::from(custom_count > 0)
+        + custom_rows;
+    let menu_height = (row_total as f32 * 34.0).clamp(68.0, 340.0);
     let (model_width, mode_width) = selector_widths_with_variant(width, variant);
-    let menu_height = (labels.len().saturating_add(1) as f32 * 34.0).clamp(68.0, 300.0);
     let right_reserved = if variant == AgentSurfaceVariant::Dock && width >= 560.0 {
         50.0 + REVIEW_CHIP_WIDTH + 8.0
     } else {
@@ -1733,73 +2083,97 @@ fn build_model_menu(
         .with_material(UiSurfaceMaterial::TranslucentRaised)
         .with_layout(menu_layout.with_z_index(30))
         .with_accessibility_role(UiAccessibilityRole::Menu);
-    for label in labels {
-        let value = if label == AgentModelRegistry::PROVIDER_DEFAULT {
-            t("app.agent_provider_default_short", settings.language)
-        } else {
-            panel
-                .model_registry
-                .get(&label)
-                .map(|shortcut| {
-                    format!(
-                        "{}  |  {}  Â·  {}",
-                        shortcut.label,
-                        shortcut.model_id,
-                        shortcut.provider.display_name()
-                    )
-                })
-                .unwrap_or_else(|| label.clone())
-        };
-        menu = menu.with_child(
-            UiNode::new(format!("agent.model.option.{label}"), UiNodeKind::Button)
-                .with_class("agent-menu-item")
-                .with_layout(UiLayout {
-                    padding: UiSpacing::xy(10.0, 8.0),
-                    ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
-                })
-                .with_text_value(value.clone())
-                .with_text_overflow(UiTextOverflow::Ellipsis)
-                .with_text_style(UiTextStyle::button(tokens.text))
-                .with_tooltip_value(value)
-                .with_accessibility_role(UiAccessibilityRole::Option)
-                .with_accessibility_selected(panel.selected_model == label)
+
+    if has_catalog {
+        menu = menu.with_child(UiNode::new("agent.model.catalog.refresh", UiNodeKind::Button)
+            .with_class("agent-menu-item-accent")
+            .with_layout(UiLayout { padding: UiSpacing::xy(10.0, 8.0), ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill) })
+            .with_text_key("agent.account.refresh_models").with_text_style(UiTextStyle::button(tokens.accent_hot))
+            .with_accessibility_role(UiAccessibilityRole::MenuItem).focusable()
+            .with_event(UiEventBinding::command(UiEventKind::Click, "agent.catalog.refresh")));
+    }
+    if !status.is_empty() {
+        menu = menu.with_child(UiNode::new(
+            "agent.model.catalog.status",
+            UiNodeKind::Label,
+        )
+        .with_layout(
+            UiLayout::fixed(0.0, 30.0)
+                .with_width_mode(UiSizeMode::Fill)
+                .padding_xy(10.0, 4.0),
+        )
+        .with_text_value(status)
+        .with_text_overflow(UiTextOverflow::Ellipsis)
+        .with_text_style(UiTextStyle::button(tokens.text_muted)));
+    }
+
+    // Custom id escape hatch first: one field, one confirmation, pins the
+    // model. Actions precede the scrollable catalog so the entry stays
+    // reachable without scrolling a long model list.
+    // Plan requests may only use the selected account's live catalog.
+    if !plan_owned {
+        menu = menu
+            .with_child(UiNode::new("agent.model.custom.divider", UiNodeKind::Separator)
+                .with_layout(UiLayout::fixed(0.0, 8.0).with_width_mode(UiSizeMode::Fill)))
+            .with_child(model_text_input(
+                "agent.new-model.id",
+                "app.agent_model_id",
+                panel.new_model_id.clone(),
+            ))
+            .with_child(UiNode::new("agent.model.confirm", UiNodeKind::Button)
+                .with_class("agent-menu-item-accent")
+                .with_layout(UiLayout { padding: UiSpacing::xy(10.0, 8.0), ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill) })
+                .with_text_key("app.agent_add_model_confirm")
+                .with_text_style(UiTextStyle::button(tokens.accent_hot))
+                .with_accessibility_role(UiAccessibilityRole::MenuItem)
                 .focusable()
-                .with_event(UiEventBinding {
-                    event: UiEventKind::Click,
-                    action: UiAction::SetSelect {
-                        key: "agent.model".to_string(),
-                        value: label.clone(),
-                        index: options
-                            .iter()
-                            .position(|option| option.value == label)
-                            .unwrap_or(0),
-                    },
-                })
-                .with_event(UiEventBinding {
-                    event: UiEventKind::Click,
-                    action: UiAction::SetSelectOpen {
-                        id: "agent.model.trigger".to_string(),
-                        open: false,
-                    },
-                }),
+                .with_event(UiEventBinding::command(UiEventKind::Click, "agent.model.confirm")));
+    }
+    if let Some(error) = panel.new_model_error.as_deref() {
+        menu = menu.with_child(UiNode::new("agent.model.error", UiNodeKind::Label)
+            .with_layout(UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill).padding_xy(10.0, 4.0))
+            .with_text_value(error.to_string())
+            .with_text_style(UiTextStyle::button(tokens.danger)));
+    }
+
+    let mut last_lane = 0u8;
+    for item in &items {
+        let lane = if item.value.starts_with("account:") {
+            3u8
+        } else if item.pinned {
+            1u8
+        } else if item.custom {
+            4u8
+        } else {
+            2u8
+        };
+        if lane != last_lane {
+            let header_key = match lane {
+                1 => "ai_models.pinned",
+                2 => "ai_models.catalog",
+                3 => "ai_models.plan",
+                _ => "ai_models.custom",
+            };
+            menu = menu
+                .with_child(crate::panels::ai_model_options::model_header_row(
+                    &paint,
+                    header_key,
+                    settings.language,
+                ));
+            last_lane = lane;
+        }
+        menu = menu.with_child(
+            crate::panels::ai_model_options::model_option_row(
+                item,
+                &paint,
+                &actions,
+                "agent-menu-item",
+            ),
         );
     }
-    menu.with_child(
-        UiNode::new("agent.model.add", UiNodeKind::Button)
-            .with_class("agent-menu-item-accent")
-            .with_layout(UiLayout {
-                padding: UiSpacing::xy(10.0, 8.0),
-                ..UiLayout::fixed(0.0, 34.0).with_width_mode(UiSizeMode::Fill)
-            })
-            .with_text_key("app.agent_add_model")
-            .with_text_style(UiTextStyle::button(tokens.accent_hot))
-            .with_accessibility_role(UiAccessibilityRole::MenuItem)
-            .focusable()
-            .with_event(UiEventBinding::command(
-                UiEventKind::Click,
-                "agent.model.add",
-            )),
-    )
+
+    // Custom id escape hatch: one field, one confirmation, pins the model.
+    menu
 }
 
 fn build_mode_menu(
@@ -1851,101 +2225,6 @@ fn build_mode_menu(
         ))
 }
 
-fn build_add_model_menu(
-    palette: StudioUiPalette,
-    panel: &AgentPanel,
-    settings: &EngineSettings,
-    width: f32,
-    height: f32,
-) -> UiNode {
-    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
-    let provider_name = panel
-        .effective_provider(settings)
-        .map(|provider| provider.provider.display_name().to_string())
-        .unwrap_or_else(|| t("app.agent_provider_default", settings.language));
-    let menu_height = if panel.new_model_error.is_some() {
-        292.0
-    } else {
-        264.0
-    };
-    let mut menu_layout = UiLayout::absolute(UiRect::new(
-        (width - 360.0).max(8.0),
-        ((height - menu_height) * 0.5).max(58.0),
-        352.0_f32.min((width - 16.0).max(1.0)),
-        menu_height,
-    ));
-    menu_layout.flow = UiFlow::Column;
-    menu_layout.gap = 8.0;
-    menu_layout.padding = UiSpacing::same(12.0);
-    menu_layout.overflow = UiOverflow::Clip;
-    let mut menu = UiNode::new("agent.add-model.menu", UiNodeKind::Menu)
-        .with_class("agent-menu agent-add-model")
-        .with_material(UiSurfaceMaterial::ModalSurface)
-        .with_layout(menu_layout.with_z_index(40))
-        .with_accessibility_role(UiAccessibilityRole::Dialog)
-        .with_child(
-            UiNode::new("agent.add-model.title", UiNodeKind::Label)
-                .with_text_key("app.agent_add_model_title")
-                .with_text_style(UiTextStyle::panel_title(tokens.text))
-                .with_layout(UiLayout::fit_content()),
-        )
-        .with_child(
-            UiNode::new("agent.add-model.provider", UiNodeKind::Label)
-                .with_text_value(format!(
-                    "{}: {}",
-                    t("app.agent_add_model_provider", settings.language),
-                    provider_name
-                ))
-                .with_text_style(UiTextStyle::body(tokens.text_muted))
-                .with_layout(UiLayout::fit_content()),
-        )
-        .with_child(model_text_input(
-            "agent.new-model.label",
-            "app.agent_model_label",
-            panel.new_model_label.clone(),
-        ))
-        .with_child(model_text_input(
-            "agent.new-model.id",
-            "app.agent_model_id",
-            panel.new_model_id.clone(),
-        ));
-    if let Some(error) = panel.new_model_error.as_deref() {
-        menu = menu.with_child(
-            UiNode::new("agent.add-model.error", UiNodeKind::Label)
-                .with_text_value(error.to_string())
-                .with_text_style(UiTextStyle::body(tokens.danger))
-                .with_layout(UiLayout::fit_content()),
-        );
-    }
-    menu.with_child(
-        UiNode::new("agent.add-model.actions", UiNodeKind::Toolbar)
-            .with_layout(UiLayout {
-                flow: UiFlow::Row,
-                gap: 6.0,
-                justify_content: UiJustify::End,
-                ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
-            })
-            .with_child(action_button(
-                "agent.add-model.cancel",
-                "app.agent_cancel",
-                "agent.model.cancel",
-                false,
-            ))
-            .with_child(action_button(
-                "agent.add-model.settings",
-                "app.agent_open_ai_settings",
-                "agent.open-settings",
-                false,
-            ))
-            .with_child(action_button(
-                "agent.add-model.confirm",
-                "app.agent_add_model_confirm",
-                "agent.model.confirm",
-                true,
-            )),
-    )
-}
-
 fn message_card_with_variant(
     palette: StudioUiPalette,
     message: &ChatMessage,
@@ -1955,8 +2234,15 @@ fn message_card_with_variant(
     variant: AgentSurfaceVariant,
     tool_expanded: bool,
 ) -> UiNode {
-    if variant == AgentSurfaceVariant::Dock && message.role == MessageRole::Tool {
-        return dock_tool_entry(palette, message, width, index, viewport, tool_expanded);
+    if message.role == MessageRole::Tool {
+        return dock_tool_entry(
+            palette,
+            message,
+            width,
+            index,
+            viewport,
+            tool_expanded || tool_needs_attention(message),
+        );
     }
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let content = bounded_text(&display_message_content(message), MAX_VISIBLE_MESSAGE_CHARS);
@@ -1988,17 +2274,12 @@ fn message_card_with_variant(
     };
     let card_width = (width * MESSAGE_WIDTH_RATIO).clamp(220.0, 760.0);
     let body_style = UiTextStyle::body(tokens.text);
-    let display_text = if matches!(message.role, MessageRole::Assistant | MessageRole::Tool) {
-        lightweight_markdown_text(&content)
-    } else {
-        content.clone()
-    };
-    let display_chunks = message_text_chunks(&display_text);
+    let display_chunks = message_text_tiles(&content, message.role);
     let body_height = display_chunks
         .iter()
         .enumerate()
         .map(|(index, chunk)| {
-            estimated_text_tile_height(chunk, card_width - 24.0, body_style.line_height_px)
+            estimated_text_tile_height(&chunk.0, card_width - 24.0, body_style.line_height_px)
                 + if index + 1 < display_chunks.len() {
                     MESSAGE_TEXT_TILE_GAP
                 } else {
@@ -2110,14 +2391,17 @@ fn dock_tool_entry(
         .map(str::trim)
         .find(|line| !line.is_empty())
         .map(str::to_string);
-    let title_node = UiNode::new(format!("agent.message.{index}.row.title"), UiNodeKind::Label)
-        .with_text_overflow(UiTextOverflow::Ellipsis)
-        .with_text_style(UiTextStyle::button(tokens.text_muted))
-        .with_layout(UiLayout {
-            grow: 1.0,
-            width_mode: UiSizeMode::Fill,
-            ..UiLayout::fit_content()
-        });
+    let title_node = UiNode::new(
+        format!("agent.message.{index}.row.title"),
+        UiNodeKind::Label,
+    )
+    .with_text_overflow(UiTextOverflow::Ellipsis)
+    .with_text_style(UiTextStyle::button(tokens.text_muted))
+    .with_layout(UiLayout {
+        grow: 1.0,
+        width_mode: UiSizeMode::Fill,
+        ..UiLayout::fit_content()
+    });
     let title_node = if let Some(title) = title {
         title_node.with_text_value(title)
     } else {
@@ -2136,35 +2420,43 @@ fn dock_tool_entry(
             ..UiLayout::default()
         })
         .with_child(
-            UiNode::new(format!("agent.message.{index}.row.toggle"), UiNodeKind::Button)
-                .with_class("agent-icon-button")
-                .with_layout(UiLayout::fixed(24.0, 24.0))
-                .with_icon(UiIcon::new(if tool_expanded {
+            UiNode::new(
+                format!("agent.message.{index}.row.toggle"),
+                UiNodeKind::Button,
+            )
+            .with_class("agent-icon-button")
+            .with_layout(UiLayout::fixed(24.0, 24.0))
+            .with_icon(
+                UiIcon::new(if tool_expanded {
                     UiIconId::ChevronDown
                 } else {
                     UiIconId::ChevronRight
                 })
-                .with_size(UiIconSize::Small))
-                .with_tooltip_key("app.agent_tool_result")
-                .with_accessibility_label_key("app.agent_tool_result")
-                .with_accessibility_role(UiAccessibilityRole::Button)
-                .with_accessibility_expanded(tool_expanded)
-                .focusable()
-                .with_event(UiEventBinding::command(
-                    UiEventKind::Click,
-                    format!("agent.tool.toggle:{}", message.id),
-                )),
+                .with_size(UiIconSize::Small),
+            )
+            .with_tooltip_key("app.agent_tool_result")
+            .with_accessibility_label_key("app.agent_tool_result")
+            .with_accessibility_role(UiAccessibilityRole::Button)
+            .with_accessibility_expanded(tool_expanded)
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                format!("agent.tool.toggle:{}", message.id),
+            )),
         )
         .with_child(
-            UiNode::new(format!("agent.message.{index}.row.status"), UiNodeKind::Panel)
-                .with_layout(UiLayout::fixed(8.0, 8.0))
-                .with_style(UiStyle {
-                    fill: status_fill,
-                    radius: 4.0,
-                    ..UiStyle::transparent()
-                })
-                .with_accessibility_role(UiAccessibilityRole::Status)
-                .with_tooltip_key(status_key),
+            UiNode::new(
+                format!("agent.message.{index}.row.status"),
+                UiNodeKind::Panel,
+            )
+            .with_layout(UiLayout::fixed(8.0, 8.0))
+            .with_style(UiStyle {
+                fill: status_fill,
+                radius: 4.0,
+                ..UiStyle::transparent()
+            })
+            .with_accessibility_role(UiAccessibilityRole::Status)
+            .with_tooltip_key(status_key),
         )
         .with_child(title_node);
     if let Some(result) = message
@@ -2190,14 +2482,13 @@ fn dock_tool_entry(
         return toggle_row;
     }
     let body_style = UiTextStyle::body(tokens.text);
-    let display_text = lightweight_markdown_text(&content);
-    let display_chunks = message_text_chunks(&display_text);
+    let display_chunks = message_text_tiles(&content, MessageRole::Tool);
     let card_width = (width * MESSAGE_WIDTH_RATIO).clamp(220.0, 760.0);
     let body_height = display_chunks
         .iter()
         .enumerate()
         .map(|(chunk_index, chunk)| {
-            estimated_text_tile_height(chunk, card_width - 24.0, body_style.line_height_px)
+            estimated_text_tile_height(&chunk.0, card_width - 24.0, body_style.line_height_px)
                 + if chunk_index + 1 < display_chunks.len() {
                     MESSAGE_TEXT_TILE_GAP
                 } else {
@@ -2233,7 +2524,7 @@ fn dock_tool_entry(
                 .with_child(
                     UiNode::new(format!("agent.message.{index}.label"), UiNodeKind::Label)
                         .with_text_key("app.agent_tool_result")
-                        .with_text_style(UiTextStyle::button(tokens.positive))
+                        .with_text_style(UiTextStyle::button(status_fill))
                         .with_layout(UiLayout {
                             grow: 1.0,
                             width_mode: UiSizeMode::Fill,
@@ -2252,7 +2543,7 @@ fn dock_tool_entry(
             message.role,
             card_width - 24.0,
             viewport,
-            chrome,
+            chrome + DOCK_TOOL_ROW_HEIGHT + DOCK_TOOL_ROW_GAP,
         ));
     UiNode::new(format!("agent.message.{index}.wrap"), UiNodeKind::Toolbar)
         .with_layout(UiLayout {
@@ -2260,10 +2551,7 @@ fn dock_tool_entry(
             align_items: UiAlign::Start,
             gap: DOCK_TOOL_ROW_GAP,
             height_mode: UiSizeMode::Fixed,
-            basis: [
-                0.0,
-                DOCK_TOOL_ROW_HEIGHT + DOCK_TOOL_ROW_GAP + card_height,
-            ],
+            basis: [0.0, DOCK_TOOL_ROW_HEIGHT + DOCK_TOOL_ROW_GAP + card_height],
             ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         })
         .with_child(toggle_row)
@@ -2273,8 +2561,18 @@ fn dock_tool_entry(
 fn tool_status(palette: StudioUiPalette, message: &ChatMessage) -> ([u8; 4], &'static str) {
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let Ok(result) = serde_json::from_str::<AgentToolResult>(&message.content) else {
-        return (tokens.text_muted, "app.agent_tool_result");
+        return (
+            if tool_needs_attention(message) {
+                tokens.danger
+            } else {
+                tokens.text_muted
+            },
+            "app.agent_tool_result",
+        );
     };
+    if !result.ok {
+        return (tokens.danger, "app.agent_tool_result");
+    }
     let verification_status = result
         .verification
         .as_ref()
@@ -2300,17 +2598,12 @@ fn message_body_with_chrome(
     chrome_height: f32,
 ) -> UiNode {
     let body_id = id;
-    let display_text = if matches!(role, MessageRole::Assistant | MessageRole::Tool) {
-        lightweight_markdown_text(content)
-    } else {
-        content.to_string()
-    };
-    let chunks = message_text_chunks(&display_text);
+    let chunks = message_text_tiles(content, role);
     let chunk_heights = chunks
         .iter()
         .enumerate()
         .map(|(index, chunk)| {
-            estimated_text_tile_height(chunk, width, body_style.line_height_px)
+            estimated_text_tile_height(&chunk.0, width, body_style.line_height_px)
                 + if index + 1 < chunks.len() {
                     MESSAGE_TEXT_TILE_GAP
                 } else {
@@ -2347,12 +2640,35 @@ fn message_body_with_chrome(
         } else {
             format!("{body_id}.text.{index}")
         };
+        let mut tile_style = body_style;
+        match chunk.1 {
+            MessageTileKind::Heading => tile_style.weight = UiFontWeight::Bold,
+            MessageTileKind::Code => tile_style.role = UiTextRole::Monospace,
+            MessageTileKind::Body => {}
+        }
+        let code_style = if chunk.1 == MessageTileKind::Code {
+            UiStyle {
+                fill: [0, 0, 0, 20],
+                border: [
+                    body_style.color[0],
+                    body_style.color[1],
+                    body_style.color[2],
+                    40,
+                ],
+                border_width: 1.0,
+                radius: 4.0,
+                ..UiStyle::transparent()
+            }
+        } else {
+            UiStyle::transparent()
+        };
         body = body.with_child(
             UiNode::new(text_id, UiNodeKind::Label)
-                .with_text_value(chunk)
+                .with_text_value(chunk.0)
                 .selectable_text()
                 .with_text_overflow(UiTextOverflow::Wrap)
-                .with_text_style(body_style)
+                .with_text_style(tile_style)
+                .with_style(code_style)
                 .with_layout(UiLayout {
                     width_mode: UiSizeMode::Fill,
                     height_mode: UiSizeMode::Fixed,
@@ -2430,25 +2746,91 @@ fn message_text_chunks(content: &str) -> Vec<String> {
     chunks
 }
 
-fn lightweight_markdown_text(content: &str) -> String {
-    content
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return String::new();
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum MessageTileKind {
+    Body,
+    Heading,
+    Code,
+}
+
+/// A deliberately small, non-HTML Markdown subset. Never opens links, loads
+/// remote images or executes code. Fenced code keeps punctuation and indentation.
+fn message_text_tiles(content: &str, role: MessageRole) -> Vec<(String, MessageTileKind)> {
+    if !matches!(role, MessageRole::Assistant | MessageRole::Tool) {
+        return message_text_chunks(content)
+            .into_iter()
+            .map(|s| (s, MessageTileKind::Body))
+            .collect();
+    }
+    let mut blocks: Vec<(String, MessageTileKind)> = Vec::new();
+    let mut fence: Option<&str> = None;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if let Some(marker) = fence {
+            if trimmed.starts_with(marker) {
+                fence = None;
+                continue;
             }
-            let without_heading = trimmed.trim_start_matches('#').trim();
-            let (bullet, text) = if let Some(value) = without_heading.strip_prefix("- ") {
-                (true, value)
-            } else if let Some(value) = without_heading.strip_prefix("* ") {
-                (true, value)
+        } else if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            fence = Some(if trimmed.starts_with("```") {
+                "```"
             } else {
-                (false, without_heading)
+                "~~~"
+            });
+            continue;
+        }
+        let (text, kind) = if fence.is_some() {
+            (line.to_string(), MessageTileKind::Code)
+        } else {
+            let heading = trimmed.chars().take_while(|c| *c == '#').count();
+            let heading =
+                heading > 0 && heading <= 6 && trimmed.as_bytes().get(heading) == Some(&b' ');
+            let text = if heading {
+                trimmed.trim_start_matches('#').trim_start()
+            } else {
+                trimmed
             };
-            let prefix = bullet.then_some("\u{2022} ").unwrap_or_default();
-            format!("{prefix}{}", strip_inline_markdown(text))
+            let text =
+                if let Some(bullet) = text.strip_prefix("- ").or_else(|| text.strip_prefix("* ")) {
+                    format!("\u{2022} {}", strip_inline_markdown(bullet))
+                } else {
+                    strip_inline_markdown(text)
+                };
+            (
+                text,
+                if heading {
+                    MessageTileKind::Heading
+                } else {
+                    MessageTileKind::Body
+                },
+            )
+        };
+        if let Some((previous, previous_kind)) = blocks.last_mut().filter(|(_, k)| *k == kind) {
+            let _ = previous_kind;
+            previous.push('\n');
+            previous.push_str(&text);
+        } else {
+            blocks.push((text, kind));
+        }
+    }
+    if blocks.is_empty() {
+        blocks.push((String::new(), MessageTileKind::Body));
+    }
+    blocks
+        .into_iter()
+        .flat_map(|(text, kind)| {
+            message_text_chunks(&text)
+                .into_iter()
+                .map(move |s| (s, kind))
         })
+        .collect()
+}
+
+#[cfg(test)]
+fn lightweight_markdown_text(content: &str) -> String {
+    message_text_tiles(content, MessageRole::Assistant)
+        .into_iter()
+        .map(|(s, _)| s)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -2561,27 +2943,20 @@ fn selector_widths_with_variant(width: f32, variant: AgentSurfaceVariant) -> (f3
 
 fn model_selector_button(
     id: &str,
-    registry: &AgentModelRegistry,
-    selected_model: &str,
     value: &str,
     tooltip: &str,
     open: bool,
     width: f32,
 ) -> UiNode {
-    let labels = registry.selector_labels();
-    let selected_index = labels
-        .iter()
-        .position(|label| label == selected_model)
-        .unwrap_or(0);
-    let options = labels
-        .into_iter()
-        .map(|label| UiSelectOption::new(label.clone(), label))
-        .collect();
+    let options = vec![UiSelectOption::new(
+        crate::panels::ai_chat::MODEL_SENTINEL,
+        crate::panels::ai_chat::MODEL_SENTINEL,
+    )];
     agent_select_trigger(
         id,
         "agent.model",
         options,
-        selected_index,
+        0,
         value,
         tooltip,
         open,
@@ -2645,21 +3020,21 @@ fn agent_select_trigger(
         node
     };
     node.with_layout(UiLayout {
-            flow: UiFlow::Row,
-            gap: 4.0,
-            padding: UiSpacing::xy(8.0, 5.0),
-            width_mode: UiSizeMode::Fixed,
-            height_mode: UiSizeMode::Fixed,
-            basis: [width, 32.0],
-            ..UiLayout::default()
-        })
-        .with_text_value(value.to_string())
-        .with_text_overflow(UiTextOverflow::Ellipsis)
-        .with_icon(UiIcon::new(UiIconId::ChevronDown).with_size(UiIconSize::Small))
-        .with_tooltip_value(tooltip.to_string())
-        .with_accessibility_role(UiAccessibilityRole::Combobox)
-        .with_accessibility_expanded(open)
-        .focusable()
+        flow: UiFlow::Row,
+        gap: 4.0,
+        padding: UiSpacing::xy(8.0, 5.0),
+        width_mode: UiSizeMode::Fixed,
+        height_mode: UiSizeMode::Fixed,
+        basis: [width, 32.0],
+        ..UiLayout::default()
+    })
+    .with_text_value(value.to_string())
+    .with_text_overflow(UiTextOverflow::Ellipsis)
+    .with_icon(UiIcon::new(UiIconId::ChevronDown).with_size(UiIconSize::Small))
+    .with_tooltip_value(tooltip.to_string())
+    .with_accessibility_role(UiAccessibilityRole::Combobox)
+    .with_accessibility_expanded(open)
+    .focusable()
 }
 
 fn icon_button(id: &str, icon: UiIconId, tooltip_key: &str, command: &str) -> UiNode {
@@ -2735,7 +3110,11 @@ fn metrics_text(
         t("app.agent_context_approx", language),
         t("app.agent_tokens", language),
         t("app.agent_response_max", language),
-        max_response_tokens
+        if max_response_tokens == 0 {
+            t("app.agent_output_auto", language)
+        } else {
+            max_response_tokens.to_string()
+        }
     )
 }
 
@@ -2800,6 +3179,21 @@ fn estimated_suffix_height(message_heights: &[f32], start: usize) -> f32 {
     }
 }
 
+fn tool_needs_attention(message: &ChatMessage) -> bool {
+    serde_json::from_str::<AgentToolResult>(&message.content)
+        .map(|result| {
+            !result.ok
+                || result
+                    .verification
+                    .as_ref()
+                    .and_then(|v| v.get("status"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some("failed")
+        })
+        // Legacy unstructured errors must remain visible too.
+        .unwrap_or_else(|_| message.content.trim_start().starts_with("Error:"))
+}
+
 fn estimated_message_height_with_variant(
     message: &ChatMessage,
     width: f32,
@@ -2807,19 +3201,14 @@ fn estimated_message_height_with_variant(
     tool_expanded: bool,
 ) -> f32 {
     let content = bounded_text(&display_message_content(message), MAX_VISIBLE_MESSAGE_CHARS);
-    let display_text = if matches!(message.role, MessageRole::Assistant | MessageRole::Tool) {
-        lightweight_markdown_text(&content)
-    } else {
-        content
-    };
     let card_width = (width * MESSAGE_WIDTH_RATIO).clamp(220.0, 760.0);
     let line_height = 18.0;
-    let chunks = message_text_chunks(&display_text);
+    let chunks = message_text_tiles(&content, message.role);
     let body_height = chunks
         .iter()
         .enumerate()
         .map(|(index, chunk)| {
-            estimated_text_tile_height(chunk, card_width - 24.0, line_height)
+            estimated_text_tile_height(&chunk.0, card_width - 24.0, line_height)
                 + if index + 1 < chunks.len() {
                     MESSAGE_TEXT_TILE_GAP
                 } else {
@@ -2827,20 +3216,31 @@ fn estimated_message_height_with_variant(
                 }
         })
         .sum::<f32>();
-    let chrome = message_chrome_height(variant);
-    if variant == AgentSurfaceVariant::Dock && message.role == MessageRole::Tool {
+    let chrome = message_chrome_height(if message.role == MessageRole::Tool {
+        AgentSurfaceVariant::Dock
+    } else {
+        variant
+    });
+    if message.role == MessageRole::Tool {
         let summary = DOCK_TOOL_ROW_HEIGHT + DOCK_TOOL_ROW_GAP;
-        if !tool_expanded {
-            return summary.max(1.0);
+        if !tool_expanded && !tool_needs_attention(message) {
+            return DOCK_TOOL_ROW_HEIGHT;
         }
-        return (summary + chrome + body_height).max(summary + 70.0);
+        return summary + chrome + body_height;
     }
     (chrome + body_height).max(70.0)
 }
 
 fn display_message_content(message: &ChatMessage) -> String {
     if message.role != MessageRole::Tool {
-        return message.content.clone();
+        let mut content = message.content.clone();
+        for image in message.images.iter().take(raf_ai::chat_media::MAX_IMAGES) {
+            if !content.is_empty() {
+                content.push('\n');
+            }
+            content.push_str(&format!("[PNG · {} × {}]", image.width, image.height));
+        }
+        return content;
     }
     let Ok(result) = serde_json::from_str::<AgentToolResult>(&message.content) else {
         return message.content.clone();
@@ -3341,9 +3741,219 @@ mod tests {
             id: Uuid::new_v4(),
             role: MessageRole::Assistant,
             content: content.to_string(),
+            images: Vec::new(),
+            reasoning: None,
             timestamp: Utc::now(),
             tool_calls: None,
         }
+    }
+
+    #[test]
+    fn harness_turn_groups_keep_errors_and_the_final_answer_outside_details() {
+        let mut user = message("Build a world");
+        user.role = MessageRole::User;
+        let comment = message("Inspecting first");
+        let mut success = message("Created objects");
+        success.role = MessageRole::Tool;
+        let mut failure = message("Error: layout check failed");
+        failure.role = MessageRole::Tool;
+        let answer = message("The layout needs one correction.");
+        let messages = [&user, &comment, &success, &failure, &answer];
+        let mut expanded = std::collections::HashSet::new();
+        assert_eq!(
+            history_entries(&messages, &expanded),
+            vec![
+                HistoryEntry::Message(0),
+                HistoryEntry::Activity {
+                    first: 1,
+                    count: 2,
+                    expanded: false
+                },
+                HistoryEntry::Message(3),
+                HistoryEntry::Message(4)
+            ]
+        );
+        expanded.insert(format!("group:{}", comment.id));
+        let entries = history_entries(&messages, &expanded);
+        assert_eq!(entries.len(), 6);
+        assert_eq!(entries.last(), Some(&HistoryEntry::Message(4)));
+    }
+
+    #[test]
+    fn harness_reasoning_visibility_and_expansion_follow_settings() {
+        let mut panel = AgentPanel::default();
+        let mut answer = message("Done");
+        answer.reasoning = Some(raf_ai::chat::ProviderReasoning {
+            endpoint: "https://openrouter.ai/api/v1".into(), model: "test/model".into(),
+            transport: String::new(), text: "Provider reasoning".into(), details: Vec::new(),
+        });
+        let id = format!("agent.reasoning.{}", answer.id);
+        let render = |panel: &AgentPanel| build_history(StudioUiPalette::IndustrialDark, panel,
+            ProjectType::Game, &[&answer], 600.0, 0.0, AgentSurfaceVariant::Embedded, |_| false);
+        let collapsed = render(&panel);
+        assert!(node(&collapsed, &format!("{id}.toggle")).is_some());
+        assert!(node(&collapsed, &format!("{id}.text")).is_none());
+        panel.expanded_tools.insert(format!("reasoning:{}", answer.id));
+        assert!(node(&render(&panel), &format!("{id}.text")).is_some());
+        panel.show_reasoning = false;
+        assert!(node(&render(&panel), &format!("{id}.toggle")).is_none());
+    }
+
+    #[test]
+    fn harness_markdown_preserves_code_and_user_literals() {
+        let source = "## Summary\nDone\n```rust\n  let snake_case = \"**literal**\";\n```";
+        let tiles = message_text_tiles(source, MessageRole::Assistant);
+        assert_eq!(tiles[0], ("Summary".into(), MessageTileKind::Heading));
+        assert_eq!(
+            tiles.last().unwrap(),
+            &(
+                "  let snake_case = \"**literal**\";".into(),
+                MessageTileKind::Code
+            )
+        );
+        assert_eq!(
+            message_text_tiles("**literal**", MessageRole::User)[0].0,
+            "**literal**"
+        );
+    }
+
+    #[test]
+    fn harness_composer_exposes_removable_images_and_automatic_output() {
+        let mut panel = AgentPanel::default();
+        panel.history.start_session("Images");
+        panel
+            .history
+            .active_session_mut()
+            .unwrap()
+            .draft_images
+            .push(raf_ai::chat_media::ChatImage {
+                file: "fixture.png".into(),
+                width: 320,
+                height: 240,
+            });
+        let settings = EngineSettings::default();
+        let composer = build_composer(
+            StudioUiPalette::IndustrialDark,
+            &panel,
+            &settings,
+            AgentReadiness::Ready,
+            720.0,
+            0,
+            AgentSurfaceVariant::Embedded,
+        );
+        assert!(node(&composer, "agent.image.paste").is_some());
+        assert!(node(&composer, "agent.image.0.remove").is_some());
+        assert!(node(&composer, "agent.reasoning.cycle").is_some());
+        assert_eq!(composer_media_height(&panel), 30.0);
+        assert!(metrics_text(&panel, Language::English, 0, 0).contains("Automatic"));
+    }
+
+    #[test]
+    fn harness_cpu_layout_keeps_grouped_activity_and_composer_inside_the_panel() {
+        // UI fixture, not evidence of a model run or of native window input.
+        let mut panel = AgentPanel::default();
+        panel.language = Language::Spanish;
+        panel.document_name = "Vista de prueba".into();
+        panel.sidebar_open = false;
+        let mut user = message("Revisa la estructura de esta escena.");
+        user.role = MessageRole::User;
+        let comment = message("Consulto la escena y reviso sus objetos.");
+        let mut tool = message(
+            &serde_json::to_string(&AgentToolResult::success(
+                "Consulta de escena",
+                serde_json::json!({}),
+            ))
+            .unwrap(),
+        );
+        tool.role = MessageRole::Tool;
+        panel.runtime.messages = vec![user, comment, tool.clone(), {let mut second=tool;second.id=Uuid::new_v4();second},
+            message("## Resumen\nRespuesta de prueba con actividad agrupada.\n```rust\nlet scene_name = \"World\";\n```")];
+        let mut settings = EngineSettings::default();
+        settings.language = Language::Spanish;
+        settings.agent_mode = AgentMode::Inspect;
+        let surface = build_dock_agent_surface(
+            StudioUiPalette::IndustrialDark,
+            &panel,
+            &settings,
+            AgentReadiness::Ready,
+            ProjectType::Game,
+            [760.0, 640.0],
+            0.0,
+            0.0,
+        );
+        let mut host = CpuUiSurfaceHost::new(surface, [9, 9, 10, 255]);
+        let rendered = host.render([760, 640], |key| t(key, Language::Spanish));
+        let rect = |id: &str| {
+            rendered
+                .frame
+                .layout_boxes
+                .iter()
+                .find(|item| item.id == id)
+                .unwrap()
+                .rect
+        };
+        let composer = rect("agent.composer");
+        let input = rect("agent.input");
+        let reasoning = rect("agent.reasoning.cycle");
+        assert!(input.y >= composer.y && input.bottom() <= composer.bottom() + 1.0);
+        assert!(reasoning.x >= composer.x && reasoning.right() <= composer.right() + 1.0);
+        assert!(composer.bottom() <= 641.0);
+        assert!(rendered.frame.text_requests.iter().any(|request| request
+            .text_key
+            .contains("Vista de prueba \u{00b7}")));
+        assert!(rendered
+            .frame
+            .layout_boxes
+            .iter()
+            .any(|item| item.id.starts_with("agent.activity.")));
+        assert!(!rendered
+            .frame
+            .layout_boxes
+            .iter()
+            .any(|item| item.id == "agent.message.2.row"));
+        let path = std::env::temp_dir().join(format!("raf-harness-ui-{}.png", Uuid::new_v4()));
+        image::save_buffer(&path, rendered.pixels, 760, 640, image::ColorType::Rgba8).unwrap();
+        eprintln!("Harness CPU fixture: {}", path.display());
+    }
+
+    #[test]
+    fn harness_workspace_tools_are_compact_and_failures_remain_visible() {
+        let mut tool = message(
+            &serde_json::to_string(&AgentToolResult::success(
+                "Created objects",
+                serde_json::json!({}),
+            ))
+            .unwrap(),
+        );
+        tool.role = MessageRole::Tool;
+        let height = estimated_message_height_with_variant(
+            &tool,
+            700.0,
+            AgentSurfaceVariant::Embedded,
+            false,
+        );
+        assert!(height < 70.0);
+        let card = message_card_with_variant(
+            StudioUiPalette::IndustrialDark,
+            &tool,
+            700.0,
+            0,
+            MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
+            AgentSurfaceVariant::Embedded,
+            false,
+        );
+        assert!(node(&card, "agent.message.0.row.toggle").is_some());
+        assert!(node(&card, "agent.message.0.copy").is_none());
+        tool.content = "Error: Verification failed".into();
+        assert!(tool_needs_attention(&tool));
+        assert!(
+            estimated_message_height_with_variant(
+                &tool,
+                700.0,
+                AgentSurfaceVariant::Embedded,
+                false
+            ) > height
+        );
     }
 
     fn node<'a>(root: &'a UiNode, id: &str) -> Option<&'a UiNode> {
@@ -3385,7 +3995,12 @@ mod tests {
         let heights = messages
             .iter()
             .map(|message| {
-                estimated_message_height_with_variant(message, 700.0, AgentSurfaceVariant::Embedded, false)
+                estimated_message_height_with_variant(
+                    message,
+                    700.0,
+                    AgentSurfaceVariant::Embedded,
+                    false,
+                )
             })
             .collect::<Vec<_>>();
         let range = visible_message_range(&heights, 5_000.0, 360.0);
@@ -3416,7 +4031,7 @@ mod tests {
 
     #[test]
     fn message_text_is_bounded_without_splitting_unicode() {
-        let source = "Ã©".repeat(MAX_VISIBLE_MESSAGE_CHARS + 10);
+        let source = "\u{00e9}".repeat(MAX_VISIBLE_MESSAGE_CHARS + 10);
         let bounded = bounded_text(&source, MAX_VISIBLE_MESSAGE_CHARS);
         assert_eq!(bounded.chars().count(), MAX_VISIBLE_MESSAGE_CHARS + 1);
         assert!(bounded.ends_with('\u{2026}'));
@@ -3458,7 +4073,7 @@ mod tests {
                     0,
                     MessageViewport::for_message(0.0, HISTORY_VIEWPORT_ESTIMATE, 0.0),
                     AgentSurfaceVariant::Embedded,
-                    false,
+                    true,
                 ))
                 .with_child(
                     UiNode::new("status.fps", UiNodeKind::Label)
@@ -3517,7 +4132,7 @@ mod tests {
                         bottom: 2_960.0,
                     },
                     AgentSurfaceVariant::Embedded,
-                    false,
+                    true,
                 )),
         );
         let mut session = UiSurfaceSession::default();
@@ -3768,12 +4383,10 @@ mod tests {
             ..UiInputState::default()
         };
         let pressed = host.process_input(size, resolve, &press);
-        assert!(pressed
-            .iter()
-            .all(|dispatched| !matches!(&dispatched.action, raf_ui::UiAction::SetSelectOpen {
-                open: false,
-                ..
-            })));
+        assert!(pressed.iter().all(|dispatched| !matches!(
+            &dispatched.action,
+            raf_ui::UiAction::SetSelectOpen { open: false, .. }
+        )));
         let release = UiInputState {
             pointer_position: Some(option_point),
             pointer_released_buttons: vec![raf_ui::UiPointerButton::Primary],
@@ -3852,7 +4465,7 @@ mod tests {
     }
 
     #[test]
-    fn model_menu_add_action_is_reachable_and_compact_selectors_keep_their_width() {
+    fn model_menu_custom_id_action_is_reachable_and_compact_selectors_keep_their_width() {
         let mut panel = AgentPanel::default();
         panel.model_menu_open = true;
         let settings = EngineSettings::default();
@@ -3871,14 +4484,16 @@ mod tests {
             session.build_frame_with_resolved_text(&surface, 720, 400, [0, 0, 0, 255], |key| {
                 key.to_string()
             });
-        let add = frame
+        // The single-field custom model entry lives inline in the picker: the
+        // old separate add-model dialog is gone.
+        let confirm = frame
             .layout_boxes
             .iter()
-            .find(|layout| layout.id == "agent.model.add")
-            .expect("add model menu item");
-        assert!(add.interactive);
+            .find(|layout| layout.id == "agent.model.confirm")
+            .expect("custom model confirmation");
+        assert!(confirm.interactive);
 
-        let point = [add.rect.x + 12.0, add.rect.y + 12.0];
+        let point = [confirm.rect.x + 12.0, confirm.rect.y + 12.0];
         let _ = session.process_input(
             &surface,
             &frame,
@@ -3900,7 +4515,7 @@ mod tests {
         );
         assert!(actions.iter().any(|action| matches!(
             action.action,
-            raf_ui::UiAction::Command { ref name } if name == "agent.model.add"
+            raf_ui::UiAction::Command { ref name } if name == "agent.model.confirm"
         )));
 
         let narrow_header = build_header(
@@ -3993,11 +4608,7 @@ mod tests {
             .find(|layout| layout.id == "agent.message.0.row")
             .expect("collapsed tool row in dock");
         assert!(row.rect.height <= 40.0);
-        assert!(row
-            .rect
-            .height
-            .min(1.0)
-            .gt(&0.0));
+        assert!(row.rect.height.min(1.0).gt(&0.0));
         assert!(frame
             .layout_boxes
             .iter()
@@ -4032,7 +4643,10 @@ mod tests {
     #[test]
     fn dock_keeps_assistant_messages_fully_visible_inside_the_tool_viewport() {
         let mut panel = AgentPanel::default();
-        panel.runtime.messages.push(message("assistant answer body"));
+        panel
+            .runtime
+            .messages
+            .push(message("assistant answer body"));
 
         let frame = dock_frame(&panel, &EngineSettings::default(), 720.0, 520.0);
         let body = frame
@@ -4064,6 +4678,62 @@ mod tests {
             .layout_boxes
             .iter()
             .all(|layout| layout.id != "agent.review.chip"));
+    }
+
+    #[test]
+    fn active_permissions_hide_review_and_approval_controls_in_workspace_and_dock() {
+        let mut panel = AgentPanel::default();
+        panel.runtime.status = AgentStatus::AwaitingApproval;
+        panel
+            .runtime
+            .pending_calls
+            .push(raf_ai::agent_runtime::PendingToolCall::new(
+                "legacy-review",
+                "scene_create",
+                serde_json::json!({}),
+            ));
+        for language in [Language::English, Language::Spanish] {
+            let settings = EngineSettings {
+                agent_mode: AgentMode::Active,
+                language,
+                ..Default::default()
+            };
+            for palette in [StudioUiPalette::IndustrialDark, StudioUiPalette::PaperLight] {
+                for variant in [AgentSurfaceVariant::Embedded, AgentSurfaceVariant::Dock] {
+                    for width in [540u32, 900] {
+                        let surface = build_agent_surface_with_variant(
+                            palette,
+                            &panel,
+                            &settings,
+                            AgentReadiness::Ready,
+                            ProjectType::Game,
+                            [width as f32, 640.0],
+                            0.0,
+                            0.0,
+                            variant,
+                            None,
+                        );
+                        let mut session = UiSurfaceSession::default();
+                        let frame = session.build_frame_with_resolved_text(
+                            &surface,
+                            width,
+                            640,
+                            [0; 4],
+                            |key| t(key, language),
+                        );
+                        assert!(frame
+                            .layout_boxes
+                            .iter()
+                            .any(|item| item.id == "agent.input"));
+                        assert!(frame
+                            .layout_boxes
+                            .iter()
+                            .all(|item| !item.id.starts_with("agent.approval")
+                                && !item.id.starts_with("agent.review")));
+                    }
+                }
+            }
+        }
     }
 
     #[test]

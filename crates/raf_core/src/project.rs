@@ -142,7 +142,7 @@ pub struct ProjectSettings {
     #[serde(default = "default_electronics_grid_step_mm")]
     pub electronics_schematic_grid_step_mm: f32,
     /// Base PCB snap/grid spacing in millimeters for this project.
-    #[serde(default = "default_electronics_grid_step_mm")]
+    #[serde(default = "default_electronics_pcb_grid_step_mm")]
     pub electronics_pcb_grid_step_mm: f32,
     /// Whether Electronics placement and routing snap to the project grid.
     #[serde(default = "default_true")]
@@ -269,6 +269,10 @@ fn default_electronics_grid_step_mm() -> f32 {
     20.0
 }
 
+fn default_electronics_pcb_grid_step_mm() -> f32 {
+    0.25
+}
+
 impl Default for ProjectSettings {
     fn default() -> Self {
         Self {
@@ -299,7 +303,7 @@ impl Default for ProjectSettings {
             building_style: BuildingStyle::Free,
             building_snap_step: default_building_snap_step(),
             electronics_schematic_grid_step_mm: default_electronics_grid_step_mm(),
-            electronics_pcb_grid_step_mm: default_electronics_grid_step_mm(),
+            electronics_pcb_grid_step_mm: default_electronics_pcb_grid_step_mm(),
             electronics_snap_to_grid: true,
         }
     }
@@ -338,7 +342,50 @@ impl Project {
         project_type: ProjectType,
         parent_dir: &Path,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let project_dir = parent_dir.join(name);
+        Self::create_in(parent_dir.join(name), name.to_string(), project_type)
+    }
+
+    /// Turn an existing folder into an AuraRafi project. The folder becomes the
+    /// project root, existing files are preserved, and the standard project
+    /// structure is added next to them.
+    pub fn adopt(
+        project_dir: &Path,
+        name: &str,
+        project_type: ProjectType,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        if project_dir.join(Self::META_FILE).exists() {
+            return Err(format!("project already exists: '{}'", project_dir.display()).into());
+        }
+        // Adoption must never overwrite files that already look like AuraRafi
+        // project metadata. Arbitrary user files are left untouched.
+        if project_dir.join(ProjectSessionRegistry::FILE_NAME).exists() {
+            return Err(format!(
+                "folder already contains AuraRafi project files: '{}'",
+                project_dir.display()
+            )
+            .into());
+        }
+        if project_type == ProjectType::Game {
+            let sessions = ProjectSessionRegistry::new(project_type);
+            if let Some(active) = sessions.active() {
+                let scene_path = active.path(project_dir, &active.scene_file);
+                if scene_path.exists() {
+                    return Err(format!(
+                        "folder already contains a scene at '{}'",
+                        scene_path.display()
+                    )
+                    .into());
+                }
+            }
+        }
+        Self::create_in(project_dir.to_path_buf(), name.to_string(), project_type)
+    }
+
+    fn create_in(
+        project_dir: PathBuf,
+        name: String,
+        project_type: ProjectType,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         if project_dir.join(Self::META_FILE).exists() {
             return Err(format!("project already exists: '{}'", project_dir.display()).into());
         }
@@ -350,7 +397,7 @@ impl Project {
         let now = Utc::now();
         let mut project = Self {
             id: Uuid::new_v4(),
-            name: name.to_string(),
+            name,
             project_type,
             path: project_dir.clone(),
             created_at: now,
@@ -402,11 +449,14 @@ impl Project {
         Ok(())
     }
 
-    /// Load a project from a directory.
+    /// Load a project from a directory. The directory is authoritative: a
+    /// project that was moved or copied is opened from its new location even
+    /// when the stored metadata still mentions the old path.
     pub fn load(project_dir: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let meta_path = project_dir.join(Self::META_FILE);
         let data = std::fs::read_to_string(meta_path)?;
-        let project: Self = ron::from_str(&data)?;
+        let mut project: Self = ron::from_str(&data)?;
+        project.path = project_dir.to_path_buf();
         Ok(project)
     }
 }
@@ -415,6 +465,12 @@ impl Project {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct RecentProjects {
     pub projects: Vec<RecentProjectEntry>,
+    /// Paths the user explicitly removed from the Hub list. Discovery skips
+    /// them so a removal survives restarts instead of reappearing on the next
+    /// scan of the default projects folder. Opening the project again clears
+    /// the entry through [`RecentProjects::add`].
+    #[serde(default)]
+    pub dismissed: Vec<PathBuf>,
 }
 
 /// A lightweight entry for the recent projects list.
@@ -442,6 +498,8 @@ impl RecentProjects {
 
     /// Add or update a project in the recent list.
     pub fn add(&mut self, project: &Project) {
+        // Opening a project makes it visible again even if it was dismissed.
+        self.dismissed.retain(|path| path != &project.path);
         // Remove existing entry with same path if present.
         self.projects.retain(|p| p.path != project.path);
 
@@ -458,8 +516,21 @@ impl RecentProjects {
             },
         );
 
-        // Keep at most 20 recent projects.
-        self.projects.truncate(20);
+        // Keep a deeper recent history: projects outside the default folder are
+        // only reachable through this registry, so a short cap hides them.
+        self.projects.truncate(50);
+    }
+
+    /// Remove a project from the Hub list and remember the removal so the
+    /// folder scan does not bring it back. The project on disk is untouched.
+    pub fn dismiss(&mut self, path: &Path) {
+        self.projects.retain(|entry| entry.path != path);
+        if !self.dismissed.iter().any(|dismissed| dismissed == path) {
+            self.dismissed.push(path.to_path_buf());
+            if self.dismissed.len() > 200 {
+                self.dismissed.remove(0);
+            }
+        }
     }
 
     /// Save to disk.
@@ -605,5 +676,80 @@ mod tests {
     fn older_settings_files_receive_adaptive_geometry_detail() {
         let loaded: ProjectSettings = serde_json::from_str("{}").expect("legacy settings load");
         assert_eq!(loaded.geometry_detail, GeometryDetailMode::Adaptive);
+    }
+
+    #[test]
+    fn electronics_pcb_grid_defaults_to_physical_spacing_and_preserves_authored_values() {
+        let defaults = ProjectSettings::default();
+        assert_eq!(defaults.electronics_schematic_grid_step_mm, 20.0);
+        assert_eq!(defaults.electronics_pcb_grid_step_mm, 0.25);
+        let missing: ProjectSettings = serde_json::from_str("{}").unwrap();
+        assert_eq!(missing.electronics_pcb_grid_step_mm, 0.25);
+        let authored: ProjectSettings =
+            serde_json::from_str(r#"{"electronics_pcb_grid_step_mm":20.0}"#).unwrap();
+        assert_eq!(authored.electronics_pcb_grid_step_mm, 20.0);
+    }
+
+    #[test]
+    fn dismissed_projects_stay_hidden_until_opened_again() {
+        let root = std::env::temp_dir().join(format!("raf-dismiss-{}", Uuid::new_v4()));
+        let project = Project::create("Hidden", ProjectType::Game, &root).expect("project create");
+        let mut recent = RecentProjects::default();
+        recent.add(&project);
+        assert_eq!(recent.projects.len(), 1);
+
+        recent.dismiss(&project.path);
+        assert!(recent.projects.is_empty());
+        assert_eq!(recent.dismissed, vec![project.path.clone()]);
+
+        let serialized = ron::ser::to_string(&recent).expect("registry serialize");
+        let loaded: RecentProjects = ron::from_str(&serialized).expect("registry deserialize");
+        assert_eq!(loaded.dismissed, vec![project.path.clone()]);
+
+        recent.add(&project);
+        assert_eq!(recent.projects.len(), 1);
+        assert!(recent.dismissed.is_empty());
+    }
+
+    #[test]
+    fn adopt_keeps_existing_files_and_creates_the_project_structure() {
+        let root = std::env::temp_dir().join(format!("raf-adopt-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("notes.txt"), "keep me").unwrap();
+
+        let project = Project::adopt(&root, "Adopted", ProjectType::Game).expect("adopt");
+        assert_eq!(project.path, root);
+        assert_eq!(project.name, "Adopted");
+        assert!(root.join(Project::META_FILE).is_file());
+        assert!(root.join("assets").is_dir());
+        assert_eq!(
+            std::fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "keep me"
+        );
+        assert!(Project::adopt(&root, "Adopted", ProjectType::Game).is_err());
+    }
+
+    #[test]
+    fn adopt_refuses_to_overwrite_existing_project_files() {
+        let root = std::env::temp_dir().join(format!("raf-adopt-guard-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let registry = root.join(ProjectSessionRegistry::FILE_NAME);
+        std::fs::create_dir_all(registry.parent().expect("registry folder")).unwrap();
+        std::fs::write(&registry, "keep me").unwrap();
+
+        assert!(Project::adopt(&root, "Adopted", ProjectType::Game).is_err());
+        assert_eq!(std::fs::read_to_string(&registry).unwrap(), "keep me");
+        assert!(!root.join(Project::META_FILE).exists());
+    }
+
+    #[test]
+    fn load_uses_the_directory_it_was_asked_to_load() {
+        let root = std::env::temp_dir().join(format!("raf-move-{}", Uuid::new_v4()));
+        let project = Project::create("Original", ProjectType::Game, &root).expect("create");
+        let moved = root.join("Moved");
+        std::fs::rename(&project.path, &moved).expect("move");
+
+        let loaded = Project::load(&moved).expect("load moved project");
+        assert_eq!(loaded.path, moved);
     }
 }

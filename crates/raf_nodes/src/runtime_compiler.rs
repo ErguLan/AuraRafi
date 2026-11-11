@@ -402,6 +402,12 @@ impl Generator<'_> {
         };
         let mut code = String::new();
         match slug {
+            "ui-text"|"ui-image"|"ui-visible"|"ui-enabled"=>{
+                let value=if matches!(slug,"ui-visible"|"ui-enabled"){self.input(i,"Visible","ui_visible","true",0)?}else{self.input(i,"Value","ui_text","",0)?};
+                code=format!("{}(ui_element({},{}),{});",slug.replace('-',"_"),self.input(i,"Instance","ui_instance","main",0)?,self.input(i,"Element","ui_node","",0)?,value);
+            },
+            "ui-show"=>code=format!("ui_show({},{});",self.input(i,"Instance","ui_instance","main",0)?,self.input(i,"Visible","ui_visible","true",0)?),
+            "ui-value"=>code=format!("ui_value({},{});",self.input(i,"Key","ui_key","",0)?,self.input(i,"Value","ui_text","",0)?),
             "set-cursor" => code = format!("set_cursor({},{});",self.input(i,"Mode","cursor_mode","free",0)?,self.input(i,"Visible","cursor_visible","true",0)?),
             "progress-set" => code = format!("progress_set({},{});",self.input(i,"Key","progress_key","",0)?,self.input(i,"Value","value","",0)?),
             "progress-save"|"progress-load"|"progress-load-backup" => code = format!("{}({});",slug.replace('-',"_"),self.input(i,"Slot","progress_slot","manual",0)?),

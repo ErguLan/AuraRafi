@@ -77,21 +77,19 @@ fn probe_alive(address: &str) -> bool {
 /// Collects candidate project paths: the recent registry plus any explicit
 /// extra path (for example the current working directory).
 fn candidate_paths(extra: Option<&Path>) -> Vec<(String, PathBuf)> {
+    let mut entries = recent_project_paths();
+    if let Some(path) = extra {
+        entries.push((path.file_name().map(|name| name.to_string_lossy().into_owned()).unwrap_or_default(), path.to_path_buf()));
+    }
+    unique_project_paths(entries)
+}
+
+fn unique_project_paths(entries: Vec<(String, PathBuf)>) -> Vec<(String, PathBuf)> {
     let mut seen = std::collections::BTreeSet::new();
     let mut candidates = Vec::new();
-    for (name, path) in recent_project_paths() {
-        if seen.insert(path.clone()) {
+    for (name, path) in entries {
+        if seen.insert(path.canonicalize().unwrap_or_else(|_| path.clone())) {
             candidates.push((name, path));
-        }
-    }
-    if let Some(path) = extra {
-        if seen.insert(path.to_path_buf()) {
-            candidates.push((
-                path.file_name()
-                    .map(|name| name.to_string_lossy().to_string())
-                    .unwrap_or_default(),
-                path.to_path_buf(),
-            ));
         }
     }
     candidates
@@ -149,6 +147,15 @@ pub fn pick_single_live(extra: Option<&Path>) -> Result<DiscoveredEditor, String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_project_identity_matches_ordinary_path() {
+        let path = std::env::current_dir().unwrap();
+        let canonical = path.canonicalize().unwrap();
+        let entries = unique_project_paths(vec![("ordinary".into(), path.clone()), ("canonical".into(), canonical)]);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0], ("ordinary".into(), path));
+    }
 
     #[test]
     fn probe_rejects_unroutable_loopback_port_quickly() {

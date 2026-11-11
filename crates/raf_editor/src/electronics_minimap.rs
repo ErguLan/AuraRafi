@@ -5,11 +5,12 @@
 //! layers connectivity under component bodies, and overlays the current
 //! viewport rectangle so navigation always has spatial context. It never
 //! mutates the document and never becomes a second schematic renderer;
-//! component artwork remains owned by the native PNG catalog on the main
-//! RafUI canvas overlay.
+//! symbol strokes and physical geometry remain owned by the main CAD scene.
 
 use glam::Vec2;
-use raf_electronics::{CadObject, CadObjectKind, CadScene, CadSurfaceKind};
+use raf_electronics::{
+    cad_scene::cad_object_distance, CadObject, CadObjectKind, CadScene, CadSurfaceKind,
+};
 use raf_ui::{StudioUiPalette, UiTokens};
 
 use crate::electronics_controller::{CadCamera, ElectronicsSelection, ElectronicsSelectionKind};
@@ -20,9 +21,85 @@ pub const IMAGE_KEY: &str = "electronics://minimap";
 // still presented inside a compact panel, so this does not change layout.
 pub const IMAGE_SIZE: [u32; 2] = [880, 560];
 
+/// Preview the same physical shapes used by the board and picking, preserving
+/// pad rotations, oblong bores and offset origins. No box approximation.
+pub fn footprint_preview_rgba(
+    asset: &raf_electronics::pcb::FootprintAsset,
+    palette: StudioUiPalette,
+) -> ([u32; 2], Vec<u8>) {
+    use raf_electronics::pcb::{PcbComponentPlacement, PcbLayer, PcbLayout};
+    let size = [640, 300];
+    let mut layout = PcbLayout::new("preview");
+    layout.board_outline.points.clear();
+    layout.components.push(PcbComponentPlacement {
+        component_id: uuid::Uuid::nil(),
+        designator: String::new(),
+        value: String::new(),
+        footprint: asset.id.clone(),
+        position: Vec2::ZERO,
+        rotation: 0.0,
+        layer: PcbLayer::TopCopper,
+        locked: false,
+        image_asset: None,
+        pad_nets: vec![String::new(); asset.pads.len()],
+    });
+    layout
+        .footprint_assets
+        .insert(asset.id.clone(), asset.clone());
+    let scene = CadScene::from_pcb(&layout);
+    let bounds = asset.bounds_mm();
+    let (min, max) = bounds
+        .map(|b| {
+            (
+                Vec2::new(b.min.x as f32, b.min.y as f32),
+                Vec2::new(b.max.x as f32, b.max.y as f32),
+            )
+        })
+        .unwrap_or((Vec2::splat(-1.0), Vec2::ONE));
+    let center = (min + max) * 0.5;
+    let span = (max - min).max(Vec2::splat(0.1)) * 1.85;
+    let aspect = size[0] as f32 / size[1] as f32;
+    let span = Vec2::new(span.x.max(span.y * aspect), span.y.max(span.x / aspect));
+    let map = Map {
+        min: center - span * 0.5,
+        max: center + span * 0.5,
+        width: size[0] as usize,
+        height: size[1] as usize,
+    };
+    let colors = MinimapColors::from_palette(palette);
+    let mut pixels = vec![0; size[0] as usize * size[1] as usize * 4];
+    fill(&mut pixels, colors.background);
+    draw_background_grid(&mut pixels, &map, with_alpha(colors.grid, 38));
+    map.line(
+        &mut pixels,
+        Vec2::new(map.min.x, 0.0),
+        Vec2::new(map.max.x, 0.0),
+        with_alpha(colors.component_stroke, 64),
+        0,
+    );
+    map.line(
+        &mut pixels,
+        Vec2::new(0.0, map.min.y),
+        Vec2::new(0.0, map.max.y),
+        with_alpha(colors.component_stroke, 64),
+        0,
+    );
+    for object in &scene.objects {
+        if matches!(
+            object.kind,
+            CadObjectKind::Pad | CadObjectKind::Trace | CadObjectKind::BoardOutline
+        ) {
+            draw_object(&mut pixels, &map, colors, object, None);
+        } else if object.kind == CadObjectKind::Component && !object.line_paths.is_empty() {
+            draw_paths(&mut pixels, &map, object, colors.component_stroke, 1);
+        }
+    }
+    (size, pixels)
+}
+
 /// Chrome header above the raster preview inside the minimap panel.
 pub const HEADER_HEIGHT: f32 = 28.0;
-const PANEL_WIDTH: f32 = 240.0;
+const PANEL_WIDTH: f32 = 184.0;
 const PANEL_MARGIN: f32 = 12.0;
 const PANEL_PAD: f32 = 6.0;
 
@@ -87,11 +164,8 @@ impl MinimapColors {
     }
 }
 
-/// Builds the minimap RGBA preview from the live CAD scene and camera.
-///
-/// Bounds are the union of document content and the visible world rectangle,
-/// so the whole design stays visible while the viewport frame remains a
-/// meaningful navigation indicator even when the camera leaves the board.
+/// CPU convenience capture, including the camera frame. The live editor uses
+/// cached `build_scene_rgba` ink and a cheap retained viewport rectangle.
 pub fn build_rgba(
     colors: MinimapColors,
     scene: &CadScene,
@@ -99,48 +173,9 @@ pub fn build_rgba(
     canvas_size: Vec2,
     selection: Option<ElectronicsSelection>,
 ) -> ([u32; 2], Vec<u8>) {
-    let width = IMAGE_SIZE[0] as usize;
-    let height = IMAGE_SIZE[1] as usize;
-    let mut pixels = vec![0_u8; width * height * 4];
-    fill(&mut pixels, colors.background);
-
-    let canvas_size = canvas_size.max(Vec2::ONE);
-    let (min, max) = overview_bounds(scene, camera, canvas_size);
-    let map = Map::new(min, max, width, height);
-
-    draw_background_grid(&mut pixels, &map, colors.grid);
-
-    // Connectivity first so component bodies sit above nets, matching the
-    // canvas paint order without inventing geometry the document lacks.
-    for object in &scene.objects {
-        if matches!(
-            object.kind,
-            CadObjectKind::BoardOutline
-                | CadObjectKind::Airwire
-                | CadObjectKind::Wire
-                | CadObjectKind::Trace
-        ) {
-            draw_object(&mut pixels, &map, colors, object, selection);
-        }
-    }
-    for object in &scene.objects {
-        if matches!(
-            object.kind,
-            CadObjectKind::Component | CadObjectKind::NetLabel
-        ) {
-            draw_object(&mut pixels, &map, colors, object, selection);
-        }
-    }
-    for object in &scene.objects {
-        if matches!(
-            object.kind,
-            CadObjectKind::Pin | CadObjectKind::Pad | CadObjectKind::DrcMarker
-        ) {
-            draw_object(&mut pixels, &map, colors, object, selection);
-        }
-    }
-
-    let viewport = camera.world_bounds(canvas_size);
+    let (size, mut pixels) = build_scene_rgba(colors, scene, selection);
+    let map = overview_map(scene, camera, canvas_size);
+    let viewport = camera.world_bounds(canvas_size.max(Vec2::ONE));
     map.fill_rect(
         &mut pixels,
         Vec2::new(viewport[0], viewport[2]),
@@ -154,9 +189,130 @@ pub fn build_rgba(
         colors.viewport,
         2,
     );
+    draw_frame(
+        &mut pixels,
+        size[0] as usize,
+        size[1] as usize,
+        colors.border,
+    );
+    (size, pixels)
+}
+
+/// Camera-independent document ink. The overview keeps one stable world map,
+/// so a minimap drag cannot move its own coordinate system under the pointer.
+pub fn build_scene_rgba(
+    colors: MinimapColors,
+    scene: &CadScene,
+    selection: Option<ElectronicsSelection>,
+) -> ([u32; 2], Vec<u8>) {
+    let width = IMAGE_SIZE[0] as usize;
+    let height = IMAGE_SIZE[1] as usize;
+    let mut pixels = vec![0_u8; width * height * 4];
+    fill(&mut pixels, colors.background);
+
+    let map = overview_map(scene, CadCamera::default(), Vec2::new(640.0, 480.0));
+
+    draw_background_grid(&mut pixels, &map, colors.grid);
+
+    // Connectivity first so component bodies sit above nets, matching the
+    // canvas paint order without inventing geometry the document lacks.
+    for object in &scene.objects {
+        if object.id.ends_with("preview") {
+            continue;
+        }
+        if matches!(
+            object.kind,
+            CadObjectKind::BoardOutline
+                | CadObjectKind::Airwire
+                | CadObjectKind::Wire
+                | CadObjectKind::Trace
+        ) {
+            draw_object(&mut pixels, &map, colors, object, selection);
+        }
+    }
+    for object in &scene.objects {
+        if object.id.ends_with("preview") {
+            continue;
+        }
+        if matches!(
+            object.kind,
+            CadObjectKind::Component | CadObjectKind::NetLabel
+        ) {
+            draw_object(&mut pixels, &map, colors, object, selection);
+        }
+    }
+    for object in &scene.objects {
+        if object.id.ends_with("preview") {
+            continue;
+        }
+        if matches!(
+            object.kind,
+            CadObjectKind::Pin | CadObjectKind::Pad | CadObjectKind::DrcMarker
+        ) {
+            draw_object(&mut pixels, &map, colors, object, selection);
+        }
+    }
+
     draw_frame(&mut pixels, width, height, colors.border);
 
     (IMAGE_SIZE, pixels)
+}
+
+/// The image store owns pixels; this cache owns only the identity of its ink.
+/// Camera/hover updates return None and therefore cause no raster or upload.
+#[derive(Default)]
+pub struct RasterCache {
+    key: Option<((CadSurfaceKind, u64, u64), StudioUiPalette)>,
+}
+
+impl RasterCache {
+    pub fn invalidate(&mut self) {
+        self.key = None;
+    }
+
+    pub fn update(
+        &mut self,
+        revision: (CadSurfaceKind, u64, u64),
+        palette: StudioUiPalette,
+        scene: &CadScene,
+        selection: Option<ElectronicsSelection>,
+    ) -> Option<([u32; 2], Vec<u8>)> {
+        let key = (revision, palette);
+        if self.key == Some(key) {
+            return None;
+        }
+        let image = build_scene_rgba(MinimapColors::from_palette(palette), scene, selection);
+        self.key = Some(key);
+        Some(image)
+    }
+}
+
+fn overview_map(scene: &CadScene, camera: CadCamera, canvas_size: Vec2) -> Map {
+    let (min, max) = overview_bounds(scene, camera, canvas_size.max(Vec2::ONE));
+    Map::new(min, max, IMAGE_SIZE[0] as usize, IMAGE_SIZE[1] as usize)
+}
+
+/// Canvas-local visible portion of the camera, clipped to the overview image.
+pub fn viewport_rect(
+    scene: &CadScene,
+    camera: CadCamera,
+    canvas_size: Vec2,
+) -> Option<raf_ui::UiRect> {
+    let image = visible_rects(scene, canvas_size)?.image;
+    let map = overview_map(scene, camera, canvas_size);
+    let view = camera.world_bounds(canvas_size.max(Vec2::ONE));
+    let span = map.max - map.min;
+    let min = ((Vec2::new(view[0], view[2]) - map.min) / span).max(Vec2::ZERO);
+    let max = ((Vec2::new(view[1], view[3]) - map.min) / span).min(Vec2::ONE);
+    if min.x >= max.x || min.y >= max.y {
+        return None;
+    }
+    Some(raf_ui::UiRect::new(
+        image.x + min.x * image.width,
+        image.y + min.y * image.height,
+        (max.x - min.x) * image.width,
+        (max.y - min.y) * image.height,
+    ))
 }
 
 #[derive(Clone, Copy)]
@@ -197,9 +353,117 @@ impl Map {
         ]
     }
 
+    fn world(self, pixel: Vec2) -> Vec2 {
+        let span = (self.max - self.min).max(Vec2::splat(1.0));
+        let extent = Vec2::new(
+            self.width.saturating_sub(1).max(1) as f32,
+            self.height.saturating_sub(1).max(1) as f32,
+        );
+        self.min + pixel / extent * span
+    }
+
+    fn fill_cad_geometry(
+        self,
+        pixels: &mut [u8],
+        object: &CadObject,
+        fill: [u8; 4],
+        stroke: [u8; 4],
+    ) {
+        let Some(rect) = object.rect else {
+            return;
+        };
+        let half = rect.size.abs() * 0.5;
+        let rotation = object.rotation_degrees.to_radians();
+        let (sin, cos) = rotation.sin_cos();
+        let extent = Vec2::new(
+            cos.abs() * half.x + sin.abs() * half.y,
+            sin.abs() * half.x + cos.abs() * half.y,
+        );
+        let min = self.point(rect.center - extent);
+        let max = self.point(rect.center + extent);
+        let left = (min[0].min(max[0]).floor() as i32 - 1).max(0);
+        let right = (min[0].max(max[0]).ceil() as i32 + 1).min(self.width as i32 - 1);
+        let top = (min[1].min(max[1]).floor() as i32 - 1).max(0);
+        let bottom = (min[1].max(max[1]).ceil() as i32 + 1).min(self.height as i32 - 1);
+        let pixel_step = (self.max - self.min).abs()
+            / Vec2::new(
+                self.width.saturating_sub(1).max(1) as f32,
+                self.height.saturating_sub(1).max(1) as f32,
+            );
+
+        // Rectangles at quarter turns need no per-sample rotation, distance
+        // square roots or four further shape probes. Drills/curves keep the
+        // authoritative CAD distance path below.
+        if object.shape == raf_electronics::cad_scene::CadShape::Rectangle
+            && object.drill.is_none()
+            && object.rotation_degrees.is_finite()
+            && object.rotation_degrees.rem_euclid(90.0) < 0.0001
+        {
+            let lo = rect.center - extent;
+            let hi = rect.center + extent;
+            for y in top..=bottom {
+                let wy = self.min.y + (y as f32 + 0.5) * pixel_step.y;
+                if wy < lo.y || wy > hi.y {
+                    continue;
+                }
+                for x in left..=right {
+                    let wx = self.min.x + (x as f32 + 0.5) * pixel_step.x;
+                    if wx < lo.x || wx > hi.x {
+                        continue;
+                    }
+                    let edge = wx - pixel_step.x < lo.x
+                        || wx + pixel_step.x > hi.x
+                        || wy - pixel_step.y < lo.y
+                        || wy + pixel_step.y > hi.y;
+                    put(
+                        pixels,
+                        self.width,
+                        self.height,
+                        x,
+                        y,
+                        if edge { stroke } else { fill },
+                    );
+                }
+            }
+            return;
+        }
+
+        for y in top..=bottom {
+            for x in left..=right {
+                let world = self.world(Vec2::new(x as f32 + 0.5, y as f32 + 0.5));
+                if cad_object_distance(object, world) > 0.0 {
+                    continue;
+                }
+                let edge = [
+                    Vec2::new(pixel_step.x, 0.0),
+                    Vec2::new(-pixel_step.x, 0.0),
+                    Vec2::new(0.0, pixel_step.y),
+                    Vec2::new(0.0, -pixel_step.y),
+                ]
+                .into_iter()
+                .any(|offset| cad_object_distance(object, world + offset) > 0.0);
+                let color = if edge { stroke } else { fill };
+                if color[3] != 0 {
+                    put(pixels, self.width, self.height, x, y, color);
+                }
+            }
+        }
+    }
+
     fn line(self, pixels: &mut [u8], start: Vec2, end: Vec2, color: [u8; 4], radius: i32) {
         let start = self.point(start);
         let end = self.point(end);
+        let Some((start, end)) = clip_pixel_line(
+            Vec2::from(start),
+            Vec2::from(end),
+            Vec2::splat(-(radius.max(0) as f32)),
+            Vec2::new(
+                self.width as f32 + radius.max(0) as f32,
+                self.height as f32 + radius.max(0) as f32,
+            ),
+        ) else {
+            return;
+        };
         let distance = Vec2::new(end[0] - start[0], end[1] - start[1]).length();
         let steps = distance.ceil().max(1.0) as usize;
         for step in 0..=steps {
@@ -220,10 +484,10 @@ impl Map {
     fn fill_rect(&self, pixels: &mut [u8], min: Vec2, max: Vec2, color: [u8; 4]) {
         let a = self.point(min);
         let b = self.point(max);
-        let left = a[0].min(b[0]).floor() as i32;
-        let right = a[0].max(b[0]).ceil() as i32;
-        let top = a[1].min(b[1]).floor() as i32;
-        let bottom = a[1].max(b[1]).ceil() as i32;
+        let left = (a[0].min(b[0]).floor() as i32).max(0);
+        let right = (a[0].max(b[0]).ceil() as i32).min(self.width as i32 - 1);
+        let top = (a[1].min(b[1]).floor() as i32).max(0);
+        let bottom = (a[1].max(b[1]).ceil() as i32).min(self.height as i32 - 1);
         for y in top..=bottom {
             for x in left..=right {
                 put(pixels, self.width, self.height, x, y, color);
@@ -234,6 +498,39 @@ impl Map {
     fn stroke_rect(self, pixels: &mut [u8], min: Vec2, max: Vec2, color: [u8; 4], radius: i32) {
         self.border_rect(pixels, min, max, color, radius);
     }
+}
+
+/// Clip before stepping pixels: off-map geometry must not turn a pan into
+/// millions of rejected samples. Expanded bounds preserve thick edge ink.
+fn clip_pixel_line(start: Vec2, end: Vec2, min: Vec2, max: Vec2) -> Option<(Vec2, Vec2)> {
+    if !start.is_finite() || !end.is_finite() {
+        return None;
+    }
+    let delta = end - start;
+    let (mut enter, mut exit) = (0.0_f32, 1.0_f32);
+    for (p, q) in [
+        (-delta.x, start.x - min.x),
+        (delta.x, max.x - start.x),
+        (-delta.y, start.y - min.y),
+        (delta.y, max.y - start.y),
+    ] {
+        if p.abs() <= f32::EPSILON {
+            if q < 0.0 {
+                return None;
+            }
+        } else {
+            let t = q / p;
+            if p < 0.0 {
+                enter = enter.max(t);
+            } else {
+                exit = exit.min(t);
+            }
+            if enter > exit {
+                return None;
+            }
+        }
+    }
+    Some((start + delta * enter, start + delta * exit))
 }
 
 fn draw_object(
@@ -256,42 +553,34 @@ fn draw_object(
     });
     match object.kind {
         CadObjectKind::Component => {
-            if let Some(rect) = object.rect {
-                let min = rect.center - rect.size.abs() * 0.5;
-                let max = rect.center + rect.size.abs() * 0.5;
+            if object.rect.is_some() {
                 let mut fill_color = object.color_rgba;
                 fill_color[3] = fill_color[3].saturating_sub(40).max(160);
                 if selected {
                     fill_color = colors.selection_fill;
                 }
-                map.fill_rect(pixels, min, max, fill_color);
                 let stroke = if selected {
                     colors.selected_stroke
                 } else {
                     colors.component_stroke
                 };
-                map.stroke_rect(pixels, min, max, stroke, 1);
+                map.fill_cad_geometry(pixels, object, fill_color, stroke);
             }
         }
         CadObjectKind::Pin | CadObjectKind::Pad => {
-            if let Some(rect) = object.rect {
-                let min = rect.center - rect.size.abs() * 0.5;
-                let max = rect.center + rect.size.abs() * 0.5;
-                let color = if selected {
-                    colors.selected_stroke
+            if object.rect.is_some() {
+                let (fill, stroke) = if selected {
+                    (colors.selection_fill, colors.selected_stroke)
+                } else if object.kind == CadObjectKind::Pad
+                    && object.drill.is_some()
+                    && object.color_rgba[3] == 0
+                {
+                    ([0, 0, 0, 0], colors.border)
                 } else {
-                    pin_color(object, colors)
+                    let fill = pin_color(object, colors);
+                    (fill, copper_edge_color(fill))
                 };
-                map.fill_rect(pixels, min, max, color);
-                if selected {
-                    map.stroke_rect(
-                        pixels,
-                        min - Vec2::splat(1.0),
-                        max + Vec2::splat(1.0),
-                        colors.selected_stroke,
-                        1,
-                    );
-                }
+                map.fill_cad_geometry(pixels, object, fill, stroke);
             }
         }
         CadObjectKind::Wire => {
@@ -308,7 +597,15 @@ fn draw_object(
             } else {
                 object.color_rgba
             };
-            draw_paths(pixels, map, object, color, 3);
+            let width = object
+                .stroke_width_world
+                .map(|width| {
+                    (width * 0.5 * map.width as f32 / (map.max.x - map.min.x).max(0.001))
+                        .round()
+                        .clamp(0.0, 64.0) as i32
+                })
+                .unwrap_or(3);
+            draw_paths(pixels, map, object, color, width);
         }
         CadObjectKind::Airwire => draw_paths(pixels, map, object, colors.airwire, 1),
         CadObjectKind::BoardOutline => {
@@ -369,6 +666,15 @@ fn drc_color(object: &CadObject, colors: MinimapColors) -> [u8; 4] {
     }
 }
 
+fn copper_edge_color(copper: [u8; 4]) -> [u8; 4] {
+    [
+        copper[0].saturating_add(34),
+        copper[1].saturating_add(29),
+        copper[2].saturating_add(22),
+        copper[3],
+    ]
+}
+
 fn draw_background_grid(pixels: &mut [u8], map: &Map, grid: [u8; 4]) {
     const CELLS_X: usize = 10;
     const CELLS_Y: usize = 7;
@@ -402,17 +708,13 @@ fn draw_paths(pixels: &mut [u8], map: &Map, object: &CadObject, color: [u8; 4], 
     }
 }
 
-/// Union of content bounds and the camera's visible world rectangle.
-///
-/// Content keeps the whole board stable while zoomed in. The viewport is
-/// folded in so panning away from the design never drops the navigation
-/// indicator off the minimap. An empty document falls back to the viewport.
+/// Fixed document extent. Only an empty-document capture uses the viewport.
 fn overview_bounds(scene: &CadScene, camera: CadCamera, canvas_size: Vec2) -> (Vec2, Vec2) {
     let viewport = camera.world_bounds(canvas_size.max(Vec2::ONE));
     let viewport_min = Vec2::new(viewport[0], viewport[2]);
     let viewport_max = Vec2::new(viewport[1], viewport[3]);
     match content_bounds(scene) {
-        Some((min, max)) => (min.min(viewport_min), max.max(viewport_max)),
+        Some(bounds) => bounds,
         None => (viewport_min, viewport_max),
     }
 }
@@ -437,8 +739,15 @@ fn content_bounds(scene: &CadScene) -> Option<(Vec2, Vec2)> {
             continue;
         }
         if let Some(rect) = object.rect {
-            include(&mut bounds, rect.center - rect.size.abs() * 0.5);
-            include(&mut bounds, rect.center + rect.size.abs() * 0.5);
+            let half = rect.size.abs() * 0.5;
+            let rotation = object.rotation_degrees.to_radians();
+            let (sin, cos) = rotation.sin_cos();
+            let extent = Vec2::new(
+                cos.abs() * half.x + sin.abs() * half.y,
+                sin.abs() * half.x + cos.abs() * half.y,
+            );
+            include(&mut bounds, rect.center - extent);
+            include(&mut bounds, rect.center + extent);
         }
         for point in &object.points {
             include(&mut bounds, *point);
@@ -452,17 +761,52 @@ fn content_bounds(scene: &CadScene) -> Option<(Vec2, Vec2)> {
     bounds
 }
 
-/// Full panel rectangle including the chrome header. Used for pointer
-/// routing so clicks on the header never fall through to the CAD canvas.
-pub fn overlay_rect(size: Vec2) -> raf_ui::UiRect {
+/// The exact minimap bounds shared by painting and pointer routing.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MinimapRects {
+    pub panel: raf_ui::UiRect,
+    pub image: raf_ui::UiRect,
+}
+
+/// Returns no bounds until the document has navigable content. The UI and
+/// controller both consume this helper, so hidden empty maps cannot steal input.
+pub fn visible_rects(scene: &CadScene, size: Vec2) -> Option<MinimapRects> {
+    visible_rects_with_state(scene, size, false)
+}
+
+pub fn visible_rects_with_state(
+    scene: &CadScene,
+    size: Vec2,
+    collapsed: bool,
+) -> Option<MinimapRects> {
+    if !has_document_content(scene)
+        || size.x < PANEL_MARGIN * 2.0 + PANEL_PAD * 2.0 + 8.0
+        || size.y < PANEL_MARGIN * 2.0 + HEADER_HEIGHT + PANEL_PAD + 8.0
+    {
+        return None;
+    }
+    let mut panel = overlay_rect(size);
+    let mut image = image_rect(size);
+    if collapsed {
+        panel.height = HEADER_HEIGHT;
+        image = raf_ui::UiRect::new(panel.x, panel.y + HEADER_HEIGHT, 0.0, 0.0);
+    }
+    Some(MinimapRects { panel, image })
+}
+
+/// Full panel rectangle including the chrome header.
+fn overlay_rect(size: Vec2) -> raf_ui::UiRect {
     let max_width = (size.x - PANEL_MARGIN * 2.0).max(1.0);
     let max_height = (size.y - PANEL_MARGIN * 2.0).max(1.0);
-    let width = PANEL_WIDTH.min(max_width);
-    let image_h = (width - PANEL_PAD * 2.0) * IMAGE_SIZE[1] as f32 / IMAGE_SIZE[0] as f32;
-    let height = (HEADER_HEIGHT + image_h + PANEL_PAD).min(max_height);
+    let image_height_limit = (max_height - HEADER_HEIGHT - PANEL_PAD).max(1.0);
+    let width_from_height =
+        image_height_limit * IMAGE_SIZE[0] as f32 / IMAGE_SIZE[1] as f32 + PANEL_PAD * 2.0;
+    let width = PANEL_WIDTH.min(max_width).min(width_from_height).max(1.0);
+    let image_h = (width - PANEL_PAD * 2.0).max(1.0) * IMAGE_SIZE[1] as f32 / IMAGE_SIZE[0] as f32;
+    let height = HEADER_HEIGHT + image_h + PANEL_PAD;
     raf_ui::UiRect::new(
         (size.x - width - PANEL_MARGIN).max(0.0),
-        (size.y - height - PANEL_MARGIN).max(0.0),
+        PANEL_MARGIN.min((size.y - height).max(0.0)),
         width,
         height,
     )
@@ -470,18 +814,16 @@ pub fn overlay_rect(size: Vec2) -> raf_ui::UiRect {
 
 /// Inner raster image rectangle below the chrome header. World mapping and
 /// image placement both use this rect so drag navigation stays pixel-true.
-pub fn image_rect(size: Vec2) -> raf_ui::UiRect {
+fn image_rect(size: Vec2) -> raf_ui::UiRect {
     let panel = overlay_rect(size);
     let width = (panel.width - PANEL_PAD * 2.0).max(1.0);
-    let height = (width * IMAGE_SIZE[1] as f32 / IMAGE_SIZE[0] as f32)
-        .min((panel.height - HEADER_HEIGHT - PANEL_PAD).max(1.0));
+    let height = width * IMAGE_SIZE[1] as f32 / IMAGE_SIZE[0] as f32;
     raf_ui::UiRect::new(panel.x + PANEL_PAD, panel.y + HEADER_HEIGHT, width, height)
 }
 
 /// Maps a canvas-local pointer position to a world point on the document.
 ///
-/// Uses the same content-union-viewport bounds as [`build_rgba`], so a drag
-/// on the minimap lands exactly where the overview paints that pixel.
+/// Uses the same padded, aspect-correct map as the raster and camera frame.
 pub fn world_at(
     scene: &CadScene,
     camera: CadCamera,
@@ -489,14 +831,14 @@ pub fn world_at(
     local: Vec2,
 ) -> Option<Vec2> {
     let canvas_size = canvas_size.max(Vec2::ONE);
-    let rect = image_rect(canvas_size);
+    let rect = visible_rects(scene, canvas_size)?.image;
     if rect.width <= f32::EPSILON || rect.height <= f32::EPSILON {
         return None;
     }
     let fraction = ((local - Vec2::new(rect.x, rect.y)) / Vec2::new(rect.width, rect.height))
         .clamp(Vec2::ZERO, Vec2::ONE);
-    let (min, max) = overview_bounds(scene, camera, canvas_size);
-    Some(min + fraction * (max - min))
+    let map = overview_map(scene, camera, canvas_size);
+    Some(map.min + fraction * (map.max - map.min))
 }
 
 fn include(bounds: &mut Option<(Vec2, Vec2)>, point: Vec2) {
@@ -556,6 +898,23 @@ fn put(pixels: &mut [u8], width: usize, height: usize, x: i32, y: i32, color: [u
         return;
     }
     let index = (y as usize * width + x as usize) * 4;
+    if color[3] == 0 {
+        return;
+    }
+    if color[3] == 255 {
+        pixels[index..index + 4].copy_from_slice(&color);
+        return;
+    }
+    if pixels[index + 3] == 255 {
+        let alpha = u32::from(color[3]);
+        for channel in 0..3 {
+            pixels[index + channel] = ((u32::from(color[channel]) * alpha
+                + u32::from(pixels[index + channel]) * (255 - alpha)
+                + 127)
+                / 255) as u8;
+        }
+        return;
+    }
     let source_alpha = f32::from(color[3]) / 255.0;
     let destination_alpha = f32::from(pixels[index + 3]) / 255.0;
     let output_alpha = source_alpha + destination_alpha * (1.0 - source_alpha);
@@ -601,11 +960,123 @@ pub fn minimap_empty_key(surface: CadSurfaceKind) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raf_electronics::{ElectronicComponent, Schematic};
+    use raf_electronics::{
+        cad_scene::{CadDrill, CadDrillShape, CadRect, CadShape},
+        ElectronicComponent, Schematic,
+    };
     use std::collections::HashMap;
 
     fn colors() -> MinimapColors {
         MinimapColors::from_palette(StudioUiPalette::IndustrialDark)
+    }
+
+    #[test]
+    fn electronics_pan_zoom_and_hover_reuse_overview_pixels() {
+        use crate::electronics_controller::NativeElectronicsEditor;
+        let mut editor = NativeElectronicsEditor::empty("overview cache");
+        editor
+            .schematic
+            .add_component(ElectronicComponent::resistor("10k"));
+        editor.rebuild_scene();
+        editor.select_component(0);
+        let mut cache = RasterCache::default();
+        let palette = StudioUiPalette::IndustrialDark;
+        assert!(cache
+            .update(
+                editor.overview_revision(),
+                palette,
+                editor.scene(),
+                editor.selection()
+            )
+            .is_some());
+        let original = editor.overview_revision();
+        for i in 0..120 {
+            editor.zoom_in();
+            editor.set_hovered(if i % 2 == 0 { editor.selection() } else { None });
+            assert_eq!(editor.overview_revision(), original);
+            assert!(cache
+                .update(
+                    editor.overview_revision(),
+                    palette,
+                    editor.scene(),
+                    editor.selection()
+                )
+                .is_none());
+        }
+        editor.select_component(0);
+        assert!(cache
+            .update(
+                editor.overview_revision(),
+                palette,
+                editor.scene(),
+                editor.selection()
+            )
+            .is_some());
+        assert!(cache
+            .update(
+                editor.overview_revision(),
+                StudioUiPalette::PaperLight,
+                editor.scene(),
+                editor.selection()
+            )
+            .is_some());
+        cache.invalidate();
+        assert!(cache
+            .update(
+                editor.overview_revision(),
+                StudioUiPalette::PaperLight,
+                editor.scene(),
+                editor.selection()
+            )
+            .is_some());
+    }
+
+    #[test]
+    fn minimap_coordinates_stay_fixed_during_pan_and_include_raster_padding() {
+        let mut schematic = Schematic::new("fixed overview");
+        let mut resistor = ElectronicComponent::resistor("1k");
+        resistor.position = Vec2::new(100.0, 50.0);
+        schematic.add_component(resistor);
+        let scene = CadScene::from_schematic(&schematic);
+        let size = Vec2::new(900.0, 600.0);
+        let image = visible_rects(&scene, size).unwrap().image;
+        let map = overview_map(&scene, CadCamera::default(), size);
+        let world = Vec2::new(120.0, 55.0);
+        let pixel = Vec2::from(map.point(world));
+        let fraction = pixel / Vec2::new((IMAGE_SIZE[0] - 1) as f32, (IMAGE_SIZE[1] - 1) as f32);
+        let point = Vec2::new(image.x, image.y) + fraction * Vec2::new(image.width, image.height);
+        for camera in [
+            CadCamera::default(),
+            CadCamera {
+                center: Vec2::new(-1000.0, 2000.0),
+                zoom: 10.0,
+            },
+        ] {
+            assert!(
+                world_at(&scene, camera, size, point)
+                    .unwrap()
+                    .distance(world)
+                    < 0.001
+            );
+        }
+    }
+
+    #[test]
+    fn offscreen_minimap_ink_is_clipped_before_raster_work() {
+        let min = Vec2::ZERO;
+        let max = Vec2::new(880.0, 560.0);
+        let (a, b) = clip_pixel_line(
+            Vec2::new(-1_000_000.0, 200.0),
+            Vec2::new(1_000_000.0, 200.0),
+            min,
+            max,
+        )
+        .unwrap();
+        assert!(a.x >= -0.1 && b.x <= 880.1);
+        assert!(a.distance(b) <= 881.0);
+        assert!(
+            clip_pixel_line(Vec2::new(-1e6, -100.0), Vec2::new(1e6, -100.0), min, max).is_none()
+        );
     }
 
     #[test]
@@ -710,7 +1181,7 @@ mod tests {
     }
 
     #[test]
-    fn world_at_center_of_empty_minimap_maps_to_camera_center() {
+    fn empty_minimap_has_no_pointer_target() {
         let camera = CadCamera {
             center: Vec2::new(50.0, 30.0),
             zoom: 1.0,
@@ -718,16 +1189,35 @@ mod tests {
         let size = Vec2::new(640.0, 480.0);
         let image = image_rect(size);
         let local = Vec2::new(image.x + image.width * 0.5, image.y + image.height * 0.5);
-        let world = world_at(
+        assert!(world_at(
             &CadScene::from_schematic(&Schematic::new("t")),
             camera,
             size,
             local,
         )
-        .expect("empty minimap still maps");
+        .is_none());
+    }
+
+    #[test]
+    fn content_minimap_uses_shared_visible_image_bounds_for_mapping() {
+        let mut schematic = Schematic::new("content");
+        let mut resistor = ElectronicComponent::resistor("10k");
+        resistor.position = Vec2::ZERO;
+        schematic.add_component(resistor);
+        let scene = CadScene::from_schematic(&schematic);
+        let camera = CadCamera::default();
+        let size = Vec2::new(640.0, 480.0);
+        let rects = visible_rects(&scene, size).expect("content shows the minimap");
+        assert_eq!(rects.panel, overlay_rect(size));
+        assert_eq!(rects.image, image_rect(size));
+        let center = Vec2::new(
+            rects.image.x + rects.image.width * 0.5,
+            rects.image.y + rects.image.height * 0.5,
+        );
+        let world = world_at(&scene, camera, size, center).expect("visible image maps");
         assert!(
             (world - camera.center).length() < 4.0,
-            "center pixel should resolve near the camera center, got {world:?}"
+            "image center should resolve near the camera center, got {world:?}"
         );
     }
 
@@ -778,6 +1268,57 @@ mod tests {
         assert!(
             hits > 40,
             "expected the component body color in the overview, found {hits} green-dominant pixels"
+        );
+    }
+
+    #[test]
+    fn minimap_uses_rotated_pad_shape_and_keeps_drill_as_a_gap() {
+        let object = CadObject {
+            stroke_width_world: None,
+            id: "pad:physical".to_string(),
+            source_id: None,
+            kind: CadObjectKind::Pad,
+            layer: raf_electronics::CadLayerKind::PcbTopCopper,
+            pick_priority: raf_electronics::CadPickPriority::Pin,
+            rect: Some(CadRect::new(Vec2::splat(50.0), Vec2::new(30.0, 10.0))),
+            shape: CadShape::Oval,
+            rotation_degrees: 45.0,
+            drill: Some(CadDrill {
+                shape: CadDrillShape::Oval,
+                size: Vec2::new(4.0, 8.0),
+                offset: Vec2::new(2.0, 0.0),
+                plated: true,
+            }),
+            points: Vec::new(),
+            line_paths: Vec::new(),
+            label: Some("1".to_string()),
+            net: Some("GND".to_string()),
+            net_id: Some(0),
+            color_rgba: [207, 150, 91, 255],
+        };
+        let map = Map {
+            min: Vec2::ZERO,
+            max: Vec2::splat(100.0),
+            width: 101,
+            height: 101,
+        };
+        let background = [9, 10, 12, 255];
+        let mut pixels = vec![0; 101 * 101 * 4];
+        fill(&mut pixels, background);
+        map.fill_cad_geometry(
+            &mut pixels,
+            &object,
+            object.color_rgba,
+            copper_edge_color(object.color_rgba),
+        );
+
+        let at = |x: usize, y: usize| &pixels[(y * 101 + x) * 4..(y * 101 + x) * 4 + 4];
+        // Sample the pad interior, away from the highlighted drill rim.
+        assert_eq!(at(44, 46), object.color_rgba);
+        assert_eq!(
+            at(51, 51),
+            background,
+            "the offset oval drill remains empty"
         );
     }
 

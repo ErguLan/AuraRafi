@@ -404,13 +404,6 @@ impl RhaiScriptRuntime {
         hook: &str,
         dt: f32,
     ) -> ScriptRuntimeReport {
-        let deadline = if hook == "on_start" || hook == "on_destroy" {
-            Instant::now() + Duration::from_millis(self.options.max_time_ms.clamp(1, 100))
-        } else {
-            self.tick_deadline.unwrap_or_else(|| {
-                Instant::now() + Duration::from_millis(self.options.max_time_ms.clamp(1, 100))
-            })
-        };
         let mut report = ScriptRuntimeReport::default();
         let cleanup = hook == "on_destroy";
         let indices: Vec<usize> = if cleanup {
@@ -448,6 +441,9 @@ impl RhaiScriptRuntime {
             } else {
                 dt
             };
+            // Per-attachment budget: one heavy script must not starve the rest.
+            let deadline =
+                Instant::now() + Duration::from_millis(self.options.max_time_ms.clamp(1, 100));
             let mut ctx = ScriptContext {
                 view: &mut self.view,
                 scene,
@@ -530,9 +526,6 @@ impl RhaiScriptRuntime {
     ) -> ScriptRuntimeReport {
         let events = std::mem::take(&mut self.events.events);
         let mut report = ScriptRuntimeReport::default();
-        let deadline = self.tick_deadline.unwrap_or_else(|| {
-            Instant::now() + Duration::from_millis(self.options.max_time_ms.clamp(1, 100))
-        });
         for event in events {
             for binding in &mut self.bindings {
                 if !binding.compiled.has_on_event
@@ -554,6 +547,8 @@ impl RhaiScriptRuntime {
                         continue;
                     }
                 }
+                let deadline =
+                    Instant::now() + Duration::from_millis(self.options.max_time_ms.clamp(1, 100));
                 let mut ctx = ScriptContext {
                     view: &mut self.view,
                     scene,

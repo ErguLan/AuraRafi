@@ -75,10 +75,10 @@ const TOOLBAR_ICON_BUTTON_WIDTH: f32 = 24.0;
 /// Smallest width a labelled control may claim, in logical points. The resolved
 /// label almost always measures wider; this only protects a one-letter label.
 const TOOLBAR_BUTTON_MIN_WIDTH: f32 = 24.0;
-/// Gap between two controls of the same group and around the hairline that
-/// closes the group, in logical points. The separator carries the group
-/// boundary, so the band keeps one rhythm instead of two.
-const TOOLBAR_GAP: f32 = 3.0;
+/// Gap between compact controls and around a group hairline, in logical points.
+/// The narrower rhythm preserves the mode labels and all commands at the 590pt
+/// one-row breakpoint.
+const TOOLBAR_GAP: f32 = 2.0;
 /// Vertical gap between the two rows of the stacked density, in logical points.
 const TOOLBAR_ROW_GAP: f32 = 4.0;
 /// Horizontal padding of the band, in logical points.
@@ -118,6 +118,18 @@ const CLASS_UNAVAILABLE: &str = "electronics-toolbar-unavailable";
 const CLASS_DANGER: &str = "electronics-toolbar-danger";
 /// Shared resting class of every control of the band.
 const CLASS_BUTTON: &str = "electronics-toolbar-button";
+/// Neutral islands that make the active surface's tool families scannable.
+const CLASS_TOOL_ISLAND_SELECT: &str = "electronics-toolbar-island-select";
+const CLASS_TOOL_ISLAND_CONNECT: &str = "electronics-toolbar-island-connect";
+const CLASS_TOOL_ISLAND_PLACE: &str = "electronics-toolbar-island-place";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToolIsland {
+    Selection,
+    Connection,
+    Placement,
+    Operations,
+}
 
 /// How much of the band a control may occupy at one canvas width.
 ///
@@ -335,24 +347,26 @@ fn document_controls(state: &ToolbarState) -> Vec<ToolbarControl> {
             ));
             controls.push(ToolbarControl::tool(
                 "electronics.place",
-                UiIconId::Add,
+                UiIconId::CadPlace,
                 Some("electronics.toolbar.place"),
             ));
         }
         CadSurfaceKind::Pcb => {
             controls.push(ToolbarControl::tool(
                 "electronics.route",
-                UiIconId::Route,
+                UiIconId::CadRoute,
                 Some("electronics.toolbar.route"),
             ));
+            controls.push(ToolbarControl::command("electronics.pcb.via", UiIconId::CadVia,
+                Some("electronics.pcb.via_label"), true));
             controls.push(ToolbarControl::tool(
                 "electronics.board-outline",
-                UiIconId::BoardOutline,
-                None,
+                UiIconId::CadOutline,
+                Some("app.pcb_outline_status"),
             ));
             controls.push(ToolbarControl::tool(
                 "electronics.place",
-                UiIconId::Add,
+                UiIconId::CadPlace,
                 Some("electronics.toolbar.place"),
             ));
             // Synchronizing footprints is a one-way projection of the schematic
@@ -366,6 +380,8 @@ fn document_controls(state: &ToolbarState) -> Vec<ToolbarControl> {
                 None,
                 true,
             ));
+            controls.push(ToolbarControl::command("electronics.pcb.menu:rules", UiIconId::Settings,
+                None, true));
         }
     }
     controls.push(ToolbarControl::command(
@@ -454,6 +470,309 @@ pub fn build_electronics_toolbar_surface(
     can_rotate: bool,
     width: f32,
 ) -> UiSurface {
+    if width >= 1100.0 {
+        let state = ToolbarState {
+            surface,
+            tool,
+            grid_visible,
+            labels_visible,
+            snap_enabled,
+            can_undo,
+            can_redo,
+            has_selection,
+            can_rotate,
+        };
+        return build_desktop_ribbon(palette, &state, width);
+    }
+    build_compact_electronics_toolbar_surface(
+        palette,
+        surface,
+        tool,
+        grid_visible,
+        labels_visible,
+        snap_enabled,
+        can_undo,
+        can_redo,
+        has_selection,
+        can_rotate,
+        width,
+    )
+}
+
+fn build_desktop_ribbon(palette: StudioUiPalette, state: &ToolbarState, width: f32) -> UiSurface {
+    let t = crate::panels::electronics_surface::electronics_tokens(palette);
+    let mut root = UiNode::new("electronics.toolbar", UiNodeKind::Toolbar)
+        .with_class("electronics-toolbar")
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 4.0,
+            padding: UiSpacing::xy(8.0, 6.0),
+            overflow: UiOverflow::Clip,
+            ..UiLayout::fixed(width, crate::editor_layout::ELECTRONICS_TOOLBAR_HEIGHT)
+        });
+    for (command, key, icon, active, w) in [
+        (
+            "electronics.mode.schematic",
+            "electronics.toolbar.schematic",
+            UiIconId::Schematic,
+            state.surface == CadSurfaceKind::Schematic,
+            132.0,
+        ),
+        (
+            "electronics.mode.pcb",
+            "electronics.toolbar.pcb",
+            UiIconId::Pcb,
+            state.surface == CadSurfaceKind::Pcb,
+            76.0,
+        ),
+    ] {
+        let c = ToolbarControl::segment(command, icon, Some(key));
+        let mut node = control_button(palette, &c, ToolbarDensity::Labelled, 34.0, active);
+        node.layout = UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            justify_content: UiJustify::Center,
+            gap: 4.0,
+            padding: UiSpacing::xy(6.0, 0.0),
+            ..UiLayout::fixed(w, 34.0)
+        };
+        if active {
+            node = node.with_class("electronics-desktop-mode-active");
+        }
+        node.icon = None;
+        node.text_key = None;
+        node = node
+            .with_child(
+                UiNode::new(format!("{command}.glyph"), UiNodeKind::Label)
+                    .with_icon(
+                        UiIcon::new(icon)
+                            .with_size(UiIconSize::Custom(22))
+                            .with_tint(if active { t.background } else { t.text }),
+                    )
+                    .with_layout(UiLayout::fixed(24.0, 24.0)),
+            )
+            .with_child(
+                UiNode::new(format!("{command}.label"), UiNodeKind::Label)
+                    .with_text_key(key)
+                    .with_text_style(UiTextStyle {
+                        role: UiTextRole::Label,
+                        size_px: 13.0,
+                        line_height_px: 18.0,
+                        weight: UiFontWeight::Medium,
+                        color: if active { t.background } else { t.text },
+                        inherit_color: false,
+                    })
+                    .with_text_overflow(UiTextOverflow::Ellipsis)
+                    .with_layout(UiLayout::fixed(w - 40.0, 22.0).with_text_safe_area(false)),
+            );
+        root = root.with_child(node);
+    }
+    root = root.with_child(separator("electronics.toolbar.surface-separator"));
+    for mut c in document_controls(state) {
+        if c.command == "electronics.pan" {
+            c.label = Some("electronics.toolbar.pan");
+        }
+        let active = c.kind == ControlKind::Tool && tool_is_engaged(c.command, state.tool);
+        let mut node = control_button(palette, &c, ToolbarDensity::Icon, 44.0, active);
+        if let Some(key) = c.label {
+            let w = if width < 1320.0 {
+                match c.command {
+                    "electronics.select" => 78.0,
+                    "electronics.board-outline" => 72.0,
+                    _ => 64.0,
+                }
+            } else {
+                match c.command {
+                    "electronics.select" => 82.0,
+                    "electronics.board-outline" => 80.0,
+                    _ => 68.0,
+                }
+            };
+            node.text_key = None;
+            node.icon = None;
+            node.layout = UiLayout {
+                flow: UiFlow::Column,
+                align_items: UiAlign::Center,
+                justify_content: UiJustify::Center,
+                gap: 2.0,
+                padding: UiSpacing::xy(2.0, 0.0),
+                ..UiLayout::fixed(w, 48.0)
+            };
+            let color = if active { t.background } else { t.text };
+            node = node
+                .with_child(
+                    UiNode::new(format!("{}.glyph", c.id()), UiNodeKind::Label)
+                        .with_icon(
+                            UiIcon::new(c.icon)
+                                .with_size(UiIconSize::Custom(28))
+                                .with_tint(color),
+                        )
+                        .with_layout(UiLayout::fixed(28.0, 28.0)),
+                )
+                .with_child(
+                    UiNode::new(format!("{}.label", c.id()), UiNodeKind::Label)
+                        .with_text_key(key)
+                        .with_text_style(UiTextStyle {
+                            role: UiTextRole::Label,
+                            size_px: 13.0,
+                            line_height_px: 18.0,
+                            ..UiTextStyle::button(color)
+                        })
+                        .with_text_overflow(UiTextOverflow::Ellipsis)
+                        .with_layout(
+                            UiLayout::fixed(0.0, 18.0)
+                                .with_width_mode(UiSizeMode::FitContent)
+                                .with_text_safe_area(false),
+                        ),
+                );
+        } else {
+            node.layout = UiLayout::fixed(32.0, 34.0);
+            node.icon = Some(UiIcon::new(c.icon).with_size(UiIconSize::Custom(22)));
+        }
+        if c.kind == ControlKind::Tool && !active {
+            node = node.with_class("electronics-desktop-resting-tool");
+        }
+        root = root.with_child(node);
+    }
+    root = root.with_child(separator("electronics.toolbar.history-separator"));
+    for c in history_controls(state) {
+        let mut node = control_button(palette, &c, ToolbarDensity::Icon, 34.0, false);
+        node.layout = UiLayout::fixed(32.0, 34.0);
+        node.icon = Some(UiIcon::new(c.icon).with_size(UiIconSize::Custom(22)));
+        root = root.with_child(node);
+    }
+    root = root.with_child(
+        UiNode::new("electronics.toolbar.flex", UiNodeKind::Panel)
+            .with_layout(UiLayout::fixed(0.0, 30.0).fill_width().grow(1.0)),
+    );
+    root = root.with_child(separator("electronics.toolbar.navigation-separator"));
+    for (c, latched) in view_controls(state) {
+        let mut node = control_button(palette, &c, ToolbarDensity::Icon, 32.0, latched);
+        node.layout = UiLayout::fixed(if width < 1320.0 { 28.0 } else { 32.0 }, 34.0);
+        node.icon = Some(
+            UiIcon::new(c.icon)
+                .with_size(UiIconSize::Custom(22))
+                .with_tint(if latched { t.accent } else { t.text_muted }),
+        );
+        root = root.with_child(node);
+    }
+    if state.surface == CadSurfaceKind::Pcb && width >= 1320.0 {
+        root = root.with_child(separator("electronics.toolbar.view-separator"));
+        for (id, key, text, command, active) in [
+            (
+                "2d",
+                "electronics.desktop.view2d",
+                "2D",
+                "electronics.pcb.preview.close",
+                true,
+            ),
+            (
+                "3d",
+                "electronics.desktop.preview_beta",
+                "3D",
+                "electronics.pcb.preview.toggle",
+                false,
+            ),
+            (
+                "layers",
+                "electronics.rail.layers",
+                "",
+                "electronics.navigator.tab:layers",
+                false,
+            ),
+            (
+                "export",
+                "electronics.pcb.fabrication",
+                "",
+                "electronics.fabrication.export",
+                false,
+            ),
+        ] {
+            let mut button = UiNode::new(format!("electronics.toolbar.{id}"), UiNodeKind::Button)
+                .with_layout(UiLayout::fixed(
+                    if id == "layers" || id == "export" {
+                        88.0
+                    } else {
+                        38.0
+                    },
+                    32.0,
+                ))
+                .with_text_style(UiTextStyle {
+                    size_px: 13.0,
+                    line_height_px: 18.0,
+                    ..UiTextStyle::button(if active { t.background } else { t.text })
+                })
+                .with_class(if active {
+                    "electronics-desktop-mode-active"
+                } else {
+                    CLASS_BUTTON
+                })
+                .with_accessibility_role(UiAccessibilityRole::Button)
+                .with_accessibility_label_key(key)
+                .with_tooltip_key(key)
+                .focusable()
+                .with_event(UiEventBinding::command(UiEventKind::Click, command));
+            button = if text.is_empty() {
+                button.with_text_key(key)
+            } else {
+                button.with_text_value(text)
+            };
+            root = root.with_child(button);
+        }
+    }
+    if state.surface == CadSurfaceKind::Pcb && width < 1320.0 {
+        root = root.with_child(
+            UiNode::new("electronics.toolbar.3d", UiNodeKind::Button)
+                .with_icon(UiIcon::new(UiIconId::Cube))
+                .with_layout(UiLayout::fixed(28.0, 32.0))
+                .with_accessibility_label_key("electronics.desktop.preview_beta")
+                .with_tooltip_key("electronics.desktop.preview_beta")
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    "electronics.pcb.preview.toggle",
+                )),
+        );
+    }
+    let mut surface = UiSurface::new("electronics.toolbar", palette, root);
+    surface.style_sheet = style_sheet(&t);
+    surface.style_sheet.rules.push(electronics_class_rule(
+        "electronics-desktop-resting-tool",
+        [0, 0, 0, 0],
+        [0, 0, 0, 0],
+        t.text,
+    ));
+    surface.style_sheet.rules.push(electronics_hover_rule(
+        "electronics-desktop-resting-tool",
+        t,
+    ));
+    surface.style_sheet.rules.push(electronics_focus_rule(
+        "electronics-desktop-resting-tool",
+        t,
+    ));
+    surface.style_sheet.rules.push(electronics_class_rule(
+        "electronics-desktop-mode-active",
+        t.accent,
+        t.accent,
+        t.background,
+    ));
+    surface
+}
+
+fn build_compact_electronics_toolbar_surface(
+    palette: StudioUiPalette,
+    surface: CadSurfaceKind,
+    tool: ElectronicsTool,
+    grid_visible: bool,
+    labels_visible: bool,
+    snap_enabled: bool,
+    can_undo: bool,
+    can_redo: bool,
+    has_selection: bool,
+    can_rotate: bool,
+    width: f32,
+) -> UiSurface {
     let state = ToolbarState {
         surface,
         tool,
@@ -465,7 +784,7 @@ pub fn build_electronics_toolbar_surface(
         has_selection,
         can_rotate,
     };
-    let tokens = palette.tokens();
+    let tokens = crate::panels::electronics_surface::electronics_tokens(palette);
     let density = ToolbarDensity::for_width(width);
     let document = document_cluster(palette, &state, density, TOOLBAR_BUTTON_HEIGHT);
     let view_and_history = view_cluster(palette, &state, density, TOOLBAR_BUTTON_HEIGHT);
@@ -520,13 +839,33 @@ fn document_cluster(
     height: f32,
 ) -> UiNode {
     let mut group = group_row("electronics.toolbar.cluster.document", height);
-    group = group.with_child(document_segment(palette, state, density, height));
+    group = group
+        .with_child(document_segment(palette, state, density, height))
+        .with_child(separator("electronics.toolbar.surface-separator"));
+    let mut previous_island = None;
     for control in document_controls(state) {
+        let island = tool_island(control.command);
+        if density.prints_labels()
+            && previous_island.is_some()
+            && island.is_some()
+            && previous_island != island
+        {
+            group = group.with_child(separator(&format!(
+                "electronics.toolbar.island-separator.{}",
+                match island.expect("a tool control has an island") {
+                    ToolIsland::Selection => "selection",
+                    ToolIsland::Connection => "connection",
+                    ToolIsland::Placement => "placement",
+                    ToolIsland::Operations => "operations",
+                }
+            )));
+        }
         let engaged = match control.kind {
             ControlKind::Tool => tool_is_engaged(control.command, state.tool),
             _ => false,
         };
         group = group.with_child(control_button(palette, &control, density, height, engaged));
+        previous_island = island.or(previous_island);
     }
     group
 }
@@ -589,8 +928,8 @@ fn group_row(id: &str, height: f32) -> UiNode {
 /// The schematic/PCB selector.
 ///
 /// It is the only bordered container of the band, so "which document am I
-/// editing" cannot be mistaken for a tool, and its engaged option uses the pale
-/// selection wash because the solid accent is reserved for the tool in hand.
+/// editing" cannot be mistaken for a tool. A hairline separates it from the
+/// first tool island, and its engaged option uses the pale selection wash.
 fn document_segment(
     palette: StudioUiPalette,
     state: &ToolbarState,
@@ -654,9 +993,14 @@ fn control_button(
     height: f32,
     engaged: bool,
 ) -> UiNode {
-    let tokens = palette.tokens();
+    let tokens = crate::panels::electronics_surface::electronics_tokens(palette);
     let unavailable = control.available.is_some_and(|available| !available);
-    let labelled = density.prints_labels() && control.needs_label();
+    let compact_mode = control.kind == ControlKind::Segment && !density.prints_labels();
+    // The workspace identity must remain explicit even when every other control
+    // has collapsed to an icon. The 9px mode labels are measured to keep both
+    // full names visible at the 530pt one-row breakpoint.
+    let labelled =
+        control.kind == ControlKind::Segment || (density.prints_labels() && control.needs_label());
     let action = tooltip_key(control.command);
     let tooltip = if unavailable {
         unavailable_reason_key(control.command)
@@ -688,7 +1032,11 @@ fn control_button(
                 flow: UiFlow::Row,
                 align_items: UiAlign::Center,
                 justify_content: UiJustify::Center,
-                padding: UiSpacing::xy(8.0, 2.0),
+                padding: if compact_mode {
+                    UiSpacing::xy(1.0, 2.0)
+                } else {
+                    UiSpacing::xy(8.0, 2.0)
+                },
                 // The horizontal minimum must stay at zero for a content-sized
                 // row child: any non-zero `min_size`/`basis` makes the parent
                 // advance this node by that constant while the node still paints
@@ -721,8 +1069,8 @@ fn control_button(
             .with_text_overflow(UiTextOverflow::Ellipsis)
             .with_text_style(UiTextStyle {
                 role: UiTextRole::Button,
-                size_px: 11.0,
-                line_height_px: 15.0,
+                size_px: if compact_mode { 9.0 } else { 11.0 },
+                line_height_px: if compact_mode { 12.0 } else { 15.0 },
                 // Medium keeps the labelled controls readable without letting
                 // the whole band carry the same weight as its one accent fill.
                 weight: UiFontWeight::Medium,
@@ -738,6 +1086,10 @@ fn control_button(
                 .with_size(UiIconSize::Small)
                 .with_tint(glyph_color),
         );
+    }
+
+    if let Some(island_class) = tool_island_class(control.command) {
+        node = node.with_class(island_class);
     }
 
     if engaged {
@@ -784,6 +1136,29 @@ fn tool_is_engaged(command: &str, tool: ElectronicsTool) -> bool {
     )
 }
 
+fn tool_island(command: &str) -> Option<ToolIsland> {
+    match command {
+        "electronics.select" | "electronics.pan" => Some(ToolIsland::Selection),
+        "electronics.wire" | "electronics.route" | "electronics.board-outline" | "electronics.pcb.via" => {
+            Some(ToolIsland::Connection)
+        }
+        "electronics.place" => Some(ToolIsland::Placement),
+        "electronics.pcb.sync" | "electronics.rotate" | "edit.delete" | "electronics.pcb.menu:rules" => {
+            Some(ToolIsland::Operations)
+        }
+        _ => None,
+    }
+}
+
+fn tool_island_class(command: &str) -> Option<&'static str> {
+    match tool_island(command)? {
+        ToolIsland::Selection => Some(CLASS_TOOL_ISLAND_SELECT),
+        ToolIsland::Connection => Some(CLASS_TOOL_ISLAND_CONNECT),
+        ToolIsland::Placement => Some(CLASS_TOOL_ISLAND_PLACE),
+        ToolIsland::Operations => None,
+    }
+}
+
 fn separator(id: &str) -> UiNode {
     crate::ui_atoms::UiSeparator::vertical(id, SEPARATOR_HEIGHT)
         .with_class("electronics-toolbar-separator")
@@ -799,6 +1174,8 @@ fn tooltip_key(command: &str) -> &'static str {
         "electronics.wire" => "electronics.tooltip.wire",
         "electronics.place" => "electronics.tooltip.place",
         "electronics.route" => "electronics.tooltip.route",
+        "electronics.pcb.via" => "electronics.pcb.via_help",
+        "electronics.pcb.menu:rules" => "electronics.pcb.rules_title",
         "electronics.board-outline" => "electronics.tooltip.board_outline",
         "electronics.pcb.sync" => "electronics.tooltip.pcb_sync",
         "electronics.fit" => "electronics.tooltip.fit",
@@ -851,9 +1228,7 @@ fn style_sheet(tokens: &UiTokens) -> UiStyleSheet {
                 ..UiStylePatch::default()
             },
         ),
-        // The document segment is the only bordered container of the band, which
-        // is what separates "which document" from "which tool" without needing
-        // another separator or another color.
+        // The document segment is the only bordered container of the band.
         electronics_class_rule(
             "electronics-toolbar-segment",
             tokens.surface_alt,
@@ -876,6 +1251,44 @@ fn style_sheet(tokens: &UiTokens) -> UiStyleSheet {
             },
         ),
     ];
+    // Resting tool islands use quiet neutral fills. Their boundaries are
+    // carried by surface tone and spacing; only the tool in hand uses the
+    // saturated accent.
+    rules.extend([
+        electronics_state_rule(
+            UiStyleRuleState::Always,
+            CLASS_TOOL_ISLAND_SELECT,
+            UiStylePatch {
+                fill: Some(tokens.surface_raised),
+                border: Some([0, 0, 0, 0]),
+                border_width: Some(0.0),
+                radius: Some(ELECTRONICS_CORNER_RADIUS),
+                ..UiStylePatch::default()
+            },
+        ),
+        electronics_state_rule(
+            UiStyleRuleState::Always,
+            CLASS_TOOL_ISLAND_CONNECT,
+            UiStylePatch {
+                fill: Some(tokens.surface_alt),
+                border: Some([0, 0, 0, 0]),
+                border_width: Some(0.0),
+                radius: Some(ELECTRONICS_CORNER_RADIUS),
+                ..UiStylePatch::default()
+            },
+        ),
+        electronics_state_rule(
+            UiStyleRuleState::Always,
+            CLASS_TOOL_ISLAND_PLACE,
+            UiStylePatch {
+                fill: Some(tokens.surface_raised),
+                border: Some([0, 0, 0, 0]),
+                border_width: Some(0.0),
+                radius: Some(ELECTRONICS_CORNER_RADIUS),
+                ..UiStylePatch::default()
+            },
+        ),
+    ]);
     rules.push(electronics_hover_rule(CLASS_BUTTON, *tokens));
     rules.push(electronics_focus_rule(CLASS_BUTTON, *tokens));
     rules.push(electronics_active_rule(CLASS_BUTTON, *tokens));
@@ -1035,6 +1448,105 @@ mod tests {
     use super::*;
     use crate::panels::electronics_surface::assert_electronics_layout_gate;
 
+    #[test]
+    fn desktop_ribbon_keeps_tools_visible_and_usable_at_real_window_widths() {
+        for language in [raf_core::Language::English, raf_core::Language::Spanish] {
+            for width in [1100.0, 1280.0, 1600.0] {
+                for kind in [CadSurfaceKind::Pcb, CadSurfaceKind::Schematic] {
+                    let surface = build_electronics_toolbar_surface(
+                        StudioUiPalette::IndustrialDark,
+                        kind,
+                        ElectronicsTool::Select,
+                        true,
+                        true,
+                        true,
+                        true,
+                        true,
+                        true,
+                        true,
+                        width,
+                    );
+                    let mut host = raf_render::api_graphic_basic::ui_surface::CpuUiSurfaceHost::new(
+                        surface.clone(),
+                        [0, 0, 0, 255],
+                    );
+                    let capture = host.render(
+                        [
+                            width as u32,
+                            crate::editor_layout::ELECTRONICS_TOOLBAR_HEIGHT as u32,
+                        ],
+                        |key| raf_core::i18n::t(key, language),
+                    );
+                    for id in [
+                        "electronics.mode.schematic.label",
+                        "electronics.mode.pcb.label",
+                    ] {
+                        let request = capture
+                            .frame
+                            .text_requests
+                            .iter()
+                            .find(|r| r.node_id == id)
+                            .unwrap();
+                        let text = raf_core::i18n::t(&request.text_key, language);
+                        let mut natural = request.clone();
+                        natural.max_width = 1024.0;
+                        natural.overflow = UiTextOverflow::Clip;
+                        let needed =
+                            raf_render::api_graphic_basic::ui_surface::UiTextAtlas::default()
+                                .measure_prefix_width(&natural, &text, text.chars().count());
+                        assert!(
+                            needed <= request.max_width + 0.1,
+                            "{id} needs {needed}, receives {} at {width}",
+                            request.max_width
+                        );
+                    }
+                    for command in [
+                        "electronics.mode.schematic",
+                        "electronics.mode.pcb",
+                        "electronics.select",
+                        "electronics.place",
+                        "electronics.fit",
+                        "electronics.zoom-in",
+                        "edit.undo",
+                        "edit.redo",
+                    ] {
+                        let id = format!("electronics.toolbar.{command}");
+                        let node = surface.root.find(&id).expect("live tool");
+                        assert!(node.focusable && !node.disabled);
+                        let rect = capture
+                            .frame
+                            .layout_boxes
+                            .iter()
+                            .find(|b| b.id == id)
+                            .unwrap()
+                            .rect;
+                        assert!(
+                            rect.x >= 0.0 && rect.x + rect.width <= width + 0.5,
+                            "{id}: {rect:?} at {width}"
+                        );
+                        assert!(rect.width >= 24.0 && rect.height >= 24.0);
+                        assert!(node.event_handlers.iter().any(
+                            |e| matches!(&e.action,raf_ui::UiAction::Command{name} if name==command)
+                        ));
+                    }
+                    let connect = if kind == CadSurfaceKind::Pcb {
+                        "electronics.route"
+                    } else {
+                        "electronics.wire"
+                    };
+                    assert!(surface
+                        .root
+                        .find(&format!("electronics.toolbar.{connect}.glyph"))
+                        .is_some());
+                    assert!(surface
+                        .root
+                        .find(&format!("electronics.toolbar.{connect}.label"))
+                        .is_some());
+                }
+            }
+        }
+    }
+
     /// Canvas width that resolves the labelled density.
     const LABELLED_WIDTH: f32 = 1600.0;
     /// Canvas width that resolves the single glyph-only row.
@@ -1047,17 +1559,28 @@ mod tests {
     /// already including the 8+8 points of padding the compositor forces on every
     /// labelled control. Measured from the bundled Ubuntu Medium face at 11px
     /// against `crates/raf_core/locales/es.json`, which is the longest catalog of
-    /// the two.
-    const MEASURED_ES_LABELS: [(&str, f32); 9] = [
+    /// the two. The reused `Contorno` key reserves a conservative 64pt span.
+    const MEASURED_ES_LABELS: [(&str, f32); 11] = [
         ("electronics.toolbar.schematic", 81.5),
         ("electronics.toolbar.pcb", 37.1),
         ("electronics.toolbar.select", 74.5),
         ("electronics.toolbar.wire", 45.0),
         ("electronics.toolbar.place", 54.9),
         ("electronics.toolbar.route", 48.3),
+        ("electronics.pcb.via_label", 34.0),
         ("electronics.toolbar.grid", 70.1),
         ("electronics.toolbar.snap", 48.9),
         ("electronics.toolbar.labels", 64.8),
+        // Existing bilingual app label reused because the shared locale files
+        // are outside this task's edit scope.
+        ("app.pcb_outline_status", 64.0),
+    ];
+
+    /// Mode labels stay visible in the compact row. These widths use the same
+    /// Ubuntu Medium face at 9px with 1px horizontal padding on each button.
+    const COMPACT_ES_MODE_LABELS: [(&str, f32); 2] = [
+        ("electronics.toolbar.schematic", 55.6),
+        ("electronics.toolbar.pcb", 19.3),
     ];
 
     fn build(kind: CadSurfaceKind, width: f32) -> UiSurface {
@@ -1075,7 +1598,7 @@ mod tests {
     }
 
     fn build_with(state: ToolbarState, width: f32) -> UiSurface {
-        build_electronics_toolbar_surface(
+        build_compact_electronics_toolbar_surface(
             StudioUiPalette::IndustrialDark,
             state.surface,
             state.tool,
@@ -1156,6 +1679,14 @@ mod tests {
             .unwrap_or(TOOLBAR_ICON_BUTTON_WIDTH)
     }
 
+    fn compact_mode_width(label: &str) -> f32 {
+        COMPACT_ES_MODE_LABELS
+            .iter()
+            .find(|(key, _)| *key == label)
+            .map(|(_, width)| *width)
+            .unwrap_or(TOOLBAR_ICON_BUTTON_WIDTH)
+    }
+
     /// Width of one control at one density, from the measured table.
     fn control_width(labelled: bool, label: Option<&str>) -> f32 {
         match (labelled, label) {
@@ -1167,14 +1698,14 @@ mod tests {
     /// Span of the document group at one density: the surface segment, the tools
     /// of the active surface and the two selection edits.
     fn document_span(kind: CadSurfaceKind, labelled: bool) -> f32 {
-        let segment = if labelled {
+        let mode_width = if labelled {
             labelled_width("electronics.toolbar.schematic")
                 + labelled_width("electronics.toolbar.pcb")
-                + SEGMENT_GAP
-                + 2.0 * SEGMENT_INSET
         } else {
-            2.0 * TOOLBAR_ICON_BUTTON_WIDTH + SEGMENT_GAP + 2.0 * SEGMENT_INSET
+            compact_mode_width("electronics.toolbar.schematic")
+                + compact_mode_width("electronics.toolbar.pcb")
         };
+        let segment = mode_width + SEGMENT_GAP + 2.0 * SEGMENT_INSET;
         let mut widths = vec![
             segment,
             control_width(labelled, Some("electronics.toolbar.select")),
@@ -1188,15 +1719,20 @@ mod tests {
             }
             CadSurfaceKind::Pcb => {
                 widths.push(control_width(labelled, Some("electronics.toolbar.route")));
+                widths.push(control_width(labelled, Some("electronics.pcb.via_label")));
+                widths.push(control_width(labelled, Some("app.pcb_outline_status")));
                 widths.push(control_width(labelled, Some("electronics.toolbar.place")));
                 widths.push(control_width(labelled, None));
+                // Board rules is a glyph alongside the sync operation.
                 widths.push(control_width(labelled, None));
             }
         }
         // Rotate and Delete are glyph-only in every density.
         widths.push(control_width(labelled, None));
         widths.push(control_width(labelled, None));
-        widths.iter().sum::<f32>() + TOOLBAR_GAP * (widths.len() - 1) as f32
+        let control_gaps = TOOLBAR_GAP * (widths.len() - 1) as f32;
+        let island_separators = if labelled { 4.0 } else { 1.0 };
+        widths.iter().sum::<f32>() + control_gaps + island_separators * (1.0 + TOOLBAR_GAP)
     }
 
     /// Span of the view group at one density: the three latched options plus the
@@ -1327,6 +1863,7 @@ mod tests {
             "electronics.mode.pcb",
             "electronics.select",
             "electronics.route",
+            "electronics.board-outline",
             "electronics.place",
             "electronics.grid.toggle",
             "electronics.snap.toggle",
@@ -1348,7 +1885,6 @@ mod tests {
         // universal glyph or a gesture equivalent that its tooltip states.
         for command in [
             "electronics.pan",
-            "electronics.board-outline",
             "electronics.pcb.sync",
             "electronics.rotate",
             "edit.delete",
@@ -1372,10 +1908,24 @@ mod tests {
                 let surface = build(kind, width);
                 fn walk(node: &UiNode) {
                     if node.kind == UiNodeKind::Button {
-                        assert!(node.text_key.is_none(), "{} hid its glyph", node.id);
-                        assert!(node.icon.is_some(), "{} lost its glyph", node.id);
+                        let is_mode = node.id == "electronics.toolbar.electronics.mode.schematic"
+                            || node.id == "electronics.toolbar.electronics.mode.pcb";
+                        if is_mode {
+                            assert!(node.text_key.is_some(), "{} must name the mode", node.id);
+                            assert!(node.icon.is_none(), "{} must stay text-first", node.id);
+                        } else {
+                            assert!(node.text_key.is_none(), "{} hid its glyph", node.id);
+                            assert!(node.icon.is_some(), "{} lost its glyph", node.id);
+                        }
                         assert!(node.tooltip_key.is_some());
-                        assert_eq!(node.layout.width_mode, UiSizeMode::Fixed);
+                        assert_eq!(
+                            node.layout.width_mode,
+                            if is_mode {
+                                UiSizeMode::FitContent
+                            } else {
+                                UiSizeMode::Fixed
+                            }
+                        );
                     }
                     for child in &node.children {
                         walk(child);
@@ -1383,6 +1933,92 @@ mod tests {
                 }
                 walk(&surface.root);
             }
+        }
+    }
+
+    #[test]
+    fn the_mode_selector_keeps_both_localized_names_at_every_density() {
+        for width in [
+            NARROW_WIDTH,
+            crate::editor_layout::ELECTRONICS_TOOLBAR_STACKED_WIDTH,
+            crate::editor_layout::ELECTRONICS_TOOLBAR_LABELLED_WIDTH,
+            1200.0,
+        ] {
+            for (surface_kind, active_mode) in [
+                (CadSurfaceKind::Schematic, "schematic"),
+                (CadSurfaceKind::Pcb, "pcb"),
+            ] {
+                let surface = build(surface_kind, width);
+                for (command, key) in [
+                    ("schematic", "electronics.toolbar.schematic"),
+                    ("pcb", "electronics.toolbar.pcb"),
+                ] {
+                    let mode = surface
+                        .root
+                        .find(&format!("electronics.toolbar.electronics.mode.{command}"))
+                        .expect("both surface modes stay available");
+                    assert_eq!(mode.text_key.as_deref(), Some(key));
+                    assert!(mode.icon.is_none());
+                    let selected = command == active_mode;
+                    assert_eq!(mode.accessibility_selected, Some(selected));
+                    assert_eq!(
+                        class_of(
+                            &surface,
+                            &format!("electronics.toolbar.electronics.mode.{command}"),
+                            CLASS_OPTION_ON,
+                        ),
+                        selected,
+                        "the active {command} mode has a visible selected treatment"
+                    );
+                    assert!(mode.focusable);
+                    assert!(mode.tooltip_key.is_some());
+                }
+                assert!(
+                    surface
+                        .root
+                        .find("electronics.toolbar.surface-separator")
+                        .is_some(),
+                    "the mode selector stays distinct from the tool islands"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tool_islands_follow_the_active_surface_workflow() {
+        let schematic = build(CadSurfaceKind::Schematic, LABELLED_WIDTH);
+        for command in ["electronics.select", "electronics.pan"] {
+            assert!(class_of(
+                &schematic,
+                &format!("electronics.toolbar.{command}"),
+                CLASS_TOOL_ISLAND_SELECT
+            ));
+        }
+        assert!(class_of(
+            &schematic,
+            "electronics.toolbar.electronics.wire",
+            CLASS_TOOL_ISLAND_CONNECT
+        ));
+        assert!(class_of(
+            &schematic,
+            "electronics.toolbar.electronics.place",
+            CLASS_TOOL_ISLAND_PLACE
+        ));
+
+        let pcb = build(CadSurfaceKind::Pcb, LABELLED_WIDTH);
+        for command in ["electronics.route", "electronics.board-outline"] {
+            assert!(class_of(
+                &pcb,
+                &format!("electronics.toolbar.{command}"),
+                CLASS_TOOL_ISLAND_CONNECT
+            ));
+        }
+        for id in [
+            "electronics.toolbar.island-separator.connection",
+            "electronics.toolbar.island-separator.placement",
+            "electronics.toolbar.island-separator.operations",
+        ] {
+            assert!(pcb.root.find(id).is_some(), "missing boundary {id}");
         }
     }
 
@@ -1552,7 +2188,7 @@ mod tests {
     #[test]
     fn the_engaged_tool_and_an_engaged_option_do_not_share_a_treatment() {
         for palette in [StudioUiPalette::IndustrialDark, StudioUiPalette::PaperLight] {
-            let surface = build_electronics_toolbar_surface(
+            let surface = build_compact_electronics_toolbar_surface(
                 palette,
                 CadSurfaceKind::Schematic,
                 ElectronicsTool::Wire,
@@ -1565,7 +2201,7 @@ mod tests {
                 true,
                 LABELLED_WIDTH,
             );
-            let tokens = palette.tokens();
+            let tokens = crate::panels::electronics_surface::electronics_tokens(palette);
             let tool = rule_for(&surface, CLASS_TOOL_ACTIVE, UiStyleRuleState::Always);
             let option = rule_for(&surface, CLASS_OPTION_ON, UiStyleRuleState::Always);
             assert_eq!(tool.fill, Some(tokens.accent));
@@ -1631,7 +2267,7 @@ mod tests {
     #[test]
     fn the_document_segment_is_the_only_bordered_container() {
         let surface = build(CadSurfaceKind::Pcb, LABELLED_WIDTH);
-        let tokens = surface.palette.tokens();
+        let tokens = crate::panels::electronics_surface::electronics_tokens(surface.palette);
         let segment = rule_for(
             &surface,
             "electronics-toolbar-segment",
@@ -1765,6 +2401,7 @@ mod tests {
                 ELECTRONICS_TOOLBAR_STACKED_WIDTH,
                 ELECTRONICS_TOOLBAR_LABELLED_WIDTH - 1.0,
                 ELECTRONICS_TOOLBAR_LABELLED_WIDTH,
+                1200.0,
                 1280.0,
                 LABELLED_WIDTH,
             ] {
@@ -1779,6 +2416,57 @@ mod tests {
                     "{kind:?} at {width} resolved {} focusable regions",
                     diagnostics.focusable_regions
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn cpu_toolbar_layouts_at_real_breakpoints_and_can_save_optional_review_images() {
+        use raf_render::api_graphic_basic::ui_surface::CpuUiSurfaceHost;
+
+        let qa_dir =
+            std::env::var_os("RAF_ELECTRONICS_TOOLBAR_QA_DIR").map(std::path::PathBuf::from);
+        if let Some(dir) = &qa_dir {
+            std::fs::create_dir_all(dir).expect("create toolbar QA image directory");
+        }
+
+        for width in [360_u32, 530, 840, 1200] {
+            let height = electronics_toolbar_height(width as f32) as u32;
+            let surface = build(CadSurfaceKind::Pcb, width as f32);
+            let mut host = CpuUiSurfaceHost::new(surface, [12, 15, 21, 255]);
+            let rendered = host.render([width, height], |key| {
+                raf_core::i18n::t(key, raf_core::Language::Spanish)
+            });
+            assert!(
+                rendered.pixels.chunks_exact(4).any(|pixel| {
+                    pixel[0] != 12 || pixel[1] != 15 || pixel[2] != 21 || pixel[3] != 255
+                }),
+                "the toolbar should paint at {width}×{height}"
+            );
+            for layout in rendered
+                .frame
+                .layout_boxes
+                .iter()
+                .filter(|layout| layout.id.starts_with("electronics.toolbar.electronics."))
+            {
+                assert!(
+                    layout.rect.width > 0.0
+                        && layout.rect.x >= 0.0
+                        && layout.rect.right() <= width as f32 + f32::EPSILON,
+                    "{} escaped the {width}px toolbar: {:?}",
+                    layout.id,
+                    layout.rect
+                );
+            }
+            if let Some(dir) = &qa_dir {
+                image::save_buffer(
+                    dir.join(format!("electronics-toolbar-{width}.png")),
+                    rendered.pixels,
+                    width,
+                    height,
+                    image::ColorType::Rgba8,
+                )
+                .expect("save optional toolbar QA image");
             }
         }
     }

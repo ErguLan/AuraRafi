@@ -34,14 +34,28 @@ pub fn build_tab_strip_surface(
     collapsed: bool,
     preview: Option<&BottomTabDragPreview>,
 ) -> UiSurface {
+    build_tab_strip_surface_sized(palette, group, collapsed, preview, f32::INFINITY)
+}
+
+pub fn build_tab_strip_surface_sized(
+    palette: StudioUiPalette,
+    group: &DockTabGroup,
+    collapsed: bool,
+    preview: Option<&BottomTabDragPreview>,
+    width: f32,
+) -> UiSurface {
+    let console_controls = group.active_tab == "console" && !collapsed;
+    let compact = width
+        < group.tabs.iter().map(|tab| tab_width(tab)).sum::<f32>()
+            + if console_controls { 164.0 } else { 40.0 };
     let tokens = palette.tokens();
     let mut root = UiNode::new("bottom.tabs", UiNodeKind::Toolbar)
         .with_class("bottom-tabs")
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
-            gap: 2.0,
-            padding: UiSpacing::xy(5.0, 2.0),
+            gap: 1.0,
+            padding: UiSpacing::xy(2.0, 2.0),
             overflow: UiOverflow::ScrollX,
             ..UiLayout::fill(UiFlow::Row)
         })
@@ -49,7 +63,7 @@ pub fn build_tab_strip_surface(
             fill: tokens.surface_alt,
             border: tokens.border,
             text: tokens.text,
-            border_width: 1.0,
+            border_width: 0.0,
             radius: 0.0,
             opacity: 1.0,
         });
@@ -75,7 +89,7 @@ pub fn build_tab_strip_surface(
         // captures the pointer on that node, so removing it here would make a
         // later pointer release unable to dispatch DragEnd.
         let active = group.active_tab == tab.id;
-        let mut button = tab_button(group, tab, active);
+        let mut button = tab_button(group, tab, active, compact, width < 340.0, tokens.accent);
         if preview.is_some_and(|preview| {
             preview.source_group_id == group.id && preview.source_tab_id == tab.id
         }) {
@@ -90,14 +104,53 @@ pub fn build_tab_strip_surface(
     }
 
     root = root.with_child(
+        UiNode::new("bottom.tabs.spacer", UiNodeKind::Panel)
+            .with_layout(UiLayout::fixed(0.0, 28.0).fill_width().grow(1.0)),
+    );
+    if console_controls {
+        root = root.with_child(
+            UiNode::new("bottom.console.filters", UiNodeKind::Button)
+                .with_class("bottom-tab")
+                .with_icon(UiIcon::new(UiIconId::ChevronDown))
+                .with_text_style(UiTextStyle {
+                    size_px: 13.0,
+                    line_height_px: 18.0,
+                    ..UiTextStyle::button(tokens.text)
+                })
+                .with_layout(UiLayout::fixed(
+                    if width >= 520.0 { 92.0 } else { 28.0 },
+                    28.0,
+                ))
+                .with_accessibility_label_key("electronics.desktop.filters")
+                .with_tooltip_key("electronics.desktop.filters")
+                .focusable()
+                .with_event(UiEventBinding::command(
+                    UiEventKind::Click,
+                    "console.filters.toggle",
+                )),
+        );
+        if width >= 520.0 {
+            if let Some(button) = root.find_mut("bottom.console.filters") {
+                button.text_key = Some("electronics.desktop.filters".into());
+            }
+        }
+        if width >= 560.0 {
+            root = root.with_child(
+                UiNode::new("bottom.console.clear", UiNodeKind::Button)
+                    .with_class("bottom-tab")
+                    .with_icon(UiIcon::new(UiIconId::Trash))
+                    .with_layout(UiLayout::fixed(28.0, 28.0))
+                    .with_accessibility_label_key("app.clear")
+                    .with_tooltip_key("app.clear")
+                    .focusable()
+                    .with_event(UiEventBinding::command(UiEventKind::Click, "console.clear")),
+            );
+        }
+    }
+    root = root.with_child(
         UiNode::new("bottom.collapse", UiNodeKind::Button)
             .with_class("bottom-collapse-button")
-            .with_layout(UiLayout {
-                grow: 1.0,
-                justify_content: UiJustify::End,
-                align_items: UiAlign::Center,
-                ..UiLayout::fit_content()
-            })
+            .with_layout(UiLayout::fixed(28.0, 28.0))
             .with_icon(UiIcon::new(if collapsed {
                 UiIconId::ChevronRight
             } else {
@@ -346,32 +399,62 @@ fn tab_context_button(
         })
         .with_icon(UiIcon::new(icon).with_size(UiIconSize::Small))
         .with_text_key(label_key)
-        .with_text_style(UiTextStyle::button([237, 239, 242, 255]).inherit_theme_color())
+        .with_text_style(UiTextStyle {
+            size_px: 13.0,
+            line_height_px: 18.0,
+            ..UiTextStyle::button([237, 239, 242, 255]).inherit_theme_color()
+        })
         .with_accessibility_label_key(label_key)
         .focusable()
         .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
-fn tab_button(group: &DockTabGroup, tab: &DockTab, active: bool) -> UiNode {
+fn tab_width(tab: &DockTab) -> f32 {
+    match tab.id.as_str() {
+        "project-settings" => 124.0,
+        "nodes" => 92.0,
+        "console" => 106.0,
+        "assets" | "drc" => 94.0,
+        "simulation" => 120.0,
+        _ => 96.0,
+    }
+}
+
+fn tab_button(
+    group: &DockTabGroup,
+    tab: &DockTab,
+    active: bool,
+    compact: bool,
+    icon_only_active: bool,
+    accent: [u8; 4],
+) -> UiNode {
     let class = if active {
         "bottom-tab bottom-tab-active"
     } else {
         "bottom-tab"
     };
-    let width = match tab.id.as_str() {
-        "project-settings" => 104.0,
-        "nodes" => 92.0,
-        "console" => 96.0,
-        "assets" => 86.0,
-        "drc" => 86.0,
-        "simulation" => 112.0,
-        _ => 96.0,
+    let width = if compact && (!active || icon_only_active) {
+        32.0
+    } else {
+        tab_width(tab)
     };
-    UiNode::new(
+    let mut node = UiNode::new(
         format!("bottom.tab.{}|{}", group.id, tab.id),
         UiNodeKind::Button,
     )
     .with_class(class)
+    .with_accessibility_role(raf_ui::UiAccessibilityRole::Tab)
+    .with_accessibility_selected(active)
+    .with_child(
+        UiNode::new(
+            format!("bottom.tab.{}|{}.edge", group.id, tab.id),
+            UiNodeKind::Separator,
+        )
+        .with_layout(UiLayout::absolute(raf_ui::UiRect::new(
+            0.0, 0.0, width, 2.0,
+        )))
+        .with_style(UiStyle::transparent().with_fill(if active { accent } else { [0, 0, 0, 0] })),
+    )
     .with_layout(UiLayout {
         flow: UiFlow::Row,
         align_items: UiAlign::Center,
@@ -380,8 +463,13 @@ fn tab_button(group: &DockTabGroup, tab: &DockTab, active: bool) -> UiNode {
         ..UiLayout::fixed(width, 28.0).with_text_safe_area(true)
     })
     .with_icon(UiIcon::new(tab.icon).with_size(UiIconSize::Small))
-    .with_text_key(tab.title_key.clone())
-    .with_text_style(UiTextStyle::button([237, 239, 242, 255]).inherit_theme_color())
+    .with_tooltip_key(tab.title_key.clone())
+    .with_accessibility_label_key(tab.title_key.clone())
+    .with_text_style(UiTextStyle {
+        size_px: 13.0,
+        line_height_px: 18.0,
+        ..UiTextStyle::button([237, 239, 242, 255]).inherit_theme_color()
+    })
     .focusable()
     .with_event(UiEventBinding::command(
         UiEventKind::Click,
@@ -402,12 +490,68 @@ fn tab_button(group: &DockTabGroup, tab: &DockTab, active: bool) -> UiNode {
     .with_event(UiEventBinding::command(
         UiEventKind::ContextMenu,
         format!("bottom.context.open.{}|{}", group.id, tab.id),
-    ))
+    ));
+    if !compact || (active && !icon_only_active) {
+        node = node.with_text_key(tab.title_key.clone());
+    }
+    node
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn narrow_report_strip_keeps_all_tabs_and_the_collapse_button_reachable() {
+        let group = DockTabGroup::new(
+            "reports",
+            vec![
+                DockTab::new("console", "app.studio_console", UiIconId::Console),
+                DockTab::new("assets", "app.studio_assets", UiIconId::Assets),
+                DockTab::new("drc", "app.electronics_drc", UiIconId::Warning),
+                DockTab::new("simulation", "app.electronics_simulation", UiIconId::Play),
+                DockTab::new("agent", "app.agent_tab", UiIconId::Agent),
+                DockTab::new(
+                    "project-settings",
+                    "app.project_settings_tab",
+                    UiIconId::Settings,
+                ),
+            ],
+        );
+        let surface = build_tab_strip_surface_sized(
+            StudioUiPalette::IndustrialDark,
+            &group,
+            false,
+            None,
+            360.0,
+        );
+        let frame = surface.build_frame(360, 34, [0, 0, 0, 255]);
+        for tab in &group.tabs {
+            let id = format!("bottom.tab.reports|{}", tab.id);
+            let node = surface.root.find(&id).unwrap();
+            let rect = frame.layout_boxes.iter().find(|b| b.id == id).unwrap().rect;
+            assert!(
+                rect.width >= 28.0 && rect.x + rect.width <= 360.0,
+                "{id}: {rect:?}"
+            );
+            assert!(node.focusable && node.tooltip_key.is_some());
+            assert!(node
+                .event_handlers
+                .iter()
+                .any(|e| e.event == UiEventKind::ContextMenu));
+        }
+        let collapse = frame
+            .layout_boxes
+            .iter()
+            .find(|b| b.id == "bottom.collapse")
+            .unwrap()
+            .rect;
+        assert!(collapse.width >= 24.0 && collapse.x + collapse.width <= 360.0);
+        assert!(
+            collapse.x >= 330.0,
+            "Collapse stays in the right corner: {collapse:?}"
+        );
+    }
 
     fn child<'a>(node: &'a UiNode, id: &str) -> &'a UiNode {
         if node.id == id {
@@ -526,7 +670,7 @@ mod tests {
         let surface = build_tab_strip_surface(StudioUiPalette::IndustrialDark, &group, false, None);
         let tab = child(&surface.root, "bottom.tab.main|project-settings");
 
-        assert_eq!(tab.layout.basis, [104.0, 28.0]);
+        assert_eq!(tab.layout.basis, [124.0, 28.0]);
         assert_eq!(tab.text_key.as_deref(), Some("app.studio_project"));
     }
 }

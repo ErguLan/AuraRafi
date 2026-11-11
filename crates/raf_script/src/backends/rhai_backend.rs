@@ -187,6 +187,10 @@ pub fn create_engine(max_operations: u64) -> Engine {
     engine.on_print(capture_log);
     engine.on_debug(|message, _, _| capture_log(message));
     engine.register_type_with_name::<NodeHandle>("Handle");
+    // Rhai exposes the two-argument arc-tangent only as `atan(y, x)`. Authored
+    // gameplay conventionally uses `atan2(y, x)`; register the alias so scripts
+    // do not fail a Play test over a naming difference.
+    engine.register_fn("atan2", |y: f64, x: f64| y.atan2(x));
     super::rhai_behavior_api::register(&mut engine);
     super::rhai_environment_api::register(&mut engine);
     engine.register_type_with_name::<ScriptValue>("Value");
@@ -430,6 +434,7 @@ pub fn create_engine(max_operations: u64) -> Engine {
     super::rhai_scene_api::register(&mut engine);
     super::rhai_physics_api::register(&mut engine);
     super::rhai_services_api::register(&mut engine);
+    super::rhai_ui_api::register(&mut engine);
     engine
 }
 

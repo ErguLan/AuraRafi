@@ -21,7 +21,7 @@ use serde_json::Value;
 use std::collections::{hash_map::DefaultHasher, BTreeMap};
 use std::env;
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, BufReader, BufWriter, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
 
@@ -32,6 +32,10 @@ use discovery::DiscoveredEditor;
 
 const PROGRAM: &str = "raf";
 const PROTOCOL_VERSION: &str = "2025-06-18";
+/// Keep ad-hoc parameter documents bounded. The largest project document the
+/// CLI currently edits is a 4 MiB UI file, so 8 MiB leaves room for a JSON
+/// envelope without making an accidental multi-gigabyte read possible.
+const MAX_PARAMS_BYTES: u64 = 8 * 1024 * 1024;
 
 type CliResult<T> = Result<T, String>;
 
@@ -86,7 +90,7 @@ fn parse_options(arguments: &[String]) -> Options {
                     .insert(name.to_ascii_lowercase(), Some(value.to_string()));
             } else if arguments
                 .get(index + 1)
-                .is_some_and(|next| !next.starts_with('-'))
+                .is_some_and(|next| !next.starts_with('-') || next == "-")
             {
                 options
                     .flags
@@ -844,17 +848,26 @@ impl HeadlessEngine {
 
 trait McpCommandHost: CommandEndpoint {
     fn resource(&self, uri: &str) -> CliResult<Value>;
+    fn project_root(&self) -> Option<&Path>;
 }
 
 impl McpCommandHost for HeadlessEngine {
     fn resource(&self, uri: &str) -> CliResult<Value> {
         HeadlessEngine::resource(self, uri)
     }
+
+    fn project_root(&self) -> Option<&Path> {
+        self.project_path()
+    }
 }
 
 impl McpCommandHost for AttachedClient {
     fn resource(&self, uri: &str) -> CliResult<Value> {
         AttachedClient::resource(self, uri)
+    }
+
+    fn project_root(&self) -> Option<&Path> {
+        Some(self.project_path())
     }
 }
 
@@ -1200,17 +1213,75 @@ fn named_command_request(
 }
 
 fn parse_params(options: &Options) -> CliResult<Value> {
-    let params = options
-        .value("params")
-        .map(|raw| {
-            serde_json::from_str(raw).map_err(|error| format!("Invalid --params JSON: {error}"))
-        })
-        .transpose()?
-        .unwrap_or_else(|| json!({}));
+    if options.value("params").is_some() && options.value("params-file").is_some() {
+        return Err("Use only one of --params or --params-file.".to_string());
+    }
+    let raw = if let Some(path) = options.value("params-file") {
+        read_params_source(path)?
+    } else if let Some(value) = options.value("params") {
+        if let Some(path) = value.strip_prefix('@') {
+            read_params_source(path)?
+        } else if value == "-" {
+            read_params_source("-")?
+        } else {
+            value.to_string()
+        }
+    } else {
+        "{}".to_string()
+    };
+    let params: Value = serde_json::from_str(&raw)
+        .map_err(|error| format!("Invalid params JSON: {error}"))?;
     if !params.is_object() {
-        return Err("--params must be a JSON object.".to_string());
+        return Err("params must be a JSON object.".to_string());
     }
     Ok(params)
+}
+
+/// Read a JSON parameter document from a project-adjacent file or stdin.
+/// `--params-file -` and `--params -` both read stdin so generated payloads
+/// never return to the Windows command-line length limit.
+fn read_params_source(path: &str) -> CliResult<String> {
+    if path == "-" {
+        let stdin = io::stdin();
+        let mut source = String::new();
+        stdin
+            .lock()
+            .take(MAX_PARAMS_BYTES + 1)
+            .read_to_string(&mut source)
+            .map_err(|error| format!("Read params from stdin: {error}"))?;
+        if source.len() as u64 > MAX_PARAMS_BYTES {
+            return Err(format!(
+                "params from stdin exceed the {} byte safety limit.",
+                MAX_PARAMS_BYTES
+            ));
+        }
+        return Ok(source);
+    }
+    let file = Path::new(path);
+    let metadata = std::fs::metadata(file)
+        .map_err(|error| format!("params file {}: {error}", file.display()))?;
+    if !metadata.is_file() {
+        return Err(format!("params path is not a file: {}", file.display()));
+    }
+    if metadata.len() > MAX_PARAMS_BYTES {
+        return Err(format!(
+            "params file {} exceeds the {} byte safety limit.",
+            file.display(),
+            MAX_PARAMS_BYTES
+        ));
+    }
+    let mut source = String::new();
+    std::fs::File::open(file)
+        .and_then(|file| file.take(MAX_PARAMS_BYTES + 1).read_to_string(&mut source))
+        .map_err(|error| format!("Read params file {}: {error}", file.display()))?;
+    if source.len() as u64 > MAX_PARAMS_BYTES {
+        return Err(format!(
+            "params file {} exceeds the {} byte safety limit.",
+            file.display(),
+            MAX_PARAMS_BYTES
+        ));
+    }
+    Ok(source)
 }
 
 fn apply_cli_controls(
@@ -1342,14 +1413,65 @@ fn print_response(response: &EngineCommandResponse, format: OutputFormat) -> Cli
     if response.ok {
         Ok(())
     } else {
-        Err(response.lines.join(" "))
+        Err(if response.lines.iter().any(|line| !line.trim().is_empty()) {
+            response.lines.join(" ")
+        } else { response.title.clone() })
     }
+}
+
+fn print_project_path(options: &Options, format: OutputFormat) -> CliResult<()> {
+    let explicit = options
+        .path("project")
+        .or_else(|| options.path("path"))
+        .or_else(|| options.positionals.get(2).map(PathBuf::from));
+    let (path, source) = match explicit {
+        Some(path) => {
+            let canonical = std::fs::canonicalize(&path)
+                .map_err(|error| format!("Resolve project path {}: {error}", path.display()))?;
+            let root = if canonical.is_file() {
+                canonical
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .ok_or_else(|| "Project file has no parent directory.".to_string())?
+            } else {
+                canonical
+            };
+            (root, "explicit")
+        }
+        None => (discovery::pick_single_live(None)?.project_path, "attached"),
+    };
+    let clean = clean_path_string(&path);
+    match format {
+        OutputFormat::Human => println!("{clean}"),
+        OutputFormat::Json => println!(
+            "{}",
+            json!({
+                "ok": true,
+                "path": clean,
+                "raw_path": path.display().to_string(),
+                "source": source,
+            })
+        ),
+        OutputFormat::Ndjson => println!(
+            "{}",
+            json!({"path": clean, "source": source})
+        ),
+    }
+    Ok(())
+}
+
+/// Windows project descriptors frequently use the verbatim `\\?\` prefix.
+/// Agents should see the ordinary filesystem path, while `raw_path` remains
+/// available for diagnostics.
+fn clean_path_string(path: &Path) -> String {
+    let raw = path.display().to_string();
+    raw.strip_prefix(r"\\?\").unwrap_or(&raw).to_string()
 }
 
 fn print_help() {
     println!(
         "{PROGRAM} - lightweight AuraRafi command and MCP surface\n\n\
-Usage:\n  raf doctor [--json]\n  raf editors [--json]                 list known projects and live editors\n  raf status [--project PATH] [--json]\n  raf attach [ACTION] [--project PATH]  PATH is optional when one editor is live\n  raf project create --name NAME [--parent PATH] [--type game|electronics] --confirm\n  raf project open PATH\n  raf project info [PATH]\n  raf capabilities [search QUERY]\n  raf session list [--project PATH]\n  raf workspace describe [PATH]\n  raf command NAME [--params JSON] [--dry-run] [--confirm]\n  raf mcp serve [--attach PATH]         PATH is optional when one editor is live\n  raf serve [--project PATH]            JSONL command endpoint\n\nGlobal output: --json, --ndjson, --format human|json"
+Usage:\n  raf doctor [--json]\n  raf editors [--json]                 list known projects and live editors\n  raf status [--project PATH] [--json]\n  raf attach [ACTION] [--project PATH]  PATH is optional when one editor is live\n  raf project create --name NAME [--parent PATH] [--type game|electronics] --confirm\n  raf project open PATH\n  raf project info [PATH]\n  raf project path [PATH]               print the explicit or attached project root\n  raf capabilities [search QUERY]\n  raf session list [--project PATH]\n  raf workspace describe [PATH]\n  raf command NAME [--params JSON|@FILE|-] [--params-file FILE|-] [--dry-run] [--confirm]\n  raf mcp serve [--attach PATH]         PATH is optional when one editor is live\n  raf serve [--project PATH]            JSONL command endpoint\n\nGlobal output: --json, --ndjson, --format human|json"
     );
     println!("Project persistence: raf project save|checkpoint --confirm");
     println!("Budgets: --budget JSON or --max-tool-calls N --max-milliseconds N --max-scene-operations N --max-scene-entities N --max-result-bytes N --budget-profile NAME");
@@ -1697,6 +1819,9 @@ fn run_cli(arguments: Vec<String>) -> CliResult<()> {
     }
     if command == "attach" {
         return run_attached_cli(&options, format);
+    }
+    if command == "project" && options.positionals.get(1).map(String::as_str) == Some("path") {
+        return print_project_path(&options, format);
     }
     if command == "mcp" && options.has("attach") {
         let attach_path = match options.path("attach").or_else(|| options.path("project")) {
@@ -2057,6 +2182,34 @@ fn handle_mcp_tool_call<H: McpCommandHost>(
         .pointer("/params/arguments")
         .cloned()
         .unwrap_or_else(|| json!({}));
+    if name == "raf_project_path" {
+        let Some(root) = engine.project_root() else {
+            return Some(jsonrpc_result(
+                id,
+                json!({
+                    "isError": true,
+                    "content": [{"type": "text", "text": "No project is mounted or attached."}],
+                    "structuredContent": {"ok": false, "error": "project_not_found"}
+                }),
+            ));
+        };
+        let clean = clean_path_string(root);
+        let project = engine.resource("raf://project").unwrap_or_else(|_| json!({}));
+        return Some(jsonrpc_result(
+            id,
+            json!({
+                "isError": false,
+                "content": [{"type": "text", "text": clean.clone()}],
+                "structuredContent": {
+                    "ok": true,
+                    "path": clean,
+                    "raw_path": root.display().to_string(),
+                    "project": project,
+                    "summary": clean,
+                }
+            }),
+        ));
+    }
     let confirm = arguments
         .get("confirm")
         .and_then(Value::as_bool)
@@ -2153,11 +2306,22 @@ fn handle_mcp_tool_call<H: McpCommandHost>(
                 .unwrap_or_else(|| response.title.clone())),
         );
     }
+    let mut content = vec![json!({"type": "text", "text": text})];
+    if let Some(image) = response
+        .data
+        .get("artifact")
+        .and_then(Value::as_object)
+        .and_then(|artifact| artifact.get("uri"))
+        .and_then(Value::as_str)
+        .and_then(|uri| engine.project_root().and_then(|root| mcp_image_content(root, uri)))
+    {
+        content.push(image);
+    }
     Some(jsonrpc_result(
         id,
         json!({
             "isError": !response.ok,
-            "content": [{"type": "text", "text": text}],
+            "content": content,
             "structuredContent": structured,
         }),
     ))
@@ -2185,6 +2349,17 @@ fn mcp_tool_command(name: &str) -> Option<&'static str> {
         "raf_assets_recommend" => Some("assets.recommend"),
         "raf_asset_inspect" => Some("assets.inspect"),
         "raf_scripts_search" => Some("scripts.catalog"),
+        "raf_script_list" => Some("script.list"),
+        "raf_script_create" => Some("script.create"),
+        "raf_script_write" => Some("script.write"),
+        "raf_script_attach" => Some("script.attach"),
+        "raf_script_validate" => Some("script.validate"),
+        "raf_script_run" => Some("script.run"),
+        "raf_behavior_attach" => Some("behavior.attach"),
+        "raf_lighting_inspect" => Some("lighting.inspect"),
+        "raf_lighting_set" => Some("lighting.set"),
+        "raf_lighting_reset" => Some("lighting.reset"),
+        "raf_game_completion_audit" => Some("project.gameplay_audit"),
         "raf_project_health" => Some("project.health"),
         "raf_scene_verify" => Some("scene.verify"),
         "raf_transaction_undo" => Some("transaction.undo"),
@@ -2211,6 +2386,66 @@ fn mcp_tool_command(name: &str) -> Option<&'static str> {
         "raf_command" => Some("__generic__"),
         _ => None,
     }
+}
+
+fn mcp_image_content(root: &Path, uri: &str) -> Option<Value> {
+    const MAX_BYTES: u64 = 4 * 1024 * 1024;
+    let relative = Path::new(uri);
+    if relative.is_absolute()
+        || relative
+            .components()
+            .any(|part| !matches!(part, std::path::Component::Normal(_)))
+        || relative.extension().and_then(|value| value.to_str()) != Some("png")
+    {
+        return None;
+    }
+    let project = root.canonicalize().ok()?;
+    let file = project.join(relative).canonicalize().ok()?;
+    if !file.starts_with(&project) {
+        return None;
+    }
+    let metadata = file.metadata().ok()?;
+    if metadata.len() == 0 || metadata.len() > MAX_BYTES {
+        return None;
+    }
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(&file)
+        .ok()?
+        .take(MAX_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_BYTES || !bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        return None;
+    }
+    Some(json!({
+        "type": "image",
+        "data": base64_encode(&bytes),
+        "mimeType": "image/png",
+    }))
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for part in bytes.chunks(3) {
+        let bits = ((part[0] as u32) << 16)
+            | ((part.get(1).copied().unwrap_or(0) as u32) << 8)
+            | part.get(2).copied().unwrap_or(0) as u32;
+        output.push(TABLE[((bits >> 18) & 63) as usize] as char);
+        output.push(TABLE[((bits >> 12) & 63) as usize] as char);
+        output.push(if part.len() > 1 {
+            TABLE[((bits >> 6) & 63) as usize] as char
+        } else {
+            '='
+        });
+        output.push(if part.len() > 2 {
+            TABLE[(bits & 63) as usize] as char
+        } else {
+            '='
+        });
+    }
+    output
 }
 
 fn strip_mcp_controls(arguments: &Value) -> Value {
@@ -2262,6 +2497,11 @@ fn mcp_tools() -> Vec<Value> {
             "raf_project_info",
             "Read project metadata.",
             json!({"type":"object","properties":{"path":{"type":"string"}}}),
+        ),
+        mcp_tool(
+            "raf_project_path",
+            "Return the exact project root of the live attached editor, or of the explicitly selected project, as a clean filesystem path. Use this before reading or writing project files.",
+            json!({"type":"object","properties":{}}),
         ),
         mcp_tool(
             "raf_project_open",
@@ -2409,9 +2649,23 @@ fn mcp_semantic_tools() -> Vec<Value> {
         ),
         mcp_tool(
             "raf_viewport_capture",
-            "Capture the attached Game viewport as a PNG artifact. Set refresh=true to request a fresh editor frame; this never starts Play mode.",
+            "Capture the attached Game scene as a PNG image for visual inspection. Use view=current for the last editor frame or front/back/left/right/top/bottom/isometric/custom for a framed angle. Targets default to the selection; frame=scene fits the whole scene. The MCP result includes the PNG as image content when the project artifact is available. This never starts Play mode.",
             schema(
-                vec![("refresh", json!({"type":"boolean"}))],
+                vec![
+                    ("refresh", json!({"type":"boolean"})),
+                    ("view", json!({"type":"string","enum":["current","front","back","left","right","top","bottom","isometric","custom"]})),
+                    ("frame", json!({"type":"string","enum":["selection","scene"]})),
+                    ("target", json!({"type":"string"})),
+                    ("targets", json!({"type":"array","items":{"type":"string"},"maxItems":64})),
+                    ("yaw_deg", json!({"type":"number"})),
+                    ("pitch_deg", json!({"type":"number"})),
+                    ("distance", json!({"type":"number","exclusiveMinimum":0})),
+                    ("padding", json!({"type":"number","minimum":1,"maximum":3})),
+                    ("width", json!({"type":"integer","minimum":128,"maximum":1024})),
+                    ("height", json!({"type":"integer","minimum":128,"maximum":1024})),
+                    ("highlight_selection", json!({"type":"boolean"})),
+                    ("label", json!({"type":"string"})),
+                ],
                 &[],
                 false,
             ),
@@ -2487,6 +2741,115 @@ fn mcp_semantic_tools() -> Vec<Value> {
                 &[],
                 false,
             ),
+        ),
+        mcp_tool(
+            "raf_script_list",
+            "List project scripts and attached scene references without starting Play.",
+            schema(
+                vec![
+                    ("query", json!({"type":"string"})),
+                    ("cursor", json!({"type":"integer","minimum":0})),
+                    ("limit", json!({"type":"integer","minimum":1,"maximum":128})),
+                ],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_script_create",
+            "Create a script file from the project template. Use raf_script_write when you already have complete source.",
+            schema(
+                vec![
+                    ("lang", json!({"type":"string","enum":["rhai","cpp"]})),
+                    ("name", json!({"type":"string"})),
+                ],
+                &["name"],
+                true,
+            ),
+        ),
+        mcp_tool(
+            "raf_script_write",
+            "Validate and write complete Rhai gameplay source into the project scripts folder. The source is compiled before disk replacement; overwrite is explicit.",
+            schema(
+                vec![
+                    ("file", json!({"type":"string","description":"Project-relative .rhai path, for example scripts/player.rhai."})),
+                    ("content", json!({"type":"string","description":"Complete Rhai source."})),
+                    ("overwrite", json!({"type":"boolean"})),
+                ],
+                &["file","content"],
+                true,
+            ),
+        ),
+        mcp_tool(
+            "raf_script_attach",
+            "Attach a project script to a scene entity.",
+            schema(
+                vec![
+                    ("file", json!({"type":"string"})),
+                    ("entity", json!({"type":"string"})),
+                ],
+                &["file","entity"],
+                true,
+            ),
+        ),
+        mcp_tool(
+            "raf_script_validate",
+            "Compile and validate a project script without starting Play.",
+            schema(vec![("file", json!({"type":"string"}))], &["file"], false),
+        ),
+        mcp_tool(
+            "raf_script_run",
+            "Run one script on a cloned scene without starting Play. Optional entity keeps that entity as the behavior owner and preserves its typed parameters. Optional ticks and keys exercise update, fixed-update, bounded physics and late-update with synthetic input. The editor document is never mutated.",
+            schema(
+                vec![
+                    ("file", json!({"type":"string","description":"Project-relative .rhai path."})),
+                    ("entity", json!({"type":"string","description":"Optional owner reference; defaults to a temporary __script_run__ root."})),
+                    ("ticks", json!({"type":"integer","minimum":0,"maximum":600})),
+                    ("keys", json!({"type":"array","items":{"type":"string"},"maxItems":16,"description":"Held key names such as w, space, shift or arrow_left."})),
+                ],
+                &["file"],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_behavior_attach",
+            "Attach an authored behavior to an entity through the shared behavior kernel.",
+            schema(
+                vec![
+                    ("target", json!({"type":"string"})),
+                    ("source", json!({"type":"string"})),
+                ],
+                &["target","source"],
+                true,
+            ),
+        ),
+        mcp_tool(
+            "raf_lighting_inspect",
+            "Read the authored Sun, Sky, Shadow, Clock and technology lighting values.",
+            schema(Vec::new(), &[], false),
+        ),
+        mcp_tool(
+            "raf_lighting_set",
+            "Set validated lighting properties atomically. Use raf_lighting_inspect first for supported paths and bounds.",
+            schema(
+                vec![
+                    ("patch", json!({"type":"object","maxProperties":20})),
+                    ("property", json!({"type":"string"})),
+                    ("value", json!({})),
+                ],
+                &[],
+                true,
+            ),
+        ),
+        mcp_tool(
+            "raf_lighting_reset",
+            "Reset one authored lighting property, or all properties when omitted.",
+            schema(vec![("property", json!({"type":"string"}))], &[], true),
+        ),
+        mcp_tool(
+            "raf_game_completion_audit",
+            "Audit whether the attached Game foundation is playable rather than geometry alone: renderable geometry, camera/startup camera, lighting, attached scripts, gameplay signals, enabled systems, missing pieces, and next actions.",
+            schema(Vec::new(), &[], false),
         ),
         mcp_tool(
             "raf_project_health",
@@ -2935,6 +3298,42 @@ mod tests {
     }
 
     #[test]
+    fn params_can_be_read_from_at_file_and_params_file() {
+        let path = std::env::temp_dir().join(format!(
+            "raf-cli-params-{}.json",
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::write(&path, r#"{"name":"Demo","confirm":true}"#).unwrap();
+        let at_file = parse_options(&[
+            "command".to_string(),
+            "project.info".to_string(),
+            "--params".to_string(),
+            format!("@{}", path.display()),
+        ]);
+        let params = parse_params(&at_file).unwrap();
+        assert_eq!(params["name"], "Demo");
+        assert_eq!(params["confirm"], true);
+        let explicit = parse_options(&[
+            "command".to_string(),
+            "project.info".to_string(),
+            "--params-file".to_string(),
+            path.display().to_string(),
+        ]);
+        let params = parse_params(&explicit).unwrap();
+        assert_eq!(params["name"], "Demo");
+        let both = parse_options(&[
+            "command".to_string(),
+            "project.info".to_string(),
+            "--params".to_string(),
+            "{}".to_string(),
+            "--params-file".to_string(),
+            path.display().to_string(),
+        ]);
+        assert!(parse_params(&both).is_err());
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
     fn attached_command_builder_targets_the_command_after_attach_mode() {
         let options = parse_options(&[
             "attach".to_string(),
@@ -2995,6 +3394,32 @@ mod tests {
     }
 
     #[test]
+    fn mcp_image_content_is_bounded_and_project_confined() {
+        let root = std::env::temp_dir().join(format!(
+            "raf-mcp-image-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let artifacts = root.join(".aura_rafi/agent_artifacts");
+        fs::create_dir_all(&artifacts).unwrap();
+        fs::write(
+            artifacts.join("front.png"),
+            [
+                0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, b'I',
+                b'H', b'D', b'R', 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06,
+                0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, b'I', b'D',
+                b'A', b'T', 0x78, 0x9C, 0x63, 0xF8, 0xCF, 0xC0, 0xF0, 0x1F, 0x00, 0x05, 0x00,
+                0x01, 0xFF, 0x89, 0x99, 0x3D, 0x1D, 0x00, 0x00, 0x00, 0x00, b'I', b'E', b'N',
+                b'D', 0xAE, 0x42, 0x60, 0x82,
+            ],
+        )
+        .unwrap();
+        assert!(mcp_image_content(&root, ".aura_rafi/agent_artifacts/front.png").is_some());
+        assert!(mcp_image_content(&root, ".aura_rafi/agent_artifacts/../../escape.png").is_none());
+        assert!(mcp_image_content(&root, "project.ron").is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn mcp_initialize_and_tool_catalog_are_json_rpc() {
         let mut engine = HeadlessEngine::new(None).unwrap();
         let initialize = handle_mcp_message(
@@ -3035,6 +3460,11 @@ mod tests {
             "raf_task_cancel",
             "raf_asset_inspect",
             "raf_transaction_undo",
+            "raf_script_write",
+            "raf_script_attach",
+            "raf_lighting_inspect",
+            "raf_lighting_set",
+            "raf_game_completion_audit",
         ] {
             assert!(
                 tools.iter().any(|tool| tool["name"] == name),

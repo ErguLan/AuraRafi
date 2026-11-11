@@ -36,8 +36,10 @@ User types message
 |------|------|
 | `src/panels/agent_surface.rs` | Retained native Agent surface: sidebar, transcript, model/mode controls, approvals and input |
 | `src/panels/ai_chat.rs` | AgentPanel session/readiness model consumed by the native surface |
-| `src/agent_context.rs` | ProjectSnapshot, scene hierarchy/query/inspect, asset/script catalog, health and verification reads |
+| `src/agent_context.rs` | ProjectSnapshot, scene hierarchy/query/inspect, asset/script catalog, health, gameplay completion audit and verification reads |
 | `src/agent_executor.rs` | Contextual semantic tool packs and typed Agent tool-call-to-CommandGateway adapter |
+| `src/agent_scene_capture.rs` | Read-only framed/offscreen scene captures for visual Agent evidence |
+| `src/agent_artifacts.rs` | Bounded PNG artifact creation and live viewport capture |
 | `src/native_workbench.rs` | Owns the active native editor composition and connects the Agent surface to the editor runtime |
 | `src/attached.rs` | Token-scoped loopback endpoint; queues external CLI/MCP requests onto the editor thread |
 
@@ -48,7 +50,9 @@ User types message
 | `src/agent_runtime.rs` | Non-blocking state machine: `start_run()` spawns HTTP on background thread, `poll()` advances the loop each frame |
 | `src/openai_client.rs` | OpenAI-compatible HTTP client. Talks to any `/chat/completions` endpoint |
 | `src/agent_history.rs` | Per-project session persistence as `.ai/agent_history.ron` |
-| `src/agent_model_registry.rs` | User-defined model shortcuts (label -> provider + model_id) |
+| `src/provider_catalog.rs` | Bounded live API catalogs, scoped to endpoint and credential |
+| `src/chatgpt_auth.rs` | Account authorization, protected credentials and live plan models |
+| `src/model_capabilities.rs` | Automatic known-family image-input policy; unknown models remain attemptable |
 | `src/chat.rs` | ChatMessage, MessageRole, ChatPanel structs |
 | `src/puerto.rs` | Bridge client for OpenClawd / OpenClaw gateways |
 | `AGENT.md` | System prompt embedded into every LLM request |
@@ -163,7 +167,7 @@ authoring prompts receive semantic mutation tools. Observation tools are
 bounded and paginated: `project_summary`, `scene_outline`, `scene_query`,
 `scene_spatial_map`, `scene_check_overlaps`, `scene_diff`, `scene_design_audit`,
 `scene_inspect`, `assets_catalog`, `assets_recommend`, `scripts_catalog`,
-`project_health`, `scene_verify`, and
+`project_health`, `game_completion_audit`, `scene_verify`, and
 `game_validate_layout`.
 
 Game mutations use `scene_create`, `scene_update`, `scene_delete`,
@@ -197,16 +201,15 @@ The Agent panel reads from the same `EngineSettings` as the Settings panel:
 - `settings.default_ai_provider` -- which provider is active
 - `settings.ai_providers` -- per-provider base URL, model, API key
 - `settings.agent_mode` -- Inspect, Plan (preview), or Active (apply)
-- `settings.agent_model_shortcuts` -- user-defined model shortcuts
+- `settings.ai_providers[].pinned_models` -- per-provider model favorites
 - `settings.language` -- UI language
 
-Changes in either panel are reflected immediately because both operate on the
-same `EngineSettings` reference. Agent panel saves changes to disk via the
-`settings_changed` flag.
+The Agent saves settings through its `settings_changed` flag. Settings uses a
+draft with Apply/Cancel; model selection updates the provider card, not a second
+shortcut registry.
 
-Implementation note: the panel refreshes the model shortcut registry before
-building the runtime client config, so a selected shortcut resolves to the
-correct provider/model before the next request is sent.
+The runtime configuration resolves the selected provider card and connection
+route before the next request; discovery does not silently replace that model.
 
 The runtime client is rebuilt only when its effective endpoint, model, key, or
 generation settings change. Project history restores the saved active session
@@ -227,6 +230,34 @@ client until the response finishes, then converted into the same normal tool
 calls used by passive approvals and active execution. This is important because
 executing a partially received JSON argument would be unsafe. Providers that
 do not support `stream: true` can be used with the toggle disabled.
+
+### Automatic visual evidence loop
+
+The native Agent no longer requires a manual "this model supports images"
+confirmation. `model_capabilities.rs` classifies known model families:
+families known to be text-only are blocked with an explicit message, unknown
+models are attempted, and the provider remains the authority. A provider image
+rejection is surfaced as a clear error instead of being silently swallowed.
+
+`viewport_capture` accepts `view=current` for the last editor frame, or
+`front`, `back`, `left`, `right`, `top`, `bottom`, `isometric`, or `custom` for
+a framed read-only offscreen render. `target`/`targets` frame a selection or
+explicit entities; `frame=scene` fits the whole scene; `width`, `height`,
+`padding`, `distance`, `yaw_deg`, `pitch_deg`, and `highlight_selection` bound
+the result. The Hub workspace uses the CPU offscreen path because it has no
+live viewport.
+
+Successful captures return a project-local PNG artifact and an ephemeral
+`visual_evidence` reference. The runtime attaches up to four evidence images to
+the next provider request when the model family accepts images. The synthetic
+evidence message is never persisted as user chat content and is not resent on
+later text-only turns. Attached CLI/MCP clients also receive the PNG as MCP
+image content when the artifact is available.
+
+Gameplay authoring is expected to use the same loop: write actual Rhai source
+through `script.write`, attach it, validate it, inspect lighting, call
+`game_completion_audit`, capture at least two angles, inspect the images, and
+repair the result before claiming the game is complete.
 
 ### Provider Transport Boundary
 
@@ -258,8 +289,8 @@ Each active provider is configured with:
 - **API Key**: authentication token
 - **Enabled**: toggle visibility in the agent panel
 
-The agent uses the default provider's configuration. Model shortcuts let the
-user create quick-select entries for frequently used models across any provider.
+The agent uses the selected provider's configuration. Favorites in Settings and
+the Agent share the provider card; plan model choices remain account-scoped.
 
 ## Image Asset Worker
 
@@ -293,3 +324,33 @@ component-pin bypass shorts), component identities, and the available DC
 simulation messages in one structured result. This prevents a reply based only
 on counts of components, wires, or nets and gives the agent evidence to name
 the exact affected components and connections.
+
+## Provider catalog corrections (2026-10-30)
+
+The shared Settings/Agent picker distinguishes API-key catalogs from the selected
+account's plan catalog. Plan choices come only from the authorized account's live
+model list (display names and slugs, server order); API models and API credential
+fields do not appear in that mode. Discovery never selects a replacement model.
+Unavailable saved selections remain visible as disabled entries without deleting
+user preferences. Explicit account selection enables the corresponding plan route.
+
+The API catalog worker now initializes its cache, deduplicates pending requests,
+invalidates on endpoint/credential changes and rejects obsolete worker results.
+Successful lists, including empty lists, replace offline suggestions. OpenAI has
+no bundled model suggestions; the native agent's API picker omits known legacy
+families and non-chat models. This is suggestion policy, not a claim that every
+legacy API model is universally shut down. Custom endpoints/ids remain an explicit
+API configuration option. Other gateways retain labeled offline suggestions.
+
+The Settings picker scrolls and distinguishes live, loading, offline, missing
+credentials, error and no-match states. Favorites retain their credential lane.
+Account sign-in, protected credential storage and authorization are preserved;
+live login/inference and native-window behavior require separate validation.
+
+Verification on 2026-10-30: the first focused pass passed 4 AI catalog tests and
+10 editor tests. After the final request-bounding and presentation-invalidation
+changes, all 4 AI catalog tests passed again. The final editor retest was blocked
+by four unrelated E0061 errors in `ApiGraphicBasic/shadow_gpu.rs` (pipeline calls
+missing a seventh argument). Those renderer files were not changed here.
+Changed editor sources passed syntax parsing; locale JSON and scoped whitespace
+checks passed. No application executable or live account inference was built/run.
