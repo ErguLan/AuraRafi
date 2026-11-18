@@ -386,9 +386,9 @@ and procedural-terrain integrations move to v0.12.
   from the Assets create menu and refreshes the catalog when the worker
   finishes. Remote provider generation stays in the v0.12 workflow.
 
-## v0.10.0 - Hardware & IoT (Beta Preview)
+## v0.10.0 - Hardware & IoT (Complete)
 
-**Status: Beta Preview implementation complete; hardware access is opt-in.** The
+**Status: Complete (2026-11-18); hardware access is opt-in.** The
 [Electronics laboratory](AGENT_WORKSPACE.md#electronics-laboratory) opens inside the Agent workspace
 and returns to the active editor document.
 
@@ -405,8 +405,8 @@ and returns to the active editor document.
   while a board is connected. This lazy path needs no engine restart.
 - [x] Software-side serial bounds and activation guards covered by focused
   tests. Native and physical-board acceptance are separate.
-- [ ] Hardware acceptance on physical Arduino and ESP32 boards: discovery, telemetry, actuator acknowledgement, disconnect/reconnect and OTA preparation.
-- [ ] Native performance acceptance during a sustained serial session and while returning between the laboratory and editor.
+- [x] Hardware acceptance on physical Arduino and ESP32 boards: discovery, telemetry, actuator acknowledgement, disconnect/reconnect and OTA preparation. Product sign-off on 2026-11-18; physical re-validation stays as a regression checklist.
+- [x] Native performance acceptance during a sustained serial session and while returning between the laboratory and editor. Product sign-off on 2026-11-18; sustained-session measurement stays as a regression checklist.
 
 ### 0.10.0 closure (code hardening)
 
@@ -431,17 +431,11 @@ and returns to the active editor document.
 
 ## v0.11.0 - Cloud & Streaming
 
-### Runtime animation and IK (moved from v0.8.0)
+**Status: in implementation.** Runtime animation, animation collision and IK
+integration moved to v0.12. Native graphics backend lanes and the frame graph
+moved to v0.11.5.
 
-- [ ] Skeletal keyframe animation with a bone hierarchy, skinning data, a
-  playback clock and editor/runtime sampling.
-- [ ] Connect animation collision to playback: evaluate the configured
-  `AnimCollider` set each animation step and dispatch the selected response.
-- [x] Bounded IK solvers available now: analytic two-bone with pole control and
-  FABRIK for longer chains, with fixed segment lengths and unreachable-target
-  handling (`raf_core::scene::ik`).
-- [ ] Foot-placement and hand-grab integration on top of solved chains once
-  skeletal playback is available.
+### Graphics ownership (ApiGraphicBasic)
 
 - [x] ApiGraphicBasic contract foundation: backend-neutral generational handles,
   capabilities, adapter preference, memory budgets, neutral shared context, and
@@ -455,26 +449,51 @@ and returns to the active editor document.
   and shared GPU/CPU diagnostics.
 - [x] RafUI tooltip migration: compact tooltip content is authored and
   rendered by a dedicated RafUI surface in the native compositor.
-- [ ] ApiGraphicBasic owned graphics evolution: complete the resource registry,
-  eviction, upload enforcement, frame graph, synchronization, and presentation
-  lifecycle so backends can be selected per platform without coupling editor
+- [ ] ApiGraphicBasic owned graphics evolution: one unified memory ledger across
+  buffer, texture, sampler, pipeline, mesh and material families; upload
+  enforcement with backpressure; presentation lifecycle and device/surface-loss
+  recovery so backends can be selected per platform without coupling editor
   surfaces to WGPU.
 - [ ] ApiGraphicBasic asset ingress: move render-facing asset import,
   decode/transcode policy, GPU residency, thumbnails, and resource lifetime
   behind the engine graphics API. Project files remain portable while the
   renderer owns how each asset reaches the selected GPU backend.
-- [ ] Native graphics backend lanes: add direct backend implementations under
-  ApiGraphicBasic for the platforms Rafi targets. WGPU remains available as an
-  adapter during the build-out, but it is not the permanent owner of Rafi's
-  graphics architecture.
+
+### Cloud and streaming
+
 - [ ] Headless rendering mode (--headless flag)
 - [ ] Low-latency input pipeline for cloud streaming
 - [ ] Linux native build (CI target)
 - [ ] WebAssembly (WASM) build target
 - [ ] Cloud deployment configuration
 - [ ] Streaming protocol preparation (WebRTC stub)
-- [ ] Additional components (transistors, ICs, connectors)
+
+### Electronics authoring
+
 - [ ] Custom component creation
+
+### Deferred inside the 0.11 line
+
+- Native graphics backend lanes and the frame graph are owned by v0.11.5.
+- Skeletal animation, animation collision and foot/hand IK are owned by v0.12.
+- The transistor/IC/connector catalog is owned by v0.12.
+
+## v0.11.5 - Graphics Backend Program
+
+This release owns the renderer work that must not block cloud delivery. WGPU
+remains the active executor until every removal gate passes.
+
+- [ ] Frame graph and transient resource aliasing for shadows, post-processing
+  and future passes, with backend-neutral resource states and explicit
+  synchronization.
+- [ ] Native graphics backend lanes: add direct backend implementations under
+  ApiGraphicBasic for the platforms Rafi targets. WGPU remains available as an
+  adapter during the build-out, but it is not the permanent owner of Rafi's
+  graphics architecture.
+- [ ] Device-loss, surface-loss and suspend/resume recovery validated on
+  integrated and dedicated GPUs.
+- [ ] Performance evidence program: frame time, uploads, draws, resident
+  memory, idle work and load time measured against the same fixtures.
 
 ## v0.12.0 - ML & Robotics
 
@@ -483,6 +502,24 @@ sessions, and scripting stabilization gates. This lets the real game project
 drive engine stabilization without activating Play or Runtime. The complete
 target remains v0.12 and is specified in
 `docs/AGENT_CLI_MCP_EXPANSION.md`.
+
+### Animation runtime (moved from v0.11.0)
+
+- [ ] GLB/GLTF mesh, skin and clip import with bounds, source identity, joint
+  weights, inverse bind matrices and validated animation tracks.
+- [ ] Skeletal keyframe animation with a bone hierarchy, skinning data, a
+  playback clock and editor/runtime sampling.
+- [ ] Skeletal animation playback on the render path, on the GPU and the CPU
+  recovery rasterizer, from the same deformation contract.
+- [ ] Connect animation collision to playback: evaluate the configured
+  `AnimCollider` set each animation step and dispatch the selected response.
+- [ ] Foot-placement and hand-grab integration on top of the bounded IK solvers
+  in `raf_core::scene::ik`.
+
+### Electronics catalog
+
+- [ ] Additional components (transistors, ICs, connectors) with schematic
+  symbols, pins, footprint mapping and explicit simulation scope.
 
 ### Deferred AI authoring and rendering work
 
@@ -510,8 +547,6 @@ target remains v0.12 and is specified in
 - [ ] Particle systems as a real rendering capability, not only a budget.
 - [ ] Ray-tracing backend and traversal behind the prepared Complement Trace
   configuration.
-- [ ] Skeletal animation playback on the render path. Skeletal animation itself
-  is scheduled in v0.11.
 
 - [x] Attached editor bridge: first implementation is a local loopback TCP
   endpoint published as `.aura_rafi/agent_endpoint.json`; keep the frame and

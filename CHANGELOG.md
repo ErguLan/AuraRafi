@@ -5,10 +5,20 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 0.10.0 closure
+## [0.10.0] - 2026-11-18 - Hardware, Physics and Agent Stabilization
 
 ### Added
 
+- **Physics runtime foundation**: authored joints (fixed, hinge, slider, ball,
+  spring), a capsule character controller with grounded/support state, and
+  bounded IK solvers (analytic two-bone with pole control and FABRIK).
+- **Hardware laboratory**: serial discovery, Arduino/ESP32 handshake, telemetry
+  plots, actuator acknowledgements, diagnostics, OTA preparation and a
+  persisted opt-in hardware consent that keeps serial access lazy.
+- **Agent and vision expansion**: model capability negotiation, image evidence
+  bridge, contact sheets and structured attached-task lifecycle.
+- **Portable native pickers** for project, folder, firmware and OTA
+  destinations on Linux and macOS.
 - **Bounded IK solvers** in `raf_core::scene::ik`: analytic two-bone with pole
   control and FABRIK for longer chains, preserving segment lengths and handling
   unreachable targets. Foot/hand rig integration remains part of the animation
