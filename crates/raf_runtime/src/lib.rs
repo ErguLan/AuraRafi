@@ -2,8 +2,12 @@
 pub mod input;
 pub mod manifest;
 pub mod physics;
+mod physics_character;
 mod physics_contacts;
-mod physics_response;
+mod physics_dynamics;
+mod physics_joints;
+#[cfg(test)]
+mod physics_project_test;
 #[cfg(test)]
 mod physics_tests;
 pub mod session_loader;

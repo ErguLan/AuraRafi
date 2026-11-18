@@ -89,6 +89,9 @@ pub enum Receipt {
     Accepted(u64),
     Rejected(u64),
     TimedOut(u64),
+    /// The transport failed before a receipt could be correlated. The output
+    /// state is unknown, just like a timeout, but the link itself is gone.
+    Failed(u64),
 }
 
 #[derive(Debug, Clone)]
@@ -175,8 +178,7 @@ impl SerialSession {
                 let result = run(&port, baud, &state, input, &stop);
                 if let Err(error) = result {
                     let mut state = state.lock().unwrap_or_else(|error| error.into_inner());
-                    state.snapshot.state = LinkState::Failed(error);
-                    state.snapshot.version += 1;
+                    mark_link_failed(&mut state, error);
                 }
             })
             .map_err(|error| error.to_string())?;
@@ -369,6 +371,17 @@ fn send_identify(port: &mut dyn serialport::SerialPort) -> Result<(), String> {
         .map_err(|error| error.to_string())
 }
 
+/// Terminates the active receipt when the worker exits. Without this, a write
+/// or read failure would leave the Inspector waiting forever for an ACK that
+/// can never arrive.
+fn mark_link_failed(state: &mut State, error: String) {
+    if let Some((id, _)) = state.output_pending.take() {
+        state.snapshot.receipt = Some(Receipt::Failed(id));
+    }
+    state.snapshot.state = LinkState::Failed(error);
+    state.snapshot.version += 1;
+}
+
 fn expire_receipt(state: &mut State) {
     if let Some((id, sent)) = state.output_pending {
         if sent.elapsed() >= ACK_TIMEOUT {
@@ -464,6 +477,60 @@ fn accept(state: &mut State, bytes: &[u8], ms: u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn state_with_receipt(receipt: Receipt, pending: Option<Instant>) -> State {
+        State {
+            snapshot: Snapshot {
+                version: 1,
+                state: LinkState::Open,
+                device: None,
+                latest: BTreeMap::new(),
+                received: 0,
+                invalid: 0,
+                evicted: 0,
+                receipt: Some(receipt.clone()),
+                diagnostics: VecDeque::new(),
+            },
+            history: VecDeque::new(),
+            output_pending: pending.map(|sent| {
+                let id = match receipt {
+                    Receipt::Pending(id)
+                    | Receipt::Accepted(id)
+                    | Receipt::Rejected(id)
+                    | Receipt::TimedOut(id)
+                    | Receipt::Failed(id) => id,
+                };
+                (id, sent)
+            }),
+        }
+    }
+
+    #[test]
+    fn transport_failure_terminates_the_pending_receipt() {
+        let mut state = state_with_receipt(Receipt::Pending(11), Some(Instant::now()));
+
+        mark_link_failed(&mut state, "device removed".into());
+
+        assert!(state.output_pending.is_none());
+        assert_eq!(state.snapshot.receipt, Some(Receipt::Failed(11)));
+        assert!(matches!(state.snapshot.state, LinkState::Failed(_)));
+    }
+
+    #[test]
+    fn an_unanswered_output_expires_once() {
+        let mut state = state_with_receipt(
+            Receipt::Pending(4),
+            Instant::now().checked_sub(ACK_TIMEOUT + Duration::from_millis(1)),
+        );
+
+        expire_receipt(&mut state);
+        assert_eq!(state.snapshot.receipt, Some(Receipt::TimedOut(4)));
+        assert!(state.output_pending.is_none());
+
+        let version = state.snapshot.version;
+        expire_receipt(&mut state);
+        assert_eq!(state.snapshot.version, version);
+    }
 
     #[test]
     fn serial_protocol_keeps_bounded_history_and_correlates_receipts() {

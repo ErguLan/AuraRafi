@@ -11,6 +11,10 @@ pub enum ScriptRole {
 
 #[derive(Debug, Default)]
 pub struct RuntimeViewState {
+    /// Optional per-session gravity override, consumed at a physics boundary.
+    pub world_gravity: Option<glam::Vec3>,
+    pub advanced_physics: bool,
+    pub character_defaults: Option<[f32; 3]>,
     pub game_ui: raf_ui::game_ui::UiGameRuntime,
     pub active_camera: Option<Uuid>,
     pub role: ScriptRole,

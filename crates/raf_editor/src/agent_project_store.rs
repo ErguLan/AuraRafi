@@ -215,7 +215,11 @@ pub(crate) fn recover(project: &Project, session: &ProjectSession) -> Result<(),
     }
     let allowed = document_files(
         session,
-        project.project_type == raf_core::project::ProjectType::Electronics,
+        // Journals may contain schematic/PCB files even for Game documents
+        // when an electronics editor was mounted during the save. Recovery
+        // must accept every file owned by the session instead of rejecting a
+        // valid journal based on the current project type.
+        true,
     );
     for file in &journal.files {
         relative_path(&file.path)?;
@@ -416,5 +420,56 @@ mod tests {
             .unwrap()
             .exists());
         recover(&fixture.project, &fixture.session).unwrap();
+    }
+
+    #[test]
+    fn game_recovery_accepts_electronics_files_from_a_mixed_journal() {
+        let fixture = Fixture::new();
+        let expected = read_document_files(&fixture.project, &fixture.session).unwrap();
+        let files = vec![
+            FileChange {
+                path: fixture.session.scene_file.clone(),
+                before: expected[&fixture.session.scene_file].clone(),
+                after: b"next scene".to_vec(),
+            },
+            FileChange {
+                path: fixture.session.nodes_file.clone(),
+                before: expected[&fixture.session.nodes_file].clone(),
+                after: b"next nodes".to_vec(),
+            },
+            FileChange {
+                path: fixture.session.schematic_file.clone(),
+                before: None,
+                after: b"next schematic".to_vec(),
+            },
+            FileChange {
+                path: fixture.session.pcb_file.clone(),
+                before: None,
+                after: b"next pcb".to_vec(),
+            },
+        ];
+        let journal = SaveJournal {
+            project_id: fixture.project.id,
+            document_id: fixture.session.id.0,
+            revision: 9,
+            files,
+        };
+        write_atomic(
+            &journal_path(&fixture.project, &fixture.session).unwrap(),
+            ron::ser::to_string(&journal).unwrap().as_bytes(),
+        )
+        .unwrap();
+        recover(&fixture.project, &fixture.session).unwrap();
+        assert_eq!(
+            fs::read(fixture.project.path.join(&fixture.session.schematic_file)).unwrap(),
+            b"next schematic"
+        );
+        assert_eq!(
+            fs::read(fixture.project.path.join(&fixture.session.pcb_file)).unwrap(),
+            b"next pcb"
+        );
+        assert!(!journal_path(&fixture.project, &fixture.session)
+            .unwrap()
+            .exists());
     }
 }

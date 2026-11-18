@@ -22,7 +22,7 @@ if is_valid(body) {
 ```
 
 - `configure_body(type, gravity, trigger, mass, damping)` explicitly enables
-  a body, preserving its velocity. Type is `static`, `dynamic` or `kinematic`.
+  a body. Changing a moving body to static clears its velocity. Type is `static`, `dynamic` or `kinematic`.
   Mass is positive finite kilograms; damping is nonnegative finite 1/seconds.
 - `get_velocity()`, `set_velocity([x,y,z])`, `add_velocity([x,y,z])` use
   world-space meters/second, including under transformed parents. Velocity
@@ -35,6 +35,15 @@ if is_valid(body) {
 - `set_aabb_collider(min,max)` sets finite local bounds, strictly ordered on
   every axis, and resets the collider offset to zero. It never enables a body.
 - `remove_collider()` does not remove the entity or its velocity/body.
+- `set_character_body(bool)` marks a body for simulation in basic mode.
+- `set_world_gravity([x,y,z])` changes the runtime instance's gravity in
+  advanced mode, at the next physics boundary. Values are finite m/s².
+- `apply_force([x,y,z])`, `apply_torque([x,y,z])` and `apply_impulse_at(impulse, point)`
+  queue world-space force, torque and an impulse at a world position for the
+  next fixed tick on an advanced dynamic body.
+- `set_collision_filter(layer,mask)` assigns bitsets. Both sides must accept
+  the other's layer. `attach_collider_to_parent(true)` explicitly assigns a
+  child collider to its direct parent body.
 
 Project `enable_physics` must be on for integration/events. Otherwise scripts
 can configure their snapshot, but physics does not step. Script spawns and
@@ -87,23 +96,51 @@ avoid two executions for the two endpoints of one pair. Missing filters do
 not silently match another entity. Delay retains the event payload; validate
 handles again if the entity can disappear while waiting.
 
-## Lightweight limits and known boundaries
+## Physics modes and known boundaries
 
-- At most 64 moving bodies, 1024 colliders, 4096 active/collider candidates,
-  128 touching pairs and 256 directed events per fixed tick. Limits fail
-  visibly; no unbounded contact queue or silent truncation.
-- Dynamic solid bodies use gravity/damping, axis-swept AABB blocking and
+- Project Runtime settings offer advanced physics and a world gravity vector.
+  Basic mode uses 9.81 m/s² downward and simulates marked character bodies,
+  kinematic bodies and sensors. Other dynamic bodies stay in place. Existing
+  scripts must mark their character explicitly in basic mode.
+- A retained bounding-volume tree selects candidates. Topology is rebuilt when
+  the collider roster changes. Pose changes refit bounds in the existing tree.
+  Runtime metrics count builds, refits, visits and candidates. Contact history admits up to
+  16384 pairs and 65536 directed events; overflow is reported explicitly.
+- Dynamic solid bodies use gravity/damping, swept oriented box blocking and
   minimum-translation initial-overlap correction (up to four passes).
   Unresolvable initial overlap reports an error; no infinite solver loop.
 - Kinematic bodies integrate prescribed velocity, ignoring gravity, damping
   and blocking response. Scripts are responsible for their motion constraints.
-- No angular dynamics, friction/restitution, full dynamic-body impulse solver,
-  convex/mesh narrow phase, collision layers or continuous trigger sweep.
-  A fast body can cross a thin trigger between ticks without overlap events.
-- Rotated colliders are world-axis bounds, not oriented boxes. Nonfinite
-  transforms and singular moving-body parents fail explicitly.
+- Advanced dynamics resolves linear and angular impulses, contact materials,
+  gravity scale, per-axis locks and sleeping. The narrow phase uses oriented
+  boxes. Convex and triangle meshes require a separate narrow phase. Swept
+  tests use translation and the initial orientation. A fast traversal that
+  starts and ends outside an advanced sensor emits enter and exit in the tick.
+- Rotation and scale are applied once to local collider bounds. Raycasts use
+  the transformed box; overlap_aabb remains a conservative world-box query.
+  Nonfinite transforms and singular moving-body parents fail explicitly.
 - No rollback of already-applied mutations within a failed tick; the existing
   runtime error policy applies. Scene changes never save into the project.
+
+## Capsule controllers and joints
+
+`configure_character(radius, height)` creates an explicit capsule, in meters,
+using the project jump height and slope limit. `character_move(direction)`
+uses the project movement speed. `character_set_velocity(velocity)` requests
+an explicit world velocity. The controller projects movement onto the gravity
+plane. `character_jump()` requests a grounded jump and `character_grounded()`
+reports the last tick's support. The controller carries the character with a
+translating support and can climb a step within its configured limit. In advanced
+mode, side contacts can push dynamic bodies. Dynamic boxes test collisions
+against the curved capsule instead of its enclosing bounds.
+
+The Physics Inspector creates fixed, hinge, slider, ball and spring joints
+between two selected bodies. The joint editor takes local anchors and axes,
+angle limits in radians or slider limits in meters, optional motor and break
+threshold. Scripts can use `add_physics_joint`, `configure_joint_motion` and
+`configure_joint_spring`. Joints solve at fixed ticks in the advanced mode.
+The player can show physics shapes and capsule ground normals through the
+project debug setting in Runtime.
 
 ## Minimal manual acceptance
 

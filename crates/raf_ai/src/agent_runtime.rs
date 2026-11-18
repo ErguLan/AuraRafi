@@ -64,6 +64,15 @@ pub struct AgentToolResult {
     pub details: Vec<String>,
     #[serde(default)]
     pub preview: bool,
+    /// True when some requested targets were resolved and others were not.
+    /// Partial evidence is still useful and must not be reported as a total
+    /// failure by the Agent, CLI or MCP.
+    #[serde(default)]
+    pub partial: bool,
+    /// Project-scoped visual or file artifacts produced by the tool. The UI and
+    /// MCP adapter can render these without re-parsing tool-specific data.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Value>,
 }
 
 impl AgentToolResult {
@@ -80,6 +89,8 @@ impl AgentToolResult {
             warnings: Vec::new(),
             details: Vec::new(),
             preview: false,
+            partial: false,
+            artifacts: Vec::new(),
         }
     }
 
@@ -103,20 +114,54 @@ impl AgentToolResult {
         if encoded.chars().count() <= max_chars {
             return encoded;
         }
-        let fallback = Self {
+        let mut fallback = Self {
             ok: compact.ok,
             summary: truncate_chars(compact.summary, max_chars.saturating_sub(120)),
-            data: serde_json::json!({"truncated": true}),
+            data: serde_json::json!({"truncated": true, "reason": "result_budget"}),
             references: compact.references.into_iter().take(16).collect(),
             changed: compact.changed,
             revision: compact.revision,
-            diff: None,
+            diff: compact.diff.clone(),
             verification: compact.verification,
-            warnings: Vec::new(),
-            details: Vec::new(),
+            warnings: compact
+                .warnings
+                .iter()
+                .take(8)
+                .map(|warning| truncate_chars(warning.clone(), 240))
+                .collect(),
+            details: compact
+                .details
+                .iter()
+                .take(6)
+                .map(|detail| truncate_chars(detail.clone(), 240))
+                .collect(),
             preview: compact.preview,
+            partial: compact.partial,
+            artifacts: compact.artifacts.into_iter().take(8).collect(),
         };
-        serde_json::to_string(&fallback).unwrap_or_else(|_| "{\"ok\":false}".to_string())
+        let mut encoded = serde_json::to_string(&fallback).unwrap_or_default();
+        // Keep the machine-readable diff and warnings as long as they fit. Only
+        // strip details, then diff, when the hard result budget requires it.
+        if encoded.chars().count() > max_chars {
+            fallback.details.clear();
+            fallback.warnings.truncate(4);
+            encoded = serde_json::to_string(&fallback).unwrap_or_default();
+        }
+        if encoded.chars().count() > max_chars {
+            fallback.diff = None;
+            encoded = serde_json::to_string(&fallback).unwrap_or_default();
+        }
+        if encoded.chars().count() > max_chars {
+            fallback.warnings.clear();
+            encoded = serde_json::to_string(&fallback).unwrap_or_default();
+        }
+        if encoded.chars().count() > max_chars {
+            fallback.summary = truncate_chars(fallback.summary, 120);
+            fallback.references.truncate(4);
+            fallback.artifacts.truncate(2);
+            encoded = serde_json::to_string(&fallback).unwrap_or_default();
+        }
+        encoded
     }
 }
 
@@ -705,21 +750,25 @@ impl AgentRuntime {
 
         let client = self.client.clone();
         let media_root = self.media_root.clone();
+        if let Some(root) = media_root.as_deref() {
+            crate::model_capabilities::load_project_observations(root);
+        }
+        let vision_allowed = crate::model_capabilities::vision_support(&self.client.config.model)
+            .allows_attempt();
         // Only images from the latest user turn are sent. A text-only turn
         // must not silently resend an older private image.
-        let last_images = crate::chat_media::latest_user_images(&self.messages);
+        let mut last_images = crate::chat_media::latest_user_images(&self.messages);
         // Tool-produced evidence is ephemeral and sent once. It never enters
         // persisted chat history or a later text-only turn.
-        let evidence_images = if crate::model_capabilities::vision_support(
-            &self.client.config.model,
-        )
-        .allows_attempt()
-        {
-            std::mem::take(&mut self.evidence_images)
-        } else {
-            self.evidence_images.clear();
-            Vec::new()
-        };
+        let mut evidence_images = std::mem::take(&mut self.evidence_images);
+        let mut blocked_images = Vec::new();
+        if !vision_allowed {
+            if let Some((_, images)) = last_images.take() {
+                blocked_images.extend(images);
+            }
+            blocked_images.append(&mut evidence_images);
+            evidence_images.clear();
+        }
         let result = Arc::new(Mutex::new(None));
         let result_clone = result.clone();
         let (stream_tx, stream_rx) = mpsc::sync_channel(128);
@@ -767,13 +816,104 @@ impl AgentRuntime {
                         }
                     }
                 }
-                let response = if client.config.streaming {
+                if !blocked_images.is_empty() {
+                    let artifacts = blocked_images
+                        .iter()
+                        .map(|image| {
+                            format!(
+                                "{} ({}x{} px)",
+                                image.file, image.width, image.height
+                            )
+                        })
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    openai_messages.push(OpenAiMessage {
+                        role: "user".to_string(),
+                        content: Value::String(format!(
+                            "[image_attached: {} | visible_to_model: false | reason: model_text_only | artifacts: {}]",
+                            blocked_images.len(),
+                            artifacts
+                        )),
+                        tool_calls: None,
+                        tool_call_id: None,
+                        reasoning_content: None,
+                        reasoning: None,
+                        reasoning_details: Vec::new(),
+                    });
+                }
+                let mut emitted_text = false;
+                let mut response = if client.config.streaming {
                     client.chat_stream_with_reasoning(&openai_messages, Some(&tools_owned), |delta| {
+                        if matches!(&delta, StreamDelta::Text(text) if !text.is_empty()) {
+                            emitted_text = true;
+                        }
                         let _ = stream_tx.send(delta);
                     })
                 } else {
                     client.chat(&openai_messages, Some(&tools_owned))
                 };
+                // Transient provider failures (rate limits, gateway errors and
+                // timeouts) are retried before the task is marked failed. Never
+                // retry after streamed text: that would duplicate visible output.
+                let mut transient_attempts = 0;
+                while response.is_err() && !emitted_text && transient_attempts < 2 {
+                    let transient = response
+                        .as_ref()
+                        .err()
+                        .is_some_and(|error| is_transient_provider_error(error));
+                    if !transient {
+                        break;
+                    }
+                    transient_attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(
+                        500 * transient_attempts,
+                    ));
+                    response = if client.config.streaming {
+                        client.chat_stream_with_reasoning(
+                            &openai_messages,
+                            Some(&tools_owned),
+                            |delta| {
+                                if matches!(&delta, StreamDelta::Text(text) if !text.is_empty()) {
+                                    emitted_text = true;
+                                }
+                                let _ = stream_tx.send(delta);
+                            },
+                        )
+                    } else {
+                        client.chat(&openai_messages, Some(&tools_owned))
+                    };
+                }
+                // A provider can reject an image even when the local family
+                // heuristic or catalog metadata said otherwise. Retry once
+                // without pixels and learn the capability, instead of failing
+                // the whole task.
+                if let Err(error) = &response {
+                    if !emitted_text && crate::model_capabilities::is_image_rejection(error) {
+                        if let Some(root) = media_root.as_deref() {
+                            crate::model_capabilities::mark_project_observed_text_only(
+                                root,
+                                &client.config.model,
+                            );
+                        } else {
+                            crate::model_capabilities::mark_observed_text_only(
+                                &client.config.model,
+                            );
+                        }
+                        if strip_image_parts(&mut openai_messages) {
+                            response = if client.config.streaming {
+                                client.chat_stream_with_reasoning(
+                                    &openai_messages,
+                                    Some(&tools_owned),
+                                    |delta| {
+                                        let _ = stream_tx.send(delta);
+                                    },
+                                )
+                            } else {
+                                client.chat(&openai_messages, Some(&tools_owned))
+                            };
+                        }
+                    }
+                }
                 *result_clone.lock().unwrap() = Some(response);
             })
             .expect("failed to spawn agent api thread");
@@ -788,8 +928,11 @@ impl AgentRuntime {
         self.status = AgentStatus::Thinking;
     }
 
-    /// Queue bounded visual evidence for the next provider request.
-    fn enqueue_evidence_images(&mut self, images: Vec<crate::chat_media::ChatImage>) {
+    /// Queue bounded visual evidence for the next provider request. Returns the
+    /// files that did not fit so the tool result can report the eviction instead
+    /// of silently dropping evidence.
+    fn enqueue_evidence_images(&mut self, images: Vec<crate::chat_media::ChatImage>) -> Vec<String> {
+        let mut evicted = Vec::new();
         for image in images {
             if self
                 .evidence_images
@@ -798,14 +941,13 @@ impl AgentRuntime {
             {
                 continue;
             }
-            self.evidence_images.push(image);
             if self.evidence_images.len() >= crate::chat_media::MAX_IMAGES {
-                break;
+                evicted.push(image.file);
+                continue;
             }
+            self.evidence_images.push(image);
         }
-        while self.evidence_images.len() > crate::chat_media::MAX_IMAGES {
-            self.evidence_images.remove(0);
-        }
+        evicted
     }
 
     /// Cancel any running background request.
@@ -1080,7 +1222,8 @@ impl AgentRuntime {
                                 summary: "The document changed after review. Inspect the current revision before proposing another operation.".into(),
                                 data: serde_json::json!({"error": {"code": "revision_conflict"}, "expected_revision": call.expected_revision, "current_revision": executor.revision()}),
                                 references: Vec::new(), changed: false, revision: executor.revision(), diff: None,
-                                verification: None, warnings: Vec::new(), details: Vec::new(), preview: false })
+                                verification: None, warnings: Vec::new(), details: Vec::new(), preview: false,
+                                partial: false, artifacts: Vec::new() })
                         } else {
                             let output = executor.execute(&call.id, &call.name, call.arguments.clone(), execution_mode);
                             if executor.is_pending(&call.id) { return None; }
@@ -1091,7 +1234,30 @@ impl AgentRuntime {
                                 output.model_content(max_tool_result_chars),
                                 visual_evidence_from_result(&output),
                             ),
-                            Err(error) => (format!("Error: {}", error), Vec::new()),
+                            Err(error) => {
+                                let result = AgentToolResult {
+                                    ok: false,
+                                    summary: "Tool execution failed.".to_string(),
+                                    data: serde_json::json!({
+                                        "error": {
+                                            "code": "tool_execution_failed",
+                                            "message": error,
+                                            "suggestion": "Inspect the tool schema and current scene revision, then retry only this call."
+                                        }
+                                    }),
+                                    references: Vec::new(),
+                                    changed: false,
+                                    revision: executor.revision(),
+                                    diff: None,
+                                    verification: None,
+                                    warnings: Vec::new(),
+                                    details: Vec::new(),
+                                    preview: false,
+                                    partial: false,
+                                    artifacts: Vec::new(),
+                                };
+                                (result.model_content(max_tool_result_chars), Vec::new())
+                            }
                         }
                     }
                 };
@@ -1099,9 +1265,26 @@ impl AgentRuntime {
                 call.result = Some(result.clone());
                 Some((call.id.clone(), result, images))
             });
-        if let Some((id, result, images)) = executed {
+        if let Some((id, mut result, images)) = executed {
             self.tool_calls_executed = self.tool_calls_executed.saturating_add(1);
-            self.enqueue_evidence_images(images);
+            let evicted = self.enqueue_evidence_images(images);
+            if !evicted.is_empty() {
+                if let Ok(mut parsed) = serde_json::from_str::<AgentToolResult>(&result) {
+                    parsed.warnings.push(format!(
+                        "Visual evidence budget kept the first {} image(s); not delivered: {}.",
+                        crate::chat_media::MAX_IMAGES,
+                        evicted.join(", ")
+                    ));
+                    result = parsed.model_content(self.max_tool_result_chars);
+                    if let Some(call) = self
+                        .pending_calls
+                        .iter_mut()
+                        .find(|call| call.id == id)
+                    {
+                        call.result = Some(result.clone());
+                    }
+                }
+            }
             self.emit(AgentEvent::ToolResult { id, result });
             return AgentStatus::ExecutingTools;
         }
@@ -1504,6 +1687,31 @@ fn message_to_openai(message: &ChatMessage) -> OpenAiMessage {
     }
 }
 
+fn is_transient_provider_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    [
+        "429",
+        "rate limit",
+        "too many requests",
+        "500",
+        "502",
+        "503",
+        "504",
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+        "timed out",
+        "timeout",
+        "connection reset",
+        "connection closed",
+        "temporarily unavailable",
+        "overloaded",
+    ]
+    .iter()
+    .any(|marker| error.contains(marker))
+}
+
 fn friendly_provider_error(error: String) -> String {
     if crate::model_capabilities::is_image_rejection(&error) {
         format!(
@@ -1512,6 +1720,28 @@ fn friendly_provider_error(error: String) -> String {
     } else {
         error
     }
+}
+
+/// Replace provider-shaped image parts with a textual placeholder. Returns
+/// true when at least one part was changed, so the caller can retry exactly
+/// once without images.
+fn strip_image_parts(messages: &mut [OpenAiMessage]) -> bool {
+    let mut changed = false;
+    for message in messages {
+        let Value::Array(parts) = &mut message.content else {
+            continue;
+        };
+        for part in parts.iter_mut() {
+            if part.get("type").and_then(Value::as_str) == Some("image_url") {
+                *part = serde_json::json!({
+                    "type": "text",
+                    "text": "[image omitted: the provider rejected image input for this model]"
+                });
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 fn visual_evidence_from_result(result: &AgentToolResult) -> Vec<crate::chat_media::ChatImage> {
@@ -1598,18 +1828,23 @@ fn compact_json_value(value: Value, depth: usize, max_items: usize, max_string: 
             }
             Value::Array(values)
         }
-        Value::Object(values) => Value::Object(
-            values
-                .into_iter()
-                .take(max_items)
-                .map(|(key, value)| {
-                    (
-                        key,
-                        compact_json_value(value, depth - 1, max_items, max_string),
-                    )
-                })
-                .collect(),
-        ),
+        Value::Object(values) => {
+            let total = values.len();
+            let mut object = serde_json::Map::new();
+            for (key, value) in values.into_iter().take(max_items) {
+                object.insert(
+                    key,
+                    compact_json_value(value, depth - 1, max_items, max_string),
+                );
+            }
+            if total > max_items {
+                object.insert(
+                    "__truncated__".to_string(),
+                    serde_json::json!({"remaining": total - max_items}),
+                );
+            }
+            Value::Object(object)
+        }
         other => other,
     }
 }
@@ -1630,6 +1865,30 @@ pub fn assistant_with_tool_calls(text: &str, calls: &[ToolCall]) -> OpenAiMessag
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn rejected_image_parts_are_replaced_with_a_text_placeholder() {
+        let mut messages = vec![OpenAiMessage {
+            role: "user".to_string(),
+            content: serde_json::json!([
+                {"type": "text", "text": "look at this"},
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}
+            ]),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning_content: None,
+            reasoning: None,
+            reasoning_details: Vec::new(),
+        }];
+        assert!(strip_image_parts(&mut messages));
+        let parts = messages[0].content.as_array().expect("content parts");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[1]["type"], "text");
+        assert!(parts[1]["text"]
+            .as_str()
+            .is_some_and(|text| text.contains("image omitted")));
+        assert!(!strip_image_parts(&mut messages));
+    }
 
     #[test]
     fn capture_visual_evidence_is_bounded_and_deduplicated() {
@@ -2101,6 +2360,56 @@ mod tests {
 
         assert!(encoded.contains("Created shelf"));
         assert!(!encoded.contains("Command executed"));
+    }
+
+    #[test]
+    fn compacted_tool_result_keeps_actionable_warnings_and_diff() {
+        let mut result = AgentToolResult::success(
+            "Large result",
+            serde_json::json!({"blob": "x".repeat(8_000)}),
+        );
+        result.diff = Some(serde_json::json!({"created": ["a", "b"], "updated": [], "deleted": []}));
+        result.warnings = vec!["keep this warning".to_string()];
+        let encoded = result.model_content(700);
+        let parsed: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(parsed["data"]["truncated"], true);
+        assert_eq!(parsed["warnings"][0], "keep this warning");
+        assert_eq!(parsed["diff"]["created"][0], "a");
+    }
+
+    #[test]
+    fn object_truncation_reports_remaining_keys() {
+        let compacted = compact_json_value(
+            serde_json::json!({"a": 1, "b": 2, "c": 3, "d": 4}),
+            6,
+            2,
+            64,
+        );
+        assert_eq!(compacted["__truncated__"]["remaining"], 2);
+    }
+
+    #[test]
+    fn evidence_image_eviction_is_reported() {
+        let mut runtime = AgentRuntime::new(OpenAiConfig::default());
+        let images = (0..6)
+            .map(|index| crate::chat_media::ChatImage {
+                file: format!("images/{index}.png"),
+                width: 32,
+                height: 32,
+            })
+            .collect();
+        let evicted = runtime.enqueue_evidence_images(images);
+        assert_eq!(runtime.evidence_images.len(), crate::chat_media::MAX_IMAGES);
+        assert_eq!(evicted, vec!["images/4.png", "images/5.png"]);
+    }
+
+    #[test]
+    fn transient_provider_errors_are_classified() {
+        assert!(is_transient_provider_error("HTTP 429 rate limit exceeded"));
+        assert!(is_transient_provider_error("503 service unavailable"));
+        assert!(is_transient_provider_error("request timed out"));
+        assert!(!is_transient_provider_error("invalid API key"));
+        assert!(!is_transient_provider_error("unsupported modality: image_url"));
     }
 
     #[test]

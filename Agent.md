@@ -32,9 +32,12 @@ The native Agent, CLI, and MCP are expected to finish what they start. A gamepla
 request is not complete after geometry alone: it needs a camera, authored lighting
 where appropriate, attached and validated Rhai gameplay source, a
 `game_completion_audit` pass, and at least two inspected `viewport_capture` angles.
-Image input is automatic: known text-only model families are blocked, unknown
-models are attempted, and provider rejections surface as explicit errors. Captures
-are attached to the next native provider request and returned as MCP image content.
+Image input is automatic: attachments are always accepted, known text-only
+families receive a textual `visible_to_model: false` evidence note instead of
+pixels, unknown models are attempted, and a provider rejection retries once
+without images before it becomes a recoverable error. Captures are attached to
+the next native provider request and returned as MCP image content; contact
+sheets combine multiple angles into one bounded evidence image.
 Never claim a visual or gameplay result was verified when only a mutation receipt
 exists.
 

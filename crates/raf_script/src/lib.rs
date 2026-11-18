@@ -16,11 +16,13 @@
 
 pub mod backends;
 pub mod behavior_api;
+pub mod character_api;
 pub mod camera_api;
 pub mod environment_api;
 pub mod errors;
 pub mod host;
 pub mod host_api;
+pub mod joint_api;
 pub mod lifetime;
 pub mod node_handle;
 pub mod physics_api;

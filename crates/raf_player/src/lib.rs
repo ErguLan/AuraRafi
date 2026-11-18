@@ -2,6 +2,7 @@
 pub mod application;
 mod audio;
 mod game_ui;
+mod physics_debug;
 pub mod session;
 pub mod surface;
 pub use application::{run, PlayerLaunch};

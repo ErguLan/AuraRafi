@@ -170,9 +170,11 @@ impl AgentObservationContext<'_> {
         match name {
             "project_summary" => Some(self.project_summary()),
             "scene_outline" => Some(self.scene_outline(arguments)),
+            "scene_digest" => Some(self.scene_digest(arguments)),
             "scene_query" => Some(self.scene_query(arguments)),
             "scene_spatial_map" => Some(self.scene_spatial_map(arguments)),
             "scene_check_overlaps" => Some(self.scene_check_overlaps(arguments)),
+            "scene_navigation_audit" => Some(self.scene_navigation_audit(arguments)),
             "scene_design_audit" => Some(self.scene_design_audit(arguments)),
             "scene_inspect" => Some(self.scene_inspect(arguments)),
             "selection_get" => Some(self.selection_get()),
@@ -202,6 +204,15 @@ impl AgentObservationContext<'_> {
             summary,
             serde_json::to_value(snapshot).unwrap_or(Value::Null),
         )
+    }
+
+    fn scene_digest(&self, arguments: &Value) -> AgentToolResult {
+        observation_to_tool_result(raf_core::agent_context::scene_digest(
+            self.scene,
+            self.assets,
+            arguments,
+            &self.selection.selected_nodes,
+        ))
     }
 
     fn scene_outline(&self, arguments: &Value) -> AgentToolResult {
@@ -247,6 +258,14 @@ impl AgentObservationContext<'_> {
         ))
     }
 
+    fn scene_navigation_audit(&self, arguments: &Value) -> AgentToolResult {
+        observation_to_tool_result(raf_core::agent_context::scene_navigation_audit(
+            self.scene,
+            arguments,
+            &self.selection.selected_nodes,
+        ))
+    }
+
     fn scene_design_audit(&self, arguments: &Value) -> AgentToolResult {
         observation_to_tool_result(raf_core::agent_context::scene_design_audit(
             self.scene,
@@ -257,6 +276,7 @@ impl AgentObservationContext<'_> {
 
     fn scene_inspect(&self, arguments: &Value) -> AgentToolResult {
         let targets = target_values(arguments);
+        let mut unresolved_targets = Vec::new();
         let ids: Vec<SceneNodeId> = if targets.is_empty() {
             self.selection
                 .selected_nodes
@@ -265,10 +285,14 @@ impl AgentObservationContext<'_> {
                 .filter(|id| self.scene.is_valid_node(*id))
                 .collect()
         } else {
-            targets
-                .iter()
-                .filter_map(|target| resolve_target(self.scene, self.selection, target))
-                .collect()
+            let mut resolved = Vec::new();
+            for target in &targets {
+                match resolve_target(self.scene, self.selection, target) {
+                    Some(id) => resolved.push(id),
+                    None => unresolved_targets.push(target.clone()),
+                }
+            }
+            resolved
         };
         let items = ids
             .iter()
@@ -276,25 +300,39 @@ impl AgentObservationContext<'_> {
             .take(32)
             .filter_map(|id| node_detail(self.scene, id))
             .collect::<Vec<_>>();
-        let unresolved = targets.len().saturating_sub(ids.len());
+        let partial = !ids.is_empty() && !unresolved_targets.is_empty();
+        let found = !items.is_empty();
         let mut result = AgentToolResult::success(
-            if unresolved == 0 {
+            if unresolved_targets.is_empty() {
                 format!("Inspected {} scene entities.", items.len())
-            } else {
+            } else if partial {
                 format!(
                     "Inspected {} scene entities; {} target(s) were not found.",
                     items.len(),
-                    unresolved
+                    unresolved_targets.len()
+                )
+            } else {
+                format!(
+                    "None of the {} requested targets were found.",
+                    unresolved_targets.len()
                 )
             },
-            serde_json::json!({"items": items, "unresolved": unresolved}),
+            serde_json::json!({
+                "status": if partial { "partial" } else if items.is_empty() { "failed" } else { "ok" },
+                "items": items,
+                "unresolved": unresolved_targets.len(),
+                "unresolved_targets": unresolved_targets.clone(),
+            }),
         );
-        if unresolved > 0 {
-            result.ok = false;
+        // A partial read is useful evidence, not a total failure. Only a read
+        // that resolved nothing is a failed tool call.
+        result.ok = found;
+        result.partial = partial;
+        if !unresolved_targets.is_empty() {
             result.verification = Some(serde_json::json!({
-                "status": "failed",
+                "status": if partial { "partial" } else { "failed" },
                 "reason": "target_not_found",
-                "unresolved": unresolved
+                "unresolved": unresolved_targets.len(),
             }));
         }
         result.references = ids

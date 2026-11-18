@@ -31,6 +31,7 @@ pub mod openai_client;
 pub mod provider;
 pub mod puerto;
 pub mod tool_registry;
+pub mod vision_bridge;
 
 pub use agent_history::{AgentHistory, AgentSession};
 pub use agent_runtime::{AgentEvent, AgentRuntime, AgentStatus, ToolExecutor};

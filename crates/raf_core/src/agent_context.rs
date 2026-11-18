@@ -11,7 +11,7 @@ use crate::transaction::VerificationSummary;
 use glam::Vec3;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 pub const DEFAULT_PAGE_SIZE: usize = 48;
 pub const MAX_PAGE_SIZE: usize = 128;
@@ -171,6 +171,165 @@ pub fn scene_context(scene: &SceneGraph, selected: &[SceneNodeId]) -> Value {
         "truncated": live_nodes.len() > MAX_PAGE_SIZE,
         "identity": "uuid-first; name and path are display hints",
     })
+}
+
+/// One-call semantic snapshot for authoring Agents. It combines the counts,
+/// hierarchy, world bounds, component coverage and optional overlap evidence
+/// that otherwise force a model to chain several observation calls.
+pub fn scene_digest(
+    scene: &SceneGraph,
+    assets: &[String],
+    args: &Value,
+    selected: &[SceneNodeId],
+) -> AgentObservationResult {
+    let (offset, limit) = page(args);
+    let root_target = string_arg(args, "root").or_else(|| string_arg(args, "scope"));
+    let root = root_target.and_then(|target| resolve_target(scene, target));
+    let scoped = if root_target.is_some() && root.is_none() {
+        Vec::new()
+    } else {
+        scoped_ids(scene, root)
+    };
+    let mut renderable = 0usize;
+    let mut folders = 0usize;
+    let mut hidden = 0usize;
+    let mut cameras = Vec::new();
+    let mut attached_scripts = 0usize;
+    let mut source_assets = 0usize;
+    let mut textured = 0usize;
+    let mut colliders = 0usize;
+    let mut rigid_bodies = 0usize;
+    let mut audio_sources = 0usize;
+    let mut roles: BTreeMap<String, usize> = BTreeMap::new();
+    let mut tags: BTreeMap<String, usize> = BTreeMap::new();
+    let mut aggregate_bounds: Option<(Vec3, Vec3)> = None;
+    for id in &scoped {
+        let Some(node) = scene.get(*id) else {
+            continue;
+        };
+        if node.is_folder {
+            folders += 1;
+        } else if node.primitive != Primitive::Empty && node.visible {
+            renderable += 1;
+            if let Some(bounds) = world_bounds(scene, *id) {
+                merge_bounds(&mut aggregate_bounds, bounds);
+            }
+        }
+        if !node.visible {
+            hidden += 1;
+        }
+        if node.game_camera.is_some() {
+            cameras.push(scene_item_reference(scene, *id));
+        }
+        attached_scripts += node.scripts.len();
+        if node.source_asset.is_some() {
+            source_assets += 1;
+        }
+        if let Some(role) = node.semantic_role.as_deref().filter(|role| !role.is_empty()) {
+            *roles.entry(role.to_string()).or_default() += 1;
+        }
+        for tag in &node.tags {
+            *tags.entry(tag.clone()).or_default() += 1;
+        }
+        if node.base_color_texture.is_some() {
+            textured += 1;
+        }
+        if node.collider.collider_type != crate::scene::ColliderType::None {
+            colliders += 1;
+        }
+        if node.rigid_body.enabled {
+            rigid_bodies += 1;
+        }
+        if node.audio_source.enabled {
+            audio_sources += 1;
+        }
+    }
+    let components = json!({
+        "textured": textured,
+        "collider": colliders,
+        "rigid_body": rigid_bodies,
+        "audio": audio_sources,
+    });
+    let total = scoped.len();
+    let items = scoped
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .filter_map(|id| scene_item(scene, *id, false))
+        .collect::<Vec<_>>();
+    let mut top_roles = roles.into_iter().collect::<Vec<_>>();
+    top_roles.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+    top_roles.truncate(16);
+    let mut top_tags = tags.into_iter().collect::<Vec<_>>();
+    top_tags.sort_by(|left, right| right.1.cmp(&left.1).then(left.0.cmp(&right.0)));
+    top_tags.truncate(16);
+    let check_collisions = bool_arg(args, "check_collisions", false);
+    let overlaps = check_collisions
+        .then(|| {
+            scene_check_overlaps(
+                scene,
+                &json!({"root": root_target, "max_pairs": 16}),
+                selected,
+            )
+        })
+        .map(|observation| {
+            json!({
+                "count": observation.data.get("overlap_count"),
+                "pairs": observation.data.get("pairs"),
+                "truncated": observation.data.get("truncated"),
+            })
+        });
+    let mut result = AgentObservationResult::new(
+        "Scene digest",
+        format!(
+            "{} live node(s), {} renderable, {} folder(s), {} camera(s), {} attached script(s).",
+            total,
+            renderable,
+            folders,
+            cameras.len(),
+            attached_scripts
+        ),
+        paged_data(
+            items,
+            total,
+            offset,
+            limit,
+            json!({
+                "scope": root.and_then(|id| scene_item_reference(scene, id)),
+                "roots": scene.roots().iter().filter_map(|id| scene_item_reference(scene, *id)).take(24).collect::<Vec<_>>(),
+                "selected": selected.iter().filter_map(|id| scene_item_reference(scene, *id)).take(16).collect::<Vec<_>>(),
+                "counts": {
+                    "live": total,
+                    "renderable": renderable,
+                    "folders": folders,
+                    "hidden": hidden,
+                    "cameras": cameras.len(),
+                    "attached_scripts": attached_scripts,
+                    "entities_with_source_asset": source_assets,
+                    "imported_assets": assets.len(),
+                },
+                "bounds": aggregate_bounds.map(bounds_value),
+                "cameras": cameras,
+                "components": components,
+                "top_semantic_roles": top_roles.into_iter().map(|(role, count)| json!({"role": role, "count": count})).collect::<Vec<_>>(),
+                "top_tags": top_tags.into_iter().map(|(tag, count)| json!({"tag": tag, "count": count})).collect::<Vec<_>>(),
+                "overlaps": overlaps,
+                "identity": "uuid-first; use ref or uuid for mutations",
+                "hint": "Use scene_program for large worlds, then scene_commit and scene_capture.",
+            }),
+        ),
+    );
+    if root_target.is_some() && root.is_none() {
+        result
+            .warnings
+            .push("The requested scene digest root was not found.".to_string());
+        result.verification = Some(VerificationSummary {
+            status: "failed".to_string(),
+            checks: Vec::new(),
+            failures: vec!["The requested scene digest root was not found.".to_string()],
+        });
+    }
+    result
 }
 
 /// Create a bounded semantic fingerprint for document-level change tracking.
@@ -514,7 +673,27 @@ pub fn scene_spatial_map(
         .iter()
         .skip(offset)
         .take(limit)
-        .filter_map(|id| scene_item(scene, *id, false))
+        .filter_map(|id| {
+            let mut item = scene_item(scene, *id, false)?;
+            if let Some((min, max)) = world_bounds(scene, *id) {
+                if let Some(object) = item.as_object_mut() {
+                    object.insert(
+                        "world_bounds".to_string(),
+                        json!({
+                            "min": [min.x, min.y, min.z],
+                            "max": [max.x, max.y, max.z],
+                            "size": [max.x - min.x, max.y - min.y, max.z - min.z],
+                        }),
+                    );
+                    let world = scene.world_matrix(*id).col(3).truncate();
+                    object.insert(
+                        "world_position".to_string(),
+                        json!([world.x, world.y, world.z]),
+                    );
+                }
+            }
+            Some(item)
+        })
         .collect::<Vec<_>>();
 
     let inspected = renderable
@@ -767,6 +946,368 @@ pub fn scene_check_overlaps(
         });
     }
     result
+}
+
+/// Static walkability and reachability audit. It never starts Play or Runtime:
+/// it samples the authored AABBs into a bounded occupancy grid, expands
+/// obstacles by an agent radius and runs a BFS from spawn to goals.
+pub fn scene_navigation_audit(
+    scene: &SceneGraph,
+    args: &Value,
+    selected: &[SceneNodeId],
+) -> AgentObservationResult {
+    let root_target = string_arg(args, "root").or_else(|| string_arg(args, "scope"));
+    let root = root_target.and_then(|target| resolve_target(scene, target));
+    let scoped = if root_target.is_some() && root.is_none() {
+        Vec::new()
+    } else {
+        scoped_ids(scene, root)
+    };
+    if root_target.is_some() && root.is_none() {
+        let mut result = AgentObservationResult::new(
+            "Scene navigation audit",
+            "The requested navigation audit root was not found.",
+            json!({"ok": false, "error": "root_not_found", "root": root_target}),
+        );
+        result.verification = Some(VerificationSummary {
+            status: "failed".to_string(),
+            checks: Vec::new(),
+            failures: vec!["The requested navigation audit root was not found.".to_string()],
+        });
+        return result;
+    }
+    let resolution = args
+        .get("resolution")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.5)
+        .clamp(0.1, 8.0) as f32;
+    let agent_radius = args
+        .get("agent_radius")
+        .and_then(Value::as_f64)
+        .unwrap_or(0.35)
+        .clamp(0.0, 8.0) as f32;
+    let mut aggregate_bounds: Option<(Vec3, Vec3)> = None;
+    let mut walkable_nodes = Vec::new();
+    let mut obstacle_nodes = Vec::new();
+    for id in &scoped {
+        let Some(node) = scene.get(*id) else {
+            continue;
+        };
+        if node.is_folder || node.primitive == Primitive::Empty || !node.visible {
+            continue;
+        }
+        let Some(bounds) = world_bounds(scene, *id) else {
+            continue;
+        };
+        merge_bounds(&mut aggregate_bounds, bounds);
+        let text = navigation_text(node);
+        let walkable = is_walkable_surface(node, &text);
+        let obstacle = !walkable
+            && (node.collider.collider_type != crate::scene::ColliderType::None
+                || text.contains("wall")
+                || text.contains("obstacle")
+                || text.contains("barrier")
+                || text.contains("fence")
+                || text.contains("shelf")
+                || text.contains("counter")
+                || text.contains("crate")
+                || text.contains("building"));
+        if walkable {
+            walkable_nodes.push(bounds);
+        } else if obstacle {
+            obstacle_nodes.push(bounds);
+        }
+    }
+    let Some((min, max)) = aggregate_bounds else {
+        let mut result = AgentObservationResult::new(
+            "Scene navigation audit",
+            "The requested scope has no renderable nodes.",
+            json!({"ok": false, "error": "empty_scope"}),
+        );
+        result.verification = Some(VerificationSummary {
+            status: "failed".to_string(),
+            checks: Vec::new(),
+            failures: vec!["No renderable nodes were found in scope.".to_string()],
+        });
+        return result;
+    };
+    let columns = (((max.x - min.x) / resolution).ceil() as usize).saturating_add(1).clamp(2, 256);
+    let rows = (((max.z - min.z) / resolution).ceil() as usize).saturating_add(1).clamp(2, 256);
+    let cell_center = |column: usize, row: usize| {
+        Vec3::new(
+            min.x + column as f32 * resolution,
+            min.y,
+            min.z + row as f32 * resolution,
+        )
+    };
+    let inside = |bounds: (Vec3, Vec3), point: Vec3, margin: f32| {
+        point.x >= bounds.0.x - margin
+            && point.x <= bounds.1.x + margin
+            && point.z >= bounds.0.z - margin
+            && point.z <= bounds.1.z + margin
+    };
+    let mut walkable = vec![true; columns * rows];
+    let has_walkable_surfaces = !walkable_nodes.is_empty();
+    for row in 0..rows {
+        for column in 0..columns {
+            let point = cell_center(column, row);
+            let index = row * columns + column;
+            if has_walkable_surfaces && !walkable_nodes.iter().any(|bounds| inside(*bounds, point, 0.01)) {
+                walkable[index] = false;
+            }
+            if obstacle_nodes
+                .iter()
+                .any(|bounds| inside(*bounds, point, agent_radius))
+            {
+                walkable[index] = false;
+            }
+        }
+    }
+    let fallback_walkable = !walkable.iter().any(|value| *value);
+    if fallback_walkable {
+        for row in 0..rows {
+            for column in 0..columns {
+                let point = cell_center(column, row);
+                let index = row * columns + column;
+                walkable[index] = !obstacle_nodes
+                    .iter()
+                    .any(|bounds| inside(*bounds, point, agent_radius));
+            }
+        }
+    }
+    let cell_of = |point: Vec3| {
+        let column = (((point.x - min.x) / resolution).round() as i64)
+            .clamp(0, columns as i64 - 1) as usize;
+        let row = (((point.z - min.z) / resolution).round() as i64)
+            .clamp(0, rows as i64 - 1) as usize;
+        (column, row)
+    };
+    let node_center = |id: SceneNodeId| {
+        world_bounds(scene, id)
+            .map(|bounds| (bounds.0 + bounds.1) * 0.5)
+            .or_else(|| scene.get(id).map(|_| scene.world_matrix(id).col(3).truncate()))
+    };
+    let spawn_target = string_arg(args, "spawn");
+    let spawn_id = spawn_target
+        .and_then(|target| resolve_target(scene, target))
+        .or_else(|| {
+            scoped.iter().copied().find(|id| {
+                scene
+                    .get(*id)
+                    .is_some_and(|node| navigation_text(node).contains("spawn"))
+            })
+        });
+    let mut goal_ids = string_array_arg(args, "goals")
+        .into_iter()
+        .filter_map(|target| resolve_target(scene, &target))
+        .collect::<Vec<_>>();
+    if goal_ids.is_empty() {
+        goal_ids = scoped
+            .iter()
+            .copied()
+            .filter(|id| {
+                scene.get(*id).is_some_and(|node| {
+                    let text = navigation_text(node);
+                    text.contains("goal") || text.contains("checkpoint") || text.contains("exit")
+                })
+            })
+            .take(32)
+            .collect();
+    }
+    let spawn_point = spawn_id
+        .and_then(node_center)
+        .unwrap_or_else(|| cell_center(columns / 2, rows / 2));
+    let mut spawn_cell = cell_of(spawn_point);
+    if !walkable[spawn_cell.1 * columns + spawn_cell.0] {
+        if let Some(cell) = nearest_walkable(&walkable, columns, rows, spawn_cell, 6) {
+            spawn_cell = cell;
+        }
+    }
+    let mut distances = vec![usize::MAX; columns * rows];
+    let mut queue = VecDeque::new();
+    if walkable[spawn_cell.1 * columns + spawn_cell.0] {
+        distances[spawn_cell.1 * columns + spawn_cell.0] = 0;
+        queue.push_back(spawn_cell);
+    }
+    while let Some((column, row)) = queue.pop_front() {
+        let distance = distances[row * columns + column];
+        for (dc, dr) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
+            let next_column = column as i64 + dc;
+            let next_row = row as i64 + dr;
+            if next_column < 0 || next_row < 0 || next_column >= columns as i64 || next_row >= rows as i64 {
+                continue;
+            }
+            let next_column = next_column as usize;
+            let next_row = next_row as usize;
+            let index = next_row * columns + next_column;
+            if !walkable[index] || distances[index] != usize::MAX {
+                continue;
+            }
+            distances[index] = distance + 1;
+            queue.push_back((next_column, next_row));
+        }
+    }
+    let goals = goal_ids
+        .iter()
+        .filter_map(|id| {
+            let point = node_center(*id)?;
+            let (column, row) = cell_of(point);
+            let index = row * columns + column;
+            let distance = distances[index];
+            Some(json!({
+                "ref": scene_item_reference(scene, *id),
+                "cell": [column, row],
+                "reachable": distance != usize::MAX,
+                "distance_m": if distance == usize::MAX { Value::Null } else { json!(distance as f32 * resolution) },
+            }))
+        })
+        .collect::<Vec<_>>();
+    let reachable_goals = goals
+        .iter()
+        .filter(|goal| goal.get("reachable").and_then(Value::as_bool) == Some(true))
+        .count();
+    let visited = distances.iter().filter(|distance| **distance != usize::MAX).count();
+    let walkable_count = walkable.iter().filter(|value| **value).count();
+    let narrow = distances
+        .iter()
+        .enumerate()
+        .filter(|(index, distance)| {
+            if **distance == usize::MAX {
+                return false;
+            }
+            let column = index % columns;
+            let row = index / columns;
+            let free = [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)]
+                .iter()
+                .filter(|(dc, dr)| {
+                    let c = column as i64 + dc;
+                    let r = row as i64 + dr;
+                    c >= 0
+                        && r >= 0
+                        && c < columns as i64
+                        && r < rows as i64
+                        && walkable[r as usize * columns + c as usize]
+                })
+                .count();
+            free <= 1
+        })
+        .count();
+    let goal_count = goals.len();
+    let has_goals = goal_count > 0;
+    let all_reachable = has_goals && reachable_goals == goal_count;
+    let status = if !has_goals {
+        "no_goals"
+    } else if all_reachable {
+        "passed"
+    } else {
+        "failed"
+    };
+    let mut result = AgentObservationResult::new(
+        "Scene navigation audit",
+        if !has_goals {
+            format!(
+                "Walkability sampled on {walkable_count} cell(s); no goals were declared."
+            )
+        } else {
+            format!(
+                "{reachable_goals}/{} goal(s) reachable from spawn on a {}x{} grid.",
+                goals.len(),
+                columns,
+                rows
+            )
+        },
+        json!({
+            "ok": !has_goals || all_reachable,
+            "status": status,
+            "scope": root.and_then(|id| scene_item_reference(scene, id)),
+            "spawn": spawn_id.and_then(|id| scene_item_reference(scene, id)),
+            "spawn_cell": [spawn_cell.0, spawn_cell.1],
+            "goals": goals,
+            "reachable_goals": reachable_goals,
+            "grid": {"columns": columns, "rows": rows, "resolution": resolution},
+            "walkable_cells": walkable_count,
+            "visited_cells": visited,
+            "narrow_cells": narrow,
+            "fallback_walkable": fallback_walkable,
+            "bounds": bounds_value((min, max)),
+            "selected": selected
+                .iter()
+                .filter(|id| scoped.contains(id))
+                .filter_map(|id| scene_item_reference(scene, *id))
+                .collect::<Vec<_>>(),
+            "note": "Static AABB sampling; doors, slopes and runtime physics are not simulated.",
+        }),
+    );
+    result.verification = Some(VerificationSummary {
+        status: if !has_goals { "not_checked" } else if all_reachable { "passed" } else { "failed" }.to_string(),
+        checks: vec![format!(
+            "{walkable_count} walkable cell(s), {visited} visited, {narrow} narrow."
+        )],
+        failures: if has_goals && !all_reachable {
+            vec![format!(
+                "{} goal(s) are unreachable from spawn.",
+                goal_count.saturating_sub(reachable_goals)
+            )]
+        } else {
+            Vec::new()
+        },
+    });
+    result
+}
+
+fn navigation_text(node: &SceneNode) -> String {
+    let mut text = display_name(&node.name).to_ascii_lowercase();
+    if let Some(role) = node.semantic_role.as_deref() {
+        text.push(' ');
+        text.push_str(&role.to_ascii_lowercase());
+    }
+    for tag in &node.tags {
+        text.push(' ');
+        text.push_str(&tag.to_ascii_lowercase());
+    }
+    text
+}
+
+fn is_walkable_surface(node: &SceneNode, text: &str) -> bool {
+    node.primitive != Primitive::Empty
+        && (text.contains("floor")
+            || text.contains("ground")
+            || text.contains("aisle")
+            || text.contains("path")
+            || text.contains("walkway")
+            || text.contains("road")
+            || text.contains("pavement")
+            || text.contains("sidewalk")
+            || text.contains("terrain")
+            || text.contains("platform"))
+}
+
+fn nearest_walkable(
+    walkable: &[bool],
+    columns: usize,
+    rows: usize,
+    origin: (usize, usize),
+    radius: i64,
+) -> Option<(usize, usize)> {
+    for distance in 1..=radius {
+        for dc in -distance..=distance {
+            for dr in -distance..=distance {
+                if dc.abs() != distance && dr.abs() != distance {
+                    continue;
+                }
+                let column = origin.0 as i64 + dc;
+                let row = origin.1 as i64 + dr;
+                if column < 0 || row < 0 || column >= columns as i64 || row >= rows as i64 {
+                    continue;
+                }
+                let index = row as usize * columns + column as usize;
+                if walkable[index] {
+                    return Some((column as usize, row as usize));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Audit whether a bounded scene scope reads as an intentional real-world
@@ -1096,37 +1637,95 @@ pub fn scene_inspect(
     args: &Value,
     selected: &[SceneNodeId],
 ) -> AgentObservationResult {
-    let target = string_arg(args, "target")
+    let mut targets = Vec::new();
+    if let Some(target) = string_arg(args, "target")
         .or_else(|| string_arg(args, "entity"))
-        .or_else(|| string_arg(args, "uuid"));
-    let id = target
-        .as_deref()
-        .and_then(|target| resolve_target(scene, target))
-        .or_else(|| selected.first().copied());
-    let Some(id) = id else {
+        .or_else(|| string_arg(args, "uuid"))
+    {
+        targets.push(target.to_string());
+    }
+    targets.extend(string_array_arg(args, "targets"));
+    targets.retain(|target| !target.trim().is_empty());
+    if targets.is_empty() {
+        if let Some(id) = selected.first().copied() {
+            return match scene_item(scene, id, true) {
+                Some(item) => AgentObservationResult::new(
+                    "Scene inspect",
+                    format!("Inspected {}.", item["name"].as_str().unwrap_or("entity")),
+                    json!({
+                        "found": true,
+                        "status": "ok",
+                        "entity": item,
+                        "items": [item],
+                        "partial": false,
+                        "unresolved_targets": Vec::<String>::new(),
+                    }),
+                ),
+                None => AgentObservationResult::new(
+                    "Scene inspect",
+                    "The selected entity is no longer live.",
+                    json!({"found": false, "status": "failed"}),
+                ),
+            };
+        }
         let mut result = AgentObservationResult::new(
             "Scene inspect",
             "No entity target was provided.",
-            json!({"found": false, "target": target}),
+            json!({"found": false, "status": "failed", "targets": targets}),
         );
         result.warnings.push(
-            "Provide target as ref, uuid, path or exact name; a selected entity is used as fallback."
+            "Provide target/targets as ref, uuid, path or exact name; a selected entity is used as fallback."
                 .to_string(),
         );
         return result;
-    };
-    let Some(item) = scene_item(scene, id, true) else {
-        return AgentObservationResult::new(
-            "Scene inspect",
-            "The requested entity is no longer live.",
-            json!({"found": false, "target": target}),
-        );
-    };
-    AgentObservationResult::new(
+    }
+    let mut items = Vec::new();
+    let mut unresolved = Vec::new();
+    for target in &targets {
+        match resolve_target(scene, target) {
+            Some(id) => {
+                if let Some(item) = scene_item(scene, id, true) {
+                    items.push(item);
+                }
+            }
+            None => unresolved.push(target.clone()),
+        }
+    }
+    let partial = !items.is_empty() && !unresolved.is_empty();
+    let found = !items.is_empty();
+    let first = items.first().cloned();
+    let item_count = items.len();
+    let unresolved_count = unresolved.len();
+    let unresolved_text = unresolved.join(", ");
+    let mut result = AgentObservationResult::new(
         "Scene inspect",
-        format!("Inspected {}.", item["name"].as_str().unwrap_or("entity")),
-        json!({"found": true, "entity": item}),
-    )
+        if partial {
+            format!(
+                "Inspected {} entity(ies); {} target(s) were not found.",
+                item_count,
+                unresolved_count
+            )
+        } else if found {
+            format!("Inspected {item_count} entity(ies).")
+        } else {
+            format!("None of the {unresolved_count} requested target(s) were found.")
+        },
+        json!({
+            "found": found,
+            "status": if partial { "partial" } else if found { "ok" } else { "failed" },
+            "partial": partial,
+            "items": items,
+            "entity": first,
+            "unresolved_targets": unresolved,
+            "targets": targets,
+        }),
+    );
+    if partial {
+        result
+            .warnings
+            .push(format!("Some targets were not resolved: {unresolved_text}."));
+    }
+    result
 }
 
 pub fn selection_info(scene: &SceneGraph, selected: &[SceneNodeId]) -> AgentObservationResult {
@@ -2855,6 +3454,103 @@ mod tests {
         assert!(result.data["items"][0]["reasons"]
             .as_array()
             .is_some_and(|reasons| !reasons.is_empty()));
+    }
+
+    #[test]
+    fn spatial_map_items_include_per_entity_world_bounds() {
+        let mut scene = SceneGraph::new();
+        let root = scene.add_root("Store");
+        let shelf = scene.add_child(root, "Shelf");
+        if let Some(node) = scene.get_mut(shelf) {
+            node.primitive = Primitive::Cube;
+            node.scale = Vec3::new(2.0, 1.0, 3.0);
+        }
+        let result = scene_spatial_map(&scene, &json!({"root":"Store"}), &[]);
+        assert_eq!(result.data["returned"], 1);
+        let bounds = &result.data["items"][0]["world_bounds"];
+        assert!(bounds.get("min").is_some(), "{:?}", result.data);
+        let size = bounds["size"].as_array().expect("size array");
+        assert!((size[0].as_f64().unwrap() - 2.0).abs() < 0.001);
+        assert!((size[2].as_f64().unwrap() - 3.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn scene_digest_reports_components_cameras_and_bounds() {
+        let mut scene = SceneGraph::new();
+        let root = scene.add_root("World");
+        let camera = scene.add_child(root, "Camera");
+        if let Some(node) = scene.get_mut(camera) {
+            node.primitive = Primitive::Empty;
+            node.game_camera = Some(crate::runtime_config::GameCamera::default());
+        }
+        let crate_id = scene.add_child(root, "Crate");
+        if let Some(node) = scene.get_mut(crate_id) {
+            node.primitive = Primitive::Cube;
+            node.scale = Vec3::splat(2.0);
+            node.base_color_texture = Some("assets/generated/wood.png".to_string());
+            node.collider.collider_type = crate::scene::ColliderType::Aabb;
+            node.rigid_body.enabled = true;
+            node.audio_source.enabled = true;
+            node.tags = vec!["prop.crate".to_string()];
+        }
+        let result = scene_digest(&scene, &["assets/generated/wood.png".to_string()], &json!({}), &[]);
+        assert_eq!(result.data["counts"]["live"], 3);
+        assert_eq!(result.data["counts"]["cameras"], 1);
+        assert_eq!(result.data["components"]["textured"], 1);
+        assert_eq!(result.data["components"]["collider"], 1);
+        assert_eq!(result.data["components"]["rigid_body"], 1);
+        assert_eq!(result.data["components"]["audio"], 1);
+        assert!(result.data["bounds"].get("min").is_some());
+        assert_eq!(result.data["top_tags"][0]["tag"], "prop.crate");
+    }
+
+    #[test]
+    fn scene_inspect_reports_partial_targets_without_total_failure() {
+        let mut scene = SceneGraph::new();
+        let root = scene.add_root("A");
+        let result = scene_inspect(&scene, &json!({"targets": ["A", "Missing"]}), &[]);
+        assert_eq!(result.data["found"], true);
+        assert_eq!(result.data["status"], "partial");
+        assert_eq!(result.data["partial"], true);
+        assert_eq!(result.data["unresolved_targets"][0], "Missing");
+        assert_eq!(result.data["items"][0]["name"], "A");
+        assert!(result.data["entity"].is_object());
+        assert_eq!(result.data["items"].as_array().map(Vec::len), Some(1));
+        let _ = root;
+    }
+
+    #[test]
+    fn navigation_audit_reports_when_a_goal_is_unreachable() {
+        let mut open = SceneGraph::new();
+        let floor = open.add_root("Floor");
+        if let Some(node) = open.get_mut(floor) {
+            node.primitive = Primitive::Plane;
+            node.scale = Vec3::new(10.0, 1.0, 10.0);
+        }
+        let spawn = open.add_root("Spawn");
+        if let Some(node) = open.get_mut(spawn) {
+            node.position = Vec3::new(0.0, 0.0, -3.0);
+        }
+        let goal = open.add_root("Goal");
+        if let Some(node) = open.get_mut(goal) {
+            node.position = Vec3::new(0.0, 0.0, 3.0);
+        }
+        assert!(navigation_text(open.get(goal).unwrap()).contains("goal"));
+        let open_result = scene_navigation_audit(&open, &json!({"resolution": 0.5}), &[]);
+        assert_eq!(open_result.data["status"], "passed", "{:?}", open_result.data);
+
+        let mut blocked = open.clone();
+        let wall = blocked.add_root("Wall");
+        if let Some(node) = blocked.get_mut(wall) {
+            node.primitive = Primitive::Cube;
+            node.position = Vec3::new(0.0, 1.0, 0.0);
+            node.scale = Vec3::new(10.0, 2.0, 0.2);
+            node.collider.collider_type = crate::scene::ColliderType::Aabb;
+        }
+        let blocked_result = scene_navigation_audit(&blocked, &json!({"resolution": 0.5}), &[]);
+        assert_eq!(blocked_result.data["status"], "failed", "{:?}", blocked_result.data);
+        assert_eq!(blocked_result.data["reachable_goals"], 0);
+        assert_eq!(blocked_result.data["goals"][0]["reachable"], false);
     }
 
     #[test]

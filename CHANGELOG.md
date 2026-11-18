@@ -5,6 +5,36 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 0.10.0 closure
+
+### Added
+
+- **Bounded IK solvers** in `raf_core::scene::ik`: analytic two-bone with pole
+  control and FABRIK for longer chains, preserving segment lengths and handling
+  unreachable targets. Foot/hand rig integration remains part of the animation
+  runtime.
+- **Local asset generation from Assets**: the create menu can enqueue a local
+  procedural PNG through the existing isolated worker. The catalog refreshes
+  when the job completes; remote provider generation remains deferred.
+- **Portable native pickers**: project, folder, firmware and OTA destinations
+  use zenity/kdialog on Linux and osascript on macOS when available.
+
+### Fixed
+
+- **Serial receipt lifecycle**: a transport failure now terminates the pending
+  output receipt as `Receipt::Failed` instead of leaving the laboratory waiting
+  forever for an ACK.
+- **Link recovery**: link loss stops the active capture and enters a bounded
+  three-attempt reconnect window with growing backoff. Attempts only reset
+  after the link reports `Open`, so a port that opens and immediately fails
+  cannot loop forever.
+- **Hardware consent propagation**: every session-scoped laboratory now honors
+  the persisted hardware-access setting, not only the mounted editor document.
+- **Reference sketch units**: the serial lab sketch reports a reference-scaled
+  voltage in `V`, enabling unit-matched comparison with a DC voltage probe.
+- **Single serial API**: removed the dead stub serial module; the live bounded
+  `serial_session` worker is the only public serial entry point.
+
 ## [0.9.5] - 2026-08-24 - First Stable Edition
 
 ### Added

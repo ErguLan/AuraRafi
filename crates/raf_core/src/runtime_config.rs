@@ -161,6 +161,15 @@ pub struct ProjectRuntimeSettings {
     /// Only this configured camera is used. Missing references never select another node.
     pub active_camera: Option<Uuid>,
     pub fixed_hz: u32,
+    /// Enables full dynamic simulation; basic mode retains character movement.
+    pub advanced_physics: bool,
+    pub physics_debug_draw: bool,
+    /// World-space gravitational acceleration in meters per second squared.
+    pub gravity: Vec3,
+    /// Defaults used by explicitly enabled character controllers.
+    pub character_jump_height: f32,
+    pub character_speed: f32,
+    pub character_max_slope_degrees: f32,
     pub max_entities: usize,
     pub input_actions: Vec<RuntimeInputAction>,
     pub input_axes: Vec<RuntimeInputAxis>,
@@ -172,6 +181,12 @@ impl Default for ProjectRuntimeSettings {
             startup_session: None,
             active_camera: None,
             fixed_hz: 60,
+            advanced_physics: true,
+            physics_debug_draw: false,
+            gravity: Vec3::new(0.0, -9.81, 0.0),
+            character_jump_height: 1.5,
+            character_speed: 4.0,
+            character_max_slope_degrees: 45.0,
             max_entities: 10_000,
             input_actions: Vec::new(),
             input_axes: Vec::new(),
@@ -181,6 +196,18 @@ impl Default for ProjectRuntimeSettings {
 }
 impl ProjectRuntimeSettings {
     pub fn validate_input(&self) -> Result<(), String> {
+        if !self.gravity.is_finite() || self.gravity.abs().max_element() > 1000.0 {
+            return Err("runtime.invalid_gravity".into());
+        }
+        if !self.character_jump_height.is_finite()
+            || !(0.0..=20.0).contains(&self.character_jump_height)
+            || !self.character_speed.is_finite()
+            || !(0.0..=100.0).contains(&self.character_speed)
+            || !self.character_max_slope_degrees.is_finite()
+            || !(0.0..=89.0).contains(&self.character_max_slope_degrees)
+        {
+            return Err("runtime.invalid_character_settings".into());
+        }
         let mut actions = std::collections::HashSet::new();
         let mut axes = std::collections::HashSet::new();
         if self.input_actions.len() > 128
@@ -251,4 +278,30 @@ pub struct RuntimeCameraPose {
     pub forward: Vec3,
     pub up: Vec3,
     pub projection: GameCamera,
+}
+
+#[cfg(test)]
+mod physics_settings_tests {
+    use super::*;
+
+    #[test]
+    fn legacy_runtime_settings_restore_gravity_defaults() {
+        let settings: ProjectRuntimeSettings = ron::from_str("(fixed_hz: 30)").unwrap();
+        assert_eq!(settings.fixed_hz, 30);
+        assert!(settings.advanced_physics);
+        assert_eq!(settings.gravity, Vec3::new(0.0, -9.81, 0.0));
+        assert_eq!(settings.character_jump_height, 1.5);
+        assert_eq!(settings.character_speed, 4.0);
+        assert_eq!(settings.character_max_slope_degrees, 45.0);
+        assert!(settings.validate_input().is_ok());
+    }
+
+    #[test]
+    fn invalid_gravity_is_rejected() {
+        let mut settings = ProjectRuntimeSettings::default();
+        settings.gravity = Vec3::splat(f32::NAN);
+        assert!(settings.validate_input().is_err());
+        settings.gravity = Vec3::new(0.0, -1001.0, 0.0);
+        assert!(settings.validate_input().is_err());
+    }
 }

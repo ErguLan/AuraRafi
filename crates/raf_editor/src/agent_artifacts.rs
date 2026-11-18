@@ -137,6 +137,11 @@ pub(crate) fn capture_viewport_artifact(
         }),
     );
     result.references.push(relative_path.replace('\\', "/"));
+    result.artifacts.push(json!({
+        "kind": "image/png",
+        "uri": relative_path.replace('\\', "/"),
+        "role": "viewport_capture",
+    }));
     result
         .details
         .push(t(language, "agent.viewport_capture.saved_detail"));

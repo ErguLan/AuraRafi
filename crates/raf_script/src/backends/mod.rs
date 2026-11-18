@@ -83,3 +83,4 @@ impl ExecutionResult {
 
 /// A value returned from a script function call.
 pub type ScriptReturn = ScriptValue;
+mod rhai_joint_api;

@@ -63,6 +63,38 @@ pub struct RigidBody {
     pub damping: f32,
     #[serde(default)]
     pub is_trigger: bool,
+    /// Opt-in controller body which remains simulated in the lightweight mode.
+    #[serde(default)]
+    pub is_character: bool,
+    /// Angular velocity in world-space radians per second.
+    #[serde(default)]
+    pub angular_velocity: Vec3,
+    #[serde(default = "default_friction")]
+    pub friction: f32,
+    #[serde(default)]
+    pub restitution: f32,
+    #[serde(default = "default_damping")]
+    pub angular_damping: f32,
+    #[serde(default = "default_mass")]
+    pub gravity_scale: f32,
+    #[serde(default)]
+    pub translation_locks: [bool; 3],
+    #[serde(default)]
+    pub rotation_locks: [bool; 3],
+    #[serde(skip)]
+    pub force: Vec3,
+    #[serde(skip)]
+    pub torque: Vec3,
+    #[serde(skip)]
+    pub impulse: Vec3,
+    #[serde(skip)]
+    pub angular_impulse: Vec3,
+    #[serde(skip)]
+    pub sleeping: bool,
+    #[serde(skip)]
+    pub sleep_timer: f32,
+    #[serde(skip)]
+    pub sleep_gravity: Vec3,
 }
 
 impl Default for RigidBody {
@@ -75,6 +107,21 @@ impl Default for RigidBody {
             mass: default_mass(),
             damping: default_damping(),
             is_trigger: false,
+            is_character: false,
+            angular_velocity: Vec3::ZERO,
+            friction: default_friction(),
+            restitution: 0.0,
+            angular_damping: default_damping(),
+            gravity_scale: 1.0,
+            translation_locks: [false; 3],
+            rotation_locks: [false; 3],
+            force: Vec3::ZERO,
+            torque: Vec3::ZERO,
+            impulse: Vec3::ZERO,
+            angular_impulse: Vec3::ZERO,
+            sleeping: false,
+            sleep_timer: 0.0,
+            sleep_gravity: Vec3::ZERO,
         }
     }
 }
@@ -112,6 +159,8 @@ fn default_true() -> bool {
 fn default_mass() -> f32 {
     1.0
 }
+
+fn default_friction() -> f32 { 0.5 }
 
 fn default_damping() -> f32 {
     0.06

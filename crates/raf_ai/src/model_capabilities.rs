@@ -5,6 +5,82 @@
 //! are attempted optimistically, and a provider rejection is reported as
 //! evidence instead of silently dropping the user's image.
 
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+
+fn observed_text_only() -> &'static Mutex<HashSet<String>> {
+    static OBSERVED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    OBSERVED.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn capability_file(root: &Path) -> PathBuf {
+    root.join(".aura_rafi").join("model_capabilities.json")
+}
+
+/// Load provider observations persisted for this project. The in-memory set is
+/// merged so a model learned in one project is not forgotten when another
+/// project is opened in the same process.
+pub fn load_project_observations(root: &Path) {
+    let Ok(bytes) = std::fs::read(capability_file(root)) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        return;
+    };
+    let Some(models) = value.get("text_only").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+    if let Ok(mut observed) = observed_text_only().lock() {
+        for model in models.iter().filter_map(serde_json::Value::as_str) {
+            let id = model.trim().to_ascii_lowercase();
+            if !id.is_empty() {
+                observed.insert(id);
+            }
+        }
+    }
+}
+
+fn persist_observations(root: &Path) -> Result<(), String> {
+    let path = capability_file(root);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|error| format!("Could not create capability directory: {error}"))?;
+    }
+    let models = observed_text_only()
+        .lock()
+        .map(|observed| {
+            let mut models = observed.iter().cloned().collect::<Vec<_>>();
+            models.sort();
+            models
+        })
+        .map_err(|_| "Model capability state is poisoned.".to_string())?;
+    let body = serde_json::json!({"version": 1, "text_only": models});
+    let encoded = serde_json::to_vec_pretty(&body)
+        .map_err(|error| format!("Could not encode model capabilities: {error}"))?;
+    std::fs::write(&path, encoded)
+        .map_err(|error| format!("Could not write model capabilities: {error}"))
+}
+
+/// Record a provider rejection for this project and persist it so the same
+/// model is not attempted again after an editor restart.
+pub fn mark_project_observed_text_only(root: &Path, model_id: &str) {
+    mark_observed_text_only(model_id);
+    let _ = persist_observations(root);
+}
+
+/// Record a provider rejection so the same model is not attempted again in
+/// this process. The model id is normalized; no credential or prompt is stored.
+pub fn mark_observed_text_only(model_id: &str) {
+    let id = model_id.trim().to_ascii_lowercase();
+    if id.is_empty() {
+        return;
+    }
+    if let Ok(mut observed) = observed_text_only().lock() {
+        observed.insert(id);
+    }
+}
+
 /// Whether a model is known to accept image input.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisionSupport {
@@ -31,6 +107,13 @@ pub fn vision_support(model_id: &str) -> VisionSupport {
     let id = model_id.trim().to_ascii_lowercase();
     if id.is_empty() {
         return VisionSupport::Unknown;
+    }
+    if observed_text_only()
+        .lock()
+        .map(|observed| observed.contains(&id))
+        .unwrap_or(false)
+    {
+        return VisionSupport::Unsupported;
     }
     const SUPPORTED: &[&str] = &[
         "gpt-4o",
@@ -156,6 +239,41 @@ mod tests {
     fn unknown_models_remain_attemptable() {
         assert_eq!(vision_support("local/my-new-model"), VisionSupport::Unknown);
         assert!(vision_support("local/my-new-model").allows_attempt());
+    }
+
+    #[test]
+    fn observed_provider_rejection_overrides_family_hints() {
+        let model = "test/vision-family-lookalike";
+        assert_eq!(vision_support(model), VisionSupport::Supported);
+        mark_observed_text_only(model);
+        assert_eq!(vision_support(model), VisionSupport::Unsupported);
+        assert!(!vision_support(model).allows_attempt());
+    }
+
+    #[test]
+    fn project_observations_are_persisted_and_reloaded() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "raf-model-capabilities-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let model = format!("test/persisted-{unique}");
+        mark_project_observed_text_only(&root, &model);
+        let file = capability_file(&root);
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+        assert!(value["text_only"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.as_str() == Some(model.as_str())));
+        load_project_observations(&root);
+        assert_eq!(vision_support(&model), VisionSupport::Unsupported);
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

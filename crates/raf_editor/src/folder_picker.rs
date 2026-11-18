@@ -178,6 +178,110 @@ mod win32 {
     }
 }
 
+/// Normalizes the first non-empty line produced by a platform dialog helper.
+/// External helpers are allowed to append warnings or trailing newlines.
+fn normalize_picker_path(output: &[u8]) -> Option<PathBuf> {
+    let text = String::from_utf8_lossy(output);
+    let line = text.lines().map(str::trim).find(|line| !line.is_empty())?;
+    Some(PathBuf::from(line))
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use super::normalize_picker_path;
+
+    fn run(command: &mut Command) -> Option<PathBuf> {
+        let output = command.output().ok()?;
+        output
+            .status
+            .success()
+            .then(|| normalize_picker_path(&output.stdout))
+            .flatten()
+    }
+
+    pub(super) fn pick_directory(title: &str) -> Option<PathBuf> {
+        let title_arg = format!("--title={title}");
+        if let Some(path) = run(Command::new("zenity").args([
+            "--file-selection",
+            "--directory",
+            title_arg.as_str(),
+        ])) {
+            return Some(path);
+        }
+        run(Command::new("kdialog").args([
+            "--getexistingdirectory",
+            ".",
+            "--title",
+            title,
+        ]))
+    }
+
+    pub(super) fn pick_file(title: &str, filter_name: &str, pattern: &str) -> Option<PathBuf> {
+        let title_arg = format!("--title={title}");
+        let filter = format!("--file-filter={filter_name} | {pattern}");
+        if let Some(path) = run(Command::new("zenity").args([
+            "--file-selection",
+            title_arg.as_str(),
+            filter.as_str(),
+        ])) {
+            return Some(path);
+        }
+        run(Command::new("kdialog").args([
+            "--getopenfilename",
+            ".",
+            pattern,
+            "--title",
+            title,
+        ]))
+    }
+}
+
+#[cfg(target_os = "macos")]
+mod macos {
+    use std::path::PathBuf;
+    use std::process::Command;
+
+    use super::normalize_picker_path;
+
+    fn escape(script: &str) -> String {
+        script.replace('\\', "\\\\").replace('"', "\\\"")
+    }
+
+    fn run(script: &str) -> Option<PathBuf> {
+        let output = Command::new("osascript")
+            .args(["-e", script])
+            .output()
+            .ok()?;
+        output
+            .status
+            .success()
+            .then(|| normalize_picker_path(&output.stdout))
+            .flatten()
+    }
+
+    pub(super) fn pick_directory(title: &str) -> Option<PathBuf> {
+        run(&format!(
+            "POSIX path of (choose folder with prompt \"{}\")",
+            escape(title)
+        ))
+    }
+
+    pub(super) fn pick_file(title: &str, _filter_name: &str, pattern: &str) -> Option<PathBuf> {
+        let extension = PathBuf::from(pattern)
+            .extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or("*");
+        run(&format!(
+            "POSIX path of (choose file with prompt \"{}\" of type {{\"{}\"}})",
+            escape(title),
+            escape(extension)
+        ))
+    }
+}
+
 /// Opens the platform folder picker used by the create form. The current
 /// location remains the form's fallback when the user cancels the dialog.
 pub fn pick_folder(_current_location: &str) -> Option<PathBuf> {
@@ -186,7 +290,17 @@ pub fn pick_folder(_current_location: &str) -> Option<PathBuf> {
         win32::browse_location()
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::pick_directory("Choose project location")
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos::pick_directory("Choose project location")
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         None
     }
@@ -199,7 +313,17 @@ pub fn pick_project_folder(_current_location: &str) -> Option<PathBuf> {
         win32::pick_project_folder()
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::pick_directory("Open AuraRafi project folder")
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos::pick_directory("Open AuraRafi project folder")
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         None
     }
@@ -212,7 +336,17 @@ pub fn pick_project_file(_current_location: &str) -> Option<PathBuf> {
         win32::pick_project_file()
     }
 
-    #[cfg(not(windows))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::pick_file("Open AuraRafi project file", "AuraRafi project (*.ron)", "*.ron")
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        macos::pick_file("Open AuraRafi project file", "AuraRafi project (*.ron)", "*.ron")
+    }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     {
         None
     }
@@ -222,13 +356,44 @@ pub fn pick_project_file(_current_location: &str) -> Option<PathBuf> {
 pub fn pick_output_folder(title: &str) -> Option<PathBuf> {
     #[cfg(windows)]
     { win32::pick_output_folder(title) }
-    #[cfg(not(windows))]
+
+    #[cfg(target_os = "linux")]
+    { linux::pick_directory(title) }
+
+    #[cfg(target_os = "macos")]
+    { macos::pick_directory(title) }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     { let _ = title; None }
 }
 
 pub(crate) fn pick_firmware(title: &str) -> Option<PathBuf> {
     #[cfg(windows)]
     { win32::pick_firmware(title) }
-    #[cfg(not(windows))]
+
+    #[cfg(target_os = "linux")]
+    { linux::pick_file(title, "Firmware (*.bin)", "*.bin") }
+
+    #[cfg(target_os = "macos")]
+    { macos::pick_file(title, "Firmware (*.bin)", "*.bin") }
+
+    #[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
     { let _ = title; None }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_picker_path;
+
+    #[test]
+    fn platform_picker_output_is_trimmed_to_the_first_path() {
+        let path = normalize_picker_path(b"\r\n  /tmp/firmware.bin  \r\nwarning: ignored\n").unwrap();
+        assert_eq!(path, std::path::PathBuf::from("/tmp/firmware.bin"));
+    }
+
+    #[test]
+    fn an_empty_or_cancelled_picker_returns_no_path() {
+        assert!(normalize_picker_path(b"").is_none());
+        assert!(normalize_picker_path(b" \n\r\n").is_none());
+    }
 }

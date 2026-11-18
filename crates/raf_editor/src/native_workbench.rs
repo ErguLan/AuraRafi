@@ -2194,6 +2194,26 @@ impl NativeGameWorkbench {
         };
         let focused = self.host.session().interaction.focus.focused.clone();
         let controls = &mut self.host.session_mut().interaction.controls;
+        for (field, value) in [
+            ("mass", node.rigid_body.mass.to_string()),
+            ("friction", node.rigid_body.friction.to_string()),
+            ("restitution", node.rigid_body.restitution.to_string()),
+            ("angular_damping", node.rigid_body.angular_damping.to_string()),
+            ("gravity_scale", node.rigid_body.gravity_scale.to_string()),
+            ("collision_layer", node.collider.collision_layer.to_string()),
+            ("collision_mask", node.collider.collision_mask.to_string()),
+        ] {
+            let key = format!("inspector.physics.{field}.text");
+            if focused.as_deref() != Some(key.as_str()) || !controls.has_text(&key) {
+                controls.set_text(key, value, 24);
+            }
+        }
+        let joint_key = "inspector.physics.joints.text";
+        if focused.as_deref() != Some(joint_key) || !controls.has_text(joint_key) {
+            if let Ok(value) = serde_json::to_string(&node.physics_joints) {
+                controls.set_text(joint_key, value, 32768);
+            }
+        }
         crate::native_behavior_authoring::seed_parameters(
             node,
             controls,
@@ -2226,6 +2246,8 @@ impl NativeGameWorkbench {
             ("rotation", node.rotation.to_array()),
             ("scale", node.scale.to_array()),
             ("size", node.primitive.dimensions(node.scale).to_array()),
+            ("velocity", node.rigid_body.velocity.to_array()),
+            ("angular_velocity", node.rigid_body.angular_velocity.to_array()),
         ] {
             for (axis, value) in [("x", values[0]), ("y", values[1]), ("z", values[2])] {
                 let display_value = if label == "position" {
@@ -2256,6 +2278,15 @@ impl NativeGameWorkbench {
         let focused = self.host.session().interaction.focus.focused.clone();
         let controls = &mut self.host.session_mut().interaction.controls;
         let values = [
+            ("project-settings.character-jump-height.text", "project-settings.character-jump-height.value", project.settings.runtime.character_jump_height.to_string()),
+            ("project-settings.character-speed.text", "project-settings.character-speed.value", project.settings.runtime.character_speed.to_string()),
+            ("project-settings.character-max-slope.text", "project-settings.character-max-slope.value", project.settings.runtime.character_max_slope_degrees.to_string()),
+            (
+                "project-settings.runtime.gravity",
+                "project-settings.runtime-gravity.control",
+                serde_json::to_string(&project.settings.runtime.gravity.to_array())
+                    .unwrap_or_else(|_| "[0,-9.81,0]".into()),
+            ),
             ("project-settings.runtime.input_axes","project-settings.runtime-input_axes.control",serde_json::to_string(&project.settings.runtime.input_axes).unwrap_or_else(|_|"[]".into())),
             ("project-settings.runtime.progress_folder","project-settings.runtime-progress_folder.control",progress_folder),
             ("project-settings.runtime.autosave_slot","project-settings.runtime-autosave_slot.control",project.settings.runtime.progress.autosave_slot.clone()),

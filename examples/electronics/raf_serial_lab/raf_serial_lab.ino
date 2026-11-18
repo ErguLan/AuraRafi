@@ -9,11 +9,17 @@
 #define RAF_ADC_PIN 34
 #endif
 #define RAF_BOARD_NAME "ESP32"
+#define RAF_ADC_MAX 4095
 #else
 #ifndef RAF_ADC_PIN
 #define RAF_ADC_PIN A0
 #endif
 #define RAF_BOARD_NAME "Arduino"
+#define RAF_ADC_MAX 1023
+#endif
+
+#ifndef RAF_ADC_REFERENCE_VOLTS
+#define RAF_ADC_REFERENCE_VOLTS 3.3
 #endif
 
 #if !defined(RAF_LED_PIN) && defined(LED_BUILTIN)
@@ -106,8 +112,10 @@ void loop() {
   const unsigned long now = millis();
   if (now - last_sample >= 100) {
     last_sample = now;
+    const double volts =
+        analogRead(RAF_ADC_PIN) * (RAF_ADC_REFERENCE_VOLTS / RAF_ADC_MAX);
     Serial.print(F("{\"type\":\"sample\",\"channel\":\"analog\",\"value\":"));
-    Serial.print(analogRead(RAF_ADC_PIN));
-    Serial.println(F(",\"unit\":\"count\"}"));
+    Serial.print(volts, 4);
+    Serial.println(F(",\"unit\":\"V\"}"));
   }
 }

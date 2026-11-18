@@ -15,6 +15,12 @@ pub(super) fn register(engine: &mut Engine) {
         },
     );
     engine.register_fn(
+        "set_environment_batch",
+        |patch: rhai::Map| -> RhaiResult<()> {
+            with_ctx(|ctx| ctx.set_environment_batch(from_dynamic(Dynamic::from_map(patch))?))
+        },
+    );
+    engine.register_fn(
         "get_view_environment",
         |path: ImmutableString| -> RhaiResult<Dynamic> {
             with_ctx(|ctx| ctx.get_view_environment(&path).map(to_dynamic))

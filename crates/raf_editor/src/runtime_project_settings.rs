@@ -10,6 +10,14 @@ pub fn apply_text(
         return Err("runtime.settings_too_large".into());
     }
     match field {
+        "gravity" => {
+            let values: [f32; 3] = serde_json::from_str(value).map_err(|e| e.to_string())?;
+            let gravity = glam::Vec3::from_array(values);
+            if !gravity.is_finite() || gravity.abs().max_element() > 1000.0 {
+                return Err("runtime.invalid_gravity".into());
+            }
+            settings.gravity = gravity;
+        }
         "active_camera" | "startup_session" => {
             let id = if value.trim().is_empty() {
                 None
@@ -62,4 +70,19 @@ pub fn apply_text(
         _ => return Err("runtime.unknown_setting".into()),
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gravity_text_validation_preserves_last_valid_value() {
+        let mut settings = ProjectRuntimeSettings::default();
+        apply_text(&mut settings, "gravity", "[0,-1.62,0]").unwrap();
+        assert_eq!(settings.gravity, glam::Vec3::new(0.0, -1.62, 0.0));
+        assert!(apply_text(&mut settings, "gravity", "[0,-1001,0]").is_err());
+        assert_eq!(settings.gravity, glam::Vec3::new(0.0, -1.62, 0.0));
+        assert!(apply_text(&mut settings, "gravity", "[0,0]").is_err());
+    }
 }

@@ -384,23 +384,17 @@ fn attach_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) ->
         format!("scripts/{}", file)
     };
 
-    let target_id = ctx.scene.roots().iter().find_map(|&id| {
-        let node = ctx.scene.get(id)?;
-        if node.name == entity_name {
-            Some(id)
-        } else {
-            None
+    let target_id = match crate::commands::behavior::resolve(ctx.scene, entity_name) {
+        Ok(id) => id,
+        Err(_) => {
+            return CommandOutput::error(
+                "Attach script",
+                format!("Entity not found: {}", entity_name),
+            )
         }
-    });
-
-    let Some(id) = target_id else {
-        return CommandOutput::error(
-            "Attach script",
-            format!("Entity not found: {}", entity_name),
-        );
     };
 
-    let node = ctx.scene.get_mut(id).unwrap();
+    let node = ctx.scene.get_mut(target_id).unwrap();
     if node.scripts.iter().any(|s| s == &relative) {
         return CommandOutput::warning(
             "Attach script",
@@ -438,23 +432,17 @@ fn detach_script(command: &ParsedCommand, ctx: &mut ScriptCommandContext<'_>) ->
         format!("scripts/{}", file)
     };
 
-    let target_id = ctx.scene.roots().iter().find_map(|&id| {
-        let node = ctx.scene.get(id)?;
-        if node.name == entity_name {
-            Some(id)
-        } else {
-            None
+    let target_id = match crate::commands::behavior::resolve(ctx.scene, entity_name) {
+        Ok(id) => id,
+        Err(_) => {
+            return CommandOutput::error(
+                "Detach script",
+                format!("Entity not found: {}", entity_name),
+            )
         }
-    });
-
-    let Some(id) = target_id else {
-        return CommandOutput::error(
-            "Detach script",
-            format!("Entity not found: {}", entity_name),
-        );
     };
 
-    let node = ctx.scene.get_mut(id).unwrap();
+    let node = ctx.scene.get_mut(target_id).unwrap();
     let before = node.scripts.len();
     node.scripts.retain(|s| s != &relative);
     let removed = before != node.scripts.len();
@@ -1137,5 +1125,36 @@ fn on_fixed_update(dt) {
         assert!(ctx.scene.get(body).unwrap().get_variable("angle").is_none());
 
         let _ = fs::remove_dir_all(project_root);
+    }
+
+    #[test]
+    fn script_attach_resolves_nested_entities_by_name() {
+        use std::collections::BTreeMap;
+
+        let mut scene = SceneGraph::new();
+        let root = scene.add_root("World");
+        let controller = scene.add_child(root, "Controller");
+        let mut ctx = ScriptCommandContext {
+            scene: &mut scene,
+            assets_root: None,
+        };
+        let command = ParsedCommand {
+            raw: String::new(),
+            name: "script.attach".into(),
+            args: [
+                ("file".to_string(), "scripts/controller.rhai".to_string()),
+                ("entity".to_string(), "Controller".to_string()),
+            ]
+            .into_iter()
+            .collect::<BTreeMap<_, _>>(),
+            positional: Vec::new(),
+            structured_args: None,
+        };
+        let output = execute("script.attach", &command, &mut ctx);
+        assert!(output.changed, "{:?}", output.lines);
+        assert_eq!(
+            ctx.scene.get(controller).unwrap().scripts,
+            vec!["scripts/controller.rhai".to_string()]
+        );
     }
 }

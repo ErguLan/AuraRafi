@@ -157,9 +157,10 @@ clearing the reference does not delete the object. No automatic character,
 controller, camera or authored HUD is injected. No camera shows a diagnostic;
 scripts still run if present. Stop discards the snapshot, never saves it.
 
-Play launches the already-built executable with `--runtime`; no Cargo, Hub,
-editor shell or Agent initialization occurs in the player route. Separate
-instances currently share executable code, not a second editor session.
+Play launches an already-built runtime executable with `--runtime`; it never
+invokes Cargo. The standalone `aurarafi-player` binary accepts a runtime
+manifest directly. Editor Play uses the sibling binary when it ships beside
+the editor and keeps the embedded route for development.
 The splash is the exact shared startup document. Its text reports real
 preparation stages and completed/total compilation work, not fictional timing
 or a fabricated percentage for disk/UI initialization. Escape cancels.
@@ -177,15 +178,11 @@ Additions to global initialization require Stop/Play. Script-generated events
 and authored UI events use `on_event(name, value)`; they cannot execute editor
 commands. Event queues, logs, source size, operations and deadlines are bounded.
 
-Local physics includes shared velocity/impulse/body/collider scripting controls,
-dynamic and prescribed kinematic translation, swept AABB blocking, bounded
-initial-overlap correction and collision/trigger enter/stay/exit callbacks.
-Unsupported collider types fail explicitly. No angular dynamics, mesh/hull
-narrow phase, general impulse solver or automatic character controller exists.
-Budgets include 64 moving bodies, 1024 colliders, 4096 active/collider candidates,
-128 contact pairs and 256 directed events. See [Physics Runtime](PHYSICS_RUNTIME.md)
-for semantics, Nodes, optional examples and remaining limitations. Implementation
-does not by itself establish native acceptance or measured potato performance.
+Local physics provides basic and advanced modes with a shared spatial tree,
+oriented box collision, collision and sensor events, and an explicit capsule
+controller. Advanced mode adds rigid-body impulses, angular motion, materials,
+collision filters, compound colliders, joints and swept sensor events. See
+[Physics Runtime](PHYSICS_RUNTIME.md) for API, budgets and supported shapes.
 Windows audio initially supports PCM 16-bit mono/stereo WAV files only, with
 four voices and 8 MiB per clip. Other formats/platforms report unsupported
 output. Stop/focus-pause release or pause the relevant playback resources.

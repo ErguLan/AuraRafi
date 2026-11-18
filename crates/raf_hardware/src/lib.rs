@@ -8,7 +8,8 @@
 //!
 //! ## Architecture
 //!
-//! - `serial` - Serial port abstraction (COM/ttyUSB), message protocol
+//! - `serial_session` - The live bounded serial worker, JSON-line protocol,
+//!   device identity, telemetry, output receipts and OTA capability discovery
 //! - `sensor` - Sensor data model (temperature, distance, voltage, etc.)
 //! - `actuator` - Output control (motors, servos, relays, LEDs)
 //! - `robot` - High-level robot control interface (future)
@@ -18,9 +19,7 @@ pub mod actuator;
 pub mod ml;
 pub mod robot;
 pub mod sensor;
-pub mod serial;
 pub mod serial_session;
 
 pub use actuator::{ActuatorCommand, ActuatorType};
 pub use sensor::{SensorData, SensorType};
-pub use serial::{SerialConfig, SerialMessage, SerialPort};

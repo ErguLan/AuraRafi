@@ -589,7 +589,8 @@ impl NativeGameWorkbench {
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                 }
-                UiAction::SetRange { key, value } if key == "inspector.audio.volume" => {
+                UiAction::SetRange { key, value }
+                    if key == "inspector.audio.volume" || key == "inspector.physics.damping" => {
                     if let Some(target) = selected.first().copied() {
                         intents.push(NativeWorkbenchIntent::Command(format!(
                             "inspector.range:{key}:{value}:{}",
@@ -1620,6 +1621,12 @@ impl NativeGameWorkbench {
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                             continue;
                         }
+                        "assets.generate-local-icon" => {
+                            self.assets_surface.close_menus();
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                            intents.push(NativeWorkbenchIntent::Command(name.clone()));
+                            continue;
+                        }
                         "assets.script.cancel" => {
                             self.assets_surface.script_menu_open = false;
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -2512,6 +2519,29 @@ impl NativeGameWorkbench {
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
+                    if let Some(kind) = name.strip_prefix("inspector.physics.add-joint:") {
+                        if let [owner, target, ..] = selected {
+                            intents.push(NativeWorkbenchIntent::Command(format!(
+                                "inspector.physics.joint.add:{}:{}:{kind}", owner.0, target.0
+                            )));
+                        }
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        continue;
+                    }
+                    if let Some(field) = name.strip_prefix("inspector.physics.commit:") {
+                        if let Some(target) = selected.first().copied() {
+                            let value = self.host.session().interaction.controls
+                                .text(&format!("inspector.physics.{field}.text"))
+                                .to_string();
+                            intents.push(NativeWorkbenchIntent::InspectorCommit {
+                                target,
+                                field: format!("physics.{field}"),
+                                value,
+                            });
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        }
+                        continue;
+                    }
                     if let Some(field) = name.strip_prefix("inspector.camera.commit:") {
                         if let Some(target) = selected.first().copied() {
                             let value = self
@@ -3118,6 +3148,18 @@ pub(crate) fn parse_agent_action(name: &str, language: raf_core::Language) -> Op
                 AgentAction::ApproveCall(id.to_string())
             } else if let Some(id) = name.strip_prefix("agent.call.deny:") {
                 AgentAction::DenyCall(id.to_string())
+            } else if let Some(id) = name.strip_prefix("agent.plan.apply:") {
+                AgentAction::ApplyPlan(id.to_string())
+            } else if let Some(id) = name.strip_prefix("agent.plan.cancel:") {
+                AgentAction::CancelPlan(id.to_string())
+            } else if let Some(uri) = name.strip_prefix("agent.evidence.select:") {
+                AgentAction::SelectEvidence(uri.to_string())
+            } else if let Some(uri) = name.strip_prefix("agent.evidence.pin:") {
+                AgentAction::PinEvidence(uri.to_string())
+            } else if name == "agent.evidence.clear" {
+                AgentAction::ClearEvidence
+            } else if name == "agent.evidence.compare" {
+                AgentAction::ToggleEvidenceCompare
             } else if let Some(id) = name.strip_prefix("agent.tool.toggle:") {
                 AgentAction::ToggleTool(id.to_string())
             } else if let Some(raw) = name.strip_prefix("agent.session.select:") {

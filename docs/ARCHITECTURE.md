@@ -620,9 +620,8 @@ Visual editor with a native Winit shell and retained RafUI surfaces:
 
 ## Hardware Integration (raf_hardware)
 
-- `SerialPort`: Connection state machine, message inbox/outbox, JSON lines protocol
-- `SerialConfig`: Port name, baud rate, data bits, stop bits, timeout
-- `SerialMessage`: Typed messages with key/value pairs and direction
+- `serial_session`: The live bounded serial worker, JSON-line protocol, device
+  identity, telemetry, output receipts and OTA capability discovery
 - `SensorData`: 13 sensor types (temperature, humidity, distance, light, voltage, current, accelerometer, gyroscope, magnetic field, pressure, analog, digital, custom) with multi-axis support
 - `ActuatorCommand`: 9 actuator types (DC motor, servo, stepper, relay, LED, buzzer, PWM, digital out, custom)
 - `RobotState`: Unified sensor+actuator state snapshot with mode (Manual/Autonomous/ML/Calibration), exportable as ML training data

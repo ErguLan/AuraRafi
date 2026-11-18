@@ -88,6 +88,10 @@ the native Agent, attached CLI, and MCP adapter:
   selection, and warning snapshot;
 - `scene.outline`, `scene.query`, and `scene.inspect`: stable UUID/ref-first
   hierarchy and exact entity inspection with pagination;
+- `scene.digest`: one compact snapshot combining counts, bounds, cameras,
+  component coverage, semantic roles and optional overlap evidence;
+- `scene.navigation_audit`: static walkability and spawn-to-goal reachability
+  on authored AABBs, with agent clearance and no Play/Runtime dependency;
 - `scene.spatial_map`: world-space extents, renderable bounds, and conservative
   overlaps for a bounded scope;
 - `scene.check_overlaps`: focused overlap evidence with deterministic
@@ -115,6 +119,84 @@ For real-world authoring, `scene_build` and `scene_reconcile` accept a design
 profile and require the Agent to establish a named semantic root and envelope
 before secondary details. `scene_repair` accepts explicit audit-driven repairs
 inside a bounded root; it does not invent geometry from a prose description.
+
+### World Program, plan journal and visual evidence
+
+The harness now has a declarative authoring layer above individual scene
+mutations:
+
+- `game.plan` compiles a World Program (built-in or custom kits, archetypes,
+  grids, paths, deterministic scatter, mirror, variants, keyed updates,
+  deletions, stable keys and design profiles) into a persistent plan id and
+  hash without touching the scene;
+- `game.commit` checks the scene fingerprint and applies the compiled plan in
+  bounded 32-group/128-entity chunks, rolling the entire document back if any
+  chunk fails. The plan remains one command, one history entry and one undo
+  token at the adapter boundary, so the interactive `game.build` limit no
+  longer caps a compiled world;
+- `scene_patch` uses reconcile semantics so a small direction change updates
+  stable keys in place instead of regenerating the world;
+- `world.brief` persists genre, camera, palette, metrics, constraints and
+  acceptance criteria under `.aura_rafi/world/brief.json`;
+- `scene.digest` combines counts, hierarchy, bounds, cameras, component
+  coverage, semantic roles and optional overlaps in one bounded read;
+- `viewport_capture` accepts `preset=contact_sheet` and returns a four-angle
+  bounded PNG for models with a small image budget;
+- `viewport_capture preset=top_down_map` and the typed `raf_scene_top_down_map`
+  tool render a metric XZ schematic with world bounds, collider outlines, a
+  configurable grid and bounded labels. The result carries the PNG plus the
+  structured entity/collider/bounds/grid/label metadata used to draw it;
+- `scene.visual_review` selects an enabled vision-capable provider/model,
+  inspects one to four capture artifacts and returns structured scores,
+  findings and fixes. Without an available vision model it returns
+  `status: "unavailable"` / `fallback: "vision_unavailable"` and preserves the
+  captures as evidence; it never starts Play or Runtime;
+- plan files and `journal.jsonl` are project-scoped, and re-committing a plan is
+  idempotent;
+- the native Agent history renders a dedicated plan review card with group,
+  entity and chunk counts, design/overlap validation chips, a bounded hierarchy
+  sample and explicit Apply/Cancel actions. Apply queues a deterministic
+  `scene_commit` request; Cancel dismisses the card without touching the scene;
+- every compiled plan now returns a `pipeline` object with explicit gates:
+  compile, simulate, budget, overlaps, design and navigation. A plan stays
+  reviewable when a gate warns or fails, but the failure is visible before
+  commit instead of surfacing as a late scene mutation;
+- `world.recipe` captures a compiled plan under
+  `.aura_rafi/world/recipes/<name>.json`, then lists, inspects, deletes or
+  instantiates it as a fresh reviewable plan. Recipes preserve stable keys and
+  compiled hierarchy, so successful districts become reusable authoring blocks;
+- `world.script` runs a sandboxed Rhai authoring script that only exposes a
+  `world::` plan-building module (`group`, `place`, `grid`, `line`, `scatter`,
+  `parent`, `count`, `assert_max_entities`, `emit`). The engine is raw, evaluation is
+  disabled, host APIs are absent, and budgets bound operations, arrays, strings
+  and call depth. The script emits the same World Program AST and cannot read
+  files, execute commands or mutate the scene. Its source is persisted under
+  `.aura_rafi/world_scripts/` with a content hash for audit and replay;
+- `game.cancel` / `scene.cancel` cancels an uncommitted plan so it cannot be
+  applied later; committed plans still require Undo. MCP exposes it as
+  `raf_scene_cancel` and adds `raf_scene_patch` for reconcile-style updates;
+- plan results now include an `assertions` gate for `no_overlaps`,
+  `max_overlaps` and `min_reachable_goals`, and the plan review card shows budget
+  and navigation chips next to design/overlap validation;
+- `scene.visual_diff` compares two project images pixel by pixel and returns
+  changed ratio, mean/max channel delta, changed bounds and an annotated PNG
+  artifact, giving the Agent and the evidence gallery a real before/after gate.
+
+The plan lifecycle is now cancellable before commit (`game.cancel` /
+`raf_scene_cancel`) and patchable through `raf_scene_patch`. `raf open PATH`
+launches the editor and waits for its endpoint, `raf mcp serve --attach PATH
+--launch` opens the editor and attaches the MCP client in one step, transient
+provider failures are retried with backoff, and text-only observations are
+persisted per project in `.aura_rafi/model_capabilities.json`. Headless MCP
+advertises only tools it can execute; mounted mutation/viewport/task tools are
+listed only in attached mode. The MCP `session` parameter is activated before the
+requested command, and every `image/*` response artifact is returned as image
+content, not only `data.artifact`.
+
+The internal Agent, attached CLI and MCP adapter share the same plan ids,
+fingerprints, previews and undo contract. None of these operations starts Play
+or Runtime. Gameplay scenario tests that depend on `script.run` and real
+simulation remain gated behind Runtime stabilization, as agreed.
 
 ## Beta operating modes
 

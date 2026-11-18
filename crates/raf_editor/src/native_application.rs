@@ -63,6 +63,24 @@ const NATIVE_EDITOR_SIZE: [f64; 2] = [1440.0, 900.0];
 const NATIVE_EDITOR_MIN_SIZE: [f64; 2] = [900.0, 600.0];
 const NATIVE_SPLASH_SIZE: [f64; 2] = [620.0, 500.0];
 
+/// Same source asset as the embedded executable resource and the in-app
+/// application bar icon: the authored Rafi mark shown before any surface
+/// draws it.
+const NATIVE_WINDOW_ICON_PNG: &[u8] = include_bytes!("../../../editor/icon.png");
+
+/// Builds the OS-level window icon (title bar and taskbar) from the authored
+/// Rafi mark. Returns `None` when the PNG or the RGBA conversion fails; the
+/// window then keeps the icon embedded by the executable resource.
+fn editor_window_icon() -> Option<winit::window::Icon> {
+    let image = image::load_from_memory(NATIVE_WINDOW_ICON_PNG)
+        .ok()?
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    winit::window::Icon::from_rgba(image.into_raw(), width, height)
+        .map_err(|error| tracing::debug!(%error, "editor window icon rejected"))
+        .ok()
+}
+
 fn switch_session_documents(
     project: &Project,
     previous_session: SessionId,
@@ -226,6 +244,16 @@ fn apply_project_setting_toggle(
 ) -> ProjectSettingsMutation {
     let mut layout_changed = false;
     let changed = match key {
+        "project-settings.advanced-physics" => {
+            let changed = settings.runtime.advanced_physics != value;
+            settings.runtime.advanced_physics = value;
+            changed
+        }
+        "project-settings.physics-debug-draw" if settings.enable_physics => {
+            let changed = settings.runtime.physics_debug_draw != value;
+            settings.runtime.physics_debug_draw = value;
+            changed
+        }
         "project-settings.progress-enabled" => {
             let changed = settings.runtime.progress.enabled != value;
             settings.runtime.progress.enabled = value;
@@ -343,6 +371,24 @@ fn apply_project_setting_range(
         (min + ((value.clamp(min, max) - min) / step).round() * step).clamp(min, max)
     };
     let changed = match key {
+        "project-settings.character-jump-height" => {
+            let next = snap(value, 0.0, 20.0, 0.05);
+            let changed = settings.runtime.character_jump_height != next;
+            settings.runtime.character_jump_height = next;
+            changed
+        }
+        "project-settings.character-speed" => {
+            let next = snap(value, 0.0, 100.0, 0.1);
+            let changed = settings.runtime.character_speed != next;
+            settings.runtime.character_speed = next;
+            changed
+        }
+        "project-settings.character-max-slope" => {
+            let next = snap(value, 0.0, 89.0, 1.0);
+            let changed = settings.runtime.character_max_slope_degrees != next;
+            settings.runtime.character_max_slope_degrees = next;
+            changed
+        }
         "project-settings.progress-interval" => {
             let next = value.round().clamp(10.0, 3600.0) as u32;
             let changed = settings.runtime.progress.autosave_seconds != next;
@@ -437,6 +483,26 @@ fn apply_project_setting_command(
     command: &str,
 ) -> ProjectSettingsMutation {
     match command {
+        command if command.starts_with("project-settings.gravity-preset.") => {
+            if !settings.enable_physics || !settings.runtime.advanced_physics {
+                return ProjectSettingsMutation::default();
+            }
+            let (gravity, jump_height, speed, slope) = match command.rsplit('.').next() {
+                Some("earth") => (glam::Vec3::new(0.0, -9.81, 0.0), 1.5, 4.0, 45.0),
+                Some("moon") => (glam::Vec3::new(0.0, -1.62, 0.0), 1.5, 4.0, 45.0),
+                Some("arcade") => (glam::Vec3::new(0.0, -20.0, 0.0), 2.5, 6.0, 50.0),
+                _ => return ProjectSettingsMutation::default(),
+            };
+            let changed = settings.runtime.gravity != gravity
+                || settings.runtime.character_jump_height != jump_height
+                || settings.runtime.character_speed != speed
+                || settings.runtime.character_max_slope_degrees != slope;
+            settings.runtime.gravity = gravity;
+            settings.runtime.character_jump_height = jump_height;
+            settings.runtime.character_speed = speed;
+            settings.runtime.character_max_slope_degrees = slope;
+            ProjectSettingsMutation::without_layout(changed)
+        }
         command if command.starts_with("project-settings.progress-location.") => {
             use raf_core::runtime_config::ProgressLocation;
             let location = match command.rsplit('.').next() {
@@ -576,6 +642,10 @@ pub fn run_native() -> Result<(), String> {
         .build()
         .map_err(|error| format!("native event loop: {error}"))?;
     let mut application = NativeEditorApplication::default();
+    if let Some(path) = startup_project_argument() {
+        tracing::info!(path = %path.display(), "opening project from the command line");
+        application.request_editor_project(path);
+    }
     let wakeup = event_loop.create_proxy();
     application.event_loop_proxy = Some(wakeup.clone());
     #[cfg(windows)]
@@ -584,6 +654,22 @@ pub fn run_native() -> Result<(), String> {
     event_loop
         .run_app(&mut application)
         .map_err(|error| format!("native editor event loop: {error}"))
+}
+
+fn startup_project_argument() -> Option<std::path::PathBuf> {
+    let mut args = std::env::args().skip(1);
+    while let Some(argument) = args.next() {
+        if argument == "--project" || argument == "--open" {
+            return args.next().map(std::path::PathBuf::from);
+        }
+        if let Some(path) = argument
+            .strip_prefix("--project=")
+            .or_else(|| argument.strip_prefix("--open="))
+        {
+            return Some(std::path::PathBuf::from(path));
+        }
+    }
+    None
 }
 
 pub struct NativeEditorApplication {
@@ -787,6 +873,7 @@ impl NativeEditorApplication {
         let startup_loading = true;
         let mut attributes = Window::default_attributes()
             .with_title("Proyecto Rafi")
+            .with_window_icon(editor_window_icon())
             .with_decorations(false)
             .with_resizable(!startup_loading);
         attributes = if startup_loading {
@@ -1442,6 +1529,11 @@ impl NativeEditorApplication {
     fn apply_project_setting_text_intent(&mut self, key: String, value: String) {
         if let Some(field) = key.strip_prefix("project-settings.runtime.") {
             let result = self.project.as_mut().map(|project| -> Result<(), String> {
+                if field == "gravity"
+                    && (!project.settings.enable_physics || !project.settings.runtime.advanced_physics)
+                {
+                    return Err("runtime.invalid_setting".into());
+                }
                 crate::runtime_project_settings::apply_text(
                     &mut project.settings.runtime,
                     field,
@@ -2313,6 +2405,38 @@ impl NativeEditorApplication {
                                         }
                                     } else { crate::commands::CommandOutput::error("Assets", "Invalid asset command") };
                                     workbench.log_console_output(output);
+                                } else if command == "assets.generate-local-icon" {
+                                    if self.project.is_some() {
+                                        let stamp = std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH)
+                                            .map(|elapsed| elapsed.as_nanos())
+                                            .unwrap_or_default();
+                                        let mut request = raf_core::EngineCommandRequest::new(
+                                            "asset.generate_local_png",
+                                            serde_json::json!({
+                                                "prompt": "Local generated icon",
+                                                "name": format!("generated_icon_{stamp}"),
+                                            }),
+                                            raf_core::CommandSource::RafUi,
+                                        );
+                                        request.confirm = true;
+                                        let response = workbench.execute_asset_command(
+                                            &request,
+                                            self.project.as_ref(),
+                                            self.attached_ledger.revision(),
+                                        );
+                                        workbench.log_console_output(crate::commands::CommandOutput {
+                                            level: if response.ok {
+                                                crate::commands::CommandLevel::Info
+                                            } else {
+                                                crate::commands::CommandLevel::Error
+                                            },
+                                            title: response.title,
+                                            lines: response.lines,
+                                            json: response.data,
+                                            changed: false,
+                                        });
+                                    }
                                 } else if command.starts_with("runtime.") {
                                     self.pending_runtime_command = Some(command);
                                 } else if command == "sessions.reload" {
@@ -3565,8 +3689,12 @@ impl NativeEditorApplication {
                 catalog_pending,
                 catalog_error.as_deref(),
                 self.settings_state.language,
+                &self.settings_state,
             )
         };
+        if let Some(path) = attached_result.open_project.clone() {
+            self.request_editor_project(path);
+        }
         if attached_result.changed {
             self.attached_ledger
                 .mark_document(crate::scene_history::scene_fingerprint(&self.scene));
@@ -4054,6 +4182,21 @@ impl ApplicationHandler for NativeEditorApplication {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gravity_presets_configure_character_values_and_preserve_basic_settings() {
+        let mut settings = ProjectSettings::default();
+        assert!(apply_project_setting_command(&mut settings, "project-settings.gravity-preset.arcade").changed);
+        assert_eq!(settings.runtime.gravity, glam::Vec3::new(0.0, -20.0, 0.0));
+        assert_eq!(settings.runtime.character_jump_height, 2.5);
+        assert_eq!(settings.runtime.character_speed, 6.0);
+        assert_eq!(settings.runtime.character_max_slope_degrees, 50.0);
+        apply_project_setting_toggle(&mut settings, "project-settings.advanced-physics", false);
+        assert!(!apply_project_setting_command(&mut settings, "project-settings.gravity-preset.moon").changed);
+        assert_eq!(settings.runtime.gravity, glam::Vec3::new(0.0, -20.0, 0.0));
+        assert!(apply_project_setting_range(&mut settings, "project-settings.character-speed", 5.0).changed);
+        assert_eq!(settings.runtime.character_speed, 5.0);
+    }
 
     #[test]
     fn electronics_save_chord_dispatches_while_control_is_still_held() {

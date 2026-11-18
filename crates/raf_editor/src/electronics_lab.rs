@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::time::{Duration, Instant};
 
+use raf_core::Language;
 use raf_electronics::{Netlist, Schematic, SimulationResults};
 use raf_hardware::serial_session::{self, LinkState, Port, Reading, SerialSession, Snapshot};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,8 @@ const MAX_POINTS: usize = 4096;
 const MAX_STORE_BYTES: u64 = 12 * 1024 * 1024;
 const MAX_FIRMWARE_BYTES: u64 = 32 * 1024 * 1024;
 const REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+const RECONNECT_ATTEMPTS: u8 = 3;
+const RECONNECT_DELAY: Duration = Duration::from_millis(1500);
 pub(crate) const MAX_GRAPH_PARTS: usize = 96;
 pub(crate) const MAX_GRAPH_WIRES: usize = 192;
 
@@ -229,6 +232,7 @@ pub(crate) struct OtaPreparation {
 pub(crate) struct ElectronicsLab {
     pub view: LabView,
     pub version: u64,
+    pub language: Language,
     pub graph: Option<Graph>,
     graph_fingerprint: Option<u64>,
     pub graph_version: u64,
@@ -240,6 +244,8 @@ pub(crate) struct ElectronicsLab {
     pub selected_capture: Option<Uuid>,
     pub ports: Vec<Port>,
     pub scanned: bool,
+    hardware_access_enabled: bool,
+    pub hardware_activation_prompt: bool,
     pub baud: u32,
     pub port: Option<String>,
     pub serial: Option<Snapshot>,
@@ -252,6 +258,9 @@ pub(crate) struct ElectronicsLab {
     pub recording: Option<u64>,
     pub output_values: BTreeMap<usize, String>,
     link: Option<SerialSession>,
+    reconnect: Option<Instant>,
+    reconnect_attempts: u8,
+    reconnect_in_flight: bool,
     refresh: Option<Instant>,
     discover: Option<Job<Vec<Port>>>,
     ota_job: Option<Job<OtaPreparation>>,
@@ -272,6 +281,33 @@ pub(crate) struct ElectronicsLab {
 impl ElectronicsLab {
     pub fn touch(&mut self) {
         self.version = self.version.wrapping_add(1);
+    }
+
+    pub fn set_language(&mut self, language: Language) {
+        if self.language != language {
+            self.language = language;
+            self.touch();
+        }
+    }
+
+    pub fn set_hardware_access_enabled(&mut self, enabled: bool) {
+        if self.hardware_access_enabled == enabled {
+            return;
+        }
+        self.hardware_access_enabled = enabled;
+        self.hardware_activation_prompt = false;
+        if !enabled {
+            self.discover = None;
+            self.ports.clear();
+            self.scanned = false;
+            self.leave();
+        } else {
+            self.touch();
+        }
+    }
+
+    pub fn hardware_access_enabled(&self) -> bool {
+        self.hardware_access_enabled
     }
 
     pub fn load_for(&mut self, project: &Path, relative: &Path) {
@@ -489,6 +525,7 @@ impl ElectronicsLab {
 
     pub fn pending(&self) -> bool {
         self.link.is_some()
+            || self.reconnect.is_some()
             || self.discover.is_some()
             || self.ota_job.is_some()
             || self.load.is_some()
@@ -561,32 +598,62 @@ impl ElectronicsLab {
             return self.version != before;
         }
         self.refresh = Some(Instant::now());
-        if let Some(link) = self.link.as_ref() {
-            if let Some(snapshot) =
-                link.snapshot_after(self.serial.as_ref().map_or(0, |view| view.version))
+        let version = self.serial.as_ref().map_or(0, |view| view.version);
+        let snapshot = self
+            .link
+            .as_ref()
+            .and_then(|link| link.snapshot_after(version));
+        if let Some(snapshot) = snapshot {
+            let failed = matches!(snapshot.state, LinkState::Failed(_));
+            let established = matches!(snapshot.state, LinkState::Open);
+            if self
+                .selected_channel
+                .as_ref()
+                .is_none_or(|key| !snapshot.latest.contains_key(key))
             {
-                let failed = matches!(snapshot.state, LinkState::Failed(_));
-                if self
-                    .selected_channel
-                    .as_ref()
-                    .is_none_or(|key| !snapshot.latest.contains_key(key))
-                {
-                    self.selected_channel = snapshot.latest.keys().next().cloned();
-                }
-                if self.view == LabView::Device {
-                    self.recent = self
-                        .selected_channel
-                        .as_ref()
-                        .and_then(|key| link.recent(key, 256))
-                        .unwrap_or_default();
-                }
-                self.serial = Some(snapshot);
-                if failed && self.recording.is_none() {
-                    self.link = None;
-                }
-                self.touch();
+                self.selected_channel = snapshot.latest.keys().next().cloned();
             }
+            if self.view == LabView::Device {
+                self.recent = self
+                    .link
+                    .as_ref()
+                    .zip(self.selected_channel.as_deref())
+                    .and_then(|(link, key)| link.recent(key, 256))
+                    .unwrap_or_default();
+            }
+            self.serial = Some(snapshot);
+            if established {
+                self.reconnect = None;
+                self.reconnect_attempts = 0;
+                self.reconnect_in_flight = false;
+            }
+            if failed {
+                if self.reconnect_in_flight {
+                    self.reconnect_in_flight = false;
+                    self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+                    if self.reconnect_attempts >= RECONNECT_ATTEMPTS {
+                        self.error = Some(
+                            raf_core::i18n::t("lab.reconnect_exhausted", self.language)
+                                .replace("{attempts}", &self.reconnect_attempts.to_string()),
+                        );
+                    }
+                }
+                // Persist whatever was measured before the link dropped, then
+                // move the session into a bounded reconnect window.
+                if self.recording.is_some() {
+                    if let Err(error) = self.stop_recording() {
+                        // The old chain is gone even if the capture could not be
+                        // finalized; never carry its start offset into a new link.
+                        self.recording = None;
+                        self.error = Some(error);
+                    }
+                }
+                self.link = None;
+                self.schedule_reconnect();
+            }
+            self.touch();
         }
+        self.poll_reconnect();
         if let Some((started, offset)) = self.replay_started {
             let end = self
                 .capture()
@@ -599,6 +666,61 @@ impl ElectronicsLab {
             self.touch();
         }
         self.version != before
+    }
+
+    fn schedule_reconnect(&mut self) {
+        if !self.hardware_access_enabled
+            || self.port.is_none()
+            || self.link.is_some()
+            || self.reconnect.is_some()
+            || self.reconnect_attempts >= RECONNECT_ATTEMPTS
+        {
+            return;
+        }
+        self.reconnect = Some(Instant::now() + RECONNECT_DELAY);
+    }
+
+    fn poll_reconnect(&mut self) {
+        let Some(deadline) = self.reconnect else { return };
+        if Instant::now() < deadline {
+            return;
+        }
+        self.reconnect = None;
+        let Some(port) = self.port.clone() else {
+            return;
+        };
+        match SerialSession::open(port, self.baud_rate()) {
+            Ok(link) => {
+                // Opening the handle is tentative: the worker may still fail.
+                // Attempts are only cleared once a real snapshot reports Open.
+                let _ = link.identify();
+                self.link = Some(link);
+                self.reconnect_in_flight = true;
+                self.serial = None;
+                self.refresh = None;
+                self.error = None;
+            }
+            Err(_error) => {
+                self.reconnect_in_flight = false;
+                self.reconnect_attempts = self.reconnect_attempts.saturating_add(1);
+                if self.reconnect_attempts >= RECONNECT_ATTEMPTS {
+                    self.error = Some(
+                        raf_core::i18n::t("lab.reconnect_exhausted", self.language)
+                            .replace("{attempts}", &self.reconnect_attempts.to_string()),
+                    );
+                } else {
+                    self.error = Some(
+                        raf_core::i18n::t("lab.reconnect_attempt_failed", self.language)
+                            .replace("{attempt}", &self.reconnect_attempts.to_string())
+                            .replace("{total}", &RECONNECT_ATTEMPTS.to_string()),
+                    );
+                    self.reconnect = Some(
+                        Instant::now() + reconnect_delay(self.reconnect_attempts),
+                    );
+                }
+            }
+        }
+        self.touch();
     }
 
     pub fn leave(&mut self) {
@@ -614,6 +736,9 @@ impl ElectronicsLab {
 
     fn disconnect(&mut self) {
         self.link = None;
+        self.reconnect = None;
+        self.reconnect_attempts = 0;
+        self.reconnect_in_flight = false;
         self.serial = None;
         self.port = None;
         self.ota = None;
@@ -673,11 +798,21 @@ impl ElectronicsLab {
             "device" => self.view = LabView::Device,
             "captures" => self.view = LabView::Captures,
             "chat" => self.view = LabView::Chat,
+            "hardware-enable-cancel" => self.hardware_activation_prompt = false,
+            "scan" if !self.hardware_access_enabled => {
+                self.hardware_activation_prompt = true;
+            }
             "scan" if self.discover.is_none() => {
                 self.discover = Some(run_job("raf-port-discovery", serial_session::enumerate)?)
             }
             "scan" => {}
+            "connect" if !self.hardware_access_enabled => {
+                return Err("Enable hardware access before connecting to a device.".into())
+            }
             "connect" if self.link.is_none() => {
+                self.reconnect = None;
+                self.reconnect_attempts = 0;
+                self.reconnect_in_flight = false;
                 let port = self
                     .ports
                     .get(index(argument)?)
@@ -948,6 +1083,53 @@ impl ElectronicsLab {
     }
 }
 
+fn reconnect_delay(attempt: u8) -> Duration {
+    let multiplier = u32::from(attempt.clamp(1, RECONNECT_ATTEMPTS));
+    RECONNECT_DELAY * multiplier
+}
+
 fn index(value: &str) -> Result<usize, String> {
     value.parse().map_err(|_| "Invalid item index.".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{reconnect_delay, ElectronicsLab, RECONNECT_DELAY};
+
+    #[test]
+    fn serial_scan_requires_explicit_hardware_activation() {
+        let mut lab = ElectronicsLab::default();
+
+        lab.action("scan");
+
+        assert!(lab.hardware_activation_prompt);
+        assert!(!lab.hardware_access_enabled());
+        assert!(!lab.scanning());
+        assert!(lab.ports.is_empty());
+
+        lab.action("hardware-enable-cancel");
+
+        assert!(!lab.hardware_activation_prompt);
+        assert!(!lab.scanning());
+    }
+
+    #[test]
+    fn reconnect_backoff_scales_with_the_attempt_number() {
+        assert_eq!(reconnect_delay(1), RECONNECT_DELAY);
+        assert_eq!(reconnect_delay(2), RECONNECT_DELAY * 2);
+        assert_eq!(reconnect_delay(3), RECONNECT_DELAY * 3);
+    }
+
+    #[test]
+    fn serial_connection_cannot_bypass_hardware_activation() {
+        let mut lab = ElectronicsLab::default();
+
+        lab.action("connect:0");
+
+        assert!(!lab.connected());
+        assert!(!lab.scanning());
+        assert!(lab.error.as_deref().is_some_and(|error| {
+            error.contains("Enable hardware access")
+        }));
+    }
 }

@@ -5,6 +5,10 @@ edition.workspace = true
 license.workspace = true
 description = "Lightweight native local runtime host"
 
+[[bin]]
+name = "aurarafi-player"
+path = "src/bin/player.rs"
+
 [dependencies]
 raf_runtime.workspace = true
 raf_core.workspace = true
@@ -18,5 +22,6 @@ serde.workspace = true
 ron.workspace = true
 uuid.workspace = true
 tracing.workspace = true
+tracing-subscriber.workspace = true
 image.workspace = true
 pollster = "0.3"

@@ -4,7 +4,7 @@
 //! may consume its state and typed actions without moving the AI backend.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -134,6 +134,10 @@ pub struct AgentPanel {
     pub(crate) saving: bool,
     pub(crate) document_name: String,
     pub(crate) expanded_tools: std::collections::HashSet<String>,
+    pub(crate) dismissed_plans: HashSet<String>,
+    pub(crate) evidence_selected: Vec<String>,
+    pub(crate) evidence_compare: bool,
+    pub(crate) evidence_pinned: Option<String>,
     pub(crate) spinner_step: u8,
     context_requested: bool,
 }
@@ -188,6 +192,10 @@ impl Default for AgentPanel {
             saving: false,
             document_name: String::new(),
             expanded_tools: std::collections::HashSet::new(),
+            dismissed_plans: HashSet::new(),
+            evidence_selected: Vec::new(),
+            evidence_compare: true,
+            evidence_pinned: None,
             spinner_step: 0,
             context_requested: false,
         }
@@ -439,16 +447,13 @@ impl AgentPanel {
     }
 
     /// Automatic image-input policy. Only a model family known to be text-only
-    /// blocks the attachment; unknown models are attempted and the provider
-    /// remains the authority.
+    /// withholds pixels; the attachment itself is always kept as project
+    /// evidence and unknown models are attempted.
+    #[allow(dead_code)]
     pub(crate) fn vision_support(&self, settings: &EngineSettings) -> VisionSupport {
         self.effective_provider(settings)
             .map(|provider| vision_support(&self.effective_model(provider)))
             .unwrap_or(VisionSupport::Unknown)
-    }
-
-    fn images_allowed(&self, settings: &EngineSettings) -> bool {
-        self.vision_support(settings).allows_attempt()
     }
 
     pub(crate) fn apply_action(&mut self, action: AgentAction, settings: &mut EngineSettings) {
@@ -687,6 +692,44 @@ impl AgentPanel {
             }
             AgentAction::ApproveCall(id) => self.decision = Some(AgentDecision::Approve(id)),
             AgentAction::DenyCall(id) => self.decision = Some(AgentDecision::Deny(id)),
+            AgentAction::ApplyPlan(id) => {
+                self.dismissed_plans.remove(&id);
+                self.input_text = t("app.agent_plan_apply_prompt", self.language)
+                    .replace("{plan}", &id);
+                self.visual_revision = self.visual_revision.wrapping_add(1);
+                self.queue_submission(settings);
+            }
+            AgentAction::CancelPlan(id) => {
+                self.dismissed_plans.insert(id);
+                self.visual_revision = self.visual_revision.wrapping_add(1);
+            }
+            AgentAction::SelectEvidence(uri) => {
+                if let Some(index) = self.evidence_selected.iter().position(|item| item == &uri) {
+                    self.evidence_selected.remove(index);
+                } else {
+                    if self.evidence_selected.len() >= 2 {
+                        self.evidence_selected.remove(0);
+                    }
+                    self.evidence_selected.push(uri);
+                }
+                self.visual_revision = self.visual_revision.wrapping_add(1);
+            }
+            AgentAction::ClearEvidence => {
+                self.evidence_selected.clear();
+                self.visual_revision = self.visual_revision.wrapping_add(1);
+            }
+            AgentAction::ToggleEvidenceCompare => {
+                self.evidence_compare = !self.evidence_compare;
+                self.visual_revision = self.visual_revision.wrapping_add(1);
+            }
+            AgentAction::PinEvidence(uri) => {
+                if self.evidence_pinned.as_deref() == Some(uri.as_str()) {
+                    self.evidence_pinned = None;
+                } else {
+                    self.evidence_pinned = Some(uri);
+                }
+                self.visual_revision = self.visual_revision.wrapping_add(1);
+            }
             AgentAction::ToggleReview => {
                 if settings.agent_mode != AgentMode::Active {
                     self.review_writes = !self.review_writes;
@@ -739,18 +782,16 @@ impl AgentPanel {
         self.media_job.is_some()
     }
 
-    fn paste_image(&mut self, settings: &EngineSettings) {
+    fn paste_image(&mut self, _settings: &EngineSettings) {
         if self.media_job.is_some()
             || self.pending_submission.is_some()
             || self.runtime.status.blocks_input()
         {
             return;
         }
-        if !self.images_allowed(settings) {
-            self.media_error = Some(t("agent.media.model_text_only", self.language));
-            self.visual_revision = self.visual_revision.wrapping_add(1);
-            return;
-        }
+        // Attachments are always accepted. A text-only model receives a
+        // textual notice and the artifact path instead of pixels; the user is
+        // never blocked from keeping visual reference material.
         let Some(root) = self.loaded_project_path.clone() else {
             return;
         };
@@ -767,7 +808,7 @@ impl AgentPanel {
         self.visual_revision = self.visual_revision.wrapping_add(1);
     }
 
-    fn attach_files(&mut self, files: Vec<std::path::PathBuf>, settings: &EngineSettings) {
+    fn attach_files(&mut self, files: Vec<std::path::PathBuf>, _settings: &EngineSettings) {
         if files.is_empty()
             || self.media_job.is_some()
             || self.pending_submission.is_some()
@@ -781,9 +822,7 @@ impl AgentPanel {
         let Some(root) = self.loaded_project_path.clone() else {
             return;
         };
-        let error = if !self.images_allowed(settings) {
-            Some("agent.media.model_text_only")
-        } else if files.len() + session.draft_images.len() > raf_ai::chat_media::MAX_IMAGES {
+        let error = if files.len() + session.draft_images.len() > raf_ai::chat_media::MAX_IMAGES {
             Some("agent.media.too_many")
         } else {
             None
@@ -827,17 +866,7 @@ impl AgentPanel {
         }
     }
 
-    fn queue_submission(&mut self, settings: &EngineSettings) {
-        if !self.images_allowed(settings)
-            && self
-                .history
-                .active_session()
-                .is_some_and(|s| !s.draft_images.is_empty())
-        {
-            self.media_error = Some(t("agent.media.model_text_only", self.language));
-            self.visual_revision = self.visual_revision.wrapping_add(1);
-            return;
-        }
+    fn queue_submission(&mut self, _settings: &EngineSettings) {
         let content = self.input_text.trim().to_string();
         let has_images = self
             .history
@@ -912,6 +941,37 @@ impl AgentPanel {
             AgentMode::Plan => ToolExecutionMode::Preview,
             AgentMode::Active => ToolExecutionMode::Apply,
         };
+        if let (Some(pinned), Some(root)) = (
+            self.evidence_pinned.clone(),
+            self.loaded_project_path.clone(),
+        ) {
+            if let Ok(root) = root.canonicalize() {
+                let candidate = root.join(&pinned);
+                if let Ok(path) = candidate.canonicalize() {
+                    if path.starts_with(&root) {
+                        if let Ok((width, height)) = image::image_dimensions(&path) {
+                            if let Some(session) = self.history.active_session_mut() {
+                                if session.draft_images.len()
+                                    < raf_ai::chat_media::MAX_IMAGES
+                                    && !session
+                                        .draft_images
+                                        .iter()
+                                        .any(|image| image.file == pinned)
+                                {
+                                    session.draft_images.push(
+                                        raf_ai::chat_media::ChatImage {
+                                            file: pinned,
+                                            width,
+                                            height,
+                                        },
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let images = self
             .history
             .active_session_mut()
@@ -1434,6 +1494,12 @@ pub(crate) enum AgentAction {
     Deny,
     ApproveCall(String),
     DenyCall(String),
+    ApplyPlan(String),
+    CancelPlan(String),
+    SelectEvidence(String),
+    PinEvidence(String),
+    ClearEvidence,
+    ToggleEvidenceCompare,
     ToggleReview,
     ToggleTool(String),
     UseSuggestion(String),
@@ -1477,6 +1543,81 @@ mod tests {
     }
 
     #[test]
+    fn plan_actions_apply_and_cancel_review_cards() {
+        let mut panel = AgentPanel::default();
+        let mut settings = EngineSettings::default();
+        panel.apply_action(
+            AgentAction::CancelPlan("plan_demo_1234567890".to_string()),
+            &mut settings,
+        );
+        assert!(panel
+            .dismissed_plans
+            .contains("plan_demo_1234567890"));
+        assert!(panel.pending_submission.is_none());
+
+        panel.apply_action(
+            AgentAction::ApplyPlan("plan_demo_1234567890".to_string()),
+            &mut settings,
+        );
+        assert!(!panel
+            .dismissed_plans
+            .contains("plan_demo_1234567890"));
+        let prompt = panel
+            .pending_submission
+            .as_deref()
+            .expect("apply action queues a plan prompt");
+        assert!(prompt.contains("plan_demo_1234567890"), "{prompt}");
+        assert!(prompt.contains("scene_commit"), "{prompt}");
+    }
+
+    #[test]
+    fn evidence_actions_select_compare_and_clear() {
+        let mut panel = AgentPanel::default();
+        let mut settings = EngineSettings::default();
+        for uri in [
+            ".aura_rafi/agent_artifacts/viewport-a.png",
+            ".aura_rafi/agent_artifacts/top-down-b.png",
+        ] {
+            panel.apply_action(
+                AgentAction::SelectEvidence(uri.to_string()),
+                &mut settings,
+            );
+        }
+        assert_eq!(panel.evidence_selected.len(), 2);
+        assert!(panel.evidence_compare);
+        panel.apply_action(
+            AgentAction::SelectEvidence(
+                ".aura_rafi/agent_artifacts/contact-c.png".to_string(),
+            ),
+            &mut settings,
+        );
+        assert_eq!(
+            panel.evidence_selected,
+            vec![
+                ".aura_rafi/agent_artifacts/top-down-b.png".to_string(),
+                ".aura_rafi/agent_artifacts/contact-c.png".to_string()
+            ]
+        );
+        panel.apply_action(AgentAction::ToggleEvidenceCompare, &mut settings);
+        assert!(!panel.evidence_compare);
+        panel.apply_action(
+            AgentAction::PinEvidence(".aura_rafi/agent_artifacts/contact-c.png".to_string()),
+            &mut settings,
+        );
+        assert_eq!(
+            panel.evidence_pinned.as_deref(),
+            Some(".aura_rafi/agent_artifacts/contact-c.png")
+        );
+        panel.apply_action(
+            AgentAction::PinEvidence(".aura_rafi/agent_artifacts/contact-c.png".to_string()),
+            &mut settings,
+        );
+        assert!(panel.evidence_pinned.is_none());
+        panel.apply_action(AgentAction::ClearEvidence, &mut settings);
+        assert!(panel.evidence_selected.is_empty());
+    }
+
+    #[test]
     fn harness_image_only_submit_uses_automatic_model_capability() {
         let mut panel = AgentPanel::default();
         panel.history.start_session("Images");
@@ -1497,10 +1638,20 @@ mod tests {
         assert_eq!(panel.pending_submission.as_deref(), Some(""));
         panel.pending_submission = None;
 
+        // A known text-only family no longer blocks the submission. The image
+        // stays in project evidence and the runtime withholds its pixels with a
+        // textual notice, so the user can still ask the question.
         settings.ai_providers[0].model = "deepseek-chat".into();
         panel.apply_action(AgentAction::Submit, &mut settings);
-        assert!(panel.pending_submission.is_none());
-        assert!(panel.media_error.is_some());
+        assert_eq!(panel.pending_submission.as_deref(), Some(""));
+        assert!(panel.media_error.is_none());
+        assert_eq!(
+            panel
+                .history
+                .active_session()
+                .map(|session| session.draft_images.len()),
+            Some(1)
+        );
     }
 
     #[test]

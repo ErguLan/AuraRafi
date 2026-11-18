@@ -201,7 +201,8 @@ impl NativeRuntimeController {
                     control_address: Some(listener.local_addr().map_err(|e| e.to_string())?),
                     control_token: token,
                 };
-                let mut command = Command::new(std::env::current_exe().map_err(|e| e.to_string())?);
+                let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+                let mut command = Command::new(player_executable(&executable));
                 command
                     .arg("--runtime")
                     .arg(serde_json::to_string(&launch).map_err(|e| e.to_string())?)
@@ -405,6 +406,23 @@ impl NativeRuntimeController {
             }
         }
         self.children.clear();
+    }
+}
+
+fn player_executable(editor_executable: &std::path::Path) -> PathBuf {
+    let player_name = if cfg!(windows) {
+        "aurarafi-player.exe"
+    } else {
+        "aurarafi-player"
+    };
+    let candidate = editor_executable
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .join(player_name);
+    if candidate.is_file() {
+        candidate
+    } else {
+        editor_executable.to_path_buf()
     }
 }
 impl Drop for NativeRuntimeController {

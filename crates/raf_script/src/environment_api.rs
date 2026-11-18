@@ -70,6 +70,36 @@ impl ScriptContext<'_> {
         self.scene.set_environment(next);
         Ok(())
     }
+    /// Apply several authored lighting properties as one validated scene write.
+    ///
+    /// A day/night driver updates sun, sky, ambient and exposure together; doing
+    /// that through one patch avoids twenty intermediate environment revisions
+    /// and keeps the whole palette change atomic.
+    pub fn set_environment_batch(&mut self, patch: ScriptValue) -> ScriptResult<()> {
+        self.check_budget()?;
+        if self.view.role == ScriptRole::Client {
+            return Err(invalid(
+                "Client scripts cannot write shared world lighting; use set_view_environment",
+            ));
+        }
+        let ScriptValue::Record(entries) = patch else {
+            return Err(invalid("set_environment_batch expects a record of paths"));
+        };
+        if entries.len() > 64 {
+            return Err(invalid("set_environment_batch accepts at most 64 paths"));
+        }
+        let mut json_patch = serde_json::Map::new();
+        for (path, value) in entries {
+            json_patch.insert(path, json_value(value)?);
+        }
+        let next = self
+            .scene
+            .environment()
+            .patched(&json_patch)
+            .map_err(invalid)?;
+        self.scene.set_environment(next);
+        Ok(())
+    }
     pub fn get_view_environment(&self, path: &str) -> ScriptResult<ScriptValue> {
         if self.view.role == ScriptRole::Server {
             return Err(invalid("Server scripts have no local presentation"));

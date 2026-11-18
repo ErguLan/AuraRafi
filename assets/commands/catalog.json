@@ -191,6 +191,20 @@
       "examples": ["/scene.spatial_map root=Store check_collisions=true"]
     },
     {
+      "name": "scene.digest",
+      "aliases": ["scene.snapshot"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scene_digest.desc",
+      "parameters": [
+        {"name": "root", "kind": "string", "required": false, "description_key": "commands.param.root"},
+        {"name": "check_collisions", "kind": "bool", "required": false, "default": "false"},
+        {"name": "cursor", "kind": "usize", "required": false, "default": "0", "description_key": "commands.param.cursor"},
+        {"name": "limit", "kind": "usize", "required": false, "default": "48", "description_key": "commands.param.limit"}
+      ],
+      "examples": ["/scene.digest check_collisions=true"]
+    },
+    {
       "name": "scene.design_audit",
       "aliases": ["scene.layout_audit", "scene.design_check"],
       "domain": "shared",
@@ -216,6 +230,35 @@
         {"name": "max_pairs", "kind": "usize", "required": false, "default": "64"}
       ],
       "examples": ["/scene.check_overlaps root=Store max_pairs=32"]
+    },
+    {
+      "name": "scene.navigation_audit",
+      "aliases": ["scene.navigation", "scene.reachability"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scene_navigation_audit.desc",
+      "parameters": [
+        {"name": "root", "kind": "string", "required": false, "description_key": "commands.param.root"},
+        {"name": "spawn", "kind": "string", "required": false, "description_key": "commands.param.target"},
+        {"name": "goals", "kind": "array", "required": false, "description_key": "commands.param.operations"},
+        {"name": "resolution", "kind": "f32", "required": false, "default": "0.5"},
+        {"name": "agent_radius", "kind": "f32", "required": false, "default": "0.35"}
+      ],
+      "examples": ["/scene.navigation_audit spawn=Player goals=[Goal] resolution=0.5"]
+    },
+    {
+      "name": "scene.visual_review",
+      "aliases": ["scene.vision", "viewport.review"],
+      "domain": "shared",
+      "category": "agent_observation",
+      "description_key": "commands.scene_visual_review.desc",
+      "parameters": [
+        {"name": "images", "kind": "array", "required": false, "description_key": "commands.param.images"},
+        {"name": "image", "kind": "string", "required": false, "description_key": "commands.param.image"},
+        {"name": "focus", "kind": "string", "required": false},
+        {"name": "brief", "kind": "json", "required": false}
+      ],
+      "examples": ["/scene.visual_review images=[.aura_rafi/agent_artifacts/viewport-abc.png] focus=entrance readability"]
     },
     {
       "name": "scene.diff",
@@ -508,6 +551,58 @@
         {"name": "operations", "kind": "array", "required": true, "description_key": "commands.param.operations"}
       ],
       "examples": ["/game.repair {\"root\":\"key:store.main\",\"operations\":[{\"name\":\"scene_update\",\"params\":{\"target\":\"key:store.wall.back\",\"transform\":{\"position\":[0,2,-4]}}}]} "]
+    },
+    {
+      "name": "game.plan",
+      "aliases": ["scene.plan", "game.program"],
+      "domain": "game",
+      "category": "generation",
+      "description_key": "commands.game_plan.desc",
+      "parameters": [
+        {"name": "mode", "kind": "enum", "required": false, "default": "build", "description_key": "commands.param.plan_mode"},
+        {"name": "parent", "kind": "string", "required": false, "description_key": "commands.param.parent"},
+        {"name": "design_profile", "kind": "enum", "required": false, "description_key": "commands.param.design_profile"},
+        {"name": "archetypes", "kind": "json", "required": false, "description_key": "commands.param.archetypes"},
+        {"name": "groups", "kind": "array", "required": false, "description_key": "commands.param.groups"},
+        {"name": "entities", "kind": "array", "required": false, "description_key": "commands.param.entities"},
+        {"name": "operations", "kind": "array", "required": false, "description_key": "commands.param.operations"}
+      ],
+      "examples": ["/game.plan {\"mode\":\"build\",\"operations\":[{\"op\":\"grid\",\"archetype\":\"street_lamp\",\"count\":[4,2],\"spacing\":[8,8]}]}"]
+    },
+    {
+      "name": "game.commit",
+      "aliases": ["scene.commit", "game.apply_plan"],
+      "domain": "game",
+      "category": "generation",
+      "description_key": "commands.game_commit.desc",
+      "parameters": [
+        {"name": "plan_id", "kind": "string", "required": true, "description_key": "commands.param.plan_id"}
+      ],
+      "examples": ["/game.commit plan_id=plan_0123456789abcdef"]
+    },
+    {
+      "name": "game.cancel",
+      "aliases": ["scene.cancel", "game.cancel_plan"],
+      "domain": "game",
+      "category": "generation",
+      "description_key": "commands.game_cancel.desc",
+      "parameters": [
+        {"name": "plan_id", "kind": "string", "required": true, "description_key": "commands.param.plan_id"}
+      ],
+      "examples": ["/game.cancel plan_id=plan_0123456789abcdef"]
+    },
+    {
+      "name": "world.brief",
+      "aliases": ["scene.brief"],
+      "domain": "game",
+      "category": "generation",
+      "description_key": "commands.world_brief.desc",
+      "parameters": [
+        {"name": "action", "kind": "enum", "required": false, "default": "read", "description_key": "commands.param.brief_action"},
+        {"name": "brief", "kind": "json", "required": false, "description_key": "commands.param.brief"},
+        {"name": "content", "kind": "string", "required": false, "description_key": "commands.param.brief_content"}
+      ],
+      "examples": ["/world.brief action=read", "/world.brief action=write brief={\"genre\":\"retail\",\"mood\":\"night\"}"]
     },
     {
       "name": "game.select",
@@ -1312,6 +1407,48 @@
         {"name": "job", "kind": "string", "required": true, "description_key": "commands.param.job"}
       ],
       "examples": ["/asset.cancel_image job=<uuid>"]
+    },
+    {
+      "name": "world.recipe",
+      "aliases": ["scene.recipe"],
+      "domain": "game",
+      "category": "generation",
+      "description_key": "commands.world_recipe.desc",
+      "parameters": [
+        {"name": "action", "kind": "enum", "required": false, "default": "list", "description_key": "commands.param.recipe_action"},
+        {"name": "name", "kind": "string", "required": false, "description_key": "commands.param.recipe_name"},
+        {"name": "plan_id", "kind": "string", "required": false, "description_key": "commands.param.plan_id"},
+        {"name": "description", "kind": "string", "required": false, "description_key": "commands.param.recipe_description"},
+        {"name": "tags", "kind": "array", "required": false, "description_key": "commands.param.recipe_tags"}
+      ],
+      "examples": ["/world.recipe action=save name=reusable_block plan_id=<plan-id>", "/world.recipe action=apply name=reusable_block"]
+    },
+    {
+      "name": "world.script",
+      "aliases": ["scene.script"],
+      "domain": "game",
+      "category": "generation",
+      "description_key": "commands.world_script.desc",
+      "parameters": [
+        {"name": "script", "kind": "string", "required": false, "description_key": "commands.param.authoring_script"},
+        {"name": "file", "kind": "string", "required": false, "description_key": "commands.param.authoring_script_file"}
+      ],
+      "examples": ["/world.script script=\"world::group(\\\"Block\\\"); world::grid(\\\"crate\\\", 3, 2, 2.0, 2.0);\""]
+    },
+    {
+      "name": "scene.visual_diff",
+      "aliases": ["game.visual_diff"],
+      "domain": "game",
+      "category": "generation",
+      "description_key": "commands.visual_diff.desc",
+      "parameters": [
+        {"name": "before", "kind": "string", "required": true, "description_key": "commands.param.visual_before"},
+        {"name": "after", "kind": "string", "required": true, "description_key": "commands.param.visual_after"},
+        {"name": "output", "kind": "string", "required": false, "description_key": "commands.param.visual_output"},
+        {"name": "threshold", "kind": "number", "required": false, "description_key": "commands.param.visual_threshold"},
+        {"name": "save", "kind": "bool", "required": false, "description_key": "commands.param.visual_save"}
+      ],
+      "examples": ["/scene.visual_diff before=.aura_rafi/agent_artifacts/before.png after=.aura_rafi/agent_artifacts/after.png"]
     }
   ]
 }

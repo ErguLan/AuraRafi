@@ -235,6 +235,20 @@ pub struct Collider {
     pub visible_in_editor: bool,
     /// Offset from entity position.
     pub offset: Vec3,
+    #[serde(default = "default_layer")]
+    pub collision_layer: u32,
+    #[serde(default = "default_mask")]
+    pub collision_mask: u32,
+    /// Explicit parent body for a compound shape. Local pose comes from the scene hierarchy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_owner: Option<uuid::Uuid>,
+}
+
+const fn default_layer() -> u32 {
+    1
+}
+const fn default_mask() -> u32 {
+    u32::MAX
 }
 
 impl Default for Collider {
@@ -249,11 +263,18 @@ impl Default for Collider {
             mesh_collider: None,
             visible_in_editor: true,
             offset: Vec3::ZERO,
+            collision_layer: default_layer(),
+            collision_mask: default_mask(),
+            body_owner: None,
         }
     }
 }
 
 impl Collider {
+    pub fn interacts_with(&self, other: &Self) -> bool {
+        self.collision_layer & other.collision_mask != 0
+            && other.collision_layer & self.collision_mask != 0
+    }
     /// Auto-generate collider from a set of vertex positions.
     pub fn auto_fit(points: &[Vec3], collider_type: ColliderType) -> Self {
         let aabb = Aabb::from_points(points);
@@ -270,6 +291,9 @@ impl Collider {
             mesh_collider: None,
             visible_in_editor: true,
             offset: Vec3::ZERO,
+            collision_layer: default_layer(),
+            collision_mask: default_mask(),
+            body_owner: None,
         }
     }
 
@@ -300,6 +324,9 @@ impl Collider {
             mesh_collider,
             visible_in_editor: true,
             offset: Vec3::ZERO,
+            collision_layer: default_layer(),
+            collision_mask: default_mask(),
+            body_owner: None,
         }
     }
 

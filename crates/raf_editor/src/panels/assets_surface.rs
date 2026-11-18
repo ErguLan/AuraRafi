@@ -398,7 +398,7 @@ pub const ASSET_CARD_MIN_VIEWPORT: f32 = 96.0;
 /// bounds: the host wrapper clips, so a too small rect would cut a menu while
 /// an extra few pixels only show transparent padding.
 pub const ASSETS_MENU_WIDTH: f32 = 214.0;
-pub const ASSETS_CREATE_MENU_HEIGHT: f32 = 104.0;
+pub const ASSETS_CREATE_MENU_HEIGHT: f32 = 160.0;
 pub const ASSETS_CONTEXT_MENU_HEIGHT: f32 = 256.0;
 pub const ASSETS_CONTEXT_MENU_BUILTIN_HEIGHT: f32 = 76.0;
 pub const ASSETS_POPOVER_WIDTH: f32 = 300.0;
@@ -1679,6 +1679,12 @@ pub fn build_assets_create_menu_surface(palette: StudioUiPalette) -> UiSurface {
             UiIconId::File,
             "app.create_file",
             "assets.create-file",
+        ),
+        (
+            "generate",
+            UiIconId::File,
+            "app.generate_local_icon",
+            "assets.generate-local-icon",
         ),
     ] {
         root = root.with_child(menu_item(

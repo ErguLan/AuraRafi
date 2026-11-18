@@ -350,7 +350,12 @@ impl AgentService {
         })
     }
 
-    pub(crate) fn poll_laboratories(&mut self, visible: bool) -> bool {
+    pub(crate) fn poll_laboratories(
+        &mut self,
+        visible: bool,
+        hardware_access: bool,
+        language: raf_core::Language,
+    ) -> bool {
         let target = visible.then(|| self.selected_lab_target()
             .map(|(path, session, _)| (path.to_owned(), session))).flatten();
         let mut changed = false;
@@ -358,9 +363,11 @@ impl AgentService {
             let WorkspaceSlot::Ready(workspace) = slot else { continue };
             for document in workspace.documents.values_mut() {
                 let Some(editor) = document.electronics.as_mut() else { continue };
+                editor.lab.set_hardware_access_enabled(hardware_access);
+                editor.lab.set_language(language);
                 let visible = target.as_ref().is_some_and(|(root, id)| root == path && *id == document.session.id);
                 if visible { editor.prepare_lab(path, &document.session.schematic_file); }
-                if visible || editor.lab.pending() || editor.lab.dc_requested {
+                if editor.lab.pending() || editor.lab.dc_requested {
                     changed |= editor.poll_lab(visible);
                 }
             }
@@ -912,6 +919,7 @@ pub(crate) fn poll_conversation(
         asset_studio: &settings.external_asset_studio,
         image_provider,
         image_model,
+        vision_reviewer: raf_ai::vision_bridge::select_reviewer(settings),
         scene,
         selection: &mut selection,
         viewport: &mut *viewport,

@@ -500,10 +500,26 @@ impl NativeEditorApplication {
     pub(super) fn apply_laboratory_command(&mut self, command: &str) {
         let Some((path, session, schematic)) = self.agents.selected_lab_target()
             .map(|(path, session, schematic)| (path.to_owned(), session, schematic.to_owned())) else { return };
+        match command {
+            "hardware-enable" => {
+                self.settings_state.electronics_hardware_enabled = true;
+                self.persist_settings();
+            }
+            "hardware-disable" => {
+                self.settings_state.electronics_hardware_enabled = false;
+                self.persist_settings();
+            }
+            _ => {}
+        }
+        let hardware_access_enabled = self.settings_state.electronics_hardware_enabled;
         let language = self.settings_state.language;
         let Some(editor) = self.laboratory_editor_mut(&path, session) else { return };
         editor.prepare_lab(&path, &schematic);
+        editor.lab.set_hardware_access_enabled(hardware_access_enabled);
+        editor.lab.set_language(language);
         match command {
+            "hardware-enable" => editor.lab.action("scan"),
+            "hardware-disable" => {}
             "simulate" => {
                 editor.lab.error = editor.start_lab_simulation(None, true).err();
                 editor.lab.touch();
@@ -530,15 +546,23 @@ impl NativeEditorApplication {
 
     pub(super) fn poll_electronics_laboratory(&mut self) {
         let visible = self.agents_open && !self.settings_open;
-        let mut changed = self.agents.poll_laboratories(visible);
+        let mut changed = self.agents.poll_laboratories(
+            visible,
+            self.settings_state.electronics_hardware_enabled,
+            self.settings_state.language,
+        );
         if let Some(editor) = self.electronics_editor.as_mut() {
+            editor
+                .lab
+                .set_hardware_access_enabled(self.settings_state.electronics_hardware_enabled);
+            editor.lab.set_language(self.settings_state.language);
             let target = visible.then(|| self.agents.selected_lab_target()).flatten()
                 .filter(|(root, id, _)| {
                     self.project.as_ref().is_some_and(|project| project.path == *root)
                         && self.workbench.as_ref().is_some_and(|workbench| workbench.active_session_id() == *id)
                 });
             if let Some((root, _, schematic)) = target { editor.prepare_lab(root, schematic); }
-            if target.is_some() || editor.lab.pending() || editor.lab.dc_requested {
+            if editor.lab.pending() || editor.lab.dc_requested {
                 changed |= editor.poll_lab(target.is_some());
             }
         }

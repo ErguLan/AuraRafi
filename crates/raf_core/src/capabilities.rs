@@ -55,7 +55,12 @@ impl CapabilityDefinition {
             || name.ends_with(".verify")
             || (name.ends_with(".capture") && name != "prefab.capture")
             || name == "scene.spatial_map"
+            || name == "scene.digest"
             || name == "scene.design_audit"
+            || name == "scene.navigation_audit"
+            || name == "scene.visual_review"
+            || name == "game.plan"
+            || name == "world.brief"
             || name == "task.get"
             || name == "task.events"
             || name == "selection.get"
@@ -183,6 +188,13 @@ mod tests {
         assert!(catalog.version >= 1);
         assert!(catalog.find("game.add").is_some());
         assert!(catalog.find("/game.add").is_some());
+        assert!(catalog.find("game.plan").is_some());
+        assert!(catalog.find("game.commit").is_some());
+        assert!(catalog.find("scene.digest").is_some());
+        assert!(catalog.find("scene.navigation_audit").is_some());
+        assert!(catalog.find("scene.visual_review").is_some());
+        assert!(catalog.find("world.brief").is_some());
+        assert!(catalog.find("game.plan").unwrap().is_read_only());
     }
 
     #[test]

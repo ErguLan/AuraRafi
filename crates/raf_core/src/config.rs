@@ -372,6 +372,10 @@ pub struct EngineSettings {
     /// editor settings because the 3D and CAD canvases use the same contract.
     #[serde(default = "default_true")]
     pub electronics_show_status: bool,
+    /// Allows device enumeration and serial workers. Hardware access stays
+    /// opt-in and the application only scans or connects after a user action.
+    #[serde(default)]
+    pub electronics_hardware_enabled: bool,
     /// Electronics-only CAD grid spacing. The document snap remains in the
     /// same world units; this controls the visible authoring calibration.
     #[serde(default = "default_electronics_grid_step_mm")]
@@ -746,6 +750,7 @@ impl Default for EngineSettings {
             hierarchy_row_height: default_hierarchy_row_height(),
             hierarchy_indent_width: default_hierarchy_indent_width(),
             electronics_show_status: true,
+            electronics_hardware_enabled: false,
             electronics_grid_step_mm: default_electronics_grid_step_mm(),
             electronics_grid_opacity: default_electronics_grid_opacity(),
             solid_show_surface_edges: false,
@@ -933,16 +938,19 @@ mod tests {
         );
         assert!(!s.agent_tool_call_limit_enabled);
         assert_eq!(s.agent_max_tool_calls, AGENT_MAX_TOOL_CALLS_DEFAULT);
+        assert!(!s.electronics_hardware_enabled);
     }
 
     #[test]
     fn round_trip_ron() {
-        let settings = EngineSettings::default();
+        let mut settings = EngineSettings::default();
+        settings.electronics_hardware_enabled = true;
         let serialized =
             ron::ser::to_string_pretty(&settings, ron::ser::PrettyConfig::default()).unwrap();
         let deserialized: EngineSettings = ron::from_str(&serialized).unwrap();
         assert_eq!(deserialized.theme, settings.theme);
         assert_eq!(deserialized.language, settings.language);
+        assert!(deserialized.electronics_hardware_enabled);
     }
 
     #[test]

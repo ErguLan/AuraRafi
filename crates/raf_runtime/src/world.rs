@@ -156,6 +156,13 @@ impl RuntimeWorld {
             .map_err(|e| vec![e.to_string()])?;
         if let Some(scripts) = &mut world.scripts {
             scripts.view.active_camera = world.settings.runtime.active_camera;
+            scripts.view.advanced_physics =
+                world.settings.enable_physics && world.settings.runtime.advanced_physics;
+            scripts.view.character_defaults = Some([
+                world.settings.runtime.character_jump_height,
+                world.settings.runtime.character_speed,
+                world.settings.runtime.character_max_slope_degrees,
+            ]);
         }
         world.status.camera_ready = world.camera_pose().is_some();
         Ok(world)
@@ -163,14 +170,43 @@ impl RuntimeWorld {
     pub fn status(&self) -> &RuntimeStatus {
         &self.status
     }
+
+    pub fn physics_spatial_metrics(&self) -> crate::physics::SpatialMetrics {
+        self.physics.spatial_metrics()
+    }
+
+    pub fn physics_gravity(&self) -> Vec3 {
+        if self.settings.runtime.advanced_physics {
+            self.scripts
+                .as_ref()
+                .and_then(|scripts| scripts.view.world_gravity)
+                .unwrap_or(self.settings.runtime.gravity)
+        } else {
+            Vec3::new(0.0, -9.81, 0.0)
+        }
+    }
+
+    pub fn physics_joint_breaks(&self) -> &[crate::physics::JointBreak] {
+        self.physics.joint_breaks()
+    }
+
+    pub fn physics_impacts(&self) -> &[crate::physics::PhysicsImpact] {
+        self.physics.impacts()
+    }
     pub fn project_settings(&self) -> &ProjectSettings {
         &self.settings
     }
     pub fn game_ui(&self) -> &raf_ui::game_ui::UiGameRuntime {
-        self.scripts.as_ref().map(|s| &s.view.game_ui).unwrap_or(&self.fallback_ui)
+        self.scripts
+            .as_ref()
+            .map(|s| &s.view.game_ui)
+            .unwrap_or(&self.fallback_ui)
     }
     pub fn game_ui_mut(&mut self) -> &mut raf_ui::game_ui::UiGameRuntime {
-        self.scripts.as_mut().map(|s| &mut s.view.game_ui).unwrap_or(&mut self.fallback_ui)
+        self.scripts
+            .as_mut()
+            .map(|s| &mut s.view.game_ui)
+            .unwrap_or(&mut self.fallback_ui)
     }
     pub fn services(&self) -> &raf_script::services::RuntimeServices {
         self.scripts
@@ -567,7 +603,13 @@ impl RuntimeWorld {
             return;
         }
         if self.settings.enable_physics {
-            let result = self.physics.step(&mut self.scene, dt);
+            let gravity = self.physics_gravity();
+            let result = self.physics.step_with_settings(
+                &mut self.scene,
+                dt,
+                gravity,
+                self.settings.runtime.advanced_physics,
+            );
             if let Err(error) = result {
                 if !self.record(ScriptRuntimeReport {
                     errors: vec![error],
@@ -728,7 +770,8 @@ mod tests {
     use super::*;
     #[test]
     fn game_ui_rhai_nodes_and_events_operate_on_isolated_instances() {
-        let fixture=Fixture::new(r#"
+        let fixture = Fixture::new(
+            r#"
 fn on_start() {
     ui_text(ui_element("main","status"),"Ready");
     ui_clone("main","copy"); ui_show("copy",false);
@@ -736,25 +779,76 @@ fn on_start() {
 fn on_event(name,value) {
     if name=="menu.accept" {ui_text(ui_element("main","status"),"Accepted");}
 }
-"#);
-        let mut scene=SceneGraph::new();let controller=scene.add_root("Controller");
-        scene.get_mut(controller).unwrap().scripts.push("scripts/main.rhai".into());
-        let mut world=fixture.world(scene);
-        let mut document=raf_ui::UiDocument::blank("HUD");
-        for id in ["status","node_status"]{document.add_node("root",raf_ui::UiNode::new(id,raf_ui::UiNodeKind::Label)).unwrap();}
+"#,
+        );
+        let mut scene = SceneGraph::new();
+        let controller = scene.add_root("Controller");
+        scene
+            .get_mut(controller)
+            .unwrap()
+            .scripts
+            .push("scripts/main.rhai".into());
+        let mut world = fixture.world(scene);
+        let mut document = raf_ui::UiDocument::blank("HUD");
+        for id in ["status", "node_status"] {
+            document
+                .add_node("root", raf_ui::UiNode::new(id, raf_ui::UiNodeKind::Label))
+                .unwrap();
+        }
         world.game_ui_mut().mount_document(&document).unwrap();
-        let mut graph=raf_nodes::NodeGraph::new("HUD");
-        let start=graph_node(&mut graph,"on-start",&[]);
-        let text=graph_node(&mut graph,"ui-text",&[("ui_instance","main"),("ui_node","node_status"),("ui_text","Nodes ready")]);
-        graph_link(&mut graph,start,"Out",text,"In");world.attach_graph(&graph).unwrap();
+        let mut graph = raf_nodes::NodeGraph::new("HUD");
+        let start = graph_node(&mut graph, "on-start", &[]);
+        let text = graph_node(
+            &mut graph,
+            "ui-text",
+            &[
+                ("ui_instance", "main"),
+                ("ui_node", "node_status"),
+                ("ui_text", "Nodes ready"),
+            ],
+        );
+        graph_link(&mut graph, start, "Out", text, "In");
+        world.attach_graph(&graph).unwrap();
         world.start();
-        assert_eq!(world.status().phase,RuntimePhase::Running,"{:?}",world.status().last_error);
-        assert_eq!(world.game_ui().instances()["main"].document.find_node("status").unwrap().text_value.as_deref(),Some("Ready"));
-        assert_eq!(world.game_ui().instances()["main"].document.find_node("node_status").unwrap().text_value.as_deref(),Some("Nodes ready"));
+        assert_eq!(
+            world.status().phase,
+            RuntimePhase::Running,
+            "{:?}",
+            world.status().last_error
+        );
+        assert_eq!(
+            world.game_ui().instances()["main"]
+                .document
+                .find_node("status")
+                .unwrap()
+                .text_value
+                .as_deref(),
+            Some("Ready")
+        );
+        assert_eq!(
+            world.game_ui().instances()["main"]
+                .document
+                .find_node("node_status")
+                .unwrap()
+                .text_value
+                .as_deref(),
+            Some("Nodes ready")
+        );
         assert!(!world.game_ui().instances()["copy"].mount.visible);
-        world.emit_ui_event("menu.accept",raf_script::ScriptValue::None).unwrap();world.advance(0.05,&InputSnapshot::default());
-        assert_eq!(world.game_ui().instances()["main"].document.find_node("status").unwrap().text_value.as_deref(),Some("Accepted"));
-        assert_eq!(document.find_node("status").unwrap().text_value,None);
+        world
+            .emit_ui_event("menu.accept", raf_script::ScriptValue::None)
+            .unwrap();
+        world.advance(0.05, &InputSnapshot::default());
+        assert_eq!(
+            world.game_ui().instances()["main"]
+                .document
+                .find_node("status")
+                .unwrap()
+                .text_value
+                .as_deref(),
+            Some("Accepted")
+        );
+        assert_eq!(document.find_node("status").unwrap().text_value, None);
         world.stop();
     }
     #[test]

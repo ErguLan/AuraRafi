@@ -88,7 +88,7 @@ pub(crate) fn numeric_commit_field(target_id: &str) -> Option<(String, String)> 
     let prefix = parts.next()?;
     let label = parts.next()?;
     let axis = parts.next()?;
-    if prefix != "inspector" || !matches!(label, "position" | "rotation" | "scale" | "size") {
+    if prefix != "inspector" || !matches!(label, "position" | "rotation" | "scale" | "size" | "velocity" | "angular_velocity") {
         return None;
     }
     if !matches!(axis, "x" | "y" | "z") {

@@ -8,6 +8,21 @@ fn invalid(message: &str) -> ScriptError {
     ScriptError::InvalidArgument(message.into())
 }
 
+impl ScriptContext<'_> {
+    pub fn set_world_gravity(&mut self, gravity: Vec3) -> ScriptResult<()> {
+        if !self.view.advanced_physics {
+            return Err(invalid("World gravity requires advanced physics"));
+        }
+        if !gravity.is_finite() || gravity.abs().max_element() > 1000.0 {
+            return Err(invalid(
+                "World gravity must be finite and within the supported range",
+            ));
+        }
+        self.view.world_gravity = Some(gravity);
+        Ok(())
+    }
+}
+
 /// Typed engine events cannot be forged through the authored event queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PhysicsEventKind {
@@ -49,6 +64,74 @@ pub struct PhysicsEvent {
 }
 
 impl NodeHandle {
+    pub fn apply_force(&self, ctx: &mut ScriptContext<'_>, force: Vec3) -> ScriptResult<()> {
+        let body = self.dynamic_body(ctx)?;
+        accumulate(&mut body.force, force)
+    }
+
+    pub fn apply_torque(&self, ctx: &mut ScriptContext<'_>, torque: Vec3) -> ScriptResult<()> {
+        let body = self.dynamic_body(ctx)?;
+        accumulate(&mut body.torque, torque)
+    }
+
+    pub fn apply_impulse_at(
+        &self,
+        ctx: &mut ScriptContext<'_>,
+        impulse: Vec3,
+        point: Vec3,
+    ) -> ScriptResult<()> {
+        let id = self.resolve(ctx)?;
+        let node = ctx
+            .scene
+            .get(id)
+            .ok_or_else(|| invalid("Body was deleted"))?;
+        let center = ctx
+            .scene
+            .world_matrix(id)
+            .transform_point3(node.collider.aabb.center() + node.collider.offset);
+        let body = self.dynamic_body(ctx)?;
+        let linear = body.impulse + impulse;
+        let angular = body.angular_impulse + (point - center).cross(impulse);
+        if !linear.is_finite() || !angular.is_finite() {
+            return Err(invalid("Impulse at point must be finite"));
+        }
+        body.impulse = linear;
+        body.angular_impulse = angular;
+        Ok(())
+    }
+
+    fn dynamic_body<'a>(
+        &self,
+        ctx: &'a mut ScriptContext<'_>,
+    ) -> ScriptResult<&'a mut raf_core::scene::RigidBody> {
+        if !ctx.view.advanced_physics {
+            return Err(invalid("This operation requires advanced physics"));
+        }
+        let id = self.resolve(ctx)?;
+        let body = &mut ctx
+            .scene
+            .get_mut(id)
+            .ok_or_else(|| invalid("Body was deleted"))?
+            .rigid_body;
+        if !body.enabled || body.body_type != RigidBodyType::Dynamic || body.is_character {
+            return Err(invalid("An enabled dynamic rigid body is required"));
+        }
+        Ok(body)
+    }
+    /// Marks the body as a character for lightweight simulation.
+    pub fn set_character_body(
+        &self,
+        ctx: &mut ScriptContext<'_>,
+        enabled: bool,
+    ) -> ScriptResult<()> {
+        let id = self.resolve(ctx)?;
+        ctx.scene
+            .get_mut(id)
+            .ok_or(ScriptError::InvalidHandle(self.raw()))?
+            .rigid_body
+            .is_character = enabled;
+        Ok(())
+    }
     pub fn velocity(&self, ctx: &ScriptContext<'_>) -> ScriptResult<Vec3> {
         Ok(ctx
             .scene
@@ -109,6 +192,14 @@ impl NodeHandle {
             .get_mut(id)
             .ok_or(ScriptError::InvalidHandle(self.raw()))?
             .rigid_body;
+        if kind == RigidBodyType::Static && body.body_type != RigidBodyType::Static {
+            body.velocity = Vec3::ZERO;
+            body.angular_velocity = Vec3::ZERO;
+            body.force = Vec3::ZERO;
+            body.torque = Vec3::ZERO;
+            body.impulse = Vec3::ZERO;
+            body.angular_impulse = Vec3::ZERO;
+        }
         body.body_type = kind;
         body.use_gravity = gravity;
         body.is_trigger = trigger;
@@ -160,4 +251,13 @@ impl NodeHandle {
             .collider_type = ColliderType::None;
         Ok(())
     }
+}
+
+fn accumulate(total: &mut Vec3, value: Vec3) -> ScriptResult<()> {
+    let next = *total + value;
+    if !next.is_finite() {
+        return Err(invalid("Physics accumulator must be finite"));
+    }
+    *total = next;
+    Ok(())
 }

@@ -160,6 +160,16 @@ impl ScenePrefab {
 
 /// Internal references follow copies; external UUIDs remain explicit external dependencies.
 pub fn remap_entity_references(node: &mut SceneNode, identities: &HashMap<Uuid, Uuid>) {
+    if let Some(target) = node.collider.body_owner.as_mut() {
+        if let Some(&mapped) = identities.get(target) {
+            *target = mapped;
+        }
+    }
+    for joint in &mut node.physics_joints {
+        if let Some(&target) = identities.get(&joint.target) {
+            joint.target = target;
+        }
+    }
     for variable in node
         .variables
         .iter_mut()

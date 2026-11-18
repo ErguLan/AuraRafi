@@ -10,6 +10,12 @@ descriptor can identify a vendor or adapter. The board's firmware confirms its
 identity and capabilities by replying to the protocol handshake. A passive
 board requires external instrumentation that can report its measurements.
 
+Serial access is off by default. The first port search asks to enable it and
+saves that choice in the engine settings. Port discovery runs only after an
+explicit search, and the serial worker exists only while a board is connected.
+Turning access off disconnects the active board and stops recording first.
+The on-demand path does not require an engine restart.
+
 Select a measured channel and a schematic probe to link them. Comparison
 requires matching units and a simulation of the current revision. For voltage,
 the hardware measurement must use the same reference node as the simulation.
@@ -32,15 +38,16 @@ on receipt. Channel names and units stay stable within a connection.
 | --- | --- |
 | Editor → board | `{"type":"identify","protocol":1}` |
 | Board → editor | `{"type":"hello","protocol":1,"board":"Arduino Uno","firmware":"lab-1","outputs":[{"id":"led","min":0,"max":1}]}` |
-| Board → editor | `{"type":"sample","channel":"analog","value":311,"unit":"count"}` |
+| Board → editor | `{"type":"sample","channel":"analog","value":1.0024,"unit":"V"}` |
 | Editor → board | `{"type":"set","output":"led","value":1,"id":1}` |
 | Board → editor | `{"type":"ack","id":1,"ok":true}` |
 
 Only advertise outputs that the firmware actually handles. Send an ACK after
 the output was applied, or `ok:false` for a rejected value. A missing ACK
-leaves the output state unknown. On disconnect, the editor stops its connection
-worker. Safe output behavior on a disconnected physical board belongs in its
-firmware.
+leaves the output state unknown. On link loss, the editor stops the active
+capture, retries the same port up to three times with growing backoff, and then
+reports the link as lost. A manual disconnect cancels the retry window. Safe
+output behavior on a disconnected physical board belongs in its firmware.
 
 Firmware with OTA support can include
 `"ota":{"target":"esp32","max_image_bytes":1310720}` in its hello. The editor
@@ -49,8 +56,10 @@ and exports a preparation manifest. The firmware's updater still validates the
 image and target before installation.
 
 The [reference sketch](../examples/electronics/raf_serial_lab/raf_serial_lab.ino)
-reports an ADC reading on Arduino Uno and classic ESP32 development boards.
-Configure `RAF_ADC_PIN` and `RAF_LED_PIN` for the actual board. Use an input
-within the ADC's permitted range and a shared ground. The reading is an
-uncalibrated ADC count. The sketch advertises the onboard LED only when its pin
-is defined.
+reports an ADC voltage estimate on Arduino Uno and classic ESP32 development
+boards, so a firmware channel can be compared with a DC voltage probe using the
+same `V` unit. Configure `RAF_ADC_PIN`, `RAF_ADC_REFERENCE_VOLTS` and
+`RAF_LED_PIN` for the actual board. Use an input within the ADC's permitted
+range and a shared ground. The value is uncalibrated and assumes the configured
+reference voltage. The sketch advertises the onboard LED only when its pin is
+defined.

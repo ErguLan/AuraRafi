@@ -123,10 +123,20 @@ pub(crate) fn body(
     match lab.view {
         LabView::Simulation => unreachable!("simulation has its own layout"),
         LabView::Device => {
-            if lab.connected() {
+            if !lab.hardware_access_enabled() {
+                toolbar = toolbar.with_child(
+                    action("scan", "lab.scan", "scan", tokens).disabled(lab.scanning()),
+                );
+            } else if lab.connected() {
                 toolbar = toolbar
                     .with_child(action("identify", "lab.identify", "identify", tokens))
-                    .with_child(action("disconnect", "lab.disconnect", "disconnect", tokens));
+                    .with_child(action("disconnect", "lab.disconnect", "disconnect", tokens))
+                    .with_child(action(
+                        "hardware.disable",
+                        "lab.hardware_disable",
+                        "hardware-disable",
+                        tokens,
+                    ));
                 if lab
                     .serial
                     .as_ref()
@@ -140,11 +150,47 @@ pub(crate) fn body(
                     });
                 }
             } else {
-                toolbar = toolbar.with_child(
-                    action("scan", "lab.scan", "scan", tokens).disabled(lab.scanning()),
-                );
+                toolbar = toolbar
+                    .with_child(
+                        action("scan", "lab.scan", "scan", tokens).disabled(lab.scanning()),
+                    )
+                    .with_child(action(
+                        "hardware.disable",
+                        "lab.hardware_disable",
+                        "hardware-disable",
+                        tokens,
+                    ));
             }
             main = main.with_child(toolbar);
+            if lab.hardware_activation_prompt {
+                main = main
+                    .with_child(label(
+                        "lab.hardware.permission.description",
+                        "lab.hardware_permission_hint",
+                        tokens.text_muted,
+                    ))
+                    .with_child(
+                        action(
+                            "hardware.enable",
+                            "lab.hardware_enable",
+                            "hardware-enable",
+                            tokens,
+                        )
+                        .with_class("lab.hardware-enable"),
+                    )
+                    .with_child(action(
+                        "hardware.enable.cancel",
+                        "lab.cancel",
+                        "hardware-enable-cancel",
+                        tokens,
+                    ));
+            } else if !lab.hardware_access_enabled() {
+                main = main.with_child(label(
+                    "lab.hardware.permission.idle",
+                    "lab.hardware_disabled_hint",
+                    tokens.text_muted,
+                ));
+            }
             if let Some(view) = &lab.serial {
                 let key = match view.state {
                     LinkState::Opening => "lab.opening",
@@ -290,6 +336,7 @@ pub(crate) fn body(
                             Receipt::Accepted(id) => (id, "lab.ack_ok"),
                             Receipt::Rejected(id) => (id, "lab.ack_rejected"),
                             Receipt::TimedOut(id) => (id, "lab.ack_timeout"),
+                            Receipt::Failed(id) => (id, "lab.ack_failed"),
                         };
                         main = main.with_child(raw(
                             "lab.output.receipt",
@@ -362,7 +409,7 @@ pub(crate) fn body(
                     }
                 }
             }
-            if !lab.connected() {
+            if lab.hardware_access_enabled() && !lab.connected() {
                 if lab.scanned && lab.ports.is_empty() {
                     main =
                         main.with_child(label("lab.port.empty", "lab.no_ports", tokens.text_muted));

@@ -1290,6 +1290,8 @@ fn vector_row(
         "rotation" => "deg",
         "scale" => "x",
         "size" => "m",
+        "velocity" => "m/s",
+        "angular_velocity" => "rad/s",
         _ => "",
     };
     let label_line = UiNode::new(
@@ -1894,6 +1896,12 @@ fn physics_section(
         ))
         .with_child(toggle_row(
             palette,
+            "runtime.physics_character",
+            "inspector.physics.character",
+            node.rigid_body.is_character,
+        ))
+        .with_child(toggle_row(
+            palette,
             "app.is_trigger",
             "inspector.physics.trigger",
             node.rigid_body.is_trigger,
@@ -1916,6 +1924,26 @@ fn physics_section(
             body_options,
             body_selected_index,
         ))
+        .with_child(physics_text_row(palette, "mass", "runtime.physics_mass"))
+        .with_child(physics_text_row(palette, "friction", "runtime.physics_friction"))
+        .with_child(physics_text_row(palette, "restitution", "runtime.physics_restitution"))
+        .with_child(physics_text_row(palette, "angular_damping", "runtime.physics_angular_damping"))
+        .with_child(physics_text_row(palette, "gravity_scale", "runtime.physics_gravity_scale"))
+        .with_child(toggle_row(palette, "runtime.lock_translation_x", "inspector.physics.translation_lock_x", node.rigid_body.translation_locks[0]))
+        .with_child(toggle_row(palette, "runtime.lock_translation_y", "inspector.physics.translation_lock_y", node.rigid_body.translation_locks[1]))
+        .with_child(toggle_row(palette, "runtime.lock_translation_z", "inspector.physics.translation_lock_z", node.rigid_body.translation_locks[2]))
+        .with_child(toggle_row(palette, "runtime.lock_rotation_x", "inspector.physics.rotation_lock_x", node.rigid_body.rotation_locks[0]))
+        .with_child(toggle_row(palette, "runtime.lock_rotation_y", "inspector.physics.rotation_lock_y", node.rigid_body.rotation_locks[1]))
+        .with_child(toggle_row(palette, "runtime.lock_rotation_z", "inspector.physics.rotation_lock_z", node.rigid_body.rotation_locks[2]))
+        .with_child(physics_text_row(palette, "collision_layer", "runtime.collision_layer"))
+        .with_child(physics_text_row(palette, "collision_mask", "runtime.collision_mask"))
+        .with_child(toggle_row(
+            palette,
+            "runtime.physics_use_parent_body",
+            "inspector.physics.body_owner",
+            node.collider.body_owner.is_some(),
+        ))
+        .with_child(physics_joints_row(palette))
         .with_child(range_labeled(
             palette,
             "app.physics_damping",
@@ -1931,6 +1959,84 @@ fn physics_section(
             node.rigid_body.velocity,
             display_unit,
         ))
+        .with_child(vector_row(
+            palette,
+            "angular_velocity",
+            node.rigid_body.angular_velocity,
+            display_unit,
+        ))
+}
+
+fn physics_joints_row(palette: StudioUiPalette) -> UiNode {
+    let key = "inspector.physics.joints.text";
+    UiNode::new("inspector.physics.joints.row", UiNodeKind::Panel)
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 4.0,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(section_label(palette, "runtime.physics_joints"))
+        .with_child(section_label(palette, "runtime.physics_joint_select_hint"))
+        .with_child(
+            UiNode::new("inspector.physics.joints.buttons", UiNodeKind::Toolbar)
+                .with_layout(UiLayout {
+                    flow: UiFlow::RowWrap,
+                    gap: 4.0,
+                    ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                })
+                .with_child(action_button(palette, "inspector.joint.fixed", "runtime.joint_fixed", "inspector.physics.add-joint:fixed".into()))
+                .with_child(action_button(palette, "inspector.joint.hinge", "runtime.joint_hinge", "inspector.physics.add-joint:hinge".into()))
+                .with_child(action_button(palette, "inspector.joint.slider", "runtime.joint_slider", "inspector.physics.add-joint:slider".into()))
+                .with_child(action_button(palette, "inspector.joint.ball", "runtime.joint_ball", "inspector.physics.add-joint:ball".into()))
+                .with_child(action_button(palette, "inspector.joint.spring", "runtime.joint_spring", "inspector.physics.add-joint:spring".into())),
+        )
+        .with_child(
+            UiNode::text_input(
+                key,
+                UiTextInput {
+                    value_key: key.to_string(),
+                    placeholder_key: Some("runtime.physics_joints_hint".into()),
+                    max_length: 32768,
+                    multiline: false,
+                    password: false,
+                    submit_command: Some("inspector.physics.commit:joints".into()),
+                },
+            )
+            .with_class("inspector-input")
+            .with_tooltip_key("runtime.physics_joints_hint")
+            .with_layout(UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill))
+            .focusable(),
+        )
+}
+
+fn physics_text_row(palette: StudioUiPalette, field: &str, label: &str) -> UiNode {
+    let key = format!("inspector.physics.{field}.text");
+    UiNode::new(format!("{key}.row"), UiNodeKind::Toolbar)
+        .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            gap: 6.0,
+            ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(section_label(palette, label).with_layout(UiLayout {
+            grow: 1.0,
+            ..UiLayout::fit_content()
+        }))
+        .with_child(
+            UiNode::text_input(
+                &key,
+                UiTextInput {
+                    value_key: key.clone(),
+                    placeholder_key: None,
+                    max_length: 24,
+                    multiline: false,
+                    password: false,
+                    submit_command: Some(format!("inspector.physics.commit:{field}")),
+                },
+            )
+            .with_class("inspector-input")
+            .with_layout(UiLayout::fixed(100.0, 28.0))
+            .focusable(),
+        )
 }
 
 fn section_label(palette: StudioUiPalette, key: &str) -> UiNode {
@@ -1975,6 +2081,8 @@ fn range_labeled(
                 .with_text_value(
                     if value_key.ends_with(".a") || value_key.ends_with(".opacity") {
                         format!("{:.0}%", value / max.max(1.0) * 100.0)
+                    } else if value_key == "inspector.physics.damping" {
+                        format!("{value:.2}")
                     } else {
                         format!("{value:.0}")
                     },

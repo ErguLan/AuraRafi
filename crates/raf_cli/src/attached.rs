@@ -119,6 +119,9 @@ impl AttachedClient {
     }
 
     pub fn resource(&self, uri: &str) -> Result<Value, String> {
+        if let Some(id) = uri.strip_prefix("raf://plan/") {
+            return super::read_plan_resource(&self.project_path, id);
+        }
         match uri {
             "raf://status" => Ok(json!({
                 "attached": true,
@@ -138,6 +141,65 @@ impl AttachedClient {
             "raf://capabilities" => Ok(json!({
                 "capabilities": self.welcome.capabilities,
             })),
+            "raf://brief" => {
+                let path = self
+                    .project_path
+                    .join(".aura_rafi/world/brief.json");
+                let content = std::fs::read(&path).ok();
+                let brief = content
+                    .as_deref()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+                    .unwrap_or(Value::Null);
+                Ok(json!({
+                    "found": content.is_some(),
+                    "path": ".aura_rafi/world/brief.json",
+                    "brief": brief,
+                }))
+            }
+            "raf://plans" => {
+                let directory = self.project_path.join(".aura_rafi/world/plans");
+                let mut plans = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&directory) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                            continue;
+                        }
+                        let Ok(bytes) = std::fs::read(&path) else {
+                            continue;
+                        };
+                        let Ok(plan) = serde_json::from_slice::<Value>(&bytes) else {
+                            continue;
+                        };
+                        plans.push(json!({
+                            "id": plan.get("id").cloned().unwrap_or(Value::Null),
+                            "status": plan.get("status").cloned().unwrap_or(Value::Null),
+                            "mode": plan.get("mode").cloned().unwrap_or(Value::Null),
+                            "groups": plan.get("groups").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+                            "entities": plan.get("entities").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+                            "updates": plan.get("updates").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+                            "deletions": plan.get("deletions").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+                        }));
+                    }
+                }
+                plans.sort_by(|left, right| {
+                    right
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .cmp(&left.get("id").and_then(Value::as_str))
+                });
+                plans.truncate(64);
+                Ok(json!({"count": plans.len(), "plans": plans}))
+            }
+            "raf://digest" => {
+                let digest = self
+                    .last_context
+                    .as_ref()
+                    .and_then(|context| context.get("scene"))
+                    .cloned()
+                    .unwrap_or(Value::Null);
+                Ok(json!({"digest": digest, "attached": true}))
+            }
             "raf://workspace" => Ok(json!({
                 "path": self.project_path,
                 "attached": true,

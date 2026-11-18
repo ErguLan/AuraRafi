@@ -6,8 +6,9 @@ use crate::agent_workspace_layout::{
     WorkspaceDivider, WorkspaceGeometry, WorkspaceLayout, WorkspaceResize,
 };
 use crate::agent_workspace_surface::{
-    build_workspace_surface, build_workspace_surface_with_laboratory, with_confirmation,
-    workspace_tokens, EvidenceTab, WorkspaceConfirmation,
+    attachment_image_key, build_workspace_surface, build_workspace_surface_with_laboratory,
+    collect_evidence_artifacts, evidence_image_key, with_confirmation, workspace_tokens,
+    EvidenceTab, WorkspaceConfirmation,
 };
 use crate::editor_layout::EditorRect;
 use crate::panels::ai_chat::AgentAction;
@@ -18,6 +19,7 @@ use raf_render::api_graphic_basic::ui_surface::{
 };
 use raf_render::api_graphic_basic::EditorUiLayer;
 use raf_ui::UiRect;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -57,6 +59,8 @@ pub(crate) struct AgentWorkspaceSurfaceHost {
     release_canvas: bool,
     frame_requested: bool,
     lab_field_key: Option<LabFieldKey>,
+    evidence_fingerprint: String,
+    evidence_keys: HashSet<String>,
 }
 
 impl AgentWorkspaceSurfaceHost {
@@ -94,6 +98,8 @@ impl AgentWorkspaceSurfaceHost {
             release_canvas: false,
             frame_requested: false,
             lab_field_key: None,
+            evidence_fingerprint: String::new(),
+            evidence_keys: HashSet::new(),
         }
     }
 
@@ -166,6 +172,81 @@ impl AgentWorkspaceSurfaceHost {
         }
     }
 
+    fn sync_evidence_images(&mut self, service: &AgentService) {
+        let Some(workspace) = service.selected_workspace().filter(|workspace| !workspace.closing)
+        else {
+            if !self.evidence_keys.is_empty() {
+                for key in self.evidence_keys.drain() {
+                    self.host.images_mut().remove(&key);
+                }
+                self.evidence_fingerprint.clear();
+                self.last_key.clear();
+            }
+            return;
+        };
+        let (artifacts, draft_images) = {
+            let panel = workspace.panel.borrow();
+            let drafts = panel
+                .history
+                .active_session()
+                .map(|session| {
+                    session
+                        .draft_images
+                        .iter()
+                        .map(|image| image.file.clone())
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (collect_evidence_artifacts(&panel), drafts)
+        };
+        let fingerprint = artifacts
+            .iter()
+            .map(|artifact| artifact.uri.as_str())
+            .chain(draft_images.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join("|");
+        if fingerprint == self.evidence_fingerprint {
+            return;
+        }
+        self.last_key.clear();
+        let mut keep = HashSet::new();
+        for artifact in artifacts.iter().take(16) {
+            let key = evidence_image_key(&artifact.uri);
+            let path = workspace.project.path.join(&artifact.uri);
+            let Some(pixels) = evidence_thumbnail(&path) else {
+                continue;
+            };
+            if self
+                .host
+                .images_mut()
+                .insert_rgba(key.clone(), [320, 180], pixels)
+                .is_ok()
+            {
+                keep.insert(key);
+            }
+        }
+        for file in draft_images.iter().take(raf_ai::chat_media::MAX_IMAGES) {
+            let key = attachment_image_key(file);
+            let path = workspace.project.path.join(file);
+            let Some(pixels) = evidence_thumbnail(&path) else {
+                continue;
+            };
+            if self
+                .host
+                .images_mut()
+                .insert_rgba(key.clone(), [320, 180], pixels)
+                .is_ok()
+            {
+                keep.insert(key);
+            }
+        }
+        for stale in self.evidence_keys.difference(&keep) {
+            self.host.images_mut().remove(stale);
+        }
+        self.evidence_keys = keep;
+        self.evidence_fingerprint = fingerprint;
+    }
+
     pub fn sync_preview(&mut self, service: &AgentService, now: Instant) {
         let target = service
             .selected_workspace()
@@ -225,6 +306,7 @@ impl AgentWorkspaceSurfaceHost {
     ) {
         self.rect = rect;
         self.sync_preview(service, Instant::now());
+        self.sync_evidence_images(service);
         let logical_size = rect.logical_size().map(|value| value as f32);
         let project_rail = self.layout.resolve(logical_size, false, false).projects;
         self.sync_laboratory_field(laboratory, palette, logical_size, project_rail);
@@ -514,6 +596,7 @@ impl AgentWorkspaceSurfaceHost {
                     "agent.workspace.retry" => service.retry_open(),
                     "agent.workspace.review" => self.review_open = !self.review_open,
                     "agent.workspace.tab.changes" => self.evidence = EvidenceTab::Changes,
+                    "agent.workspace.tab.world" => self.evidence = EvidenceTab::World,
                     "agent.workspace.tab.artifacts" => self.evidence = EvidenceTab::Artifacts,
                     "agent.workspace.tab.verification" => self.evidence = EvidenceTab::Verification,
                     "agent.workspace.save.retry" => {
@@ -674,6 +757,38 @@ impl AgentWorkspaceSurfaceHost {
             raster_scale: scale.max(1.0),
         }
     }
+}
+
+fn evidence_thumbnail(path: &std::path::Path) -> Option<Vec<u8>> {
+    let source = image::open(path).ok()?.to_rgba8();
+    let (width, height) = source.dimensions();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    const THUMB_WIDTH: u32 = 320;
+    const THUMB_HEIGHT: u32 = 180;
+    let scale = (THUMB_WIDTH as f32 / width as f32)
+        .min(THUMB_HEIGHT as f32 / height as f32);
+    let resized_width = ((width as f32 * scale).round() as u32).clamp(1, THUMB_WIDTH);
+    let resized_height = ((height as f32 * scale).round() as u32).clamp(1, THUMB_HEIGHT);
+    let resized = image::imageops::resize(
+        &source,
+        resized_width,
+        resized_height,
+        image::imageops::FilterType::Triangle,
+    );
+    let mut canvas = image::RgbaImage::from_pixel(
+        THUMB_WIDTH,
+        THUMB_HEIGHT,
+        image::Rgba([18, 19, 22, 255]),
+    );
+    image::imageops::overlay(
+        &mut canvas,
+        &resized,
+        ((THUMB_WIDTH - resized_width) / 2) as i64,
+        ((THUMB_HEIGHT - resized_height) / 2) as i64,
+    );
+    Some(canvas.into_raw())
 }
 
 fn environment(settings: &EngineSettings, size: [f32; 2]) -> raf_ui::UiEnvironment {

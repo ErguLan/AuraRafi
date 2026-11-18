@@ -5,6 +5,7 @@
 //! truth for the active model (`AiProviderConfig.model`), pinned favorites
 //! live on that card, and the fetched or curated catalogs feed suggestions.
 
+use raf_ai::model_capabilities::{vision_support, VisionSupport};
 use raf_core::ai::AiProvider;
 use raf_core::config::EngineSettings;
 use raf_core::{i18n, Language};
@@ -13,7 +14,6 @@ use raf_ui::layout::{UiAlign, UiFlow, UiLayout, UiSizeMode};
 use raf_ui::node::{UiAccessibilityRole, UiNode, UiNodeKind};
 use raf_ui::text::{UiTextOverflow, UiTextStyle};
 use raf_ui::{UiAction, UiEventBinding, UiEventKind};
-
 /// One selectable model entry in a picker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelItem {
@@ -307,6 +307,7 @@ pub fn model_option_row(
     if item.available && item.label != item.id {
         row = row.with_tooltip_value(item.id.clone());
     }
+    row = row.with_child(vision_badge(item, paint));
     row = row.with_event(UiEventBinding {
         event: UiEventKind::Click,
         action: UiAction::SetSelect {
@@ -325,6 +326,29 @@ pub fn model_option_row(
         });
     }
     row.with_child(pin_toggle(paint, actions, item))
+}
+
+fn vision_badge(item: &ModelItem, paint: &ModelRowPaint) -> UiNode {
+    let (text, tooltip, color) = match vision_support(&item.id) {
+        VisionSupport::Supported => ("V", "ai_models.vision_supported", paint.accent_hot),
+        VisionSupport::Unsupported => ("T", "ai_models.vision_unsupported", paint.muted),
+        VisionSupport::Unknown => ("?", "ai_models.vision_unknown", paint.muted),
+    };
+    UiNode::new(
+        format!("model-picker.vision.{}", item.value),
+        UiNodeKind::Label,
+    )
+    .with_text_value(text)
+    .with_text_style(UiTextStyle::button(color))
+    .with_tooltip_key(tooltip)
+    .with_layout(UiLayout {
+        padding: UiSpacing::xy(6.0, 2.0),
+        ..UiLayout::fit_content()
+    })
+    .with_style(raf_ui::UiStyle {
+        radius: 4.0,
+        ..raf_ui::UiStyle::transparent()
+    })
 }
 
 fn pin_toggle(paint: &ModelRowPaint, actions: &ModelRowActions, item: &ModelItem) -> UiNode {

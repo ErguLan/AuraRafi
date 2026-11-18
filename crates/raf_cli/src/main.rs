@@ -24,6 +24,9 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
 
 mod attached;
 mod discovery;
@@ -32,6 +35,23 @@ use discovery::DiscoveredEditor;
 
 const PROGRAM: &str = "raf";
 const PROTOCOL_VERSION: &str = "2025-06-18";
+static MCP_MODE: AtomicU8 = AtomicU8::new(2);
+static MCP_NOTIFICATIONS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+
+fn queue_mcp_notification(value: Value) {
+    if let Ok(mut pending) = MCP_NOTIFICATIONS.lock() {
+        if pending.len() < 64 {
+            pending.push(value);
+        }
+    }
+}
+
+fn take_mcp_notifications() -> Vec<Value> {
+    MCP_NOTIFICATIONS
+        .lock()
+        .map(|mut pending| std::mem::take(&mut *pending))
+        .unwrap_or_default()
+}
 /// Keep ad-hoc parameter documents bounded. The largest project document the
 /// CLI currently edits is a 4 MiB UI file, so 8 MiB leaves room for a JSON
 /// envelope without making an accidental multi-gigabyte read possible.
@@ -409,6 +429,21 @@ impl HeadlessEngine {
         )
     }
 
+    fn execute_project_close(&mut self, request: &EngineCommandRequest) -> EngineCommandResponse {
+        let Some(project) = self.project.take() else {
+            return self.error(request.id, "Project close", "No project is open.");
+        };
+        self.ledger = TransactionLedger::default();
+        self.response(
+            request.id,
+            "Project closed",
+            vec![format!("Closed {}.", project.path.display())],
+            json!({"closed": true, "path": project.path, "name": project.name}),
+            true,
+            None,
+        )
+    }
+
     fn execute_project_info(&self, request: &EngineCommandRequest) -> EngineCommandResponse {
         let project = if let Some(path) = string_param(&request.params, "path") {
             match load_project(Path::new(path)) {
@@ -513,6 +548,58 @@ impl HeadlessEngine {
             vec![format!("{} session(s).", sessions.len())],
             json!({"sessions": sessions, "active_session": registry.active_session}),
             false,
+            None,
+        )
+    }
+
+    fn execute_session_use(&self, request: &EngineCommandRequest) -> EngineCommandResponse {
+        let Some(project) = &self.project else {
+            return self.error(request.id, "Sessions", "No project is open.");
+        };
+        let target = string_param(&request.params, "id")
+            .or_else(|| string_param(&request.params, "session"))
+            .or_else(|| string_param(&request.params, "name"));
+        let Some(target) = target else {
+            return self.error(
+                request.id,
+                "Session use",
+                "Provide id, session or name for the session to activate.",
+            );
+        };
+        let mut registry = ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
+        let Some(session) = registry.sessions.iter().find(|session| {
+            session.id.0.to_string() == target
+                || session.name.eq_ignore_ascii_case(target)
+        }) else {
+            return self.error(
+                request.id,
+                "Session use",
+                format!(
+                    "Session '{target}' was not found. Available: {}.",
+                    registry
+                        .sessions
+                        .iter()
+                        .map(|session| session.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+            );
+        };
+        let selected = session.id;
+        let selected_name = session.name.clone();
+        registry.active_session = selected;
+        if let Err(error) = registry.save(&project.path) {
+            return self.error(request.id, "Session use", error);
+        }
+        self.response(
+            request.id,
+            "Session activated",
+            vec![format!("Active session: {selected_name}.")],
+            json!({
+                "active_session": selected,
+                "name": selected_name,
+            }),
+            true,
             None,
         )
     }
@@ -627,11 +714,13 @@ impl HeadlessEngine {
             && matches!(
                 name,
                 "scene.outline"
+                    | "scene.digest"
                     | "scene.query"
                     | "scene.spatial_map"
                     | "scene.spatial"
                     | "scene.overlaps"
                     | "scene.check_overlaps"
+                    | "scene.navigation_audit"
                     | "scene.diff"
                     | "scene.design_audit"
                     | "scene.layout_audit"
@@ -680,12 +769,16 @@ impl HeadlessEngine {
         let assets = project_asset_paths(&project.path);
         let observation = match name {
             "scene.outline" => agent_context::scene_outline(&scene, &request.params, &[]),
+            "scene.digest" => agent_context::scene_digest(&scene, &assets, &request.params, &[]),
             "scene.query" => agent_context::scene_query(&scene, &request.params, &[]),
             "scene.spatial_map" | "scene.spatial" => {
                 agent_context::scene_spatial_map(&scene, &request.params, &[])
             }
             "scene.overlaps" | "scene.check_overlaps" => {
                 agent_context::scene_check_overlaps(&scene, &request.params, &[])
+            }
+            "scene.navigation_audit" => {
+                agent_context::scene_navigation_audit(&scene, &request.params, &[])
             }
             "scene.design_audit" | "scene.layout_audit" | "scene.design_check" => {
                 agent_context::scene_design_audit(&scene, &request.params, &[])
@@ -774,6 +867,12 @@ impl HeadlessEngine {
     }
 
     fn resource(&self, uri: &str) -> CliResult<Value> {
+        if let Some(id) = uri.strip_prefix("raf://plan/") {
+            let Some(root) = self.project_path() else {
+                return Err("No project is mounted.".to_string());
+            };
+            return read_plan_resource(root, id);
+        }
         match uri {
             "raf://project" => Ok(self
                 .project
@@ -781,6 +880,68 @@ impl HeadlessEngine {
                 .map(|project| self.project_info(project))
                 .unwrap_or_else(|| json!({"project": null}))),
             "raf://capabilities" => Ok(self.catalog.as_json()),
+            "raf://brief" => {
+                let Some(root) = self.project_path() else {
+                    return Ok(json!({"found": false, "brief": null}));
+                };
+                let path = root.join(".aura_rafi/world/brief.json");
+                let content = std::fs::read(&path).ok();
+                let brief = content
+                    .as_deref()
+                    .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
+                    .unwrap_or(Value::Null);
+                Ok(json!({
+                    "found": content.is_some(),
+                    "path": ".aura_rafi/world/brief.json",
+                    "brief": brief,
+                }))
+            }
+            "raf://plans" => {
+                let Some(root) = self.project_path() else {
+                    return Ok(json!({"plans": []}));
+                };
+                let directory = root.join(".aura_rafi/world/plans");
+                let mut plans = Vec::new();
+                if let Ok(entries) = std::fs::read_dir(&directory) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+                            continue;
+                        }
+                        let Ok(bytes) = std::fs::read(&path) else {
+                            continue;
+                        };
+                        let Ok(plan) = serde_json::from_slice::<Value>(&bytes) else {
+                            continue;
+                        };
+                        plans.push(json!({
+                            "id": plan.get("id").cloned().unwrap_or(Value::Null),
+                            "status": plan.get("status").cloned().unwrap_or(Value::Null),
+                            "mode": plan.get("mode").cloned().unwrap_or(Value::Null),
+                            "groups": plan.get("groups").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+                            "entities": plan.get("entities").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+                            "updates": plan.get("updates").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+                            "deletions": plan.get("deletions").and_then(Value::as_array).map(Vec::len).unwrap_or(0),
+                        }));
+                    }
+                }
+                plans.sort_by(|left, right| {
+                    right
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .cmp(&left.get("id").and_then(Value::as_str))
+                });
+                plans.truncate(64);
+                Ok(json!({"count": plans.len(), "plans": plans}))
+            }
+            "raf://digest" => {
+                let Some(project) = &self.project else {
+                    return Ok(json!({"digest": null}));
+                };
+                let scene = load_project_scene(project);
+                let digest = agent_context::scene_digest(&scene, &[], &json!({}), &[]);
+                Ok(json!({"digest": digest.data, "revision": self.ledger.revision()}))
+            }
             "raf://workspace" => {
                 let Some(root) = self.project_path() else {
                     return Ok(json!({"workspace": null}));
@@ -849,6 +1010,9 @@ impl HeadlessEngine {
 trait McpCommandHost: CommandEndpoint {
     fn resource(&self, uri: &str) -> CliResult<Value>;
     fn project_root(&self) -> Option<&Path>;
+    fn attached(&self) -> bool {
+        false
+    }
 }
 
 impl McpCommandHost for HeadlessEngine {
@@ -868,6 +1032,10 @@ impl McpCommandHost for AttachedClient {
 
     fn project_root(&self) -> Option<&Path> {
         Some(self.project_path())
+    }
+
+    fn attached(&self) -> bool {
+        true
     }
 }
 
@@ -889,15 +1057,18 @@ impl CommandEndpoint for HeadlessEngine {
             ),
             "project.create" => self.execute_project_create(&request),
             "project.open" => self.execute_project_open(&request),
+            "project.close" => self.execute_project_close(&request),
             "project.info" => self.execute_project_info(&request),
             "project.save" => self.execute_project_save(&request),
             "session.list" => self.execute_session_list(&request),
+            "session.use" | "session.activate" => self.execute_session_use(&request),
             "workspace.describe" => self.execute_workspace_describe(&request),
             "engine.status" | "status" => self.execute_status(&request),
             "engine.context" | "agent.context" | "project.summary" => {
                 self.execute_context(&request)
             }
             "scene.outline"
+            | "scene.digest"
             | "scene.query"
             | "scene.spatial_map"
             | "scene.spatial"
@@ -1471,12 +1642,12 @@ fn clean_path_string(path: &Path) -> String {
 fn print_help() {
     println!(
         "{PROGRAM} - lightweight AuraRafi command and MCP surface\n\n\
-Usage:\n  raf doctor [--json]\n  raf editors [--json]                 list known projects and live editors\n  raf status [--project PATH] [--json]\n  raf attach [ACTION] [--project PATH]  PATH is optional when one editor is live\n  raf project create --name NAME [--parent PATH] [--type game|electronics] --confirm\n  raf project open PATH\n  raf project info [PATH]\n  raf project path [PATH]               print the explicit or attached project root\n  raf capabilities [search QUERY]\n  raf session list [--project PATH]\n  raf workspace describe [PATH]\n  raf command NAME [--params JSON|@FILE|-] [--params-file FILE|-] [--dry-run] [--confirm]\n  raf mcp serve [--attach PATH]         PATH is optional when one editor is live\n  raf serve [--project PATH]            JSONL command endpoint\n\nGlobal output: --json, --ndjson, --format human|json"
+Usage:\n  raf doctor [--json]\n  raf editors [--json]                 list known projects and live editors\n  raf status [--project PATH] [--json]\n  raf attach [ACTION] [--project PATH]  PATH is optional when one editor is live\n  raf open PATH                   launch the editor and wait for its live endpoint\n  raf project create --name NAME [--parent PATH] [--type game|electronics] --confirm\n  raf project open PATH\n  raf project close [--confirm]\n  raf project info [PATH]\n  raf project path [PATH]               print the explicit or attached project root\n  raf capabilities [search QUERY]\n  raf session list [--project PATH]\n  raf session use ID|NAME [--confirm]\n  raf undo | raf redo\n  raf workspace describe [PATH]\n  raf command NAME [--params JSON|@FILE|-] [--params-file FILE|-] [--dry-run] [--confirm]\n  raf mcp serve [--attach PATH] [--launch]  PATH is optional when one editor is live\n  raf serve [--project PATH]            JSONL command endpoint\n\nGlobal output: --json, --ndjson, --format human|json"
     );
-    println!("Project persistence: raf project save|checkpoint --confirm");
+    println!("Project persistence: raf project save|checkpoint [--wait] --confirm");
     println!("Budgets: --budget JSON or --max-tool-calls N --max-milliseconds N --max-scene-operations N --max-scene-entities N --max-result-bytes N --budget-profile NAME");
     println!("Additional inspection: raf context [--project PATH]");
-    println!("Scene automation: raf scene outline|query|inspect|selection|verify|create|update|build|reconcile|repair|plan|apply|batch, raf selection, raf viewport capture, raf task list|get|events|cancel, raf assets search|inspect, raf scripts search, raf health");
+    println!("Scene automation: raf scene outline|digest|query|inspect|selection|verify|navigation|map|create|update|build|reconcile|repair|program|commit|cancel|brief|batch, raf selection, raf viewport capture [--preset contact_sheet|top_down_map], raf task list|get|events|cancel, raf assets search|inspect, raf scripts search, raf health");
 }
 
 /// Lists every known project that publishes an attach descriptor, marking
@@ -1660,7 +1831,20 @@ fn run_attached_cli(options: &Options, format: OutputFormat) -> CliResult<()> {
         }
         Some("project") => match options.positionals.get(2).map(String::as_str) {
             Some("save" | "checkpoint") => {
-                client.execute(named_command_request(options, "project.save", false)?)
+                client.execute(project_save_request(options)?)
+            }
+            Some("open") => {
+                let path = options
+                    .positionals
+                    .get(3)
+                    .cloned()
+                    .or_else(|| options.value("path").map(str::to_string))
+                    .ok_or_else(|| "raf attach project open requires a path.".to_string())?;
+                client.execute(EngineCommandRequest::new(
+                    "project.open",
+                    json!({"path": path}),
+                    CommandSource::Cli,
+                ))
             }
             _ => client.execute(EngineCommandRequest::new(
                 "project.info",
@@ -1674,7 +1858,7 @@ fn run_attached_cli(options: &Options, format: OutputFormat) -> CliResult<()> {
             CommandSource::Cli,
         )),
         Some("save") | Some("checkpoint") => {
-            client.execute(named_command_request(options, "project.save", false)?)
+            client.execute(project_save_request(options)?)
         }
         Some("session") if options.positionals.get(2).map(String::as_str) == Some("list") => client
             .execute(EngineCommandRequest::new(
@@ -1709,6 +1893,37 @@ fn run_attached_cli(options: &Options, format: OutputFormat) -> CliResult<()> {
             let subcommand = options.positionals.get(2).map(String::as_str).unwrap_or("outline");
             match subcommand {
                 "outline" => client.execute(observation_command_request(options, "scene.outline", json!({}))?),
+                "digest" | "snapshot" => client.execute(observation_command_request(
+                    options,
+                    "scene.digest",
+                    json!({"check_collisions": options.has("collisions")}),
+                )?),
+                "map" | "top-down" | "top_down" => {
+                    let mut request =
+                        observation_command_request(options, "viewport.capture", json!({}))?;
+                    if let Some(object) = request.params.as_object_mut() {
+                        object
+                            .entry("preset".to_string())
+                            .or_insert_with(|| json!("top_down_map"));
+                    }
+                    client.execute(request)
+                }
+                "visual-review" | "vision" => {
+                    client.execute(named_command_request(options, "scene.visual_review", false)?)
+                }
+                "program" | "plan-world" => client.execute(named_command_request(options, "game.plan", false)?),
+                "commit" => client.execute(named_command_request(options, "game.commit", false)?),
+                "cancel" | "cancel-plan" => {
+                    client.execute(named_command_request(options, "game.cancel", false)?)
+                }
+                "brief" => client.execute(named_command_request(options, "world.brief", false)?),
+                "recipe" => client.execute(named_command_request(options, "world.recipe", false)?),
+                "script" | "authoring-script" => {
+                    client.execute(named_command_request(options, "world.script", false)?)
+                }
+                "visual-diff" | "image-diff" => {
+                    client.execute(named_command_request(options, "scene.visual_diff", false)?)
+                }
                 "spatial" | "spatial-map" => client.execute(observation_command_request(
                     options,
                     "scene.spatial_map",
@@ -1716,6 +1931,9 @@ fn run_attached_cli(options: &Options, format: OutputFormat) -> CliResult<()> {
                 )?),
                 "design" | "design-audit" | "layout-audit" => client.execute(
                     observation_command_request(options, "scene.design_audit", json!({}))?,
+                ),
+                "navigation" | "reachability" => client.execute(
+                    observation_command_request(options, "scene.navigation_audit", json!({}))?,
                 ),
                 "query" => client.execute(observation_command_request(
                     options,
@@ -1799,8 +2017,201 @@ fn run_attached_cli(options: &Options, format: OutputFormat) -> CliResult<()> {
     print_response(&response, format)
 }
 
-fn run_cli(arguments: Vec<String>) -> CliResult<()> {
-    let options = parse_options(&arguments);
+fn editor_binary_path() -> CliResult<PathBuf> {
+    if let Some(path) = std::env::var_os("AURA_RAFI_EDITOR") {
+        return Ok(PathBuf::from(path));
+    }
+    let current = std::env::current_exe()
+        .map_err(|error| format!("Could not resolve the current CLI executable: {error}"))?;
+    let name = if cfg!(windows) {
+        "aura_rafi_editor.exe"
+    } else {
+        "aura_rafi_editor"
+    };
+    let candidate = current
+        .parent()
+        .map(|parent| parent.join(name))
+        .ok_or_else(|| "The CLI executable has no parent directory.".to_string())?;
+    if candidate.is_file() {
+        Ok(candidate)
+    } else {
+        Err(format!(
+            "Could not find the editor binary next to the CLI ({}). Set AURA_RAFI_EDITOR to its path.",
+            candidate.display()
+        ))
+    }
+}
+
+fn editor_is_live(path: &Path) -> bool {
+    let target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    discovery::discover_editors(Some(path))
+        .iter()
+        .any(|editor| {
+            editor.alive
+                && editor
+                    .project_path
+                    .canonicalize()
+                    .unwrap_or_else(|_| editor.project_path.clone())
+                    == target
+        })
+}
+
+fn launch_editor_if_needed(path: &Path) -> CliResult<()> {
+    if editor_is_live(path) {
+        return Ok(());
+    }
+    let editor = editor_binary_path()?;
+    // MCP owns stdin/stdout for JSON-RPC. A launched editor must never inherit
+    // those handles: its tracing output uses ANSI colors and corrupts the
+    // protocol stream for the whole session.
+    std::process::Command::new(&editor)
+        .arg("--project")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("Could not launch {}: {error}", editor.display()))?;
+    for _ in 0..60 {
+        std::thread::sleep(Duration::from_millis(250));
+        if editor_is_live(path) {
+            return Ok(());
+        }
+    }
+    Err(format!(
+        "The editor started but did not publish a live endpoint for {} within 15 seconds.",
+        path.display()
+    ))
+}
+
+fn open_editor_project(options: &Options) -> CliResult<()> {
+    let path = options
+        .positionals
+        .get(1)
+        .map(PathBuf::from)
+        .or_else(|| options.path("project"))
+        .ok_or_else(|| "raf open requires a project path.".to_string())?;
+    if !path.is_dir() {
+        return Err(format!(
+            "Project path does not exist or is not a directory: {}",
+            path.display()
+        ));
+    }
+    launch_editor_if_needed(&path)?;
+    println!("Editor ready for {}", path.display());
+    Ok(())
+}
+
+fn project_save_request(options: &Options) -> CliResult<EngineCommandRequest> {
+    let mut request = named_command_request(options, "project.save", false)?;
+    if options.has("wait") {
+        if let Some(object) = request.params.as_object_mut() {
+            object.insert("wait".to_string(), json!(true));
+        }
+    }
+    Ok(request)
+}
+
+fn mcp_mode() -> &'static str {
+    match MCP_MODE.load(Ordering::Relaxed) {
+        0 => "inspect",
+        1 => "plan",
+        _ => "active",
+    }
+}
+
+fn set_mcp_mode(value: &str) -> Result<&'static str, String> {
+    let mode = match value.trim().to_ascii_lowercase().as_str() {
+        "inspect" | "read" | "readonly" => 0,
+        "plan" | "preview" => 1,
+        "active" | "apply" => 2,
+        other => {
+            return Err(format!(
+                "Unknown MCP mode '{other}'. Use inspect, plan or active."
+            ))
+        }
+    };
+    MCP_MODE.store(mode, Ordering::Relaxed);
+    Ok(mcp_mode())
+}
+
+fn mcp_command_is_mutation(name: &str) -> bool {
+    matches!(
+        name,
+        "game.add"
+            | "game.update"
+            | "game.delete"
+            | "game.duplicate"
+            | "game.reparent"
+            | "game.snap"
+            | "game.transform"
+            | "game.move"
+            | "game.rotate"
+            | "game.scale"
+            | "game.color"
+            | "game.batch"
+            | "game.build"
+            | "game.reconcile"
+            | "game.repair"
+            | "game.plan"
+            | "game.commit"
+            | "game.cancel"
+            | "game.create_group"
+            | "game.camera"
+            | "game.generate_prefab"
+            | "world.recipe"
+            | "world.script"
+            | "world.brief"
+            | "scene.visual_diff"
+            | "script.create"
+            | "script.write"
+            | "script.attach"
+            | "script.detach"
+            | "script.run"
+            | "behavior.attach"
+            | "behavior.detach"
+            | "behavior.parameter"
+            | "prefab.capture"
+            | "prefab.instantiate"
+            | "lighting.set"
+            | "lighting.reset"
+            | "project.create"
+            | "project.close"
+            | "project.save"
+            | "undo"
+            | "redo"
+            | "__generic__"
+    )
+}
+
+fn mcp_plan_mode_allowed(name: &str) -> bool {
+    matches!(name, "game.plan" | "world.script" | "world.brief")
+}
+
+fn read_plan_resource(root: &Path, id: &str) -> CliResult<Value> {
+    if id.is_empty()
+        || id.len() > 128
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err("Plan resource id contains unsupported characters.".to_string());
+    }
+    let path = root
+        .join(".aura_rafi/world/plans")
+        .join(format!("{id}.json"));
+    let bytes = std::fs::read(&path)
+        .map_err(|error| format!("Plan '{id}' was not found: {error}"))?;
+    let plan = serde_json::from_slice::<Value>(&bytes)
+        .map_err(|error| format!("Plan '{id}' is not valid JSON: {error}"))?;
+    Ok(json!({
+        "id": id,
+        "path": format!(".aura_rafi/world/plans/{id}.json"),
+        "plan": plan,
+    }))
+}
+
+fn run_cli(arguments: Vec<String>) -> CliResult<()> {    let options = parse_options(&arguments);
     let format = OutputFormat::from_options(&options);
     let command = options
         .positionals
@@ -1820,6 +2231,9 @@ fn run_cli(arguments: Vec<String>) -> CliResult<()> {
     if command == "attach" {
         return run_attached_cli(&options, format);
     }
+    if command == "open" {
+        return open_editor_project(&options);
+    }
     if command == "project" && options.positionals.get(1).map(String::as_str) == Some("path") {
         return print_project_path(&options, format);
     }
@@ -1828,6 +2242,9 @@ fn run_cli(arguments: Vec<String>) -> CliResult<()> {
             Some(path) => path,
             None => discovery::pick_single_live(None)?.project_path,
         };
+        if options.has("launch") {
+            launch_editor_if_needed(&attach_path)?;
+        }
         let client = AttachedClient::connect(&attach_path, "raf-mcp")?;
         return run_mcp_stdio(client);
     }
@@ -1864,6 +2281,11 @@ fn run_cli(arguments: Vec<String>) -> CliResult<()> {
             let subcommand = options.positionals.get(1).map(String::as_str).unwrap_or("outline");
             match subcommand {
                 "outline" => engine.execute(observation_command_request(&options, "scene.outline", json!({}))?),
+                "digest" | "snapshot" => engine.execute(observation_command_request(
+                    &options,
+                    "scene.digest",
+                    json!({"check_collisions": options.has("collisions")}),
+                )?),
                 "spatial" | "spatial-map" => engine.execute(observation_command_request(
                     &options,
                     "scene.spatial_map",
@@ -1871,6 +2293,9 @@ fn run_cli(arguments: Vec<String>) -> CliResult<()> {
                 )?),
                 "design" | "design-audit" | "layout-audit" => engine.execute(
                     observation_command_request(&options, "scene.design_audit", json!({}))?,
+                ),
+                "navigation" | "reachability" => engine.execute(
+                    observation_command_request(&options, "scene.navigation_audit", json!({}))?,
                 ),
                 "query" => engine.execute(observation_command_request(
                     &options,
@@ -2012,7 +2437,7 @@ fn run_cli(arguments: Vec<String>) -> CliResult<()> {
                 ))
             }
             Some("save" | "checkpoint") => {
-                engine.execute(named_command_request(&options, "project.save", false)?)
+                engine.execute(project_save_request(&options)?)
             }
             Some(other) => return Err(format!("Unknown project command: {other}")),
             None => return Err("project requires create, open, info, save or checkpoint.".to_string()),
@@ -2086,6 +2511,9 @@ fn run_mcp_stdio<H: McpCommandHost>(mut engine: H) -> CliResult<()> {
         if let Some(response) = handle_mcp_message(&mut engine, &message) {
             write_mcp_response(&mut writer, &response)?;
         }
+        for notification in take_mcp_notifications() {
+            write_mcp_response(&mut writer, &notification)?;
+        }
     }
     Ok(())
 }
@@ -2113,6 +2541,11 @@ fn handle_mcp_message<H: McpCommandHost>(engine: &mut H, message: &Value) -> Opt
     if !message.get("id").is_some() {
         return None;
     }
+    let instructions = if engine.attached() {
+        "AuraRafi attached editor surface. Inspect, preview, confirm and verify. Mutations use the live document and its real undo history. Never expose Play or Runtime."
+    } else {
+        "AuraRafi headless command surface. Only headless-supported inspection and project lifecycle tools are advertised. Mutations require an attached editor and never expose Play or Runtime."
+    };
     match method {
         "initialize" => Some(jsonrpc_result(
             &id,
@@ -2120,21 +2553,27 @@ fn handle_mcp_message<H: McpCommandHost>(engine: &mut H, message: &Value) -> Opt
                 "protocolVersion": PROTOCOL_VERSION,
                 "capabilities": {
                     "tools": {"listChanged": false},
-                    "resources": {"subscribe": false, "listChanged": false},
+                    "resources": {"subscribe": true, "listChanged": true},
                     "prompts": {"listChanged": false},
                 },
                 "serverInfo": {"name": "raf", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "AuraRafi headless command surface. Mutations are scoped to the project and never expose Play or Runtime.",
+                "instructions": instructions,
             }),
         )),
         "ping" => Some(jsonrpc_result(&id, json!({}))),
-        "tools/list" => Some(jsonrpc_result(&id, json!({"tools": mcp_tools()}))),
+        "tools/list" => Some(jsonrpc_result(
+            &id,
+            json!({"tools": mcp_tools(engine.attached())}),
+        )),
         "resources/list" => Some(jsonrpc_result(
             &id,
             json!({"resources": [
                 {"uri": "raf://status", "name": "Rafi status", "mimeType": "application/json"},
                 {"uri": "raf://project", "name": "Open project", "mimeType": "application/json"},
                 {"uri": "raf://capabilities", "name": "Engine capabilities", "mimeType": "application/json"},
+                {"uri": "raf://brief", "name": "World Brief", "mimeType": "application/json"},
+                {"uri": "raf://plans", "name": "World Plan index", "mimeType": "application/json"},
+                {"uri": "raf://digest", "name": "Scene digest", "mimeType": "application/json"},
                 {"uri": "raf://context", "name": "Compact project context", "mimeType": "application/json"},
                 {"uri": "raf://workspace", "name": "Workspace summary", "mimeType": "application/json"},
             ]}),
@@ -2252,6 +2691,22 @@ fn handle_mcp_tool_call<H: McpCommandHost>(
         },
         None => None,
     };
+    if name == "raf_set_mode" {
+        let Some(mode) = arguments.get("mode").and_then(Value::as_str) else {
+            return Some(jsonrpc_error(id, -32602, "raf_set_mode requires mode."));
+        };
+        return Some(match set_mcp_mode(mode) {
+            Ok(mode) => jsonrpc_result(
+                id,
+                json!({
+                    "isError": false,
+                    "content": [{"type": "text", "text": format!("MCP mode: {mode}")}],
+                    "structuredContent": {"ok": true, "mode": mode}
+                }),
+            ),
+            Err(error) => jsonrpc_error(id, -32602, error),
+        });
+    }
     let Some(command_name) = mcp_tool_command(name) else {
         return Some(jsonrpc_error(
             id,
@@ -2260,6 +2715,20 @@ fn handle_mcp_tool_call<H: McpCommandHost>(
         ));
     };
     let mut arguments = arguments;
+    if name == "raf_scene_top_down_map" {
+        if let Some(object) = arguments.as_object_mut() {
+            object
+                .entry("preset".to_string())
+                .or_insert_with(|| json!("top_down_map"));
+        }
+    }
+    if name == "raf_scene_patch" {
+        if let Some(object) = arguments.as_object_mut() {
+            object
+                .entry("mode".to_string())
+                .or_insert_with(|| json!("reconcile"));
+        }
+    }
     let command_name = if command_name == "__generic__" {
         let Some(generic_name) = arguments
             .get("name")
@@ -2278,6 +2747,49 @@ fn handle_mcp_tool_call<H: McpCommandHost>(
         arguments = strip_mcp_controls(&arguments);
         command_name.to_string()
     };
+    let mode = mcp_mode();
+    if mode == "inspect" && mcp_command_is_mutation(&command_name) {
+        return Some(jsonrpc_error(
+            id,
+            -32000,
+            format!(
+                "MCP mode is inspect; '{command_name}' is a mutation. Call raf_set_mode with plan or active first."
+            ),
+        ));
+    }
+    if mode == "plan"
+        && mcp_command_is_mutation(&command_name)
+        && !mcp_plan_mode_allowed(&command_name)
+    {
+        return Some(jsonrpc_error(
+            id,
+            -32000,
+            format!(
+                "MCP mode is plan; '{command_name}' applies changes. Use raf_scene_program / raf_world_script to compile a plan, then switch to active to commit."
+            ),
+        ));
+    }
+    if let Some(session_id) = session.as_deref() {
+        if command_name != "session.use" && command_name != "session.activate" {
+            let mut use_request = EngineCommandRequest::new(
+                "session.use",
+                json!({"session": session_id}),
+                CommandSource::Mcp,
+            );
+            use_request.confirm = true;
+            let use_response = engine.execute(use_request);
+            if !use_response.ok {
+                return Some(jsonrpc_error(
+                    id,
+                    -32000,
+                    format!(
+                        "The requested MCP session could not be activated: {}",
+                        use_response.lines.join(" ")
+                    ),
+                ));
+            }
+        }
+    }
     let mut request = EngineCommandRequest::new(command_name, arguments, CommandSource::Mcp);
     request.confirm = confirm;
     request.dry_run = dry_run || name == "raf_scene_plan";
@@ -2286,6 +2798,15 @@ fn handle_mcp_tool_call<H: McpCommandHost>(
     request.session = session;
     request.budget = budget;
     let response = engine.execute(request);
+    if response.ok && response.changed {
+        for uri in ["raf://status", "raf://plans", "raf://brief", "raf://digest"] {
+            queue_mcp_notification(json!({
+                "jsonrpc": "2.0",
+                "method": "notifications/resourcesUpdated",
+                "params": {"uri": uri, "revision": response.revision}
+            }));
+        }
+    }
     let compact_lines = raf_core::agent_context::compact_result_lines(&response.lines);
     let text = compact_lines
         .first()
@@ -2307,15 +2828,30 @@ fn handle_mcp_tool_call<H: McpCommandHost>(
         );
     }
     let mut content = vec![json!({"type": "text", "text": text})];
-    if let Some(image) = response
+    let mut image_uris = Vec::new();
+    if let Some(uri) = response
         .data
         .get("artifact")
         .and_then(Value::as_object)
         .and_then(|artifact| artifact.get("uri"))
         .and_then(Value::as_str)
-        .and_then(|uri| engine.project_root().and_then(|root| mcp_image_content(root, uri)))
     {
-        content.push(image);
+        image_uris.push(uri.to_string());
+    }
+    for artifact in &response.artifacts {
+        if artifact.kind.starts_with("image/") {
+            image_uris.push(artifact.uri.clone());
+        }
+    }
+    image_uris.sort();
+    image_uris.dedup();
+    for uri in image_uris.iter().take(4) {
+        if let Some(image) = engine
+            .project_root()
+            .and_then(|root| mcp_image_content(root, uri))
+        {
+            content.push(image);
+        }
     }
     Some(jsonrpc_result(
         id,
@@ -2333,14 +2869,18 @@ fn mcp_tool_command(name: &str) -> Option<&'static str> {
         "raf_context" => Some("engine.context"),
         "raf_project_snapshot" => Some("engine.context"),
         "raf_scene_outline" => Some("scene.outline"),
+        "raf_scene_digest" => Some("scene.digest"),
         "raf_scene_query" => Some("scene.query"),
         "raf_scene_spatial_map" => Some("scene.spatial_map"),
         "raf_scene_overlaps" => Some("scene.overlaps"),
+        "raf_scene_navigation_audit" => Some("scene.navigation_audit"),
         "raf_scene_diff" => Some("scene.diff"),
         "raf_scene_design_audit" => Some("scene.design_audit"),
         "raf_scene_inspect" => Some("scene.inspect"),
         "raf_selection_get" => Some("selection.get"),
         "raf_viewport_capture" => Some("viewport.capture"),
+        "raf_scene_top_down_map" => Some("viewport.capture"),
+        "raf_scene_visual_review" => Some("scene.visual_review"),
         "raf_task_list" => Some("task.list"),
         "raf_task_get" => Some("task.get"),
         "raf_task_events" => Some("task.events"),
@@ -2370,6 +2910,14 @@ fn mcp_tool_command(name: &str) -> Option<&'static str> {
         "raf_scene_snap" => Some("game.snap"),
         "raf_scene_instantiate_template" => Some("game.generate_prefab"),
         "raf_scene_build" | "raf_scene_apply" | "raf_scene_plan" => Some("game.build"),
+        "raf_scene_program" => Some("game.plan"),
+        "raf_scene_commit" => Some("game.commit"),
+        "raf_scene_patch" => Some("game.plan"),
+        "raf_scene_cancel" => Some("game.cancel"),
+        "raf_world_brief" => Some("world.brief"),
+        "raf_world_recipe" => Some("world.recipe"),
+        "raf_world_script" => Some("world.script"),
+        "raf_scene_visual_diff" => Some("scene.visual_diff"),
         "raf_scene_reconcile" => Some("game.reconcile"),
         "raf_scene_repair" => Some("game.repair"),
         "raf_scene_batch" => Some("game.batch"),
@@ -2379,9 +2927,13 @@ fn mcp_tool_command(name: &str) -> Option<&'static str> {
         "raf_capabilities_search" => Some("capabilities.search"),
         "raf_project_info" => Some("project.info"),
         "raf_project_open" => Some("project.open"),
+        "raf_project_close" => Some("project.close"),
         "raf_project_create" => Some("project.create"),
         "raf_project_save" => Some("project.save"),
         "raf_session_list" => Some("session.list"),
+        "raf_session_use" => Some("session.use"),
+        "raf_undo" => Some("undo"),
+        "raf_redo" => Some("redo"),
         "raf_workspace_describe" => Some("workspace.describe"),
         "raf_command" => Some("__generic__"),
         _ => None,
@@ -2466,8 +3018,17 @@ fn strip_mcp_controls(arguments: &Value) -> Value {
     Value::Object(params)
 }
 
-fn mcp_tools() -> Vec<Value> {
-    vec![
+fn mcp_tools(attached: bool) -> Vec<Value> {
+    let mut tools: Vec<Value> = vec![
+        mcp_tool(
+            "raf_set_mode",
+            "Set the MCP session mode: inspect (read-only), plan (compile plans only) or active (normal mutations).",
+            schema(
+                vec![("mode", json!({"type":"string","enum":["inspect","plan","active"]}))],
+                &["mode"],
+                false,
+            ),
+        ),
         mcp_tool(
             "raf_status",
             "Read headless engine and project status.",
@@ -2519,6 +3080,26 @@ fn mcp_tools() -> Vec<Value> {
             schema(Vec::new(), &[], true),
         ),
         mcp_tool(
+            "raf_project_close",
+            "Close the mounted headless project session or detach the current project context. In an attached editor this requires confirm=true and never kills the application.",
+            schema(Vec::new(), &[], true),
+        ),
+        mcp_tool(
+            "raf_session_use",
+            "Activate a project session by id or exact name. This updates the session registry; it does not mutate the live scene.",
+            schema(vec![("id", json!({"type":"string","minLength":1}))], &["id"], true),
+        ),
+        mcp_tool(
+            "raf_undo",
+            "Request one editor undo step through the attached document history.",
+            schema(Vec::new(), &[], true),
+        ),
+        mcp_tool(
+            "raf_redo",
+            "Request one editor redo step through the attached document history.",
+            schema(Vec::new(), &[], true),
+        ),
+        mcp_tool(
             "raf_session_list",
             "List sessions in the open project.",
             json!({"type":"object","properties":{}}),
@@ -2536,7 +3117,54 @@ fn mcp_tools() -> Vec<Value> {
     ]
     .into_iter()
     .chain(mcp_semantic_tools())
-    .collect()
+    .collect();
+    if !attached {
+        tools.retain(|tool| {
+            tool.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(headless_mcp_tool_supported)
+        });
+    }
+    tools
+}
+
+fn headless_mcp_tool_supported(name: &str) -> bool {
+    matches!(
+        name,
+        "raf_set_mode"
+            | "raf_status"
+            | "raf_context"
+            | "raf_doctor"
+            | "raf_capabilities"
+            | "raf_capabilities_search"
+            | "raf_project_snapshot"
+            | "raf_project_info"
+            | "raf_project_open"
+            | "raf_project_close"
+            | "raf_project_create"
+            | "raf_project_save"
+            | "raf_session_list"
+            | "raf_session_use"
+            | "raf_workspace_describe"
+            | "raf_scene_outline"
+            | "raf_scene_digest"
+            | "raf_scene_snapshot"
+            | "raf_scene_query"
+            | "raf_scene_spatial_map"
+            | "raf_scene_overlaps"
+            | "raf_scene_navigation_audit"
+            | "raf_scene_diff"
+            | "raf_scene_design_audit"
+            | "raf_scene_inspect"
+            | "raf_scene_verify"
+            | "raf_assets_search"
+            | "raf_assets_recommend"
+            | "raf_asset_inspect"
+            | "raf_scripts_search"
+            | "raf_project_health"
+            | "raf_diagnostics"
+            | "raf_command"
+    )
 }
 
 fn mcp_semantic_tools() -> Vec<Value> {
@@ -2580,6 +3208,119 @@ fn mcp_semantic_tools() -> Vec<Value> {
             ),
         ),
         mcp_tool(
+            "raf_scene_digest",
+            "Read one compact but complete scene snapshot: counts, hierarchy roots, bounds, cameras, component coverage, semantic roles, optional overlaps and a cursor for large scopes.",
+            schema(
+                vec![
+                    ("root", json!({"type":"string"})),
+                    ("check_collisions", json!({"type":"boolean"})),
+                    ("cursor", json!({"type":"integer","minimum":0})),
+                    ("limit", json!({"type":"integer","minimum":1,"maximum":128})),
+                ],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_program",
+            "Compile a World Program into a persistent plan without mutating the scene. Supports kits, archetypes, grids, paths, scatter, stable keys, budget checks, design preview and overlap evidence. Commit with raf_scene_commit.",
+            schema(
+                vec![
+                    ("mode", json!({"type":"string","enum":["build","reconcile"]})),
+                    ("parent", json!({"type":"string"})),
+                    ("design_profile", json!({"type":"string","enum":["generic","real_world","building","supermarket","parking","outdoor"]})),
+                    ("archetypes", json!({"type":"object"})),
+                    ("groups", json!({"type":"array","maxItems":512,"items":{"type":"object"}})),
+                    ("entities", json!({"type":"array","maxItems":4096,"items":{"type":"object"}})),
+                    ("operations", json!({"type":"array","maxItems":2048,"items":{"type":"object"}})),
+                ],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_commit",
+            "Commit a compiled World Plan by id after checking the scene fingerprint. Returns a plan-level undo token and structured diff.",
+            schema(vec![("plan_id", json!({"type":"string","minLength":1}))], &["plan_id"], true),
+        ),
+        mcp_tool(
+            "raf_scene_patch",
+            "Compile a keyed patch against the current world using reconcile semantics. Stable keys update in place, missing keys are created and unmentioned nodes are preserved.",
+            schema(
+                vec![
+                    ("mode", json!({"type":"string","enum":["reconcile"]})),
+                    ("parent", json!({"type":"string"})),
+                    ("design_profile", json!({"type":"string","enum":["generic","real_world","building","supermarket","parking","outdoor"]})),
+                    ("archetypes", json!({"type":"object"})),
+                    ("groups", json!({"type":"array","maxItems":512,"items":{"type":"object"}})),
+                    ("entities", json!({"type":"array","maxItems":4096,"items":{"type":"object"}})),
+                    ("operations", json!({"type":"array","maxItems":2048,"items":{"type":"object"}})),
+                ],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_cancel",
+            "Cancel an uncommitted World Plan so it cannot be applied later. Committed plans must be reverted with undo.",
+            schema(vec![("plan_id", json!({"type":"string","minLength":1}))], &["plan_id"], true),
+        ),
+        mcp_tool(
+            "raf_world_brief",
+            "Read or write the persistent World Brief that keeps art direction, scale, gameplay loop, constraints and acceptance criteria coherent across turns.",
+            schema(
+                vec![
+                    ("action", json!({"type":"string","enum":["read","write"]})),
+                    ("brief", json!({"type":"object"})),
+                    ("content", json!({"type":"string"})),
+                ],
+                &["action"],
+                true,
+            ),
+        ),
+        mcp_tool(
+            "raf_world_recipe",
+            "Capture a compiled plan as a reusable recipe, list and inspect recipes, or instantiate one as a fresh reviewable plan.",
+            schema(
+                vec![
+                    ("action", json!({"type":"string","enum":["save","list","show","delete","apply"]})),
+                    ("name", json!({"type":"string","minLength":1})),
+                    ("plan_id", json!({"type":"string"})),
+                    ("description", json!({"type":"string"})),
+                    ("tags", json!({"type":"array","items":{"type":"string"},"maxItems":32})),
+                ],
+                &["action"],
+                true,
+            ),
+        ),
+        mcp_tool(
+            "raf_world_script",
+            "Run a sandboxed Rhai authoring script that can only emit a World Program, then compile it into a reviewable plan without mutating the scene.",
+            schema(
+                vec![
+                    ("script", json!({"type":"string","description":"Rhai source using only the world:: authoring namespace."})),
+                    ("file", json!({"type":"string","description":"Project-relative .rhai file."})),
+                ],
+                &[],
+                true,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_visual_diff",
+            "Compare before/after project images, report changed ratio and bounds, and return an annotated PNG diff artifact.",
+            schema(
+                vec![
+                    ("before", json!({"type":"string"})),
+                    ("after", json!({"type":"string"})),
+                    ("output", json!({"type":"string"})),
+                    ("threshold", json!({"type":"number","minimum":0,"maximum":255})),
+                    ("save", json!({"type":"boolean"})),
+                ],
+                &["before", "after"],
+                false,
+            ),
+        ),
+        mcp_tool(
             "raf_scene_spatial_map",
             "Read bounded world-space bounds, scene extents, visible renderable entities and conservative overlaps before layout changes.",
             schema(
@@ -2603,6 +3344,21 @@ fn mcp_semantic_tools() -> Vec<Value> {
                     ("include_hidden", json!({"type":"boolean"})),
                     ("margin", json!({"type":"number","minimum":0})),
                     ("max_pairs", json!({"type":"integer","minimum":1,"maximum":256})),
+                ],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_navigation_audit",
+            "Static walkability and reachability audit on authored AABBs. Samples a bounded grid, expands obstacles by an agent radius and BFS-checks spawn-to-goal reachability without Play or Runtime.",
+            schema(
+                vec![
+                    ("root", json!({"type":"string"})),
+                    ("spawn", json!({"type":"string"})),
+                    ("goals", json!({"type":"array","items":{"type":"string"},"maxItems":32})),
+                    ("resolution", json!({"type":"number","minimum":0.1,"maximum":8})),
+                    ("agent_radius", json!({"type":"number","minimum":0,"maximum":8})),
                 ],
                 &[],
                 false,
@@ -2653,6 +3409,11 @@ fn mcp_semantic_tools() -> Vec<Value> {
             schema(
                 vec![
                     ("refresh", json!({"type":"boolean"})),
+                    ("preset", json!({"type":"string","enum":["single","contact_sheet","top_down_map"]})),
+                    ("contact_sheet", json!({"type":"boolean"})),
+                    ("top_down", json!({"type":"boolean"})),
+                    ("overlays", json!({"type":"array","items":{"type":"string","enum":["all","bounds","colliders","grid","labels"]},"maxItems":5})),
+                    ("grid", json!({"type":"number","exclusiveMinimum":0})),
                     ("view", json!({"type":"string","enum":["current","front","back","left","right","top","bottom","isometric","custom"]})),
                     ("frame", json!({"type":"string","enum":["selection","scene"]})),
                     ("target", json!({"type":"string"})),
@@ -2665,6 +3426,36 @@ fn mcp_semantic_tools() -> Vec<Value> {
                     ("height", json!({"type":"integer","minimum":128,"maximum":1024})),
                     ("highlight_selection", json!({"type":"boolean"})),
                     ("label", json!({"type":"string"})),
+                ],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_top_down_map",
+            "Render a metric top-down XZ schematic of the attached Game scene with bounds, colliders, grid and labels. Returns the PNG plus structured entity/collider/bounds metadata. This never starts Play or Runtime.",
+            schema(
+                vec![
+                    ("root", json!({"type":"string"})),
+                    ("width", json!({"type":"integer","minimum":256,"maximum":2048})),
+                    ("height", json!({"type":"integer","minimum":256,"maximum":2048})),
+                    ("overlays", json!({"type":"array","items":{"type":"string","enum":["all","bounds","colliders","grid","labels"]},"maxItems":5})),
+                    ("grid", json!({"type":"number","exclusiveMinimum":0})),
+                    ("label", json!({"type":"string"})),
+                ],
+                &[],
+                false,
+            ),
+        ),
+        mcp_tool(
+            "raf_scene_visual_review",
+            "Ask the configured vision-capable reviewer model to inspect one to four project captures and return structured scores, findings and fixes. Returns a structured vision_unavailable fallback when no vision model is configured; it never starts Play or Runtime.",
+            schema(
+                vec![
+                    ("images", json!({"type":"array","items":{"type":"string"},"maxItems":4})),
+                    ("image", json!({"type":"string"})),
+                    ("focus", json!({"type":"string"})),
+                    ("brief", json!({"type":"object"})),
                 ],
                 &[],
                 false,
@@ -3267,7 +4058,47 @@ fn budget_schema() -> Value {
 }
 
 fn mcp_tool(name: &str, description: &str, input_schema: Value) -> Value {
-    json!({"name": name, "description": description, "inputSchema": input_schema})
+    let read_only = [
+        "_status", "_context", "_info", "_path", "_list", "_outline", "_digest", "_query",
+        "_snapshot", "_spatial", "_overlaps", "_diff", "_audit", "_inspect", "_selection",
+        "_capture", "_get", "_events", "_preview", "_plan", "_program", "_verify", "_health",
+        "_review", "_map",
+        "_capabilities", "_doctor", "_assets", "_scripts", "_task_get", "_task_events",
+        "_lighting_inspect",
+    ]
+    .iter()
+    .any(|suffix| name.contains(suffix));
+    let destructive = ["_delete", "_undo", "_commit", "_repair", "_close", "_cancel"]
+        .iter()
+        .any(|suffix| name.contains(suffix));
+    let idempotent = ["_plan", "_program", "_save", "_reconcile", "_commit", "_verify"]
+        .iter()
+        .any(|suffix| name.contains(suffix));
+    json!({
+        "name": name,
+        "description": description,
+        "inputSchema": input_schema,
+        "outputSchema": {
+            "type": "object",
+            "properties": {
+                "ok": {"type": "boolean"},
+                "summary": {"type": "string"},
+                "data": {"type": "object"},
+                "references": {"type": "array", "items": {"type": "string"}},
+                "changed": {"type": "boolean"},
+                "revision": {"type": "integer"},
+                "warnings": {"type": "array", "items": {"type": "string"}},
+                "verification": {"type": "object"},
+                "artifacts": {"type": "array", "items": {"type": "object"}}
+            }
+        },
+        "annotations": {
+            "readOnlyHint": read_only && !destructive,
+            "destructiveHint": destructive,
+            "idempotentHint": idempotent,
+            "openWorldHint": false
+        }
+    })
 }
 
 fn main() {
@@ -3364,12 +4195,41 @@ mod tests {
         let response = engine.execute(create);
         assert!(response.ok, "{}", response.lines.join(" "));
         assert!(engine.project.is_some());
+        let brief = engine.resource("raf://brief").unwrap();
+        assert_eq!(brief["found"], false);
+        let plans = engine.resource("raf://plans").unwrap();
+        assert_eq!(plans["count"], 0);
         let info = engine.execute(EngineCommandRequest::new(
             "project.info",
             json!({}),
             CommandSource::Cli,
         ));
         assert!(info.ok);
+        let sessions = engine.execute(EngineCommandRequest::new(
+            "session.list",
+            json!({}),
+            CommandSource::Cli,
+        ));
+        assert!(sessions.ok);
+        let use_session = engine.execute(EngineCommandRequest::new(
+            "session.use",
+            json!({"name": "Main"}),
+            CommandSource::Cli,
+        ));
+        assert!(use_session.ok, "{}", use_session.lines.join(" "));
+        let close = engine.execute(EngineCommandRequest::new(
+            "project.close",
+            json!({}),
+            CommandSource::Cli,
+        ));
+        assert!(close.ok);
+        assert!(engine.project.is_none());
+        let after_close = engine.execute(EngineCommandRequest::new(
+            "project.info",
+            json!({}),
+            CommandSource::Cli,
+        ));
+        assert!(!after_close.ok);
         let _ = fs::remove_dir_all(root);
     }
 
@@ -3391,6 +4251,85 @@ mod tests {
         assert!(response.ok);
         assert!(!root.join("PreviewOnly").exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_modes_gate_mutations_until_active() {
+        let mut engine = HeadlessEngine::new(None).unwrap();
+        let set = handle_mcp_message(
+            &mut engine,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "tools/call",
+                "params": {
+                    "name": "raf_set_mode",
+                    "arguments": {"mode": "inspect"}
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(set["result"]["structuredContent"]["mode"], "inspect");
+        let blocked = handle_mcp_message(
+            &mut engine,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "tools/call",
+                "params": {
+                    "name": "raf_scene_program",
+                    "arguments": {"operations": []}
+                }
+            }),
+        )
+        .unwrap();
+        assert!(blocked["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("inspect"));
+        let active = handle_mcp_message(
+            &mut engine,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {
+                    "name": "raf_set_mode",
+                    "arguments": {"mode": "active"}
+                }
+            }),
+        )
+        .unwrap();
+        assert_eq!(active["result"]["structuredContent"]["mode"], "active");
+    }
+
+    #[test]
+    fn mcp_plan_resource_reads_project_plan_json() {
+        let root = std::env::temp_dir().join(format!(
+            "raf-mcp-plan-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        let directory = root.join(".aura_rafi/world/plans");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join("plan_demo.json"),
+            br#"{"id":"plan_demo","status":"planned","groups":[],"entities":[]}"#,
+        )
+        .unwrap();
+        let value = read_plan_resource(&root, "plan_demo").unwrap();
+        assert_eq!(value["id"], "plan_demo");
+        assert_eq!(value["plan"]["status"], "planned");
+        assert!(read_plan_resource(&root, "../escape").is_err());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn mcp_notifications_are_bounded_and_drained() {
+        let _ = take_mcp_notifications();
+        queue_mcp_notification(json!({"jsonrpc":"2.0","method":"notifications/resourcesUpdated"}));
+        let notifications = take_mcp_notifications();
+        assert_eq!(notifications.len(), 1);
+        assert!(take_mcp_notifications().is_empty());
     }
 
     #[test]
@@ -3450,28 +4389,74 @@ mod tests {
             .any(|tool| tool["name"] == "raf_capabilities"));
         let tools = tools["result"]["tools"].as_array().unwrap();
         for name in [
+            "raf_set_mode",
             "raf_scene_query",
-            "raf_scene_reconcile",
-            "raf_selection_get",
-            "raf_viewport_capture",
-            "raf_task_list",
-            "raf_task_get",
-            "raf_task_events",
-            "raf_task_cancel",
+            "raf_scene_digest",
+            "raf_scene_spatial_map",
+            "raf_scene_navigation_audit",
+            "raf_scene_inspect",
             "raf_asset_inspect",
-            "raf_transaction_undo",
-            "raf_script_write",
-            "raf_script_attach",
-            "raf_lighting_inspect",
-            "raf_lighting_set",
-            "raf_game_completion_audit",
+            "raf_project_close",
+            "raf_session_use",
+            "raf_project_save",
         ] {
             assert!(
                 tools.iter().any(|tool| tool["name"] == name),
-                "missing MCP tool {name}"
+                "missing headless MCP tool {name}"
             );
         }
-        let reconcile = tools
+        for name in [
+            "raf_scene_reconcile",
+            "raf_viewport_capture",
+            "raf_scene_top_down_map",
+            "raf_task_list",
+            "raf_script_write",
+            "raf_scene_program",
+            "raf_scene_commit",
+            "raf_world_brief",
+            "raf_scene_visual_diff",
+            "raf_undo",
+        ] {
+            assert!(
+                !tools.iter().any(|tool| tool["name"] == name),
+                "headless MCP must not advertise {name}"
+            );
+        }
+        let digest = tools
+            .iter()
+            .find(|tool| tool["name"] == "raf_scene_digest")
+            .unwrap();
+        assert_eq!(digest["annotations"]["readOnlyHint"], true);
+        assert!(digest["outputSchema"]["properties"]["ok"].is_object());
+        assert_eq!(
+            mcp_tool_command("raf_scene_top_down_map"),
+            Some("viewport.capture")
+        );
+        assert_eq!(mcp_tool_command("raf_scene_cancel"), Some("game.cancel"));
+        assert_eq!(mcp_tool_command("raf_scene_patch"), Some("game.plan"));
+        let attached = mcp_tools(true);
+        assert!(attached
+            .iter()
+            .any(|tool| tool["name"] == "raf_scene_cancel"));
+        assert!(attached
+            .iter()
+            .any(|tool| tool["name"] == "raf_scene_patch"));
+        let top_down = attached
+            .iter()
+            .find(|tool| tool["name"] == "raf_scene_top_down_map")
+            .unwrap();
+        assert_eq!(top_down["annotations"]["readOnlyHint"], true);
+        assert_eq!(
+            top_down["inputSchema"]["properties"]["overlays"]["type"],
+            "array"
+        );
+        let commit = attached
+            .iter()
+            .find(|tool| tool["name"] == "raf_scene_commit")
+            .unwrap();
+        assert_eq!(commit["annotations"]["destructiveHint"], true);
+        assert_eq!(commit["annotations"]["idempotentHint"], true);
+        let reconcile = attached
             .iter()
             .find(|tool| tool["name"] == "raf_scene_reconcile")
             .unwrap();

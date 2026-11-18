@@ -25,6 +25,66 @@ fn apply_inspector_commit(
     if !scene.is_valid_node(target) {
         return None;
     }
+    if let Some(field) = field.strip_prefix("physics.") {
+        if field == "joints" {
+            let joints: Option<Vec<raf_core::scene::joint::PhysicsJoint>> =
+                (value.len() <= 32768).then(|| serde_json::from_str(value).ok()).flatten();
+            let owner = scene.get(target).map(|node| node.uuid)?;
+            let valid = joints.as_ref().is_some_and(|joints| {
+                joints.len() <= 32 && joints.iter().all(|joint| {
+                    joint.is_valid() && joint.target != owner
+                        && scene.iter().filter(|(id, node)| {
+                            scene.is_valid_node(*id) && node.uuid == joint.target
+                        }).count() == 1
+                })
+            });
+            if !valid {
+                return Some(CommandOutput::error(
+                    raf_core::i18n::t("app.physics", runtime.ui_language),
+                    raf_core::i18n::t("runtime.invalid_physics_joints", runtime.ui_language),
+                ));
+            }
+            let joints = joints.unwrap();
+            runtime.mutate_scene(scene, |scene| {
+                if let Some(node) = scene.get_mut(target) {
+                    node.physics_joints = joints;
+                }
+            });
+            return None;
+        }
+        let unsigned = value.trim().parse::<u32>().ok();
+        let scalar = value.trim().parse::<f32>().ok().filter(|v| v.is_finite());
+        let valid = match field {
+            "mass" => scalar.is_some_and(|v| v > 0.0),
+            "friction" => scalar.is_some_and(|v| (0.0..=4.0).contains(&v)),
+            "restitution" => scalar.is_some_and(|v| (0.0..=1.0).contains(&v)),
+            "angular_damping" => scalar.is_some_and(|v| (0.0..=10.0).contains(&v)),
+            "gravity_scale" => scalar.is_some_and(|v| (-10.0..=10.0).contains(&v)),
+            "collision_layer" | "collision_mask" => unsigned.is_some(),
+            _ => false,
+        };
+        if !valid {
+            return Some(CommandOutput::error(
+                raf_core::i18n::t("app.physics", runtime.ui_language),
+                raf_core::i18n::t("runtime.invalid_physics_field", runtime.ui_language),
+            ));
+        }
+        runtime.mutate_scene(scene, |scene| {
+            if let Some(node) = scene.get_mut(target) {
+                match field {
+                    "mass" => node.rigid_body.mass = scalar.unwrap(),
+                    "friction" => node.rigid_body.friction = scalar.unwrap(),
+                    "restitution" => node.rigid_body.restitution = scalar.unwrap(),
+                    "angular_damping" => node.rigid_body.angular_damping = scalar.unwrap(),
+                    "gravity_scale" => node.rigid_body.gravity_scale = scalar.unwrap(),
+                    "collision_layer" => node.collider.collision_layer = unsigned.unwrap(),
+                    "collision_mask" => node.collider.collision_mask = unsigned.unwrap(),
+                    _ => {}
+                }
+            }
+        });
+        return None;
+    }
     if let Some(axis) = field.strip_prefix("size.") {
         let node = scene.get(target)?;
         let axis = match axis {
@@ -115,6 +175,36 @@ fn apply_inspector_commit(
             "rotation.z" => {
                 if let Some(value) = parsed {
                     node.rotation.z = value;
+                }
+            }
+            "velocity.x" => {
+                if let Some(value) = parsed.filter(|value| value.is_finite()) {
+                    node.rigid_body.velocity.x = value;
+                }
+            }
+            "velocity.y" => {
+                if let Some(value) = parsed.filter(|value| value.is_finite()) {
+                    node.rigid_body.velocity.y = value;
+                }
+            }
+            "velocity.z" => {
+                if let Some(value) = parsed.filter(|value| value.is_finite()) {
+                    node.rigid_body.velocity.z = value;
+                }
+            }
+            "angular_velocity.x" => {
+                if let Some(value) = parsed.filter(|value| value.is_finite()) {
+                    node.rigid_body.angular_velocity.x = value;
+                }
+            }
+            "angular_velocity.y" => {
+                if let Some(value) = parsed.filter(|value| value.is_finite()) {
+                    node.rigid_body.angular_velocity.y = value;
+                }
+            }
+            "angular_velocity.z" => {
+                if let Some(value) = parsed.filter(|value| value.is_finite()) {
+                    node.rigid_body.angular_velocity.z = value;
                 }
             }
             "scale.x" => {
@@ -232,6 +322,9 @@ fn apply_console_command(
         );
     }
 
+    let _project_root = crate::commands::game::bind_project_root(
+        project.map(|project| project.path.clone()),
+    );
     let mut selection = SceneSelectionState {
         selected_node: runtime.game_viewport().selected.first().copied(),
         selected_nodes: runtime.game_viewport().selected.clone(),
@@ -248,7 +341,10 @@ fn apply_console_command(
         output
     } else if parsed.name.starts_with("behavior.") || parsed.name.starts_with("prefab.") {
         apply_behavior_command(runtime, scene, project, &parsed)
-    } else if parsed.name.starts_with("game.") {
+    } else if parsed.name.starts_with("game.")
+        || parsed.name.starts_with("world.")
+        || parsed.name == "scene.visual_diff"
+    {
         let viewport = runtime.game_viewport_mut();
         let mut context = GameCommandContext {
             scene,
@@ -631,6 +727,44 @@ pub(crate) fn apply_workbench_intents(
                             });
                         }
                     }
+                } else if let Some(raw) = command.strip_prefix("inspector.physics.joint.add:") {
+                    let mut parts = raw.split(':');
+                    let owner = parts.next().and_then(|value| value.parse::<usize>().ok()).map(SceneNodeId);
+                    let target = parts.next().and_then(|value| value.parse::<usize>().ok()).map(SceneNodeId);
+                    let kind = match parts.next() {
+                        Some("fixed") => Some(raf_core::scene::joint::JointKind::Fixed),
+                        Some("hinge") => Some(raf_core::scene::joint::JointKind::Hinge),
+                        Some("slider") => Some(raf_core::scene::joint::JointKind::Slider),
+                        Some("ball") => Some(raf_core::scene::joint::JointKind::Ball),
+                        Some("spring") => Some(raf_core::scene::joint::JointKind::Spring),
+                        _ => None,
+                    };
+                    if let (Some(owner), Some(target), Some(kind)) = (owner, target, kind) {
+                        if owner != target && scene.is_valid_node(owner) && scene.is_valid_node(target) {
+                            let owner_matrix = scene.world_matrix(owner);
+                            let target_matrix = scene.world_matrix(target);
+                            if target_matrix.determinant().is_finite() && target_matrix.determinant().abs() > 1e-8 {
+                                let inverse = target_matrix.inverse();
+                                let target_anchor = inverse.transform_point3(owner_matrix.transform_point3(glam::Vec3::ZERO));
+                                let target_axis = inverse.transform_vector3(owner_matrix.transform_vector3(glam::Vec3::X)).normalize_or_zero();
+                                let target_uuid = scene.get(target).unwrap().uuid;
+                                let target_unique = scene.iter().filter(|(id, node)| {
+                                    scene.is_valid_node(*id) && node.uuid == target_uuid
+                                }).count() == 1;
+                                let mut joint = raf_core::scene::joint::PhysicsJoint::new(
+                                    target_uuid, kind, glam::Vec3::ZERO, target_anchor,
+                                );
+                                joint.target_axis = target_axis;
+                                if target_unique && joint.is_valid() && scene.get(owner).is_some_and(|node| node.physics_joints.len() < 32 && node.uuid != target_uuid) {
+                                    runtime.mutate_scene(scene, |scene| {
+                                        if let Some(node) = scene.get_mut(owner) {
+                                            node.physics_joints.push(joint);
+                                        }
+                                    });
+                                }
+                            }
+                        }
+                    }
                 } else if let Some(raw) = command.strip_prefix("inspector.collider:") {
                     if let Some((raw_id, raw_kind)) = raw.split_once(':') {
                         if let (Ok(id), Some(collider_type)) =
@@ -650,6 +784,12 @@ pub(crate) fn apply_workbench_intents(
                         {
                             runtime.mutate_scene(scene, |scene| {
                                 if let Some(node) = scene.get_mut(SceneNodeId(id)) {
+                                    if body_type == raf_core::scene::RigidBodyType::Static
+                                        && node.rigid_body.body_type != body_type
+                                    {
+                                        node.rigid_body.velocity = glam::Vec3::ZERO;
+                                        node.rigid_body.angular_velocity = glam::Vec3::ZERO;
+                                    }
                                     node.rigid_body.body_type = body_type;
                                 }
                             });
@@ -688,6 +828,53 @@ pub(crate) fn apply_workbench_intents(
                     };
                     if let Ok(id) = raw_id.parse::<usize>() {
                         let id = SceneNodeId(id);
+                        if key == "inspector.physics.body_owner" {
+                            let parent = scene.get(id).and_then(|node| node.parent);
+                            let parent_uuid = parent.filter(|parent| scene.is_valid_node(*parent))
+                                .and_then(|parent| scene.get(parent))
+                                .filter(|parent| parent.rigid_body.enabled && parent.collider.body_owner.is_none())
+                                .map(|parent| parent.uuid)
+                                .filter(|uuid| scene.iter().filter(|(candidate, node)| {
+                                    scene.is_valid_node(*candidate) && node.uuid == *uuid
+                                }).count() == 1);
+                            let child_has_body = scene.get(id).is_some_and(|node| node.rigid_body.enabled);
+                            if value && (parent_uuid.is_none() || child_has_body) {
+                                console_outputs.push(CommandOutput::error(
+                                    raf_core::i18n::t("app.physics", runtime.ui_language),
+                                    raf_core::i18n::t("runtime.invalid_compound_owner", runtime.ui_language),
+                                ));
+                                continue;
+                            }
+                            runtime.mutate_scene(scene, |scene| {
+                                if let Some(node) = scene.get_mut(id) {
+                                    node.collider.body_owner = if value { parent_uuid } else { None };
+                                }
+                            });
+                            continue;
+                        }
+                        if key == "inspector.physics.enabled" && value
+                            && scene.get(id).is_some_and(|node| node.collider.body_owner.is_some())
+                        {
+                            console_outputs.push(CommandOutput::error(
+                                raf_core::i18n::t("app.physics", runtime.ui_language),
+                                raf_core::i18n::t("runtime.invalid_compound_owner", runtime.ui_language),
+                            ));
+                            continue;
+                        }
+                        if key == "inspector.physics.enabled" && !value {
+                            let owner = scene.get(id).map(|node| node.uuid);
+                            let has_dependents = scene.iter().any(|(candidate, node)| {
+                                scene.is_valid_node(candidate) && owner.is_some()
+                                    && node.collider.body_owner == owner
+                            });
+                            if has_dependents {
+                                console_outputs.push(CommandOutput::error(
+                                    raf_core::i18n::t("app.physics", runtime.ui_language),
+                                    raf_core::i18n::t("runtime.compound_owner_in_use", runtime.ui_language),
+                                ));
+                                continue;
+                            }
+                        }
                         if matches!(
                             key,
                             "inspector.shadows.casts" | "inspector.shadows.receives"
@@ -744,6 +931,13 @@ pub(crate) fn apply_workbench_intents(
                                 "inspector.audio.looping" => node.audio_source.looping = value,
                                 "inspector.physics.enabled" => node.rigid_body.enabled = value,
                                 "inspector.physics.gravity" => node.rigid_body.use_gravity = value,
+                                "inspector.physics.character" => node.rigid_body.is_character = value,
+                                "inspector.physics.translation_lock_x" => node.rigid_body.translation_locks[0] = value,
+                                "inspector.physics.translation_lock_y" => node.rigid_body.translation_locks[1] = value,
+                                "inspector.physics.translation_lock_z" => node.rigid_body.translation_locks[2] = value,
+                                "inspector.physics.rotation_lock_x" => node.rigid_body.rotation_locks[0] = value,
+                                "inspector.physics.rotation_lock_y" => node.rigid_body.rotation_locks[1] = value,
+                                "inspector.physics.rotation_lock_z" => node.rigid_body.rotation_locks[2] = value,
                                 "inspector.physics.trigger" => node.rigid_body.is_trigger = value,
                                 _ => {}
                             }
@@ -854,6 +1048,8 @@ pub(crate) fn apply_workbench_intents(
                             if let Some(node) = scene.get_mut(id) {
                                 if key == "inspector.audio.volume" {
                                     node.audio_source.volume = value;
+                                } else if key == "inspector.physics.damping" {
+                                    node.rigid_body.damping = value;
                                 }
                             }
                         });

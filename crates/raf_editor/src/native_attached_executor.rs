@@ -5,6 +5,7 @@
 //! revision responses; document mutation remains in the domain controllers.
 
 use raf_core::agent_context::{self, AgentObservationResult};
+use raf_core::config::EngineSettings;
 use raf_core::capabilities::{CapabilityCatalog, CapabilityDefinition};
 use raf_core::i18n::t;
 use raf_core::project::Project;
@@ -16,12 +17,12 @@ use raf_core::{
     Language, TransactionId, TransactionLedger, UndoToken,
 };
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::agent_artifacts::capture_viewport_artifact;
 use crate::agent_context::{resolve_target, AgentObservationContext};
 use crate::agent_executor::{capture_request, capture_target_values};
-use crate::agent_scene_capture::capture_scene_angle;
+use crate::agent_scene_capture::{capture_scene_angle, stitch_contact_sheet};
 use crate::attached::{AttachedCommandHost, PendingAttachedCommand};
 use crate::commands::game::{
     GameCommandContext, GameViewportPort, HeadlessGameViewportPort, SceneSelectionState,
@@ -49,10 +50,11 @@ struct NativeElectronicsUiCommandExecutor<'a> {
     editor: &'a mut NativeElectronicsEditor,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct AttachedPollResult {
     pub changed: bool,
     pub document_saved: bool,
+    pub open_project: Option<PathBuf>,
 }
 
 impl ParsedCommandExecutor for NativeElectronicsUiCommandExecutor<'_> {
@@ -169,6 +171,11 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
     }
 
     fn execute_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
+        let _project_root = crate::commands::game::bind_project_root(
+            self.assets_root
+                .as_deref()
+                .and_then(|path| path.parent().map(Path::to_path_buf)),
+        );
         if command.name.starts_with("lighting.") {
             return crate::commands::lighting::execute(command, self.scene);
         }
@@ -208,6 +215,11 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
     }
 
     fn preview_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
+        let _project_root = crate::commands::game::bind_project_root(
+            self.assets_root
+                .as_deref()
+                .and_then(|path| path.parent().map(Path::to_path_buf)),
+        );
         let mut scene = self.scene.clone();
         if crate::commands::ui::supports(&command.name) {
             return crate::commands::ui::execute(command, self.assets_root.as_deref(), true);
@@ -227,6 +239,94 @@ impl ParsedCommandExecutor for NativeGameCommandExecutor<'_> {
         }
         if command.name == "script.write" {
             return crate::commands::script::preview_write(command);
+        }
+        if command.name.starts_with("world.brief") {
+            let action = command
+                .structured_arg("action")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| {
+                    if command.name.ends_with(".write") {
+                        "write"
+                    } else {
+                        "read"
+                    }
+                });
+            if action.eq_ignore_ascii_case("write") || action.eq_ignore_ascii_case("set") {
+                return CommandOutput::info(
+                    "World brief preview",
+                    vec!["No project file was written.".to_string()],
+                    serde_json::json!({
+                        "ok": true,
+                        "preview": true,
+                        "changed": false,
+                        "action": "write",
+                        "brief": command.structured_arg("brief").cloned().or_else(|| command.structured_arg("content").cloned()),
+                    }),
+                );
+            }
+        }
+        if command.name.starts_with("world.recipe") {
+            let action = command
+                .structured_arg("action")
+                .and_then(Value::as_str)
+                .unwrap_or("list")
+                .to_ascii_lowercase();
+            if matches!(
+                action.as_str(),
+                "save" | "delete" | "remove" | "apply" | "instantiate"
+            ) {
+                return CommandOutput::info(
+                    "World recipe preview",
+                    vec!["No recipe file was written or removed.".to_string()],
+                    serde_json::json!({
+                        "ok": true,
+                        "preview": true,
+                        "changed": false,
+                        "action": action,
+                        "name": command.structured_arg("name").cloned(),
+                    }),
+                );
+            }
+        }
+        if command.name == "game.commit" {
+            let plan_id = command
+                .structured_arg("plan_id")
+                .and_then(Value::as_str)
+                .or_else(|| command.arg("plan_id"))
+                .unwrap_or_default();
+            return CommandOutput::info(
+                "World plan commit preview",
+                vec![
+                    "No scene state was changed.".to_string(),
+                    format!("plan: {plan_id}"),
+                ],
+                serde_json::json!({
+                    "ok": true,
+                    "preview": true,
+                    "changed": false,
+                    "plan_id": plan_id,
+                }),
+            );
+        }
+        if command.name == "game.cancel" {
+            let plan_id = command
+                .structured_arg("plan_id")
+                .and_then(Value::as_str)
+                .or_else(|| command.arg("plan_id"))
+                .unwrap_or_default();
+            return CommandOutput::info(
+                "World plan cancel preview",
+                vec![
+                    "No plan file was changed.".to_string(),
+                    format!("plan: {plan_id}"),
+                ],
+                serde_json::json!({
+                    "ok": true,
+                    "preview": true,
+                    "changed": false,
+                    "plan_id": plan_id,
+                }),
+            );
         }
         if matches!(
             command.name.as_str(),
@@ -276,12 +376,14 @@ pub(crate) fn poll_attached_commands(
     catalog_pending: bool,
     catalog_error: Option<&str>,
     language: Language,
+    settings: &EngineSettings,
 ) -> AttachedPollResult {
     if pending.is_empty() {
         return AttachedPollResult::default();
     }
     let mut any_changed = false;
     let mut document_saved = false;
+    let mut open_project = None;
     let mut runtime = runtime;
     let save_queue = workbench.as_deref().map(NativeGameWorkbench::agent_save_queue);
     for command in pending {
@@ -289,6 +391,50 @@ pub(crate) fn poll_attached_commands(
         if command.request.name.starts_with("runtime.") {
             attached_host.respond(command, EngineCommandResponse::error(request_id, "Manual runtime control required",
                 "Use native Play controls or the local console. Agent/CLI/MCP runtime activation is disabled."));
+            continue;
+        }
+        if command.request.name.trim_start_matches('/').eq_ignore_ascii_case("project.open") {
+            let path = command
+                .request
+                .params
+                .get("path")
+                .and_then(Value::as_str)
+                .map(PathBuf::from);
+            let Some(path) = path else {
+                attached_host.respond(
+                    command,
+                    EngineCommandResponse::error(
+                        request_id,
+                        "Project open",
+                        "path is required.",
+                    ),
+                );
+                continue;
+            };
+            if !path.join("project.ron").is_file() {
+                attached_host.respond(
+                    command,
+                    EngineCommandResponse::error(
+                        request_id,
+                        "Project open",
+                        format!("No AuraRafi project was found at {}.", path.display()),
+                    ),
+                );
+                continue;
+            }
+            let mut response = metadata_response(
+                request_id,
+                "Project open queued",
+                vec![format!("Opening {}.", path.display())],
+                serde_json::json!({
+                    "queued": true,
+                    "path": path,
+                }),
+                attached_ledger.revision(),
+            );
+            response.ok = true;
+            attached_host.respond(command, response);
+            open_project = Some(path);
             continue;
         }
         let selected = runtime
@@ -322,6 +468,17 @@ pub(crate) fn poll_attached_commands(
                 scene,
                 project,
                 &selected,
+                attached_ledger.revision(),
+                language,
+            );
+            attached_host.respond(command, response);
+            continue;
+        }
+        if is_visual_review_command(&command.request.name) {
+            let response = execute_attached_visual_review(
+                &command.request,
+                project,
+                settings,
                 attached_ledger.revision(),
                 language,
             );
@@ -434,6 +591,51 @@ pub(crate) fn poll_attached_commands(
             continue;
         }
 
+        if is_editor_history_command(&command.request.name) {
+            let normalized = command.request.name.trim_start_matches('/').to_ascii_lowercase();
+            let before = raf_core::agent_context::scene_fingerprint(scene);
+            if normalized == "undo" {
+                runtime.undo(scene);
+            } else {
+                runtime.redo(scene);
+            }
+            let after = raf_core::agent_context::scene_fingerprint(scene);
+            let changed = before != after;
+            if changed {
+                attached_ledger
+                    .observe_document(crate::scene_history::scene_fingerprint(scene));
+                runtime.graphics_mut().request_frame(
+                    raf_render::api_graphic_basic::FrameInvalidation::DOCUMENT
+                        | raf_render::api_graphic_basic::FrameInvalidation::UI,
+                );
+            }
+            let revision = attached_ledger.revision();
+            let mut response = metadata_response(
+                command.request.id,
+                if normalized == "undo" {
+                    "Undo"
+                } else {
+                    "Redo"
+                },
+                vec![if changed {
+                    format!("{normalized} applied to the document history.")
+                } else {
+                    format!("{normalized} had no document history entry to apply.")
+                }],
+                serde_json::json!({
+                    "ok": true,
+                    "history_action": normalized,
+                    "changed": changed,
+                    "revision": revision,
+                }),
+                revision,
+            );
+            response.changed = changed;
+            any_changed |= changed;
+            attached_host.respond(command, response);
+            continue;
+        }
+
         let mut game_before = None;
         let mut game_fingerprint_before = None;
         let response = if project.is_none() {
@@ -521,6 +723,7 @@ pub(crate) fn poll_attached_commands(
     AttachedPollResult {
         changed: any_changed,
         document_saved,
+        open_project,
     }
 }
 
@@ -537,14 +740,21 @@ fn is_metadata_command(name: &str) -> bool {
             | "capabilities.list"
             | "capabilities.search"
             | "project.info"
+            | "project.close"
             | "session.list"
+            | "session.use"
+            | "session.activate"
+            | "undo"
+            | "redo"
             | "workspace.describe"
             | "scene.outline"
+            | "scene.digest"
             | "scene.query"
             | "scene.spatial_map"
             | "scene.spatial"
             | "scene.overlaps"
             | "scene.check_overlaps"
+            | "scene.navigation_audit"
             | "scene.diff"
             | "scene.design_audit"
             | "scene.layout_audit"
@@ -582,10 +792,24 @@ fn is_attached_undo_command(name: &str) -> bool {
     )
 }
 
+fn is_editor_history_command(name: &str) -> bool {
+    matches!(
+        name.trim_start_matches('/').to_ascii_lowercase().as_str(),
+        "undo" | "redo"
+    )
+}
+
 fn is_viewport_capture_command(name: &str) -> bool {
     matches!(
         name.trim_start_matches('/').to_ascii_lowercase().as_str(),
         "viewport.capture" | "viewport.screenshot"
+    )
+}
+
+fn is_visual_review_command(name: &str) -> bool {
+    matches!(
+        name.trim_start_matches('/').to_ascii_lowercase().as_str(),
+        "scene.visual_review" | "scene.vision" | "viewport.review"
     )
 }
 
@@ -719,6 +943,134 @@ fn parse_task_id(params: &Value) -> Option<raf_core::AgentTaskId> {
     uuid::Uuid::parse_str(id).ok().map(raf_core::AgentTaskId)
 }
 
+fn execute_attached_visual_review(
+    request: &EngineCommandRequest,
+    project: Option<&Project>,
+    settings: &EngineSettings,
+    revision: u64,
+    language: Language,
+) -> EngineCommandResponse {
+    let Some(project) = project else {
+        return EngineCommandResponse::error(
+            request.id,
+            t("agent.viewport_capture.no_project", language),
+            t("agent.viewport_capture.no_project_detail", language),
+        );
+    };
+    let mut paths = request
+        .params
+        .get("images")
+        .and_then(Value::as_array)
+        .map(|images| {
+            images
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if let Some(image) = request.params.get("image").and_then(Value::as_str) {
+        paths.insert(0, image.to_string());
+    }
+    paths.truncate(raf_ai::chat_media::MAX_IMAGES);
+    let mut images = Vec::new();
+    let mut warnings = Vec::new();
+    for path in &paths {
+        let relative = path.replace('\\', "/");
+        let safe = !relative.starts_with('/')
+            && !relative.contains(':')
+            && relative
+                .split('/')
+                .all(|component| !matches!(component, "" | "." | ".."))
+            && relative.ends_with(".png");
+        if !safe {
+            warnings.push(format!("Ignored unsafe image reference: {path}"));
+            continue;
+        }
+        match image::image_dimensions(project.path.join(&relative)) {
+            Ok((width, height)) => images.push(raf_ai::chat_media::ChatImage {
+                file: relative,
+                width,
+                height,
+            }),
+            Err(error) => warnings.push(format!("Could not read {path}: {error}")),
+        }
+    }
+    let brief = request
+        .params
+        .get("brief")
+        .cloned()
+        .or_else(|| {
+            std::fs::read(project.path.join(".aura_rafi/world/brief.json"))
+                .ok()
+                .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        })
+        .unwrap_or(Value::Null);
+    let focus = request
+        .params
+        .get("focus")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let reviewer = raf_ai::vision_bridge::select_reviewer(settings);
+    let data = raf_ai::vision_bridge::review_images(
+        reviewer.as_ref(),
+        Some(project.path.as_path()),
+        &images,
+        &brief,
+        focus,
+    );
+    let status = data
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("error")
+        .to_string();
+    let summary = match status.as_str() {
+        "reviewed" => "Visual review completed.",
+        "unavailable" => "Visual review unavailable; captures remain saved as project evidence.",
+        "unstructured" => "The vision reviewer returned unstructured text; no score was accepted.",
+        "invalid" => "The visual review request had no readable capture.",
+        _ => "The visual review call failed.",
+    };
+    let mut response = metadata_response(
+        request.id,
+        summary,
+        warnings.clone(),
+        data,
+        revision,
+    );
+    response.ok = !matches!(status.as_str(), "error" | "invalid");
+    response.warnings = warnings;
+    if status == "unavailable" {
+        response.warnings.push(
+            "No enabled vision-capable model is configured; the captures were not interpreted."
+                .to_string(),
+        );
+    }
+    response.verification = Some(raf_core::VerificationSummary {
+        status: match status.as_str() {
+            "reviewed" => "reviewed",
+            "unavailable" | "unstructured" => "not_checked",
+            _ => "failed",
+        }
+        .to_string(),
+        checks: vec![format!("{} capture(s) submitted.", images.len())],
+        failures: if matches!(status.as_str(), "error" | "invalid") {
+            vec!["The dedicated visual review did not complete.".to_string()]
+        } else {
+            Vec::new()
+        },
+    });
+    for image in &images {
+        response.artifacts.push(ArtifactRef {
+            id: image.file.clone(),
+            kind: "image/png".to_string(),
+            uri: image.file.clone(),
+            label: Some("vision_review_input".to_string()),
+        });
+    }
+    response
+}
+
 fn execute_attached_viewport_capture(
     request: &EngineCommandRequest,
     mut runtime: Option<&mut NativeEditorRuntime>,
@@ -768,6 +1120,162 @@ fn execute_attached_viewport_capture(
             "Viewport capture",
             format!("Capture targets were not found: {}.", unresolved.join(", ")),
         );
+    }
+    let top_down_map = request
+        .params
+        .get("preset")
+        .and_then(Value::as_str)
+        .is_some_and(|preset| {
+            preset.eq_ignore_ascii_case("top_down_map")
+                || preset.eq_ignore_ascii_case("top_down")
+                || preset.eq_ignore_ascii_case("map")
+        })
+        || request
+            .params
+            .get("top_down")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    if top_down_map {
+        let mut map_params = request.params.clone();
+        if map_params.get("root").is_none() {
+            if let Some(target) = requested_targets.first() {
+                map_params["root"] = Value::String(target.clone());
+            }
+        }
+        let result = crate::agent_map_capture::capture_top_down_map(
+            scene,
+            project,
+            selected,
+            &map_params,
+            language,
+        );
+        let mut response = metadata_response(
+            request.id,
+            &result.summary,
+            result.details.clone(),
+            result.data.clone(),
+            revision,
+        );
+        response.ok = result.ok;
+        response.warnings = result.warnings;
+        if let Some(artifact) = result.data.get("artifact").and_then(Value::as_object) {
+            if let (Some(id), Some(kind), Some(uri)) = (
+                artifact.get("id").and_then(Value::as_str),
+                artifact.get("kind").and_then(Value::as_str),
+                artifact.get("uri").and_then(Value::as_str),
+            ) {
+                response.artifacts.push(ArtifactRef {
+                    id: id.to_string(),
+                    kind: kind.to_string(),
+                    uri: uri.to_string(),
+                    label: artifact
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
+        }
+        response.metrics = serde_json::json!({
+            "attached": true,
+            "observation": true,
+            "artifact": true,
+            "top_down_map": true,
+        });
+        return response;
+    }
+    let contact_sheet = request
+        .params
+        .get("preset")
+        .and_then(Value::as_str)
+        .is_some_and(|preset| preset.eq_ignore_ascii_case("contact_sheet"))
+        || request
+            .params
+            .get("contact_sheet")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+    if contact_sheet {
+        let Some(project) = project else {
+            return EngineCommandResponse::error(
+                request.id,
+                "Viewport capture",
+                "A contact sheet requires an active Game project.",
+            );
+        };
+        let mut frames = Vec::new();
+        let mut failures = Vec::new();
+        for capture_view in ["isometric", "front", "right", "top"] {
+            let capture = capture_request(&request.params, capture_view);
+            let graphics = runtime
+                .as_deref_mut()
+                .map(|runtime| runtime.graphics_mut());
+            let result = capture_scene_angle(
+                graphics,
+                scene,
+                Some(project),
+                selected,
+                &focus,
+                &capture,
+                language,
+            );
+            if result.ok {
+                if let Some(uri) = result
+                    .data
+                    .get("artifact")
+                    .and_then(Value::as_object)
+                    .and_then(|artifact| artifact.get("uri"))
+                    .and_then(Value::as_str)
+                {
+                    frames.push(uri.to_string());
+                }
+            } else {
+                failures.push(format!("{capture_view}: {}", result.summary));
+            }
+        }
+        let label = request
+            .params
+            .get("label")
+            .and_then(Value::as_str)
+            .unwrap_or("Contact sheet");
+        let result = match stitch_contact_sheet(project, &frames, label) {
+            Ok(result) => result,
+            Err(error) => {
+                return EngineCommandResponse::error(request.id, "Viewport capture", error)
+            }
+        };
+        let mut response = metadata_response(
+            request.id,
+            &result.summary,
+            result.details.clone(),
+            result.data.clone(),
+            revision,
+        );
+        response.ok = result.ok;
+        response.warnings = result.warnings;
+        response.warnings.extend(failures);
+        if let Some(artifact) = result.data.get("artifact").and_then(Value::as_object) {
+            if let (Some(id), Some(kind), Some(uri)) = (
+                artifact.get("id").and_then(Value::as_str),
+                artifact.get("kind").and_then(Value::as_str),
+                artifact.get("uri").and_then(Value::as_str),
+            ) {
+                response.artifacts.push(ArtifactRef {
+                    id: id.to_string(),
+                    kind: kind.to_string(),
+                    uri: uri.to_string(),
+                    label: artifact
+                        .get("label")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                });
+            }
+        }
+        response.metrics = serde_json::json!({
+            "attached": true,
+            "observation": true,
+            "artifact": true,
+            "contact_sheet": true,
+        });
+        return response;
     }
     let angle_requested = view != "current"
         || frame_scene
@@ -989,7 +1497,12 @@ fn execute_attached_project_save(
         request.id,
         &t("agent.project_save.title", language),
         vec![t("agent.project_save.completed", language)],
-        serde_json::json!({"saved": true, "path": project.path}),
+        serde_json::json!({
+            "saved": true,
+            "path": project.path,
+            "document_saved": true,
+            "waited": request.params.get("wait").and_then(Value::as_bool).unwrap_or(false),
+        }),
         record.revision_after,
     );
     response.transaction_id = Some(record.id);
@@ -1114,11 +1627,13 @@ fn execute_attached_metadata(
         && matches!(
             normalized.as_str(),
             "scene.outline"
+                | "scene.digest"
                 | "scene.query"
                 | "scene.spatial_map"
                 | "scene.spatial"
                 | "scene.overlaps"
                 | "scene.check_overlaps"
+                | "scene.navigation_audit"
                 | "scene.diff"
                 | "scene.design_audit"
                 | "scene.layout_audit"
@@ -1214,6 +1729,87 @@ fn execute_attached_metadata(
                 project_info_value(project),
                 revision,
             )
+        }
+        "project.close" => {
+            let Some(project) = project else {
+                return Some(EngineCommandResponse::error(
+                    request.id,
+                    "Project close",
+                    "No project is open in the attached editor.",
+                ));
+            };
+            let mut response = metadata_response(
+                request.id,
+                "Project remains open",
+                vec![
+                    "The attached editor keeps the live document open; close it from the editor UI."
+                        .to_string(),
+                ],
+                serde_json::json!({
+                    "closed": false,
+                    "detached": true,
+                    "project": project.name,
+                    "reason": "attached_editor_owns_document",
+                }),
+                revision,
+            );
+            response.changed = false;
+            response
+        }
+        "session.use" | "session.activate" => {
+            let Some(project) = project else {
+                return Some(EngineCommandResponse::error(
+                    request.id,
+                    "Session use",
+                    "No project is open in the attached editor.",
+                ));
+            };
+            let target = request
+                .params
+                .get("id")
+                .or_else(|| request.params.get("session"))
+                .or_else(|| request.params.get("name"))
+                .and_then(Value::as_str);
+            let Some(target) = target else {
+                return Some(EngineCommandResponse::error(
+                    request.id,
+                    "Session use",
+                    "Provide id, session or name.",
+                ));
+            };
+            let mut registry =
+                ProjectSessionRegistry::load_or_legacy(&project.path, project.project_type);
+            let Some(session) = registry.sessions.iter().find(|session| {
+                session.id.0.to_string() == target || session.name.eq_ignore_ascii_case(target)
+            }) else {
+                return Some(EngineCommandResponse::error(
+                    request.id,
+                    "Session use",
+                    format!("Session '{target}' was not found."),
+                ));
+            };
+            let selected = session.id;
+            let name = session.name.clone();
+            registry.active_session = selected;
+            if let Err(error) = registry.save(&project.path) {
+                return Some(EngineCommandResponse::error(request.id, "Session use", error));
+            }
+            metadata_response(
+                request.id,
+                "Session activated",
+                vec![format!("Active session: {name}.")],
+                serde_json::json!({"active_session": selected, "name": name}),
+                revision,
+            )
+        }
+        "undo" | "redo" => {
+            let mut response = EngineCommandResponse::error(
+                request.id,
+                "Document history",
+                "Undo and redo require the attached runtime host; use transaction.undo with a scoped token or the editor history controls.",
+            );
+            response.revision = revision;
+            response
         }
         "session.list" => {
             let Some(project) = project else {
@@ -1329,6 +1925,11 @@ fn execute_attached_metadata(
             agent_context::scene_outline(scene, &request.params, selected),
             revision,
         ),
+        "scene.digest" => observation_metadata_response(
+            request.id,
+            agent_context::scene_digest(scene, project_assets, &request.params, selected),
+            revision,
+        ),
         "scene.query" => observation_metadata_response(
             request.id,
             agent_context::scene_query(scene, &request.params, selected),
@@ -1342,6 +1943,11 @@ fn execute_attached_metadata(
         "scene.overlaps" | "scene.check_overlaps" => observation_metadata_response(
             request.id,
             agent_context::scene_check_overlaps(scene, &request.params, selected),
+            revision,
+        ),
+        "scene.navigation_audit" => observation_metadata_response(
+            request.id,
+            agent_context::scene_navigation_audit(scene, &request.params, selected),
             revision,
         ),
         "scene.diff" => {

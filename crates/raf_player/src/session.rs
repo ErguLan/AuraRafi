@@ -764,6 +764,7 @@ impl PlayerSession {
         if let Err(error)=self.game_ui.world_commands(host,&mut frame,cpu,self.settings.language){
             if self.last_diagnostics.len()<256 {self.last_diagnostics.push(error);}
         }
+        crate::physics_debug::append(&mut frame.commands, world);
         let output = self.device.as_mut()?.execute_scene_frame(&frame);
         let canvas = EditorCanvasLayer {
             output: Arc::new(output),

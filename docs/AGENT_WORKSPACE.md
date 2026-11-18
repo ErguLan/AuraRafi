@@ -243,14 +243,14 @@ Channel names and units stay stable within a connection.
 | --- | --- |
 | Editor → board | `{"type":"identify","protocol":1}` |
 | Board → editor | `{"type":"hello","protocol":1,"board":"Arduino Uno","firmware":"lab-1","outputs":[{"id":"led","min":0,"max":1}]}` |
-| Board → editor | `{"type":"sample","channel":"analog","value":311,"unit":"count"}` |
+| Board → editor | `{"type":"sample","channel":"analog","value":1.0024,"unit":"V"}` |
 | Editor → board | `{"type":"set","output":"led","value":1,"id":1}` |
 | Board → editor | `{"type":"ack","id":1,"ok":true}` |
 
 Advertise only outputs the firmware handles. Send an ACK after applying the
-output or `ok:false` if rejected. A missing ACK leaves the state unknown.
-Disconnect stops the worker. The firmware owns safe output behavior after
-disconnect.
+output or `ok:false` if rejected. A missing ACK leaves the state unknown. Link
+loss stops the capture and starts a bounded three-attempt reconnect; a manual
+disconnect cancels it. The firmware owns safe output behavior after disconnect.
 
 Firmware can advertise OTA preparation with
 `"ota":{"target":"esp32","max_image_bytes":1310720}` in its hello. The editor
@@ -259,9 +259,10 @@ exports a manifest. The firmware updater validates the image and target and
 handles installation.
 
 The [reference sketch](../examples/electronics/raf_serial_lab/raf_serial_lab.ino)
-reports uncalibrated ADC counts on Arduino Uno and classic ESP32 development
-boards. Set `RAF_ADC_PIN` and optionally `RAF_LED_PIN` for the actual board.
-Use a shared ground and keep the input within the ADC range.
+reports an uncalibrated ADC voltage estimate on Arduino Uno and classic ESP32
+development boards, using the `V` unit so it can be compared with a DC probe.
+Set `RAF_ADC_PIN`, `RAF_ADC_REFERENCE_VOLTS` and optionally `RAF_LED_PIN` for the
+actual board. Use a shared ground and keep the input within the ADC range.
 
 ## Boundaries
 

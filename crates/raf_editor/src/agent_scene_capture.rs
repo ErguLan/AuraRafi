@@ -190,7 +190,12 @@ pub(crate) fn capture_scene_angle(
             }],
         }),
     );
-    result.references.push(uri);
+    result.references.push(uri.clone());
+    result.artifacts.push(json!({
+        "kind": "image/png",
+        "uri": uri,
+        "role": "scene_capture",
+    }));
     result
         .warnings
         .push(t(language, "agent.viewport_capture.offscreen_note"));
@@ -372,6 +377,95 @@ fn save_capture(
         .map_err(|error| error.to_string())
 }
 
+/// Stitch two to four single-angle captures into one bounded contact sheet.
+/// The Agent needs scale, silhouette and occlusion evidence in one image slot;
+/// four separate PNGs otherwise compete with user references for the provider
+/// image budget.
+pub(crate) fn stitch_contact_sheet(
+    project: &Project,
+    uris: &[String],
+    label: &str,
+) -> Result<AgentToolResult, String> {
+    if uris.len() < 2 || uris.len() > 4 {
+        return Err("A contact sheet requires between two and four captures.".to_string());
+    }
+    const CELL_WIDTH: u32 = 640;
+    const CELL_HEIGHT: u32 = 360;
+    let mut cells = Vec::with_capacity(uris.len());
+    for uri in uris {
+        let path = project.path.join(Path::new(uri));
+        let image = image::open(&path)
+            .map_err(|error| format!("Could not read capture {uri}: {error}"))?
+            .to_rgba8();
+        cells.push(image::imageops::resize(
+            &image,
+            CELL_WIDTH,
+            CELL_HEIGHT,
+            image::imageops::FilterType::Triangle,
+        ));
+    }
+    let columns = 2u32;
+    let rows = ((cells.len() as u32) + columns - 1) / columns;
+    let mut sheet = image::RgbaImage::from_pixel(
+        columns * CELL_WIDTH,
+        rows * CELL_HEIGHT,
+        image::Rgba([20, 20, 22, 255]),
+    );
+    for (index, cell) in cells.iter().enumerate() {
+        let x = (index as u32 % columns) * CELL_WIDTH;
+        let y = (index as u32 / columns) * CELL_HEIGHT;
+        image::imageops::overlay(&mut sheet, cell, x as i64, y as i64);
+    }
+    let id = Uuid::new_v4().to_string();
+    let relative_path = format!(".aura_rafi/agent_artifacts/contact-{id}.png");
+    let absolute_path = project.path.join(Path::new(&relative_path));
+    if let Some(parent) = absolute_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    sheet
+        .save_with_format(&absolute_path, image::ImageFormat::Png)
+        .map_err(|error| error.to_string())?;
+    let uri = relative_path.replace('\\', "/");
+    let mut result = AgentToolResult::success(
+        format!("Contact sheet with {} angles.", uris.len()),
+        json!({
+            "artifact": {
+                "id": id,
+                "kind": "image/png",
+                "uri": uri.clone(),
+                "label": label,
+                "contact_sheet": true,
+            },
+            "frames": uris.iter().enumerate().map(|(index, uri)| json!({
+                "index": index,
+                "uri": uri,
+            })).collect::<Vec<_>>(),
+            "width": columns * CELL_WIDTH,
+            "height": rows * CELL_HEIGHT,
+            "visual_evidence": [{
+                "file": uri.clone(),
+                "width": columns * CELL_WIDTH,
+                "height": rows * CELL_HEIGHT,
+                "label": label,
+            }],
+        }),
+    );
+    result.references.push(uri);
+    for frame in uris {
+        result.artifacts.push(json!({
+            "kind": "image/png",
+            "uri": frame,
+            "role": "contact_frame",
+        }));
+    }
+    result.artifacts.push(json!({
+        "kind": "image/png",
+        "uri": result.data["artifact"]["uri"],
+        "role": "contact_sheet",
+    }));
+    Ok(result)
+}
+
 fn failure(language: Language, summary_key: &str, detail_key: &str) -> AgentToolResult {
     let mut result = AgentToolResult::success(t(language, summary_key), json!({}));
     result.ok = false;
@@ -387,6 +481,44 @@ fn t(language: Language, key: &str) -> String {
 mod tests {
     use super::*;
     use raf_core::scene::Primitive;
+
+    #[test]
+    fn contact_sheet_stitches_two_frames_into_a_bounded_png() {
+        let root = std::env::temp_dir().join(format!(
+            "raf-contact-sheet-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let project = raf_core::project::Project::create(
+            "ContactDemo",
+            raf_core::project::ProjectType::Game,
+            &root,
+        )
+        .unwrap();
+        let artifact_dir = project.path.join(".aura_rafi/agent_artifacts");
+        std::fs::create_dir_all(&artifact_dir).unwrap();
+        let mut uris = Vec::new();
+        for index in 0..2 {
+            let uri = format!(".aura_rafi/agent_artifacts/frame-{index}.png");
+            let image = image::RgbaImage::from_pixel(
+                320,
+                180,
+                image::Rgba([40 + index as u8 * 40, 90, 140, 255]),
+            );
+            image
+                .save_with_format(project.path.join(&uri), image::ImageFormat::Png)
+                .unwrap();
+            uris.push(uri);
+        }
+        let result = stitch_contact_sheet(&project, &uris, "Test sheet").expect("sheet");
+        assert!(result.ok);
+        let sheet_uri = result.data["artifact"]["uri"].as_str().unwrap();
+        let sheet = image::open(project.path.join(sheet_uri)).unwrap();
+        assert_eq!(sheet.width(), 1280);
+        assert_eq!(sheet.height(), 360);
+        assert_eq!(result.artifacts.len(), 3);
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn front_and_isometric_framing_target_the_selection() {

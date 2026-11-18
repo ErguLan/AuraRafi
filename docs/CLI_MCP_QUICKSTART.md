@@ -73,6 +73,17 @@ raf attach --project D:\Games\HorseDemo viewport capture --json --params '{"view
 raf attach --project D:\Games\HorseDemo viewport capture --json --params '{"view":"front","frame":"scene"}'
 ```
 
+For spatial planning, generate a metric top-down map with bounds, colliders,
+grid and labels. The response includes the PNG plus structured entity, collider,
+bounds, grid and label metadata:
+
+```text
+raf attach --project D:\Games\HorseDemo scene map --json --params '{"width":1200,"overlays":["bounds","colliders","grid","labels"],"grid":1.0}'
+```
+
+The same artifact is available through `raf_viewport_capture` with
+`preset=top_down_map` and through the typed `raf_scene_top_down_map` MCP tool.
+
 The response references a PNG saved inside the project at
 `.aura_rafi/agent_artifacts/`. `view=current` reads the last rendered editor
 frame; named angles render a read-only offscreen capture. The MCP adapter
@@ -182,6 +193,43 @@ instead of duplicating them:
 
     raf attach --project D:\Games\HorseDemo command game.reconcile --json --params '{"groups":[{"name":"Shelves","stable_key":"store.shelves"}],"entities":[{"kind":"cube","name":"Shelf_Left","stable_key":"store.shelf.left","parent":"key:store.shelves"}]}' --confirm --idempotency-key shelves-reconcile-001
 
+### World Program: plan, preview and commit
+
+A large world should be compiled as one declarative program instead of hundreds
+of individual tool calls. The program supports built-in kits (`wall`, `floor`,
+`door`, `shelf`, `checkout`, `street_lamp`, `tree`, `bench`, `crate`, `platform`,
+`stairs`, `checkpoint`, `car`, `aisle`, `spawn`, `goal`), custom archetypes,
+grids, paths, deterministic scatter, stable keys and design profiles:
+
+```text
+raf attach --project D:\Games\Harbor scene program --json --params @world.json
+raf attach --project D:\Games\Harbor scene commit --json --params '{"plan_id":"plan_..."}' --confirm
+```
+
+`scene program` never mutates the scene. It returns a persistent `plan_id`, a
+plan hash, a preview, design-audit evidence, conservative overlap evidence and
+an optional `.aura_rafi/world/plans/<plan-id>.json` journal. `scene commit`
+checks the scene fingerprint and applies the compiled plan in bounded chunks
+(32 groups and 128 entities per chunk) so a multi-thousand-entity world is not
+rejected by the interactive `game.build` limit. Every chunk is rolled back if a
+later chunk fails, and the whole plan is still one command, one history entry
+and one scoped undo token at the adapter boundary.
+Repeating `scene commit` returns `replayed: true`; a keyed `mode: "reconcile"`
+program updates stable keys in place instead of duplicating them.
+
+The persistent `world.brief` keeps genre, camera, palette, scale metrics,
+constraints and acceptance criteria across turns:
+
+```text
+raf attach --project D:\Games\Harbor scene brief --json
+raf attach --project D:\Games\Harbor scene brief --json --params '{"action":"write","brief":{"mood":"night","metrics":{"aisle_width":2.4}}}' --confirm
+```
+
+`raf attach scene digest` returns one compact snapshot with counts, bounds,
+cameras, component coverage, semantic roles and optional overlaps. The attached
+CLI also supports `raf undo`, `raf redo`, `raf session use`, and
+`raf project close` (which detaches without killing the editor).
+
 ## 5. Create and validate scripts
 
 Scripting commands use the same attached editor endpoint and write only inside
@@ -264,11 +312,53 @@ Codex, Claude Code, OpenCode, or another MCP client should launch that command
 as a local stdio server. The MCP adapter is thin: it forwards to the same
 command catalog and attached endpoint instead of implementing a second engine.
 It exposes `raf_context` and `raf_capabilities` in addition to the generic
-`raf_command`. It also exposes typed `raf_viewport_capture`, `raf_game_completion_audit`,
-`raf_lighting_*`, `raf_script_*` (including `raf_script_run`), `raf_project_path`,
-and `raf_task_*` tools; attached results include readable text plus a structured
+`raf_command`. It also exposes typed `raf_scene_digest`, `raf_scene_program`,
+`raf_scene_commit`, `raf_scene_patch`, `raf_scene_cancel`, `raf_world_brief`,
+`raf_world_recipe`, `raf_world_script`, `raf_scene_visual_diff`,
+`raf_project_close`, `raf_session_use`, `raf_undo`, `raf_redo`,
+`raf_viewport_capture` (including `preset=contact_sheet` and
+`preset=top_down_map`), `raf_scene_top_down_map`, `raf_scene_visual_review`,
+`raf_game_completion_audit`, `raf_lighting_*`, `raf_script_*` (including
+`raf_script_run`), `raf_project_path`, and `raf_task_*` tools. Every tool
+publishes read-only/destructive/idempotent annotations and an output schema;
+attached results include readable text plus a structured
 `EngineCommandResponse` with compact model-facing lines and raw detail fields kept
 available to JSON callers. Viewport captures also return the PNG as MCP image content.
+
+Headless `raf mcp serve` intentionally advertises only the tools the headless
+host can execute (inspection, project/session lifecycle and observations).
+Mutation, viewport and task tools appear only in attached mode, so a client does
+not discover operations that can only fail.
+
+Plan compilation returns a `pipeline` object with compile, simulate, budget,
+overlap, design, navigation and assertion gates. World Program operations include
+`group`, `place`, `grid`, `along`, `scatter`, `mirror`, `variant`, `update`,
+`delete` and `assert`. `raf_world_recipe` captures a successful plan as a
+reusable project recipe, `raf_world_script` compiles a sandboxed Rhai authoring
+script that cannot touch files or Runtime (and stores the source under
+`.aura_rafi/world_scripts/`), and `raf_scene_visual_diff` compares before/after
+captures with an annotated PNG artifact.
+
+Plans are cancellable before commit with `raf scene cancel` / `raf_scene_cancel`
+and replaceable incrementally with `raf_scene_patch`. `raf open PATH` launches
+the editor and waits for its live endpoint; `raf mcp serve --attach PATH --launch`
+does both in one step. MCP exposes `raf_set_mode(inspect|plan|active)` to gate
+mutations, `raf_project_open` now switches the attached editor project,
+`raf_project_save` honors `--wait`/`wait:true`, and successful mutations emit
+`notifications/resourcesUpdated`. Resources include `raf://brief`, `raf://plans`,
+`raf://plan/{id}` and `raf://digest`. The MCP `session` parameter is consumed
+before the requested command. Transient provider errors are retried, and
+text-only model observations are persisted per project in
+`.aura_rafi/model_capabilities.json`. In the Agent workspace, evidence cards now show real thumbnails;
+the detail view opens a larger image and can pin a capture to the context so the
+next run receives it as visual evidence.
+
+A dedicated visual reviewer is available as `raf_scene_visual_review` /
+`scene.visual_review`: it selects an enabled vision-capable provider/model,
+inspects one to four capture artifacts and returns structured scores, findings
+and suggested fixes. If no vision model is configured it returns
+`status: "unavailable"`, `fallback: "vision_unavailable"` and leaves the
+captures as project evidence. It never starts Play or Runtime.
 
 ## Safety rules
 

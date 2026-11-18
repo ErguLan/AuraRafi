@@ -5,7 +5,7 @@
 //! command line and no transport is spawned inside the editor.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use raf_ai::agent_runtime::{AgentToolKind, AgentToolResult, ToolExecutionMode, ToolExecutor};
 use raf_ai::openai_client::{OpenAiFunction, OpenAiTool};
@@ -70,6 +70,10 @@ pub struct AgentToolPack {
 }
 
 impl AgentToolPack {
+    fn has_tool(&self, name: &str) -> bool {
+        self.routes.contains_key(name)
+    }
+
     fn push_native(
         &mut self,
         name: &str,
@@ -78,6 +82,9 @@ impl AgentToolPack {
         kind: AgentToolKind,
         command_name: Option<&str>,
     ) {
+        if self.has_tool(name) {
+            return;
+        }
         let description = localized_native_tool_description(name, description, self.language);
         self.tools.push(openai_tool(name, &description, parameters));
         self.routes.insert(
@@ -96,6 +103,9 @@ impl AgentToolPack {
         kind: AgentToolKind,
     ) {
         let name = sanitize_tool_name(&command.name);
+        if self.has_tool(&name) {
+            return;
+        }
         self.tools
             .push(command_to_openai_tool(&name, command, language));
         self.routes.insert(
@@ -165,7 +175,19 @@ pub(crate) fn capture_request(arguments: &Value, view: &str) -> SceneCaptureRequ
 fn order_contextual_tools(tools: &mut Vec<OpenAiTool>) {
     const PRIORITY: &[&str] = &[
         "capabilities_search",
+        "capabilities_call",
         "project_summary",
+        "scene_digest",
+        "world_brief",
+        "scene_program",
+        "scene_commit",
+        "scene_cancel",
+        "scene_patch",
+        "scene_recipe",
+        "scene_authoring_script",
+        "scene_visual_diff",
+        "scene_camera",
+        "scene_component",
         "electronics_lab_simulate",
         "electronics_lab_probe",
         "electronics_lab_signals",
@@ -173,11 +195,13 @@ fn order_contextual_tools(tools: &mut Vec<OpenAiTool>) {
         "scene_query",
         "scene_spatial_map",
         "scene_check_overlaps",
+        "scene_navigation_audit",
         "scene_diff",
         "scene_design_audit",
         "scene_inspect",
         "selection_get",
         "viewport_capture",
+        "scene_visual_review",
         "lighting_inspect",
         "lighting_set",
         "lighting_reset",
@@ -234,6 +258,7 @@ pub struct AgentToolExecutor<'a> {
     pub(crate) asset_studio: &'a raf_core::ai::ExternalAssetStudio,
     pub(crate) image_provider: Option<raf_ai::AssetImageProvider>,
     pub(crate) image_model: String,
+    pub(crate) vision_reviewer: Option<raf_ai::vision_bridge::VisionReviewer>,
     pub scene: &'a mut SceneGraph,
     pub selection: &'a mut SceneSelectionState,
     pub viewport: &'a mut dyn GameViewportPort,
@@ -279,50 +304,52 @@ impl AgentToolExecutor<'_> {
                         if kind==AgentToolKind::Read || mode!=AgentMode::Inspect {if let Some(command)=catalog.find(name){pack.push_catalog(command,language,kind);}}
                     }
                 }
-                for &name in if intent.lighting || intent.authoring {
-                    &["lighting.inspect", "lighting.set", "lighting.reset"][..]
-                } else {
-                    &[][..]
-                } {
+                for &name in &["lighting.inspect", "lighting.set", "lighting.reset"][..] {
                     let kind = if name == "lighting.inspect" {
                         AgentToolKind::Read
                     } else {
                         AgentToolKind::Mutation
                     };
-                    if kind == AgentToolKind::Read
-                        || (mode != AgentMode::Inspect && intent.authoring)
-                    {
+                    if kind == AgentToolKind::Read || mode != AgentMode::Inspect {
                         if let Some(command) = catalog.find(name) {
                             pack.push_catalog(command, language, kind);
                         }
                     }
                 }
-                if mode != AgentMode::Inspect && intent.authoring {
-                    add_game_mutation_tools(&mut pack, intent);
+                // A prompt such as "un supermercado" has no explicit authoring
+                // verb, but it still needs the construction surface. The core
+                // pack is therefore mode-gated, not keyword-gated.
+                if mode != AgentMode::Inspect {
+                    add_game_mutation_tools(
+                        &mut pack,
+                        PromptIntent {
+                            authoring: true,
+                            ..intent
+                        },
+                    );
+                    add_game_program_tools(&mut pack);
                 }
-                if intent.scripting || intent.gameplay {
-                    for name in [
-                        "script.create",
-                        "script.write",
-                        "script.attach",
-                        "script.detach",
-                        "script.validate",
-                        "script.run",
-                        "behavior.attach",
-                        "behavior.detach",
-                        "behavior.parameter",
-                        "prefab.capture",
-                        "prefab.instantiate",
-                    ] {
-                        if let Some(command) = catalog.find(name) {
-                            let kind = if matches!(name, "script.validate" | "script.run") {
-                                AgentToolKind::Read
-                            } else {
-                                AgentToolKind::Mutation
-                            };
-                            if kind == AgentToolKind::Read || mode != AgentMode::Inspect {
-                                pack.push_catalog(command, language, kind);
-                            }
+                for name in [
+                    "script.create",
+                    "script.write",
+                    "script.attach",
+                    "script.detach",
+                    "script.validate",
+                    "script.run",
+                    "behavior.attach",
+                    "behavior.detach",
+                    "behavior.parameter",
+                    "prefab.capture",
+                    "prefab.instantiate",
+                ] {
+                    if let Some(command) = catalog.find(name) {
+                        let kind = if matches!(name, "script.validate" | "script.run") {
+                            AgentToolKind::Read
+                        } else {
+                            AgentToolKind::Mutation
+                        };
+                        if kind == AgentToolKind::Read || mode != AgentMode::Inspect {
+                            pack.push_catalog(command, language, kind);
                         }
                     }
                 }
@@ -406,7 +433,12 @@ impl AgentToolExecutor<'_> {
         // Perception, gameplay, lighting, and capture must coexist for a
         // complete game request. The pack stays bounded, but 26 was too small
         // to keep scripting and the visual loop in the same turn.
-        const MAX_CONTEXTUAL_TOOLS: usize = 36;
+        // The pack now carries perception, a complete authoring core, World
+        // Program tools, scripting and visual verification in one run. Fifty-two
+        // compact schemas stay below the former context blow-up while avoiding
+        // the old failure mode where a gameplay prompt dropped scene_build or
+        // game_completion_audit from the same turn.
+        const MAX_CONTEXTUAL_TOOLS: usize = 60;
         if pack.tools.len() > MAX_CONTEXTUAL_TOOLS {
             pack.tools.truncate(MAX_CONTEXTUAL_TOOLS);
             let visible = pack
@@ -626,11 +658,20 @@ impl ToolExecutor for AgentToolExecutor<'_> {
             .ok()
     }
     fn is_pending(&self, call_id: &str) -> bool {
-        self.asset_tools.is_pending(call_id) || self.electronics.as_deref()
-            .is_some_and(|editor| editor.lab.pending_dc_tool(call_id))
+        raf_ai::vision_bridge::is_review_pending(call_id)
+            || self.asset_tools.is_pending(call_id)
+            || self.electronics.as_deref()
+                .is_some_and(|editor| editor.lab.pending_dc_tool(call_id))
     }
 
     fn poll_pending(&mut self, call_id: &str) -> Option<Result<AgentToolResult, String>> {
+        if raf_ai::vision_bridge::is_review_pending(call_id) {
+            let data = raf_ai::vision_bridge::poll_review(call_id)?;
+            return Some(Ok(visual_review_tool_result(
+                data,
+                self.ledger.revision(),
+            )));
+        }
         if let Some(editor) = self.electronics.as_deref_mut().filter(|editor| editor.lab.pending_dc_tool(call_id)) {
             editor.poll_lab(false);
             let result = editor.lab.take_dc_tool(call_id)?;
@@ -712,6 +753,94 @@ impl ToolExecutor for AgentToolExecutor<'_> {
             );
         }
 
+        if name == "world_brief" {
+            let action = arguments
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("read")
+                .to_ascii_lowercase();
+            if action == "write" && mode != ToolExecutionMode::Apply {
+                let mut result = AgentToolResult::success(
+                    "World brief preview; no project file was written.",
+                    serde_json::json!({
+                        "ok": true,
+                        "preview": true,
+                        "action": "write",
+                        "brief": arguments.get("brief").cloned().or_else(|| arguments.get("content").cloned()),
+                    }),
+                );
+                result.preview = true;
+                return Ok(result);
+            }
+            let _root_guard = crate::commands::game::bind_project_root(
+                self.project.as_ref().map(|project| project.root.clone()),
+            );
+            let parsed = ParsedCommand {
+                raw: "/world.brief".to_string(),
+                name: "world.brief".to_string(),
+                args: std::collections::BTreeMap::new(),
+                positional: Vec::new(),
+                structured_args: Some(arguments),
+            };
+            let mut context = GameCommandContext {
+                scene: self.scene,
+                selection: self.selection,
+                viewport: self.viewport as &mut dyn GameViewportPort,
+            };
+            let output = game::execute("world.brief", &parsed, &mut context);
+            let file_changed = output.changed;
+            let mut result = command_output_to_tool_result(output);
+            // The brief is a project file, not a scene mutation. Do not make
+            // the durable executor save the scene document for this write.
+            result.changed = false;
+            result.data["file_changed"] = Value::Bool(file_changed);
+            result.revision = Some(self.ledger.revision());
+            return Ok(result);
+        }
+
+        if name == "capabilities_call" {
+            let command_name = arguments
+                .get("name")
+                .or_else(|| arguments.get("command"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .ok_or_else(|| "capabilities_call requires a catalog command name.".to_string())?
+                .trim_start_matches('/')
+                .to_ascii_lowercase();
+            if command_name.starts_with("runtime.") {
+                return Err(
+                    "Runtime commands are not available through the authoring harness.".to_string(),
+                );
+            }
+            let command = self
+                .catalog
+                .find(&command_name)
+                .ok_or_else(|| {
+                    format!(
+                        "Unknown capability '{command_name}'. Call capabilities_search first; no command was executed."
+                    )
+                })?
+                .clone();
+            let kind = catalog_tool_kind(&command);
+            if kind == AgentToolKind::Mutation && mode == ToolExecutionMode::Inspect {
+                return Err(format!(
+                    "Capability '{command_name}' is unavailable in Inspect mode."
+                ));
+            }
+            let mut params = arguments
+                .get("params")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if !params.is_object() {
+                return Err("capabilities_call.params must be a JSON object.".to_string());
+            }
+            if matches!(command.name.as_str(), "game.add" | "game.update") {
+                normalize_scene_arguments(&mut params)?;
+            }
+            return self.execute_gateway(call_id, &command.name, params, kind, mode);
+        }
+
         if name == "viewport_capture" {
             let mut view = arguments
                 .get("view")
@@ -749,6 +878,110 @@ impl ToolExecutor for AgentToolExecutor<'_> {
                     }),
                 );
                 result.ok = false;
+                result.revision = Some(self.ledger.revision());
+                return Ok(result);
+            }
+            let top_down_map = arguments
+                .get("preset")
+                .and_then(Value::as_str)
+                .is_some_and(|preset| {
+                    preset.eq_ignore_ascii_case("top_down_map")
+                        || preset.eq_ignore_ascii_case("top_down")
+                        || preset.eq_ignore_ascii_case("map")
+                })
+                || arguments
+                    .get("top_down")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            if top_down_map {
+                let mut map_arguments = arguments.clone();
+                if map_arguments.get("root").is_none() {
+                    if let Some(target) = requested_targets.first() {
+                        map_arguments["root"] = Value::String(target.clone());
+                    }
+                }
+                let mut result = crate::agent_map_capture::capture_top_down_map(
+                    self.scene,
+                    self.project_info,
+                    &self.selection.selected_nodes,
+                    &map_arguments,
+                    self.language,
+                );
+                result.revision = Some(self.ledger.revision());
+                return Ok(result);
+            }
+            let contact_sheet = arguments
+                .get("preset")
+                .and_then(Value::as_str)
+                .is_some_and(|preset| preset.eq_ignore_ascii_case("contact_sheet"))
+                || arguments
+                    .get("contact_sheet")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            if contact_sheet {
+                let Some(project) = self.project_info else {
+                    let mut result = AgentToolResult::success(
+                        "A contact sheet requires an active Game project.",
+                        serde_json::json!({"ok": false, "error": "project_not_found"}),
+                    );
+                    result.ok = false;
+                    result.revision = Some(self.ledger.revision());
+                    return Ok(result);
+                };
+                let mut frames = Vec::new();
+                let mut failures = Vec::new();
+                for capture_view in ["isometric", "front", "right", "top"] {
+                    let request = capture_request(&arguments, capture_view);
+                    let capture = capture_scene_angle(
+                        self.graphics.as_deref_mut(),
+                        self.scene,
+                        self.project_info,
+                        &self.selection.selected_nodes,
+                        &focus,
+                        &request,
+                        self.language,
+                    );
+                    if capture.ok {
+                        if let Some(uri) = capture
+                            .data
+                            .get("artifact")
+                            .and_then(Value::as_object)
+                            .and_then(|artifact| artifact.get("uri"))
+                            .and_then(Value::as_str)
+                        {
+                            frames.push(uri.to_string());
+                        }
+                    } else {
+                        failures.push(format!("{capture_view}: {}", capture.summary));
+                    }
+                }
+                let label = arguments
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Contact sheet");
+                let mut result = match crate::agent_scene_capture::stitch_contact_sheet(
+                    project,
+                    &frames,
+                    label,
+                ) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let mut result = AgentToolResult::success(
+                            "The contact sheet could not be assembled.",
+                            serde_json::json!({
+                                "ok": false,
+                                "frames": frames,
+                                "failures": failures,
+                                "error": error,
+                            }),
+                        );
+                        result.ok = false;
+                        result
+                    }
+                };
+                if !failures.is_empty() {
+                    result.warnings.extend(failures);
+                }
                 result.revision = Some(self.ledger.revision());
                 return Ok(result);
             }
@@ -824,6 +1057,108 @@ impl ToolExecutor for AgentToolExecutor<'_> {
             return Ok(result);
         }
 
+        if name == "scene_visual_review" {
+            let project_root = self.project.as_ref().map(|project| project.root.clone());
+            let mut paths = arguments
+                .get("images")
+                .and_then(Value::as_array)
+                .map(|images| {
+                    images
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            if let Some(image) = arguments.get("image").and_then(Value::as_str) {
+                paths.insert(0, image.to_string());
+            }
+            paths.truncate(raf_ai::chat_media::MAX_IMAGES);
+            let mut images = Vec::new();
+            let mut warnings = Vec::new();
+            if let Some(root) = project_root.as_deref() {
+                for path in &paths {
+                    let relative = path.replace('\\', "/");
+                    let safe = !relative.starts_with('/')
+                        && !relative.contains(':')
+                        && relative
+                            .split('/')
+                            .all(|component| !matches!(component, "" | "." | ".."))
+                        && relative.ends_with(".png");
+                    if !safe {
+                        warnings.push(format!("Ignored unsafe image reference: {path}"));
+                        continue;
+                    }
+                    match image::image_dimensions(root.join(&relative)) {
+                        Ok((width, height)) => images.push(raf_ai::chat_media::ChatImage {
+                            file: relative,
+                            width,
+                            height,
+                        }),
+                        Err(error) => warnings.push(format!(
+                            "Could not read {path}: {error}"
+                        )),
+                    }
+                }
+            }
+            let brief = arguments
+                .get("brief")
+                .cloned()
+                .or_else(|| {
+                    project_root.as_ref().and_then(|root| {
+                        std::fs::read(root.join(".aura_rafi/world/brief.json"))
+                            .ok()
+                            .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+                    })
+                })
+                .unwrap_or(Value::Null);
+            let focus = arguments
+                .get("focus")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            // A dedicated reviewer performs a network call. Start it on a
+            // worker thread and let the Agent runtime poll for the result, so
+            // the editor never freezes while a provider is thinking.
+            if let (Some(reviewer), Some(root)) =
+                (self.vision_reviewer.as_ref(), project_root.as_ref())
+            {
+                let queued = raf_ai::vision_bridge::start_review(
+                    call_id,
+                    reviewer.clone(),
+                    root.clone(),
+                    images.clone(),
+                    brief.clone(),
+                    focus.to_string(),
+                );
+                if queued || raf_ai::vision_bridge::is_review_pending(call_id) {
+                    let mut result = AgentToolResult::success(
+                        "Visual review queued.",
+                        serde_json::json!({
+                            "state": "queued",
+                            "image_count": images.len(),
+                            "model": reviewer.model,
+                            "provider": reviewer.provider_label(),
+                        }),
+                    );
+                    result.revision = Some(self.ledger.revision());
+                    result.verification = Some(serde_json::json!({"status": "pending"}));
+                    return Ok(result);
+                }
+            }
+            let data = raf_ai::vision_bridge::review_images(
+                self.vision_reviewer.as_ref(),
+                project_root.as_deref(),
+                &images,
+                &brief,
+                focus,
+            );
+            let mut result = visual_review_tool_result(data, self.ledger.revision());
+            if !warnings.is_empty() {
+                result.warnings.splice(0..0, warnings);
+            }
+            return Ok(result);
+        }
+
         if name == "scene_diff" {
             let from_revision = arguments
                 .get("from_revision")
@@ -856,6 +1191,8 @@ impl ToolExecutor for AgentToolExecutor<'_> {
                     warnings: Vec::new(),
                     details: Vec::new(),
                     preview: false,
+                    partial: false,
+                    artifacts: Vec::new(),
                 }),
             };
         }
@@ -869,34 +1206,89 @@ impl ToolExecutor for AgentToolExecutor<'_> {
                 .get("query")
                 .and_then(Value::as_str)
                 .unwrap_or_default()
+                .trim()
                 .to_ascii_lowercase();
-            let items = self
-                .routes
+            let domain = self
+                .project
+                .as_ref()
+                .map(|project| match project.project_type {
+                    ProjectType::Game => "game",
+                    ProjectType::Electronics => "electronics",
+                });
+            let mut items = Vec::new();
+            let mut matches = self
+                .catalog
+                .commands
                 .iter()
-                .filter(|(name, route)| {
-                    query.is_empty()
-                        || name.to_ascii_lowercase().contains(&query)
-                        || route
-                            .command_name
-                            .as_deref()
-                            .unwrap_or_default()
-                            .to_ascii_lowercase()
-                            .contains(&query)
+                .filter(|command| {
+                    command.domain == "shared" || Some(command.domain.as_str()) == domain
                 })
-                .map(|(name, route)| {
-                    serde_json::json!({
-                        "tool": name,
-                        "command": route.command_name,
-                        "kind": match route.kind {
-                            AgentToolKind::Read => "read",
-                            AgentToolKind::Mutation => "mutation"
-                        }
-                    })
+                .filter(|command| {
+                    query.is_empty()
+                        || command.name.to_ascii_lowercase().contains(&query)
+                        || command
+                            .aliases
+                            .iter()
+                            .any(|alias| alias.to_ascii_lowercase().contains(&query))
+                        || command.category.to_ascii_lowercase().contains(&query)
+                        || command.domain.to_ascii_lowercase().contains(&query)
+                        || command.description_key.to_ascii_lowercase().contains(&query)
+                        || command
+                            .examples
+                            .iter()
+                            .any(|example| example.to_ascii_lowercase().contains(&query))
                 })
                 .collect::<Vec<_>>();
+            matches.sort_by(|left, right| left.name.cmp(&right.name));
+            for command in matches {
+                if command.name.starts_with("runtime.") {
+                    continue;
+                }
+                if command.domain != "shared" && Some(command.domain.as_str()) != domain {
+                    continue;
+                }
+                let enabled = self.routes.iter().find_map(|(tool, route)| {
+                    (route.command_name.as_deref() == Some(command.name.as_str())).then_some(tool)
+                });
+                let kind = catalog_tool_kind(command);
+                items.push(serde_json::json!({
+                    "tool": enabled,
+                    "command": command.name,
+                    "domain": command.domain,
+                    "category": command.category,
+                    "kind": match kind {
+                        AgentToolKind::Read => "read",
+                        AgentToolKind::Mutation => "mutation"
+                    },
+                    "enabled_in_pack": enabled.is_some(),
+                    "execution": if enabled.is_some() {
+                        "direct_tool"
+                    } else if kind == AgentToolKind::Read || mode != ToolExecutionMode::Inspect {
+                        "capabilities_call"
+                    } else {
+                        "unavailable_in_inspect"
+                    },
+                }));
+                if items.len() >= 96 {
+                    break;
+                }
+            }
+            let enabled_count = items
+                .iter()
+                .filter(|item| item.get("enabled_in_pack").and_then(Value::as_bool) == Some(true))
+                .count();
             return Ok(AgentToolResult::success(
-                format!("Found {} available Agent capabilities.", items.len()),
-                serde_json::json!({"items": items}),
+                format!(
+                    "Found {} capability(ies); {} are already exposed as typed tools and the rest can be called through capabilities_call.",
+                    items.len(),
+                    enabled_count
+                ),
+                serde_json::json!({
+                    "query": query,
+                    "items": items,
+                    "enabled_count": enabled_count,
+                    "next": "Use capabilities_call with an exact command name and params for a capability not exposed as a typed tool.",
+                }),
             ));
         }
 
@@ -929,6 +1321,8 @@ impl ToolExecutor for AgentToolExecutor<'_> {
                     warnings: Vec::new(),
                     details: Vec::new(),
                     preview: mode == ToolExecutionMode::Preview,
+                    partial: false,
+                    artifacts: Vec::new(),
                 });
             }
         };
@@ -985,6 +1379,9 @@ struct AgentParsedExecutor<'a> {
 
 impl AgentParsedExecutor<'_> {
     fn execute_live(&mut self, command: &ParsedCommand) -> CommandOutput {
+        let _project_root = crate::commands::game::bind_project_root(
+            self.project.map(|project| project.root.clone()),
+        );
         if crate::commands::ui::supports(&command.name) {
             let assets=self.project.map(|p|p.root.join("assets"));
             return crate::commands::ui::execute(command,assets.as_deref(),false);
@@ -1060,6 +1457,9 @@ impl ParsedCommandExecutor for AgentParsedExecutor<'_> {
     }
 
     fn preview_parsed(&mut self, command: &ParsedCommand) -> CommandOutput {
+        let _project_root = crate::commands::game::bind_project_root(
+            self.project.map(|project| project.root.clone()),
+        );
         if crate::commands::ui::supports(&command.name) {
             let assets=self.project.map(|p|p.root.join("assets"));
             return crate::commands::ui::execute(command,assets.as_deref(),true);
@@ -1078,6 +1478,52 @@ impl ParsedCommandExecutor for AgentParsedExecutor<'_> {
         }
         if command.name == "script.write" {
             return crate::commands::script::preview_write(command);
+        }
+        if command.name.starts_with("world.brief") {
+            let action = command
+                .structured_arg("action")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| {
+                    if command.name.ends_with(".write") {
+                        "write"
+                    } else {
+                        "read"
+                    }
+                });
+            if action.eq_ignore_ascii_case("write") || action.eq_ignore_ascii_case("set") {
+                return CommandOutput::info(
+                    "World brief preview",
+                    vec!["No project file was written.".to_string()],
+                    serde_json::json!({
+                        "ok": true,
+                        "preview": true,
+                        "changed": false,
+                        "action": "write",
+                        "brief": command.structured_arg("brief").cloned().or_else(|| command.structured_arg("content").cloned()),
+                    }),
+                );
+            }
+        }
+        if command.name == "game.commit" {
+            let plan_id = command
+                .structured_arg("plan_id")
+                .and_then(Value::as_str)
+                .or_else(|| command.arg("plan_id"))
+                .unwrap_or_default();
+            return CommandOutput::info(
+                "World plan commit preview",
+                vec![
+                    "No scene state was changed.".to_string(),
+                    format!("plan: {plan_id}"),
+                ],
+                serde_json::json!({
+                    "ok": true,
+                    "preview": true,
+                    "changed": false,
+                    "plan_id": plan_id,
+                    "next": "Call scene_commit with Apply permission to execute the compiled plan.",
+                }),
+            );
         }
         if command.name.starts_with("game.") {
             let mut scene = self.scene.clone();
@@ -1149,6 +1595,19 @@ fn add_project_read_tools(
             None,
         );
         pack.push_native(
+            "scene_digest",
+            "Read one compact but complete scene snapshot: counts, hierarchy roots, world bounds, cameras, component coverage, top semantic roles/tags, optional overlaps and a cursor for large scopes. Use this before planning a world instead of chaining many read calls.",
+            paginated_schema(&[
+                ("root", string_schema("Optional root ID, UUID, name, or path.")),
+                (
+                    "check_collisions",
+                    boolean_schema("Include a bounded overlap summary; defaults to false."),
+                ),
+            ]),
+            AgentToolKind::Read,
+            None,
+        );
+        pack.push_native(
             "scene_query",
             "Find scene entities by name, path, kind, semantic role, exact tags, source asset, or current selection without scanning files.",
             paginated_schema(&[
@@ -1191,6 +1650,22 @@ fn add_project_read_tools(
                     ("include_hidden".to_string(), boolean_schema("Include hidden renderable entities.")),
                     ("margin".to_string(), number_schema("Extra separation after repair.", 0.0, 100.0)),
                     ("max_pairs".to_string(), integer_schema("Maximum overlap pairs returned.", 1, 256)),
+                ]),
+                &[],
+            ),
+            AgentToolKind::Read,
+            None,
+        );
+        pack.push_native(
+            "scene_navigation_audit",
+            "Static walkability and reachability audit. Samples authored AABBs into a bounded grid, expands obstacles by an agent radius and BFS-checks spawn-to-goal reachability without starting Play or Runtime.",
+            object_schema(
+                Map::from_iter([
+                    ("root".to_string(), string_schema("Optional root ID, UUID, name, or path.")),
+                    ("spawn".to_string(), string_schema("Spawn entity target; inferred from spawn-tagged nodes when omitted.")),
+                    ("goals".to_string(), serde_json::json!({"type":"array","items":{"type":"string"},"maxItems":32,"description":"Goal entities; inferred from goal/checkpoint/exit tags when omitted."})),
+                    ("resolution".to_string(), number_schema("Grid resolution in metres.", 0.1, 8.0)),
+                    ("agent_radius".to_string(), number_schema("Agent clearance radius in metres.", 0.0, 8.0)),
                 ]),
                 &[],
             ),
@@ -1270,12 +1745,40 @@ fn add_project_read_tools(
         );
         pack.push_native(
             "viewport_capture",
-            "Capture the Game scene as a PNG artifact for visual inspection. Use view=current for the last editor frame or front/back/left/right/top/bottom/isometric/custom to render a framed angle. Targets default to the current selection; frame=scene fits the whole scene. The image is automatically attached to your next model turn when the model accepts images. This never starts Play mode or changes the scene.",
+            "Capture the Game scene as a PNG artifact for visual inspection. Use view=current for the last editor frame or front/back/left/right/top/bottom/isometric/custom to render a framed angle. preset=contact_sheet renders four angles into one bounded image. preset=top_down_map renders a metric XZ schematic with world bounds, collider outlines, grid and labels, and returns structured map metadata. Targets default to the current selection; frame=scene fits the whole scene. Images are automatically attached to your next model turn when the model accepts images. This never starts Play mode or changes the scene.",
             object_schema(
                 Map::from_iter([
                     (
                         "refresh".to_string(),
                         boolean_schema("Request a fresh live frame before the capture."),
+                    ),
+                    (
+                        "preset".to_string(),
+                        enum_schema(
+                            "Capture preset. contact_sheet renders four angles into one bounded image; top_down_map renders a metric XZ schematic with bounds, colliders, grid and labels.",
+                            &["single", "contact_sheet", "top_down_map"],
+                        ),
+                    ),
+                    (
+                        "contact_sheet".to_string(),
+                        boolean_schema("Shortcut for preset=contact_sheet."),
+                    ),
+                    (
+                        "top_down".to_string(),
+                        boolean_schema("Shortcut for preset=top_down_map."),
+                    ),
+                    (
+                        "overlays".to_string(),
+                        serde_json::json!({
+                            "type":"array",
+                            "items":{"type":"string","enum":["all","bounds","colliders","grid","labels"]},
+                            "maxItems":5,
+                            "description":"Top-down overlays. Defaults to all."
+                        }),
+                    ),
+                    (
+                        "grid".to_string(),
+                        number_schema("Top-down world grid spacing in metres; omitted uses an automatic metric step.", 0.05, 10_000.0),
                     ),
                     (
                         "view".to_string(),
@@ -1335,6 +1838,38 @@ fn add_project_read_tools(
                     (
                         "label".to_string(),
                         string_schema("Optional human-readable evidence label."),
+                    ),
+                ]),
+                &[],
+            ),
+            AgentToolKind::Read,
+            None,
+        );
+        pack.push_native(
+            "scene_visual_review",
+            "Ask the configured vision-capable reviewer model to inspect one to four project capture artifacts and return structured scores, findings and fixes. Use this when the active Agent model is text-only or when a second visual opinion is useful. If no vision model is available it returns a structured `vision_unavailable` fallback and never blocks the task.",
+            object_schema(
+                Map::from_iter([
+                    (
+                        "images".to_string(),
+                        serde_json::json!({
+                            "type":"array",
+                            "items":{"type":"string"},
+                            "maxItems":4,
+                            "description":"Project-relative PNG capture paths, for example .aura_rafi/agent_artifacts/viewport-....png."
+                        }),
+                    ),
+                    (
+                        "image".to_string(),
+                        string_schema("Optional single project-relative PNG capture path."),
+                    ),
+                    (
+                        "focus".to_string(),
+                        string_schema("Optional review focus such as entrance readability, aisle width or lighting."),
+                    ),
+                    (
+                        "brief".to_string(),
+                        serde_json::json!({"type":"object","description":"Optional world brief; the active project brief is used when omitted."}),
                     ),
                 ]),
                 &[],
@@ -1478,6 +2013,265 @@ fn add_project_read_tools(
             None,
         );
     }
+}
+
+fn add_game_program_tools(pack: &mut AgentToolPack) {
+    pack.push_native(
+        "scene_camera",
+        "Create, configure, assign or remove a Game camera component. Use action=create for a new camera, action=add/set for an existing entity, and action=remove to detach the component. This is the tool that completes game_completion_audit camera checks.",
+        object_schema(
+            Map::from_iter([
+                (
+                    "action".to_string(),
+                    enum_schema("Camera action.", &["create", "add", "set", "remove"]),
+                ),
+                ("target".to_string(), string_schema("Entity target for add/set/remove.")),
+                ("name".to_string(), string_schema("Name for a new camera entity.")),
+                ("parent".to_string(), string_schema("Optional parent for a new camera.")),
+                ("fov".to_string(), number_schema("Vertical field of view in degrees.", 1.0, 179.0)),
+                ("near".to_string(), number_schema("Near plane.", 0.0001, 100_000.0)),
+                ("far".to_string(), number_schema("Far plane.", 0.0001, 100_000.0)),
+                ("ortho_scale".to_string(), number_schema("Orthographic scale.", 0.0001, 100_000.0)),
+                ("orthographic".to_string(), boolean_schema("Use an orthographic projection.")),
+            ]),
+            &["action"],
+        ),
+        AgentToolKind::Mutation,
+        Some("game.camera"),
+    );
+    let component = object_schema(
+        Map::from_iter([
+            ("target".to_string(), string_schema("Entity target.")),
+            (
+                "texture".to_string(),
+                string_schema("Project-relative base-color texture path, for example assets/generated/wall.png."),
+            ),
+            (
+                "collider".to_string(),
+                serde_json::json!({
+                    "type": ["string", "object"],
+                    "description": "none, aabb, convex_hull or mesh; or an object with type, offset and visible_in_editor."
+                }),
+            ),
+            (
+                "rigid_body".to_string(),
+                serde_json::json!({
+                    "type": "object",
+                    "description": "enabled, body_type (static/dynamic/kinematic), use_gravity, velocity, mass, damping, is_trigger."
+                }),
+            ),
+            (
+                "audio".to_string(),
+                serde_json::json!({
+                    "type": "object",
+                    "description": "enabled, clip (project audio path), autoplay, looping and volume."
+                }),
+            ),
+            (
+                "camera".to_string(),
+                serde_json::json!({
+                    "type": "object",
+                    "description": "orthographic, fov_degrees, near, far and ortho_scale."
+                }),
+            ),
+            (
+                "scripts".to_string(),
+                serde_json::json!({"type":"array","items":{"type":"string"},"maxItems":32}),
+            ),
+            (
+                "variables".to_string(),
+                serde_json::json!({"type":"array","maxItems":64}),
+            ),
+        ]),
+        &["target"],
+    );
+    pack.push_native(
+        "scene_component",
+        "Set Inspector-level components on an entity: base-color texture, collider, rigid body, audio source, camera lens, attached scripts or variables. This is required for gameplay-ready objects, not just visible primitives.",
+        component,
+        AgentToolKind::Mutation,
+        Some("game.update"),
+    );
+    let program_schema = object_schema(
+        Map::from_iter([
+            (
+                "mode".to_string(),
+                enum_schema("Plan mode. Reconcile updates stable keys in place.", &["build", "reconcile"]),
+            ),
+            ("parent".to_string(), string_schema("Optional existing group that receives the program.")),
+            (
+                "design_profile".to_string(),
+                enum_schema(
+                    "Optional design contract.",
+                    &["generic", "real_world", "building", "supermarket", "parking", "outdoor"],
+                ),
+            ),
+            (
+                "archetypes".to_string(),
+                serde_json::json!({"type":"object","description":"Named kits. Each kit has a parts array of primitive entities."}),
+            ),
+            (
+                "groups".to_string(),
+                serde_json::json!({"type":"array","maxItems":512,"items":{"type":"object"}}),
+            ),
+            (
+                "entities".to_string(),
+                serde_json::json!({"type":"array","maxItems":4096,"items":{"type":"object"}}),
+            ),
+            (
+                "operations".to_string(),
+                serde_json::json!({
+                    "type":"array","maxItems":2048,"items":{"type":"object"},
+                    "description":"group, place, grid, along/path, scatter, camera, script, mirror, variant, update, delete and assert operations. Supports built-in kits such as wall, door, shelf, checkout, street_lamp, tree, bench, crate, platform, stairs, checkpoint, car, aisle, spawn and goal."
+                }),
+            ),
+        ]),
+        &[],
+    );
+    pack.push_native(
+        "scene_program",
+        "Compile a World Program into a plan without mutating the scene. Use it for a whole level or district instead of hundreds of tool calls. Supports built-in kits, archetype parts, grids, paths, deterministic scatter, cameras, script attachment, mirror, variants, keyed updates, deletions, stable keys, design profiles, overlap preview and a persistent plan id. Then call scene_commit.",
+        program_schema.clone(),
+        AgentToolKind::Mutation,
+        Some("game.plan"),
+    );
+    pack.push_native(
+        "scene_patch",
+        "Compile a keyed patch against an existing world. It uses reconcile semantics: stable keys update entities in place, missing keys are created and unmentioned nodes are preserved.",
+        program_schema,
+        AgentToolKind::Mutation,
+        Some("game.plan"),
+    );
+    pack.push_native(
+        "scene_commit",
+        "Commit a previously compiled World Plan by plan_id. The scene fingerprint and the real editor revision are checked before mutation; a plan-level undo token and diff are returned.",
+        object_schema(
+            Map::from_iter([
+                ("plan_id".to_string(), string_schema("Plan id returned by scene_program.")),
+                (
+                    "regions".to_string(),
+                    serde_json::json!({"type":"array","items":{"type":"string"},"maxItems":64,"description":"Optional region filter reserved for chunked commits."}),
+                ),
+            ]),
+            &["plan_id"],
+        ),
+        AgentToolKind::Mutation,
+        Some("game.commit"),
+    );
+    pack.push_native(
+        "scene_cancel",
+        "Cancel an uncommitted World Plan by plan_id so it cannot be applied later. Committed plans must be reverted with Undo instead.",
+        object_schema(
+            Map::from_iter([(
+                "plan_id".to_string(),
+                string_schema("Plan id returned by scene_program."),
+            )]),
+            &["plan_id"],
+        ),
+        AgentToolKind::Mutation,
+        Some("game.cancel"),
+    );
+    pack.push_native(
+        "world_brief",
+        "Read or write the persistent World Brief: genre, camera, core loop, palette, lighting, scale metrics, constraints and acceptance criteria. Read it at task start and update it when the user changes direction. Writing in Plan mode returns a preview and does not touch the project.",
+        object_schema(
+            Map::from_iter([
+                ("action".to_string(), enum_schema("Brief action.", &["read", "write"])),
+                ("brief".to_string(), serde_json::json!({"type":"object"})),
+                ("content".to_string(), string_schema("Optional raw brief content.")),
+            ]),
+            &["action"],
+        ),
+        AgentToolKind::Read,
+        Some("world.brief"),
+    );
+    pack.push_native(
+        "scene_recipe",
+        "Save a compiled plan as a reusable recipe, list and inspect recipes, and instantiate one as a fresh reviewable plan. Recipes keep the stable keys and compiled groups/entities from a successful plan.",
+        object_schema(
+            Map::from_iter([
+                (
+                    "action".to_string(),
+                    enum_schema("Recipe action.", &["save", "list", "show", "delete", "apply"]),
+                ),
+                ("name".to_string(), string_schema("Stable recipe name.")),
+                (
+                    "plan_id".to_string(),
+                    string_schema("Plan id to capture when action=save."),
+                ),
+                (
+                    "description".to_string(),
+                    string_schema("Optional human-readable recipe description."),
+                ),
+                (
+                    "tags".to_string(),
+                    serde_json::json!({"type":"array","items":{"type":"string"},"maxItems":32}),
+                ),
+            ]),
+            &["action"],
+        ),
+        AgentToolKind::Mutation,
+        Some("world.recipe"),
+    );
+    pack.push_native(
+        "scene_authoring_script",
+        "Run a sandboxed Rhai authoring script that can only emit a World Program, then compile it into a reviewable plan. It cannot read files, run commands or mutate the scene. Use world::group, world::place, world::grid, world::line, world::scatter, world::camera, world::script, world::parent, world::count (read-only scene tag/role count) and world::assert_max_entities.",
+        object_schema(
+            Map::from_iter([
+                (
+                    "script".to_string(),
+                    string_schema(
+                        "Rhai source. Only the world:: authoring namespace is available; eval and host APIs are disabled.",
+                    ),
+                ),
+                (
+                    "file".to_string(),
+                    string_schema("Project-relative .rhai file with the authoring script."),
+                ),
+            ]),
+            &[],
+        ),
+        AgentToolKind::Mutation,
+        Some("world.script"),
+    );
+    pack.push_native(
+        "scene_visual_diff",
+        "Compare before/after project images pixel by pixel. Reports changed ratio, mean and max delta, changed bounds and writes an annotated PNG artifact for the evidence gallery.",
+        object_schema(
+            Map::from_iter([
+                ("before".to_string(), string_schema("Project-relative before image.")),
+                ("after".to_string(), string_schema("Project-relative after image.")),
+                (
+                    "output".to_string(),
+                    string_schema("Optional project-relative diff PNG path."),
+                ),
+                (
+                    "threshold".to_string(),
+                    serde_json::json!({"type":"number","minimum":0,"maximum":255,"description":"Per-channel delta threshold."}),
+                ),
+                (
+                    "save".to_string(),
+                    serde_json::json!({"type":"boolean","description":"Write the annotated diff PNG (default true)."}),
+                ),
+            ]),
+            &["before", "after"],
+        ),
+        AgentToolKind::Read,
+        Some("scene.visual_diff"),
+    );
+    pack.push_native(
+        "capabilities_call",
+        "Execute one catalog command by name through the same revision, permission, idempotency and undo gateway. Use capabilities_search first. This is the escape hatch for an Inspector or engine command that is not in the current typed pack; runtime.* commands are always rejected.",
+        object_schema(
+            Map::from_iter([
+                ("name".to_string(), string_schema("Exact catalog command name, for example game.camera.")),
+                ("params".to_string(), serde_json::json!({"type":"object"})),
+            ]),
+            &["name"],
+        ),
+        AgentToolKind::Mutation,
+        None,
+    );
 }
 
 fn add_game_mutation_tools(pack: &mut AgentToolPack, intent: PromptIntent) {
@@ -1790,6 +2584,11 @@ fn translate_arguments(
         "scene_reconcile" => translate_reconcile(&mut arguments)?,
         "scene_repair" => translate_repair(&mut arguments)?,
         "scene_batch" => translate_batch(&mut arguments)?,
+        "scene_patch" => {
+            if let Some(object) = arguments.as_object_mut() {
+                object.insert("mode".to_string(), Value::String("reconcile".to_string()));
+            }
+        }
         _ => {}
     }
     Ok(arguments)
@@ -1947,13 +2746,98 @@ fn translate_repair(arguments: &mut Value) -> Result<(), String> {
     Ok(())
 }
 
+fn visual_review_tool_result(data: Value, revision: u64) -> AgentToolResult {
+    let status = data
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("error")
+        .to_string();
+    let summary = match status.as_str() {
+        "reviewed" => "Visual review completed.".to_string(),
+        "unavailable" => {
+            "Visual review unavailable; captures remain saved as project evidence.".to_string()
+        }
+        "unstructured" => {
+            "The vision reviewer returned unstructured text; no score was accepted.".to_string()
+        }
+        "invalid" => "The visual review request had no readable capture.".to_string(),
+        _ => "The visual review call failed.".to_string(),
+    };
+    let images = data
+        .get("images")
+        .and_then(Value::as_array)
+        .map(|images| {
+            images
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let mut warnings = data
+        .get("warnings")
+        .and_then(Value::as_array)
+        .map(|warnings| {
+            warnings
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if status == "unavailable" {
+        warnings.push(
+            "No enabled vision-capable model is configured; the captures were not interpreted."
+                .to_string(),
+        );
+    }
+    let mut result = AgentToolResult::success(summary, data);
+    result.ok = !matches!(status.as_str(), "error" | "invalid");
+    result.partial = matches!(status.as_str(), "unavailable" | "unstructured");
+    result.revision = Some(revision);
+    result.references = images.clone();
+    result.artifacts = images
+        .iter()
+        .map(|image| {
+            serde_json::json!({
+                "kind": "image/png",
+                "uri": image,
+                "role": "vision_review_input",
+            })
+        })
+        .collect();
+    result.verification = Some(serde_json::json!({
+        "status": match status.as_str() {
+            "reviewed" => "reviewed",
+            "unavailable" | "unstructured" => "not_checked",
+            _ => "failed",
+        },
+        "vision_status": status,
+        "image_count": images.len(),
+    }));
+    result.warnings = warnings;
+    result
+}
+
+fn command_output_to_tool_result(output: CommandOutput) -> AgentToolResult {
+    let ok = !matches!(output.level, crate::commands::output::CommandLevel::Error);
+    let mut result = AgentToolResult::success(output.title.clone(), output.json.clone());
+    result.ok = ok;
+    result.changed = output.changed;
+    result.details = compact_response_lines(&output.lines);
+    if !ok {
+        result.warnings = output.lines.iter().skip(1).cloned().collect();
+    }
+    result
+}
+
 fn response_to_tool_result(
     response: EngineCommandResponse,
     preview: bool,
     scene_diff: Option<Value>,
 ) -> AgentToolResult {
     let receipt = serde_json::json!({"transaction_id": response.transaction_id, "undo_token": response.undo_token,
-        "undo_available": response.undo_available, "artifacts": response.artifacts, "metrics": response.metrics,
+        "undo_available": response.undo_available, "artifacts": response.artifacts.clone(), "metrics": response.metrics,
         "revision": response.revision});
     let references = collect_references(&response.data);
     let details = compact_response_lines(&response.lines);
@@ -1976,6 +2860,12 @@ fn response_to_tool_result(
         warnings: response.warnings,
         details,
         preview,
+        partial: false,
+        artifacts: response
+            .artifacts
+            .iter()
+            .filter_map(|artifact| serde_json::to_value(artifact).ok())
+            .collect(),
     };
     if !result.data.is_object() {
         result.data = serde_json::json!({"value": result.data});
@@ -2806,6 +3696,7 @@ fn expects_observable_scene_change(command_name: &str) -> bool {
             | "game.reconcile"
             | "game.repair"
             | "game.batch"
+            | "game.commit"
     )
 }
 
@@ -3636,6 +4527,226 @@ mod tests {
     use super::*;
 
     #[test]
+    fn simple_noun_prompts_still_expose_the_authoring_core_and_program_tools() {
+        let catalog = CommandCatalog::builtin();
+        for prompt in ["un supermercado", "una estacion abandonada", "un nivel"] {
+            let pack = AgentToolExecutor::build_tool_pack(
+                &catalog,
+                Language::English,
+                Some(ProjectType::Game),
+                AgentMode::Active,
+                prompt,
+            );
+            for name in [
+                "scene_build",
+                "scene_reconcile",
+                "scene_batch",
+                "scene_digest",
+                "scene_program",
+                "scene_commit",
+                "scene_cancel",
+                "scene_patch",
+                "scene_camera",
+                "scene_component",
+                "capabilities_call",
+                "world_brief",
+                "game_completion_audit",
+                "viewport_capture",
+                "scene_visual_review",
+                "script_write",
+                "script_validate",
+            ] {
+                assert!(
+                    pack.tools.iter().any(|tool| tool.function.name == name),
+                    "prompt '{prompt}' is missing {name}"
+                );
+            }
+            assert!(pack.tools.len() <= 60, "prompt '{prompt}' exceeded the pack budget");
+        }
+    }
+
+    #[test]
+    fn program_tools_are_not_advertised_in_inspect_mode() {
+        let catalog = CommandCatalog::builtin();
+        let pack = AgentToolExecutor::build_tool_pack(
+            &catalog,
+            Language::English,
+            Some(ProjectType::Game),
+            AgentMode::Inspect,
+            "un supermercado",
+        );
+        for name in [
+            "scene_program",
+            "scene_commit",
+            "scene_cancel",
+            "scene_camera",
+            "scene_component",
+        ] {
+            assert!(
+                !pack.tools.iter().any(|tool| tool.function.name == name),
+                "{name} must not be mutable in Inspect"
+            );
+        }
+        assert!(pack
+            .tools
+            .iter()
+            .any(|tool| tool.function.name == "scene_digest"));
+    }
+
+    #[test]
+    fn viewport_capture_top_down_map_returns_a_structured_artifact_with_obstacles() {
+        let root = std::env::temp_dir().join(format!(
+            "raf-tool-top-down-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let project = raf_core::project::Project::create(
+            "MapToolDemo",
+            raf_core::project::ProjectType::Game,
+            &root,
+        )
+        .unwrap();
+        let mut scene = SceneGraph::new();
+        let floor = scene.add_root("Floor");
+        if let Some(node) = scene.get_mut(floor) {
+            node.primitive = raf_core::scene::Primitive::Plane;
+            node.scale = glam::Vec3::new(10.0, 1.0, 10.0);
+        }
+        let wall = scene.add_root("Wall");
+        if let Some(node) = scene.get_mut(wall) {
+            node.primitive = raf_core::scene::Primitive::Cube;
+            node.position = glam::Vec3::new(0.0, 1.0, 0.0);
+            node.scale = glam::Vec3::new(6.0, 2.0, 0.3);
+            node.collider.collider_type = raf_core::scene::ColliderType::Aabb;
+        }
+        let mut selection = SceneSelectionState::default();
+        let mut viewport = HeadlessGameViewportPort::default();
+        let mut asset_tools = crate::agent_asset_tools::AgentAssetTools::default();
+        let studio = raf_core::ai::ExternalAssetStudio::default();
+        let mut ledger = TransactionLedger::default();
+        let mut editor_actions = Vec::new();
+        let mut canvas_changed = false;
+        let mut routes = HashMap::new();
+        routes.insert(
+            "viewport_capture".to_string(),
+            AgentToolRoute {
+                command_name: None,
+                kind: AgentToolKind::Read,
+            },
+        );
+        let catalog = CommandCatalog::builtin();
+        let agent_project = AgentProjectContext {
+            root: project.path.clone(),
+            project_type: raf_core::project::ProjectType::Game,
+        };
+        let mut executor = AgentToolExecutor {
+            asset_tools: &mut asset_tools,
+            asset_studio: &studio,
+            image_provider: None,
+            image_model: String::new(),
+            vision_reviewer: None,
+            scene: &mut scene,
+            selection: &mut selection,
+            viewport: &mut viewport,
+            graphics: None,
+            electronics: None,
+            project: Some(agent_project),
+            project_info: Some(&project),
+            project_assets: &[],
+            active_session: "test",
+            catalog_pending: false,
+            catalog_error: None,
+            catalog: &catalog,
+            language: Language::English,
+            routes,
+            ledger: &mut ledger,
+            editor_actions: &mut editor_actions,
+            canvas_changed: &mut canvas_changed,
+        };
+        let result = executor
+            .execute(
+                "map-call",
+                "viewport_capture",
+                serde_json::json!({"preset":"top_down_map","width":256,"height":256}),
+                ToolExecutionMode::Inspect,
+            )
+            .expect("map capture");
+        assert!(result.ok, "{:?}", result.details);
+        assert_eq!(result.data["mode"], "top_down_map");
+        assert!(result.data["colliders"].as_array().unwrap().len() >= 1);
+        assert!(result.data["labels"].as_array().unwrap().len() >= 1);
+        let uri = result.data["artifact"]["uri"].as_str().expect("artifact");
+        assert!(project.path.join(uri).exists());
+        assert!(!result.artifacts.is_empty());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scene_visual_review_without_a_vision_model_returns_a_structured_fallback() {
+        let catalog = CommandCatalog::builtin();
+        let mut scene = SceneGraph::new();
+        let mut selection = SceneSelectionState::default();
+        let mut viewport = HeadlessGameViewportPort::default();
+        let mut asset_tools = crate::agent_asset_tools::AgentAssetTools::default();
+        let studio = raf_core::ai::ExternalAssetStudio::default();
+        let mut ledger = TransactionLedger::default();
+        let mut editor_actions = Vec::new();
+        let mut canvas_changed = false;
+        let mut routes = HashMap::new();
+        routes.insert(
+            "scene_visual_review".to_string(),
+            AgentToolRoute {
+                command_name: None,
+                kind: AgentToolKind::Read,
+            },
+        );
+        let mut executor = AgentToolExecutor {
+            asset_tools: &mut asset_tools,
+            asset_studio: &studio,
+            image_provider: None,
+            image_model: String::new(),
+            vision_reviewer: None,
+            scene: &mut scene,
+            selection: &mut selection,
+            viewport: &mut viewport,
+            graphics: None,
+            electronics: None,
+            project: None,
+            project_info: None,
+            project_assets: &[],
+            active_session: "",
+            catalog_pending: false,
+            catalog_error: None,
+            catalog: &catalog,
+            language: Language::English,
+            routes,
+            ledger: &mut ledger,
+            editor_actions: &mut editor_actions,
+            canvas_changed: &mut canvas_changed,
+        };
+        let result = executor
+            .execute(
+                "vision-call",
+                "scene_visual_review",
+                serde_json::json!({}),
+                ToolExecutionMode::Inspect,
+            )
+            .expect("the fallback must be a tool result, not an adapter error");
+        assert!(result.ok);
+        assert!(result.partial);
+        assert_eq!(result.data["status"], "unavailable");
+        assert_eq!(result.data["fallback"], "vision_unavailable");
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("vision-capable")));
+        assert_eq!(
+            result.verification.as_ref().and_then(|value| value.get("status")),
+            Some(&serde_json::json!("not_checked"))
+        );
+    }
+
+    #[test]
     fn image_intent_exposes_real_generation_choices_without_separate_model_roles() {
         let catalog = CommandCatalog::builtin();
         let active = AgentToolExecutor::build_tool_pack(
@@ -3656,7 +4767,7 @@ mod tests {
                 "missing {name}"
             );
         }
-        assert!(active.tools.len() <= 36);
+        assert!(active.tools.len() <= 52);
         let inspect = AgentToolExecutor::build_tool_pack(
             &catalog,
             Language::English,
@@ -3682,7 +4793,7 @@ mod tests {
             "Create a detailed store shelf",
         );
 
-        assert!(pack.tools.len() <= 36);
+        assert!(pack.tools.len() <= 52);
         assert!(pack
             .tools
             .iter()
@@ -3956,7 +5067,7 @@ mod tests {
             AgentMode::Active,
             "Create a world with scripts, lighting, image assets, prefabs and grid layout",
         );
-        assert!(pack.tools.len() <= 36);
+        assert!(pack.tools.len() <= 52);
         for name in [
             "script_create",
             "script_attach",

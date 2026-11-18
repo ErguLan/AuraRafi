@@ -1,14 +1,26 @@
-//! Initial fixed-step physics: world-space translation and swept AABB contacts.
-//! No angular dynamics, hull/mesh narrow phase or implicit character controller.
+//! Fixed-step physics with oriented box contacts and a retained spatial tree.
+#[path = "physics_shapes.rs"]
+pub(super) mod shapes;
+#[path = "physics_spatial.rs"]
+pub(super) mod spatial;
+
+pub use crate::physics_dynamics::PhysicsImpact;
+pub use crate::physics_joints::JointBreak;
+use glam::Vec3;
 use raf_core::scene::{Aabb, ColliderType, RigidBodyType, SceneGraph, SceneNodeId};
+use shapes::BoxShape;
+pub use spatial::SpatialMetrics;
 
 #[derive(Default)]
 pub struct PhysicsWorld {
     dynamic: Vec<SceneNodeId>,
     colliders: Vec<SceneNodeId>,
     active: Vec<SceneNodeId>,
-    obstacles: Vec<Aabb>,
+    spatial: spatial::SpatialIndex,
+    candidates: Vec<SceneNodeId>,
     contacts: super::physics_contacts::ContactHistory,
+    joints: crate::physics_joints::JointSolver,
+    impacts: Vec<PhysicsImpact>,
 }
 impl PhysicsWorld {
     pub fn prepare(scene: &SceneGraph) -> Result<Self, Vec<String>> {
@@ -71,12 +83,6 @@ impl PhysicsWorld {
                 break;
             }
         }
-        if self.dynamic.len() > 64
-            || self.colliders.len() > 1024
-            || self.active.len().saturating_mul(self.colliders.len()) > 4096
-        {
-            errors.push("Local physics budget exceeded (64 moving bodies, 1024 colliders, 4096 active/collider pairs)".into());
-        }
         if errors.is_empty() {
             Ok(())
         } else {
@@ -87,13 +93,77 @@ impl PhysicsWorld {
         !self.dynamic.is_empty()
     }
     pub fn step(&mut self, scene: &mut SceneGraph, dt: f32) -> Result<(), String> {
+        self.step_with_gravity(scene, dt, Vec3::new(0.0, -9.81, 0.0))
+    }
+    pub fn step_with_gravity(
+        &mut self,
+        scene: &mut SceneGraph,
+        dt: f32,
+        gravity: Vec3,
+    ) -> Result<(), String> {
+        self.step_with_settings(scene, dt, gravity, true)
+    }
+    pub fn step_with_settings(
+        &mut self,
+        scene: &mut SceneGraph,
+        dt: f32,
+        gravity: Vec3,
+        advanced: bool,
+    ) -> Result<(), String> {
         self.contacts.events.clear();
-        if !dt.is_finite() || dt <= 0.0 {
+        self.impacts.clear();
+        if !dt.is_finite() || dt <= 0.0 || !gravity.is_finite() {
             return Err("Physics timestep must be finite and positive".into());
         }
         // Explicit script changes are picked up at the fixed boundary; reuse allocations.
         self.refresh(scene).map_err(|errors| errors.join("; "))?;
-        for &id in &self.dynamic {
+        if !advanced {
+            self.dynamic.retain(|id| {
+                scene.get(*id).is_some_and(|node| {
+                    node.rigid_body.is_character
+                        || node.rigid_body.body_type == RigidBodyType::Kinematic
+                })
+            });
+            self.active.retain(|id| {
+                scene.get(*id).is_some_and(|node| {
+                    node.rigid_body.is_character
+                        || node.rigid_body.is_trigger
+                        || node.rigid_body.body_type == RigidBodyType::Kinematic
+                })
+            });
+        }
+        self.active
+            .extend(self.colliders.iter().copied().filter(|&id| {
+                let owner = crate::physics_dynamics::collider_owner(scene, id);
+                owner != id
+                    && self
+                        .dynamic
+                        .binary_search_by_key(&owner.0, |id| id.0)
+                        .is_ok()
+            }));
+        // Platforms must publish their pose before characters read the support delta.
+        self.dynamic.sort_unstable_by_key(|id| {
+            let node = scene.get(*id).unwrap();
+            let stage = if node.rigid_body.body_type == RigidBodyType::Kinematic {
+                0
+            } else if node.character_controller.is_some() {
+                1
+            } else {
+                2
+            };
+            (stage, id.0)
+        });
+        self.spatial.rebuild(scene, &self.colliders);
+        self.update_character_bounds(scene, gravity, advanced);
+        self.contacts.begin_step(
+            scene,
+            &self.colliders,
+            &self.active,
+            &self.spatial,
+            advanced,
+        );
+        for index in 0..self.dynamic.len() {
+            let id = self.dynamic[index];
             if !scene.is_valid_node(id) {
                 continue;
             }
@@ -101,10 +171,47 @@ impl PhysicsWorld {
             if !node.rigid_body.enabled {
                 continue;
             }
+            if node.character_controller.is_some() {
+                crate::physics_character::step_character(
+                    scene,
+                    &self.spatial,
+                    id,
+                    gravity,
+                    dt,
+                    advanced,
+                    &mut self.candidates,
+                )?;
+                if scene.get(id).is_some_and(|node| !node.children.is_empty()) {
+                    self.spatial.rebuild(scene, &self.colliders);
+                }
+                self.update_character_bounds(scene, gravity, advanced);
+                continue;
+            }
+            if advanced
+                && node.rigid_body.body_type == RigidBodyType::Dynamic
+                && !node.rigid_body.is_character
+            {
+                crate::physics_dynamics::step_body(
+                    scene,
+                    &mut self.spatial,
+                    id,
+                    gravity,
+                    dt,
+                    &mut self.candidates,
+                    &mut self.impacts,
+                )?;
+                if scene.get(id).is_some_and(|node| !node.children.is_empty()) {
+                    self.spatial.rebuild(scene, &self.colliders);
+                    self.update_character_bounds(scene, gravity, advanced);
+                } else if let Some(shape) = BoxShape::from_scene(scene, id) {
+                    self.spatial.update_shape(id, shape);
+                }
+                continue;
+            }
             let mut velocity = node.rigid_body.velocity;
             let dynamic = node.rigid_body.body_type == RigidBodyType::Dynamic;
             if dynamic && node.rigid_body.use_gravity {
-                velocity.y -= 9.81 * dt;
+                velocity += gravity * dt;
             }
             if dynamic {
                 velocity *= (1.0 - node.rigid_body.damping * dt).clamp(0.0, 1.0);
@@ -114,50 +221,89 @@ impl PhysicsWorld {
                 return Err("physics produced a non-finite displacement".into());
             }
             let trigger = node.rigid_body.is_trigger;
-            let body_bounds = world_bounds(scene, id);
+            let body_shape = if node.collider.collider_type == ColliderType::Aabb {
+                BoxShape::from_scene(scene, id)
+            } else {
+                None
+            };
             let mut correction = glam::Vec3::ZERO;
             // Kinematic velocity is prescribed: no gravity, damping or collision response.
             if dynamic && !trigger {
-                if let Some(mut body) = body_bounds {
-                    self.obstacles.clear();
-                    self.obstacles.extend(
-                        self.colliders
-                            .iter()
-                            .copied()
-                            .filter(|other| *other != id)
-                            .filter(|other| {
-                                scene.get(*other).is_some_and(|n| {
-                                    !(n.rigid_body.enabled && n.rigid_body.is_trigger)
-                                })
-                            })
-                            .filter_map(|other| world_bounds(scene, other)),
-                    );
-                    (body, correction) =
-                        super::physics_response::depenetrate(body, &self.obstacles, &mut velocity)?;
-                    delta = velocity * dt;
-                    for axis in 0..3 {
-                        let mut movement = delta[axis];
-                        for bounds in &self.obstacles {
-                            let perpendicular_overlap = (0..3).filter(|a| *a != axis).all(|a| {
-                                body.min[a] < bounds.max[a] && body.max[a] > bounds.min[a]
-                            });
-                            if !perpendicular_overlap {
+                if let Some(mut body) = body_shape {
+                    for _ in 0..4 {
+                        self.spatial.query(body.bounds(), &mut self.candidates);
+                        let mut changed = false;
+                        for &other in &self.candidates {
+                            if skip_collision(scene, id, other) {
                                 continue;
                             }
-                            if movement > 0.0 && body.max[axis] <= bounds.min[axis] {
-                                movement =
-                                    movement.min((bounds.min[axis] - body.max[axis]).max(0.0));
-                            } else if movement < 0.0 && body.min[axis] >= bounds.max[axis] {
-                                movement =
-                                    movement.max((bounds.max[axis] - body.min[axis]).min(0.0));
+                            if let Some(shift) = BoxShape::from_scene(scene, other)
+                                .and_then(|obstacle| shapes::penetration(body, obstacle))
+                            {
+                                let normal = shift.normalize_or_zero();
+                                velocity -= normal * velocity.dot(normal).min(0.0);
+                                body = body.translated(shift);
+                                correction += shift;
+                                changed = true;
                             }
                         }
-                        if movement != delta[axis] {
-                            velocity[axis] = 0.0;
+                        if !changed {
+                            break;
                         }
-                        delta[axis] = movement;
-                        body.min[axis] += movement;
-                        body.max[axis] += movement;
+                    }
+                    self.spatial.query(body.bounds(), &mut self.candidates);
+                    for &other in &self.candidates {
+                        if skip_collision(scene, id, other) {
+                            continue;
+                        }
+                        if BoxShape::from_scene(scene, other)
+                            .and_then(|obstacle| shapes::penetration(body, obstacle))
+                            .is_some_and(|shift| shift.length_squared() > 1e-10)
+                        {
+                            return Err(
+                                "Initial overlap cannot be resolved within four translation passes"
+                                    .into(),
+                            );
+                        }
+                    }
+                    let mut remaining = velocity * dt;
+                    delta = Vec3::ZERO;
+                    for _ in 0..4 {
+                        let start = body.bounds();
+                        let end = body.translated(remaining).bounds();
+                        self.spatial.query(
+                            Aabb {
+                                min: start.min.min(end.min),
+                                max: start.max.max(end.max),
+                            },
+                            &mut self.candidates,
+                        );
+                        let mut hit: Option<(f32, Vec3)> = None;
+                        for &other in &self.candidates {
+                            if skip_collision(scene, id, other) {
+                                continue;
+                            }
+                            let candidate = BoxShape::from_scene(scene, other)
+                                .and_then(|obstacle| shapes::sweep(body, obstacle, remaining));
+                            if let Some(candidate) = candidate {
+                                if hit.is_none_or(|previous| candidate.0 < previous.0) {
+                                    hit = Some(candidate);
+                                }
+                            }
+                        }
+                        let Some((time, normal)) = hit else {
+                            delta += remaining;
+                            break;
+                        };
+                        let traveled = remaining * time;
+                        delta += traveled;
+                        body = body.translated(traveled);
+                        remaining *= 1.0 - time;
+                        remaining -= normal * remaining.dot(normal).min(0.0);
+                        velocity -= normal * velocity.dot(normal).min(0.0);
+                        if remaining.length_squared() < 1e-12 {
+                            break;
+                        }
                     }
                 }
             }
@@ -181,8 +327,21 @@ impl PhysicsWorld {
             }
             node.position += local_delta;
             node.rigid_body.velocity = velocity;
+            if scene.get(id).is_some_and(|node| !node.children.is_empty()) {
+                // Parent movement affects every descendant collider, including statics.
+                self.spatial.rebuild(scene, &self.colliders);
+            } else if let Some(shape) = BoxShape::from_scene(scene, id) {
+                self.spatial.update_shape(id, shape);
+            }
         }
-        let result = self.contacts.update(scene, &self.colliders, &self.active);
+        if advanced {
+            self.joints.solve(scene, dt)?;
+        } else {
+            self.joints.breaks.clear();
+        }
+        self.spatial.rebuild(scene, &self.colliders);
+        self.update_character_bounds(scene, gravity, advanced);
+        let result = self.contacts.update(scene, &self.active, &self.spatial);
         if result.is_err() {
             self.contacts.events.clear();
         }
@@ -191,6 +350,51 @@ impl PhysicsWorld {
     pub fn events(&self) -> &[raf_script::physics_api::PhysicsEvent] {
         &self.contacts.events
     }
+    pub fn joint_breaks(&self) -> &[JointBreak] {
+        &self.joints.breaks
+    }
+
+    pub fn impacts(&self) -> &[PhysicsImpact] {
+        &self.impacts
+    }
+    pub fn spatial_metrics(&self) -> SpatialMetrics {
+        self.spatial.metrics()
+    }
+    fn update_character_bounds(&mut self, scene: &SceneGraph, gravity: Vec3, advanced: bool) {
+        for &id in &self.dynamic {
+            let Some(node) = scene.get(id) else {
+                continue;
+            };
+            let Some(controller) = &node.character_controller else {
+                continue;
+            };
+            let up = crate::physics_character::character_up(
+                gravity,
+                advanced && node.rigid_body.use_gravity && node.rigid_body.gravity_scale < 0.0,
+            );
+            let center = scene.world_matrix(id).transform_point3(Vec3::ZERO);
+            let bounds = crate::physics_character::capsule_bounds(
+                center,
+                up,
+                controller.radius,
+                controller.height,
+            );
+            self.spatial.update_shape(id, bounds);
+        }
+    }
+}
+fn skip_collision(scene: &SceneGraph, id: SceneNodeId, other: SceneNodeId) -> bool {
+    id == other
+        || is_trigger(scene, other)
+        || !scene
+            .get(id)
+            .zip(scene.get(other))
+            .is_some_and(|(a, b)| a.collider.interacts_with(&b.collider))
+}
+fn is_trigger(scene: &SceneGraph, id: SceneNodeId) -> bool {
+    scene
+        .get(id)
+        .is_some_and(|node| node.rigid_body.enabled && node.rigid_body.is_trigger)
 }
 pub(super) fn world_bounds(scene: &SceneGraph, id: SceneNodeId) -> Option<Aabb> {
     raf_script::query_api::world_aabb(scene, id)

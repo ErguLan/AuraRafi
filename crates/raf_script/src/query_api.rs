@@ -1,6 +1,6 @@
 //! Bounded world-space AABB queries shared by all language adapters.
 use crate::{NodeHandle, ScriptContext, ScriptError, ScriptResult};
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 use raf_core::scene::{Aabb, ColliderType, SceneGraph, SceneNodeId};
 
 #[derive(Debug, Clone, Default)]
@@ -94,7 +94,25 @@ impl ScriptContext<'_> {
             }
             let bounds =
                 world_aabb(self.scene, id).ok_or_else(|| invalid("Invalid collider transform"))?;
-            if let Some((t, normal)) = ray_box(origin, direction, limit, bounds) {
+            if ray_box(origin, direction, limit, bounds).is_none() {
+                continue;
+            }
+            let node = self
+                .scene
+                .get(id)
+                .ok_or_else(|| invalid("Collider missing"))?;
+            let matrix = self.scene.world_matrix(id);
+            if !matrix.is_finite() || matrix.determinant().abs() < 1e-8 {
+                return Err(invalid("Invalid or singular collider transform"));
+            }
+            if let Some((t, normal)) = ray_transformed_box(
+                origin,
+                direction,
+                limit,
+                node.collider.aabb,
+                node.collider.offset,
+                matrix,
+            ) {
                 limit = t;
                 closest = Some(RayHit {
                     entity: NodeHandle::scoped(id, self),
@@ -136,6 +154,26 @@ impl ScriptContext<'_> {
         Ok(hits)
     }
 }
+fn ray_transformed_box(
+    origin: Vec3,
+    direction: Vec3,
+    limit: f32,
+    bounds: Aabb,
+    offset: Vec3,
+    matrix: Mat4,
+) -> Option<(f32, Vec3)> {
+    let inverse = matrix.inverse();
+    let local_origin = inverse.transform_point3(origin) - offset;
+    let local_direction = inverse.transform_vector3(direction);
+    let (distance, normal) = ray_box(local_origin, local_direction, limit, bounds)?;
+    Some((
+        distance,
+        inverse
+            .transpose()
+            .transform_vector3(normal)
+            .normalize_or_zero(),
+    ))
+}
 pub fn ray_box(origin: Vec3, direction: Vec3, limit: f32, bounds: Aabb) -> Option<(f32, Vec3)> {
     let mut near = 0.0_f32;
     let mut far = limit;
@@ -169,6 +207,34 @@ pub fn ray_box(origin: Vec3, direction: Vec3, limit: f32, bounds: Aabb) -> Optio
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn raycast_uses_rotated_surface_instead_of_bounding_box() {
+        let bounds = Aabb {
+            min: Vec3::splat(-0.5),
+            max: Vec3::splat(0.5),
+        };
+        let matrix = Mat4::from_rotation_z(std::f32::consts::FRAC_PI_4);
+        let hit = ray_transformed_box(
+            Vec3::new(0.0, 2.0, 0.0),
+            -Vec3::Y,
+            4.0,
+            bounds,
+            Vec3::ZERO,
+            matrix,
+        )
+        .unwrap();
+        assert!((hit.0 - (2.0 - std::f32::consts::FRAC_1_SQRT_2)).abs() < 1e-5);
+        assert!(hit.1.y > 0.7 && hit.1.x.abs() > 0.7);
+        assert!(ray_transformed_box(
+            Vec3::new(0.7, 2.0, 0.0),
+            -Vec3::Y,
+            1.31,
+            bounds,
+            Vec3::ZERO,
+            matrix
+        )
+        .is_none());
+    }
     #[test]
     fn runtime_services_slab_query_handles_parallel_inside_and_surface_normal() {
         let bounds = Aabb {

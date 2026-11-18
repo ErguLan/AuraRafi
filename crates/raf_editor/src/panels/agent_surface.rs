@@ -12,6 +12,7 @@ use raf_core::ai::AgentMode;
 use raf_core::config::{EngineSettings, Language};
 use raf_core::i18n::t;
 use raf_core::project::ProjectType;
+use raf_ui::UiTokens;
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAccessibilityRole, UiAction, UiAlign, UiEventBinding, UiEventKind, UiFlow,
     UiFontWeight, UiIcon, UiIconId, UiIconSize, UiJustify, UiLayout, UiNode, UiNodeKind,
@@ -31,6 +32,8 @@ const MESSAGE_CARD_CHROME_HEIGHT: f32 = 76.0;
 const HISTORY_OVERSCAN: usize = 3;
 const HISTORY_VIEWPORT_ESTIMATE: f32 = 460.0;
 const MESSAGE_WIDTH_RATIO: f32 = 0.78;
+const PLAN_REVIEW_HEIGHT: f32 = 388.0;
+const PLAN_REVIEW_TREE_ROWS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AgentSurfaceVariant {
@@ -1239,9 +1242,110 @@ fn format_elapsed(seconds: u64) -> String {
     format!("{minutes:02}:{seconds:02}")
 }
 
+#[derive(Debug, Clone)]
+struct PlanReview {
+    plan_id: String,
+    mode: String,
+    groups: u64,
+    entities: u64,
+    chunks: u64,
+    design_status: String,
+    overlap_count: u64,
+    budget_status: String,
+    navigation_status: String,
+    warnings: Vec<String>,
+    group_sample: Vec<String>,
+    entity_sample: Vec<String>,
+    hash: Option<String>,
+    persisted_path: Option<String>,
+    revision: Option<u64>,
+}
+
+fn plan_review_from_message(message: &ChatMessage) -> Option<PlanReview> {
+    if message.role != MessageRole::Tool {
+        return None;
+    }
+    let result: AgentToolResult = serde_json::from_str(&message.content).ok()?;
+    let data = &result.data;
+    let plan_id = data.get("plan_id")?.as_str()?.to_string();
+    let preview = data.get("preview")?.as_object()?;
+    let gate_status = |gate: &str| {
+        data.get("pipeline")
+            .and_then(|pipeline| pipeline.get("gates"))
+            .and_then(serde_json::Value::as_array)
+            .and_then(|gates| {
+                gates
+                    .iter()
+                    .find(|candidate| candidate.get("gate").and_then(serde_json::Value::as_str) == Some(gate))
+            })
+            .and_then(|candidate| candidate.get("status"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("not_declared")
+            .to_string()
+    };
+    let names = |key: &str| {
+        preview
+            .get(key)
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default()
+    };
+    Some(PlanReview {
+        plan_id,
+        mode: data
+            .get("mode")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("build")
+            .to_string(),
+        groups: data
+            .get("groups")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        entities: data
+            .get("entities")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        chunks: preview
+            .get("chunks")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        design_status: data
+            .get("design_audit")
+            .and_then(|audit| audit.get("status"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("not_run")
+            .to_string(),
+        overlap_count: data
+            .get("overlap_count")
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(0),
+        budget_status: gate_status("budget"),
+        navigation_status: gate_status("navigation"),
+        warnings: result.warnings,
+        group_sample: names("group_sample"),
+        entity_sample: names("entity_sample"),
+        hash: data
+            .get("plan_hash")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        persisted_path: data
+            .get("persisted_path")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        revision: result.revision,
+    })
+}
+
 #[derive(Debug, PartialEq)]
 enum HistoryEntry {
     Message(usize),
+    Plan(usize),
     Reasoning(usize),
     Activity {
         first: usize,
@@ -1264,9 +1368,24 @@ fn history_entries(
             cursor += 1;
             continue;
         }
-        let first = cursor;
-        while cursor < messages.len() && messages[cursor].role != MessageRole::User {
+        if messages[cursor].role == MessageRole::Tool
+            && plan_review_from_message(messages[cursor]).is_some()
+        {
+            entries.push(HistoryEntry::Plan(cursor));
             cursor += 1;
+            continue;
+        }
+        let first = cursor;
+        while cursor < messages.len()
+            && messages[cursor].role != MessageRole::User
+            && !(messages[cursor].role == MessageRole::Tool
+                && plan_review_from_message(messages[cursor]).is_some())
+        {
+            cursor += 1;
+        }
+        if cursor == first {
+            // The next entry is a plan card and is handled by the branch above.
+            continue;
         }
         let segment = &messages[first..cursor];
         let count = segment
@@ -1338,6 +1457,437 @@ fn activity_group(
         ))
 }
 
+fn short_plan_id(plan_id: &str) -> String {
+    plan_id
+        .strip_prefix("plan_")
+        .unwrap_or(plan_id)
+        .chars()
+        .take(12)
+        .collect()
+}
+
+fn plan_metric_chip(
+    tokens: &UiTokens,
+    id: &str,
+    label_key: &str,
+    value: String,
+) -> UiNode {
+    UiNode::new(id.to_string(), UiNodeKind::Panel)
+        .with_class("agent-plan-metric")
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 1.0,
+            padding: UiSpacing::xy(8.0, 4.0),
+            height_mode: UiSizeMode::FitContent,
+            ..UiLayout::fit_content()
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface_alt,
+            border: tokens.border,
+            border_width: 1.0,
+            radius: 6.0,
+            ..UiStyle::transparent()
+        })
+        .with_child(
+            UiNode::new(format!("{id}.label"), UiNodeKind::Label)
+                .with_text_key(label_key)
+                .with_text_style(UiTextStyle::button(tokens.text_muted))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(
+            UiNode::new(format!("{id}.value"), UiNodeKind::Label)
+                .with_text_value(value)
+                .with_text_style(UiTextStyle::button(tokens.text))
+                .with_layout(UiLayout::fit_content()),
+        )
+}
+
+fn plan_validation_chip(
+    tokens: &UiTokens,
+    language: Language,
+    id: &str,
+    label_key: &str,
+    value: String,
+    color: [u8; 4],
+) -> UiNode {
+    UiNode::new(id.to_string(), UiNodeKind::Label)
+        .with_class("agent-plan-validation")
+        .with_text_value(format!("{}: {}", t(label_key, language), value))
+        .with_text_style(UiTextStyle::button(color))
+        .with_layout(UiLayout {
+            padding: UiSpacing::xy(8.0, 3.0),
+            ..UiLayout::fit_content()
+        })
+        .with_style(UiStyle {
+            fill: tokens.surface_alt,
+            border: color,
+            border_width: 1.0,
+            radius: 5.0,
+            ..UiStyle::transparent()
+        })
+}
+
+fn plan_review_card(
+    palette: StudioUiPalette,
+    panel: &AgentPanel,
+    review: &PlanReview,
+    width: f32,
+    index: usize,
+) -> UiNode {
+    let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
+    let card_width = (width * 0.94).clamp(320.0, 900.0);
+    let mut card = UiNode::new(
+        format!("agent.plan.review.{index}"),
+        UiNodeKind::Panel,
+    )
+    .with_class("agent-plan-review")
+    .with_layout(UiLayout {
+        flow: UiFlow::Column,
+        gap: 7.0,
+        padding: UiSpacing::same(13.0),
+        width_mode: UiSizeMode::Fixed,
+        height_mode: UiSizeMode::Fixed,
+        basis: [card_width, PLAN_REVIEW_HEIGHT],
+        overflow: UiOverflow::Clip,
+        ..UiLayout::default()
+    })
+    .with_style(UiStyle {
+        fill: tokens.surface_raised,
+        border: tokens.accent_hot,
+        border_width: 1.0,
+        radius: 10.0,
+        ..UiStyle::transparent()
+    })
+    .with_accessibility_label_key("app.agent_plan_title");
+    let mut header = UiNode::new(
+        format!("agent.plan.review.{index}.header"),
+        UiNodeKind::Toolbar,
+    )
+    .with_layout(UiLayout {
+        flow: UiFlow::Row,
+        align_items: UiAlign::Center,
+        gap: 8.0,
+        height_mode: UiSizeMode::Fixed,
+        basis: [0.0, 28.0],
+        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+    })
+    .with_child(
+        UiNode::new(
+            format!("agent.plan.review.{index}.icon"),
+            UiNodeKind::Image,
+        )
+        .with_icon(UiIcon::new(UiIconId::Grid).with_tint(tokens.accent_hot))
+        .with_layout(UiLayout::fixed(20.0, 20.0)),
+    )
+    .with_child(
+        UiNode::new(
+            format!("agent.plan.review.{index}.title"),
+            UiNodeKind::Label,
+        )
+        .with_text_key("app.agent_plan_title")
+        .with_text_style(UiTextStyle::panel_title(tokens.text))
+        .with_layout(UiLayout {
+            grow: 1.0,
+            width_mode: UiSizeMode::Fill,
+            ..UiLayout::fit_content()
+        }),
+    )
+    .with_child({
+        let mut id_chip = UiNode::new(
+            format!("agent.plan.review.{index}.id"),
+            UiNodeKind::Label,
+        )
+        .with_class("agent-tool-chip")
+        .with_text_value(format!(
+            "{} · {}",
+            t("app.agent_plan_plan", panel.language),
+            short_plan_id(&review.plan_id)
+        ))
+        .with_text_style(UiTextStyle::button(tokens.text_muted))
+        .with_layout(UiLayout::fit_content());
+        let tooltip = [
+            review.hash.as_ref().map(|hash| format!("Hash: {hash}")),
+            review
+                .persisted_path
+                .as_ref()
+                .map(|path| format!("Journal: {path}")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+        if !tooltip.is_empty() {
+            id_chip = id_chip.with_tooltip_value(tooltip);
+        }
+        id_chip
+    })
+    .with_child(
+        UiNode::new(
+            format!("agent.plan.review.{index}.mode"),
+            UiNodeKind::Label,
+        )
+        .with_class("agent-tool-chip")
+        .with_text_value(review.mode.clone())
+        .with_text_style(UiTextStyle::button(tokens.accent_hot))
+        .with_layout(UiLayout::fit_content()),
+    );
+    if let Some(revision) = review.revision {
+        header = header.with_child(
+            UiNode::new(
+                format!("agent.plan.review.{index}.revision"),
+                UiNodeKind::Label,
+            )
+            .with_class("agent-tool-chip")
+            .with_text_value(format!("Rev {revision}"))
+            .with_text_style(UiTextStyle::button(tokens.text_muted))
+            .with_layout(UiLayout::fit_content()),
+        );
+    }
+    card = card.with_child(header);
+    let metrics = UiNode::new(
+        format!("agent.plan.review.{index}.metrics"),
+        UiNodeKind::Toolbar,
+    )
+    .with_layout(UiLayout {
+        flow: UiFlow::Row,
+        gap: 6.0,
+        height_mode: UiSizeMode::FitContent,
+        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+    })
+    .with_child(plan_metric_chip(
+        &tokens,
+        &format!("agent.plan.metric.groups.{index}"),
+        "app.agent_plan_groups",
+        review.groups.to_string(),
+    ))
+    .with_child(plan_metric_chip(
+        &tokens,
+        &format!("agent.plan.metric.entities.{index}"),
+        "app.agent_plan_entities",
+        review.entities.to_string(),
+    ))
+    .with_child(plan_metric_chip(
+        &tokens,
+        &format!("agent.plan.metric.chunks.{index}"),
+        "app.agent_plan_chunks",
+        review.chunks.to_string(),
+    ));
+    card = card.with_child(metrics);
+    let (design_value, design_color) = match review.design_status.as_str() {
+        "passed" => (t("app.agent_plan_passed", panel.language), tokens.positive),
+        "failed" => (t("app.agent_plan_failed", panel.language), tokens.danger),
+        _ => (t("app.agent_plan_not_run", panel.language), tokens.warning),
+    };
+    let overlap_color = if review.overlap_count == 0 {
+        tokens.positive
+    } else {
+        tokens.warning
+    };
+    let gate_color = |status: &str| match status {
+        "passed" => tokens.positive,
+        "failed" => tokens.danger,
+        _ => tokens.warning,
+    };
+    let budget_color = gate_color(&review.budget_status);
+    let navigation_color = gate_color(&review.navigation_status);
+    let mut validations = UiNode::new(
+        format!("agent.plan.review.{index}.validations"),
+        UiNodeKind::Toolbar,
+    )
+    .with_layout(UiLayout {
+        flow: UiFlow::Row,
+        gap: 6.0,
+        height_mode: UiSizeMode::FitContent,
+        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+    })
+    .with_child(plan_validation_chip(
+        &tokens,
+        panel.language,
+        &format!("agent.plan.validation.design.{index}"),
+        "app.agent_plan_design",
+        design_value,
+        design_color,
+    ))
+    .with_child(plan_validation_chip(
+        &tokens,
+        panel.language,
+        &format!("agent.plan.validation.overlaps.{index}"),
+        "app.agent_plan_overlaps",
+        review.overlap_count.to_string(),
+        overlap_color,
+    ))
+    .with_child(plan_validation_chip(
+        &tokens,
+        panel.language,
+        &format!("agent.plan.validation.budget.{index}"),
+        "app.agent_plan_budget",
+        review.budget_status.clone(),
+        budget_color,
+    ))
+    .with_child(plan_validation_chip(
+        &tokens,
+        panel.language,
+        &format!("agent.plan.validation.navigation.{index}"),
+        "app.agent_plan_navigation",
+        review.navigation_status.clone(),
+        navigation_color,
+    ));
+    if !review.warnings.is_empty() {
+        validations = validations.with_child(plan_validation_chip(
+            &tokens,
+            panel.language,
+            &format!("agent.plan.validation.warnings.{index}"),
+            "app.agent_plan_warnings",
+            review.warnings.len().to_string(),
+            tokens.warning,
+        ));
+    }
+    card = card.with_child(validations);
+    let mut tree = UiNode::new(
+        format!("agent.plan.review.{index}.tree"),
+        UiNodeKind::Panel,
+    )
+    .with_layout(UiLayout {
+        flow: UiFlow::Column,
+        gap: 1.0,
+        height_mode: UiSizeMode::FitContent,
+        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+    })
+    .with_child(
+        UiNode::new(
+            format!("agent.plan.review.{index}.tree.title"),
+            UiNodeKind::Label,
+        )
+        .with_text_key("app.agent_plan_tree")
+        .with_text_style(UiTextStyle::button(tokens.text_muted))
+        .with_layout(UiLayout::fit_content()),
+    );
+    let mut rows = 0usize;
+    for (row, name) in review.group_sample.iter().take(3).enumerate() {
+        tree = tree.with_child(
+            UiNode::new(
+                format!("agent.plan.review.{index}.group.{row}"),
+                UiNodeKind::Label,
+            )
+            .with_text_value(format!("Group · {name}"))
+            .with_text_style(UiTextStyle::button(tokens.text))
+            .with_text_overflow(UiTextOverflow::Ellipsis)
+            .with_layout(UiLayout {
+                width_mode: UiSizeMode::Fill,
+                ..UiLayout::fit_content()
+            }),
+        );
+        rows += 1;
+    }
+    for (row, name) in review
+        .entity_sample
+        .iter()
+        .take(PLAN_REVIEW_TREE_ROWS.saturating_sub(rows))
+        .enumerate()
+    {
+        tree = tree.with_child(
+            UiNode::new(
+                format!("agent.plan.review.{index}.entity.{row}"),
+                UiNodeKind::Label,
+            )
+            .with_text_value(format!("  Entity · {name}"))
+            .with_text_style(UiTextStyle::body(tokens.text_muted))
+            .with_text_overflow(UiTextOverflow::Ellipsis)
+            .with_layout(UiLayout {
+                width_mode: UiSizeMode::Fill,
+                ..UiLayout::fit_content()
+            }),
+        );
+    }
+    if review.group_sample.len() + review.entity_sample.len() > PLAN_REVIEW_TREE_ROWS {
+        tree = tree.with_child(
+            UiNode::new(
+                format!("agent.plan.review.{index}.tree.more"),
+                UiNodeKind::Label,
+            )
+            .with_text_key("app.agent_plan_more")
+            .with_text_style(UiTextStyle::button(tokens.text_muted))
+            .with_layout(UiLayout::fit_content()),
+        );
+    }
+    card = card.with_child(tree);
+    let mut actions = UiNode::new(
+        format!("agent.plan.review.{index}.actions"),
+        UiNodeKind::Toolbar,
+    )
+    .with_layout(UiLayout {
+        flow: UiFlow::Row,
+        align_items: UiAlign::Center,
+        gap: 8.0,
+        height_mode: UiSizeMode::Fixed,
+        basis: [0.0, 34.0],
+        ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+    })
+    .with_child(
+        UiNode::new("agent.plan.review.spacer", UiNodeKind::Panel)
+            .with_layout(UiLayout {
+                grow: 1.0,
+                ..UiLayout::fit_content()
+            }),
+    )
+    .with_child(
+        UiNode::new("agent.plan.cancel", UiNodeKind::Button)
+            .with_class("agent-plan-cancel")
+            .with_text_key("app.agent_plan_cancel")
+            .with_text_style(UiTextStyle::button(tokens.text_muted))
+            .with_icon(UiIcon::new(UiIconId::Close).with_tint(tokens.text_muted))
+            .with_layout(UiLayout {
+                padding: UiSpacing::xy(10.0, 6.0),
+                height_mode: UiSizeMode::Fixed,
+                basis: [0.0, 30.0],
+                ..UiLayout::fit_content()
+            })
+            .with_style(UiStyle {
+                fill: tokens.surface_alt,
+                border: tokens.border,
+                border_width: 1.0,
+                radius: 6.0,
+                ..UiStyle::transparent()
+            })
+            .focusable()
+            .with_accessibility_role(UiAccessibilityRole::Button)
+            .with_accessibility_label_key("app.agent_plan_cancel")
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                format!("agent.plan.cancel:{}", review.plan_id),
+            )),
+    )
+    .with_child(
+        UiNode::new("agent.plan.apply", UiNodeKind::Button)
+            .with_class("agent-plan-apply")
+            .with_text_key("app.agent_plan_apply")
+            .with_text_style(UiTextStyle::button(tokens.background))
+            .with_icon(UiIcon::new(UiIconId::Play).with_tint(tokens.background))
+            .with_layout(UiLayout {
+                padding: UiSpacing::xy(12.0, 6.0),
+                height_mode: UiSizeMode::Fixed,
+                basis: [0.0, 30.0],
+                ..UiLayout::fit_content()
+            })
+            .with_style(UiStyle {
+                fill: tokens.accent_hot,
+                border: tokens.accent_hot,
+                border_width: 1.0,
+                radius: 6.0,
+                ..UiStyle::transparent()
+            })
+            .focusable()
+            .with_accessibility_role(UiAccessibilityRole::Button)
+            .with_accessibility_label_key("app.agent_plan_apply")
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                format!("agent.plan.apply:{}", review.plan_id),
+            )),
+    );
+    card = card.with_child(actions);
+    card
+}
+
 fn build_history(
     palette: StudioUiPalette,
     panel: &AgentPanel,
@@ -1351,6 +1901,13 @@ fn build_history(
     let tokens = crate::agent_workspace_surface::workspace_tokens(palette);
     let mut entries = Vec::new();
     for entry in history_entries(messages, &panel.expanded_tools) {
+        if let HistoryEntry::Plan(index) = &entry {
+            let dismissed = plan_review_from_message(messages[*index])
+                .is_some_and(|plan| panel.dismissed_plans.contains(&plan.plan_id));
+            if dismissed {
+                continue;
+            }
+        }
         if let HistoryEntry::Message(index) = entry {
             let message = messages[index];
             if panel.show_reasoning && message.reasoning.as_ref().is_some_and(|r| !r.text.is_empty()) {
@@ -1367,6 +1924,7 @@ fn build_history(
         .iter()
         .map(|entry| match entry {
             HistoryEntry::Activity { .. } => DOCK_TOOL_ROW_HEIGHT,
+            HistoryEntry::Plan(_) => PLAN_REVIEW_HEIGHT,
             HistoryEntry::Reasoning(index) => {
                 if panel.expanded_tools.contains(&format!("reasoning:{}", messages[*index].id)) {
                     DOCK_TOOL_ROW_HEIGHT + 126.0
@@ -1444,6 +2002,13 @@ fn build_history(
                     count,
                     expanded,
                 } => activity_group(palette, panel, messages[*first], *count, *expanded),
+                HistoryEntry::Plan(index) => {
+                    if let Some(review) = plan_review_from_message(messages[*index]) {
+                        plan_review_card(palette, panel, &review, width, *index)
+                    } else {
+                        spacer("agent.plan.review.missing", 0.0)
+                    }
+                }
                 HistoryEntry::Reasoning(index) => reasoning_entry(palette, panel, messages[*index]),
                 HistoryEntry::Message(index) => message_card_with_variant(
                     palette,
@@ -1769,6 +2334,18 @@ fn composer_media(palette: StudioUiPalette, panel: &AgentPanel, running: bool) -
                         align_items: UiAlign::Center,
                         gap: 6.0,
                         ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
+                    })
+                    .with_child({
+                        let mut thumb =
+                            UiNode::new(format!("agent.image.{index}.thumb"), UiNodeKind::Image)
+                                .with_layout(UiLayout::fixed(52.0, 26.0));
+                        raf_ui::components::set_thumbnail_image(
+                            &mut thumb,
+                            crate::agent_workspace_surface::attachment_image_key(&image.file),
+                            raf_ui::UiImageFit::Cover,
+                            4.0,
+                        );
+                        thumb
                     })
                     .with_child(
                         UiNode::new(format!("agent.image.{index}.label"), UiNodeKind::Label)
@@ -2466,7 +3043,7 @@ fn dock_tool_entry(
         .and_then(|()| serde_json::from_str::<AgentToolResult>(&message.content).ok())
         .and_then(|result| result.revision.map(|revision| (result, revision)))
     {
-        let (_result, revision) = result;
+        let (result, revision) = result;
         toggle_row = toggle_row.with_child(
             UiNode::new(
                 format!("agent.message.{index}.row.revision"),
@@ -2477,6 +3054,54 @@ fn dock_tool_entry(
             .with_text_style(UiTextStyle::button(tokens.text_muted))
             .with_layout(UiLayout::fit_content()),
         );
+        if result.partial {
+            toggle_row = toggle_row.with_child(
+                UiNode::new(
+                    format!("agent.message.{index}.row.partial"),
+                    UiNodeKind::Label,
+                )
+                .with_class("agent-tool-chip")
+                .with_text_key("app.agent_tool_partial")
+                .with_text_style(UiTextStyle::button(tokens.warning))
+                .with_layout(UiLayout::fit_content()),
+            );
+        }
+        if let Some(plan_id) = result
+            .data
+            .get("plan_id")
+            .and_then(serde_json::Value::as_str)
+        {
+            toggle_row = toggle_row.with_child(
+                UiNode::new(
+                    format!("agent.message.{index}.row.plan"),
+                    UiNodeKind::Label,
+                )
+                .with_class("agent-tool-chip")
+                .with_text_value(format!(
+                    "{} · {}",
+                    t("app.agent_tool_plan", Language::English),
+                    plan_id
+                ))
+                .with_text_style(UiTextStyle::button(tokens.accent_hot))
+                .with_layout(UiLayout::fit_content()),
+            );
+        }
+        if !result.artifacts.is_empty() {
+            toggle_row = toggle_row.with_child(
+                UiNode::new(
+                    format!("agent.message.{index}.row.artifacts"),
+                    UiNodeKind::Label,
+                )
+                .with_class("agent-tool-chip")
+                .with_text_value(format!(
+                    "{} · {}",
+                    t("app.agent_tool_artifacts", Language::English),
+                    result.artifacts.len()
+                ))
+                .with_text_style(UiTextStyle::button(tokens.positive))
+                .with_layout(UiLayout::fit_content()),
+            );
+        }
     }
     if !tool_expanded {
         return toggle_row;
@@ -2573,6 +3198,9 @@ fn tool_status(palette: StudioUiPalette, message: &ChatMessage) -> ([u8; 4], &'s
     if !result.ok {
         return (tokens.danger, "app.agent_tool_result");
     }
+    if result.partial {
+        return (tokens.warning, "app.agent_tool_partial");
+    }
     let verification_status = result
         .verification
         .as_ref()
@@ -2580,7 +3208,9 @@ fn tool_status(palette: StudioUiPalette, message: &ChatMessage) -> ([u8; 4], &'s
         .and_then(serde_json::Value::as_str)
         .map(str::to_ascii_lowercase);
     match verification_status.as_deref() {
-        Some("ok") | Some("passed") | Some("success") => (tokens.positive, "app.agent_tool_result"),
+        Some("ok") | Some("passed") | Some("success") | Some("reviewed") => {
+            (tokens.positive, "app.agent_tool_result")
+        }
         Some("failed") | Some("error") | Some("errors") => (tokens.danger, "app.agent_tool_result"),
         _ if !result.warnings.is_empty() => (tokens.warning, "app.agent_tool_result"),
         _ if result.changed => (tokens.positive, "app.agent_tool_result"),
@@ -3257,6 +3887,66 @@ fn display_message_content(message: &ChatMessage) -> String {
     {
         lines.push(format!("Verification: {status}"));
     }
+    if result.partial {
+        lines.push("Partial result: some requested targets were not found.".to_string());
+    }
+    if let Some(diff) = result.diff.as_ref() {
+        let count = |key: &str| {
+            diff.get(key)
+                .and_then(serde_json::Value::as_array)
+                .map_or(0, Vec::len)
+        };
+        let created = count("created");
+        let updated = count("updated");
+        let deleted = count("deleted");
+        if created + updated + deleted > 0 {
+            lines.push(format!(
+                "Changes: {created} created, {updated} updated, {deleted} deleted."
+            ));
+        }
+    }
+    if let Some(plan_id) = result
+        .data
+        .get("plan_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        lines.push(format!("Plan: {plan_id}"));
+    }
+    if let Some(preview_lines) = result
+        .data
+        .get("preview")
+        .and_then(|preview| preview.get("lines"))
+        .and_then(serde_json::Value::as_array)
+    {
+        lines.push("Plan preview:".to_string());
+        lines.extend(
+            preview_lines
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .take(8)
+                .map(|line| format!("- {line}")),
+        );
+    }
+    if let Some(status) = result
+        .data
+        .get("design_audit")
+        .and_then(|audit| audit.get("status"))
+        .and_then(serde_json::Value::as_str)
+    {
+        lines.push(format!("Design audit: {status}."));
+    }
+    if let Some(overlaps) = result
+        .data
+        .get("overlap_count")
+        .and_then(serde_json::Value::as_u64)
+    {
+        if overlaps > 0 {
+            lines.push(format!("Conservative overlaps: {overlaps}."));
+        }
+    }
+    if !result.artifacts.is_empty() {
+        lines.push(format!("Evidence artifacts: {}.", result.artifacts.len()));
+    }
     lines.extend(
         result
             .warnings
@@ -3749,6 +4439,131 @@ mod tests {
     }
 
     #[test]
+    fn plan_review_card_exposes_counts_tree_validations_and_actions() {
+        let result = AgentToolResult::success(
+            "World plan ready",
+            serde_json::json!({
+                "status": "planned",
+                "plan_id": "plan_demo_1234567890",
+                "plan_hash": "abc123",
+                "mode": "build",
+                "groups": 18,
+                "entities": 240,
+                "design_audit": {"status": "passed"},
+                "overlap_count": 2,
+                "pipeline": {
+                    "status": "warning",
+                    "gates": [
+                        {"gate": "budget", "status": "passed", "detail": {}},
+                        {"gate": "navigation", "status": "passed", "detail": {}}
+                    ]
+                },
+                "preview": {
+                    "chunks": 3,
+                    "group_sample": [{"name":"Test District"},{"name":"Retail Row"}],
+                    "entity_sample": [{"name":"Floor"},{"name":"Shelf_A"},{"name":"Checkout"}]
+                }
+            }),
+        );
+        let message = tool_message(&serde_json::to_string(&result).unwrap());
+        let review = plan_review_from_message(&message).expect("recognized plan result");
+        assert_eq!(review.plan_id, "plan_demo_1234567890");
+        assert_eq!(review.groups, 18);
+        assert_eq!(review.entities, 240);
+        assert_eq!(review.chunks, 3);
+        assert_eq!(review.design_status, "passed");
+        assert_eq!(review.overlap_count, 2);
+
+        let panel = AgentPanel::default();
+        let card = plan_review_card(
+            StudioUiPalette::IndustrialDark,
+            &panel,
+            &review,
+            760.0,
+            0,
+        );
+        for id in [
+            "agent.plan.review.0",
+            "agent.plan.metric.groups.0",
+            "agent.plan.metric.entities.0",
+            "agent.plan.metric.chunks.0",
+            "agent.plan.validation.design.0",
+            "agent.plan.validation.overlaps.0",
+            "agent.plan.validation.budget.0",
+            "agent.plan.validation.navigation.0",
+            "agent.plan.review.0.tree",
+            "agent.plan.review.0.group.0",
+            "agent.plan.review.0.entity.0",
+            "agent.plan.apply",
+            "agent.plan.cancel",
+        ] {
+            assert!(node(&card, id).is_some(), "missing plan card node {id}");
+        }
+        let apply = node(&card, "agent.plan.apply").unwrap();
+        assert!(apply.focusable);
+        assert!(apply.event_handlers.iter().any(|binding| {
+            matches!(&binding.action, UiAction::Command { name } if name == "agent.plan.apply:plan_demo_1234567890")
+        }));
+        let cancel = node(&card, "agent.plan.cancel").unwrap();
+        assert!(cancel.event_handlers.iter().any(|binding| {
+            matches!(&binding.action, UiAction::Command { name } if name == "agent.plan.cancel:plan_demo_1234567890")
+        }));
+    }
+
+    #[test]
+    fn plan_review_card_is_wired_into_history_and_cancel_hides_it() {
+        let mut user = message("Build a test district");
+        user.role = MessageRole::User;
+        let result = AgentToolResult::success(
+            "World plan ready",
+            serde_json::json!({
+                "status": "planned",
+                "plan_id": "plan_history_demo",
+                "mode": "build",
+                "groups": 4,
+                "entities": 40,
+                "design_audit": {"status": "passed"},
+                "overlap_count": 0,
+                "preview": {
+                    "chunks": 1,
+                    "group_sample": [{"name":"District"}],
+                    "entity_sample": [{"name":"Dock"}]
+                }
+            }),
+        );
+        let plan = tool_message(&serde_json::to_string(&result).unwrap());
+        let messages = vec![&user, &plan];
+        let entries = history_entries(&messages, &std::collections::HashSet::new());
+        assert!(entries.iter().any(|entry| matches!(entry, HistoryEntry::Plan(1))));
+
+        let mut panel = AgentPanel::default();
+        let surface = build_history(
+            StudioUiPalette::IndustrialDark,
+            &panel,
+            ProjectType::Game,
+            &messages,
+            760.0,
+            0.0,
+            AgentSurfaceVariant::Embedded,
+            |_| false,
+        );
+        assert!(node(&surface, "agent.plan.review.1").is_some());
+
+        panel.dismissed_plans.insert("plan_history_demo".to_string());
+        let surface = build_history(
+            StudioUiPalette::IndustrialDark,
+            &panel,
+            ProjectType::Game,
+            &messages,
+            760.0,
+            0.0,
+            AgentSurfaceVariant::Embedded,
+            |_| false,
+        );
+        assert!(node(&surface, "agent.plan.review.1").is_none());
+    }
+
+    #[test]
     fn harness_turn_groups_keep_errors_and_the_final_answer_outside_details() {
         let mut user = message("Build a world");
         user.role = MessageRole::User;
@@ -3842,6 +4657,7 @@ mod tests {
             AgentSurfaceVariant::Embedded,
         );
         assert!(node(&composer, "agent.image.paste").is_some());
+        assert!(node(&composer, "agent.image.0.thumb").is_some());
         assert!(node(&composer, "agent.image.0.remove").is_some());
         assert!(node(&composer, "agent.reasoning.cycle").is_some());
         assert_eq!(composer_media_height(&panel), 30.0);

@@ -156,6 +156,11 @@ pub struct SceneNode {
     /// Physics body state for runtime simulation.
     #[serde(default)]
     pub rigid_body: RigidBody,
+    /// Optional explicit capsule character controller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub character_controller: Option<super::character::CharacterController>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub physics_joints: Vec<super::joint::PhysicsJoint>,
     /// Explicit game camera component. Ordinary objects never become cameras implicitly.
     #[serde(default)]
     pub game_camera: Option<crate::runtime_config::GameCamera>,
@@ -208,6 +213,8 @@ impl SceneNode {
             audio_source: AudioSource::default(),
             collider: Collider::default(),
             rigid_body: RigidBody::default(),
+            character_controller: None,
+            physics_joints: Vec::new(),
             game_camera: None,
             is_folder: false,
             source_asset: None,
@@ -235,7 +242,7 @@ impl SceneNode {
             visible: true,
             casts_shadows: true,
             receives_shadows: true,
-            locked: false,
+            locked: primitive != Primitive::Empty,
             entity_index: None,
             scripts: Vec::new(),
             variables: Vec::new(),
@@ -243,6 +250,8 @@ impl SceneNode {
             audio_source: AudioSource::default(),
             collider: Collider::default(),
             rigid_body: RigidBody::default(),
+            character_controller: None,
+            physics_joints: Vec::new(),
             game_camera: None,
             is_folder: false,
             source_asset: None,
@@ -258,6 +267,7 @@ impl SceneNode {
     pub fn folder(name: &str) -> Self {
         let mut node = Self::new(name);
         node.is_folder = true;
+        node.locked = true;
         node
     }
 

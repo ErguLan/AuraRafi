@@ -236,6 +236,91 @@ fn runtime(
             "project-settings.enable-physics",
             project.settings.enable_physics,
         ))
+        .with_child(toggle_row_disabled(
+            palette,
+            "project-settings.advanced-physics",
+            "runtime.advanced_physics",
+            "project-settings.advanced-physics",
+            project.settings.runtime.advanced_physics,
+            !project.settings.enable_physics,
+        ))
+        .with_child(toggle_row_disabled(
+            palette,
+            "project-settings.physics-debug-draw",
+            "runtime.physics_debug_draw",
+            "project-settings.physics-debug-draw",
+            project.settings.runtime.physics_debug_draw,
+            !project.settings.enable_physics,
+        ))
+        .with_child(segment_row_disabled(
+            palette,
+            "project-settings.gravity-preset",
+            "runtime.gravity_preset",
+            &[
+                (
+                    "runtime.gravity_earth",
+                    "project-settings.gravity-preset.earth",
+                    project.settings.runtime.gravity == glam::Vec3::new(0.0, -9.81, 0.0)
+                        && project.settings.runtime.character_jump_height == 1.5
+                        && project.settings.runtime.character_speed == 4.0
+                        && project.settings.runtime.character_max_slope_degrees == 45.0,
+                ),
+                (
+                    "runtime.gravity_moon",
+                    "project-settings.gravity-preset.moon",
+                    project.settings.runtime.gravity == glam::Vec3::new(0.0, -1.62, 0.0)
+                        && project.settings.runtime.character_jump_height == 1.5
+                        && project.settings.runtime.character_speed == 4.0
+                        && project.settings.runtime.character_max_slope_degrees == 45.0,
+                ),
+                (
+                    "runtime.gravity_arcade",
+                    "project-settings.gravity-preset.arcade",
+                    project.settings.runtime.gravity == glam::Vec3::new(0.0, -20.0, 0.0)
+                        && project.settings.runtime.character_jump_height == 2.5
+                        && project.settings.runtime.character_speed == 6.0
+                        && project.settings.runtime.character_max_slope_degrees == 50.0,
+                ),
+            ],
+            !project.settings.enable_physics || !project.settings.runtime.advanced_physics,
+        ))
+        .with_child(runtime_text_row_disabled(
+            palette,
+            "gravity",
+            "runtime.gravity_vector",
+            128,
+            !project.settings.enable_physics || !project.settings.runtime.advanced_physics,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.character-jump-height",
+            "runtime.character_jump_height",
+            "project-settings.character-jump-height",
+            project.settings.runtime.character_jump_height,
+            0.0, 20.0, 0.05,
+            format!("{:.2}", project.settings.runtime.character_jump_height),
+            !project.settings.enable_physics,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.character-speed",
+            "runtime.character_speed",
+            "project-settings.character-speed",
+            project.settings.runtime.character_speed,
+            0.0, 100.0, 0.1,
+            format!("{:.2}", project.settings.runtime.character_speed),
+            !project.settings.enable_physics,
+        ))
+        .with_child(range_row_disabled(
+            palette,
+            "project-settings.character-max-slope",
+            "runtime.character_max_slope",
+            "project-settings.character-max-slope",
+            project.settings.runtime.character_max_slope_degrees,
+            0.0, 89.0, 1.0,
+            format!("{:.0}", project.settings.runtime.character_max_slope_degrees),
+            !project.settings.enable_physics,
+        ))
         .with_child(toggle_row(
             palette,
             "project-settings.pause-unfocused",
@@ -330,6 +415,16 @@ fn runtime_text_row(
     label: &str,
     max_length: usize,
 ) -> UiNode {
+    runtime_text_row_disabled(palette, field, label, max_length, field == "progress_folder")
+}
+
+fn runtime_text_row_disabled(
+    palette: StudioUiPalette,
+    field: &str,
+    label: &str,
+    max_length: usize,
+    disabled: bool,
+) -> UiNode {
     row(
         palette,
         format!("project-settings.runtime-{field}"),
@@ -345,7 +440,7 @@ fn runtime_text_row(
                 submit_command: Some(format!("project-settings.commit_text:runtime.{field}")),
             },
         )
-        .disabled(field == "progress_folder")
+        .disabled(disabled)
         .with_layout(UiLayout::fixed(CONTROL_WIDTH, 30.0)),
     )
 }

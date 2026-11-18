@@ -8,6 +8,7 @@
 //! canvas hosts. The engine and renderer remain independent.
 
 pub(crate) mod agent_artifacts;
+mod agent_map_capture;
 mod agent_scene_capture;
 mod agent_asset_tools;
 mod agent_project_store;

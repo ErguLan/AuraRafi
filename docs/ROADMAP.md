@@ -47,6 +47,66 @@ Current source scope:
 After 0.12: splines, lathe/sweep/loft and extensive procedural construction.
 Native DPI/input/recovery acceptance is distinct from compilation/offscreen tests.
 
+## Harness 0.12 — pendientes de la pasada P0–P2
+
+La pasada actual ya cubre contratos de resultado, persistencia de capacidades
+visuales, evicción reportada, retry/backoff, plan cancelable, `raf open`,
+`mcp serve --launch`, filtrado honesto de tools headless, consumo real de
+`session` en MCP, imágenes MCP para todos los artefactos `image/*`, persistencia
+de `world.script` en `.aura_rafi/world_scripts/`, gates de assertions, chips de
+budget/navigation en la plan review card, `project.open` attached,
+`project.save --wait`, modos MCP (`raf_set_mode`), notificaciones
+`resourcesUpdated` y recursos `raf://plans` / `raf://plan/{id}` / `raf://digest`.
+Las operaciones de plan `camera` y `script`, y `world::camera` / `world::script`
+en el sandbox, también están implementadas.
+
+Quedan para 0.12, sin fingir que ya existen:
+
+- [ ] UI: lightbox modal con zoom sobre el detalle de evidencia y miniaturas
+  reales en mensajes del historial; composer y evidencia ya las tienen, igual
+  que el pin al contexto.
+- [ ] Plan review: miniatura top-down, “Aplicar por región”, chips de gameplay
+  y diff viewer por entidad con creados/actualizados/eliminados.
+- [ ] Activity strip con fases Observar → Planificar → Construir → Verificar →
+  Revisar visualmente → Checkpoint, y miniatura viva durante capturas.
+- [ ] Compaction de historial con memoria: resumir resultados viejos conservando
+  receipts y resúmenes, sin amputar los turnos recientes.
+- [ ] Evidence gallery: usar una captura como referencia de estilo y abrirla en
+  el viewport; el pin al contexto ya existe. Índice por tarea en vez de
+  limitarse a los últimos 32 mensajes.
+- [ ] Model picker: badges de reasoning/contexto además del badge de visión ya
+  añadido.
+- [ ] MCP: progreso por chunk para commits grandes, recurso
+  `raf://artifact/{id}` y prompts de brief/program/visual review. `raf_set_mode`,
+  notificaciones `resourcesUpdated` y recursos `raf://plan/{id}`,
+  `raf://plans` y `raf://digest` ya existen.
+- [ ] CLI/MCP: `project.save` headless limitado a metadata del proyecto (no
+  escena); alinear el legado `raf_scene_plan` con el pipeline de
+  `raf_scene_program`. `project.open` attached y `raf save --wait` ya existen.
+- [ ] Contact sheet: reportar `failures[]` por vista y reintentar/omitir vistas
+  que no producen frame, en vez de fallar con “requires two to four captures”.
+- [ ] `world_script`: completar `query_scene` (hoy existe `world::count`
+  read-only), `place_prefab`, `noise/seeded_random` y semilla explícita; el
+  sandbox, la persistencia y `world::camera` / `world::script` ya existen.
+- [ ] World Program: operación `light`, zonas y listas explícitas
+  `resolved/unresolved/failed_checks`; `assert` de accesibilidad y presupuesto
+  más allá de `no_overlaps`/`min_reachable_goals`, con el alcance de solapes
+  limitado a las entidades del plan cuando corresponda. `camera` y `script` ya
+  existen.
+- [ ] Tools de intención: `build_world`, `dress_scene`,
+  `place_checkpoints(along_route)` y `verify_playable_path`.
+- [ ] Catálogo: conectar `enum_values` de todos los parámetros del catálogo a
+  los JSON Schemas de tools; hoy los enums críticos están tipados a mano.
+- [ ] `scene_query`/`outline`: incluir color y world bounds por defecto cuando
+  el presupuesto lo permita.
+- [ ] Resiliencia: `max_turns` como pausa con “Continuar” en vez de `Error`,
+  timeout de tools asíncronas y checkpoint del agente tras transacciones grandes.
+- [ ] Evaluación: proyectos dorados + prompts (“un supermercado”, “hazlo de
+  noche”, “arregla los solapes”) con métricas de plan, navegación, diseño,
+  round-trips y artefactos.
+- [ ] Tests de escenario con `script.run` y simulación real, después de que
+  Runtime esté estable.
+
 ## Current Status: Active development beyond the initial foundation
 
 The engine foundation is in place and several vertical slices have already moved past pure scaffolding. This section tracks broadly available systems, while later sections separate implemented milestones from planned work.
@@ -193,6 +253,10 @@ Prepared rendering goals in this phase also include:
 - Shadow mapping
 - Ambient occlusion (SSAO)
 
+> The prepared PBR, point/spot lighting, SSAO, post-processing, particle and
+> ray-tracing goals moved to v0.12. The active v0.7 scope is directional Sun
+> lighting, ambient/sky and opt-in directional shadows.
+
 ### Current implementation boundary
 
 - [x] Per-project RenderConfig and GPU-first resource profiles with Potato,
@@ -201,12 +265,18 @@ Prepared rendering goals in this phase also include:
   shadows, post-processing, PBR, particles, and skeletal animation.
 - [x] Flat scene/CAD rendering, camera, selection, gizmos, and retained UI
   composition through the shared graphics runtime.
-- [ ] PBR, shadows, post-processing, particle systems, skeletal animation,
-  advanced lighting, and ray tracing are intentionally not product-enabled
-  while the renderer and editor are stabilized.
+- [x] Directional Sun, ambient and sky lighting, plus opt-in directional
+  shadows through the shared GPU and CPU paths.
+- [ ] Native-window visual and sustained performance acceptance on representative
+  hardware. Automated and offscreen renderer checks remain separate evidence.
+  This is an acceptance gate, not pending feature code.
 - [x] 2D game view uses the shared 3D scene renderer with an orthographic
       camera; legacy `Sprite2D` data is loaded as `Plane` (textured assets
       remain future)
+
+> Product PBR rendering, general post-processing, ambient occlusion, particles,
+> skeletal animation playback and ray tracing moved to v0.12. Prepared
+> descriptors and budgets do not count as active rendering features.
 
 ## v0.8.0 - Game Runtime (Local implementation; acceptance tracked separately)
 
@@ -221,22 +291,28 @@ low-spec performance. See LOCAL_RUNTIME.md and CAMERA_RUNTIME.md for evidence.
 - [x] Supported saved/unsaved node graphs compile to Rhai in Play; start, update, late-update and events
 - [x] Keyboard input snapshot shape for future runtime scripts
 - [x] External `.rhai` lifecycle harness for prepared runtime tests
-- [ ] Script-facing access to `self`, `parent`, entity paths, variables, movement, velocity, and audio triggers
-      (self, hierarchy, stable references, movement, camera/lens, basic audio and shared velocity/impulse API exist; focused validation and acceptance remain separate)
-- [ ] Basic collision detection through scene colliders
-- [ ] Simple physics (gravity, damping, velocity, trigger-only bodies)
-      (bounded AABB integration, initial-overlap correction and collision/trigger enter/stay/exit are implemented; see PHYSICS_RUNTIME.md for limits and acceptance)
-- [ ] Audio playback for entity audio sources inside Play mode
+- [x] Script-facing access to `self`, `parent`, entity paths, variables,
+  movement, velocity, camera/lens, and audio triggers through the shared Host API.
+- [x] Basic scene-collider contacts and simple gravity, damping, velocity,
+  blocking, and trigger events. Supported AABB limits and native acceptance
+  are documented in PHYSICS_RUNTIME.md.
+- [x] Entity audio-source playback for supported WAV files on Windows.
 - [x] Properties inspector support for runtime variables, audio sources, rigid bodies, and colliders
-- [x] Animation-aware collision structure (raf_core/scene/anim_collider.rs): AnimCollider per bone, 5 response types (Stop/Blend/Slide/Recoil/Ignore), auto-generate for hands/feet, enabled by DEFAULT (marketing differentiator)
+- [x] Animation-collider data contract with per-bone bounds and response types.
+  Skeletal playback does not yet drive these colliders.
 
 Follow-up work after 0.8.0:
 
-- [ ] Separate game runtime binary
+- [x] Separate `aurarafi-player` executable for runtime snapshots. Editor Play
+  uses the sibling executable when it is packaged and retains the embedded
+  route for development.
 - [x] Fixed-timestep loop decoupled from editor frame timing
-- [ ] Animation system (keyframe-based, bone hierarchy)
-- [ ] Connect animation collision to playback (check colliders each animation step, trigger response on hit)
-- [ ] IK (Inverse Kinematics) for procedural foot placement and hand grabs
+- [x] Bounded IK solvers delivered ahead of the animation runtime: analytic
+  two-bone with pole control plus FABRIK for longer chains, length preservation
+  and unreachable-target handling in `raf_core::scene::ik`.
+
+> Skeletal keyframe animation and animation-driven collision moved to v0.11.
+> Foot/hand IK placement remains an integration task after skeletal playback.
 
 ## v0.8.5 - Viewport & Renderer Restructure (Done)
 
@@ -254,6 +330,8 @@ Full architectural rewrite of the viewport and render pipeline. The monolithic v
 - [x] `ViewportBridge`: owns camera state, renderer, edit session, and transform controller — zero widget-toolkit dependency
 - [x] `ViewportTransformController`: gizmo drag lifecycle (translate/rotate/scale) with screen-space axis projection
 - [x] `ViewportEditSession`: per-entity editable mesh state, vertex picking (10px), vertex dragging (world→local via inverse rotation)
+- [x] Viewport vertex edits are session-only. Persistent mesh editing, saved
+  topology and undo/redo belong to v0.12.
 - [x] Precise entity picking: ray-sphere broad phase + ray-triangle narrow phase (replaces old screen-space distance check)
 
 ### Render Pipeline (`raf_render::scene_renderer`)
@@ -295,19 +373,22 @@ The 0.9.0 target establishes the editor IDE as the native "home" for the AI agen
   concise summaries without exposing private reasoning
 - [x] Improved temperature (0.7) for more natural, expressive responses
 
-### Pending (next)
-- [ ] AI Director connected to game loop (reads WorldState, emits actions)
-- [ ] Mesh provider connected to viewport (streams chunks into EditableMesh)
-- [ ] Asset generator UI in asset browser panel ("Generate with AI" button)
-- [ ] AI-assisted entity & asset creation (prompt -> generate multi-primitive prefabs)
-- [ ] AI-assisted script writing & configuration (Rhai/C++ code generation)
-- [ ] AI-assisted debugging (console error monitoring, auto-fix suggestions)
-- [ ] AI-generated textures applied as materials
-- [ ] Procedural terrain via mesh provider (algorithmic, no AI needed)
+Agent authoring, script, and visual-review routes are present. The native
+provider-to-project smoke test and visual/provider acceptance are tracked
+separately in AGENT_CLI_MCP_EXPANSION.md and AGENT_WORKSPACE.md.
+
+The remaining AI Director, MeshProvider, asset-generation, texture-material,
+and procedural-terrain integrations move to v0.12.
+
+- [x] v0.9.0 code scope closed: no queued implementation remains in this
+  version. The deferred integration list above is owned by v0.12.
+- [x] Pull-forward: on-demand local procedural PNG generation is available
+  from the Assets create menu and refreshes the catalog when the worker
+  finishes. Remote provider generation stays in the v0.12 workflow.
 
 ## v0.10.0 - Hardware & IoT (Beta Preview)
 
-**Status: Beta Preview scope implemented.** The
+**Status: Beta Preview implementation complete; hardware access is opt-in.** The
 [Electronics laboratory](AGENT_WORKSPACE.md#electronics-laboratory) opens inside the Agent workspace
 and returns to the active editor document.
 
@@ -319,10 +400,48 @@ and returns to the active editor document.
 - [x] Hardware diagnostics for connection state, firmware identity, reported channels and output acknowledgements.
 - [x] OTA preparation for compatible devices: image size check, SHA-256 and manifest export. Installation is handled by the device firmware updater.
 - [x] PCB fabrication preview milestone: JLCPCB's quote page rendered both sides of the exported heart and detected its two layers and 334.75 × 212.25 mm dimensions.
+- [x] Persisted hardware-access consent, off by default. Port search starts only
+  after explicit activation and remains on demand. A serial worker exists only
+  while a board is connected. This lazy path needs no engine restart.
+- [x] Software-side serial bounds and activation guards covered by focused
+  tests. Native and physical-board acceptance are separate.
 - [ ] Hardware acceptance on physical Arduino and ESP32 boards: discovery, telemetry, actuator acknowledgement, disconnect/reconnect and OTA preparation.
 - [ ] Native performance acceptance during a sustained serial session and while returning between the laboratory and editor.
 
+### 0.10.0 closure (code hardening)
+
+- [x] A transport failure terminates the pending output receipt as
+  `Receipt::Failed`, so the laboratory never waits forever for an ACK that
+  cannot arrive.
+- [x] Link loss stops the active capture and enters a bounded three-attempt
+  reconnect window with growing backoff; a manual disconnect cancels it.
+- [x] Hardware-access consent propagates to every session-scoped laboratory,
+  not only the mounted editor document.
+- [x] Portable native pickers cover project, folder, firmware and OTA manifest
+  destinations through zenity/kdialog on Linux and osascript on macOS, in
+  addition to the Windows COM dialogs. Unsupported systems still fall back to
+  no selection instead of a silent Windows-only no-op.
+- [x] The reference sketch reports a reference-scaled voltage in `V`, enabling
+  a unit-matched comparison with a DC voltage probe. `RAF_ADC_REFERENCE_VOLTS`
+  is configurable per board.
+- [x] Removed the dead stub serial API; `raf_hardware::serial_session` is the
+  single live transport and the only public serial entry point.
+- [x] Focused tests cover failed-receipt termination, ACK expiry, reconnect
+  backoff and picker-output normalization.
+
 ## v0.11.0 - Cloud & Streaming
+
+### Runtime animation and IK (moved from v0.8.0)
+
+- [ ] Skeletal keyframe animation with a bone hierarchy, skinning data, a
+  playback clock and editor/runtime sampling.
+- [ ] Connect animation collision to playback: evaluate the configured
+  `AnimCollider` set each animation step and dispatch the selected response.
+- [x] Bounded IK solvers available now: analytic two-bone with pole control and
+  FABRIK for longer chains, with fixed segment lengths and unreachable-target
+  handling (`raf_core::scene::ik`).
+- [ ] Foot-placement and hand-grab integration on top of solved chains once
+  skeletal playback is available.
 
 - [x] ApiGraphicBasic contract foundation: backend-neutral generational handles,
   capabilities, adapter preference, memory budgets, neutral shared context, and
@@ -364,6 +483,35 @@ sessions, and scripting stabilization gates. This lets the real game project
 drive engine stabilization without activating Play or Runtime. The complete
 target remains v0.12 and is specified in
 `docs/AGENT_CLI_MCP_EXPANSION.md`.
+
+### Deferred AI authoring and rendering work
+
+- [ ] Connect AI Director updates to the Game loop with explicit activation and
+  bounded per-frame work.
+- [ ] Stream MeshProvider chunks into the editor viewport and bounded scene
+  meshes.
+- [x] On-demand local procedural PNG generation from the Assets create menu,
+  backed by the isolated worker and catalog refresh.
+- [ ] Remote provider/model asset-generation controls in the Assets surface.
+- [ ] Expand AI-assisted entity, prefab, script, configuration, and debugging
+  workflows beyond the current command and review baseline.
+- [ ] Apply generated textures through portable material assets and the owned
+  ApiGraphicBasic ingress.
+- [ ] Build procedural terrain with deterministic seeds and the shared mesh
+  provider.
+
+### Deferred advanced rendering (moved from v0.7.0)
+
+- [ ] Product PBR material rendering with metallic/roughness, normal and
+  emissive texture slots on the active GPU and CPU-recovery paths.
+- [ ] Point and spot lights registered as editable scene capabilities with
+  Inspector, shading and automation schemas.
+- [ ] Ambient occlusion (SSAO) and a general post-processing stack.
+- [ ] Particle systems as a real rendering capability, not only a budget.
+- [ ] Ray-tracing backend and traversal behind the prepared Complement Trace
+  configuration.
+- [ ] Skeletal animation playback on the render path. Skeletal animation itself
+  is scheduled in v0.11.
 
 - [x] Attached editor bridge: first implementation is a local loopback TCP
   endpoint published as `.aura_rafi/agent_endpoint.json`; keep the frame and
