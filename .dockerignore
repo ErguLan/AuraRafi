@@ -1,0 +1,40 @@
+# Build output. The repository only allows target_gnu; keep every target
+# variant out of the Docker build context.
+target/
+target_*/
+**/target/
+**/target_*/
+
+# Version control and tooling state
+.git/
+.github/
+.cargo/
+.vscode/
+.idea/
+.agents/
+.ai/
+.codex/
+.codex-run-logs/
+.ulpi/
+
+# Local artifacts and screenshots
+artifacts/
+**/__pycache__/
+/*.png
+/*.log
+/*-run.log
+/engine-out.log
+/target_*.log
+/mundo_eras.py
+
+# Documentation and non-build assets. The root assets/ directory is required
+# because raf_core embeds assets/commands/catalog.json at compile time.
+docs/
+examples/
+ElectricalAssets/
+LICENSE
+LICENSE-APACHE
+LICENSE-MIT
+NOTICE
+README.md
+SETUP.md

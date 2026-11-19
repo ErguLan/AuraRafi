@@ -14,6 +14,7 @@
 
 // === NEW RENDERER ARCHITECTURE ===
 pub mod bridge;
+mod engine_time;
 pub mod environment_frame;
 pub mod geometry;
 pub mod math;

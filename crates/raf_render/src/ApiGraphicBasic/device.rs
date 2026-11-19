@@ -1,8 +1,8 @@
+use crate::engine_time::Instant;
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{mpsc, Arc};
-use std::time::Instant;
 
 use bytemuck::{Pod, Zeroable};
 use raf_core::config::RenderExecutionPolicy;
@@ -13,6 +13,7 @@ use crate::api_graphic_basic::capabilities::{
 };
 use crate::api_graphic_basic::command_list::{BasicMeshInstance, GraphicCommand};
 use crate::api_graphic_basic::handles::{MeshHandle, TextureHandle};
+use crate::api_graphic_basic::memory_ledger::{GraphicsResourceFamily, GraphicsResourceLedger};
 use crate::api_graphic_basic::mesh::BasicMesh;
 use crate::api_graphic_basic::pipeline::BasicPipelineKind;
 use crate::api_graphic_basic::resource_registry::{
@@ -140,6 +141,18 @@ pub struct SceneFrameMetrics {
     pub mesh_cache_evictions: u64,
     pub frame_upload_bytes: u64,
     pub upload_budget_exceeded: bool,
+    /// Bytes tracked by the cross-family graphics memory ledger.
+    pub ledger_resident_bytes: u64,
+    /// Peak of the summed family residency since the device was created.
+    pub ledger_peak_bytes: u64,
+    /// Admissions rejected by a family or arena budget.
+    pub ledger_rejected_reservations: u64,
+    /// Highest family budget utilization in `0.0..=1.0`.
+    pub ledger_pressure: f32,
+    /// Optional texture uploads skipped because the frame upload budget was full.
+    pub frame_upload_rejected: u64,
+    /// Frame upload bytes divided by the frame upload budget.
+    pub frame_upload_pressure: f32,
 }
 
 impl SceneFrameMetrics {
@@ -1228,6 +1241,9 @@ struct GpuSceneState {
     target_generation: u32,
     frame_index: u64,
     frame_upload_budget: u64,
+    frame_upload_rejected: u64,
+    upload_pressure: f32,
+    ledger: GraphicsResourceLedger,
     gpu_timing: Option<GpuTimestampState>,
 }
 
@@ -1295,7 +1311,11 @@ fn create_scene_mesh_pipeline(
         depth_stencil: Some(wgpu::DepthStencilState {
             format: wgpu::TextureFormat::Depth32Float,
             depth_write_enabled: ui_mode.is_none(),
-            depth_compare: if ui_mode == Some(true) { wgpu::CompareFunction::Always } else { wgpu::CompareFunction::LessEqual },
+            depth_compare: if ui_mode == Some(true) {
+                wgpu::CompareFunction::Always
+            } else {
+                wgpu::CompareFunction::LessEqual
+            },
             stencil: wgpu::StencilState::default(),
             bias: wgpu::DepthBiasState::default(),
         }),
@@ -1303,6 +1323,23 @@ fn create_scene_mesh_pipeline(
         multiview: None,
         cache: None,
     })
+}
+
+/// Build the family ledger and return the mesh/texture shares used by the
+/// bounded arenas.
+fn scene_memory_ledger(memory_budget: GraphicsMemoryBudget) -> (GraphicsResourceLedger, u64, u64) {
+    let mut ledger = GraphicsResourceLedger::new(memory_budget.gpu_bytes);
+    let mut mesh_family_budget = 0;
+    let mut texture_family_budget = 0;
+    for (family, bytes) in memory_budget.family_budgets() {
+        ledger.set_family_budget(family, bytes);
+        match family {
+            GraphicsResourceFamily::Mesh => mesh_family_budget = bytes,
+            GraphicsResourceFamily::Texture => texture_family_budget = bytes,
+            _ => {}
+        }
+    }
+    (ledger, mesh_family_budget, texture_family_budget)
 }
 
 impl GpuSceneState {
@@ -1441,7 +1478,14 @@ impl GpuSceneState {
             true,
             None,
         );
-        let ui_texture_sampler=device.create_sampler(&wgpu::SamplerDescriptor{label:Some("ApiGraphicBasic.UiSurfaceSampler"),address_mode_u:wgpu::AddressMode::ClampToEdge,address_mode_v:wgpu::AddressMode::ClampToEdge,mag_filter:wgpu::FilterMode::Linear,min_filter:wgpu::FilterMode::Linear,..Default::default()});
+        let ui_texture_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("ApiGraphicBasic.UiSurfaceSampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
 
         let line_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("ApiGraphicBasic.LinePipelineLayout"),
@@ -1572,6 +1616,9 @@ impl GpuSceneState {
             cache: None,
         });
 
+        let (ledger, mesh_family_budget, texture_family_budget) =
+            scene_memory_ledger(memory_budget);
+
         Self {
             color_format,
             optimized_filter: None,
@@ -1589,8 +1636,8 @@ impl GpuSceneState {
             overlay_bind_group_layout,
             mesh_pipeline,
             mesh_two_sided_pipeline,
-            ui_surface_pipeline:None,
-            ui_overlay_pipeline:None,
+            ui_surface_pipeline: None,
+            ui_overlay_pipeline: None,
             ui_mode: None,
             ui_premultiplied: false,
             mesh_instanced_pipeline,
@@ -1599,13 +1646,13 @@ impl GpuSceneState {
             line_pipeline_xray,
             overlay_pipeline,
             mesh_cache: HashMap::new(),
-            mesh_registry: MeshRegistry::new(memory_budget.gpu_bytes / 2),
+            mesh_registry: MeshRegistry::new(mesh_family_budget),
             mesh_cache_limit: memory_budget.mesh_cache_entries as usize,
-            texture_registry: TextureRegistry::new(memory_budget.gpu_bytes / 8),
+            texture_registry: TextureRegistry::new(texture_family_budget),
             texture_handles: HashMap::new(),
             external_texture_bindings: HashMap::new(),
             texture_cache_limit: (memory_budget.texture_cache_entries as usize).min(512),
-            texture_cache_budget_bytes: memory_budget.gpu_bytes / 8,
+            texture_cache_budget_bytes: texture_family_budget,
             mesh_uniform_reuse: UniformReuse::default(),
             line_uniform_reuse: UniformReuse::default(),
             overlay_uniform_reuse: UniformReuse::default(),
@@ -1622,6 +1669,9 @@ impl GpuSceneState {
             target_generation: 0,
             frame_index: 0,
             frame_upload_budget: memory_budget.frame_upload_bytes,
+            frame_upload_rejected: 0,
+            upload_pressure: 0.0,
+            ledger,
             gpu_timing: GpuTimestampState::new(device, queue),
         }
     }
@@ -1651,6 +1701,10 @@ impl GpuSceneState {
                     .min(self.texture_registry.budget_bytes());
                 self.texture_registry
                     .set_budget_bytes(self.texture_cache_budget_bytes);
+                self.ledger.set_family_budget(
+                    GraphicsResourceFamily::Texture,
+                    self.texture_cache_budget_bytes,
+                );
                 self.texture_handles
                     .retain(|_, handle| self.texture_registry.contains(*handle));
             }
@@ -1662,6 +1716,10 @@ impl GpuSceneState {
             .min(self.texture_registry.budget_bytes());
         self.texture_registry
             .set_budget_bytes(self.texture_cache_budget_bytes);
+        self.ledger.set_family_budget(
+            GraphicsResourceFamily::Texture,
+            self.texture_cache_budget_bytes,
+        );
         self.texture_handles
             .retain(|_, handle| self.texture_registry.contains(*handle));
 
@@ -1698,10 +1756,11 @@ impl GpuSceneState {
                 self.texture_handles.remove(&key);
             }
             let bytes = texture.memory_bytes() as u64;
-            if bytes == 0
-                || bytes > self.texture_cache_budget_bytes
-                || uploaded_bytes.saturating_add(bytes) > self.frame_upload_budget
-            {
+            if bytes == 0 || bytes > self.texture_cache_budget_bytes {
+                continue;
+            }
+            if uploaded_bytes.saturating_add(bytes) > self.frame_upload_budget {
+                self.frame_upload_rejected = self.frame_upload_rejected.saturating_add(1);
                 continue;
             }
             self.texture_handles
@@ -1750,19 +1809,33 @@ impl GpuSceneState {
             .unwrap_or_else(|| Arc::clone(&self.fallback_texture_bind_group))
     }
 
-    fn external_texture_bind_group(&mut self, device: &wgpu::Device, texture: &GpuTextureView) -> Arc<wgpu::BindGroup> {
+    fn external_texture_bind_group(
+        &mut self,
+        device: &wgpu::Device,
+        texture: &GpuTextureView,
+    ) -> Arc<wgpu::BindGroup> {
         let key = Arc::as_ptr(&texture.view) as usize;
-        self.external_texture_bindings.entry(key).or_insert_with(|| {
-            let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("ApiGraphicBasic.GameUiSceneBinding"),
-                layout: &self.scene_texture_bind_group_layout,
-                entries: &[
-                    wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(texture.as_wgpu()) },
-                    wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&self.ui_texture_sampler) },
-                ],
-            });
-            (texture.clone(), Arc::new(binding))
-        }).1.clone()
+        self.external_texture_bindings
+            .entry(key)
+            .or_insert_with(|| {
+                let binding = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("ApiGraphicBasic.GameUiSceneBinding"),
+                    layout: &self.scene_texture_bind_group_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(texture.as_wgpu()),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.ui_texture_sampler),
+                        },
+                    ],
+                });
+                (texture.clone(), Arc::new(binding))
+            })
+            .1
+            .clone()
     }
 
     fn render(
@@ -1773,15 +1846,58 @@ impl GpuSceneState {
     ) -> Option<(SceneFrameOutput, SceneFrameMetrics)> {
         let frame_start = Instant::now();
         self.frame_index = self.frame_index.wrapping_add(1).max(1);
-        self.ui_mode=None;
-        self.ui_premultiplied=false;
-        if self.ui_surface_pipeline.is_none() && frame.commands.commands().iter().any(|command|matches!(command,GraphicCommand::SetPipeline(BasicPipelineKind::UiSurface|BasicPipelineKind::UiSurfaceOverlay))) {
-            let shader=device.create_shader_module(wgpu::ShaderModuleDescriptor{label:Some("ApiGraphicBasic.UiSurfaceShader"),source:wgpu::ShaderSource::Wgsl(Cow::Owned(basic_scene_shader()))});
-            let layout=device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor{label:Some("ApiGraphicBasic.UiSurfaceLayout"),bind_group_layouts:&[&self.mesh_bind_group_layout,&self.scene_texture_bind_group_layout],push_constant_ranges:&[]});
-            self.ui_surface_pipeline=Some(create_scene_mesh_pipeline(device,&shader,&layout,self.color_format,false,true,Some(false)));
-            self.ui_overlay_pipeline=Some(create_scene_mesh_pipeline(device,&shader,&layout,self.color_format,false,true,Some(true)));
+        self.ledger.begin_frame(self.frame_index);
+        self.frame_upload_rejected = 0;
+        self.upload_pressure = 0.0;
+        self.ui_mode = None;
+        self.ui_premultiplied = false;
+        if self.ui_surface_pipeline.is_none()
+            && frame.commands.commands().iter().any(|command| {
+                matches!(
+                    command,
+                    GraphicCommand::SetPipeline(
+                        BasicPipelineKind::UiSurface | BasicPipelineKind::UiSurfaceOverlay
+                    )
+                )
+            })
+        {
+            let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("ApiGraphicBasic.UiSurfaceShader"),
+                source: wgpu::ShaderSource::Wgsl(Cow::Owned(basic_scene_shader())),
+            });
+            let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("ApiGraphicBasic.UiSurfaceLayout"),
+                bind_group_layouts: &[
+                    &self.mesh_bind_group_layout,
+                    &self.scene_texture_bind_group_layout,
+                ],
+                push_constant_ranges: &[],
+            });
+            self.ui_surface_pipeline = Some(create_scene_mesh_pipeline(
+                device,
+                &shader,
+                &layout,
+                self.color_format,
+                false,
+                true,
+                Some(false),
+            ));
+            self.ui_overlay_pipeline = Some(create_scene_mesh_pipeline(
+                device,
+                &shader,
+                &layout,
+                self.color_format,
+                false,
+                true,
+                Some(true),
+            ));
         }
-        self.external_texture_bindings.retain(|key,_| frame.commands.gpu_textures().any(|view| Arc::as_ptr(&view.view) as usize == *key));
+        self.external_texture_bindings.retain(|key, _| {
+            frame
+                .commands
+                .gpu_textures()
+                .any(|view| Arc::as_ptr(&view.view) as usize == *key)
+        });
         let target_rebuilt = self.ensure_target(device, frame.width, frame.height);
         let timestamp_plan = self.gpu_timing.as_mut().and_then(|timing| {
             timing.collect_ready(device);
@@ -1929,7 +2045,11 @@ impl GpuSceneState {
                     GraphicCommand::Clear { .. } => {}
                     GraphicCommand::SetPipeline(pipeline) => {
                         current_pipeline = *pipeline;
-                        self.ui_mode = match pipeline { BasicPipelineKind::UiSurface=>Some(false),BasicPipelineKind::UiSurfaceOverlay=>Some(true),_=>None };
+                        self.ui_mode = match pipeline {
+                            BasicPipelineKind::UiSurface => Some(false),
+                            BasicPipelineKind::UiSurfaceOverlay => Some(true),
+                            _ => None,
+                        };
                     }
                     GraphicCommand::SetShadowReceiver(value) => self.shadow_receiver = *value,
                     GraphicCommand::DrawMesh {
@@ -1942,11 +2062,17 @@ impl GpuSceneState {
                             continue;
                         };
                         let cacheable = frame.commands.mesh_cacheable(*mesh_id);
-                        self.ui_premultiplied = self.ui_mode.is_some() && texture_id.and_then(|id|frame.commands.gpu_texture(id)).is_some();
-                        let texture_bind_group = if let Some(view) = texture_id.and_then(|id| frame.commands.gpu_texture(id)) {
+                        self.ui_premultiplied = self.ui_mode.is_some()
+                            && texture_id
+                                .and_then(|id| frame.commands.gpu_texture(id))
+                                .is_some();
+                        let texture_bind_group = if let Some(view) =
+                            texture_id.and_then(|id| frame.commands.gpu_texture(id))
+                        {
                             self.external_texture_bind_group(device, view)
                         } else {
-                            texture_id.and_then(|id| frame.commands.texture(id))
+                            texture_id
+                                .and_then(|id| frame.commands.texture(id))
                                 .map(|texture| self.scene_texture_bind_group(texture))
                                 .unwrap_or_else(|| Arc::clone(&self.fallback_texture_bind_group))
                         };
@@ -2104,6 +2230,10 @@ impl GpuSceneState {
         metrics.texture_cache_evictions = texture_residency.evictions;
         metrics.frame_upload_bytes = metrics.total_upload_bytes();
         metrics.upload_budget_exceeded = metrics.frame_upload_bytes > self.frame_upload_budget;
+        self.upload_pressure =
+            upload_pressure(metrics.frame_upload_bytes, self.frame_upload_budget);
+        metrics.frame_upload_pressure = self.upload_pressure;
+        self.sync_memory_ledger_metrics(&mut metrics);
         metrics.frame_cpu_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
         Some((
             SceneFrameOutput::GpuTexture {
@@ -2187,7 +2317,15 @@ impl GpuSceneState {
         two_sided: bool,
     ) {
         if let Some(overlay) = self.ui_mode {
-            pass.set_pipeline(if overlay { self.ui_overlay_pipeline.as_ref().expect("prepared UI pipeline") } else { self.ui_surface_pipeline.as_ref().expect("prepared UI pipeline") });
+            pass.set_pipeline(if overlay {
+                self.ui_overlay_pipeline
+                    .as_ref()
+                    .expect("prepared UI pipeline")
+            } else {
+                self.ui_surface_pipeline
+                    .as_ref()
+                    .expect("prepared UI pipeline")
+            });
         } else if let Some(shadows) = self.shadows.as_ref() {
             pass.set_pipeline(
                 &shadows.pipelines[usize::from(instanced) * 2 + usize::from(two_sided)],
@@ -2317,7 +2455,13 @@ impl GpuSceneState {
                 .unwrap_or([0.0; 4]),
             params: [
                 if lit { 1.0 } else { 0.0 },
-                if self.ui_premultiplied { 2.0 } else if texture_enabled { 1.0 } else { 0.0 },
+                if self.ui_premultiplied {
+                    2.0
+                } else if texture_enabled {
+                    1.0
+                } else {
+                    0.0
+                },
                 f32::from(frame.commands.environment.is_some()),
                 f32::from(self.shadows.is_some() && self.shadow_receiver),
             ],
@@ -2738,7 +2882,13 @@ impl GpuSceneState {
                 .unwrap_or([0.0; 4]),
             params: [
                 if lit { 1.0 } else { 0.0 },
-                if self.ui_premultiplied { 2.0 } else if texture_enabled { 1.0 } else { 0.0 },
+                if self.ui_premultiplied {
+                    2.0
+                } else if texture_enabled {
+                    1.0
+                } else {
+                    0.0
+                },
                 f32::from(frame.commands.environment.is_some()),
                 f32::from(self.shadows.is_some() && self.shadow_receiver),
             ],
@@ -2920,6 +3070,42 @@ impl GpuSceneState {
         self.overlay_slots[batch_index].clone()
     }
 
+    /// Publish one frame of residency into the cross-family ledger.
+    ///
+    /// A bounded arena is the authoritative owner of its family, so this runs
+    /// once per frame after all admissions and evictions have settled. Direct
+    /// families use `try_admit`/`release` instead and must not be synced here.
+    fn sync_memory_ledger_metrics(&mut self, metrics: &mut SceneFrameMetrics) {
+        self.ledger.touch(GraphicsResourceFamily::Mesh);
+        self.ledger.touch(GraphicsResourceFamily::Texture);
+        self.mesh_registry
+            .sync_ledger(&mut self.ledger, GraphicsResourceFamily::Mesh);
+        self.texture_registry
+            .sync_ledger(&mut self.ledger, GraphicsResourceFamily::Texture);
+
+        let transient_bytes = self.transient_slot_bytes();
+        if transient_bytes > 0 {
+            self.ledger.touch(GraphicsResourceFamily::Transient);
+        }
+        self.ledger
+            .sync_resident(GraphicsResourceFamily::Transient, transient_bytes);
+
+        let snapshot = self.ledger.snapshot();
+        metrics.ledger_resident_bytes = snapshot.resident_bytes;
+        metrics.ledger_peak_bytes = snapshot.peak_bytes;
+        metrics.ledger_rejected_reservations = snapshot.rejected_total;
+        metrics.ledger_pressure = snapshot.pressure;
+        metrics.frame_upload_rejected = self.frame_upload_rejected;
+    }
+
+    fn transient_slot_bytes(&self) -> u64 {
+        self.transient_mesh_slots.iter().fold(0_u64, |total, slot| {
+            total
+                .saturating_add(slot.vertex_capacity)
+                .saturating_add(slot.index_capacity)
+        })
+    }
+
     fn make_room_for_cached_mesh(&mut self) {
         self.mesh_cache
             .retain(|_, handle| self.mesh_registry.contains(*handle));
@@ -2935,6 +3121,17 @@ impl GpuSceneState {
 #[inline]
 fn slot_capacity(required_capacity: usize) -> usize {
     required_capacity.max(1).next_power_of_two()
+}
+
+/// Frame upload consumption as a ratio of the hard upload budget.
+///
+/// A zero budget reports `1.0` as soon as anything uploads so callers do not
+/// have to special-case an infinite ratio.
+fn upload_pressure(used_bytes: u64, budget_bytes: u64) -> f32 {
+    if budget_bytes == 0 {
+        return if used_bytes == 0 { 0.0 } else { 1.0 };
+    }
+    used_bytes as f32 / budget_bytes as f32
 }
 
 fn create_gpu_mesh_buffers(device: &wgpu::Device, mesh: &BasicMesh) -> GpuMeshBuffers {

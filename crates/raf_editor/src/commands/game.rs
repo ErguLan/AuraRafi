@@ -18,14 +18,16 @@ use uuid::Uuid;
 use crate::commands::output::CommandOutput;
 use crate::commands::parser::ParsedCommand;
 
+#[path = "game/visual.rs"]
 mod visual;
+#[path = "game/world.rs"]
 mod world;
 
+pub use world::{bind_project_root, clear_project_root, set_project_root, ProjectRootGuard};
 use world::{
     execute_cancel, execute_commit, execute_plan, execute_world_brief, execute_world_recipe,
     execute_world_script,
 };
-pub use world::{bind_project_root, clear_project_root, set_project_root, ProjectRootGuard};
 
 #[derive(Debug, Clone, Default)]
 pub struct SceneSelectionState {
@@ -1784,16 +1786,20 @@ fn apply_scene_components(
     node: &mut SceneNode,
     label: &str,
 ) -> Result<(), String> {
-    if let Some(texture) = component_text(command, "texture")
-        .or_else(|| component_text(command, "base_color_texture"))
+    if let Some(texture) =
+        component_text(command, "texture").or_else(|| component_text(command, "base_color_texture"))
     {
         node.base_color_texture = validate_component_texture(&texture, label)?;
     }
 
-    if let Some(value) = structured_or_json_value(command, "collider", &format!("{label}.collider"))? {
+    if let Some(value) =
+        structured_or_json_value(command, "collider", &format!("{label}.collider"))?
+    {
         apply_collider_component(&value, node, label)?;
     }
-    if let Some(mut value) = structured_or_json_value(command, "rigid_body", &format!("{label}.rigid_body"))? {
+    if let Some(mut value) =
+        structured_or_json_value(command, "rigid_body", &format!("{label}.rigid_body"))?
+    {
         if let Some(object) = value.as_object_mut() {
             let body_type = object
                 .get("body_type")
@@ -1814,17 +1820,30 @@ fn apply_scene_components(
         }
         let mut body: RigidBody = serde_json::from_value(value)
             .map_err(|error| format!("{label}.rigid_body is invalid: {error}"))?;
-        body.mass = finite_component_f32(body.mass, &format!("{label}.rigid_body.mass"), 0.0001, 1_000_000.0)?;
-        body.damping = finite_component_f32(body.damping, &format!("{label}.rigid_body.damping"), 0.0, 100.0)?;
-        body.velocity = finite_component_vec3(body.velocity, &format!("{label}.rigid_body.velocity"))?;
+        body.mass = finite_component_f32(
+            body.mass,
+            &format!("{label}.rigid_body.mass"),
+            0.0001,
+            1_000_000.0,
+        )?;
+        body.damping = finite_component_f32(
+            body.damping,
+            &format!("{label}.rigid_body.damping"),
+            0.0,
+            100.0,
+        )?;
+        body.velocity =
+            finite_component_vec3(body.velocity, &format!("{label}.rigid_body.velocity"))?;
         node.rigid_body = body;
     }
     if let Some(value) = structured_or_json_value(command, "audio", &format!("{label}.audio"))? {
         let mut audio: AudioSource = serde_json::from_value(value)
             .map_err(|error| format!("{label}.audio is invalid: {error}"))?;
-        audio.volume = finite_component_f32(audio.volume, &format!("{label}.audio.volume"), 0.0, 1.0)?;
+        audio.volume =
+            finite_component_f32(audio.volume, &format!("{label}.audio.volume"), 0.0, 1.0)?;
         if !audio.clip.trim().is_empty() {
-            audio.clip = validate_component_asset_path(&audio.clip, label, &["mp3", "ogg", "wav", "flac"])?;
+            audio.clip =
+                validate_component_asset_path(&audio.clip, label, &["mp3", "ogg", "wav", "flac"])?;
         }
         node.audio_source = audio;
     }
@@ -1836,10 +1855,13 @@ fn apply_scene_components(
             .map_err(|error| format!("{label}.camera is invalid: {error}"))?;
         node.game_camera = Some(camera);
     }
-    if let Some(value) = structured_or_json_value(command, "scripts", &format!("{label}.scripts"))? {
+    if let Some(value) = structured_or_json_value(command, "scripts", &format!("{label}.scripts"))?
+    {
         node.scripts = parse_component_scripts(&value, label)?;
     }
-    if let Some(value) = structured_or_json_value(command, "variables", &format!("{label}.variables"))? {
+    if let Some(value) =
+        structured_or_json_value(command, "variables", &format!("{label}.variables"))?
+    {
         let variables: Vec<raf_core::scene::SceneVariable> = serde_json::from_value(value)
             .map_err(|error| format!("{label}.variables is invalid: {error}"))?;
         if variables.len() > 64 {
@@ -1961,9 +1983,9 @@ fn validate_component_asset_path(
 }
 
 fn parse_component_scripts(value: &Value, label: &str) -> Result<Vec<String>, String> {
-    let values = value
-        .as_array()
-        .ok_or_else(|| format!("{label}.scripts must be an array of project-relative .rhai paths."))?;
+    let values = value.as_array().ok_or_else(|| {
+        format!("{label}.scripts must be an array of project-relative .rhai paths.")
+    })?;
     if values.len() > 32 {
         return Err(format!("{label}.scripts accepts at most 32 entries."));
     }
@@ -1985,7 +2007,9 @@ fn parse_component_scripts(value: &Value, label: &str) -> Result<Vec<String>, St
 
 fn finite_component_f32(value: f32, label: &str, min: f32, max: f32) -> Result<f32, String> {
     if !value.is_finite() || value < min || value > max {
-        return Err(format!("{label} must be finite and between {min} and {max}."));
+        return Err(format!(
+            "{label} must be finite and between {min} and {max}."
+        ));
     }
     Ok(value)
 }
@@ -2019,7 +2043,9 @@ fn add_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> Comm
             )
         }
     };
-    let transform = match parse_transform_patch(command).and_then(|patch| dimensions_patch(command, primitive, Vec3::ONE, patch)) {
+    let transform = match parse_transform_patch(command)
+        .and_then(|patch| dimensions_patch(command, primitive, Vec3::ONE, patch))
+    {
         Ok(transform) => transform,
         Err(error) => return CommandOutput::error("Create entity", error),
     };
@@ -2432,7 +2458,9 @@ fn update_entity(command: &ParsedCommand, ctx: &mut GameCommandContext<'_>) -> C
     let Some(current_node) = ctx.scene.get(id) else {
         return CommandOutput::error("Update entity", "Target not found.");
     };
-    let transform = match parse_transform_patch(command).and_then(|patch| dimensions_patch(command, current_node.primitive, current_node.scale, patch)) {
+    let transform = match parse_transform_patch(command).and_then(|patch| {
+        dimensions_patch(command, current_node.primitive, current_node.scale, patch)
+    }) {
         Ok(transform) => transform,
         Err(error) => return CommandOutput::error("Update entity", error),
     };
@@ -3197,11 +3225,23 @@ fn apply_transform_patch(node: &mut raf_core::scene::graph::SceneNode, patch: Tr
     }
 }
 
-fn dimensions_patch(command: &ParsedCommand, primitive: Primitive, previous: Vec3, mut patch: TransformPatch) -> Result<TransformPatch, String> {
+fn dimensions_patch(
+    command: &ParsedCommand,
+    primitive: Primitive,
+    previous: Vec3,
+    mut patch: TransformPatch,
+) -> Result<TransformPatch, String> {
     if let Some(value) = structured_or_json_value(command, "size", "size")? {
-        if patch.scale.iter().any(Option::is_some) { return Err("commands.error.dimensions_scale".into()); }
+        if patch.scale.iter().any(Option::is_some) {
+            return Err("commands.error.dimensions_scale".into());
+        }
         let size = Vec3::from_array(parse_vec3_value(&value, "size")?);
-        patch.scale = optional_vec3_values(primitive.scale_for_dimensions(size, previous).map_err(str::to_string)?.to_array());
+        patch.scale = optional_vec3_values(
+            primitive
+                .scale_for_dimensions(size, previous)
+                .map_err(str::to_string)?
+                .to_array(),
+        );
     }
     Ok(patch)
 }
@@ -4329,26 +4369,39 @@ mod tests {
 
     #[test]
     fn authoring_capsule_dimensions_validate_and_round_trip_without_duplicate_size() {
-        let mut scene=SceneGraph::new();
-        let mut selection=SceneSelectionState::default();
-        let mut viewport=HeadlessGameViewportPort::default();
-        let mut ctx=GameCommandContext {scene:&mut scene,selection:&mut selection,viewport:&mut viewport};
-        let add=parsed_command("game.add",serde_json::json!({"primitive":"capsule","name":"Capsule","size":[2,6,2]}));
-        let output=execute("game.add",&add,&mut ctx);
-        assert!(output.changed,"{:?}",output.lines);
-        let id=ctx.selection.selected_node.unwrap();
-        assert_eq!(ctx.scene.get(id).unwrap().scale,Vec3::new(2.0,3.0,2.0));
-        let before=ctx.scene.clone();
-        let bad=parsed_command("game.update",serde_json::json!({"target":"Capsule","size":[1,2,1],"transform":{"scale":[1,1,1]}}));
-        assert_eq!(execute("game.update",&bad,&mut ctx).level,CommandLevel::Error);
-        assert_eq!(ctx.scene.render_fingerprint(),before.render_fingerprint());
-        let serialized=ron::to_string(ctx.scene).unwrap();
-        let restored:SceneGraph=ron::from_str(&serialized).unwrap();
-        assert_eq!(restored.get(id).unwrap().primitive,Primitive::Capsule);
-        let prefab=raf_core::scene::prefab::ScenePrefab::capture(&restored,id).unwrap();
-        let mut copy=SceneGraph::new();
-        let copied=prefab.instantiate(&mut copy,None).unwrap();
-        assert_eq!(copy.get(copied).unwrap().scale,Vec3::new(2.0,3.0,2.0));
+        let mut scene = SceneGraph::new();
+        let mut selection = SceneSelectionState::default();
+        let mut viewport = HeadlessGameViewportPort::default();
+        let mut ctx = GameCommandContext {
+            scene: &mut scene,
+            selection: &mut selection,
+            viewport: &mut viewport,
+        };
+        let add = parsed_command(
+            "game.add",
+            serde_json::json!({"primitive":"capsule","name":"Capsule","size":[2,6,2]}),
+        );
+        let output = execute("game.add", &add, &mut ctx);
+        assert!(output.changed, "{:?}", output.lines);
+        let id = ctx.selection.selected_node.unwrap();
+        assert_eq!(ctx.scene.get(id).unwrap().scale, Vec3::new(2.0, 3.0, 2.0));
+        let before = ctx.scene.clone();
+        let bad = parsed_command(
+            "game.update",
+            serde_json::json!({"target":"Capsule","size":[1,2,1],"transform":{"scale":[1,1,1]}}),
+        );
+        assert_eq!(
+            execute("game.update", &bad, &mut ctx).level,
+            CommandLevel::Error
+        );
+        assert_eq!(ctx.scene.render_fingerprint(), before.render_fingerprint());
+        let serialized = ron::to_string(ctx.scene).unwrap();
+        let restored: SceneGraph = ron::from_str(&serialized).unwrap();
+        assert_eq!(restored.get(id).unwrap().primitive, Primitive::Capsule);
+        let prefab = raf_core::scene::prefab::ScenePrefab::capture(&restored, id).unwrap();
+        let mut copy = SceneGraph::new();
+        let copied = prefab.instantiate(&mut copy, None).unwrap();
+        assert_eq!(copy.get(copied).unwrap().scale, Vec3::new(2.0, 3.0, 2.0));
     }
 
     #[test]
@@ -4385,11 +4438,17 @@ mod tests {
         assert_eq!(node.collider.collider_type, ColliderType::Aabb);
         assert_eq!(node.collider.offset, Vec3::new(0.0, 0.5, 0.0));
         assert!(node.rigid_body.enabled);
-        assert_eq!(node.rigid_body.body_type, raf_core::scene::RigidBodyType::Dynamic);
+        assert_eq!(
+            node.rigid_body.body_type,
+            raf_core::scene::RigidBodyType::Dynamic
+        );
         assert_eq!(node.rigid_body.mass, 2.0);
         assert_eq!(node.audio_source.clip, "assets/audio/hit.wav");
         assert_eq!(node.audio_source.volume, 0.5);
-        assert_eq!(node.game_camera.as_ref().map(|camera| camera.fov_degrees), Some(75.0));
+        assert_eq!(
+            node.game_camera.as_ref().map(|camera| camera.fov_degrees),
+            Some(75.0)
+        );
         assert_eq!(node.scripts, vec!["assets/scripts/test.rhai"]);
 
         let before = ctx.scene.all_live_ids();
@@ -4401,12 +4460,12 @@ mod tests {
                 "texture": "../escape.png"
             }),
         );
-        assert_eq!(execute("game.add", &bad, &mut ctx).level, CommandLevel::Error);
+        assert_eq!(
+            execute("game.add", &bad, &mut ctx).level,
+            CommandLevel::Error
+        );
         assert_eq!(ctx.scene.all_live_ids(), before);
-        assert!(ctx
-            .scene
-            .iter()
-            .all(|(_, node)| node.name != "Escape"));
+        assert!(ctx.scene.iter().all(|(_, node)| node.name != "Escape"));
     }
 
     #[test]
@@ -4442,8 +4501,15 @@ mod tests {
             .and_then(Value::as_str)
             .expect("plan id")
             .to_string();
-        assert!(planned.json.get("plan_hash").and_then(Value::as_str).is_some());
-        assert!(ctx.scene.all_live_ids().is_empty(), "plan must not mutate the scene");
+        assert!(planned
+            .json
+            .get("plan_hash")
+            .and_then(Value::as_str)
+            .is_some());
+        assert!(
+            ctx.scene.all_live_ids().is_empty(),
+            "plan must not mutate the scene"
+        );
         assert!(planned.json.get("preview").is_some());
 
         let commit = parsed_command("game.commit", serde_json::json!({"plan_id": plan_id}));
@@ -4575,7 +4641,10 @@ mod tests {
             &mut ctx,
         );
         assert_ne!(planned.level, CommandLevel::Error, "{:?}", planned.lines);
-        assert!(ctx.scene.all_live_ids().is_empty(), "plan must not mutate the scene");
+        assert!(
+            ctx.scene.all_live_ids().is_empty(),
+            "plan must not mutate the scene"
+        );
         assert!(
             planned.json["preview"]["chunks"].as_u64().unwrap_or(0) > 1,
             "the preview must report multiple chunks: {:?}",
@@ -4604,7 +4673,10 @@ mod tests {
             planned.json["entities"].as_u64().unwrap_or(0)
         );
         let live = ctx.scene.all_live_ids().len();
-        assert!(live > 128, "expected more than 128 live entities, got {live}");
+        assert!(
+            live > 128,
+            "expected more than 128 live entities, got {live}"
+        );
         assert_eq!(
             live as u64,
             planned.json["groups"].as_u64().unwrap_or(0)
@@ -4646,8 +4718,15 @@ mod tests {
         };
         let error = apply_plan_to_scene(&plan, &mut scene, &mut selection, &mut viewport)
             .expect_err("the invalid parent must fail the plan");
-        assert!(error.contains("MissingParent") || error.contains("Parent"), "{error}");
-        assert_eq!(scene.all_live_ids(), before, "all chunks must be rolled back");
+        assert!(
+            error.contains("MissingParent") || error.contains("Parent"),
+            "{error}"
+        );
+        assert_eq!(
+            scene.all_live_ids(),
+            before,
+            "all chunks must be rolled back"
+        );
         assert!(scene
             .iter()
             .all(|(_, node)| !node.name.starts_with("ChunkCrate_")));
@@ -4655,10 +4734,8 @@ mod tests {
 
     #[test]
     fn world_plan_persists_a_project_scoped_plan_and_journal() {
-        let root = std::env::temp_dir().join(format!(
-            "raf-world-plan-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("raf-world-plan-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&root).unwrap();
         let _guard = bind_project_root(Some(root.clone()));
         let mut scene = SceneGraph::new();
@@ -4698,10 +4775,8 @@ mod tests {
 
     #[test]
     fn world_brief_round_trips_inside_the_project_root() {
-        let root = std::env::temp_dir().join(format!(
-            "raf-world-brief-{}",
-            uuid::Uuid::new_v4().simple()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("raf-world-brief-{}", uuid::Uuid::new_v4().simple()));
         std::fs::create_dir_all(&root).unwrap();
         let _guard = bind_project_root(Some(root.clone()));
         let write = parsed_command(

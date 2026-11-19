@@ -3,11 +3,12 @@ name = "raf_net"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Networking stubs for future multiplayer in AuraRafi"
+description = "Self-made streaming transport for AuraRafi cloud sessions"
 
 [dependencies]
 raf_core = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tracing = { workspace = true }
 uuid = { workspace = true }
+
+[[bin]]
+name = "raf-stream-probe"
+path = "src/bin/stream_probe.rs"

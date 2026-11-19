@@ -220,6 +220,7 @@ fn write_component(hasher: &mut Hasher, component: &ElectronicComponent) {
             hasher.write_u8(5);
             hasher.write_f32(*voltage as f32);
         }
+        crate::component::SimModel::Unmodeled => hasher.write_u8(6),
     }
 }
 

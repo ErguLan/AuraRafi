@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="dark">
+    <title>AuraRafi Web Renderer</title>
+    <style>
+        :root {
+            --rafi-background: #080b0f;
+            --rafi-surface: #0d1116;
+            --rafi-surface-raised: #191f26;
+            --rafi-border: #262d36;
+            --rafi-text: #edeff2;
+            --rafi-text-muted: #979faa;
+            --rafi-accent: #e8851c;
+            --rafi-danger: #cb4949;
+            --rafi-radius: 6px;
+            --rafi-font: ui-monospace, "Cascadia Mono", "Segoe UI Mono", Consolas, monospace;
+        }
+
+        * {
+            box-sizing: border-box;
+        }
+
+        html,
+        body {
+            width: 100%;
+            height: 100%;
+            margin: 0;
+            overflow: hidden;
+            background: var(--rafi-background);
+        }
+
+        #rafi-canvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+            background: var(--rafi-background);
+            outline: none;
+        }
+
+        #rafi-diagnostics {
+            position: fixed;
+            left: 16px;
+            bottom: 16px;
+            z-index: 10;
+            min-width: 248px;
+            max-width: min(420px, calc(100vw - 32px));
+            padding: 9px 12px 8px;
+            border: 1px solid var(--rafi-border);
+            border-left: 2px solid var(--rafi-accent);
+            border-radius: var(--rafi-radius);
+            background: rgba(13, 17, 22, 0.88);
+            color: var(--rafi-text-muted);
+            font-family: var(--rafi-font);
+            font-size: 11px;
+            line-height: 1.65;
+            letter-spacing: 0.01em;
+            pointer-events: none;
+            user-select: none;
+        }
+
+        .rafi-row {
+            display: flex;
+            align-items: baseline;
+            justify-content: space-between;
+            gap: 16px;
+        }
+
+        .rafi-key {
+            color: var(--rafi-text-muted);
+            text-transform: lowercase;
+        }
+
+        .rafi-value {
+            color: var(--rafi-text);
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        #rafi-fps {
+            color: var(--rafi-text);
+        }
+
+        #rafi-state {
+            color: var(--rafi-text);
+        }
+
+        #rafi-state[data-state="error"] {
+            color: var(--rafi-danger);
+        }
+
+        #rafi-state[data-state="paused"],
+        #rafi-state[data-state="hidden"],
+        #rafi-state[data-state="booting"] {
+            color: var(--rafi-accent);
+        }
+
+        #rafi-error {
+            margin-top: 6px;
+            padding-top: 6px;
+            border-top: 1px solid var(--rafi-border);
+            color: var(--rafi-danger);
+            white-space: normal;
+            word-break: break-word;
+        }
+
+        #rafi-error[hidden] {
+            display: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="rafi-canvas" aria-label="AuraRafi scene canvas"></canvas>
+
+    <aside id="rafi-diagnostics" aria-label="Renderer diagnostics">
+        <div class="rafi-row"><span class="rafi-key">fps</span><span id="rafi-fps" class="rafi-value">--</span></div>
+        <div class="rafi-row"><span class="rafi-key">backend</span><span id="rafi-backend" class="rafi-value">--</span></div>
+        <div class="rafi-row"><span class="rafi-key">resolution</span><span id="rafi-resolution" class="rafi-value">--</span></div>
+        <div class="rafi-row"><span class="rafi-key">frame</span><span id="rafi-frame" class="rafi-value">--</span></div>
+        <div class="rafi-row"><span class="rafi-key">state</span><span id="rafi-state" class="rafi-value" data-state="booting">booting</span></div>
+        <div class="rafi-row"><span class="rafi-key">pause</span><span class="rafi-value">P</span></div>
+        <div id="rafi-error" hidden></div>
+    </aside>
+
+    <script type="module">
+        const errorElement = document.getElementById('rafi-error');
+
+        const showError = (error) => {
+            const message = error && error.message ? error.message : String(error);
+            if (errorElement) {
+                errorElement.textContent = message;
+                errorElement.hidden = false;
+            }
+            console.error(error);
+        };
+
+        const boot = async () => {
+            const module = await import('./pkg/raf_web.js');
+            await module.default();
+            window.addEventListener('keydown', (event) => {
+                if (event.key !== 'p' && event.key !== 'P') {
+                    return;
+                }
+                const status = module.stats();
+                module.set_paused(!(status && status.paused));
+            });
+        };
+
+        boot().catch(showError);
+    </script>
+</body>
+</html>

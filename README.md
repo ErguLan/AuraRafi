@@ -67,13 +67,16 @@ What works today after launch:
 | `raf_electronics` | Schematic editor domain, simulation, DRC, export pipeline, synchronized PCB layout model |
 | `raf_nodes` | Visual node-based scripting, graph validation, executor |
 | `raf_ai` | AI agent interface, tool registry, director and mesh-generation infrastructure |
-| `raf_net` | Networking protocol stubs |
+| `raf_net` | Self-made cloud streaming transport: framing, token handshake, input and RGBA video frames |
+| `raf_player` | Standalone runtime host for windowed Play, `--headless` capture and `--stream` sessions |
+| `raf_web` | WebAssembly canvas host for the renderer core |
 | `raf_hardware` | Serial, sensors, actuators, robotics and ML-facing hardware models |
 
 Current implementation profile:
 
 - The active editor surfaces use a shared graphics runtime: GPU hardware first when available, CPU software fallback retained for low-end compatibility.
 - The local game runtime is implemented and connected to manual Play. It runs from an isolated scene snapshot; native-window acceptance and measured performance are tracked separately in [Local Runtime](docs/LOCAL_RUNTIME.md).
+- Headless rendering and one-client streaming are available through `aurarafi-player --headless` and `--stream`; the transport is self-made and documented in [Cloud Streaming](docs/CLOUD_STREAMING.md).
 - Electronics is currently the most end-to-end vertical: schematic, checks, simulation, export, and PCB 2D sync already live in the editor, unified under the same shared graphics runtime.
 - The repository favors modular staging: some systems are usable now, others are intentionally prepared without being wired into final runtime flows yet.
 

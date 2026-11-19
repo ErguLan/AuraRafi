@@ -5,7 +5,6 @@
 //! monolithic event handler.
 
 use super::*;
-use raf_core::InputOwner;
 use crate::console::LogLevel;
 use crate::native_editor_commands::{
     asset_duplicate_row, asset_file_row, asset_rename_row, asset_script_row,
@@ -14,6 +13,7 @@ use crate::panels::assets_surface::{
     asset_file_name, is_builtin_asset_row, AssetFilter, AssetSort, AssetViewMode,
 };
 use crate::panels::assets_surface_host::AssetsContextMenu;
+use raf_core::InputOwner;
 
 impl NativeGameWorkbench {
     pub fn process_input<F>(
@@ -28,46 +28,102 @@ impl NativeGameWorkbench {
     where
         F: FnMut(&str) -> String,
     {
-        self.popup_press_consumed = native_input.snapshot().button_pressed(raf_core::PointerButton::Primary)
-            && (self.toolbar_state.primitive_menu_open || self.toolbar_state.view_menu_open
-                || self.toolbar_state.shading_menu_open || self.toolbar_state.building_menu_open
-                || self.inspector_view.color_picker || self.inspector_view.dropdown.is_some());
+        self.popup_press_consumed = native_input
+            .snapshot()
+            .button_pressed(raf_core::PointerButton::Primary)
+            && (self.toolbar_state.primitive_menu_open
+                || self.toolbar_state.view_menu_open
+                || self.toolbar_state.shading_menu_open
+                || self.toolbar_state.building_menu_open
+                || self.inspector_view.color_picker
+                || self.inspector_view.dropdown.is_some());
         let diagnostic_shortcut = native_input.snapshot();
-        if diagnostic_shortcut.window_focused && !matches!(router.keyboard_owner(), Some(InputOwner::Modal(_)))
-            && diagnostic_shortcut.modifiers.command_modifier() && diagnostic_shortcut.modifiers.shift
-            && diagnostic_shortcut.key_pressed(raf_core::InputKey::F12) {
+        if diagnostic_shortcut.window_focused
+            && !matches!(router.keyboard_owner(), Some(InputOwner::Modal(_)))
+            && diagnostic_shortcut.modifiers.command_modifier()
+            && diagnostic_shortcut.modifiers.shift
+            && diagnostic_shortcut.key_pressed(raf_core::InputKey::F12)
+        {
             self.handle_ui_performance_command("ui.performance");
         }
-        let dropped_on_composer = native_input.snapshot().pointer_position.is_some_and(|point| {
-            self.host.layout_rect("agent.composer").is_some_and(|rect| rect.contains([point[0] - self.rect.x, point[1] - self.rect.y]))
-        });
-        if dropped_on_composer && native_input.snapshot().window_focused
+        let dropped_on_composer = native_input
+            .snapshot()
+            .pointer_position
+            .is_some_and(|point| {
+                self.host.layout_rect("agent.composer").is_some_and(|rect| {
+                    rect.contains([point[0] - self.rect.x, point[1] - self.rect.y])
+                })
+            });
+        if dropped_on_composer
+            && native_input.snapshot().window_focused
             && !matches!(router.keyboard_owner(), Some(InputOwner::Modal(_)))
-            && !self.search_surface.is_open() && !native_input.dropped_files().is_empty() {
-            self.agent_panel.borrow_mut().apply_action(AgentAction::AttachFiles(native_input.dropped_files().to_vec()), &mut self.agent_settings);
+            && !self.search_surface.is_open()
+            && !native_input.dropped_files().is_empty()
+        {
+            self.agent_panel.borrow_mut().apply_action(
+                AgentAction::AttachFiles(native_input.dropped_files().to_vec()),
+                &mut self.agent_settings,
+            );
         }
         if native_input.snapshot().modifiers.command_modifier()
             && native_input.snapshot().window_focused
             && router.keyboard_owner() == Some(self.owner())
             && native_input.snapshot().key_pressed(raf_core::InputKey::V)
             && !native_input.has_clipboard_text()
-            && self.host.session().interaction.focus.has_focus("agent.input")
+            && self
+                .host
+                .session()
+                .interaction
+                .focus
+                .has_focus("agent.input")
         {
-            self.agent_panel.borrow_mut().apply_action(AgentAction::PasteImage, &mut self.agent_settings);
+            self.agent_panel
+                .borrow_mut()
+                .apply_action(AgentAction::PasteImage, &mut self.agent_settings);
         }
-        if self.electronics_workspace.pcb_menu.is_some() && native_input.snapshot().key_pressed(raf_core::InputKey::Escape) {
-            self.electronics_workspace.pcb_menu=None;self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+        if self.electronics_workspace.pcb_menu.is_some()
+            && native_input
+                .snapshot()
+                .key_pressed(raf_core::InputKey::Escape)
+        {
+            self.electronics_workspace.pcb_menu = None;
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
-        if self.console.filters_open && native_input.snapshot().key_pressed(raf_core::InputKey::Escape) {self.console.filters_open=false;self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);}
-        let electronics_transform_had_focus = self.host.session().interaction.focus.focused.clone()
+        if self.console.filters_open
+            && native_input
+                .snapshot()
+                .key_pressed(raf_core::InputKey::Escape)
+        {
+            self.console.filters_open = false;
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        }
+        let electronics_transform_had_focus = self
+            .host
+            .session()
+            .interaction
+            .focus
+            .focused
+            .clone()
             .filter(|id| id.starts_with("electronics.inspector.transform."));
-        let project_numeric_focus = native_input.snapshot()
+        let project_numeric_focus = native_input
+            .snapshot()
             .key_pressed(raf_core::InputKey::Escape)
             .then(|| self.host.session().interaction.focus.focused.clone())
             .flatten();
-        if native_input.snapshot().key_pressed(raf_core::InputKey::Escape) && self.host.session().interaction.focus.focused.as_deref().is_some_and(|id|id.starts_with("electronics.inspector.transform.")) {
+        if native_input
+            .snapshot()
+            .key_pressed(raf_core::InputKey::Escape)
+            && self
+                .host
+                .session()
+                .interaction
+                .focus
+                .focused
+                .as_deref()
+                .is_some_and(|id| id.starts_with("electronics.inspector.transform."))
+        {
             self.host.session_mut().interaction.focus.clear_focus();
-            self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
         let electronics_value_had_focus = self
             .host
@@ -151,13 +207,16 @@ impl NativeGameWorkbench {
             }
         }
         let mut actions = Vec::new();
-        self.interface_keyboard(native_input,router);
+        self.interface_keyboard(native_input, router);
         if !search_open {
             // The compass is a true overlay. Give it the first chance to
             // consume a pointer press so an underlying toolbar control cannot
             // win when the two rectangles overlap in a compact viewport.
-            let compass_actions = if self.interface.workspace.active(){Vec::new()}else{
-                self.viewport_compass.process_input(native_input, router, &mut resolve)
+            let compass_actions = if self.interface.workspace.active() {
+                Vec::new()
+            } else {
+                self.viewport_compass
+                    .process_input(native_input, router, &mut resolve)
             };
             let compass_clicked = compass_actions
                 .iter()
@@ -171,7 +230,11 @@ impl NativeGameWorkbench {
             }
             actions.extend(compass_actions);
             if self.electronics_overlay_active
-                && self.electronics_workspace.pcb_menu.as_deref().is_none_or(|menu| menu == "rules")
+                && self
+                    .electronics_workspace
+                    .pcb_menu
+                    .as_deref()
+                    .is_none_or(|menu| menu == "rules")
                 && !self.console.filters_open
             {
                 let overlay_actions = self.electronics_overlay_host.process_routed_input(
@@ -210,7 +273,8 @@ impl NativeGameWorkbench {
             ));
         }
         if electronics_transform_had_focus.is_some()
-            && electronics_transform_had_focus != self.host.session().interaction.focus.focused {
+            && electronics_transform_had_focus != self.host.session().interaction.focus.focused
+        {
             // An unsubmitted field reverts on focus loss. Re-seed the visible
             // value even when the click did not mutate any document or toolbar.
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -267,10 +331,12 @@ impl NativeGameWorkbench {
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
         for dispatched in &actions {
-            if self.handle_interface_action(&dispatched.action,native_input,scene,selected) {
+            if self.handle_interface_action(&dispatched.action, native_input, scene, selected) {
                 continue;
             }
-            if dispatched.target_id.starts_with("ui.designer.preview.") {continue;}
+            if dispatched.target_id.starts_with("ui.designer.preview.") {
+                continue;
+            }
             if self.handle_project_numeric_action(&dispatched.action, &mut intents) {
                 continue;
             }
@@ -303,6 +369,20 @@ impl NativeGameWorkbench {
                     "electronics.library.search" => {
                         self.electronics_library_query = value.clone();
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                    }
+                    key if crate::electronics_controller::ComponentCreatorField::from_value_key(key).is_some() => {
+                        if let Some(field) = crate::electronics_controller::ComponentCreatorField::from_value_key(key) {
+                            intents.insert(
+                                0,
+                                NativeWorkbenchIntent::Command(format!(
+                                    "{}{}:{}",
+                                    crate::electronics_controller::COMPONENT_CREATOR_FIELD_PREFIX,
+                                    field.slug(),
+                                    value
+                                )),
+                            );
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        }
                     }
                     "nodes.search" => {
                         self.nodes_host.set_query(value.clone());
@@ -2890,17 +2970,21 @@ impl NativeGameWorkbench {
             }
             if self.inspector_view.dropdown.is_some() || self.inspector_view.color_picker {
                 let inside_popup_bounds = snapshot.pointer_position.is_some_and(|point| {
-                    self.host.layout_rect("inspector.color.popover").is_some_and(|rect|
-                        rect.contains([point[0] - self.rect.x, point[1] - self.rect.y]))
+                    self.host
+                        .layout_rect("inspector.color.popover")
+                        .is_some_and(|rect| {
+                            rect.contains([point[0] - self.rect.x, point[1] - self.rect.y])
+                        })
                 });
-                let inside_inspector_popup = inside_popup_bounds || hovered.as_deref().is_some_and(|id| {
-                    id.starts_with("inspector.")
-                        && (id.contains("dropdown")
-                            || id.contains("color")
-                            || id.contains(".trigger")
-                            || id.contains(".menu")
-                            || id.contains(".option."))
-                });
+                let inside_inspector_popup = inside_popup_bounds
+                    || hovered.as_deref().is_some_and(|id| {
+                        id.starts_with("inspector.")
+                            && (id.contains("dropdown")
+                                || id.contains("color")
+                                || id.contains(".trigger")
+                                || id.contains(".menu")
+                                || id.contains(".option."))
+                    });
                 if !inside_inspector_popup {
                     self.inspector_view.dropdown = None;
                     self.inspector_view.color_picker = false;
@@ -2909,9 +2993,18 @@ impl NativeGameWorkbench {
             }
         }
         let inside_toolbar_popup = snapshot.pointer_position.is_some_and(|point| {
-            ["viewport.toolbar.primitive-menu", "viewport.toolbar.view-menu", "viewport.toolbar.shading-menu", "viewport.toolbar.building-menu"]
-                .iter().any(|id| self.host.layout_rect(id).is_some_and(|rect|
-                    rect.contains([point[0] - self.rect.x, point[1] - self.rect.y])))
+            [
+                "viewport.toolbar.primitive-menu",
+                "viewport.toolbar.view-menu",
+                "viewport.toolbar.shading-menu",
+                "viewport.toolbar.building-menu",
+            ]
+            .iter()
+            .any(|id| {
+                self.host.layout_rect(id).is_some_and(|rect| {
+                    rect.contains([point[0] - self.rect.x, point[1] - self.rect.y])
+                })
+            })
         });
         if snapshot.button_pressed(raf_core::PointerButton::Primary)
             && !inside_toolbar_popup

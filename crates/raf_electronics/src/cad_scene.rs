@@ -523,18 +523,39 @@ impl CadScene {
         }
 
         for via in &layout.vias {
-            if !via.position.is_finite() || !via.diameter.is_finite() || !via.drill.is_finite()
-                || via.drill <= 0.0 || via.diameter <= via.drill { continue; }
+            if !via.position.is_finite()
+                || !via.diameter.is_finite()
+                || !via.drill.is_finite()
+                || via.drill <= 0.0
+                || via.diameter <= via.drill
+            {
+                continue;
+            }
             for layer in [PcbLayer::TopCopper, PcbLayer::BottomCopper] {
                 let mut object = CadObject::rect(
-                    format!("via:{}:{}", via.id, if layer == PcbLayer::TopCopper { "top" } else { "bottom" }),
-                    Some(via.id), CadObjectKind::Pad, pcb_layer_to_cad(layer),
-                    CadPickPriority::Pin, CadRect::new(via.position, Vec2::splat(via.diameter)),
+                    format!(
+                        "via:{}:{}",
+                        via.id,
+                        if layer == PcbLayer::TopCopper {
+                            "top"
+                        } else {
+                            "bottom"
+                        }
+                    ),
+                    Some(via.id),
+                    CadObjectKind::Pad,
+                    pcb_layer_to_cad(layer),
+                    CadPickPriority::Pin,
+                    CadRect::new(via.position, Vec2::splat(via.diameter)),
                     pcb_copper_color(layer),
                 );
                 object.shape = CadShape::Circle;
-                object.drill = Some(CadDrill { shape: CadDrillShape::Circle,
-                    size: Vec2::splat(via.drill), offset: Vec2::ZERO, plated: true });
+                object.drill = Some(CadDrill {
+                    shape: CadDrillShape::Circle,
+                    size: Vec2::splat(via.drill),
+                    offset: Vec2::ZERO,
+                    plated: true,
+                });
                 object.net = Some(via.net.clone());
                 object.net_id = net_ids.get(&via.net);
                 scene.objects.push(object);
@@ -681,7 +702,7 @@ fn push_schematic_component(
         CadRect::new(component.position, rotated_body_size),
         component.appearance.color,
     );
-    body.label = Some(format!("{} {}", component.designator, component.value));
+    body.label = Some(schematic_component_label(component));
     body.line_paths = schematic_component_symbol_paths(component);
     objects.push(body);
 
@@ -708,6 +729,41 @@ fn push_schematic_component(
             .or_else(|| net_ids.get(&pin.net));
         objects.push(object);
     }
+}
+
+/// Component label shared by the canvas and overlay.
+///
+/// An authored symbol may carry one short annotation. The existing label path
+/// already paints designator and value, so the annotation is folded into the
+/// same text instead of introducing a second font renderer.
+fn schematic_component_label(component: &ElectronicComponent) -> String {
+    let mut label = format!("{} {}", component.designator, component.value);
+    let annotation = component
+        .symbol
+        .as_ref()
+        .filter(|symbol| symbol.primitives.len() <= crate::symbol::MAX_SYMBOL_PRIMITIVES)
+        .and_then(|symbol| {
+            symbol
+                .primitives
+                .iter()
+                .find_map(|primitive| match primitive {
+                    crate::symbol::SymbolPrimitive::Text { value, .. }
+                        if !value.trim().is_empty()
+                            && value.trim().chars().count()
+                                <= crate::symbol::MAX_SYMBOL_TEXT_CHARS =>
+                    {
+                        Some(value.trim())
+                    }
+                    _ => None,
+                })
+        });
+    if let Some(annotation) = annotation {
+        if !label.contains(annotation) {
+            label.push(' ');
+            label.push_str(annotation);
+        }
+    }
+    label
 }
 
 /// Maps every netlist pin to the stable identity assigned to its net.
@@ -805,7 +861,46 @@ fn schematic_pin_paths(center: Vec2, rotation_degrees: f32) -> Vec<Vec<Vec2>> {
 /// Vector symbol ink is authored in the component's local schematic space.
 /// Pin offsets remain the electrical endpoints; the artwork only occupies the
 /// compact center between them, so changing the symbol never changes picking.
+///
+/// An authored [`crate::symbol::SymbolDefinition`] takes precedence when it is
+/// present and valid. Anything else keeps the exact legacy ink for the six
+/// built-in parts, which is why legacy templates and newly loaded projects
+/// render identically to earlier builds.
 fn schematic_component_symbol_paths(component: &ElectronicComponent) -> Vec<Vec<Vec2>> {
+    if let Some(paths) = authored_symbol_paths(component) {
+        return paths;
+    }
+    builtin_symbol_paths(component)
+}
+
+/// Converts authored symbol primitives into world-space path ink.
+///
+/// The definition is validated before drawing; a malformed or unbounded file
+/// falls back to the built-in symbol instead of painting arbitrary geometry.
+fn authored_symbol_paths(component: &ElectronicComponent) -> Option<Vec<Vec<Vec2>>> {
+    let symbol = component.symbol.as_ref()?;
+    symbol.validate().ok()?;
+    let paths = symbol.to_paths();
+    if paths.is_empty() {
+        return None;
+    }
+    let point = |local: Vec2| {
+        component.position
+            + rotate_vec2(
+                local * crate::symbol::DEFAULT_SYMBOL_SCALE,
+                component.rotation,
+            )
+    };
+    Some(
+        paths
+            .into_iter()
+            .map(|path| path.into_iter().map(point).collect())
+            .collect(),
+    )
+}
+
+/// Legacy vector ink derived from the simulation model and pin geometry.
+fn builtin_symbol_paths(component: &ElectronicComponent) -> Vec<Vec<Vec2>> {
     let pins = component
         .pins
         .iter()
@@ -817,7 +912,11 @@ fn schematic_component_symbol_paths(component: &ElectronicComponent) -> Vec<Vec<
     let first = pins.first().copied().unwrap_or(Vec2::ZERO);
     let second = pins.get(1).copied().unwrap_or(first + Vec2::X * 20.0);
     let axis = (second - first).normalize_or_zero();
-    let axis = if axis.length_squared() > 0.5 { axis } else { Vec2::X };
+    let axis = if axis.length_squared() > 0.5 {
+        axis
+    } else {
+        Vec2::X
+    };
     let normal = Vec2::new(-axis.y, axis.x);
     let center = (first + second) * 0.5;
     let mut paths = Vec::new();
@@ -862,10 +961,7 @@ fn schematic_component_symbol_paths(component: &ElectronicComponent) -> Vec<Vec<
                 base + normal * 8.0,
                 base - normal * 8.0,
             ]));
-            paths.push(path(&[
-                cathode - normal * 10.0,
-                cathode + normal * 10.0,
-            ]));
+            paths.push(path(&[cathode - normal * 10.0, cathode + normal * 10.0]));
             for offset in [normal * 12.0, normal * 5.0] {
                 let ray_start = center - axis * 4.0 - offset;
                 let ray_end = ray_start + axis * 6.0 - normal * 6.0;
@@ -919,18 +1015,46 @@ fn schematic_component_symbol_paths(component: &ElectronicComponent) -> Vec<Vec<
                 paths.push(path(&[origin, stem]));
                 for (index, half_width) in [8.0, 5.5, 3.0].into_iter().enumerate() {
                     let y = stem.y + index as f32 * 3.0;
-                    paths.push(path(&[
-                        Vec2::new(-half_width, y),
-                        Vec2::new(half_width, y),
-                    ]));
+                    paths.push(path(&[Vec2::new(-half_width, y), Vec2::new(half_width, y)]));
                 }
             } else {
                 let half = 7.0_f32.min(first.distance(second) * 0.22);
                 let start = center - axis * half;
                 let end = center + axis * half;
                 paths.push(path(&[first, start]));
-                paths.push(path(&[start, start + normal * 6.0, end + normal * 6.0, end]));
+                paths.push(path(&[
+                    start,
+                    start + normal * 6.0,
+                    end + normal * 6.0,
+                    end,
+                ]));
                 paths.push(path(&[end, second]));
+            }
+        }
+        SimModel::Unmodeled => {
+            if component.pins.len() <= 1 {
+                let origin = pins.first().copied().unwrap_or(Vec2::ZERO);
+                let half = 6.0;
+                paths.push(path(&[
+                    origin + Vec2::new(-half, -half),
+                    origin + Vec2::new(half, -half),
+                    origin + Vec2::new(half, half),
+                    origin + Vec2::new(-half, half),
+                    origin + Vec2::new(-half, -half),
+                ]));
+            } else {
+                let half = 8.0_f32.min(first.distance(second) * 0.25);
+                let height = 6.0_f32;
+                let corners = [
+                    center - axis * half - normal * height,
+                    center + axis * half - normal * height,
+                    center + axis * half + normal * height,
+                    center - axis * half + normal * height,
+                    center - axis * half - normal * height,
+                ];
+                paths.push(path(&[first, center - axis * half]));
+                paths.push(path(&corners));
+                paths.push(path(&[center + axis * half, second]));
             }
         }
     }
@@ -1227,20 +1351,22 @@ mod tests {
         let component = scene
             .objects
             .iter()
-            .find(|object| object.kind == CadObjectKind::Component && object.source_id == Some(component_id))
+            .find(|object| {
+                object.kind == CadObjectKind::Component && object.source_id == Some(component_id)
+            })
             .expect("component CAD object");
 
         assert!(!component.line_paths.is_empty());
         assert!(component.rect.is_some());
-        let bounds = component
-            .line_paths
-            .iter()
-            .flatten()
-            .fold((Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)), |(min, max), point| {
-                (min.min(*point), max.max(*point))
-            });
+        let bounds = component.line_paths.iter().flatten().fold(
+            (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY)),
+            |(min, max), point| (min.min(*point), max.max(*point)),
+        );
         let symbol_size = bounds.1 - bounds.0;
-        assert!(symbol_size.x < 25.0 && symbol_size.y < 45.0, "symbol ink stays proportional to pin spacing: {symbol_size:?}");
+        assert!(
+            symbol_size.x < 25.0 && symbol_size.y < 45.0,
+            "symbol ink stays proportional to pin spacing: {symbol_size:?}"
+        );
     }
 
     #[test]
@@ -1323,6 +1449,54 @@ mod tests {
         assert!((pads[1].rect.unwrap().center - Vec2::new(100.0, 51.0)).length() < 0.001);
         assert!((pads[1].rotation_degrees - 240.0).abs() < 0.001);
         assert_eq!(pads[1].net.as_deref(), Some("SIG"));
+    }
+
+    #[test]
+    fn authored_symbols_take_precedence_and_invalid_ones_fall_back() {
+        let mut custom = ElectronicComponent::resistor("x");
+        custom.symbol = Some(crate::symbol::SymbolDefinition::new(vec![
+            crate::symbol::SymbolPrimitive::Polyline {
+                points: vec![
+                    Vec2::new(-12.0, 0.0),
+                    Vec2::new(0.0, 10.0),
+                    Vec2::new(12.0, 0.0),
+                ],
+            },
+        ]));
+        custom.sim_model = SimModel::Unmodeled;
+        let mut schematic = Schematic::new("Authored symbol");
+        let component_id = custom.id;
+        schematic.add_component(custom);
+        let scene = CadScene::from_schematic(&schematic);
+        let body = scene
+            .objects
+            .iter()
+            .find(|object| object.kind == CadObjectKind::Component)
+            .expect("component body");
+        assert_eq!(body.source_id, Some(component_id));
+        assert_eq!(body.line_paths.len(), 1);
+        assert_eq!(body.line_paths[0].len(), 3);
+
+        let mut broken = ElectronicComponent::resistor("y");
+        broken.sim_model = SimModel::Unmodeled;
+        broken.symbol = Some(crate::symbol::SymbolDefinition::new(vec![
+            crate::symbol::SymbolPrimitive::Circle {
+                center: Vec2::ZERO,
+                radius: 5_000.0,
+            },
+        ]));
+        let mut schematic = Schematic::new("Broken symbol");
+        schematic.add_component(broken);
+        let scene = CadScene::from_schematic(&schematic);
+        let body = scene
+            .objects
+            .iter()
+            .find(|object| object.kind == CadObjectKind::Component)
+            .expect("component body");
+        assert!(
+            !body.line_paths.is_empty(),
+            "invalid symbol uses generic fallback"
+        );
     }
 
     #[test]

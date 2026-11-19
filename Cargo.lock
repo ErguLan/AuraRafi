@@ -496,6 +496,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "console_error_panic_hook"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a06aeb73f470f66dcdbf7223caeebb85984942f22f1adb2a088cf9668146bbbc"
+dependencies = [
+ "cfg-if",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "const-random"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2609,9 +2619,6 @@ name = "raf_net"
 version = "0.9.8"
 dependencies = [
  "raf_core",
- "serde",
- "serde_json",
- "tracing",
  "uuid",
 ]
 
@@ -2635,6 +2642,7 @@ dependencies = [
  "image",
  "pollster",
  "raf_core",
+ "raf_net",
  "raf_render",
  "raf_runtime",
  "raf_script",
@@ -2658,6 +2666,7 @@ dependencies = [
  "epaint_default_fonts",
  "glam",
  "image",
+ "js-sys",
  "pollster",
  "raf_assets",
  "raf_core",
@@ -2711,6 +2720,25 @@ dependencies = [
  "serde",
  "serde_json",
  "uuid",
+]
+
+[[package]]
+name = "raf_web"
+version = "0.9.8"
+dependencies = [
+ "bytemuck",
+ "console_error_panic_hook",
+ "glam",
+ "js-sys",
+ "raf_core",
+ "raf_render",
+ "ron",
+ "serde",
+ "uuid",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "wgpu",
 ]
 
 [[package]]

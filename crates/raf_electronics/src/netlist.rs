@@ -4,6 +4,7 @@
 //! nets (groups of connected pins). This is the foundation for
 //! simulation, DRC, and export.
 
+use crate::component::SimModel;
 use crate::schematic::{Schematic, Wire};
 use glam::Vec2;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -31,6 +32,9 @@ pub struct NetlistComponent {
     pub designator: String,
     pub value: String,
     pub footprint: String,
+    /// False for a custom component whose pins stay connected but whose
+    /// electrical behavior is not modeled by the DC solver.
+    pub modeled: bool,
 }
 
 /// The complete netlist extracted from a schematic.
@@ -74,6 +78,10 @@ impl Netlist {
                 designator: c.designator.clone(),
                 value: c.value.clone(),
                 footprint: c.footprint.clone(),
+                // Connectivity is physical: an unmodeled part keeps every pin
+                // in the netlist so wires, DRC and cross-probing see the same
+                // circuit. Only the electrical solver skips its behavior.
+                modeled: !matches!(c.sim_model, SimModel::Unmodeled),
             })
             .collect();
 

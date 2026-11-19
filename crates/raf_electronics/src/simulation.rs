@@ -84,11 +84,43 @@ fn solve_dc(
     const LED_R: f64 = 100.0;
     const LED_OFF_G: f64 = 1e-12;
     const SOURCE_R: f64 = 0.01;
+    const MAX_UNMODELED_DIAGNOSTICS: usize = 16;
     let mut results = SimulationResults::default();
     if netlist.nets.is_empty() || schematic.components.is_empty() {
         results
             .messages
             .push("Empty circuit - nothing to simulate.".into());
+        return Some(results);
+    }
+    // A custom part has real pins but no branch law. Reporting it once per run
+    // keeps the result honest without flooding the dock on a large board.
+    let mut unmodeled_count = 0usize;
+    for component in &netlist.components {
+        if component.modeled {
+            continue;
+        }
+        unmodeled_count += 1;
+        if unmodeled_count <= MAX_UNMODELED_DIAGNOSTICS {
+            results.messages.push(format!(
+                "{}: unmodeled custom component; its pins stay connected but contribute no conductance.",
+                component.designator
+            ));
+        }
+    }
+    if unmodeled_count > MAX_UNMODELED_DIAGNOSTICS {
+        results.messages.push(format!(
+            "{} additional unmodeled components were skipped.",
+            unmodeled_count - MAX_UNMODELED_DIAGNOSTICS
+        ));
+    }
+    if netlist
+        .components
+        .iter()
+        .all(|component| !component.modeled)
+    {
+        results.messages.push(
+            "No modeled components: DC analysis has nothing to solve for this circuit.".into(),
+        );
         return Some(results);
     }
     for comp in &schematic.components {
@@ -102,6 +134,7 @@ fn solve_dc(
                 forward_voltage.is_finite() && forward_voltage >= 0.0
             }
             SimModel::DcSource { voltage } => voltage.is_finite(),
+            SimModel::Unmodeled => true,
             _ => true,
         };
         if !valid {
@@ -192,6 +225,8 @@ fn solve_dc(
                     (LED_OFF_G + 1.0 / LED_R, forward_voltage / LED_R)
                 }
                 SimModel::Led { .. } => (LED_OFF_G, 0.0),
+                // Explicit: a custom part is electrically inert, never a wire.
+                SimModel::Unmodeled => continue,
                 _ => continue,
             };
             stamp_resistor(&mut matrix, a, b, conductance, ground_node, &net_to_idx);
@@ -258,6 +293,7 @@ fn solve_dc(
             }
             SimModel::Wire if comp.pins.len() >= 2 => drop * 1000.0,
             SimModel::DcSource { voltage } => (drop - voltage) / SOURCE_R,
+            SimModel::Unmodeled => 0.0,
             _ => 0.0,
         };
         results.component_currents.insert(ci, current);
@@ -456,7 +492,9 @@ fn gaussian_solve_cancellable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::component::ElectronicComponent;
     use crate::schematic::Schematic;
+    use glam::Vec2;
 
     #[test]
     fn empty_circuit() {
@@ -482,5 +520,49 @@ mod tests {
         let mut a = vec![vec![1.0, 2.0], vec![2.0, 4.0]];
         let mut b = vec![3.0, 6.0];
         assert!(gaussian_solve(&mut a, &mut b).is_none());
+    }
+
+    #[test]
+    fn unmodeled_custom_parts_keep_pins_but_never_conduct() {
+        let mut sch = Schematic::new("Unmodeled");
+        let mut source = ElectronicComponent::dc_source(9.0);
+        source.position = Vec2::ZERO;
+        sch.add_component(source);
+
+        let mut resistor = ElectronicComponent::resistor("1k");
+        resistor.position = Vec2::new(100.0, 0.0);
+        sch.add_component(resistor);
+
+        let mut custom = ElectronicComponent::resistor("x");
+        custom.position = Vec2::new(40.0, -40.0);
+        custom.sim_model = SimModel::Unmodeled;
+        custom.symbol = Some(crate::symbol::SymbolPreset::Passive.symbol_for(2));
+        let custom_index = sch.components.len();
+        sch.add_component(custom);
+
+        sch.add_wire(Vec2::new(0.0, -20.0), Vec2::new(80.0, 0.0), "VCC");
+        sch.add_wire(Vec2::new(0.0, -20.0), Vec2::new(20.0, -40.0), "VCC");
+        sch.add_wire(Vec2::new(60.0, -40.0), Vec2::new(0.0, 20.0), "GND");
+        sch.add_wire(Vec2::new(120.0, 0.0), Vec2::new(0.0, 20.0), "GND");
+
+        let netlist = Netlist::from_schematic(&sch);
+        assert!(!netlist.components[custom_index].modeled);
+        let result = simulate_dc(&sch);
+        assert!(
+            result
+                .messages
+                .iter()
+                .any(|message| message.contains("unmodeled custom component")),
+            "diagnostic must name the skipped part: {:?}",
+            result.messages
+        );
+        assert_eq!(
+            result
+                .component_currents
+                .get(&custom_index)
+                .copied()
+                .unwrap_or(0.0),
+            0.0
+        );
     }
 }

@@ -11,6 +11,7 @@ use super::handles::{
     BufferHandle, GraphicsHandle, MaterialHandle, MeshHandle, PipelineHandle, SamplerHandle,
     TextureHandle,
 };
+use super::memory_ledger::{GraphicsResourceFamily, GraphicsResourceLedger};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResourceAdmission {
@@ -113,6 +114,24 @@ where
     pub fn set_budget_bytes(&mut self, budget_bytes: u64) {
         self.budget_bytes = budget_bytes;
         self.evict_to_budget(0);
+    }
+
+    /// Publish this arena's residency and lifetime counters into the shared
+    /// graphics ledger.
+    ///
+    /// The arena stays the authoritative owner of its slots; the ledger only
+    /// records the resulting bytes and event counters. Call this once per
+    /// frame, never once per resource.
+    pub fn sync_ledger(&self, ledger: &mut GraphicsResourceLedger, family: GraphicsResourceFamily) {
+        let metrics = self.metrics;
+        ledger.sync_resident(family, metrics.resident_bytes);
+        ledger.sync_family_stats(
+            family,
+            metrics.peak_resident_bytes,
+            metrics.admissions,
+            metrics.evictions,
+            metrics.rejected_admissions,
+        );
     }
 
     pub fn insert(

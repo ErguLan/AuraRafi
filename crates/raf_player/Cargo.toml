@@ -14,6 +14,7 @@ raf_runtime.workspace = true
 raf_core.workspace = true
 raf_script.workspace = true
 raf_render.workspace = true
+raf_net.workspace = true
 raf_ui.workspace = true
 winit.workspace = true
 glam.workspace = true

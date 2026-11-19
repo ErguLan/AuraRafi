@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use winit::window::{ResizeDirection, Window};
 
+use super::headless::{self, HeadlessSurface};
 use super::{
     CpuUiSurfaceHost, DirectUiSurfaceFrame, DirectUiSurfaceHost, NativeApplicationMenuAdapter,
     UiSurface, UiSurfaceCpuMetrics, UiSurfaceGpuSharedResources,
@@ -106,20 +107,24 @@ impl Default for NativeUiWindowConfig {
 }
 
 pub struct NativeUiWindowHost {
-    window: Arc<Window>,
+    window: Option<Arc<Window>>,
     _instance: wgpu::Instance,
-    surface: wgpu::Surface<'static>,
+    surface: Option<wgpu::Surface<'static>>,
     adapter: wgpu::Adapter,
     pub(super) device: Arc<wgpu::Device>,
     pub(super) queue: Arc<wgpu::Queue>,
     pub(super) configuration: wgpu::SurfaceConfiguration,
+    pub(super) headless: Option<HeadlessSurface>,
     host_config: NativeUiWindowConfig,
     ui_shared: Arc<UiSurfaceGpuSharedResources>,
 }
 
 /// Runtime-owned cursor lease. Dropping Play never leaves the editor cursor captured.
+///
+/// A headless host has no window, so applying and releasing a capture become
+/// virtual bookkeeping instead of operating-system calls.
 pub struct NativeCursorLease {
-    window: Arc<Window>,
+    window: Option<Arc<Window>>,
     requested: Option<(raf_core::runtime_config::CursorCapture, bool)>,
     effective: raf_core::runtime_config::CursorCapture,
 }
@@ -135,21 +140,22 @@ impl NativeCursorLease {
             return Ok(self.effective);
         }
         self.requested = Some((capture, visible));
+        let Some(window) = self.window.as_ref() else {
+            self.effective = capture;
+            return Ok(capture);
+        };
         let result = match capture {
-            CursorCapture::Free => self
-                .window
+            CursorCapture::Free => window
                 .set_cursor_grab(CursorGrabMode::None)
                 .map(|_| CursorCapture::Free),
-            CursorCapture::Confined => self
-                .window
+            CursorCapture::Confined => window
                 .set_cursor_grab(CursorGrabMode::Confined)
                 .map(|_| CursorCapture::Confined),
-            CursorCapture::Locked => self
-                .window
+            CursorCapture::Locked => window
                 .set_cursor_grab(CursorGrabMode::Locked)
                 .map(|_| CursorCapture::Locked)
                 .or_else(|_| {
-                    self.window
+                    window
                         .set_cursor_grab(CursorGrabMode::Confined)
                         .map(|_| CursorCapture::Confined)
                 }),
@@ -157,7 +163,7 @@ impl NativeCursorLease {
         match result {
             Ok(effective) => {
                 self.effective = effective;
-                self.window.set_cursor_visible(visible);
+                window.set_cursor_visible(visible);
                 Ok(effective)
             }
             Err(error) => {
@@ -168,10 +174,10 @@ impl NativeCursorLease {
         }
     }
     pub fn release(&mut self) {
-        let _ = self
-            .window
-            .set_cursor_grab(winit::window::CursorGrabMode::None);
-        self.window.set_cursor_visible(true);
+        if let Some(window) = self.window.as_ref() {
+            let _ = window.set_cursor_grab(winit::window::CursorGrabMode::None);
+            window.set_cursor_visible(true);
+        }
         self.requested = None;
         self.effective = raf_core::runtime_config::CursorCapture::Free;
     }
@@ -276,20 +282,124 @@ impl NativeUiWindowHost {
         let ui_shared = Arc::new(UiSurfaceGpuSharedResources::new(&device, format));
 
         Ok(Self {
-            window,
+            window: Some(window),
             _instance: instance,
-            surface,
+            surface: Some(surface),
             adapter,
             device: Arc::new(device),
             queue: Arc::new(queue),
             configuration,
+            headless: None,
             host_config,
             ui_shared,
         })
     }
 
+    /// Creates a fixed-size, windowless presentation host.
+    ///
+    /// The host owns one render target instead of a swapchain and uses the
+    /// same device, queue, UI shared resources, and frame composition path as
+    /// the native window host. It never creates a Winit window or event loop.
+    pub fn create_headless(
+        size: [u32; 2],
+        host_config: NativeUiWindowConfig,
+    ) -> Result<Self, String> {
+        let size = headless::validate_size(size)?;
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+            backends: wgpu::Backends::all(),
+            ..wgpu::InstanceDescriptor::default()
+        });
+        let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: match host_config.adapter_preference {
+                GraphicsAdapterPreference::LowPower => wgpu::PowerPreference::LowPower,
+                GraphicsAdapterPreference::HighPerformance => {
+                    wgpu::PowerPreference::HighPerformance
+                }
+            },
+            force_fallback_adapter: false,
+            compatible_surface: None,
+        }))
+        .ok_or_else(|| "headless UI adapter was not found".to_string())?;
+        let timestamp_features = wgpu_timestamp_features();
+        let optional_features = if adapter.features().contains(timestamp_features) {
+            timestamp_features
+        } else {
+            wgpu::Features::empty()
+        };
+        let (device, queue) = pollster::block_on(adapter.request_device(
+            &wgpu::DeviceDescriptor {
+                label: Some("ApiGraphicBasic.HeadlessUiDevice"),
+                required_features: optional_features,
+                required_limits: wgpu::Limits::downlevel_defaults(),
+                memory_hints: match host_config.adapter_preference {
+                    GraphicsAdapterPreference::LowPower => wgpu::MemoryHints::MemoryUsage,
+                    GraphicsAdapterPreference::HighPerformance => wgpu::MemoryHints::Performance,
+                },
+            },
+            None,
+        ))
+        .map_err(|error| format!("headless UI device: {error}"))?;
+        let format = wgpu::TextureFormat::Rgba8UnormSrgb;
+        let target = HeadlessSurface::new(&device, format, size)?;
+        let configuration = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: size[0],
+            height: size[1],
+            present_mode: wgpu::PresentMode::Fifo,
+            alpha_mode: wgpu::CompositeAlphaMode::Opaque,
+            view_formats: vec![],
+            desired_maximum_frame_latency: host_config.desired_maximum_frame_latency.clamp(1, 3),
+        };
+        let ui_shared = Arc::new(UiSurfaceGpuSharedResources::new(&device, format));
+
+        Ok(Self {
+            window: None,
+            _instance: instance,
+            surface: None,
+            adapter,
+            device: Arc::new(device),
+            queue: Arc::new(queue),
+            configuration,
+            headless: Some(target),
+            host_config,
+            ui_shared,
+        })
+    }
+
+    /// True when this host renders into an owned target without a swapchain.
+    pub fn is_headless(&self) -> bool {
+        self.headless.is_some()
+    }
+
+    /// Logical-to-physical scale reported by the native window, or `1.0`
+    /// headless where logical and physical pixels are identical.
+    pub fn scale_factor(&self) -> f32 {
+        self.window
+            .as_ref()
+            .map_or(1.0, |window| window.scale_factor() as f32)
+    }
+
+    /// Headless-safe window access for hosts that may run without a window.
+    pub fn window_opt(&self) -> Option<&Arc<Window>> {
+        self.window.as_ref()
+    }
+
+    /// Presentation color format shared by the surface, UI compositor, and
+    /// headless render target. It stays below the ApiGraphicBasic boundary.
+    pub(super) fn format(&self) -> wgpu::TextureFormat {
+        self.configuration.format
+    }
+
+    /// Returns the native window.
+    ///
+    /// Existing editor call sites depend on this borrowed handle. Headless
+    /// hosts have no window, so use [`Self::window_opt`] in code that may run
+    /// without one; calling this in headless mode is a programming error.
     pub fn window(&self) -> &Arc<Window> {
-        &self.window
+        self.window.as_ref().expect(
+            "NativeUiWindowHost::window() requires a windowed host; use window_opt() for headless-capable code",
+        )
     }
 
     /// Executes the OS-owned part of RafUI's window contract.
@@ -302,23 +412,24 @@ impl NativeUiWindowHost {
         &self,
         command: UiWindowCommand,
     ) -> Result<NativeWindowCommandResult, String> {
+        let Some(window) = self.window.as_ref() else {
+            return Err("window commands are unavailable in headless presentation".to_string());
+        };
         let result = match command {
-            UiWindowCommand::BeginDrag => self
-                .window
+            UiWindowCommand::BeginDrag => window
                 .drag_window()
                 .map_err(|error| format!("native window drag: {error}"))
                 .map(|_| NativeWindowCommandResult::Applied),
-            UiWindowCommand::BeginResize(edge) => self
-                .window
+            UiWindowCommand::BeginResize(edge) => window
                 .drag_resize_window(resize_direction(edge))
                 .map_err(|error| format!("native window resize: {error}"))
                 .map(|_| NativeWindowCommandResult::Applied),
             UiWindowCommand::Minimize => {
-                self.window.set_minimized(true);
+                window.set_minimized(true);
                 Ok(NativeWindowCommandResult::Applied)
             }
             UiWindowCommand::ToggleMaximize => {
-                self.window.set_maximized(!self.window.is_maximized());
+                window.set_maximized(!window.is_maximized());
                 Ok(NativeWindowCommandResult::Applied)
             }
             UiWindowCommand::Close => Ok(NativeWindowCommandResult::RequestClose),
@@ -335,7 +446,7 @@ impl NativeUiWindowHost {
     pub fn graphics_context(&self) -> NativeGraphicsContext<'_> {
         NativeGraphicsContext {
             device: self.device.as_ref(),
-            color_format: self.configuration.format,
+            color_format: self.format(),
             ui_shared: &self.ui_shared,
             memory_budget: self.host_config.memory_budget,
         }
@@ -368,6 +479,9 @@ impl NativeUiWindowHost {
     }
 
     pub fn presentation_mode(&self) -> NativePresentMode {
+        if self.is_headless() {
+            return NativePresentMode::Other;
+        }
         match self.configuration.present_mode {
             wgpu::PresentMode::Fifo | wgpu::PresentMode::AutoVsync => NativePresentMode::Vsync,
             wgpu::PresentMode::Immediate | wgpu::PresentMode::AutoNoVsync => {
@@ -380,12 +494,15 @@ impl NativeUiWindowHost {
 
     /// Returns the refresh rate of the monitor currently carrying the
     /// native window. Winit exposes this in milli-Hz; the scheduler only
-    /// needs a conservative whole-Hz cadence.
+    /// needs a conservative whole-Hz cadence. A headless host has no monitor.
     pub fn display_refresh_hz(&self) -> Option<u16> {
-        self.window.current_monitor().and_then(|monitor| {
-            let refresh_millihz = monitor.refresh_rate_millihertz()?;
-            (refresh_millihz > 0).then(|| {
-                ((refresh_millihz.saturating_add(500)) / 1000).clamp(1, u32::from(u16::MAX)) as u16
+        self.window.as_ref().and_then(|window| {
+            window.current_monitor().and_then(|monitor| {
+                let refresh_millihz = monitor.refresh_rate_millihertz()?;
+                (refresh_millihz > 0).then(|| {
+                    ((refresh_millihz.saturating_add(500)) / 1000).clamp(1, u32::from(u16::MAX))
+                        as u16
+                })
             })
         })
     }
@@ -401,9 +518,13 @@ impl NativeUiWindowHost {
 
     /// Applies the editor's VSync preference to the native swapchain. The
     /// surface capabilities remain authoritative because some platforms do
-    /// not expose an immediate present mode.
+    /// not expose an immediate present mode. A headless host has no
+    /// swapchain, so the request has no recurring cost.
     pub fn set_vsync(&mut self, enabled: bool) {
-        let capabilities = self.surface.get_capabilities(&self.adapter);
+        let Some(surface) = self.surface.as_ref() else {
+            return;
+        };
+        let capabilities = surface.get_capabilities(&self.adapter);
         let desired = if enabled {
             wgpu::PresentMode::Fifo
         } else {
@@ -429,12 +550,13 @@ impl NativeUiWindowHost {
             return;
         }
         self.configuration.present_mode = present_mode;
-        self.surface.configure(&self.device, &self.configuration);
+        surface.configure(&self.device, &self.configuration);
     }
 
     /// Installs the shared application command tree through a platform-owned
     /// menu adapter. The native event loop later drains stable command IDs and
-    /// dispatches them at the application boundary.
+    /// dispatches them at the application boundary. Headless hosts expose no
+    /// OS menu surface and report that explicitly.
     pub fn install_application_menu<A>(
         &self,
         adapter: &mut A,
@@ -443,7 +565,10 @@ impl NativeUiWindowHost {
     where
         A: NativeApplicationMenuAdapter,
     {
-        adapter.install(self.window.as_ref(), menu)
+        let Some(window) = self.window.as_ref() else {
+            return Err("native application menus require a windowed host".to_string());
+        };
+        adapter.install(window.as_ref(), menu)
     }
 
     pub fn install_application_menu_localized<A>(
@@ -455,7 +580,10 @@ impl NativeUiWindowHost {
     where
         A: NativeApplicationMenuAdapter,
     {
-        adapter.install_localized(self.window.as_ref(), menu, resolve)
+        let Some(window) = self.window.as_ref() else {
+            return Err("native application menus require a windowed host".to_string());
+        };
+        adapter.install_localized(window.as_ref(), menu, resolve)
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -465,9 +593,48 @@ impl NativeUiWindowHost {
         if self.configuration.width == width && self.configuration.height == height {
             return;
         }
+        if let Some(target) = self.headless.as_mut() {
+            if target.resize(&self.device, [width, height]).is_ok() {
+                self.configuration.width = width;
+                self.configuration.height = height;
+            }
+            return;
+        }
         self.configuration.width = width;
         self.configuration.height = height;
-        self.surface.configure(&self.device, &self.configuration);
+        if let Some(surface) = self.surface.as_ref() {
+            surface.configure(&self.device, &self.configuration);
+        }
+    }
+
+    /// Runs `encode` against the next presentation view.
+    ///
+    /// Windowed hosts acquire and present a swapchain image. Headless hosts
+    /// compose into their owned target and never present, which is why the
+    /// returned metrics keep `presents = 0` there.
+    fn with_presentation_target<R>(
+        &mut self,
+        encode: impl FnOnce(&wgpu::Device, &wgpu::Queue, &wgpu::TextureView, [u32; 2]) -> R,
+    ) -> Result<R, wgpu::SurfaceError> {
+        if let Some(target) = self.headless.as_ref() {
+            let size = target.size();
+            return Ok(encode(
+                self.device.as_ref(),
+                self.queue.as_ref(),
+                target.view(),
+                size,
+            ));
+        }
+        // Public constructors always install a swapchain or a headless target.
+        let surface = self.surface.as_ref().ok_or(wgpu::SurfaceError::Lost)?;
+        let frame = surface.get_current_texture()?;
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        let size = [self.configuration.width, self.configuration.height];
+        let output = encode(self.device.as_ref(), self.queue.as_ref(), &view, size);
+        frame.present();
+        Ok(output)
     }
 
     pub fn render<F>(
@@ -478,19 +645,9 @@ impl NativeUiWindowHost {
     where
         F: FnMut(&str) -> String,
     {
-        let frame = self.surface.get_current_texture()?;
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let output = host.render(
-            &self.device,
-            &self.queue,
-            &view,
-            [self.configuration.width, self.configuration.height],
-            resolve,
-        );
-        frame.present();
-        Ok(output)
+        self.with_presentation_target(|device, queue, view, size| {
+            host.render(device, queue, view, size, resolve)
+        })
     }
 
     pub fn render_editor_frame<F>(
@@ -505,23 +662,21 @@ impl NativeUiWindowHost {
     where
         F: FnMut(&str) -> String,
     {
-        let frame = self.surface.get_current_texture()?;
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut composed = compositor.compose(
-            self.device.as_ref(),
-            self.queue.as_ref(),
-            &view,
-            [self.configuration.width, self.configuration.height],
-            canvas_layer,
-            ui,
-            logical_size,
-            raster_scale,
-            resolve,
-        );
-        frame.present();
-        composed.metrics.presents = 1;
+        let headless = self.is_headless();
+        let mut composed = self.with_presentation_target(|device, queue, view, size| {
+            compositor.compose(
+                device,
+                queue,
+                view,
+                size,
+                canvas_layer,
+                ui,
+                logical_size,
+                raster_scale,
+                resolve,
+            )
+        })?;
+        composed.metrics.presents = if headless { 0 } else { 1 };
         Ok(composed)
     }
 
@@ -535,21 +690,11 @@ impl NativeUiWindowHost {
     where
         F: FnMut(&str) -> String,
     {
-        let frame = self.surface.get_current_texture()?;
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut composed = compositor.compose_layers(
-            self.device.as_ref(),
-            self.queue.as_ref(),
-            &view,
-            [self.configuration.width, self.configuration.height],
-            canvas_layer,
-            ui_layers,
-            resolve,
-        );
-        frame.present();
-        composed.metrics.presents = 1;
+        let headless = self.is_headless();
+        let mut composed = self.with_presentation_target(|device, queue, view, size| {
+            compositor.compose_layers(device, queue, view, size, canvas_layer, ui_layers, resolve)
+        })?;
+        composed.metrics.presents = if headless { 0 } else { 1 };
         Ok(composed)
     }
 
@@ -560,20 +705,9 @@ impl NativeUiWindowHost {
         source_size: [u32; 2],
         clear_color: [u8; 4],
     ) -> Result<(), wgpu::SurfaceError> {
-        let frame = self.surface.get_current_texture()?;
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        presenter.present(
-            &self.device,
-            &self.queue,
-            &view,
-            output,
-            source_size,
-            clear_color,
-        );
-        frame.present();
-        Ok(())
+        self.with_presentation_target(|device, queue, view, _| {
+            presenter.present(device, queue, view, output, source_size, clear_color);
+        })
     }
 
     /// Presents a retained surface through the CPU compositor and uploads the
@@ -587,26 +721,20 @@ impl NativeUiWindowHost {
     where
         F: FnMut(&str) -> String,
     {
-        let output = self.surface.get_current_texture()?;
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        let clear_color = host.clear_color();
-        let ui_frame = host.render(
-            [self.configuration.width, self.configuration.height],
-            resolve,
-        );
-        let metrics = ui_frame.metrics;
-        presenter.present_cpu_pixels(
-            &self.device,
-            &self.queue,
-            &view,
-            ui_frame.pixels,
-            ui_frame.size,
-            clear_color,
-        );
-        output.present();
-        Ok(metrics)
+        self.with_presentation_target(|device, queue, view, size| {
+            let clear_color = host.clear_color();
+            let ui_frame = host.render(size, resolve);
+            let metrics = ui_frame.metrics;
+            presenter.present_cpu_pixels(
+                device,
+                queue,
+                view,
+                ui_frame.pixels,
+                ui_frame.size,
+                clear_color,
+            );
+            metrics
+        })
     }
 
     pub fn render_scene(
@@ -615,13 +743,9 @@ impl NativeUiWindowHost {
         basic_device: &mut BasicDevice,
         frame: &SceneRenderFrame,
     ) -> Result<(), wgpu::SurfaceError> {
-        let output = self.surface.get_current_texture()?;
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        host.render_frame(basic_device, &self.device, &self.queue, &view, frame);
-        output.present();
-        Ok(())
+        self.with_presentation_target(|device, queue, view, _| {
+            host.render_frame(basic_device, device, queue, view, frame);
+        })
     }
 }
 

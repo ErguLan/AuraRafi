@@ -258,18 +258,14 @@ pub fn build_electronics_analysis_surface(
                     align_items: UiAlign::Center,
                     gap: 7.0,
                     padding: UiSpacing::xy(8.0, 6.0),
-                    ..UiLayout::fixed(0.0, 28.0)
-                        .with_width_mode(UiSizeMode::Fill)
+                    ..UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill)
                 })
                 .with_child(
                     UiNode::new("electronics.analysis.header.icon", UiNodeKind::Label)
                         .with_icon(UiIcon::new(header_icon).with_size(UiIconSize::Small))
                         // A row child with no authored track resolves to zero
                         // width and its glyph is never painted.
-                        .with_layout(UiLayout::fixed(
-                            ELECTRONICS_ROW_GLYPH_TRACK,
-                            16.0,
-                        )),
+                        .with_layout(UiLayout::fixed(ELECTRONICS_ROW_GLYPH_TRACK, 16.0)),
                 )
                 .with_child(
                     UiNode::new("electronics.analysis.header.title", UiNodeKind::Label)
@@ -313,7 +309,14 @@ pub fn build_electronics_analysis_surface(
         }
     }
 
-    let mut heading = raf_ui::table::table_heading("electronics.analysis.columns", &[("", ELECTRONICS_ROW_GLYPH_TRACK),("electronics.desktop.message",0.0)], tokens);
+    let mut heading = raf_ui::table::table_heading(
+        "electronics.analysis.columns",
+        &[
+            ("", ELECTRONICS_ROW_GLYPH_TRACK),
+            ("electronics.desktop.message", 0.0),
+        ],
+        tokens,
+    );
     heading.layout = heading.layout.fixed_height(28.0);
     root = root.with_child(heading);
     root = root.with_child(body);
@@ -441,7 +444,9 @@ fn analysis_row(
                 )),
         );
     }
-    if index % 2 == 0 { row = row.with_style(UiStyle::transparent().with_fill(tokens.surface_alt)); }
+    if index % 2 == 0 {
+        row = row.with_style(UiStyle::transparent().with_fill(tokens.surface_alt));
+    }
     row.with_child(text)
 }
 
@@ -545,7 +550,8 @@ fn analysis_action(
     UiNode::new(id, UiNodeKind::Button)
         .with_class(class)
         .with_layout(
-            UiLayout::fit_content().fixed_height(ELECTRONICS_CONTROL_HEIGHT)
+            UiLayout::fit_content()
+                .fixed_height(ELECTRONICS_CONTROL_HEIGHT)
                 .with_text_safe_area(true),
         )
         .with_text_key(label_key)
@@ -860,11 +866,16 @@ const MODAL_BUTTON_WIDTH: f32 = 112.0;
 
 /// Electronics has its own workstation palette; Game chrome is independent.
 pub(crate) fn electronics_tokens(palette: StudioUiPalette) -> UiTokens {
-    let mut t=palette.tokens();
-    if palette==StudioUiPalette::IndustrialDark {
-        t.background=[9,16,23,255]; t.canvas=[6,15,21,255];
-        t.surface=[14,23,31,255]; t.surface_alt=[17,27,36,255]; t.surface_raised=[23,35,46,255];
-        t.border=[44,61,74,255]; t.text=[229,234,240,255]; t.text_muted=[151,166,180,255];
+    let mut t = palette.tokens();
+    if palette == StudioUiPalette::IndustrialDark {
+        t.background = [9, 16, 23, 255];
+        t.canvas = [6, 15, 21, 255];
+        t.surface = [14, 23, 31, 255];
+        t.surface_alt = [17, 27, 36, 255];
+        t.surface_raised = [23, 35, 46, 255];
+        t.border = [44, 61, 74, 255];
+        t.text = [229, 234, 240, 255];
+        t.text_muted = [151, 166, 180, 255];
     }
     t
 }
@@ -1055,6 +1066,78 @@ impl ElectronicsIconButton {
     }
 }
 
+/// Command that opens the custom component creator.
+pub const ELECTRONICS_COMPONENT_CREATE_COMMAND: &str =
+    crate::electronics_controller::COMPONENT_CREATOR_OPEN_COMMAND;
+
+/// Library-header action that opens the component creator.
+///
+/// The navigator owns the header row, so this stays a self-contained node: add
+/// it as the last child of the library heading (or use
+/// [`with_electronics_library_create_action`]) and extend the navigator style
+/// sheet with [`electronics_library_create_action_style_sheet`].
+pub fn electronics_library_create_action(palette: StudioUiPalette) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new("electronics.library.create-component", UiNodeKind::Button)
+        .with_class("electronics-library-create-action")
+        .with_layout(UiLayout::fixed(152.0, 28.0).with_text_safe_area(true))
+        .with_style(UiStyle {
+            fill: tokens.surface_alt,
+            border: tokens.border,
+            text: tokens.text,
+            border_width: 1.0,
+            radius: ELECTRONICS_CORNER_RADIUS,
+            opacity: 1.0,
+        })
+        .with_icon(UiIcon::new(UiIconId::Add).with_size(UiIconSize::Small))
+        .with_text_key("electronics.component_creator.title")
+        .with_text_style(UiTextStyle::button(tokens.text))
+        .with_text_overflow(UiTextOverflow::Ellipsis)
+        .with_tooltip_key("electronics.component_creator.action_tooltip")
+        .with_accessibility_label_key("electronics.component_creator.title")
+        .with_accessibility_role(UiAccessibilityRole::Button)
+        .focusable()
+        .with_event(UiEventBinding::command(
+            UiEventKind::Click,
+            ELECTRONICS_COMPONENT_CREATE_COMMAND,
+        ))
+        .with_event(UiEventBinding::command(
+            UiEventKind::KeyPress("enter".to_string()),
+            ELECTRONICS_COMPONENT_CREATE_COMMAND,
+        ))
+}
+
+/// Appends the create action to an existing library header row.
+pub fn with_electronics_library_create_action(header: UiNode, palette: StudioUiPalette) -> UiNode {
+    header.with_child(electronics_library_create_action(palette))
+}
+
+/// State rules for [`electronics_library_create_action`].
+pub fn electronics_library_create_action_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
+    let tokens = palette.tokens();
+    let class = "electronics-library-create-action";
+    let mut rules = vec![electronics_class_rule(
+        class,
+        tokens.surface_alt,
+        tokens.border,
+        tokens.text,
+    )];
+    rules.push(electronics_state_rule(
+        UiStyleRuleState::Hovered,
+        class,
+        UiStylePatch {
+            fill: Some(tokens.surface_raised),
+            border: Some(tokens.border),
+            text: Some(tokens.text),
+            ..UiStylePatch::default()
+        },
+    ));
+    rules.push(electronics_focus_rule(class, tokens));
+    rules.push(electronics_active_rule(class, tokens));
+    rules.push(electronics_disabled_rule(class, tokens));
+    UiStyleSheet { rules }
+}
+
 fn analysis_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
     let tokens = palette.tokens();
     let mut rules = vec![
@@ -1213,12 +1296,17 @@ pub(crate) fn assert_electronics_layout_gate(
     let diagnostics = UiSurfaceDiagnostics::from_frame(&frame);
     // Overflow adds real track/thumb controls after the authored tree. These
     // belong to the scroll view, whose generic role is intentionally tolerated.
-    let generated_scroll_controls = frame.layout_boxes.iter().filter(|node| {
-        node.interactive && !node.disabled
-            && node.accessibility_role == UiAccessibilityRole::Generic
-            && node.id.starts_with("__rafui.scrollbar.")
-            && (node.id.ends_with(".track") || node.id.ends_with(".thumb"))
-    }).count();
+    let generated_scroll_controls = frame
+        .layout_boxes
+        .iter()
+        .filter(|node| {
+            node.interactive
+                && !node.disabled
+                && node.accessibility_role == UiAccessibilityRole::Generic
+                && node.id.starts_with("__rafui.scrollbar.")
+                && (node.id.ends_with(".track") || node.id.ends_with(".thumb"))
+        })
+        .count();
     let expected_untyped = untyped_interactive_nodes(&surface.root) + generated_scroll_controls;
     assert_eq!(diagnostics.duplicate_ids, 0, "retained ids must be unique");
     assert_eq!(diagnostics.zero_sized_boxes, 0, "no collapsed layout box");
@@ -1266,6 +1354,22 @@ mod tests {
             lines,
             ElectronicsAnalysisMotion::default(),
         )
+    }
+
+    #[test]
+    fn library_header_creates_the_component_creator_command() {
+        let action = electronics_library_create_action(StudioUiPalette::IndustrialDark);
+        assert_eq!(
+            action.text_key.as_deref(),
+            Some("electronics.component_creator.title")
+        );
+        assert!(action.event_handlers.iter().any(|event| {
+            matches!(&event.action, UiAction::Command { name }
+                if name == ELECTRONICS_COMPONENT_CREATE_COMMAND)
+        }));
+        assert_eq!(action.accessibility_role, UiAccessibilityRole::Button);
+        let sheet = electronics_library_create_action_style_sheet(StudioUiPalette::IndustrialDark);
+        assert!(!sheet.rules.is_empty());
     }
 
     #[test]
@@ -1474,16 +1578,37 @@ mod tests {
         use raf_render::api_graphic_basic::ui_surface::CpuUiSurfaceHost;
         for language in [Language::English, Language::Spanish] {
             for width in [420, 980] {
-                let surface = surface_for(ELECTRONICS_ANALYSIS_SIMULATION_TAB, &[
-                    ElectronicsAnalysisLine::normal("D1: 2.636335 V | 0.006363 A | 0.016776 W"),
-                    ElectronicsAnalysisLine::with_tone("Solver converged.", ElectronicsAnalysisTone::Passed),
-                ]);
-                let mut host = CpuUiSurfaceHost::new(surface, [9,16,23,255]);
+                let surface = surface_for(
+                    ELECTRONICS_ANALYSIS_SIMULATION_TAB,
+                    &[
+                        ElectronicsAnalysisLine::normal("D1: 2.636335 V | 0.006363 A | 0.016776 W"),
+                        ElectronicsAnalysisLine::with_tone(
+                            "Solver converged.",
+                            ElectronicsAnalysisTone::Passed,
+                        ),
+                    ],
+                );
+                let mut host = CpuUiSurfaceHost::new(surface, [9, 16, 23, 255]);
                 let output = host.render([width, 240], |key| i18n::t(key, language));
-                let rect = |id: &str| output.frame.layout_boxes.iter().find(|b| b.id==id).unwrap().rect;
-                for id in ["electronics.analysis.line.0.text", "electronics.analysis.line.1.text",
-                    "electronics.analysis.header.title"] {
-                    assert!(rect(id).width > width as f32 - 100.0, "{id}: {:?}", rect(id));
+                let rect = |id: &str| {
+                    output
+                        .frame
+                        .layout_boxes
+                        .iter()
+                        .find(|b| b.id == id)
+                        .unwrap()
+                        .rect
+                };
+                for id in [
+                    "electronics.analysis.line.0.text",
+                    "electronics.analysis.line.1.text",
+                    "electronics.analysis.header.title",
+                ] {
+                    assert!(
+                        rect(id).width > width as f32 - 100.0,
+                        "{id}: {:?}",
+                        rect(id)
+                    );
                 }
                 assert!(rect("electronics.analysis.simulation").width > 100.0);
                 let message = rect("electronics.analysis.line.0.text");
@@ -1491,8 +1616,14 @@ mod tests {
                 if let Some(dir) = std::env::var_os("RAF_ELECTRONICS_POLISH_QA_DIR") {
                     let dir = std::path::PathBuf::from(dir);
                     std::fs::create_dir_all(&dir).unwrap();
-                    image::save_buffer(dir.join(format!("analysis-{language:?}-{width}.png")),
-                        output.pixels, width, 240, image::ColorType::Rgba8).unwrap();
+                    image::save_buffer(
+                        dir.join(format!("analysis-{language:?}-{width}.png")),
+                        output.pixels,
+                        width,
+                        240,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
                 }
             }
         }

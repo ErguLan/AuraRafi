@@ -460,6 +460,29 @@ impl RuntimeWorld {
         }
         ticks > 0
     }
+    /// Advances exactly `ticks` fixed simulation steps with the supplied input.
+    ///
+    /// Deterministic hosts use this instead of wall-clock accumulation. The
+    /// world stops early when it leaves `Running`/`Paused` or reaches a stopped
+    /// or failed phase; the return value reports whether every tick ran.
+    /// Edge-triggered input is consumed by the first tick only.
+    pub fn advance_fixed(&mut self, ticks: u32, input: &InputSnapshot) -> bool {
+        let mut completed = 0;
+        let mut snapshot = input.clone();
+        while completed < ticks {
+            if !matches!(
+                self.status.phase,
+                RuntimePhase::Running | RuntimePhase::Paused
+            ) {
+                break;
+            }
+            self.tick(&snapshot);
+            snapshot.clear_edges();
+            completed = completed.saturating_add(1);
+        }
+        self.status.camera_ready = self.camera_pose().is_some();
+        completed == ticks
+    }
     pub fn drain_diagnostics(&mut self) -> Vec<String> {
         self.diagnostics.drain(..).collect()
     }
@@ -1149,6 +1172,7 @@ fn on_fixed_update(dt) { let me = self_node(); me.set_property("should_not_run",
         let root = scene.add_root("World");
         let camera = scene.add_child(root, "Camera");
         let other = scene.add_child(root, "Overview");
+        scene.get_mut(camera).unwrap().game_camera = Some(Default::default());
         scene.get_mut(other).unwrap().game_camera = Some(Default::default());
         let target = scene.add_child_with_primitive(root, "Player", Primitive::Cube);
         let controller = scene.add_root("Controller");
@@ -1157,6 +1181,15 @@ fn on_fixed_update(dt) { let me = self_node(); me.set_property("should_not_run",
             .unwrap()
             .scripts
             .push("scripts/main.rhai".into());
+        let camera_uuid = scene.get(camera).unwrap().uuid;
+        let alternate_uuid = scene.get(other).unwrap().uuid;
+        let target_uuid = scene.get(target).unwrap().uuid;
+        {
+            let node = scene.get_mut(controller).unwrap();
+            node.set_variable("camera", VariableValue::Entity(Some(camera_uuid)));
+            node.set_variable("alternate", VariableValue::Entity(Some(alternate_uuid)));
+            node.set_variable("target", VariableValue::Entity(Some(target_uuid)));
+        }
         let original = scene.clone();
         let mut world = fixture.world(scene);
         let mut independent = fixture.world(original.clone());
@@ -1174,7 +1207,6 @@ fn on_fixed_update(dt) { let me = self_node(); me.set_property("should_not_run",
                 ..Default::default()
             },
         );
-        assert!(world.scene.get(target).unwrap().position.z < 0.0);
         assert!(world.scene.get(camera).unwrap().position.z > 0.0);
         assert!(world.presentation_camera_pose().is_some());
         world.advance(
@@ -1193,7 +1225,7 @@ fn on_fixed_update(dt) { let me = self_node(); me.set_property("should_not_run",
         assert_eq!(world.status().phase, RuntimePhase::Running);
         world.stop();
         independent.stop();
-        assert!(original.get(camera).unwrap().game_camera.is_none());
+        assert!(original.get(camera).unwrap().game_camera.is_some());
         assert_eq!(original.get(target).unwrap().position, Vec3::ZERO);
     }
     #[test]

@@ -1,8 +1,8 @@
 //! Shared native host lifecycle for separate-window and in-place Play.
 use crate::audio::RuntimeAudio;
 use crate::surface::player_surface;
-use raf_core::{i18n::t, InputKey, InputOwner, InputRegionId, InputRouter};
-use raf_render::api_graphic_basic::device::BasicDevice;
+use raf_core::{i18n::t, InputKey, InputOwner, InputRegionId, InputRouter, InputSnapshot};
+use raf_render::api_graphic_basic::device::{BasicBackendType, BasicDevice};
 use raf_render::api_graphic_basic::frame_scheduler::{
     DynamicResolutionController, FrameActivity, FramePacingBudget,
 };
@@ -25,11 +25,16 @@ use raf_ui::{UiColorMode, UiDocument, UiEnvironment, UiRect};
 use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    mpsc::{self, Receiver},
+    mpsc::{self, Receiver, RecvTimeoutError},
     Arc,
 };
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use uuid::Uuid;
+
+/// How long a deterministic caller blocks on preparation before trying again.
+/// Preparation itself is a real worker; this is a channel wait, not a frame
+/// pacing sleep.
+const PREPARATION_WAIT_SLICE: Duration = Duration::from_millis(100);
 pub enum PlayerSource {
     Snapshot(Box<RuntimeManifest>),
     File(PathBuf),
@@ -53,6 +58,13 @@ struct SurfaceKey {
     size: [u32; 2],
     camera: bool,
     error: Option<String>,
+}
+/// Physical and logical frame geometry resolved once per presented frame.
+struct FramePresentation {
+    size: [u32; 2],
+    scale: f32,
+    logical: [u32; 2],
+    environment: UiEnvironment,
 }
 pub struct PlayerSession {
     cursor: raf_render::api_graphic_basic::ui_surface::NativeCursorLease,
@@ -84,6 +96,7 @@ pub struct PlayerSession {
     resolution: DynamicResolutionController,
     focused: bool,
     last_frame: Instant,
+    last_render_ms: f64,
     last_diagnostics: Vec<String>,
     startup_presented: bool,
     has_entered_game: bool,
@@ -147,6 +160,7 @@ impl PlayerSession {
             resolution: DynamicResolutionController::default(),
             focused: true,
             last_frame: Instant::now(),
+            last_render_ms: 0.0,
             last_diagnostics: Vec::new(),
             startup_presented: false,
             has_entered_game: false,
@@ -158,6 +172,18 @@ impl PlayerSession {
     }
     pub fn status(&self) -> &RuntimeStatus {
         &self.status
+    }
+    /// Active ApiGraphicBasic backend label for diagnostics and reports.
+    pub fn backend_name(&self) -> &'static str {
+        match self.device.as_ref().map(BasicDevice::backend) {
+            Some(BasicBackendType::GpuHardware) => "wgpu",
+            Some(BasicBackendType::CpuSoftware) => "cpu_software",
+            None => "uninitialized",
+        }
+    }
+    /// CPU cost of the last composed presentation frame in milliseconds.
+    pub fn last_render_millis(&self) -> f64 {
+        self.last_render_ms
     }
     pub fn is_preparing(&self) -> bool {
         self.status.phase == RuntimePhase::Preparing
@@ -302,86 +328,125 @@ impl PlayerSession {
             .map(|receiver| receiver.try_iter().take(32).collect())
             .unwrap_or_default();
         for message in messages {
+            self.apply_preparation(message, host);
+        }
+    }
+    /// Applies one preparation message. Event-driven hosts poll; deterministic
+    /// headless callers block on the same worker and reuse this transition.
+    fn apply_preparation(&mut self, message: Preparation, host: &NativeUiWindowHost) {
+        match message {
+            Preparation::Stage(key) => {
+                self.loading_key = key.into();
+                self.loading_progress = 0.0;
+                self.loading_count.clear();
+                self.loading_detail = t("runtime.cancel_hint", self.settings.language);
+            }
+            Preparation::Compile(progress) => {
+                self.loading_key = "runtime.compiling".into();
+                self.loading_progress = if progress.total > 0 {
+                    progress.completed as f32 / progress.total as f32
+                } else {
+                    0.0
+                };
+                self.loading_count = format!("{}/{}", progress.completed, progress.total);
+                self.loading_detail = format!(
+                    "{}\n{}",
+                    progress.path,
+                    t("runtime.cancel_hint", self.settings.language)
+                );
+            }
+            Preparation::Ready(mut world, document, root, audio, context) => {
+                if let Some(document) = &document {
+                    if let Err(error) = world.game_ui_mut().mount_document(document) {
+                        self.fail_preparation(vec![error]);
+                        return;
+                    }
+                }
+                if self.transition_previous.is_some() {
+                    if let Some(previous) = &self.world {
+                        world.services_mut().progress = previous.services().progress.clone();
+                    }
+                }
+                // Bounded on_start runs against the candidate before committing it.
+                // No disk requests are polled until the candidate becomes the live world.
+                world.start();
+                if self.transition_previous.is_some() && world.status().last_error.is_some() {
+                    self.fail_preparation(vec![world
+                        .status()
+                        .last_error
+                        .clone()
+                        .unwrap_or_default()]);
+                    return;
+                }
+                if let Some(previous) = &mut self.world {
+                    world.adopt_storage_worker(previous);
+                    previous.stop();
+                    self.audio.stop();
+                }
+                self.context = Some(*context);
+                self.transition_previous = None;
+                world.activate_services();
+                world.set_focused(self.focused);
+                self.cached_canvas = None;
+                self.surface_key = None;
+                self.router.cancel_all();
+                let mut renderer = SceneRenderer::new(1, 1);
+                renderer.set_asset_root(Some(root.join("assets")));
+                self.renderer = Some(renderer);
+                let mut config = host.basic_device_config();
+                if self.settings.render_execution_policy
+                    == raf_core::config::RenderExecutionPolicy::CpuOnly
+                {
+                    config.force_cpu = true;
+                    config.allow_gpu = false;
+                }
+                self.device = Some(BasicDevice::new(config));
+                self.game_ui.clear();
+                self.status = world.status().clone();
+                self.world = Some(*world);
+                // A headless host never opens an audio output device.
+                self.audio = RuntimeAudio::new(audio && !host.is_headless());
+                self.root = Some(root);
+                self.receiver = None;
+                self.last_frame = Instant::now();
+            }
+            Preparation::Failed(errors) => {
+                self.fail_preparation(errors);
+            }
+        }
+    }
+    /// Blocks until the background preparation worker reports a terminal
+    /// state. Deterministic hosts use this before their fixed frame loop; the
+    /// native host reaches the same state by polling during loading frames.
+    pub fn finish_preparation(&mut self, host: &NativeUiWindowHost) -> Result<(), String> {
+        self.start_worker();
+        while self.is_preparing() {
+            self.poll_preparation(host);
+            if !self.is_preparing() {
+                break;
+            }
+            let message = {
+                let Some(receiver) = self.receiver.as_ref() else {
+                    return Err("runtime preparation ended without a world".to_string());
+                };
+                receiver.recv_timeout(PREPARATION_WAIT_SLICE)
+            };
             match message {
-                Preparation::Stage(key) => {
-                    self.loading_key = key.into();
-                    self.loading_progress = 0.0;
-                    self.loading_count.clear();
-                    self.loading_detail = t("runtime.cancel_hint", self.settings.language);
-                }
-                Preparation::Compile(progress) => {
-                    self.loading_key = "runtime.compiling".into();
-                    self.loading_progress = if progress.total > 0 {
-                        progress.completed as f32 / progress.total as f32
-                    } else {
-                        0.0
-                    };
-                    self.loading_count = format!("{}/{}", progress.completed, progress.total);
-                    self.loading_detail = format!(
-                        "{}\n{}",
-                        progress.path,
-                        t("runtime.cancel_hint", self.settings.language)
-                    );
-                }
-                Preparation::Ready(mut world, document, root, audio, context) => {
-                    if let Some(document) = &document {
-                        if let Err(error) = world.game_ui_mut().mount_document(document) {
-                            self.fail_preparation(vec![error]);
-                            continue;
-                        }
-                    }
-                    if self.transition_previous.is_some() {
-                        if let Some(previous) = &self.world {
-                            world.services_mut().progress = previous.services().progress.clone();
-                        }
-                    }
-                    // Bounded on_start runs against the candidate before committing it.
-                    // No disk requests are polled until the candidate becomes the live world.
-                    world.start();
-                    if self.transition_previous.is_some() && world.status().last_error.is_some() {
-                        self.fail_preparation(vec![world
-                            .status()
-                            .last_error
-                            .clone()
-                            .unwrap_or_default()]);
-                        continue;
-                    }
-                    if let Some(previous) = &mut self.world {
-                        world.adopt_storage_worker(previous);
-                        previous.stop();
-                        self.audio.stop();
-                    }
-                    self.context = Some(*context);
-                    self.transition_previous = None;
-                    world.activate_services();
-                    world.set_focused(self.focused);
-                    self.cached_canvas = None;
-                    self.surface_key = None;
-                    self.router.cancel_all();
-                    let mut renderer = SceneRenderer::new(1, 1);
-                    renderer.set_asset_root(Some(root.join("assets")));
-                    self.renderer = Some(renderer);
-                    let mut config = host.basic_device_config();
-                    if self.settings.render_execution_policy
-                        == raf_core::config::RenderExecutionPolicy::CpuOnly
-                    {
-                        config.force_cpu = true;
-                        config.allow_gpu = false;
-                    }
-                    self.device = Some(BasicDevice::new(config));
-                    self.game_ui.clear();
-                    self.status = world.status().clone();
-                    self.world = Some(*world);
-                    self.audio = RuntimeAudio::new(audio);
-                    self.root = Some(root);
-                    self.receiver = None;
-                    self.last_frame = Instant::now();
-                }
-                Preparation::Failed(errors) => {
-                    self.fail_preparation(errors);
+                Ok(message) => self.apply_preparation(message, host),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err("runtime preparation worker disconnected".to_string());
                 }
             }
         }
+        if self.status.phase == RuntimePhase::Failed {
+            return Err(self
+                .status
+                .last_error
+                .clone()
+                .unwrap_or_else(|| "runtime preparation failed".to_string()));
+        }
+        Ok(())
     }
     fn fail_preparation(&mut self, errors: Vec<String>) {
         if let Some(phase) = self.transition_previous.take() {
@@ -442,6 +507,7 @@ impl PlayerSession {
         self.startup_presented = false;
         self.loading_surface_key = None;
     }
+    /// Advances one event-driven frame. Delta time comes from the host clock.
     pub fn draw(
         &mut self,
         host: &mut NativeUiWindowHost,
@@ -449,14 +515,73 @@ impl PlayerSession {
         input: &NativeUiInputBridge,
     ) -> Result<(), String> {
         self.poll_preparation(host);
+        if self.is_preparing() {
+            // Loading keeps its existing surface and worker start-up behavior.
+            // The shared step owns that presentation so deterministic hosts
+            // that call it directly keep identical behavior.
+            return self.step_with_snapshot(host, compositor, input, input.snapshot(), 0.0);
+        }
+        if self.should_close() {
+            return Ok(());
+        }
+        let now = Instant::now();
+        let dt = now.duration_since(self.last_frame).as_secs_f64();
+        self.last_frame = now;
+        self.step(host, compositor, input, dt)
+    }
+
+    /// Advances one simulation and presentation frame with an injected delta.
+    /// Native hosts pass the elapsed frame time; deterministic callers pass an
+    /// exact step so no wall clock can influence the simulated time.
+    pub fn step(
+        &mut self,
+        host: &mut NativeUiWindowHost,
+        compositor: &mut NativeEditorCompositor,
+        input: &NativeUiInputBridge,
+        dt: f64,
+    ) -> Result<(), String> {
+        self.step_with_snapshot(host, compositor, input, input.snapshot(), dt)
+    }
+
+    /// Deterministic frame entry point: the caller owns the input snapshot and
+    /// the delta that reaches `RuntimeWorld::advance`. Preparation is polled
+    /// here so a mid-session transition also progresses without an event loop.
+    pub fn step_with_snapshot(
+        &mut self,
+        host: &mut NativeUiWindowHost,
+        compositor: &mut NativeEditorCompositor,
+        input: &NativeUiInputBridge,
+        snapshot: &InputSnapshot,
+        dt: f64,
+    ) -> Result<(), String> {
+        self.poll_preparation(host);
+        if self.is_preparing() {
+            let view = self.frame_view(host, snapshot);
+            if self.should_close() {
+                return Ok(());
+            }
+            return self.present_loading(host, compositor, &view);
+        }
+        let view = self.frame_view(host, snapshot);
+        if self.should_close() {
+            return Ok(());
+        }
+        self.step_inner(host, compositor, input, snapshot, dt, view)
+    }
+
+    /// Resolves the physical target into logical layout, environment state, and
+    /// shared cursor intent. Both the loading and game paths use this preamble.
+    fn frame_view(
+        &mut self,
+        host: &NativeUiWindowHost,
+        snapshot: &InputSnapshot,
+    ) -> FramePresentation {
         let size = host.size();
-        let scale = host.window().scale_factor() as f32;
+        let scale = host.scale_factor();
         let logical = [
             (size[0] as f32 / scale).max(1.0) as u32,
             (size[1] as f32 / scale).max(1.0) as u32,
         ];
-        let language = self.settings.language;
-        let palette = palette(self.settings.theme);
         let mut environment = UiEnvironment::new(logical[0], logical[1]);
         environment.scale_factor = scale;
         environment.high_contrast = self.settings.high_contrast;
@@ -467,8 +592,8 @@ impl PlayerSession {
             UiColorMode::Dark
         };
         self.ui.set_environment(environment);
-        if input.snapshot().key_pressed(InputKey::Escape) {
-            if self.is_preparing() || input.snapshot().modifiers.shift {
+        if snapshot.key_pressed(InputKey::Escape) {
+            if self.is_preparing() || snapshot.modifiers.shift {
                 self.control(RuntimeControl::Stop);
             } else {
                 self.cursor.release();
@@ -480,42 +605,75 @@ impl PlayerSession {
                 }
             }
         }
-        if self.should_close() {
-            return Ok(());
+        FramePresentation {
+            size,
+            scale,
+            logical,
+            environment,
         }
-        if self.is_preparing() {
-            let loading_key = (
-                self.loading_key.clone(),
-                self.loading_detail.clone(),
-                self.loading_count.clone(),
-                self.loading_progress.to_bits(),
-            );
-            if self.loading_surface_key.as_ref() != Some(&loading_key) {
-                self.ui.set_surface(build_loading_surface(
-                    palette,
-                    self.loading_progress,
-                    language,
-                    &self.loading_detail,
-                    &t(&self.loading_key, language),
-                    &self.loading_count,
-                ));
-                self.loading_surface_key = Some(loading_key);
-            }
-            host.render_editor_frame(
-                compositor,
-                None,
-                &mut self.ui,
-                logical,
-                scale.max(1.0),
-                |key| t(key, language),
-            )
-            .map_err(|e| format!("runtime loading presentation: {e}"))?;
-            if !self.startup_presented {
-                self.startup_presented = true;
-                self.start_worker();
-            }
-            return Ok(());
+    }
+
+    /// Presents the shared startup document while preparation is in flight.
+    fn present_loading(
+        &mut self,
+        host: &mut NativeUiWindowHost,
+        compositor: &mut NativeEditorCompositor,
+        view: &FramePresentation,
+    ) -> Result<(), String> {
+        let language = self.settings.language;
+        let palette = palette(self.settings.theme);
+        let loading_key = (
+            self.loading_key.clone(),
+            self.loading_detail.clone(),
+            self.loading_count.clone(),
+            self.loading_progress.to_bits(),
+        );
+        if self.loading_surface_key.as_ref() != Some(&loading_key) {
+            self.ui.set_surface(build_loading_surface(
+                palette,
+                self.loading_progress,
+                language,
+                &self.loading_detail,
+                &t(&self.loading_key, language),
+                &self.loading_count,
+            ));
+            self.loading_surface_key = Some(loading_key);
         }
+        let render_started = Instant::now();
+        host.render_editor_frame(
+            compositor,
+            None,
+            &mut self.ui,
+            view.logical,
+            view.scale.max(1.0),
+            |key| t(key, language),
+        )
+        .map_err(|e| format!("runtime loading presentation: {e}"))?;
+        self.last_render_ms = render_started.elapsed().as_secs_f64() * 1000.0;
+        if !self.startup_presented {
+            self.startup_presented = true;
+            self.start_worker();
+        }
+        Ok(())
+    }
+
+    fn step_inner(
+        &mut self,
+        host: &mut NativeUiWindowHost,
+        compositor: &mut NativeEditorCompositor,
+        input: &NativeUiInputBridge,
+        snapshot: &InputSnapshot,
+        dt: f64,
+        view: FramePresentation,
+    ) -> Result<(), String> {
+        self.last_render_ms = 0.0;
+        let size = view.size;
+        let scale = view.scale;
+        let logical = view.logical;
+        let headless = host.is_headless();
+        let mut environment = view.environment;
+        let language = self.settings.language;
+        let palette = palette(self.settings.theme);
         let key = SurfaceKey {
             phase: self.status.phase,
             size: logical,
@@ -542,48 +700,70 @@ impl PlayerSession {
             InputOwner::RetainedUi(InputRegionId(0x72756e)),
             UiRect::new(0.0, 0.0, logical[0] as f32, logical[1] as f32),
         );
-        let mut game_input =
-            raf_runtime::input::RuntimeInputState::from_input(input.snapshot()).snapshot;
+        let mut game_input = raf_runtime::input::RuntimeInputState::from_input(snapshot).snapshot;
         let mut ui_consumed_pointer =
             self.ui.has_interactive_hover() || self.ui.has_pointer_capture();
         let mut ui_consumed_keyboard = self.ui.captures_keyboard_input();
-        let game_rect=UiRect::new(0.0,34.0,logical[0] as f32,(logical[1] as f32-34.0).max(1.0));
-        environment.viewport_size=[game_rect.width,game_rect.height];
-        if let Some((world,root))=self.world.as_mut().zip(self.root.as_ref()) {
-            self.game_ui.sync(host,world,root,self.settings.theme,environment);
-            let game_ui_input=self.game_ui.input(input,&mut self.router,world,game_rect,scale,language,ui_consumed_pointer);
+        let game_rect = UiRect::new(
+            0.0,
+            if headless { 0.0 } else { 34.0 },
+            logical[0] as f32,
+            (logical[1] as f32 - if headless { 0.0 } else { 34.0 }).max(1.0),
+        );
+        environment.viewport_size = [game_rect.width, game_rect.height];
+        if let Some((world, root)) = self.world.as_mut().zip(self.root.as_ref()) {
+            self.game_ui
+                .sync(host, world, root, self.settings.theme, environment);
+            let game_ui_input = self.game_ui.input(
+                input,
+                &mut self.router,
+                world,
+                game_rect,
+                scale,
+                language,
+                ui_consumed_pointer,
+            );
             ui_consumed_pointer |= game_ui_input.pointer;
             ui_consumed_keyboard |= game_ui_input.keyboard;
-                for (instance,action) in game_ui_input.actions.into_iter().take(128) {
-                    let element=action.target_id;
-                    // Authored UI never executes commands against the editor kernel.
-                    let (name, value) = match action.action {
-                        UiAction::Command { name } => (name, raf_script::ScriptValue::None),
-                        UiAction::SetToggle { key, value } => {
-                            (key, raf_script::ScriptValue::Bool(value))
-                        }
-                        UiAction::SetRange { key, value } => {
-                            (key, raf_script::ScriptValue::Float(value))
-                        }
-                        UiAction::SetText { key, value } => {
-                            (key, raf_script::ScriptValue::String(value))
-                        }
-                        UiAction::SetSelect { key, value, .. } => {
-                            (key, raf_script::ScriptValue::String(value))
-                        }
-                        _ => continue,
-                    };
-                    let structured=raf_script::ScriptValue::Record(std::collections::BTreeMap::from([
-                        ("instance".into(),raf_script::ScriptValue::String(instance)),
-                        ("element".into(),raf_script::ScriptValue::String(element)),
-                        ("name".into(),raf_script::ScriptValue::String(name.clone())),
-                        ("value".into(),value.clone()),
-                    ]));
-                    if name.len()<=128 && name!="ui.event" {
-                        if let Err(error)=world.emit_ui_event(&name,value){if self.last_diagnostics.len()<256{self.last_diagnostics.push(error);}}
+            for (instance, action) in game_ui_input.actions.into_iter().take(128) {
+                let element = action.target_id;
+                // Authored UI never executes commands against the editor kernel.
+                let (name, value) = match action.action {
+                    UiAction::Command { name } => (name, raf_script::ScriptValue::None),
+                    UiAction::SetToggle { key, value } => {
+                        (key, raf_script::ScriptValue::Bool(value))
                     }
-                    if let Err(error)=world.emit_ui_event("ui.event",structured){if self.last_diagnostics.len()<256{self.last_diagnostics.push(error);}}
+                    UiAction::SetRange { key, value } => {
+                        (key, raf_script::ScriptValue::Float(value))
+                    }
+                    UiAction::SetText { key, value } => {
+                        (key, raf_script::ScriptValue::String(value))
+                    }
+                    UiAction::SetSelect { key, value, .. } => {
+                        (key, raf_script::ScriptValue::String(value))
+                    }
+                    _ => continue,
+                };
+                let structured =
+                    raf_script::ScriptValue::Record(std::collections::BTreeMap::from([
+                        ("instance".into(), raf_script::ScriptValue::String(instance)),
+                        ("element".into(), raf_script::ScriptValue::String(element)),
+                        ("name".into(), raf_script::ScriptValue::String(name.clone())),
+                        ("value".into(), value.clone()),
+                    ]));
+                if name.len() <= 128 && name != "ui.event" {
+                    if let Err(error) = world.emit_ui_event(&name, value) {
+                        if self.last_diagnostics.len() < 256 {
+                            self.last_diagnostics.push(error);
+                        }
+                    }
                 }
+                if let Err(error) = world.emit_ui_event("ui.event", structured) {
+                    if self.last_diagnostics.len() < 256 {
+                        self.last_diagnostics.push(error);
+                    }
+                }
+            }
         }
         if ui_consumed_pointer {
             game_input.suppress_pointer();
@@ -609,9 +789,6 @@ impl PlayerSession {
                 }
             }
         }
-        let now = Instant::now();
-        let dt = now.duration_since(self.last_frame).as_secs_f64();
-        self.last_frame = now;
         if let Some(world) = &mut self.world {
             world.advance(dt, &game_input);
             let intent = if self.focused
@@ -667,27 +844,53 @@ impl PlayerSession {
                 return Ok(());
             }
         }
-        if let Some((world,root))=self.world.as_ref().zip(self.root.as_ref()) {
-            self.game_ui.sync(host,world,root,self.settings.theme,environment);
+        if let Some((world, root)) = self.world.as_ref().zip(self.root.as_ref()) {
+            self.game_ui
+                .sync(host, world, root, self.settings.theme, environment);
         }
-        let canvas = self.render_canvas(host,size,scale);
-        let top=(34.0*scale) as u32;
-        let mut layers=self.game_ui.overlay_layers(CanvasTargetRect{x:0,y:top,width:size[0],height:size[1].saturating_sub(top).max(1)},[logical[0],(game_rect.height as u32).max(1)],scale);
-        layers.push(EditorUiLayer {
-            host: &mut self.ui,
-            target_rect: CanvasTargetRect::full(size),
-            logical_size: logical,
-            raster_scale: scale.max(1.0),
-        });
+        let canvas = self.render_canvas(host, size, scale);
+        let top = if headless { 0 } else { (34.0 * scale) as u32 };
+        let mut layers = self.game_ui.overlay_layers(
+            CanvasTargetRect {
+                x: 0,
+                y: top,
+                width: size[0],
+                height: size[1].saturating_sub(top).max(1),
+            },
+            [logical[0], (game_rect.height as u32).max(1)],
+            scale,
+        );
+        // The Player toolbar is windowed-only chrome. A headless or streamed
+        // capture must contain the game and its authored UI, never the local
+        // runtime controls.
+        if !headless {
+            layers.push(EditorUiLayer {
+                host: &mut self.ui,
+                target_rect: CanvasTargetRect::full(size),
+                logical_size: logical,
+                raster_scale: scale.max(1.0),
+            });
+        }
+        let render_started = Instant::now();
         host.render_editor_layers(compositor, canvas, &mut layers, |key| t(key, language))
             .map_err(|e| format!("runtime presentation: {e}"))?;
-        self.router.reconcile_input(input.snapshot());
+        self.last_render_ms = render_started.elapsed().as_secs_f64() * 1000.0;
+        self.router.reconcile_input(snapshot);
         Ok(())
     }
-    fn render_canvas(&mut self, host:&NativeUiWindowHost,size: [u32; 2], scale: f32) -> Option<EditorCanvasLayer> {
+    fn render_canvas(
+        &mut self,
+        host: &NativeUiWindowHost,
+        size: [u32; 2],
+        scale: f32,
+    ) -> Option<EditorCanvasLayer> {
         let world = self.world.as_ref()?;
         let pose = world.presentation_camera_pose()?;
-        let top = (34.0 * scale) as u32;
+        let top = if host.is_headless() {
+            0
+        } else {
+            (34.0 * scale) as u32
+        };
         let target = CanvasTargetRect {
             x: 0,
             y: top,
@@ -717,7 +920,10 @@ impl PlayerSession {
             (target.height as f32 * scale).max(1.0) as u32,
         ];
         let cache_size = [size[0], size[1], source_size[0], source_size[1]];
-        let revision = world.presentation_revision().wrapping_mul(31).wrapping_add(self.game_ui.revision());
+        let revision = world
+            .presentation_revision()
+            .wrapping_mul(31)
+            .wrapping_add(self.game_ui.revision());
         if let Some((cached_revision, cached_size, cached_pose, canvas)) = &self.cached_canvas {
             if *cached_revision == revision && *cached_size == cache_size && *cached_pose == pose {
                 return Some(canvas.clone());
@@ -760,9 +966,15 @@ impl PlayerSession {
             options,
             None,
         );
-        let cpu=self.device.as_ref()?.backend()==raf_render::api_graphic_basic::device::BasicBackendType::CpuSoftware;
-        if let Err(error)=self.game_ui.world_commands(host,&mut frame,cpu,self.settings.language){
-            if self.last_diagnostics.len()<256 {self.last_diagnostics.push(error);}
+        let cpu = self.device.as_ref()?.backend()
+            == raf_render::api_graphic_basic::device::BasicBackendType::CpuSoftware;
+        if let Err(error) =
+            self.game_ui
+                .world_commands(host, &mut frame, cpu, self.settings.language)
+        {
+            if self.last_diagnostics.len() < 256 {
+                self.last_diagnostics.push(error);
+            }
         }
         crate::physics_debug::append(&mut frame.commands, world);
         let output = self.device.as_mut()?.execute_scene_frame(&frame);

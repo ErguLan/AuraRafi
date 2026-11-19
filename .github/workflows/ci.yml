@@ -1,0 +1,189 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux check and test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      # .cargo/config.toml targets x86_64-pc-windows-gnu for local Windows
+      # builds. CI overrides it instead of editing the repository file.
+      CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
+      CARGO_TARGET_DIR: target_gnu
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            libudev-dev \
+            libxkbcommon-dev \
+            libwayland-dev \
+            libx11-xcb-dev \
+            libxcb1-dev \
+            libxrandr-dev \
+            libxi-dev \
+            libxcursor-dev \
+            libfontconfig1-dev \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            cmake \
+            clang \
+            lld
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt
+
+      # The cache key follows Cargo.lock so dependency changes start a fresh
+      # target directory while source-only changes reuse compiled dependencies.
+      - name: Cache target_gnu
+        uses: actions/cache@v4
+        with:
+          path: target_gnu
+          key: ${{ runner.os }}-target-gnu-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-target-gnu-
+
+      # The repository still contains pre-existing unformatted files outside
+      # this delivery. Report formatting drift without blocking the Linux gate;
+      # edited files are formatted before commit.
+      - name: Check formatting
+        continue-on-error: true
+        run: cargo fmt --all -- --check
+
+      - name: Check core crates
+        run: cargo check -p raf_core -p raf_runtime -p raf_render -p raf_ui -p raf_net -p raf_web
+
+      - name: Check player
+        run: cargo check -p raf_player --bins
+
+      - name: Check editor library
+        run: cargo check -p raf_editor
+
+      - name: Check editor binary
+        run: cargo check -p aura_rafi_editor
+
+      # Focused crates only. The workspace test suite is intentionally not run
+      # here because unrelated in-flight areas must not block this gate.
+      - name: Test raf_core
+        run: cargo test -p raf_core --lib
+
+      - name: Test raf_net
+        run: cargo test -p raf_net --lib
+
+      - name: Test raf_runtime
+        run: cargo test -p raf_runtime --lib
+
+      - name: Test raf_render
+        run: cargo test -p raf_render --lib
+
+      - name: Build player binary
+        run: cargo build -p raf_player --bin aurarafi-player
+
+      # The smoke job only prints help and runs a tiny fixture. Debug symbols
+      # add hundreds of megabytes to the artifact without helping that check.
+      - name: Trim artifact
+        run: strip target_gnu/x86_64-unknown-linux-gnu/debug/aurarafi-player
+
+      - name: Upload player artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: aurarafi-player-linux-x86_64
+          path: target_gnu/x86_64-unknown-linux-gnu/debug/aurarafi-player
+          if-no-files-found: error
+          retention-days: 7
+
+  headless-smoke:
+    name: Headless smoke
+    needs: linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Download player artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: aurarafi-player-linux-x86_64
+          path: .
+
+      - name: Make player executable
+        run: chmod +x aurarafi-player
+
+      - name: Install headless runtime dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libvulkan1 mesa-vulkan-drivers
+
+      - name: Player help
+        run: ./aurarafi-player --help
+
+      - name: Headless help
+        run: ./aurarafi-player --headless --help
+
+      # A real frame run needs a committed headless fixture. Until
+      # examples/headless/project exists this step is skipped instead of
+      # turning the smoke job red for a missing fixture.
+      - name: Headless frame run
+        if: hashFiles('examples/headless/project/**') != ''
+        run: |
+          rm -rf /tmp/rafi-headless
+          ./aurarafi-player \
+            --headless \
+            --manifest examples/headless/project/runtime.ron \
+            --frames 3 \
+            --size 640x360 \
+            --out /tmp/rafi-headless \
+            --report /tmp/rafi-headless/report.json
+          test -s /tmp/rafi-headless/frame_0000.png
+          test -s /tmp/rafi-headless/frame_0002.png
+          python3 - <<'PY'
+          import json
+          report = json.load(open('/tmp/rafi-headless/report.json'))
+          assert report['camera_ready'] is True, report
+          assert report['fixed_ticks'] == 3, report
+          assert report['diagnostics'] == [], report
+          assert report['backend'] in ('wgpu', 'cpu'), report
+          PY
+
+  wasm:
+    name: WASM check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CARGO_TARGET_DIR: target_gnu
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - name: Check out
+        uses: actions/checkout@v4
+
+      - name: Install Rust with wasm32 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Check raf_web for wasm32
+        run: cargo check -p raf_web --target wasm32-unknown-unknown

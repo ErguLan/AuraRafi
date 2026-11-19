@@ -4,6 +4,29 @@ use glam::Vec2;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::symbol::SymbolDefinition;
+
+/// Longest accepted designator on a custom component.
+pub const MAX_COMPONENT_DESIGNATOR: usize = 16;
+/// Longest accepted value/part name on a custom component.
+pub const MAX_COMPONENT_VALUE: usize = 64;
+/// Longest accepted category on a custom component.
+pub const MAX_COMPONENT_CATEGORY: usize = 64;
+/// Longest accepted library display name on a custom component.
+pub const MAX_COMPONENT_NAME: usize = 64;
+/// Largest accepted pin count on a custom component.
+pub const MAX_COMPONENT_PINS: usize = 256;
+/// Longest accepted footprint reference on a custom component.
+pub const MAX_COMPONENT_FOOTPRINT: usize = 128;
+/// Longest accepted pin name on a custom component.
+pub const MAX_COMPONENT_PIN_NAME: usize = 64;
+/// Longest accepted datasheet reference on a custom component.
+pub const MAX_COMPONENT_DATASHEET: usize = 512;
+/// Longest accepted appearance size label on a custom component.
+pub const MAX_COMPONENT_APPEARANCE_SIZE: usize = 32;
+/// Largest absolute pin offset accepted on a custom component.
+pub const MAX_COMPONENT_OFFSET: f32 = 10_000.0;
+
 fn default_visible() -> bool {
     true
 }
@@ -42,6 +65,12 @@ pub enum SimModel {
     Wire,
     /// DC Voltage Source (ideal battery).
     DcSource { voltage: f64 },
+    /// Custom part with no electrical model in the DC solver.
+    ///
+    /// The component keeps every pin connected in the netlist, but it never
+    /// contributes conductance. Treating it as a wire would short nets, so the
+    /// solver skips it and reports a bounded diagnostic instead.
+    Unmodeled,
 }
 
 impl Default for SimModel {
@@ -100,6 +129,15 @@ pub struct ElectronicComponent {
     /// map preserves the legacy exact-name convention.
     #[serde(default)]
     pub footprint_pin_map: std::collections::BTreeMap<String, String>,
+    /// Authored schematic symbol. `None` keeps the built-in look driven by the
+    /// simulation model, so legacy templates and the six built-ins render
+    /// exactly as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<SymbolDefinition>,
+    /// Optional display name used by data-driven library entries. Empty for
+    /// built-ins and for legacy templates, whose file stem supplies the name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub library_name: String,
     /// Simulation model for this component.
     pub sim_model: SimModel,
     /// Optional datasheet URL or project-relative path.
@@ -190,6 +228,7 @@ impl ElectronicComponent {
             SimModel::Magnet { .. } => "Magnet",
             SimModel::Wire => "Ground",
             SimModel::DcSource { .. } => "Battery",
+            SimModel::Unmodeled => "Custom",
         }
     }
 
@@ -208,7 +247,7 @@ impl ElectronicComponent {
             SimModel::DcSource { voltage } => {
                 *voltage = parse_voltage(&self.value);
             }
-            SimModel::Led { .. } | SimModel::Wire => {}
+            SimModel::Led { .. } | SimModel::Wire | SimModel::Unmodeled => {}
         }
     }
 
@@ -240,6 +279,8 @@ impl ElectronicComponent {
             rotation: 0.0,
             footprint: "0805".to_string(),
             footprint_pin_map: Default::default(),
+            symbol: None,
+            library_name: String::new(),
             sim_model: SimModel::Resistor { ohms },
             datasheet: None,
             locked: false,
@@ -285,6 +326,8 @@ impl ElectronicComponent {
             rotation: 0.0,
             footprint: "0805".to_string(),
             footprint_pin_map: Default::default(),
+            symbol: None,
+            library_name: String::new(),
             sim_model: SimModel::Led {
                 forward_voltage: 2.0,
             },
@@ -332,6 +375,8 @@ impl ElectronicComponent {
             rotation: 0.0,
             footprint: "MAG-10x5".to_string(),
             footprint_pin_map: Default::default(),
+            symbol: None,
+            library_name: String::new(),
             sim_model: SimModel::Magnet {
                 tesla,
                 north_up: true,
@@ -373,6 +418,8 @@ impl ElectronicComponent {
             rotation: 0.0,
             footprint: "BAT-18650".to_string(),
             footprint_pin_map: Default::default(),
+            symbol: None,
+            library_name: String::new(),
             sim_model: SimModel::DcSource { voltage },
             datasheet: None,
             locked: false,
@@ -402,6 +449,8 @@ impl ElectronicComponent {
             rotation: 0.0,
             footprint: "TP-GND".to_string(),
             footprint_pin_map: Default::default(),
+            symbol: None,
+            library_name: String::new(),
             sim_model: SimModel::Wire, // electrically transparent
             datasheet: None,
             locked: false,
@@ -411,6 +460,109 @@ impl ElectronicComponent {
                 size: "Normal".to_string(),
             },
         }
+    }
+
+    /// Validates a data-driven custom component before it is persisted.
+    ///
+    /// Built-in constructors are intentionally not required to pass this gate
+    /// (`R?`, `D?` and `GND` keep their historic labels); only a component the
+    /// author created through the component authoring flow is compared against
+    /// the stricter custom contract.
+    pub fn validate_custom(&self) -> Result<(), String> {
+        let designator = self.designator.trim();
+        let designator_len = designator.chars().count();
+        if designator_len == 0 || designator_len > MAX_COMPONENT_DESIGNATOR {
+            return Err(format!(
+                "designator must use 1 to {MAX_COMPONENT_DESIGNATOR} characters"
+            ));
+        }
+        if !designator
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+        {
+            return Err("designator must use ASCII letters or digits only".to_string());
+        }
+        if self.value.chars().count() > MAX_COMPONENT_VALUE {
+            return Err(format!(
+                "value is limited to {MAX_COMPONENT_VALUE} characters"
+            ));
+        }
+        if self.category.chars().count() > MAX_COMPONENT_CATEGORY {
+            return Err(format!(
+                "category is limited to {MAX_COMPONENT_CATEGORY} characters"
+            ));
+        }
+        if !self.library_name.is_empty() && self.library_name.chars().count() > MAX_COMPONENT_NAME {
+            return Err(format!(
+                "library name is limited to {MAX_COMPONENT_NAME} characters"
+            ));
+        }
+        if self.pins.is_empty() || self.pins.len() > MAX_COMPONENT_PINS {
+            return Err(format!("pins must stay between 1 and {MAX_COMPONENT_PINS}"));
+        }
+        let mut names = std::collections::HashSet::with_capacity(self.pins.len());
+        for pin in &self.pins {
+            let name = pin.name.trim();
+            if name.is_empty() || name.chars().count() > MAX_COMPONENT_PIN_NAME {
+                return Err(format!(
+                    "pin names must use 1 to {MAX_COMPONENT_PIN_NAME} characters"
+                ));
+            }
+            if !names.insert(name) {
+                return Err(format!("duplicate pin name '{name}'"));
+            }
+            if !pin.offset.is_finite()
+                || pin.offset.x.abs() > MAX_COMPONENT_OFFSET
+                || pin.offset.y.abs() > MAX_COMPONENT_OFFSET
+            {
+                return Err("pin offsets must be finite and inside the schematic grid".to_string());
+            }
+            if pin.net.chars().count() > MAX_COMPONENT_PIN_NAME {
+                return Err("pin net labels are too long".to_string());
+            }
+        }
+        if self.footprint.chars().count() > MAX_COMPONENT_FOOTPRINT {
+            return Err(format!(
+                "footprint is limited to {MAX_COMPONENT_FOOTPRINT} characters"
+            ));
+        }
+        if self.footprint_pin_map.len() > MAX_COMPONENT_PINS {
+            return Err("the footprint pin map is too large".to_string());
+        }
+        if self.footprint_pin_map.iter().any(|(logical, physical)| {
+            logical.chars().count() > MAX_COMPONENT_PIN_NAME
+                || physical.chars().count() > MAX_COMPONENT_PIN_NAME
+        }) {
+            return Err("a footprint pin mapping is too long".to_string());
+        }
+        if self
+            .datasheet
+            .as_ref()
+            .is_some_and(|datasheet| datasheet.chars().count() > MAX_COMPONENT_DATASHEET)
+        {
+            return Err(format!(
+                "datasheet reference is limited to {MAX_COMPONENT_DATASHEET} characters"
+            ));
+        }
+        if self.appearance.size.chars().count() > MAX_COMPONENT_APPEARANCE_SIZE {
+            return Err("appearance size label is too long".to_string());
+        }
+        if let Some(symbol) = &self.symbol {
+            symbol.validate()?;
+        }
+        Ok(())
+    }
+
+    /// True when this component owns authored vector ink that the scene accepts.
+    pub fn has_authored_symbol(&self) -> bool {
+        self.symbol
+            .as_ref()
+            .is_some_and(|symbol| symbol.validate().is_ok())
+    }
+
+    /// True when the DC solver has no electrical model for this part.
+    pub fn is_unmodeled(&self) -> bool {
+        matches!(self.sim_model, SimModel::Unmodeled)
     }
 }
 
@@ -494,5 +646,22 @@ mod tests {
             SimModel::Resistor { ohms } => assert!((ohms - 1_000.0).abs() < 0.1),
             _ => panic!("Expected Resistor sim model"),
         }
+    }
+
+    #[test]
+    fn custom_validation_rejects_unsafe_identifiers_and_accepts_a_generated_symbol() {
+        let mut custom = ElectronicComponent::resistor("10k");
+        custom.designator = "U?".to_string();
+        assert!(custom.validate_custom().is_err());
+
+        custom.designator = "U".to_string();
+        custom.symbol = Some(crate::symbol::SymbolPreset::Ic.symbol_for(2));
+        custom.sim_model = SimModel::Unmodeled;
+        custom.validate_custom().expect("valid custom part");
+        assert!(custom.is_unmodeled());
+        assert!(custom.has_authored_symbol());
+
+        custom.pins[1].name = custom.pins[0].name.clone();
+        assert!(custom.validate_custom().is_err());
     }
 }

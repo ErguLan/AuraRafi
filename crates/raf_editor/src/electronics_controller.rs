@@ -33,18 +33,30 @@ use crate::schematic_document::{load_schematic_document, DocumentLoad};
 mod analysis;
 #[path = "electronics_command_adapter.rs"]
 mod command_adapter;
+#[path = "electronics_component_authoring.rs"]
+mod component_authoring;
 #[path = "electronics_document.rs"]
 mod documents;
 #[path = "electronics_controller_footprints.rs"]
 mod footprints;
+#[path = "electronics_controller_interaction.rs"]
+mod interaction;
 #[path = "electronics_manufacturing.rs"]
 mod manufacturing;
 #[path = "electronics_pcb_authoring.rs"]
 mod pcb_authoring;
-#[path = "electronics_controller_interaction.rs"]
-mod interaction;
 
 use analysis::{AnalysisKind, AnalysisResult, AnalysisTask, AnalysisWorker};
+pub use component_authoring::{
+    preset_from_slug, preset_slug, ComponentCreatorDraft, ComponentCreatorError,
+    ComponentCreatorField, ComponentCreatorPhase, ComponentCreatorState,
+    COMPONENT_CREATOR_CANCEL_COMMAND, COMPONENT_CREATOR_CATEGORY_VALUE_KEY,
+    COMPONENT_CREATOR_DESIGNATOR_VALUE_KEY, COMPONENT_CREATOR_FIELD_PREFIX,
+    COMPONENT_CREATOR_FOOTPRINT_VALUE_KEY, COMPONENT_CREATOR_NAME_VALUE_KEY,
+    COMPONENT_CREATOR_OPEN_COMMAND, COMPONENT_CREATOR_PINS_VALUE_KEY,
+    COMPONENT_CREATOR_PRESET_PREFIX, COMPONENT_CREATOR_SAVE_COMMAND,
+    COMPONENT_CREATOR_VALUE_VALUE_KEY,
+};
 
 const MIN_ZOOM: f32 = 0.15;
 const MAX_ZOOM: f32 = 160.0;
@@ -248,11 +260,7 @@ impl PcbLayerVisibility {
     /// True when no filter prunes anything, the common steady state, so the
     /// scene rebuild stays a no-op for it.
     fn is_all_visible(self) -> bool {
-        self.components
-            && self.top_traces
-            && self.bottom_traces
-            && self.silkscreen
-            && self.airwires
+        self.components && self.top_traces && self.bottom_traces && self.silkscreen && self.airwires
     }
 
     /// Flips one layer. `None` for an unknown key so the command bus reports a
@@ -271,13 +279,7 @@ impl PcbLayerVisibility {
 }
 
 /// Stable command suffixes of one visibility row.
-pub const PCB_LAYER_KEYS: [&str; 5] = [
-    "components",
-    "top",
-    "bottom",
-    "silk",
-    "airwires",
-];
+pub const PCB_LAYER_KEYS: [&str; 5] = ["components", "top", "bottom", "silk", "airwires"];
 
 impl Default for ElectronicsInputResult {
     fn default() -> Self {
@@ -349,6 +351,8 @@ pub struct NativeElectronicsEditor {
     pending_delete: bool,
     analysis_task: Option<AnalysisTask>,
     analysis_worker: Option<AnalysisWorker>,
+    /// Custom component authoring draft and lifecycle.
+    component_creator: ComponentCreatorState,
     pub(crate) lab: crate::electronics_lab::ElectronicsLab,
     wire_start: Option<WireStart>,
     board_outline_start: Option<Vec2>,
@@ -428,6 +432,7 @@ impl NativeElectronicsEditor {
             pending_delete: false,
             analysis_task: None,
             analysis_worker: None,
+            component_creator: ComponentCreatorState::default(),
             lab: crate::electronics_lab::ElectronicsLab::default(),
             wire_start: None,
             board_outline_start: None,
@@ -547,12 +552,21 @@ impl NativeElectronicsEditor {
         if !self.camera_initialized || old == new {
             return;
         }
-        let delta = Vec2::new(new.x + new.width * 0.5 - old.x - old.width * 0.5,
-            new.y + new.height * 0.5 - old.y - old.height * 0.5);
+        let delta = Vec2::new(
+            new.x + new.width * 0.5 - old.x - old.width * 0.5,
+            new.y + new.height * 0.5 - old.y - old.height * 0.5,
+        );
         self.camera.center += delta / self.camera.zoom.max(0.001);
         if let Some(center) = self.selection.and_then(|selection| {
-            self.scene.objects.iter().find(|object| object.source_id == Some(selection.source_id)
-                && object.kind == CadObjectKind::Component).and_then(|object| object.rect).map(|rect| rect.center)
+            self.scene
+                .objects
+                .iter()
+                .find(|object| {
+                    object.source_id == Some(selection.source_id)
+                        && object.kind == CadObjectKind::Component
+                })
+                .and_then(|object| object.rect)
+                .map(|rect| rect.center)
         }) {
             let size = Vec2::new(new.width.max(1.0), new.height.max(1.0));
             let screen = self.camera.screen_from_world(center, size);
@@ -574,8 +588,15 @@ impl NativeElectronicsEditor {
     /// Re-read external component templates from `<project_path>/ElectricalAssets/`
     /// and merge them into the live library. Safe to call after the editor is
     /// already open; touch the UI revision so the navigator refreshes.
+    ///
+    /// The library is rebuilt from its built-in baseline first, so repeated
+    /// refreshes replace project entries instead of stacking duplicates.
     pub fn refresh_library(&mut self, project_path: &std::path::Path) {
+        self.library = ComponentLibrary::default_library();
         self.library.load_external_assets_from(project_path);
+        // Indexes are positional; reloading can reorder project entries, so a
+        // previously armed placement must not silently point at another part.
+        self.placement_template = None;
         self.touch_ui();
     }
 
@@ -879,10 +900,15 @@ impl NativeElectronicsEditor {
 
     pub(crate) fn prepare_lab(&mut self, root: &std::path::Path, schematic: &std::path::Path) {
         self.lab.load_for(root, schematic);
-        self.lab.sync_graph(&self.schematic, self.built_schematic_fingerprint);
+        self.lab
+            .sync_graph(&self.schematic, self.built_schematic_fingerprint);
     }
 
-    pub(crate) fn start_lab_simulation(&mut self, tool: Option<String>, persist: bool) -> Result<(), String> {
+    pub(crate) fn start_lab_simulation(
+        &mut self,
+        tool: Option<String>,
+        persist: bool,
+    ) -> Result<(), String> {
         if self.analysis_running() {
             return Err("An Electronics analysis is already running.".into());
         }
@@ -898,7 +924,8 @@ impl NativeElectronicsEditor {
             changed |= self.poll_analysis();
         }
         if visible {
-            self.lab.sync_graph(&self.schematic, self.built_schematic_fingerprint);
+            self.lab
+                .sync_graph(&self.schematic, self.built_schematic_fingerprint);
         }
         if self.lab.pending() {
             changed |= self.lab.poll();
@@ -957,7 +984,8 @@ impl NativeElectronicsEditor {
             }
             Err(()) => {
                 let kind = task.kind();
-                self.lab.fail_dc("Simulation worker did not return a result.");
+                self.lab
+                    .fail_dc("Simulation worker did not return a result.");
                 self.drc_stale |= kind == AnalysisKind::Drc;
                 self.simulation_stale |= kind == AnalysisKind::Simulation;
                 let key = match kind {
@@ -1296,7 +1324,7 @@ impl NativeElectronicsEditor {
             }
             ElectronicsAction::ContextCancel => {
                 self.wire_start = None;
-                self.pcb_route_draft=None;
+                self.pcb_route_draft = None;
                 self.context_menu_position = None;
                 self.touch_ui();
                 true
@@ -1321,7 +1349,12 @@ impl NativeElectronicsEditor {
     }
 
     pub fn apply_ui_command(&mut self, command: &str) -> bool {
-        if self.apply_pcb_tool_command(command) {return true;}
+        if self.apply_component_creator_command(command) {
+            return true;
+        }
+        if self.apply_pcb_tool_command(command) {
+            return true;
+        }
         if let Some(payload) = command.strip_prefix("electronics.footprint.assign_for:") {
             return self.apply_footprint_assignment_command(payload);
         }
@@ -1371,6 +1404,11 @@ impl NativeElectronicsEditor {
         if self.active_surface == surface {
             return;
         }
+        // The creator is schematic authoring; switching the CAD surface must
+        // not leave a stale modal owning focus over a different document.
+        if self.component_creator.is_open() {
+            self.component_creator = ComponentCreatorState::default();
+        }
         let cross_probe_component = self
             .selection
             .filter(|selection| {
@@ -1403,8 +1441,8 @@ impl NativeElectronicsEditor {
         self.interaction.clear_selection();
         self.wire_start = None;
         self.board_outline_start = None;
-                self.board_outline_vertices.clear();
-        self.pcb_route_draft=None;
+        self.board_outline_vertices.clear();
+        self.pcb_route_draft = None;
         self.tool = ElectronicsTool::Select;
         self.placement_template = None;
         self.placement_drag_active = false;
@@ -1446,7 +1484,11 @@ impl NativeElectronicsEditor {
     /// Overview ink changes with document geometry and UI appearance, never
     /// with camera motion or passive pointer hover.
     pub fn overview_revision(&self) -> (CadSurfaceKind, u64, u64) {
-        (self.active_surface, self.base_scene_fingerprint.map_or(0, |(_, hash)| hash), self.ui_revision)
+        (
+            self.active_surface,
+            self.base_scene_fingerprint.map_or(0, |(_, hash)| hash),
+            self.ui_revision,
+        )
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -1501,8 +1543,10 @@ impl NativeElectronicsEditor {
             }
             if tool != ElectronicsTool::Route {
                 self.clear_route_error();
-                if self.pcb_route_draft.is_some(){self.highlight_net=None;}
-                self.pcb_route_draft=None;
+                if self.pcb_route_draft.is_some() {
+                    self.highlight_net = None;
+                }
+                self.pcb_route_draft = None;
             }
             if tool != ElectronicsTool::Wire {
                 self.wire_start = None;
@@ -1563,8 +1607,8 @@ impl NativeElectronicsEditor {
         options.grid_color = base(tokens.border, 0.30);
         options.major_grid_color = base(tokens.border, 0.55);
         if options.dotted_grid {
-            options.grid_color=base(tokens.text_muted,0.32);
-            options.major_grid_color=base(tokens.text_muted,0.55);
+            options.grid_color = base(tokens.text_muted, 0.32);
+            options.major_grid_color = base(tokens.text_muted, 0.55);
         }
         options.axis_color = base(tokens.text_muted, 0.75);
         options.show_grid = self.grid_visible;
@@ -1572,10 +1616,16 @@ impl NativeElectronicsEditor {
         options
     }
 
-    pub fn minimap_collapsed(&self) -> bool { self.minimap_collapsed }
+    pub fn minimap_collapsed(&self) -> bool {
+        self.minimap_collapsed
+    }
 
     pub fn minimap_rects(&self, size: Vec2) -> Option<crate::electronics_minimap::MinimapRects> {
-        crate::electronics_minimap::visible_rects_with_state(&self.scene, size, self.minimap_collapsed)
+        crate::electronics_minimap::visible_rects_with_state(
+            &self.scene,
+            size,
+            self.minimap_collapsed,
+        )
     }
 
     pub fn fit_view(&mut self) {
@@ -1637,14 +1687,25 @@ impl NativeElectronicsEditor {
     pub fn select_component_by_id(&mut self, source_id: Uuid) -> bool {
         if self.active_surface == CadSurfaceKind::Pcb {
             if self.pcb.vias.iter().any(|via| via.id == source_id) {
-                self.selection = Some(ElectronicsSelection { source_id, kind: ElectronicsSelectionKind::Pin });
-                self.interaction.selected = Some(raf_electronics::cad_interaction::CadSelection {
-                    object_id: format!("via:{source_id}:top"), source_id: Some(source_id),
-                    kind: CadObjectKind::Pad, layer: CadLayerKind::PcbTopCopper,
+                self.selection = Some(ElectronicsSelection {
+                    source_id,
+                    kind: ElectronicsSelectionKind::Pin,
                 });
-                self.touch_ui(); return true;
+                self.interaction.selected = Some(raf_electronics::cad_interaction::CadSelection {
+                    object_id: format!("via:{source_id}:top"),
+                    source_id: Some(source_id),
+                    kind: CadObjectKind::Pad,
+                    layer: CadLayerKind::PcbTopCopper,
+                });
+                self.touch_ui();
+                return true;
             }
-            if let Some(index) = self.pcb.traces.iter().position(|trace| trace.id == source_id) {
+            if let Some(index) = self
+                .pcb
+                .traces
+                .iter()
+                .position(|trace| trace.id == source_id)
+            {
                 return self.select_trace(index);
             }
             let Some(index) = self
@@ -1682,8 +1743,20 @@ impl NativeElectronicsEditor {
                 .iter()
                 .find(|component| component.component_id == selection.source_id)
                 .map(|component| component.position)
-                .or_else(|| self.pcb.vias.iter().find(|via| via.id == selection.source_id).map(|via| via.position))
-                .or_else(|| self.pcb.traces.iter().find(|trace| trace.id == selection.source_id).and_then(|trace| trace.points.first().copied()))
+                .or_else(|| {
+                    self.pcb
+                        .vias
+                        .iter()
+                        .find(|via| via.id == selection.source_id)
+                        .map(|via| via.position)
+                })
+                .or_else(|| {
+                    self.pcb
+                        .traces
+                        .iter()
+                        .find(|trace| trace.id == selection.source_id)
+                        .and_then(|trace| trace.points.first().copied())
+                })
         } else {
             self.schematic
                 .components
@@ -1695,11 +1768,22 @@ impl NativeElectronicsEditor {
             return;
         };
         self.camera.center = position;
-        if self.active_surface==CadSurfaceKind::Pcb {
-            if let Some(placement)=self.pcb.components.iter().find(|c|c.component_id==selection.source_id && self.pcb.footprint_assets.contains_key(&c.footprint)) {
-                let span=self.pcb.resolved_footprint(placement).body_size.max_element().max(0.1);
-                self.camera.zoom=self.camera.zoom.max((180.0/span).clamp(MIN_ZOOM,MAX_ZOOM));
-                self.camera_initialized=true;
+        if self.active_surface == CadSurfaceKind::Pcb {
+            if let Some(placement) = self.pcb.components.iter().find(|c| {
+                c.component_id == selection.source_id
+                    && self.pcb.footprint_assets.contains_key(&c.footprint)
+            }) {
+                let span = self
+                    .pcb
+                    .resolved_footprint(placement)
+                    .body_size
+                    .max_element()
+                    .max(0.1);
+                self.camera.zoom = self
+                    .camera
+                    .zoom
+                    .max((180.0 / span).clamp(MIN_ZOOM, MAX_ZOOM));
+                self.camera_initialized = true;
             }
         }
         self.touch();
@@ -1771,9 +1855,18 @@ impl NativeElectronicsEditor {
         }
     }
 
-    fn accept_simulation_result(&mut self, result: SimulationResults, netlist: &raf_electronics::Netlist) {
+    fn accept_simulation_result(
+        &mut self,
+        result: SimulationResults,
+        netlist: &raf_electronics::Netlist,
+    ) {
         if self.lab.dc_requested {
-            self.lab.accept_dc(&self.schematic, self.built_schematic_fingerprint, netlist, &result);
+            self.lab.accept_dc(
+                &self.schematic,
+                self.built_schematic_fingerprint,
+                netlist,
+                &result,
+            );
         }
         let mut lines = vec![ElectronicsReportLine::new(
             if result.converged {
@@ -1804,9 +1897,15 @@ impl NativeElectronicsEditor {
             ElectronicsReportLine::new(ElectronicsReportLineKind::Message, message.clone())
         }));
         if result.converged {
-            lines.push(ElectronicsReportLine::new(ElectronicsReportLineKind::Info,
-                format!("{}: {:.3e} A · {:.3e} W", i18n::t("electronics.analysis.dc_balance", self.language),
-                    result.max_kcl_residual_amps, result.power_balance_watts)));
+            lines.push(ElectronicsReportLine::new(
+                ElectronicsReportLineKind::Info,
+                format!(
+                    "{}: {:.3e} A · {:.3e} W",
+                    i18n::t("electronics.analysis.dc_balance", self.language),
+                    result.max_kcl_residual_amps,
+                    result.power_balance_watts
+                ),
+            ));
         }
         for net in &netlist.nets {
             if let Some(voltage) = result.node_voltages.get(&net.id) {
@@ -1978,12 +2077,19 @@ impl NativeElectronicsEditor {
         let span = (max - min).max(Vec2::splat(if physical_pcb { 1.0 } else { 40.0 }));
         // PCB coordinates are millimeters. The schematic's old 120-unit
         // margin left a small real board as a tiny island after Fit View.
-        let padding = if physical_pcb { span * 0.16 + Vec2::splat(4.0) } else { Vec2::splat(120.0) };
+        let padding = if physical_pcb {
+            span * 0.16 + Vec2::splat(4.0)
+        } else {
+            Vec2::splat(120.0)
+        };
         // Fit into the clear drawing area while the overview is expanded.
         // The camera still uses the full canvas coordinate system for input.
         let reserved = if physical_pcb && !self.minimap_collapsed && size.x >= 600.0 {
-            self.minimap_rects(size).map_or(0.0, |r| r.panel.width + 24.0)
-        } else { 0.0 };
+            self.minimap_rects(size)
+                .map_or(0.0, |r| r.panel.width + 24.0)
+        } else {
+            0.0
+        };
         self.camera.center = (min + max) * 0.5;
         self.camera.zoom = ((size.x - reserved).max(1.0) / (span.x + padding.x))
             .min(size.y / (span.y + padding.y))
@@ -2007,7 +2113,9 @@ impl NativeElectronicsEditor {
         self.built_schematic_fingerprint = before_schematic;
         self.built_pcb_fingerprint = before_pcb;
         if schematic_changed || pcb_changed {
-            if self.fabrication_error.is_none() {self.fabrication_status=None;}
+            if self.fabrication_error.is_none() {
+                self.fabrication_status = None;
+            }
             self.fabrication_job = None;
             self.fabrication_summary.clear();
             self.fabrication_warnings.clear();
@@ -2041,7 +2149,8 @@ impl NativeElectronicsEditor {
     fn start_analysis(&mut self, kind: AnalysisKind) {
         if let Some(task) = self.analysis_task.take() {
             task.cancel();
-            self.lab.fail_dc("Simulation was replaced by another analysis.");
+            self.lab
+                .fail_dc("Simulation was replaced by another analysis.");
             self.push_report_line(
                 kind,
                 ElectronicsReportLineKind::Status,
@@ -2080,8 +2189,7 @@ impl NativeElectronicsEditor {
         // Presentation filtering runs after the base build but before the
         // analysis markers and previews, so a DRC marker always stays visible
         // even when the graph it names is pruned.
-        if self.active_surface == CadSurfaceKind::Pcb
-            && !self.pcb_layer_visibility.is_all_visible()
+        if self.active_surface == CadSurfaceKind::Pcb && !self.pcb_layer_visibility.is_all_visible()
         {
             let visibility = self.pcb_layer_visibility;
             self.scene.objects.retain(|object| match object.kind {
@@ -2114,7 +2222,10 @@ impl NativeElectronicsEditor {
                 let min = position - size * 0.5;
                 let max = position + size * 0.5;
                 self.scene.objects.push(CadObject {
-                    shape: Default::default(), rotation_degrees: 0.0, drill: None, stroke_width_world: None,
+                    shape: Default::default(),
+                    rotation_degrees: 0.0,
+                    drill: None,
+                    stroke_width_world: None,
                     id: "component-placement-preview".to_string(),
                     source_id: None,
                     kind: CadObjectKind::Component,
@@ -2142,7 +2253,10 @@ impl NativeElectronicsEditor {
                 preview.push(self.snap_world(end));
                 preview.push(start);
                 self.scene.objects.push(CadObject {
-                    shape: Default::default(), rotation_degrees: 0.0, drill: None, stroke_width_world: None,
+                    shape: Default::default(),
+                    rotation_degrees: 0.0,
+                    drill: None,
+                    stroke_width_world: None,
                     id: "board-outline-preview".to_string(),
                     source_id: None,
                     kind: CadObjectKind::BoardOutline,
@@ -2171,7 +2285,10 @@ impl NativeElectronicsEditor {
                 [255, 172, 64, 190]
             };
             self.scene.objects.push(CadObject {
-                    shape: Default::default(), rotation_degrees: 0.0, drill: None, stroke_width_world: None,
+                shape: Default::default(),
+                rotation_degrees: 0.0,
+                drill: None,
+                stroke_width_world: None,
                 id: "wire-preview".to_string(),
                 source_id: None,
                 kind: CadObjectKind::Wire,
@@ -2187,7 +2304,10 @@ impl NativeElectronicsEditor {
             });
             if is_snapped {
                 self.scene.objects.push(CadObject {
-                    shape: Default::default(), rotation_degrees: 0.0, drill: None, stroke_width_world: None,
+                    shape: Default::default(),
+                    rotation_degrees: 0.0,
+                    drill: None,
+                    stroke_width_world: None,
                     id: "pin-snap-target".to_string(),
                     source_id: None,
                     kind: CadObjectKind::Pin,
@@ -2371,13 +2491,22 @@ mod tests {
     fn electronics_context_panels_keep_geometry_at_window_coordinates() {
         let mut editor = NativeElectronicsEditor::empty("Camera continuity");
         editor.camera_initialized = true;
-        editor.camera = CadCamera { center: Vec2::new(60.0, 40.0), zoom: 2.0 };
+        editor.camera = CadCamera {
+            center: Vec2::new(60.0, 40.0),
+            zoom: 2.0,
+        };
         let old = EditorRect::new(260.0, 90.0, 1340.0, 750.0);
         let new = EditorRect::new(260.0, 90.0, 1040.0, 750.0);
         let point = Vec2::new(80.0, 100.0);
-        let before = editor.camera.screen_from_world(point, Vec2::new(old.width, old.height)) + Vec2::new(old.x, old.y);
+        let before = editor
+            .camera
+            .screen_from_world(point, Vec2::new(old.width, old.height))
+            + Vec2::new(old.x, old.y);
         editor.preserve_camera_for_canvas_change(old, new);
-        let after = editor.camera.screen_from_world(point, Vec2::new(new.width, new.height)) + Vec2::new(new.x, new.y);
+        let after = editor
+            .camera
+            .screen_from_world(point, Vec2::new(new.width, new.height))
+            + Vec2::new(new.x, new.y);
         assert!(before.distance(after) < 0.001);
     }
 
@@ -2390,13 +2519,21 @@ mod tests {
         editor.rebuild_scene();
         editor.select_component(0);
         editor.camera_initialized = true;
-        editor.camera = CadCamera { center: Vec2::ZERO, zoom: 1.0 };
+        editor.camera = CadCamera {
+            center: Vec2::ZERO,
+            zoom: 1.0,
+        };
         let old = EditorRect::new(260.0, 90.0, 1340.0, 750.0);
         let new = EditorRect::new(260.0, 90.0, 1040.0, 750.0);
         editor.preserve_camera_for_canvas_change(old, new);
-        let local = editor.camera.screen_from_world(Vec2::new(600.0, 0.0), Vec2::new(new.width,new.height));
+        let local = editor
+            .camera
+            .screen_from_world(Vec2::new(600.0, 0.0), Vec2::new(new.width, new.height));
         assert!(local.x >= 40.0 && local.x <= new.width - 40.0);
-        assert_eq!(editor.schematic.components[0].position, Vec2::new(600.0,0.0));
+        assert_eq!(
+            editor.schematic.components[0].position,
+            Vec2::new(600.0, 0.0)
+        );
     }
 
     #[test]
@@ -2412,7 +2549,11 @@ mod tests {
         editor.pcb.board_outline = raf_electronics::pcb::BoardOutline::default_rect(20.0, 12.0);
         editor.set_surface(CadSurfaceKind::Pcb);
         let canvas = EditorRect::new(52.0, 80.0, 928.0, 660.0);
-        editor.render_options(canvas, raf_render::api_graphic_basic::ui_surface::StudioUiPalette::IndustrialDark, 1.0);
+        editor.render_options(
+            canvas,
+            raf_render::api_graphic_basic::ui_surface::StudioUiPalette::IndustrialDark,
+            1.0,
+        );
         let displayed_width = 20.0 * editor.camera.zoom;
         assert!(displayed_width > canvas.width * 0.5 && displayed_width < canvas.width);
     }

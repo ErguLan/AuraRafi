@@ -147,6 +147,9 @@ pub fn build_electronics_navigator_surface_with_state(
                             crate::panels::electronics_surface::electronics_tokens(palette).text,
                         ))
                         .with_layout(UiLayout::fixed(0.0, 22.0).fill_width().grow(1.0)),
+                )
+                .with_child(
+                    crate::panels::electronics_surface::electronics_library_create_action(palette),
                 ),
         )
         .with_child(desktop_library_tabs(palette, desktop));
@@ -1344,6 +1347,10 @@ fn style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
         electronics_hover_rule("electronics-library-preview", tokens),
         electronics_focus_rule("electronics-library-preview", tokens),
     ]);
+    rules.extend(
+        crate::panels::electronics_surface::electronics_library_create_action_style_sheet(palette)
+            .rules,
+    );
     UiStyleSheet { rules }
 }
 

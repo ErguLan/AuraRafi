@@ -1,5 +1,6 @@
 //! Winit adapter for the shared backend-neutral input snapshot.
 
+#[cfg(not(target_arch = "wasm32"))]
 use arboard::Clipboard;
 use raf_core::{
     InputKey, InputModifiers, InputOwner, InputRouter, InputSnapshot,
@@ -36,9 +37,26 @@ impl Default for NativeUiInputBridge {
 impl NativeUiInputBridge {
     /// Explicit image paste, read on the attachment worker only.
     pub fn read_clipboard_rgba() -> Option<(u32, u32, Vec<u8>)> {
-        let image = Clipboard::new().ok()?.get_image().ok()?;
-        if image.width == 0 || image.height == 0 || image.width.checked_mul(image.height)? > 16 * 1024 * 1024 { return None; }
-        Some((u32::try_from(image.width).ok()?, u32::try_from(image.height).ok()?, image.bytes.into_owned()))
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let image = Clipboard::new().ok()?.get_image().ok()?;
+            if image.width == 0
+                || image.height == 0
+                || image.width.checked_mul(image.height)? > 16 * 1024 * 1024
+            {
+                return None;
+            }
+            Some((
+                u32::try_from(image.width).ok()?,
+                u32::try_from(image.height).ok()?,
+                image.bytes.into_owned(),
+            ))
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // The browser host has no native clipboard image bridge yet.
+            None
+        }
     }
     /// Raw device events must only be forwarded by the focused runtime host.
     pub fn ingest_relative_motion(&mut self, delta: (f64, f64)) {
@@ -60,7 +78,9 @@ impl NativeUiInputBridge {
     pub fn ingest(&mut self, event: &WindowEvent) -> bool {
         match event {
             WindowEvent::DroppedFile(path) => {
-                if self.dropped_files.len() < 16 { self.dropped_files.push(path.clone()); }
+                if self.dropped_files.len() < 16 {
+                    self.dropped_files.push(path.clone());
+                }
                 true
             }
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
@@ -138,9 +158,12 @@ impl NativeUiInputBridge {
                             if self.snapshot.modifiers.command_modifier()
                                 && matches!(key, InputKey::V)
                             {
-                                self.clipboard_paste = Clipboard::new()
-                                    .and_then(|mut clipboard| clipboard.get_text())
-                                    .ok();
+                                #[cfg(not(target_arch = "wasm32"))]
+                                {
+                                    self.clipboard_paste = Clipboard::new()
+                                        .and_then(|mut clipboard| clipboard.get_text())
+                                        .ok();
+                                }
                             }
                         }
                         ElementState::Released => {
@@ -154,7 +177,10 @@ impl NativeUiInputBridge {
                         if !self.snapshot.modifiers.command_modifier()
                             && !self.snapshot.modifiers.alt
                         {
-                            self.snapshot.text_input.extend(text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')));
+                            self.snapshot.text_input.extend(
+                                text.chars()
+                                    .filter(|c| !c.is_control() || matches!(c, '\n' | '\t')),
+                            );
                         }
                     }
                 }
@@ -183,7 +209,10 @@ impl NativeUiInputBridge {
                 true
             }
             WindowEvent::Ime(Ime::Commit(text)) => {
-                self.snapshot.text_input.extend(text.chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')));
+                self.snapshot.text_input.extend(
+                    text.chars()
+                        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t')),
+                );
                 self.snapshot.ime_preedit.clear();
                 true
             }
@@ -329,12 +358,15 @@ impl NativeUiInputBridge {
         self.clipboard_paste.is_some()
     }
 
-    pub fn dropped_files(&self) -> &[std::path::PathBuf] { &self.dropped_files }
+    pub fn dropped_files(&self) -> &[std::path::PathBuf] {
+        &self.dropped_files
+    }
 
     pub fn write_clipboard(&self, text: &str) {
         if text.is_empty() {
             return;
         }
+        #[cfg(not(target_arch = "wasm32"))]
         if let Ok(mut clipboard) = Clipboard::new() {
             let _ = clipboard.set_text(text.to_string());
         }
@@ -369,15 +401,27 @@ mod tests {
     fn cad_release_does_not_leak_into_the_overlapping_retained_workbench() {
         let mut bridge = NativeUiInputBridge::default();
         bridge.snapshot_mut().pointer_position = Some([400.0, 200.0]);
-        bridge.snapshot_mut().pointer_released_buttons.insert(PointerButton::Primary);
+        bridge
+            .snapshot_mut()
+            .pointer_released_buttons
+            .insert(PointerButton::Primary);
         let mut router = InputRouter::default();
-        router.try_capture_pointer(PointerButton::Primary, InputOwner::ElectronicsCanvas,
-            CaptureMode::Exclusive, [100.0,100.0], 1.0);
+        router.try_capture_pointer(
+            PointerButton::Primary,
+            InputOwner::ElectronicsCanvas,
+            CaptureMode::Exclusive,
+            [100.0, 100.0],
+            1.0,
+        );
         router.reconcile_input(bridge.snapshot());
         let workbench = InputOwner::RetainedUi(InputRegionId::from_static("test.workbench"));
-        let state = bridge.ui_state_for_owner(UiRect::new(0.0,0.0,800.0,600.0), workbench, &router);
+        let state =
+            bridge.ui_state_for_owner(UiRect::new(0.0, 0.0, 800.0, 600.0), workbench, &router);
         assert!(state.pointer_released_buttons.is_empty());
-        assert_eq!(router.pointer_owner(PointerButton::Primary), Some(InputOwner::ElectronicsCanvas));
+        assert_eq!(
+            router.pointer_owner(PointerButton::Primary),
+            Some(InputOwner::ElectronicsCanvas)
+        );
         router.finish_frame(bridge.snapshot());
         assert!(!router.has_pointer_capture());
     }

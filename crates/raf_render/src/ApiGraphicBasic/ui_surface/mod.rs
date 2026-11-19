@@ -6,19 +6,21 @@
 //! editor shell.
 
 mod application_menu;
+mod authoring_gallery;
 mod compilation;
 mod cost_observation;
 mod cpu_host;
 mod cpu_renderer;
 mod diagnostics;
-mod authoring_gallery;
-mod flow_sizing;
-mod inspection;
 mod direct_host;
 mod effects;
+mod flow_sizing;
 mod gpu_renderer;
+mod headless;
+mod host_frame_capture;
 mod image_layout;
 mod images;
+mod inspection;
 pub mod loading;
 mod native_input;
 mod native_window;
@@ -36,24 +38,26 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 pub use application_menu::{NativeApplicationMenuAdapter, NativeWindowApplicationMenuAdapter};
+pub use authoring_gallery::component_gallery;
 pub use compilation::UiSurfaceCompileMetrics;
 pub use cpu_host::{CpuUiSurfaceHost, DirectUiSurfaceCpuFrame};
 pub use cpu_renderer::{UiSurfaceCpuMetrics, UiSurfaceCpuRenderer};
 pub use diagnostics::UiSurfaceDiagnostics;
-pub use authoring_gallery::component_gallery;
-pub use inspection::{inspect_surface, UiAuthoringIssue, UiAuthoringIssueKind,
-    UiImageInspection, UiNodeInspection, UiSurfaceInspection};
 pub use direct_host::{DirectUiSurfaceFrame, DirectUiSurfaceHost};
 pub use effects::{UiPaintEffects, UiPaintKey, UiRoundedClip, UiSurfaceEffects};
 pub(crate) use gpu_renderer::UiSurfaceGpuSharedResources;
 pub use gpu_renderer::{UiSurfaceGpuMetrics, UiSurfaceGpuRenderer};
 pub use images::{UiSurfaceImageData, UiSurfaceImageStore};
+pub use inspection::{
+    inspect_surface, UiAuthoringIssue, UiAuthoringIssueKind, UiImageInspection, UiNodeInspection,
+    UiSurfaceInspection,
+};
 pub use native_input::NativeUiInputBridge;
-pub use offscreen::UiOffscreenTarget;
 pub use native_window::{
     NativeCursorLease, NativeGraphicsContext, NativePresentMode, NativeUiWindowConfig,
     NativeUiWindowHost, NativeWindowCommandResult,
 };
+pub use offscreen::UiOffscreenTarget;
 pub use presentation::{
     UiSurfaceDrawList, UiSurfaceImageQuad, UiSurfacePaintCommand, UiSurfaceQuad, UiSurfaceStroke,
     UiSurfaceTextQuad,

@@ -241,7 +241,7 @@ impl ApplicationHandler for PlayerApplication {
                             self.stop(event_loop);
                             return;
                         }
-                        if session.entered_game() {
+                        if session.entered_game() && !host.is_headless() {
                             let size = session.settings.runtime.window_size;
                             if let Some(window) = &self.window {
                                 window.set_decorations(true);

@@ -129,11 +129,17 @@ impl GameUiPresenter {
                     }
                 });
                 if keys != item.image_keys {
-                    let window = native.window().clone();
+                    let wakeup: Option<Arc<dyn Fn() + Send + Sync>> =
+                        native.window_opt().map(|window| {
+                            let window = window.clone();
+                            let wakeup: Arc<dyn Fn() + Send + Sync> =
+                                Arc::new(move || window.request_redraw());
+                            wakeup
+                        });
                     item.host.images_mut().register_project_images_with_wakeup(
                         root,
                         &source.document.root,
-                        Some(Arc::new(move || window.request_redraw())),
+                        wakeup,
                     );
                     item.image_keys = keys;
                 }
@@ -164,7 +170,9 @@ impl GameUiPresenter {
                 changed = true;
             }
             if item.host.images().has_deferred_images() {
-                native.window().request_redraw();
+                if let Some(window) = native.window_opt() {
+                    window.request_redraw();
+                }
             }
             let old_transform = item.transform;
             let old_visible = item.visible;

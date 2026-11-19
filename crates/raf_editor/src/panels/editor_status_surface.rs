@@ -45,8 +45,9 @@ pub fn build_status_surface(palette: StudioUiPalette, status: &[String]) -> UiSu
         }
         let performance_item = is_performance_status_item(item);
         let layout = if performance_item {
-            // Performance telemetry is patched as paint-only text. Give it the remaining row
-            // width instead of the old 76 px track: the telemetry string is
+            // Performance telemetry, including the compact memory segment, is
+            // patched as paint-only text. Give it the remaining row width
+            // instead of a fixed 76 px track: the telemetry string is
             // deliberately one line, so it can never grow downward and be
             // clipped by the bottom edge of the editor window.
             UiLayout {
@@ -129,7 +130,7 @@ mod tests {
     fn fps_status_stays_on_one_visible_line_for_paint_only_updates() {
         let surface = build_status_surface(
             StudioUiPalette::IndustrialDark,
-            &["Project".to_string(), "CAP:~323 FPS | FPS: 46/240 | VP: 46 | CPU 1.0ms | GPU 0.8ms | P95 1.2ms | D8 | U12K | H0 | Immediate".to_string()],
+            &["Project".to_string(), "CAP:~323 FPS | FPS: 46/240 | VP: 46 | CPU 1.0ms | GPU 0.8ms | P95 1.2ms | MEM 123.4/256 MB | UP 2 | D8 | U12K | H0 | Immediate".to_string()],
         );
         let fps = surface
             .root

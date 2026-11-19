@@ -5,6 +5,56 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased] - 0.11.0 Cloud & Streaming Preview
+
+### Added
+
+- **Headless player**: `aurarafi-player --headless` renders a real project with
+  deterministic fixed ticks, writes PNG frames and a machine-readable report
+  with backend, camera readiness, timings and a content hash. The capture
+  excludes the local Player toolbar.
+- **Self-made streaming transport** in `raf_net`: length-prefixed binary
+  framing, token handshake, authoritative input frames with sequence numbers
+  and derived edges, raw RGBA video frames, bounded queues, partial writes and
+  p50/p95 latency accounting. No external transport or WebRTC crate.
+- **Streaming host**: `aurarafi-player --stream ADDR:PORT` serves one
+  authenticated session, renders only while a client is connected and reports
+  sent/dropped frames, bytes and input latency.
+- **Graphics memory ledger**: per-family budgets for buffer, texture, sampler,
+  pipeline, mesh, material, staging and transient resources; saturating
+  admission/release, upload rejection pressure and editor HUD telemetry.
+- **Custom electronics components**: symbol presets, pin geometry, validation,
+  `ElectricalAssets` persistence, a retained creator surface and explicit
+  unmodeled simulation semantics.
+- **WASM renderer host**: `raf_web` canvas target that reuses the desktop scene
+  renderer and `BasicGraphic` device, with an HTML demo and build scripts.
+- **Linux CI and deployment**: Linux workflow with the target override, focused
+  crate gates, artifact upload and headless smoke; multi-stage container,
+  entrypoint and deployment documentation.
+- **Frame graph compiler**: backend-neutral pass ordering, barriers, transient
+  aliasing and budget validation with focused tests. Device integration remains
+  open.
+- **Editor memory telemetry**: cached `MEM` segment in the Game status bar and a
+  Memory group in the UI cost inspector.
+
+### Changed
+
+- `arboard` is a native-only dependency; the browser target uses a safe
+  no-clipboard path.
+- Engine timing uses a wasm-safe `Instant` wrapper instead of
+  `std::time::Instant` in the render device.
+- Custom electronics components are excluded from conductance and reported as
+  unmodeled instead of being treated as wires.
+
+### Known limitations
+
+- Render-facing asset ingress, device/surface-loss recovery and the WebRTC/SDP
+  adapter remain open.
+- The WASM target is a renderer demo; project loading, scripts and audio still
+  need a browser VFS.
+- Five editor unit tests and one retained-layout test were already failing
+  before this delivery and remain outside this scope.
+
 ## [0.10.0] - 2026-11-18 - Hardware, Physics and Agent Stabilization
 
 ### Added

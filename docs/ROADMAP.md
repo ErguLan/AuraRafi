@@ -431,9 +431,11 @@ and returns to the active editor document.
 
 ## v0.11.0 - Cloud & Streaming
 
-**Status: in implementation.** Runtime animation, animation collision and IK
-integration moved to v0.12. Native graphics backend lanes and the frame graph
-moved to v0.11.5.
+**Status: Preview.** The headless cloud path, graphics memory ledger and custom
+electronics components are implemented. Asset ingress, presentation recovery,
+WebRTC encoding and the first remote CI run remain open. Runtime animation,
+animation collision and IK integration moved to v0.12. Native graphics backend
+lanes and the frame graph moved to v0.11.5.
 
 ### Graphics ownership (ApiGraphicBasic)
 
@@ -449,11 +451,13 @@ moved to v0.11.5.
   and shared GPU/CPU diagnostics.
 - [x] RafUI tooltip migration: compact tooltip content is authored and
   rendered by a dedicated RafUI surface in the native compositor.
-- [ ] ApiGraphicBasic owned graphics evolution: one unified memory ledger across
-  buffer, texture, sampler, pipeline, mesh and material families; upload
-  enforcement with backpressure; presentation lifecycle and device/surface-loss
-  recovery so backends can be selected per platform without coupling editor
-  surfaces to WGPU.
+- [x] ApiGraphicBasic unified memory ledger: cross-family budgets, saturating
+  admission/release accounting, mesh/texture residency, upload rejection
+  pressure and editor telemetry.
+- [ ] ApiGraphicBasic presentation lifecycle: presentation health, device and
+  surface-loss recovery, suspend/resume and backend-neutral fence tracking so
+  backends can be selected per platform without coupling editor surfaces to
+  WGPU.
 - [ ] ApiGraphicBasic asset ingress: move render-facing asset import,
   decode/transcode policy, GPU residency, thumbnails, and resource lifetime
   behind the engine graphics API. Project files remain portable while the
@@ -461,16 +465,31 @@ moved to v0.11.5.
 
 ### Cloud and streaming
 
-- [ ] Headless rendering mode (--headless flag)
-- [ ] Low-latency input pipeline for cloud streaming
-- [ ] Linux native build (CI target)
-- [ ] WebAssembly (WASM) build target
-- [ ] Cloud deployment configuration
-- [ ] Streaming protocol preparation (WebRTC stub)
+- [x] Headless rendering mode (`--headless`) with deterministic fixed ticks,
+  PNG capture and a machine-readable report.
+- [x] Low-latency input pipeline for cloud streaming: authenticated handshake,
+  authoritative input frames with sequence numbers, edge derivation and
+  p50/p95 latency accounting. The WebRTC adapter remains open.
+- [x] Linux native build (CI target): Linux workflow, target override and
+  artifact upload are in place. The first remote green run is pending.
+- [x] WebAssembly (WASM) build target: `raf_web` canvas host and renderer demo.
+  `cargo check -p raf_web --target wasm32-unknown-unknown` passes; the browser
+  runtime is still a demo until the project VFS and scripts land.
+- [x] Cloud deployment configuration: multi-stage image, entrypoint, resource
+  limits and volume layout. The image build remains pending.
+- [ ] Streaming protocol preparation (WebRTC stub): the self-made length-
+  prefixed transport, token handshake and raw RGBA video contract are shipped;
+  the WebRTC/SDP adapter is still open.
 
 ### Electronics authoring
 
-- [ ] Custom component creation
+- [x] Custom component creation: symbol presets, pin geometry, validation,
+  project persistence and a retained creator surface.
+
+**0.11 delivery snapshot (2026-11-19):** headless capture and streaming,
+self-made transport, Linux CI/Docker, WASM renderer host, the graphics memory
+ledger and custom electronics components landed. Asset ingress, presentation
+recovery, WebRTC encoding and the first remote CI run remain open.
 
 ### Deferred inside the 0.11 line
 
@@ -485,7 +504,8 @@ remains the active executor until every removal gate passes.
 
 - [ ] Frame graph and transient resource aliasing for shadows, post-processing
   and future passes, with backend-neutral resource states and explicit
-  synchronization.
+  synchronization. The backend-neutral compiler, aliasing and barrier tests are
+  in place; `BasicDevice` integration remains open.
 - [ ] Native graphics backend lanes: add direct backend implementations under
   ApiGraphicBasic for the platforms Rafi targets. WGPU remains available as an
   adapter during the build-out, but it is not the permanent owner of Rafi's

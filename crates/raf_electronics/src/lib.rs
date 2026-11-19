@@ -16,6 +16,7 @@ pub mod pcb;
 pub mod schematic;
 pub mod simulation;
 pub mod storage;
+pub mod symbol;
 
 pub use cad_interaction::{
     pick as pick_cad_object, pick_editable as pick_editable_cad_object, CadInteractionState,
@@ -36,7 +37,7 @@ pub use extensions::{
     ElectricalExtensionRegistry, ElectricalExtensionSummary, ElectricalRule,
 };
 pub use fingerprint::{pcb_fingerprint, schematic_fingerprint};
-pub use library::{ComponentLibrary, ComponentTemplate, ELECTRICAL_ASSETS_DIR};
+pub use library::{ComponentLibrary, ComponentTemplate, TemplateSource, ELECTRICAL_ASSETS_DIR};
 pub use netlist::Netlist;
 pub use pcb::{
     footprint_definition, BoardOutline, FootprintDefinition, FootprintPadDefinition, PcbAirwire,
@@ -44,3 +45,4 @@ pub use pcb::{
 };
 pub use schematic::Schematic;
 pub use simulation::{simulate_dc, SimulationResults};
+pub use symbol::{SymbolDefinition, SymbolPreset, SymbolPrimitive};

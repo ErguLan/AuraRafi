@@ -199,6 +199,38 @@ Static/paused sessions poll at 4 Hz; active display rate is configurable and
 input-triggered presentation is capped. These are budgets, not measured
 whole-machine RAM/CPU/GPU guarantees.
 
+## Headless capture and streaming
+
+`aurarafi-player` can run without a window and without a Winit event loop:
+
+```bash
+aurarafi-player --headless \
+  --manifest examples/headless/project/runtime.ron \
+  --frames 3 --size 640x360 \
+  --out /tmp/rafi-headless \
+  --report /tmp/rafi-headless/report.json
+```
+
+Each frame is written as PNG and the report includes backend, camera readiness,
+phase, fixed ticks, tick/render/capture timings and a content hash. Input can be
+scripted with `--input` (JSON keyed by frame). The capture contains the game and
+its authored UI, never the local Player toolbar.
+
+The same host can serve one authenticated client:
+
+```bash
+aurarafi-player --stream 127.0.0.1:9400 \
+  --manifest examples/headless/project/runtime.ron \
+  --stream-token "$RAFI_TOKEN" \
+  --size 1280x720 --stream-fps 30 --idle-timeout 60
+```
+
+It does not render while no client is connected. The self-made transport uses
+length-prefixed binary frames, a token handshake and authoritative input
+snapshots; the report records sent/dropped frames, bytes and input latency
+p50/p95. `--stream` and `--headless` are mutually exclusive. See
+[Cloud Streaming](CLOUD_STREAMING.md) for the protocol and deployment details.
+
 ## Acceptance gates
 
 1. Two owners using one Rhai asset preserve independent state.

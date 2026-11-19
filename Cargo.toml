@@ -15,6 +15,7 @@ members = [
     "crates/raf_runtime",
     "crates/raf_player",
     "crates/raf_cli",
+    "crates/raf_web",
     "editor",
 ]
 
@@ -92,8 +93,16 @@ image = { version = "0.25", default-features = false, features = [
 gltf = "1"
 
 # Utilities
-uuid = { version = "1", features = ["v4", "serde"] }
+uuid = { version = "1", features = ["v4", "serde", "js"] }
 chrono = { version = "0.4", features = ["serde"] }
+
+# WebAssembly host bindings. The browser canvas target lives in `raf_web`; the
+# native workspace does not depend on these crates.
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = "0.3"
+console_error_panic_hook = "0.1"
 
 # Scripting
 rhai = { version = "1.19", features = ["sync"] }
