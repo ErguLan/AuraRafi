@@ -319,6 +319,7 @@ pub(super) fn node_json(
             "is_folder": node.is_folder,
             "primitive": node.primitive.label(),
             "game_camera": node.game_camera,
+            "animation_layers": node.animation.as_ref().map(|rig| rig.layers.len()),
             "position": vec3_json(node.position),
             "rotation_deg": vec3_json(node.rotation),
             "scale": vec3_json(node.scale),

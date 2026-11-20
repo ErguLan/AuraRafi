@@ -58,6 +58,8 @@ struct SurfaceKey {
     size: [u32; 2],
     camera: bool,
     error: Option<String>,
+    debug_interval: u64,
+    debug_text: Option<String>,
 }
 /// Physical and logical frame geometry resolved once per presented frame.
 struct FramePresentation {
@@ -674,11 +676,31 @@ impl PlayerSession {
         let mut environment = view.environment;
         let language = self.settings.language;
         let palette = palette(self.settings.theme);
+        let debug_world = self.world.as_ref().filter(|world| {
+            let settings = world.project_settings();
+            !headless && (settings.runtime.animation_debug_draw
+                || (settings.enable_physics && settings.runtime.physics_debug_draw))
+        });
+        let debug_interval = debug_world.map_or(0, |world| {
+            let ticks = world.status().fixed_ticks;
+            if self.status.phase == RuntimePhase::Running {
+                ticks / u64::from((world.project_settings().runtime.fixed_hz.clamp(15, 120) / 4).max(1))
+            } else {
+                ticks
+            }
+        });
+        let debug_text = debug_world.map(|world| {
+            self.surface_key.as_ref().filter(|key| key.debug_interval == debug_interval && key.phase == self.status.phase)
+                .and_then(|key| key.debug_text.clone())
+                .unwrap_or_else(|| crate::physics_debug::stats(world))
+        });
         let key = SurfaceKey {
             phase: self.status.phase,
             size: logical,
             camera: self.status.camera_ready,
             error: self.status.last_error.clone(),
+            debug_interval,
+            debug_text,
         };
         if self.surface_key.as_ref() != Some(&key) {
             self.ui.set_surface(player_surface(
@@ -688,6 +710,7 @@ impl PlayerSession {
                 !key.camera,
                 key.error.as_deref(),
                 self.settings.runtime.diagnostics,
+                key.debug_text.as_deref(),
             ));
             self.surface_key = Some(key);
         }

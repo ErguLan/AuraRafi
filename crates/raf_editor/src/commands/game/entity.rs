@@ -718,6 +718,10 @@ pub(super) fn update_entity(command: &ParsedCommand, ctx: &mut GameCommandContex
     if let Err(error) = apply_scene_components(command, &mut staged_components, "game.update") {
         return CommandOutput::error("Update entity", error);
     }
+    let animation = match super::animation::update(command, ctx, id, &staged_components) {
+        Ok(animation) => animation,
+        Err(error) => return CommandOutput::error("Update entity", error),
+    };
     let Some(node) = ctx.scene.get_mut(id) else {
         return CommandOutput::error("Update entity", "Target not found.");
     };
@@ -752,6 +756,9 @@ pub(super) fn update_entity(command: &ParsedCommand, ctx: &mut GameCommandContex
     node.game_camera = staged_components.game_camera;
     node.scripts = staged_components.scripts;
     node.variables = staged_components.variables;
+    if let Some(animation) = animation {
+        node.animation = animation;
+    }
     select_ids(ctx, vec![id]);
     let node = ctx.scene.get(id).expect("updated node exists");
     CommandOutput::changed(

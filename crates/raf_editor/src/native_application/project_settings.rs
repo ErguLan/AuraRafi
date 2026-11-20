@@ -48,6 +48,11 @@ pub(super) fn apply_project_setting_toggle(
             settings.runtime.physics_debug_draw = value;
             changed
         }
+        "project-settings.animation-debug-draw" => {
+            let changed = settings.runtime.animation_debug_draw != value;
+            settings.runtime.animation_debug_draw = value;
+            changed
+        }
         "project-settings.progress-enabled" => {
             let changed = settings.runtime.progress.enabled != value;
             settings.runtime.progress.enabled = value;

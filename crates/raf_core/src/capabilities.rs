@@ -59,6 +59,7 @@ impl CapabilityDefinition {
             || name == "scene.design_audit"
             || name == "scene.navigation_audit"
             || name == "scene.visual_review"
+            || name == "game.animation.sample"
             || name == "game.plan"
             || name == "world.brief"
             || name == "task.get"

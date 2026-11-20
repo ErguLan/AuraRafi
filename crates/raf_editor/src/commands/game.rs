@@ -18,6 +18,7 @@ use crate::commands::output::CommandOutput;
 use crate::commands::parser::ParsedCommand;
 
 mod build;
+mod animation;
 mod camera;
 mod entity;
 mod material;
@@ -102,6 +103,7 @@ const KNOWN_GAME_COMMANDS: &[&str] = &[
     "game.duplicate",
     "game.set_transform",
     "game.update",
+    "game.animation.sample",
     "game.move",
     "game.rotate",
     "game.scale",
@@ -171,6 +173,7 @@ pub fn execute(
         "game.duplicate" => duplicate_entity(command, ctx),
         "game.set_transform" => set_transform(command, ctx),
         "game.update" => update_entity(command, ctx),
+        "game.animation.sample" => animation::sample(command, ctx),
         "game.move" => move_entity(command, ctx),
         "game.rotate" => rotate_entity(command, ctx),
         "game.scale" => scale_entity(command, ctx),

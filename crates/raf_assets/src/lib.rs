@@ -2,6 +2,7 @@
 //!
 //! Asset management for AuraRafi: importing, hot-reloading, and browsing.
 
+pub mod animation_import;
 pub mod browser;
 pub mod authoring_catalog;
 pub mod image_asset;

@@ -154,6 +154,8 @@ pub struct SceneNode {
     pub character_controller: Option<crate::scene::character::CharacterController>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub physics_joints: Vec<crate::scene::joint::PhysicsJoint>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation: Option<crate::scene::animation::AnimationRig>,
     /// Explicit game camera component. Ordinary objects never become cameras implicitly.
     #[serde(default)]
     pub game_camera: Option<crate::runtime_config::GameCamera>,
@@ -208,6 +210,7 @@ impl SceneNode {
             rigid_body: RigidBody::default(),
             character_controller: None,
             physics_joints: Vec::new(),
+            animation: None,
             game_camera: None,
             is_folder: false,
             source_asset: None,
@@ -245,6 +248,7 @@ impl SceneNode {
             rigid_body: RigidBody::default(),
             character_controller: None,
             physics_joints: Vec::new(),
+            animation: None,
             game_camera: None,
             is_folder: false,
             source_asset: None,

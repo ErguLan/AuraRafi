@@ -531,8 +531,18 @@ target remains v0.12 and is specified in
 
 ### Animation runtime (moved from v0.11.0)
 
+- [x] Persistent transform rigs on scene hierarchies. Ordered weighted and additive
+  layers, scoped transform tracks, fades, fixed-step playback, and stepped poses.
+- [x] Velocity-driven locomotion blend between authored speed profiles at a
+  shared gait phase.
+- [x] Agent/attached CLI/MCP transform rig updates and read-only pose sampling.
+  Embedded GLB transform clips can be mapped to existing rig nodes explicitly.
+- [x] Development overlays in Play for transform rig links, collision geometry,
+  velocity, gravitational weight, applied loads and contact impulses. Optional
+  world-space impact offsets drive a bounded visual reaction on a rig child.
 - [ ] GLB/GLTF mesh, skin and clip import with bounds, source identity, joint
-  weights, inverse bind matrices and validated animation tracks.
+  weights, inverse bind matrices and full animation tracks including cubic and
+  morph curves. Preserve stable bone bindings and validate reimports.
 - [ ] Skeletal keyframe animation with a bone hierarchy, skinning data, a
   playback clock and editor/runtime sampling.
 - [ ] Skeletal animation playback on the render path, on the GPU and the CPU
@@ -541,6 +551,17 @@ target remains v0.12 and is specified in
   `AnimCollider` set each animation step and dispatch the selected response.
 - [ ] Foot-placement and hand-grab integration on top of the bounded IK solvers
   in `raf_core::scene::ik`.
+- [ ] Animation workspace with native timeline, curve and graph editing, pose
+  preview, collision inspection and camera/audio sequencing. Export take images
+  and video, preserve stepped poses through retargeting and bake to keys/cache.
+- [ ] Actions with resource ownership, synchronized gameplay markers and safe
+  interruption. Verify held props, contact-aware root motion, shape casts for
+  rotating limbs and held objects, and bounded contact correction.
+- [ ] Partial active ragdoll with motors, per-joint blends, balance/recovery and
+  facial targets. Verify the same impacts at several speeds and angles.
+- [ ] Procedural locomotion and motion matching from a measured clip library.
+  Profile 1, 20 and 100 characters with per-character detail levels and replay
+  diagnostics. Evaluate studio interchange beyond GLB through external adapters.
 
 ### Electronics catalog
 

@@ -1,4 +1,5 @@
 use crate::physics::PhysicsWorld;
+use crate::animation::AnimationPlayback;
 use glam::Vec3;
 use raf_core::runtime_config::{RuntimeCameraPose, RuntimeErrorPolicy, RuntimePreferences};
 use raf_core::{
@@ -57,6 +58,8 @@ pub struct RuntimeWorld {
     accumulator: f64,
     pending_input: InputSnapshot,
     physics: PhysicsWorld,
+    animation: AnimationPlayback,
+    physics_debug_loads: Vec<PhysicsDebugLoad>,
     diagnostics: VecDeque<String>,
     audio: Vec<AudioCommand>,
     last_reload: Instant,
@@ -68,6 +71,17 @@ pub struct RuntimeWorld {
     services_enabled: bool,
     shutdown_started: Option<Instant>,
 }
+
+#[derive(Clone, Copy, Debug)]
+pub struct PhysicsDebugLoad {
+    pub body: Uuid,
+    pub force: Vec3,
+    pub torque: Vec3,
+    pub impulse: Vec3,
+}
+
+const MAX_DEBUG_LOADS: usize = 512;
+
 impl RuntimeWorld {
     pub fn prepare(
         instance: Uuid,
@@ -88,6 +102,7 @@ impl RuntimeWorld {
         if scene.len() > entity_limit {
             return Err(vec!["Scene exceeds the configured entity limit".into()]);
         }
+        let animation = AnimationPlayback::prepare(&scene).map_err(|error| vec![error])?;
         let (scripts, report) = if settings.enable_scripting
             && settings.script_execution_mode != ScriptExecutionMode::Disabled
         {
@@ -136,6 +151,8 @@ impl RuntimeWorld {
             accumulator: 0.0,
             pending_input: InputSnapshot::default(),
             physics,
+            animation,
+            physics_debug_loads: Vec::new(),
             diagnostics: VecDeque::new(),
             audio: Vec::new(),
             last_reload: Instant::now(),
@@ -192,6 +209,25 @@ impl RuntimeWorld {
 
     pub fn physics_impacts(&self) -> &[crate::physics::PhysicsImpact] {
         self.physics.impacts()
+    }
+    pub fn animation_bones(&self) -> &[(raf_core::scene::SceneNodeId, Uuid)] {
+        self.animation.bone_nodes()
+    }
+    pub fn physics_debug_loads(&self) -> &[PhysicsDebugLoad] {
+        &self.physics_debug_loads
+    }
+
+    fn sample_physics_debug_loads(&mut self) {
+        self.physics_debug_loads.clear();
+        if !self.settings.runtime.physics_debug_draw || !self.settings.runtime.advanced_physics {
+            return;
+        }
+        self.physics_debug_loads.extend(self.scene.iter().filter_map(|(_, node)| {
+            let body = &node.rigid_body;
+            (body.enabled && !body.is_character && body.body_type == raf_core::scene::RigidBodyType::Dynamic
+                && (body.force != Vec3::ZERO || body.torque != Vec3::ZERO || body.impulse != Vec3::ZERO))
+                .then_some(PhysicsDebugLoad { body: node.uuid, force: body.force, torque: body.torque, impulse: body.impulse })
+        }).take(MAX_DEBUG_LOADS));
     }
     pub fn project_settings(&self) -> &ProjectSettings {
         &self.settings
@@ -337,6 +373,8 @@ impl RuntimeWorld {
             self.record(report);
         }
         self.status.camera_ready = self.camera_pose().is_some();
+        let animation_gravity = self.settings.enable_physics.then(|| self.physics_gravity());
+        self.animation.tick(&mut self.scene, 0.0, 0.0, &[], animation_gravity);
         if self.settings.enable_audio {
             let names: Vec<String> = self
                 .scene
@@ -522,6 +560,11 @@ impl RuntimeWorld {
                 .as_ref()
                 .map(|scripts| scripts.view.environment_revision().rotate_left(17))
                 .unwrap_or(0)
+            ^ if self.settings.enable_physics && self.settings.runtime.physics_debug_draw {
+                self.status.fixed_ticks.rotate_left(33)
+            } else {
+                0
+            }
     }
     fn fixed_step(&self) -> f64 {
         1.0 / self.settings.runtime.fixed_hz.clamp(15, 120) as f64
@@ -627,6 +670,7 @@ impl RuntimeWorld {
         }
         if self.settings.enable_physics {
             let gravity = self.physics_gravity();
+            self.sample_physics_debug_loads();
             let result = self.physics.step_with_settings(
                 &mut self.scene,
                 dt,
@@ -642,6 +686,10 @@ impl RuntimeWorld {
                 }
             }
         }
+        let impacts = if self.settings.enable_physics { self.physics.impacts() } else { &[] };
+        let animation_time = (self.status.fixed_ticks.saturating_add(1)) as f64 * self.fixed_step();
+        let animation_gravity = self.settings.enable_physics.then(|| self.physics_gravity());
+        self.animation.tick(&mut self.scene, animation_time, dt, impacts, animation_gravity);
         if self.settings.enable_physics {
             if let Some(scripts) = &mut self.scripts {
                 let report = scripts.dispatch_physics_events(

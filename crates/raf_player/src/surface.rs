@@ -189,6 +189,7 @@ pub fn player_surface(
     missing_camera: bool,
     error: Option<&str>,
     diagnostics: bool,
+    debug_text: Option<&str>,
 ) -> UiSurface {
     let tokens = palette.tokens();
     let controls = runtime_controls(
@@ -233,6 +234,26 @@ pub fn player_surface(
         .with_layout(UiLayout::fill(UiFlow::None))
         .with_style(UiStyle::transparent())
         .with_child(toolbar);
+    if let Some(text) = debug_text {
+        root = root.with_child(
+            UiNode::new("runtime.player.debug", UiNodeKind::Panel)
+                .with_layout(UiLayout {
+                    flow: UiFlow::Column,
+                    padding: UiSpacing::xy(8.0, 4.0),
+                    ..UiLayout::absolute(UiRect::new(10.0, 42.0, (size[0] as f32 - 20.0).clamp(0.0, 520.0), 48.0))
+                })
+                .with_style(UiStyle { fill: tokens.surface_alt, ..UiStyle::transparent() })
+                .with_child(UiNode::new("runtime.player.debug.label", UiNodeKind::Label)
+                    .with_layout(UiLayout::fixed(240.0, 18.0))
+                    .with_text_key("runtime.debug_development")
+                    .with_text_style(UiTextStyle::body(tokens.text_muted)))
+                .with_child(UiNode::new("runtime.player.debug.values", UiNodeKind::Label)
+                    .with_layout(UiLayout::fixed(0.0, 18.0).with_width_mode(raf_ui::UiSizeMode::Fill))
+                    .with_text_value(text)
+                    .with_text_overflow(raf_ui::UiTextOverflow::Ellipsis)
+                    .with_text_style(UiTextStyle::body(tokens.text))),
+        );
+    }
     if missing_camera {
         root = root.with_child(
             UiNode::new("runtime.player.no-camera", UiNodeKind::Label)

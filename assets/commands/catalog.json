@@ -781,6 +781,8 @@
       "category": "scene",
       "description_key": "commands.game_update.desc",
       "parameters": [
+        {"name": "animation", "kind": "object", "required": false},
+        {"name": "animation_clip", "kind": "object", "required": false},
         {"name": "size", "kind": "array", "required": false, "description_key": "commands.param.size"},
         {"name": "casts_shadows", "kind": "bool", "required": false},
         {"name": "receives_shadows", "kind": "bool", "required": false},
@@ -806,6 +808,19 @@
         {"name": "agent_origin", "kind": "string", "required": false, "description_key": "commands.param.agent_origin"}
       ],
       "examples": ["/game.update target=Player x=1 y=2 z=0", "/game.update target=Player casts_shadows=true receives_shadows=false"]
+    },
+    {
+      "name": "game.animation.sample",
+      "domain": "game",
+      "category": "scene",
+      "risk": "read",
+      "description_key": "commands.game_animation_sample.desc",
+      "parameters": [
+        {"name": "target", "kind": "string", "required": true},
+        {"name": "time", "kind": "f32", "required": false},
+        {"name": "speed", "kind": "f32", "required": false}
+      ],
+      "examples": ["/game.animation.sample target=Character time=0.5"]
     },
     {
       "name": "game.batch",

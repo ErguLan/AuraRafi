@@ -252,6 +252,13 @@ fn runtime(
             project.settings.runtime.physics_debug_draw,
             !project.settings.enable_physics,
         ))
+        .with_child(toggle_row(
+            palette,
+            "project-settings.animation-debug-draw",
+            "runtime.animation_debug_draw",
+            "project-settings.animation-debug-draw",
+            project.settings.runtime.animation_debug_draw,
+        ))
         .with_child(segment_row_disabled(
             palette,
             "project-settings.gravity-preset",

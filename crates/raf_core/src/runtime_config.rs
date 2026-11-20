@@ -164,6 +164,7 @@ pub struct ProjectRuntimeSettings {
     /// Enables full dynamic simulation; basic mode retains character movement.
     pub advanced_physics: bool,
     pub physics_debug_draw: bool,
+    pub animation_debug_draw: bool,
     /// World-space gravitational acceleration in meters per second squared.
     pub gravity: Vec3,
     /// Defaults used by explicitly enabled character controllers.
@@ -183,6 +184,7 @@ impl Default for ProjectRuntimeSettings {
             fixed_hz: 60,
             advanced_physics: true,
             physics_debug_draw: false,
+            animation_debug_draw: false,
             gravity: Vec3::new(0.0, -9.81, 0.0),
             character_jump_height: 1.5,
             character_speed: 4.0,

@@ -139,8 +139,59 @@ between two selected bodies. The joint editor takes local anchors and axes,
 angle limits in radians or slider limits in meters, optional motor and break
 threshold. Scripts can use `add_physics_joint`, `configure_joint_motion` and
 `configure_joint_spring`. Joints solve at fixed ticks in the advanced mode.
-The player can show physics shapes and capsule ground normals through the
-project debug setting in Runtime.
+## Development overlays and transform animation
+
+Open **Project Settings → Runtime** before Play. **Animation debug in Play**
+draws red links between animated hierarchy nodes, including intermediate joints.
+**Physics debug in Play** displays collider outlines and green support normals,
+blue velocity, yellow gravitational weight, purple scripted force, pink angular
+velocity and torque, and orange impulses. Each arrow type uses its own bounded
+display scale. The development panel shows fixed tick and elapsed time, link
+count, and SI readings for the first simulated dynamic body. `W` is its weight,
+`F` is its sampled scripted force, and `J` is the peak contact impulse in the
+sampled tick. Set an active camera to see the world overlay. Enter Play again
+after changing the settings so they take effect in the new runtime snapshot.
+
+A transform rig can be authored by Agent, attached CLI/MCP or the editor
+console through `game.update`. For example, given `Puppet` with a child `Head`:
+
+```json
+{
+  "target": "/Puppet",
+  "animation": {
+    "layers": [{
+      "name": "Lift",
+      "duration": 1,
+      "looping": true,
+      "tracks": [{
+        "path": ["Head"], "channel": "position", "stepped": true,
+        "keys": [{"time": 0, "value": [0, 1, 0]}, {"time": 0.5, "value": [0, 1.4, 0]}]
+      }]
+    }]
+  }
+}
+```
+
+Track values are local meters, YXZ Euler degrees or scale. Layer order defines
+composition. Layers can set `start`, `fade_in`, `fade_out`, `weight` and
+`additive`. Non-looping layers hold the final pose unless `fade_out` is set.
+Optional `motion_speed` layers go first in increasing meters per second and
+share loop duration and track bindings. The runtime blends them by the owner's
+velocity projected onto the gravity plane while keeping the gait phase shared.
+`game.animation.sample` accepts `target`, `time` and an optional `speed` for
+read-only evaluation.
+Use `animation: null` to clear the rig. To append a GLB layer instead, send
+`animation_clip: {"asset":"puppet.glb","clip":0,"bindings":{"3":["Head"]}}`
+to `game.update`. This reads embedded linear/step transform tracks from the
+project's `assets` directory into the authored rig. The scene nodes and track
+paths must already exist. Rebinding after renaming a tracked child is explicit.
+
+An optional `impact` on the rig takes `path`, `duration`, `meters_per_impulse`
+and `max_offset`. An impact on the owner offsets that visual child along the
+received impulse and decays back to the current clip pose. The owner may retain
+its physics collider on a separate hierarchy branch. Rig transform writes that
+would move a physics body or collider are rejected during binding. Skinned mesh
+deformation, limb-driven colliders and ragdolls are tracked in the roadmap.
 
 ## Minimal manual acceptance
 

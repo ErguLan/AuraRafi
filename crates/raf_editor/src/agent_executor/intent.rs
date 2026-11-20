@@ -302,7 +302,8 @@ pub(super) fn classify_prompt(prompt: &str) -> PromptIntent {
 
 pub(super) fn catalog_tool_kind(command: &CommandDefinition) -> AgentToolKind {
     let name = command.name.as_str();
-    if name.ends_with(".describe")
+    if name == "game.animation.sample"
+        || name.ends_with(".describe")
         || name=="ui.document.read"
         || name.ends_with(".netlist")
         || name.ends_with(".bom")

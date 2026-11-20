@@ -721,6 +721,8 @@ fn scene_update_properties() -> Vec<(&'static str, Value)> {
         *name != "name" && *name != "kind" && *name != "primitive" && *name != "parent"
     });
     properties.insert(0, ("target", json!({"type":"string","minLength":1})));
+    properties.push(("animation", json!({"type":["object","null"],"description":"Replace the transform rig with layers and tracks, or remove it with null."})));
+    properties.push(("animation_clip", json!({"type":"object","description":"Append an embedded GLB clip. Specify asset, clip index and bindings from GLB node indices to child-name paths."})));
     properties
 }
 

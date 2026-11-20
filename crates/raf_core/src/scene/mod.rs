@@ -1,6 +1,7 @@
 //! Scene graph module - parent-child hierarchy, colliders, mesh operations.
 
 pub mod anim_collider;
+pub mod animation;
 pub mod character;
 pub mod collider;
 pub mod graph;

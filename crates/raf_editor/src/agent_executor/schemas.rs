@@ -462,6 +462,8 @@ pub(super) fn batch_operation_params_schema() -> Value {
             ),
             ("visible".to_string(), boolean_schema("Entity visibility.")),
             ("locked".to_string(), boolean_schema("Editor lock state.")),
+            ("animation".to_string(), serde_json::json!({"type":["object","null"],"description":"Replace or remove the transform animation rig on scene_update."})),
+            ("animation_clip".to_string(), serde_json::json!({"type":"object","description":"Append a GLB clip on scene_update using asset, clip and bindings."})),
             ("semantic_role".to_string(), string_schema("Semantic role.")),
             (
                 "stable_key".to_string(),
