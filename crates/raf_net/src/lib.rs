@@ -8,6 +8,11 @@
 //! accounting. Rendering, windowing and editor integration stay outside this
 //! crate.
 //!
+//! The [`webrtc`] module adds a separate WebRTC control plane: SDP
+//! offer/answer text, trickled ICE candidate lines, a bounded line-delimited
+//! JSON signaling server and a negotiation state machine. It does not
+//! implement the media plane (DTLS, SRTP, SCTP, RTP or codecs).
+//!
 //! Typical host side:
 //!
 //! 1. Bind a [`StreamServer`] with a non-nil token.
@@ -32,6 +37,7 @@ pub mod messages;
 pub mod protocol;
 pub mod session;
 pub mod video;
+pub mod webrtc;
 
 pub use frame::{CompletedFrame, FlushReport, FrameKind, FrameReader, FrameWriter, QueueError};
 pub use input::{

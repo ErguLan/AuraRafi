@@ -120,7 +120,7 @@ impl AttachedClient {
 
     pub fn resource(&self, uri: &str) -> Result<Value, String> {
         if let Some(id) = uri.strip_prefix("raf://plan/") {
-            return super::read_plan_resource(&self.project_path, id);
+            return crate::cli::read_plan_resource(&self.project_path, id);
         }
         match uri {
             "raf://status" => Ok(json!({

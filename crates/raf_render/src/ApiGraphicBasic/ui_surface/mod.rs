@@ -27,6 +27,7 @@ mod native_window;
 mod offscreen;
 mod paint_motion;
 mod presentation;
+mod presentation_lifecycle;
 mod quality;
 mod regional_layout;
 mod regional_paint;
@@ -61,6 +62,10 @@ pub use offscreen::UiOffscreenTarget;
 pub use presentation::{
     UiSurfaceDrawList, UiSurfaceImageQuad, UiSurfacePaintCommand, UiSurfaceQuad, UiSurfaceStroke,
     UiSurfaceTextQuad,
+};
+pub use presentation_lifecycle::{
+    PresentationDecision, PresentationFault, PresentationHealth, PresentationPolicy,
+    PresentationRecovery,
 };
 pub use quality::{cpu_quality_matrix, craftsmanship_gallery, UiSurfaceQualitySample};
 pub use raf_ui::{

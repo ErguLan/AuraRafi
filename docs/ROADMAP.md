@@ -431,11 +431,12 @@ and returns to the active editor document.
 
 ## v0.11.0 - Cloud & Streaming
 
-**Status: Preview.** The headless cloud path, graphics memory ledger and custom
-electronics components are implemented. Asset ingress, presentation recovery,
-WebRTC encoding and the first remote CI run remain open. Runtime animation,
-animation collision and IK integration moved to v0.12. Native graphics backend
-lanes and the frame graph moved to v0.11.5.
+**Status: Preview (non-media scope complete).** Headless capture, streaming,
+asset ingress, presentation surface recovery, the graphics memory ledger and
+custom electronics components are implemented. WebRTC media, device-loss
+recreation and the first remote CI run remain open. Runtime animation, animation
+collision and IK integration moved to v0.12. Native graphics backend lanes and
+the frame graph moved to v0.11.5.
 
 ### Graphics ownership (ApiGraphicBasic)
 
@@ -458,10 +459,14 @@ lanes and the frame graph moved to v0.11.5.
   surface-loss recovery, suspend/resume and backend-neutral fence tracking so
   backends can be selected per platform without coupling editor surfaces to
   WGPU.
-- [ ] ApiGraphicBasic asset ingress: move render-facing asset import,
-  decode/transcode policy, GPU residency, thumbnails, and resource lifetime
-  behind the engine graphics API. Project files remain portable while the
-  renderer owns how each asset reaches the selected GPU backend.
+- [x] ApiGraphicBasic asset ingress: render-facing texture decode and residency
+  now pass through `raf_assets::ingress` and
+  `ApiGraphicBasic::asset_ingress`, with path confinement, byte/pixel budgets,
+  LRU eviction and bounded thumbnails. GPU upload remains in `device.rs`.
+- [x] Presentation surface recovery: Lost/Outdated/Timeout reconfigure and retry
+  once; OutOfMemory is fatal; health is observable by the Player and editor.
+- [ ] Device-loss recreation: a lost `wgpu::Device` is not re-created yet; the
+  surface path reports the failure instead of reloading the runtime.
 
 ### Cloud and streaming
 
@@ -477,9 +482,9 @@ lanes and the frame graph moved to v0.11.5.
   runtime is still a demo until the project VFS and scripts land.
 - [x] Cloud deployment configuration: multi-stage image, entrypoint, resource
   limits and volume layout. The image build remains pending.
-- [ ] Streaming protocol preparation (WebRTC stub): the self-made length-
-  prefixed transport, token handshake and raw RGBA video contract are shipped;
-  the WebRTC/SDP adapter is still open.
+- [x] Streaming protocol preparation (WebRTC control plane): SDP offer/answer,
+  ICE candidate models, token-authenticated signaling and a bounded negotiation
+  state machine. The media plane (DTLS/SRTP/SCTP/codec) is owned by v0.12.
 
 ### Electronics authoring
 
@@ -488,8 +493,9 @@ lanes and the frame graph moved to v0.11.5.
 
 **0.11 delivery snapshot (2026-11-19):** headless capture and streaming,
 self-made transport, Linux CI/Docker, WASM renderer host, the graphics memory
-ledger and custom electronics components landed. Asset ingress, presentation
-recovery, WebRTC encoding and the first remote CI run remain open.
+ledger, asset ingress, presentation surface recovery, WebRTC control plane and
+custom electronics components landed. WebRTC media (DTLS/SRTP/SCTP/codec),
+device-loss recreation and the first remote CI run remain open.
 
 ### Deferred inside the 0.11 line
 
@@ -540,6 +546,28 @@ target remains v0.12 and is specified in
 
 - [ ] Additional components (transistors, ICs, connectors) with schematic
   symbols, pins, footprint mapping and explicit simulation scope.
+
+### Real-time media plane (WebRTC, moved from v0.11)
+
+The v0.11 WebRTC item delivered the control plane only: SDP offer/answer, ICE
+candidate models, a token-authenticated signaling server and a bounded
+negotiation state machine (`docs/WEBRTC.md`). Browser media is a separate
+engineering block and belongs to v0.12:
+
+- [ ] ICE agent: STUN binding, pair checks, nomination and consent freshness.
+- [ ] DTLS certificate, handshake and SDP fingerprint verification.
+- [ ] SRTP key export, RTP/RTCP protection and anti-replay window.
+- [ ] SCTP/DCEP data channels with bounded message sizes.
+- [ ] RTP packetization and a browser-supported codec (VP8/H264/AV1), keyframes,
+  jitter buffer and RTCP feedback.
+- [ ] Congestion control, pacing and bandwidth estimation.
+- [ ] Browser-compatible signaling transport (WebSocket/TLS edge) and a real
+  browser client.
+- [ ] Interoperability acceptance in Chromium and Firefox before claiming
+  browser streaming.
+
+`RAF1` remains an internal payload label and no browser decodes it. Do not mark
+this section complete until the media path is measured end to end.
 
 ### Deferred AI authoring and rendering work
 

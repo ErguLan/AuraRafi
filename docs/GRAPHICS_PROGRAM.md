@@ -57,17 +57,25 @@ Rules:
 - Disabled features have zero recurring frame cost.
 - A native lane that only opens a window is not a qualified backend.
 
-## 3. Current baseline (2026-11-18)
+## 3. Current baseline (2026-11-19)
 
 - WGPU 23 is the active GPU executor behind ApiGraphicBasic.
 - `BasicDevice` carries adapter preference, backend-neutral capabilities,
   generational handles, and `GraphicsMemoryBudget`.
 - CPU recovery produces RGBA frames without GPU access.
+- The cross-family memory ledger budgets buffer, texture, sampler, pipeline,
+  mesh, material, staging and transient families, and feeds the editor HUD.
 - RafUI compiles one `UiSurfaceDrawList` per invalidated frame and batches
   adjacent compatible paint work.
 - Scene rendering has bounded mesh residency, line batching, upload budgets,
   and `SceneFrameMetrics` for CPU/GPU frame time, draw calls, uploads, evictions,
   and budget overruns.
+- Texture decode and CPU residency now pass through `raf_assets::ingress` and
+  `ApiGraphicBasic::asset_ingress`; `SceneRenderer` no longer decodes files ad
+  hoc. GPU upload remains inside `device.rs`.
+- Surface loss (`Lost`/`Outdated`/`Timeout`) reconfigures and retries once;
+  `OutOfMemory` is fatal. Device recreation is still open.
+- Headless capture and the one-client streaming host are active and measured.
 - The directional shadow pass is opt-in and budgeted. It is not a general
   shadow system.
 - A prepared backend-neutral frame graph exists in
@@ -75,6 +83,45 @@ Rules:
   [FRAME_GRAPH.md](FRAME_GRAPH.md). It is not wired into `BasicDevice` yet, so
   the active scene path remains single-pass.
 - There is no native backend lane yet. That is v0.11.5 work.
+
+### Boundary status
+
+WGPU is still the only GPU executor, and the boundary is not sealed yet. The
+remaining direct `wgpu::` consumers are concentrated in:
+
+| File | Role |
+| --- | --- |
+| `ApiGraphicBasic/device.rs` | neutral device plus WGPU scene execution and pipelines |
+| `ui_surface/gpu_renderer.rs` | RafUI's WGPU renderer |
+| `canvas_presenter.rs` | WGPU surface blit |
+| `ui_surface/native_window.rs` | WGPU instance/adapter/device/surface creation |
+| `shadow_gpu.rs`, `environment_gpu.rs`, `optimized_filter_gpu.rs` | scene sub-passes inside the device |
+| `editor_compositor.rs` | WGPU layer composition |
+
+The target layout is:
+
+```text
+ApiGraphicBasic/
+  mod.rs                 public contract only
+  device.rs              neutral device + dispatch
+  frame_graph.rs
+  command_list.rs
+  asset_ingress.rs
+  memory_ledger.rs
+  handles.rs
+  capabilities.rs
+  backends/
+    wgpu/                the only place that imports wgpu
+    cpu/
+    null/
+    vulkan/              v0.11.5+
+    dx12/                v0.11.5+
+    metal/               v0.11.5+
+```
+
+The hard rule for the migration: no file outside `backends/` imports `wgpu`.
+Until that is true, adding a native backend would also require duplicating RafUI,
+the compositor and the surface host.
 
 Current budgets:
 

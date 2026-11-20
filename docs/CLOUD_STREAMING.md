@@ -57,8 +57,10 @@ run scripts, or decide simulation results.
 
 - No video codec is promised. v0.11 emits raw RGBA8 frames. A codec can be
   added later behind the same frame contract.
-- No WebRTC implementation is included. The transport boundary is an operator
-  concern; a future WebRTC carrier can consume the same frames.
+- No WebRTC media plane is included. The control plane (SDP offer/answer, ICE
+  candidates, token-authenticated signaling and a negotiation state machine)
+  lives in `raf_net::webrtc`; DTLS, SRTP, SCTP, RTP and a browser codec belong
+  to v0.12. See [WebRTC](WEBRTC.md).
 - No audio transport. Linux audio output is not implemented in the player.
 - No adaptive bitrate, congestion control, or packet retransmission.
 - No multi-tenant scheduler or GPU sharing in this repository.
@@ -440,7 +442,8 @@ baked into the image. `RAFI_MANIFEST`, `RAFI_PROJECT_DIR`, `RAFI_OUT_DIR`,
 - Linux audio output is not implemented. `crates/raf_player/src/audio.rs`
   reports unsupported output outside Windows.
 - Clipboard, IME, gamepad, and multi-client input are not defined.
-- No WebRTC carrier, signaling, or browser client is included.
+- The WebRTC control plane exists, but no browser media carrier is implemented:
+  no DTLS, SRTP, SCTP, RTP packetization, or VP8/H264 codec.
 - No multi-session supervisor or GPU partitioning exists.
-- There is no committed `examples/headless/project` fixture yet, so the real
-  frame-run step is skipped until that fixture exists.
+- The committed fixture lives at `examples/headless/project/runtime.ron`; the CI
+  smoke runs three frames and validates the report.

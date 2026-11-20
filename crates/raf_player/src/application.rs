@@ -1,6 +1,6 @@
 use crate::{PlayerSession, PlayerSource};
 use raf_render::api_graphic_basic::ui_surface::{
-    NativeUiInputBridge, NativeUiWindowConfig, NativeUiWindowHost,
+    NativeUiInputBridge, NativeUiWindowConfig, NativeUiWindowHost, PresentationHealth,
 };
 use raf_render::api_graphic_basic::{GraphicsAdapterPreference, NativeEditorCompositor};
 use raf_runtime::manifest::RuntimeHostSettings;
@@ -43,6 +43,8 @@ pub fn run(launch: PlayerLaunch) -> Result<(), String> {
         last_status: Instant::now(),
         last_render: Instant::now(),
         minimized: false,
+        presentation_warning_active: false,
+        presentation_fatal_reported: false,
     };
     event_loop
         .run_app(&mut app)
@@ -60,6 +62,8 @@ struct PlayerApplication {
     last_status: Instant,
     last_render: Instant,
     minimized: bool,
+    presentation_warning_active: bool,
+    presentation_fatal_reported: bool,
 }
 impl PlayerApplication {
     fn stop(&mut self, event_loop: &ActiveEventLoop) {
@@ -232,14 +236,41 @@ impl ApplicationHandler for PlayerApplication {
             }
             WindowEvent::RedrawRequested => {
                 self.poll_control(event_loop);
+                let mut presentation_retry = None;
                 if !self.minimized {
                     if let (Some(session), Some(host), Some(compositor)) =
                         (&mut self.session, &mut self.host, &mut self.compositor)
                     {
-                        if let Err(error) = session.draw(host, compositor, &self.input) {
-                            tracing::error!(%error, "runtime draw failed");
-                            self.stop(event_loop);
-                            return;
+                        match session.draw(host, compositor, &self.input) {
+                            Ok(()) => {
+                                self.presentation_warning_active = false;
+                                self.presentation_fatal_reported = false;
+                            }
+                            Err(error) => {
+                                let health = host.presentation_health();
+                                if let PresentationHealth::Failed { fault } = health {
+                                    if !self.presentation_fatal_reported {
+                                        self.presentation_fatal_reported = true;
+                                        tracing::error!(
+                                            fault = fault.label(),
+                                            %error,
+                                            "runtime presentation failed"
+                                        );
+                                    }
+                                    self.stop(event_loop);
+                                    return;
+                                }
+                                if !self.presentation_warning_active {
+                                    self.presentation_warning_active = true;
+                                    tracing::warn!(
+                                        %error,
+                                        "runtime presentation interrupted; retrying"
+                                    );
+                                }
+                                if let PresentationHealth::Recovering { next_retry, .. } = health {
+                                    presentation_retry = Some(next_retry);
+                                }
+                            }
                         }
                         if session.entered_game() && !host.is_headless() {
                             let size = session.settings.runtime.window_size;
@@ -274,11 +305,16 @@ impl ApplicationHandler for PlayerApplication {
                     self.stop(event_loop);
                     return;
                 }
-                self.next_frame = Instant::now()
+                let now = Instant::now();
+                let mut next_frame = now
                     + self
                         .session
                         .as_ref()
                         .map_or(Duration::from_millis(250), |s| s.frame_interval());
+                if let Some(retry_at) = presentation_retry {
+                    next_frame = next_frame.max(retry_at);
+                }
+                self.next_frame = next_frame;
                 return;
             }
             _ => {}

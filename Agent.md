@@ -19,6 +19,36 @@ All AI models and contributors must strictly adhere to these fundamental operati
    * Eliminate God-functions and God-files: Never write monster functions or bloated files. Decompose logic into clean, focused, composable units.
    * Proactive modular file creation: The AI is explicitly empowered and expected to create as many dedicated files (helpers, sub-surfaces, hosts, models) as needed to maintain high modularity and clean architectural growth.
 
+## Large File & God Module Guardrail
+
+These rules exist because monolithic files block review, merge safety, and the
+ApiGraphicBasic backend migration.
+
+- A Rust source file above **1,500 lines** is a design smell. Above **2,500
+  lines** it must be split before adding or moving more features.
+- New files must stay below **1,200 lines**. A feature that would cross that
+  limit gets its own module from the start.
+- Split by responsibility that changes for a different reason, never by an
+  arbitrary line count or by "types vs functions".
+- Keep the original file as the module facade. Add a sibling directory with the
+  same stem (for example `device.rs` + `device/backend_wgpu.rs`) and declare the
+  submodules in the original file. Do not edit shared `mod.rs` or `lib.rs` files
+  just to register a split.
+- Extract `#[cfg(test)] mod tests` into `tests.rs` first. It is the lowest-risk
+  cut and usually removes hundreds of lines.
+- A split is a move-only change. Do not mix it with behavior, naming, formatting
+  or feature work in the same pass.
+- Compile the owning crate after each split and fix only that split's errors.
+- Never leave two copies of a function, a re-export that hides a duplicate, or a
+  module that only exists to forward one symbol.
+
+Current high-risk files include `ui_surface/mod.rs`,
+`ui_surface/render.rs`, `raf_ai/agent_runtime.rs`,
+`native_attached_executor.rs` and `electronics_inspector_surface.rs`. The
+split inventory and the remaining debt are tracked in
+[docs/MODULARIZATION.md](docs/MODULARIZATION.md). Treat the list as a living
+inventory, not a one-time cleanup.
+
 ## Synaptic Directory Map
 * **Definitive Architectural Directory**: [.ai/SYSTEM_TRUTH.md](.ai/SYSTEM_TRUTH.md) — All crates, files, and logic paths detailed.
 * **Strict Quality & Localisation Policies**: [.ai/instructions.md](.ai/instructions.md) — Languages, modular layouts, commands consistency, and no-emoji mandates.

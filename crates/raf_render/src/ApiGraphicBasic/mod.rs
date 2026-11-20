@@ -2,6 +2,7 @@ pub mod grid;
 pub mod recipes;
 
 mod cad_board_surface;
+pub mod asset_ingress;
 pub mod cad_surface;
 pub mod cad_surface_host;
 pub mod canvas_presenter;
@@ -21,6 +22,10 @@ pub mod pipeline;
 pub mod resource_registry;
 pub mod ui_surface;
 
+pub use asset_ingress::{
+    TextureIngress, TextureIngressEntry, TextureIngressKey, TextureIngressMetrics,
+    DEFAULT_TEXTURE_INGRESS_BUDGET_BYTES, TEXTURE_THUMBNAIL_MAX_DIMENSION,
+};
 pub use canvas_presenter::CanvasTargetRect;
 pub use capabilities::{
     GraphicsAdapterPreference, GraphicsBackendId, GraphicsBudgetError, GraphicsCapabilities,

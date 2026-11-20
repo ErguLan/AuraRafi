@@ -5,7 +5,7 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased] - 0.11.0 Cloud & Streaming Preview
+## [0.11.2] - 2026-11-19 - Cloud Spine, Iron Ledger and Modular Forge
 
 ### Added
 
@@ -27,7 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ElectricalAssets` persistence, a retained creator surface and explicit
   unmodeled simulation semantics.
 - **WASM renderer host**: `raf_web` canvas target that reuses the desktop scene
-  renderer and `BasicGraphic` device, with an HTML demo and build scripts.
+  renderer and `ApiGraphicBasic` device, with an HTML demo and build scripts.
 - **Linux CI and deployment**: Linux workflow with the target override, focused
   crate gates, artifact upload and headless smoke; multi-stage container,
   entrypoint and deployment documentation.
@@ -36,6 +36,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   open.
 - **Editor memory telemetry**: cached `MEM` segment in the Game status bar and a
   Memory group in the UI cost inspector.
+- **Asset ingress**: `raf_assets::ingress` owns texture decode policy and
+  `ApiGraphicBasic::asset_ingress` owns path confinement, CPU residency, LRU
+  eviction and bounded 128 px thumbnails. `SceneRenderer` no longer decodes
+  files ad hoc.
+- **Presentation surface recovery**: `Lost`, `Outdated` and `Timeout`
+  reconfigure the surface and retry once; `OutOfMemory` is fatal; health is
+  observable by the Player and the editor.
+- **WebRTC control plane**: SDP offer/answer, ICE candidate models,
+  token-authenticated line-delimited signaling and a bounded negotiation state
+  machine in `raf_net::webrtc`.
 
 ### Changed
 
@@ -45,11 +55,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `std::time::Instant` in the render device.
 - Custom electronics components are excluded from conductance and reported as
   unmodeled instead of being treated as wires.
+- **God-file pass**: 27 large modules were split into facade + focused
+  submodules, including `device.rs`, `gpu_renderer.rs`, `agent_surface.rs`,
+  `agent_executor.rs`, `native_application.rs`, `game.rs`, `agent_context.rs`
+  and `raf_cli/main.rs`. Public paths and behavior are unchanged; the rule and
+  remaining debt live in [MODULARIZATION.md](docs/MODULARIZATION.md).
 
 ### Known limitations
 
-- Render-facing asset ingress, device/surface-loss recovery and the WebRTC/SDP
-  adapter remain open.
+- The WebRTC media plane (ICE agent, DTLS, SRTP, SCTP, RTP, VP8/H264) is owned by
+  v0.12. The control plane is complete.
+- Device-loss recreation is not implemented; surface loss recovers, a lost
+  `wgpu::Device` is reported instead of reloaded.
+- The first remote Linux CI run is still pending.
 - The WASM target is a renderer demo; project loading, scripts and audio still
   need a browser VFS.
 - Five editor unit tests and one retained-layout test were already failing

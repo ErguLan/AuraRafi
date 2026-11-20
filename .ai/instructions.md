@@ -18,6 +18,7 @@ This file defines the strict, non-negotiable rules for code quality, behavior, a
   * Zero hardcoding: Never hardcode arbitrary offsets, magic values, or rigid inline blocks that hinder expandability.
   * Anti-God-Functions & Anti-God-Files: Never write bloated monster functions or giant monolithic files. Decompose logic into clean, focused, composable units.
   * Proactive modular file creation: The AI is explicitly authorized and expected to create as many dedicated files (helpers, sub-surfaces, hosts, models) as needed to maintain high modularity and clean architectural growth.
+  * **File size guardrail**: A Rust file above 1,500 lines is a design smell; above 2,500 lines it must be split before adding features. New files stay below 1,200 lines. Keep the original file as the module facade, add a sibling directory with the same stem, and declare submodules in the original file instead of editing shared `mod.rs`/`lib.rs` files. Extract `#[cfg(test)] mod tests` into `tests.rs` first. A split is a move-only change: no behavior, naming, formatting, or feature work in the same pass. Compile the owning crate after each split.
 * **SLIM NATIVE HOSTS AND RAFUI-FIRST PROTOCOL**: Do not write raw drawing
   calls, menu trees, or panel-specific business logic into a monolithic editor
   coordinator. The active boundary is the native Winit application,

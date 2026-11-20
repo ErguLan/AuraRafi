@@ -46,3 +46,5 @@ target_*.log
 # Local smoke-test output and generated Python bytecode
 /artifacts/
 **/__pycache__/
+# Local rustc temp used when the system temp drive is full
+/.tmp-rustc/

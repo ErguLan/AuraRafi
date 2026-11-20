@@ -6,12 +6,17 @@ pub mod browser;
 pub mod authoring_catalog;
 pub mod image_asset;
 pub mod importer;
+pub mod ingress;
 pub mod primitive_manifest;
 pub mod primitives;
 
 pub use browser::AssetBrowser;
 pub use image_asset::{decode_image, image_output_dimensions, DecodedImage};
 pub use importer::{AssetImporter, AssetType};
+pub use ingress::{
+    decode_texture, thumbnail, AssetIngressError, DecodedTexture, TextureDecodeLimits,
+    MAX_THUMBNAIL_DIMENSION,
+};
 pub use primitive_manifest::{
     builtin_primitive_model_kinds, PrimitiveManifestError, PrimitiveModelManifest,
     PrimitiveModelPart,

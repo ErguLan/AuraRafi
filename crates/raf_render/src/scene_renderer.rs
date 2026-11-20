@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use crate::api_graphic_basic::asset_ingress::TextureIngress;
 use crate::api_graphic_basic::command_list::{BasicCommandList, BasicLine, GraphicCommand};
 use crate::api_graphic_basic::grid::{build_3d_grid, GridLineKind};
 use crate::api_graphic_basic::mesh::BasicMesh;
@@ -35,8 +36,9 @@ use crate::render_pipeline::rasterizer::{self, ScreenVertex};
 use crate::scene_visibility::{
     SceneObjectBounds, SceneVisibility, SceneVisibilityPolicy, WorldStreamVisibility,
 };
-use crate::texture::TextureCache;
+use crate::texture::CpuTexture;
 
+use raf_assets::ingress::TextureDecodeLimits;
 use raf_core::project::{GeometryDetailMode, TextureQualityMode};
 use raf_core::scene::graph::{Primitive, SceneGraph, SceneNodeId};
 use raf_core::scene::WorldTransformCache;
@@ -162,8 +164,8 @@ impl CurvedMeshDetail {
 
 /// The CPU scene renderer.
 ///
-/// Owns the framebuffer and mesh cache. Stateless between frames
-/// except for the framebuffer allocation (reused across frames).
+/// Owns the framebuffer, mesh cache, and the budgeted texture ingress.
+/// Retained state is limited to reusable allocations and budgeted caches.
 pub struct SceneRenderer {
     /// The render target.
     framebuffer: Framebuffer,
@@ -191,7 +193,14 @@ pub struct SceneRenderer {
     geometry_lod_by_id: HashMap<SceneNodeId, u8>,
     geometry_lod_history_revision: u64,
     asset_root: Option<PathBuf>,
-    texture_cache: TextureCache,
+    /// Budgeted decode/residency cache for project base-color textures.
+    texture_ingress: TextureIngress,
+    /// Authored relative texture path -> confined project path resolution.
+    texture_paths: HashMap<String, Option<PathBuf>>,
+    /// Monotonic frame counter used by ingress LRU and per-frame admission.
+    texture_frame: u64,
+    /// Output dimension cap applied to the last texture-quality policy.
+    texture_max_dimension: u32,
     shadow_geometry: Option<Arc<crate::shadow_frame::ShadowGeometry>>,
     shadow_budget_exceeded: bool,
     shadow_geometry_revision: u64,
@@ -264,7 +273,12 @@ impl SceneRenderer {
             geometry_lod_by_id: HashMap::new(),
             geometry_lod_history_revision: 0,
             asset_root: None,
-            texture_cache: TextureCache::default(),
+            texture_ingress: TextureIngress::new(
+                crate::api_graphic_basic::asset_ingress::DEFAULT_TEXTURE_INGRESS_BUDGET_BYTES,
+            ),
+            texture_paths: HashMap::new(),
+            texture_frame: 0,
+            texture_max_dimension: TextureQualityMode::default().max_dimension(),
             shadow_geometry: None,
             shadow_budget_exceeded: false,
             shadow_geometry_revision: 0,
@@ -275,25 +289,44 @@ impl SceneRenderer {
     pub fn set_asset_root(&mut self, assets_root: Option<PathBuf>) {
         if self.asset_root != assets_root {
             self.asset_root = assets_root;
-            self.texture_cache.clear();
+            self.texture_paths.clear();
+            self.texture_ingress.clear();
         }
     }
 
-    fn resolve_texture_path(&self, relative_path: &str) -> Option<PathBuf> {
-        let root = self.asset_root.as_ref()?;
-        let normalized = relative_path.replace('\\', "/");
-        let mut relative = PathBuf::new();
-        for component in Path::new(&normalized).components() {
-            match component {
-                Component::Normal(value) => relative.push(value),
-                _ => return None,
-            }
+    /// Resolve one authored texture path through the budgeted ingress.
+    ///
+    /// Relative paths are normalized once and cached; a resident texture hit
+    /// allocates no new path or pixel buffer on later frames. The caller passes
+    /// the three disjoint fields so mesh borrows stay alive during the scene
+    /// loop without borrowing the whole renderer mutably.
+    fn resolve_base_color_texture(
+        asset_root: Option<&Path>,
+        texture_paths: &mut HashMap<String, Option<PathBuf>>,
+        texture_ingress: &mut TextureIngress,
+        relative_path: &str,
+        limits: TextureDecodeLimits,
+        frame: u64,
+    ) -> Result<Arc<CpuTexture>, String> {
+        let root = asset_root.ok_or_else(|| "no project asset root is configured".to_string())?;
+        if !texture_paths.contains_key(relative_path) {
+            texture_paths.insert(
+                relative_path.to_owned(),
+                resolve_texture_candidate(root, relative_path),
+            );
         }
-        if relative.as_os_str().is_empty() {
-            return None;
-        }
-        let resolved = root.join(relative);
-        resolved.starts_with(root).then_some(resolved)
+        let path = texture_paths
+            .get(relative_path)
+            .and_then(|path| path.as_deref())
+            .ok_or_else(|| "texture path is outside the project asset root".to_string())?;
+        texture_ingress.get_or_decode(path, root, limits, frame)
+    }
+
+    /// Snapshot of texture ingress residency and cumulative counters.
+    pub fn texture_ingress_metrics(
+        &self,
+    ) -> crate::api_graphic_basic::asset_ingress::TextureIngressMetrics {
+        self.texture_ingress.metrics()
     }
 
     fn local_bounds_for_primitive(&self, primitive: Primitive) -> (Vec3, Vec3) {
@@ -735,10 +768,27 @@ impl SceneRenderer {
             mesh_override,
         );
         let shadows = self.build_shadows(scene, cam_eye, environment, mesh_override);
-        self.texture_cache.set_limits(
-            (options.texture_quality.cache_budget_bytes() / 2) as usize,
-            options.texture_quality.max_dimension(),
-        );
+
+        // Texture policy is shared with the GPU budget: half of the quality
+        // budget caps long-lived CPU residency and the other half caps new
+        // admissions per frame. Both halves stay inside the project's hard
+        // texture-quality contract.
+        self.texture_frame = self.texture_frame.wrapping_add(1).max(1);
+        let texture_frame = self.texture_frame;
+        let texture_budget_bytes = options.texture_quality.cache_budget_bytes();
+        let texture_resident_budget = texture_budget_bytes / 2;
+        let texture_frame_budget = texture_budget_bytes.saturating_sub(texture_resident_budget);
+        let texture_max_dimension = options.texture_quality.max_dimension();
+        if texture_max_dimension != self.texture_max_dimension {
+            self.texture_max_dimension = texture_max_dimension;
+            self.texture_ingress.clear();
+        }
+        self.texture_ingress.set_budget(texture_resident_budget);
+        self.texture_ingress.set_frame_budget(texture_frame_budget);
+        let texture_limits = TextureDecodeLimits {
+            max_dimension: texture_max_dimension,
+            ..TextureDecodeLimits::default()
+        };
 
         let cube_mesh = &self.cube_mesh;
         let cube_basic_mesh = Arc::clone(&self.cube_basic_mesh);
@@ -767,13 +817,6 @@ impl SceneRenderer {
 
         let use_tonality = options.solid_face_tonality;
         let mut grid_drawn = false;
-        let frame_texture_budget_bytes = options
-            .texture_quality
-            .cache_budget_bytes()
-            .saturating_sub(options.texture_quality.cache_budget_bytes() / 2);
-        let mut frame_texture_bytes = 0_u64;
-        let mut frame_texture_sources = HashSet::new();
-        let mut rejected_texture_sources = HashSet::new();
         for job in &jobs {
             if job.is_transparent && !grid_drawn {
                 if options.show_grid_3d && matches!(camera.mode, CameraMode::Perspective) {
@@ -831,35 +874,19 @@ impl SceneRenderer {
                 job.base_color
             };
 
-            let texture_id = job
-                .base_color_texture
-                .as_deref()
-                .and_then(|path| self.resolve_texture_path(path))
-                .and_then(|path| {
-                    if rejected_texture_sources.contains(&path) {
-                        return None;
-                    }
-                    if frame_texture_sources.contains(&path) {
-                        return self
-                            .texture_cache
-                            .get_or_load(&path)
-                            .map(|texture| commands.register_texture(texture));
-                    }
-
-                    let remaining = frame_texture_budget_bytes
-                        .saturating_sub(frame_texture_bytes)
-                        .min(usize::MAX as u64) as usize;
-                    let Some(texture) =
-                        self.texture_cache.get_or_load_with_budget(&path, remaining)
-                    else {
-                        rejected_texture_sources.insert(path);
-                        return None;
-                    };
-                    frame_texture_bytes =
-                        frame_texture_bytes.saturating_add(texture.memory_bytes() as u64);
-                    frame_texture_sources.insert(texture.source.clone());
-                    Some(commands.register_texture(texture))
-                });
+            let texture_id = match job.base_color_texture.as_deref() {
+                Some(path) => Self::resolve_base_color_texture(
+                    self.asset_root.as_deref(),
+                    &mut self.texture_paths,
+                    &mut self.texture_ingress,
+                    path,
+                    texture_limits,
+                    texture_frame,
+                )
+                .ok()
+                .map(|texture| commands.register_texture(texture)),
+                None => None,
+            };
 
             let two_sided = job.primitive == Primitive::Plane;
             commands.set_pipeline(match (use_tonality, two_sided) {
@@ -945,6 +972,26 @@ impl SceneRenderer {
     pub fn dimensions(&self) -> (u32, u32) {
         (self.framebuffer.width(), self.framebuffer.height())
     }
+}
+
+/// Normalize an authored texture path and confine it to the project asset root.
+///
+/// Traversal components, absolute paths, and drive prefixes are rejected before
+/// the ingress ever touches the filesystem.
+fn resolve_texture_candidate(root: &Path, relative_path: &str) -> Option<PathBuf> {
+    let normalized = relative_path.replace('\\', "/");
+    let mut relative = PathBuf::new();
+    for component in Path::new(&normalized).components() {
+        match component {
+            Component::Normal(value) => relative.push(value),
+            _ => return None,
+        }
+    }
+    if relative.as_os_str().is_empty() {
+        return None;
+    }
+    let resolved = root.join(relative);
+    resolved.starts_with(root).then_some(resolved)
 }
 
 pub(crate) fn rasterize_basic_scene_frame(frame: &SceneRenderFrame, framebuffer: &mut Framebuffer) {
@@ -1852,6 +1899,85 @@ mod tests {
             command,
             GraphicCommand::DrawMesh { .. } | GraphicCommand::DrawMeshBatch { .. }
         )));
+    }
+
+    #[test]
+    fn base_color_textures_enter_through_the_budgeted_ingress() {
+        let root = std::env::temp_dir().join(format!(
+            "raf-scene-texture-ingress-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create temporary asset root");
+        image::RgbaImage::from_pixel(8, 8, image::Rgba([200, 40, 20, 255]))
+            .save(root.join("base.png"))
+            .expect("write temporary texture");
+
+        let mut scene = SceneGraph::new();
+        let cube = scene.add_root_with_primitive("Cube", Primitive::Cube);
+        scene.get_mut(cube).unwrap().base_color_texture = Some("base.png".to_string());
+        let camera = Camera::default();
+        let mut renderer = SceneRenderer::new(64, 64);
+        renderer.set_asset_root(Some(root.clone()));
+        let options = RenderOptions {
+            show_grid_3d: false,
+            ..RenderOptions::default()
+        };
+        let build = |renderer: &mut SceneRenderer, scene: &SceneGraph| {
+            renderer.build_frame(
+                scene,
+                &camera,
+                64.0,
+                64.0,
+                &[],
+                [20, 20, 20, 255],
+                Vec3::Y,
+                options,
+                None,
+            )
+        };
+
+        let first = build(&mut renderer, &scene);
+        let texture_id = first
+            .commands
+            .commands()
+            .iter()
+            .find_map(|command| match command {
+                GraphicCommand::DrawMesh {
+                    texture_id: Some(texture_id),
+                    ..
+                } => Some(*texture_id),
+                _ => None,
+            })
+            .expect("the cube should render with its base-color texture");
+        let texture = first
+            .commands
+            .texture(texture_id)
+            .expect("the texture should be registered for the frame");
+        assert_eq!((texture.width, texture.height), (8, 8));
+        assert!(texture
+            .source
+            .starts_with(root.canonicalize().expect("canonical asset root")));
+
+        let metrics = renderer.texture_ingress_metrics();
+        assert_eq!(metrics.misses, 1);
+        assert_eq!(metrics.entries, 1);
+
+        let _ = build(&mut renderer, &scene);
+        let metrics = renderer.texture_ingress_metrics();
+        assert_eq!(metrics.misses, 1);
+        assert_eq!(metrics.hits, 1);
+        assert_eq!(metrics.entries, 1);
+
+        scene.get_mut(cube).unwrap().base_color_texture = Some("../base.png".to_string());
+        let escaped = build(&mut renderer, &scene);
+        assert!(!escaped.commands.commands().iter().any(|command| matches!(
+            command,
+            GraphicCommand::DrawMesh {
+                texture_id: Some(_),
+                ..
+            }
+        )));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

@@ -145,6 +145,10 @@ These are not implemented and must not be presented as working:
   adapter, or retained UI surfaces are hosted by this crate.
 - **Full project assets.** No texture, mesh, or audio project files are read.
   The scene is embedded RON data.
+- **Saving and runtime services.** There is no project save, storage worker,
+  progress slot, or runtime service host in the browser demo.
+- **Streaming.** The page does not expose the native `--stream` transport and no
+  WebRTC media adapter is wired into `raf_web`.
 - **Device loss recovery.** A lost surface is reconfigured. A lost device is not
   re-created, because that would discard the `BasicDevice` and scene state; the
   page reports the failure instead.
