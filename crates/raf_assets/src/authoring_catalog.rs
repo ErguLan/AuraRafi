@@ -12,6 +12,7 @@ pub enum AssetClass {
     Audio,
     Camera,
     Interface,
+    Animation,
     File,
 }
 
@@ -32,15 +33,19 @@ mod tests {
         let mut scene = SceneGraph::new();
         let id = scene.add_root_with_primitive("Part", Primitive::Cube);
         scene.get_mut(id).unwrap().base_color_texture = Some("textures/wood.png".into());
+        scene.get_mut(id).unwrap().animation_asset = Some("motion/lift.animation.json".into());
         let rows = vec![
             "textures/wood.png".into(),
             "models/store.glb".into(),
             "shelf.prefab.ron".into(),
+            "motion/lift.animation.json".into(),
         ];
         let entries = project_assets(&rows, &scene);
         assert_eq!(entries[&rows[0]].usages, 1);
         assert!(!entries[&rows[1]].insertable());
         assert!(entries[&rows[2]].insertable());
+        assert_eq!(entries[&rows[3]].class, AssetClass::Animation);
+        assert_eq!(entries[&rows[3]].usages, 1);
     }
 }
 
@@ -63,6 +68,8 @@ impl AuthoringAsset {
             AssetClass::Interface
         } else if lower.ends_with(".prefab.ron") {
             AssetClass::Prefab
+        } else if crate::animation_asset::is_animation_asset(&lower) {
+            AssetClass::Animation
         } else {
             match lower.rsplit('.').next().unwrap_or("") {
                 "png" | "jpg" | "jpeg" | "bmp" | "webp" => AssetClass::Image,
@@ -104,6 +111,7 @@ pub fn project_assets(rows: &[String], scene: &SceneGraph) -> HashMap<String, Au
             .source_asset
             .iter()
             .chain(node.base_color_texture.iter())
+            .chain(node.animation_asset.iter())
             .chain(node.scripts.iter())
             .chain(std::iter::once(&node.audio_source.clip).filter(|clip|!clip.is_empty()))
         {

@@ -37,7 +37,6 @@ fn agent_workspace_preview_is_lazy_cached_bounded_and_readonly() {
             &project,
             &cpu_settings(),
             CanvasTargetRect::full([1600, 900]),
-            || panic!("hidden preview allocated graphics")
         )
         .is_none());
     preview.sync(Some(target), true, Instant::now());
@@ -51,7 +50,6 @@ fn agent_workspace_preview_is_lazy_cached_bounded_and_readonly() {
             &project,
             &cpu_settings(),
             CanvasTargetRect::full([1600, 900]),
-            || None,
         )
         .unwrap();
     assert!(layer.source_size[0] <= 480 && layer.source_size[1] <= 360);
@@ -82,7 +80,6 @@ fn agent_workspace_preview_is_lazy_cached_bounded_and_readonly() {
                 &project,
                 &cpu_settings(),
                 CanvasTargetRect::full([1600, 900]),
-                || panic!("cached frame recreated context"),
             )
             .unwrap();
         assert!(Arc::ptr_eq(&cached.output, &layer.output));
@@ -114,7 +111,6 @@ fn agent_workspace_preview_target_switch_and_exit_drop_resources_immediately() {
             &project,
             &cpu_settings(),
             CanvasTargetRect::full([320, 240]),
-            || None,
         )
         .unwrap();
     let other = PreviewTarget {
@@ -129,7 +125,6 @@ fn agent_workspace_preview_target_switch_and_exit_drop_resources_immediately() {
             &project,
             &cpu_settings(),
             CanvasTargetRect::full([320, 240]),
-            || None,
         )
         .unwrap();
     assert_eq!(preview.target, Some(other));

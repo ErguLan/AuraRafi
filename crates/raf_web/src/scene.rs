@@ -262,10 +262,14 @@ impl DemoScene {
     /// `dt` is clamped so a suspended tab cannot jump the animation after it
     /// resumes. Elapsed time wraps at a bounded value to avoid precision drift
     /// during long sessions.
-    pub(crate) fn update(&mut self, dt: f32) {
+    ///
+    /// Returns whether the recorded scene content changed. The camera travels
+    /// in `FrameUniforms`, so a camera-only update returns `false` and the host
+    /// reuses the retained product packet.
+    pub(crate) fn update(&mut self, dt: f32) -> bool {
         let dt = dt.clamp(0.0, 0.1);
         if dt == 0.0 {
-            return;
+            return false;
         }
         self.elapsed = (self.elapsed + dt).rem_euclid(ELAPSED_WRAP);
         self.orbit.yaw = (self.orbit.yaw + self.orbit.yaw_speed * dt).rem_euclid(TAU);
@@ -273,11 +277,17 @@ impl DemoScene {
         self.camera.target = self.orbit.target;
 
         let elapsed = self.elapsed;
+        let mut content_changed = false;
         for (id, speed) in &self.spinning {
             if let Some(node) = self.graph.get_mut(*id) {
-                node.rotation.y = (elapsed * *speed).to_degrees().rem_euclid(360.0);
+                let rotation = (elapsed * *speed).to_degrees().rem_euclid(360.0);
+                if node.rotation.y != rotation {
+                    node.rotation.y = rotation;
+                    content_changed = true;
+                }
             }
         }
+        content_changed
     }
 
     /// Record one scene frame through the shared renderer.

@@ -42,6 +42,7 @@ pub fn matches(scene: &SceneGraph, id: SceneNodeId, query: &str) -> bool {
             "script" => node.scripts.iter().any(|s| contains(s)),
             "asset" => {
                 node.source_asset.as_deref().is_some_and(contains)
+                    || node.animation_asset.as_deref().is_some_and(contains)
                     || node.base_color_texture.as_deref().is_some_and(contains)
                     || node.scripts.iter().any(|script| contains(script))
                     || (!node.audio_source.clip.is_empty() && contains(&node.audio_source.clip))

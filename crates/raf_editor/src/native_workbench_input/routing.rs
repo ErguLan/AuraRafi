@@ -318,6 +318,9 @@ impl NativeGameWorkbench {
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
         for dispatched in &actions {
+            if self.handle_animation_action(&dispatched.action, scene, selected, &mut intents) {
+                continue;
+            }
             if self.handle_interface_action(&dispatched.action, native_input, scene, selected) {
                 continue;
             }

@@ -236,7 +236,11 @@ impl NativeGameWorkbench {
         }
         self.project_catalog
             .sync_project(project.map(|project| project.path.as_path()));
-        self.assets_project_root = project.map(|project| project.path.clone());
+        let asset_root = project.map(|project| project.path.clone());
+        if self.assets_project_root != asset_root {
+            self.animations = Default::default();
+        }
+        self.assets_project_root = asset_root;
         if let Some(links) = self.script_relationships.sync(
             self.agent_settings.hierarchy_show_script_links
                 && self.project_type == ProjectType::Game,

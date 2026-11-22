@@ -1,9 +1,9 @@
-# Frame Graph (prepared)
+# Frame Graph
 
-`crates/raf_render/src/ApiGraphicBasic/frame_graph.rs` is the backend-neutral
-scheduling contract for multi-pass rendering. It is prepared for v0.11.5 and is
-not yet wired into `BasicDevice`; the active single-pass scene path is
-unchanged.
+`crates/raf_agb/src/frame_graph.rs` is the backend-neutral
+scheduling contract for multi-pass rendering. The standalone probe compiles a
+`FramePlan` for scene, overlays and output. The active `BasicDevice` scene path
+has yet to adopt this contract. See the [product migration guide](AGB_MIGRATION.md).
 
 ## Why
 
@@ -68,11 +68,11 @@ executor.
 
 ## Integration order (when authorized)
 
-1. Map `CompiledFrameGraph` to backend barriers and attachments inside
-   `BasicDevice`, without exposing backend types upward.
+1. Map `CompiledFrameGraph` to backend barriers and attachments through the
+   native ApiGraphicBasic product contract.
 2. Move shadow-map preparation to a graph pass.
 3. Move the optimized filter and future post chain to graph passes.
-4. Add a transient pool owned by `GpuSceneState`, fed by `AliasSlot`.
+4. Reuse transient resources by `AliasSlot` under the graphics device budget.
 5. Expose pass timings and transient bytes in `SceneFrameMetrics`.
 
 ## Acceptance

@@ -106,7 +106,7 @@ total frame time, and presentation mode.
 
 **Reference code:**
 
-- `crates/raf_render/src/ApiGraphicBasic/frame_scheduler.rs`
+- `crates/raf_agb/src/frame_scheduler.rs`
 - `crates/raf_editor/src/native_studio.rs`
 - `crates/raf_editor/src/native_application.rs`
 
@@ -269,8 +269,8 @@ entries, evictions, upload-budget overruns, and device generations.
 **Reference code:**
 
 - `crates/raf_render/src/ApiGraphicBasic/device.rs`
-- `crates/raf_render/src/ApiGraphicBasic/capabilities.rs`
-- `crates/raf_render/src/ApiGraphicBasic/resource_registry.rs`
+- `crates/raf_agb/src/capabilities.rs`
+- `crates/raf_agb/src/resource_registry.rs`
 
 ### UC-08 - Pacing, VSync, and dynamic resolution [ACTIVE/PARTIAL]
 
@@ -297,7 +297,7 @@ FPS, frame time, P95, hitches, resolution scale, CPU, and GPU.
 
 **Reference code:**
 
-- `crates/raf_render/src/ApiGraphicBasic/frame_scheduler.rs`
+- `crates/raf_agb/src/frame_scheduler.rs`
 - `crates/raf_editor/src/native_editor_runtime.rs`
 - `crates/raf_render/src/ApiGraphicBasic/ui_surface/native_window.rs`
 
@@ -471,11 +471,11 @@ outside persistent residency.
 
 **Current code:**
 
-- `crates/raf_render/src/ApiGraphicBasic/resource_registry.rs`
+- `crates/raf_agb/src/resource_registry.rs`
 - `crates/raf_render/src/ApiGraphicBasic/device.rs`
 - `crates/raf_render/src/ApiGraphicBasic/ui_surface/gpu_renderer.rs`
 - `crates/raf_render/src/ApiGraphicBasic/ui_surface/images.rs`
-- `crates/raf_render/src/ApiGraphicBasic/memory_ledger.rs`
+- `crates/raf_agb/src/memory_ledger.rs`
 
 ### OC-04 - Batching across surfaces [MEASURE_FIRST]
 

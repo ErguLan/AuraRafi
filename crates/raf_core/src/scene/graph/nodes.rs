@@ -156,6 +156,9 @@ pub struct SceneNode {
     pub physics_joints: Vec<crate::scene::joint::PhysicsJoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub animation: Option<crate::scene::animation::AnimationRig>,
+    /// Project-relative file under assets, resolved when preparing playback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub animation_asset: Option<String>,
     /// Explicit game camera component. Ordinary objects never become cameras implicitly.
     #[serde(default)]
     pub game_camera: Option<crate::runtime_config::GameCamera>,
@@ -211,6 +214,7 @@ impl SceneNode {
             character_controller: None,
             physics_joints: Vec::new(),
             animation: None,
+            animation_asset: None,
             game_camera: None,
             is_folder: false,
             source_asset: None,
@@ -249,6 +253,7 @@ impl SceneNode {
             character_controller: None,
             physics_joints: Vec::new(),
             animation: None,
+            animation_asset: None,
             game_camera: None,
             is_folder: false,
             source_asset: None,

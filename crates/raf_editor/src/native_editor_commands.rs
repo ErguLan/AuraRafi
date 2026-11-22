@@ -524,6 +524,12 @@ pub(crate) fn apply_workbench_intents(
                 {
                     runtime.game_viewport_mut().snap_compass_target(target);
                     runtime.request_canvas_frame();
+                } else if command == "animations.redraw" {
+                    runtime.request_canvas_frame();
+                } else if let Some(data) = command.strip_prefix("animations.bind:") {
+                    if let Err(error) = bind_animation_asset(runtime, scene, project, data) {
+                        console_outputs.push(CommandOutput::error(raf_core::i18n::t("animation.tab", runtime.ui_language), error));
+                    }
                 } else if let Some(raw) = command.strip_prefix("hierarchy.reorder:") {
                     let parts = raw.split(':').collect::<Vec<_>>();
                     if parts.len() == 3 {
@@ -1187,7 +1193,13 @@ pub(crate) fn apply_workbench_intents(
                         None => (raw, ""),
                     };
                     if let Some(project) = project {
-                        if let Err(error) = rename_asset_file(&project.path, row, new_name) {
+                        let result = if animation_asset_in_use(scene, row) {
+                            Err(raf_core::i18n::t("animation.asset_in_use", runtime.ui_language))
+                        } else if raf_assets::animation_asset::is_animation_asset(row)
+                            && !raf_assets::animation_asset::is_animation_asset(new_name) {
+                            Err(raf_core::i18n::t("animation.keep_extension", runtime.ui_language))
+                        } else { rename_asset_file(&project.path, row, new_name) };
+                        if let Err(error) = result {
                             tracing::warn!(%error, row, "native asset rename failed");
                             console_outputs.push(CommandOutput::error("Rename asset", error));
                         }
@@ -1201,7 +1213,10 @@ pub(crate) fn apply_workbench_intents(
                     }
                 } else if let Some(row) = command.strip_prefix("assets.delete:") {
                     if let Some(project) = project {
-                        if let Err(error) = delete_asset_file(&project.path, row) {
+                        let result = if animation_asset_in_use(scene, row) {
+                            Err(raf_core::i18n::t("animation.asset_in_use", runtime.ui_language))
+                        } else { delete_asset_file(&project.path, row) };
+                        if let Err(error) = result {
                             tracing::warn!(%error, row, "native asset deletion failed");
                             console_outputs.push(CommandOutput::error("Delete asset", error));
                         }
@@ -1491,10 +1506,13 @@ pub(crate) fn asset_duplicate_row(row: &str) -> String {
         Some((folder, file_name)) => (folder, file_name),
         None => ("", row),
     };
-    let (stem, extension) = match file_name.rsplit_once('.') {
+    let (stem, extension) = if raf_assets::animation_asset::is_animation_asset(file_name) {
+        let suffix = raf_assets::animation_asset::SUFFIX;
+        (&file_name[..file_name.len() - suffix.len()], Some(&suffix[1..]))
+    } else { match file_name.rsplit_once('.') {
         Some((stem, extension)) => (stem, Some(extension)),
         None => (file_name, None),
-    };
+    }};
     let duplicated = match extension {
         Some(extension) => format!("{stem}_copy.{extension}"),
         None => format!("{stem}_copy"),
@@ -1504,6 +1522,30 @@ pub(crate) fn asset_duplicate_row(row: &str) -> String {
     } else {
         format!("{folder}/{duplicated}")
     }
+}
+
+fn bind_animation_asset(runtime: &mut NativeEditorRuntime, scene: &mut SceneGraph, project: Option<&Project>, data: &str) -> Result<(), String> {
+    #[derive(serde::Deserialize)]
+    struct Binding { target: uuid::Uuid, asset: Option<String> }
+    let binding: Binding = serde_json::from_str(data).map_err(|error| error.to_string())?;
+    let project = project.ok_or("Animation binding requires an open project")?;
+    let id = scene.iter().find(|(_, node)| !node.name.is_empty() && node.uuid == binding.target)
+        .map(|(id, _)| id).ok_or("Animation target was removed")?;
+    crate::commands::game::animation::validate_link(scene, id, &project.path, binding.asset.as_deref())?;
+    runtime.mutate_scene(scene, |scene| {
+        if let Some(node) = scene.get_mut(id) {
+            node.animation = None;
+            node.animation_asset = binding.asset;
+        }
+    });
+    Ok(())
+}
+
+fn animation_asset_in_use(scene: &SceneGraph, row: &str) -> bool {
+    if !raf_assets::animation_asset::is_animation_asset(row) { return false; }
+    let path = raf_assets::animation_asset::reference(row);
+    scene.iter().any(|(_, node)| !node.name.is_empty() && node.animation_asset.as_deref()
+        .is_some_and(|asset| raf_assets::animation_asset::reference(asset).eq_ignore_ascii_case(&path)))
 }
 
 /// Absolute path of a catalog row, or `None` for virtual built-in rows.

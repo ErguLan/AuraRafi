@@ -2,6 +2,7 @@
 pub mod application;
 mod audio;
 mod game_ui;
+mod graphics;
 pub mod headless;
 mod physics_debug;
 pub mod session;

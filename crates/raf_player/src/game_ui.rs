@@ -9,7 +9,7 @@ use raf_render::api_graphic_basic::{
     mesh::{BasicMesh, BasicVertex},
     pipeline::BasicPipelineKind,
     ui_surface::{
-        DirectUiSurfaceHost, NativeUiInputBridge, NativeUiWindowHost, UiOffscreenTarget, UiSurface,
+        DirectUiSurfaceHost, NativeUiInputBridge, NativeUiWindowHost, UiSurface,
         UiSurfaceCpuRenderer,
     },
 };
@@ -31,7 +31,6 @@ struct Instance {
     mount: UiMount,
     revision: u64,
     generation: u64,
-    target: Option<UiOffscreenTarget>,
     cpu_texture: Option<Arc<CpuTexture>>,
     dirty: bool,
     transform: Option<Mat4>,
@@ -102,7 +101,6 @@ impl GameUiPresenter {
                     mount: source.mount.clone(),
                     revision: 0,
                     generation: source.generation,
-                    target: None,
                     cpu_texture: None,
                     dirty: true,
                     transform: None,
@@ -146,7 +144,6 @@ impl GameUiPresenter {
                 if item.mount.canvas_size != source.mount.canvas_size
                     || item.mount.kind != source.mount.kind
                 {
-                    item.target = None;
                     item.cpu_texture = None;
                 }
                 if item.mount.target != source.mount.target {
@@ -369,13 +366,12 @@ impl GameUiPresenter {
         }
         output
     }
-    pub fn world_commands(
-        &mut self,
-        native: &NativeUiWindowHost,
-        frame: &mut SceneRenderFrame,
-        cpu: bool,
-        language: Language,
-    ) -> Result<(), String> {
+    /// Appends world-space UI panels as textured overlay meshes.
+    ///
+    /// Panels always come from the CPU rasterizer: the product encoder accepts
+    /// `UiSurface` / `UiSurfaceOverlay` as overlay-pipeline textured meshes, so
+    /// one retained texture path serves every backend.
+    pub fn world_commands(&mut self, frame: &mut SceneRenderFrame, language: Language) {
         let quad = self
             .quad
             .get_or_insert_with(|| {
@@ -421,38 +417,27 @@ impl GameUiPresenter {
             let Some(transform) = item.transform else {
                 continue;
             };
-            let texture = if cpu {
-                if item.dirty || item.host.has_active_motion() || item.cpu_texture.is_none() {
-                    let renderer = self
-                        .cpu_renderer
-                        .get_or_insert_with(UiSurfaceCpuRenderer::new);
-                    let data =
-                        item.host
-                            .rasterize_cpu_texture(item.mount.canvas_size, renderer, |key| {
-                                t(key, language)
-                            });
-                    item.cpu_texture = Some(Arc::new(CpuTexture {
-                        data,
-                        width: item.mount.canvas_size[0],
-                        height: item.mount.canvas_size[1],
-                        source: format!("__game_ui/{id}/{}", self.revision).into(),
-                    }));
-                }
-                frame
-                    .commands
-                    .register_texture(item.cpu_texture.as_ref().unwrap().clone())
-            } else {
-                if item.target.is_none() {
-                    item.target = Some(native.create_ui_target(item.mount.canvas_size)?);
-                    item.dirty = true;
-                }
-                let target = item.target.as_ref().unwrap();
-                if item.dirty || item.host.has_active_motion() {
-                    native.render_ui_target(&mut item.host, target, |key| t(key, language));
-                }
-                frame.commands.register_gpu_texture(target.view())
-            };
+            if item.dirty || item.host.has_active_motion() || item.cpu_texture.is_none() {
+                let renderer = self
+                    .cpu_renderer
+                    .get_or_insert_with(UiSurfaceCpuRenderer::new);
+                let data = item
+                    .host
+                    .rasterize_cpu_texture(item.mount.canvas_size, renderer, |key| {
+                        t(key, language)
+                    });
+                item.cpu_texture = Some(Arc::new(CpuTexture {
+                    data,
+                    width: item.mount.canvas_size[0],
+                    height: item.mount.canvas_size[1],
+                    source: format!("__game_ui/{id}/{}", self.revision).into(),
+                }));
+            }
             item.dirty = false;
+            let Some(texture) = item.cpu_texture.as_ref() else {
+                continue;
+            };
+            let texture = frame.commands.register_texture(texture.clone());
             frame.commands.set_pipeline(if item.mount.always_on_top {
                 BasicPipelineKind::UiSurfaceOverlay
             } else {
@@ -464,7 +449,6 @@ impl GameUiPresenter {
                 .commands
                 .draw_mesh_with_texture(mesh, transform, [255; 4], Some(texture));
         }
-        Ok(())
     }
     pub fn overlay_layers(
         &mut self,

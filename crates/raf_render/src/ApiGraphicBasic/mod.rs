@@ -6,21 +6,17 @@ pub mod asset_ingress;
 pub mod cad_surface;
 pub mod cad_surface_host;
 pub mod canvas_presenter;
-pub mod capabilities;
 pub mod command_list;
 pub mod device;
+#[cfg(not(target_arch = "wasm32"))]
 pub mod editor_compositor;
-mod environment_gpu;
-pub mod frame_graph;
-pub mod frame_scheduler;
-pub mod handles;
 pub mod line_projection;
-pub mod memory_ledger;
 pub mod mesh;
-mod optimized_filter_gpu;
 pub mod pipeline;
-pub mod resource_registry;
+pub mod product_composition;
 pub mod ui_surface;
+
+pub use raf_agb::{capabilities, frame_graph, frame_scheduler, handles, memory_ledger, resource_registry};
 
 pub use asset_ingress::{
     TextureIngress, TextureIngressEntry, TextureIngressKey, TextureIngressMetrics,
@@ -32,6 +28,7 @@ pub use capabilities::{
     GraphicsMemoryBudget,
 };
 pub use device::{SceneFrameCapture, SceneFrameMetrics};
+#[cfg(not(target_arch = "wasm32"))]
 pub use editor_compositor::{
     EditorCanvasLayer, EditorComposedFrame, EditorCompositorMetrics, EditorUiLayer,
     NativeEditorCompositor,
@@ -51,6 +48,9 @@ pub use handles::{
 pub use memory_ledger::{
     GraphicsFamilyLedger, GraphicsFamilySnapshot, GraphicsLedgerSnapshot, GraphicsResourceFamily,
     GraphicsResourceLedger, LedgerAdmission, LedgerError, ProcessMemoryLedger,
+};
+pub use product_composition::{
+    prepare_product_scene, scene_frame_uniforms, ProductFrameBuilder, PRODUCT_SCENE_PACKET_KEY,
 };
 pub use resource_registry::{
     BufferRegistry, MaterialRegistry, MeshRegistry, PipelineRegistry, ResourceAdmission,

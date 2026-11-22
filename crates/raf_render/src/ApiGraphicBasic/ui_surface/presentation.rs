@@ -1,7 +1,8 @@
 //! Renderer-ready retained UI draw data.
 //!
-//! This module has no window-framework dependency. Native WGPU hosts consume
-//! the same draw list as off-screen and test presenters.
+//! This module has no window-framework dependency. ApiGraphicBasic producers,
+//! native hosts, off-screen presenters and the CPU recovery compositor consume
+//! the same draw list.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -26,8 +27,8 @@ pub struct UiSurfaceQuad {
 ///
 /// Small marks such as checkbox ticks should not be assembled from a handful
 /// of axis-aligned pixels. Keeping the stroke in the ApiGraphicBasic draw list
-/// lets both the WGPU presenter and the CPU recovery path rasterize the same
-/// geometry at the output density.
+/// lets both the ApiGraphicBasic producer and the CPU recovery path rasterize
+/// the same geometry at the output density.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct UiSurfaceStroke {
     pub start: [f32; 2],

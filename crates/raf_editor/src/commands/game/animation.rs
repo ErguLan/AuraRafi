@@ -1,7 +1,8 @@
 use super::query::{resolve_target, structured_or_json_value};
 use super::{CommandOutput, GameCommandContext, ParsedCommand};
+use raf_assets::animation_asset;
 use raf_core::scene::animation::AnimationRig;
-use raf_core::scene::{SceneNode, SceneNodeId};
+use raf_core::scene::{SceneGraph, SceneNode, SceneNodeId};
 use raf_runtime::animation::AnimationPlayback;
 use serde::Deserialize;
 use serde_json::json;
@@ -19,17 +20,47 @@ struct ImportClip {
     looping: bool,
 }
 
+pub(super) struct AnimationBinding {
+    pub rig: Option<AnimationRig>,
+    pub asset: Option<String>,
+}
+
 pub(super) fn update(
     command: &ParsedCommand,
     ctx: &GameCommandContext<'_>,
     id: SceneNodeId,
     staged: &SceneNode,
-) -> Result<Option<Option<AnimationRig>>, String> {
+) -> Result<Option<AnimationBinding>, String> {
     let has_rig =
         command.structured_arg("animation").is_some() || command.arg("animation").is_some();
     let clip = structured_or_json_value(command, "animation_clip", "game.update.animation_clip")?;
-    if !has_rig && clip.is_none() {
+    let link = command
+        .structured_arg("animation_asset")
+        .map(|value| {
+            if value.is_null() {
+                Ok(None)
+            } else {
+                value
+                    .as_str()
+                    .map(animation_asset::reference)
+                    .map(Some)
+                    .ok_or("Expected an animation asset path or null")
+            }
+        })
+        .or_else(|| {
+            command
+                .arg("animation_asset")
+                .map(|value| Ok((value != "null").then(|| animation_asset::reference(value))))
+        })
+        .transpose()?;
+    if !has_rig && clip.is_none() && link.is_none() {
         return Ok(None);
+    }
+    if link.is_some() && (has_rig || clip.is_some()) {
+        return Err("Set animation_asset or an inline animation in one operation".into());
+    }
+    if clip.is_some() && !has_rig && staged.animation_asset.is_some() {
+        return Err("Choose an inline rig before appending a GLB clip".into());
     }
     let mut rig: Option<AnimationRig> = if has_rig {
         structured_or_json_value(command, "animation", "game.update.animation")?
@@ -37,8 +68,10 @@ pub(super) fn update(
             .transpose()
             .map_err(|error| error.to_string())?
             .flatten()
-    } else {
+    } else if link.is_none() {
         staged.animation.clone()
+    } else {
+        None
     };
     if let Some(clip) = clip {
         let import: ImportClip = serde_json::from_value(clip).map_err(|error| error.to_string())?;
@@ -61,8 +94,65 @@ pub(super) fn update(
     node.rigid_body = staged.rigid_body.clone();
     node.collider = staged.collider.clone();
     node.animation = rig.clone();
-    AnimationPlayback::prepare(&scene)?;
-    Ok(Some(rig))
+    let asset = link.flatten();
+    node.animation_asset = asset.clone();
+    if rig.is_some() || asset.is_some() {
+        prepare_snapshot(&mut scene, super::world::active_project_root().as_deref())?;
+    }
+    Ok(Some(AnimationBinding { rig, asset }))
+}
+
+fn prepare_snapshot(
+    scene: &mut SceneGraph,
+    project: Option<&Path>,
+) -> Result<AnimationPlayback, String> {
+    if scene
+        .iter()
+        .any(|(_, node)| !node.name.is_empty() && node.animation_asset.is_some())
+    {
+        animation_asset::resolve_scene(
+            project.ok_or("Animation asset lookup requires an open project")?,
+            scene,
+        )?;
+    }
+    AnimationPlayback::prepare(scene)
+}
+
+pub(crate) fn validate_link(
+    scene: &SceneGraph,
+    id: SceneNodeId,
+    project: &Path,
+    asset: Option<&str>,
+) -> Result<(), String> {
+    if asset.is_none() {
+        return Ok(());
+    }
+    let mut snapshot = scene.clone();
+    let target = snapshot.get_mut(id).ok_or("Animation target was removed")?;
+    target.animation = None;
+    target.animation_asset = asset.map(animation_asset::reference);
+    prepare_snapshot(&mut snapshot, Some(project))?;
+    Ok(())
+}
+
+pub(crate) fn preview(
+    scene: &SceneGraph,
+    id: SceneNodeId,
+    rig: &AnimationRig,
+    seconds: f64,
+) -> Result<SceneGraph, String> {
+    let mut snapshot = scene.clone();
+    let target = snapshot.get_mut(id).ok_or("Animation target was removed")?;
+    target.animation = Some(rig.clone());
+    let mut playback = AnimationPlayback::prepare(&snapshot)?;
+    for pose in playback.sample(seconds, 0.0)?.filter(|pose| pose.rig == id) {
+        if let Some(node) = snapshot.get_mut(pose.node) {
+            node.position = pose.transform.position;
+            node.rotation = pose.transform.rotation;
+            node.scale = pose.transform.scale;
+        }
+    }
+    Ok(snapshot)
 }
 
 fn asset_path(file: &Path) -> Result<std::path::PathBuf, String> {
@@ -98,8 +188,10 @@ pub(super) fn sample(command: &ParsedCommand, ctx: &GameCommandContext<'_>) -> C
     let result = (|| -> Result<_, String> {
         let target = resolve_target(command, ctx.scene, ctx.selection)
             .ok_or("Animation target not found")?;
-        let rig = ctx
-            .scene
+        let mut scene = ctx.scene.clone();
+        let mut playback =
+            prepare_snapshot(&mut scene, super::world::active_project_root().as_deref())?;
+        let rig = scene
             .get(target)
             .and_then(|node| node.animation.as_ref())
             .ok_or("Target has no animation rig")?;
@@ -113,12 +205,12 @@ pub(super) fn sample(command: &ParsedCommand, ctx: &GameCommandContext<'_>) -> C
             .unwrap_or("0")
             .parse::<f32>()
             .map_err(|error| error.to_string())?;
-        let mut playback = AnimationPlayback::prepare(ctx.scene)?;
         let poses: Vec<_> = playback.sample(seconds, speed)?.filter(|pose| pose.rig == target).filter_map(|pose| {
             let entry = ctx.scene.get(pose.node)?;
             Some(json!({ "uuid": entry.uuid, "path": ctx.scene.node_path(pose.node), "transform": pose.transform }))
         }).collect();
-        Ok(json!({"time": seconds, "speed": speed, "rig": rig, "poses": poses}))
+        Ok(json!({"time": seconds, "speed": speed, "rig": rig,
+            "animation_asset": scene.get(target).and_then(|node| node.animation_asset.as_ref()), "poses": poses}))
     })();
     match result {
         Ok(data) => CommandOutput::info("Animation sample", Vec::new(), data),

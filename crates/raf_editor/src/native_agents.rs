@@ -29,7 +29,7 @@ pub(super) fn render_preview_layer(
     service: &crate::agent_service::AgentService,
     attached: Option<(&Path, SessionId, &SceneGraph)>,
     settings: &EngineSettings,
-    host: &raf_render::api_graphic_basic::ui_surface::NativeUiWindowHost,
+    _host: &raf_render::api_graphic_basic::ui_surface::NativeUiWindowHost,
     scale: f32,
     size: [u32; 2],
 ) -> Option<raf_render::api_graphic_basic::EditorCanvasLayer> {
@@ -41,7 +41,6 @@ pub(super) fn render_preview_layer(
         project,
         settings,
         rect.to_physical(scale, size),
-        || Some(host.shared_graphics_context()),
     )
 }
 

@@ -60,6 +60,7 @@ pub enum AssetFilter {
     Audio,
     Scripts,
     Interfaces,
+    Animations,
 }
 
 impl AssetFilter {
@@ -71,6 +72,7 @@ impl AssetFilter {
             Self::Audio => "app.audio",
             Self::Scripts => "app.scripts_filter",
             Self::Interfaces => "ui.designer.title",
+            Self::Animations => "animation.tab",
         }
     }
 
@@ -82,6 +84,7 @@ impl AssetFilter {
             Self::Audio => "app.assets_empty_audio",
             Self::Scripts => "app.assets_empty_scripts",
             Self::Interfaces => "ui.designer.empty",
+            Self::Animations => "animation.empty_library",
         }
     }
 }
@@ -242,7 +245,7 @@ pub const ASSET_CARD_MIN_VIEWPORT: f32 = 96.0;
 /// bounds: the host wrapper clips, so a too small rect would cut a menu while
 /// an extra few pixels only show transparent padding.
 pub const ASSETS_MENU_WIDTH: f32 = 214.0;
-pub const ASSETS_CREATE_MENU_HEIGHT: f32 = 160.0;
+pub const ASSETS_CREATE_MENU_HEIGHT: f32 = 188.0;
 pub const ASSETS_CONTEXT_MENU_HEIGHT: f32 = 256.0;
 pub const ASSETS_CONTEXT_MENU_BUILTIN_HEIGHT: f32 = 76.0;
 pub const ASSETS_POPOVER_WIDTH: f32 = 300.0;

@@ -1,18 +1,22 @@
 //! Browser application lifecycle for the WASM canvas host.
 //!
-//! The host owns one `BasicDevice`, one `SceneRenderer`, one surface, and one
-//! self-scheduling animation-frame callback. The callback renders at a bounded
-//! cadence and stops entirely when the page is paused or hidden, so an idle
-//! browser tab performs no scene, GPU, or present work.
+//! The host owns one AGB `ProductDevice<WebGpu>`, one `SceneRenderer`, one
+//! `ProductFrameBuilder`, and one self-scheduling animation-frame callback.
+//! The AGB WebGPU executor configures the canvas target and presents every
+//! draw; this crate never creates a surface, device, queue, or blit path.
+//!
+//! The callback renders at a bounded cadence and stops entirely when the page
+//! is paused or hidden, so an idle browser tab performs no scene, GPU, or
+//! present work.
 
 use std::cell::{Cell, RefCell};
-use std::sync::Arc;
 
-use raf_render::api_graphic_basic::capabilities::{
-    GraphicsAdapterPreference, GraphicsMemoryBudget,
-};
-use raf_render::api_graphic_basic::device::{
-    BasicDevice, BasicDeviceConfig, SceneFrameOutput, SharedGraphicsContext,
+use raf_agb::backends::webgpu::WebGpu;
+use raf_agb::capabilities::GraphicsMemoryBudget;
+use raf_agb::product::ProductDevice;
+use raf_agb::{Error as GraphicsError, Output};
+use raf_render::api_graphic_basic::{
+    prepare_product_scene, scene_frame_uniforms, ProductFrameBuilder,
 };
 use raf_render::scene_renderer::SceneRenderer;
 use uuid::Uuid;
@@ -21,7 +25,6 @@ use wasm_bindgen::JsCast;
 use web_sys::{Document, HtmlCanvasElement, Window};
 
 use crate::diagnostics;
-use crate::present::CanvasBlit;
 use crate::scene::{DemoScene, DEMO_SCENE_RECIPE};
 
 const CANVAS_ID: &str = "rafi-canvas";
@@ -45,12 +48,14 @@ thread_local! {
     static SCHEDULED: Cell<bool> = Cell::new(false);
     static PAUSED: Cell<bool> = Cell::new(false);
     static VISIBLE: Cell<bool> = Cell::new(true);
+    static RECOVERING: Cell<bool> = Cell::new(false);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct ViewportMetrics {
-    canvas: [u32; 2],
-    render: [u32; 2],
+    /// Physical extent used by both the canvas backing store and the AGB
+    /// target. The browser stretches it to the CSS viewport.
+    target: [u32; 2],
     pixel_ratio: f64,
 }
 
@@ -58,12 +63,6 @@ struct FpsCounter {
     window_start_ms: f64,
     frames: u32,
     fps: f32,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PresentOutcome {
-    Presented,
-    Skipped,
 }
 
 impl FpsCounter {
@@ -79,7 +78,7 @@ impl FpsCounter {
         self.frames = self.frames.saturating_add(1);
         let elapsed = now_ms - self.window_start_ms;
         if elapsed >= 500.0 {
-            // A very long gap means the page was paused or the surface was
+            // A very long gap means the page was paused or the target was
             // unavailable. Report zero instead of a misleading tiny average.
             self.fps = if elapsed <= 2_000.0 {
                 (self.frames as f64 * 1000.0 / elapsed) as f32
@@ -95,15 +94,20 @@ impl FpsCounter {
 struct WebApp {
     window: Window,
     canvas: HtmlCanvasElement,
-    surface: wgpu::Surface<'static>,
-    surface_config: wgpu::SurfaceConfiguration,
-    device: Arc<wgpu::Device>,
-    queue: Arc<wgpu::Queue>,
-    basic_device: BasicDevice,
+    /// Taken while the executor is being reopened. The AGB WebGPU backend
+    /// unconfigures the shared canvas context when it is dropped, so the old
+    /// executor must be released before the replacement configures the canvas.
+    device: Option<ProductDevice<WebGpu>>,
+    builder: ProductFrameBuilder,
     scene_renderer: SceneRenderer,
     scene: DemoScene,
-    blit: CanvasBlit,
     viewport: ViewportMetrics,
+    /// Monotonic revision of the retained product composition. It advances
+    /// only when the scene content or the target extent changes.
+    revision: u64,
+    /// The executor is reopened at most once per page. A second failure is
+    /// reported instead of retrying forever.
+    reopen_requested: bool,
     last_render_ms: f64,
     last_frame_ms: f64,
     last_resize_check_ms: f64,
@@ -147,139 +151,49 @@ impl WebApp {
             .map_err(|_| js_error(format!("element #{CANVAS_ID} is not a canvas")))?;
 
         let viewport = measure_viewport(window);
-        canvas.set_width(viewport.canvas[0]);
-        canvas.set_height(viewport.canvas[1]);
+        canvas.set_width(viewport.target[0]);
+        canvas.set_height(viewport.target[1]);
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            // On wasm this descriptor only selects between the browser WebGPU
-            // backend and the WebGL2 fallback.
-            backends: wgpu::Backends::BROWSER_WEBGPU | wgpu::Backends::GL,
-            ..wgpu::InstanceDescriptor::default()
-        });
-
-        let surface = instance
-            .create_surface(wgpu::SurfaceTarget::Canvas(canvas.clone()))
+        let backend = WebGpu::open(canvas.clone()).await.map_err(|error| {
+            js_error(format!(
+                "the AGB WebGPU executor could not open the canvas: {}",
+                describe_js(&error)
+            ))
+        })?;
+        let mut device = ProductDevice::new(backend, GraphicsMemoryBudget::potato()).map_err(
+            |error| js_error(format!("the AGB WebGPU device was rejected: {error}")),
+        )?;
+        device
+            .configure(viewport.target, Output::Present)
             .map_err(|error| {
                 js_error(format!(
-                    "the browser could not create a render surface: {error}"
+                    "the AGB WebGPU target rejected {}x{}: {error}",
+                    viewport.target[0], viewport.target[1]
                 ))
             })?;
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::LowPower,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-            })
-            .await
-            .ok_or_else(|| {
-                js_error(
-                    "neither WebGPU nor a WebGL2 fallback adapter was available; \
-                     enable hardware acceleration or a modern browser",
-                )
-            })?;
-
-        let adapter_info = adapter.get_info();
-        let backend_label = match adapter_info.backend {
-            wgpu::Backend::BrowserWebGpu => "WebGPU",
-            wgpu::Backend::Gl => "WebGL2",
-            other => other.to_str(),
-        };
-        let adapter_name = adapter_info.name.trim();
-
-        // WebGL2 has a lower mandatory floor than `downlevel_defaults()`;
-        // requesting the WebGPU floor there can fail on constrained drivers.
-        let limits = match adapter_info.backend {
-            wgpu::Backend::BrowserWebGpu => wgpu::Limits::downlevel_defaults(),
-            _ => wgpu::Limits::downlevel_webgl2_defaults(),
-        };
-
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("AuraRafi_WebDevice"),
-                    required_features: wgpu::Features::empty(),
-                    required_limits: limits,
-                    memory_hints: wgpu::MemoryHints::Performance,
-                },
-                None,
-            )
-            .await
-            .map_err(|error| {
-                js_error(format!(
-                    "the browser refused the GPU device request: {error}"
-                ))
-            })?;
-        let device = Arc::new(device);
-        let queue = Arc::new(queue);
-
-        let surface_capabilities = surface.get_capabilities(&adapter);
-        let surface_format = surface_capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(wgpu::TextureFormat::is_srgb)
-            .or_else(|| surface_capabilities.formats.first().copied())
-            .ok_or_else(|| js_error("the browser surface reported no color formats"))?;
-        let present_mode = surface_capabilities
-            .present_modes
-            .iter()
-            .copied()
-            .find(|mode| *mode == wgpu::PresentMode::Fifo)
-            .or_else(|| surface_capabilities.present_modes.first().copied())
-            .unwrap_or(wgpu::PresentMode::Fifo);
-        let alpha_mode = surface_capabilities
-            .alpha_modes
-            .first()
-            .copied()
-            .unwrap_or(wgpu::CompositeAlphaMode::Auto);
-
-        let surface_config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format: surface_format,
-            width: viewport.canvas[0],
-            height: viewport.canvas[1],
-            present_mode,
-            alpha_mode,
-            view_formats: Vec::new(),
-            desired_maximum_frame_latency: 2,
-        };
-        surface.configure(&device, &surface_config);
 
         let scene = DemoScene::from_recipe(DEMO_SCENE_RECIPE)
             .map_err(|error| js_error(format!("the embedded demo scene is invalid: {error}")))?;
-        let scene_renderer = SceneRenderer::new(viewport.render[0], viewport.render[1]);
-        let blit = CanvasBlit::new(&device, surface_format);
-
-        let basic_device = BasicDevice::new(BasicDeviceConfig {
-            allow_gpu: true,
-            force_cpu: false,
-            shared_graphics_context: Some(SharedGraphicsContext::from_host(
-                device.clone(),
-                queue.clone(),
-            )),
-            memory_budget: GraphicsMemoryBudget::potato(),
-            adapter_preference: GraphicsAdapterPreference::LowPower,
-        });
+        let scene_renderer = SceneRenderer::new(viewport.target[0], viewport.target[1]);
 
         let instance_id = Uuid::new_v4().to_string();
-        diagnostics::configure(backend_label, adapter_name, &instance_id);
-        diagnostics::set_viewport(viewport.canvas, viewport.render, viewport.pixel_ratio);
+        let backend_label = device.info().backend;
+        let adapter_name = device.info().name.clone();
+        diagnostics::configure(backend_label, &adapter_name, &instance_id);
+        diagnostics::set_viewport(viewport.target, viewport.target, viewport.pixel_ratio);
         diagnostics::set_hidden(document.hidden());
 
         let now = js_sys::Date::now();
         Ok(Self {
             window: window.clone(),
             canvas,
-            surface,
-            surface_config,
-            device,
-            queue,
-            basic_device,
+            device: Some(device),
+            builder: ProductFrameBuilder::default(),
             scene_renderer,
             scene,
-            blit,
             viewport,
+            revision: 0,
+            reopen_requested: false,
             last_render_ms: now,
             last_frame_ms: now,
             last_resize_check_ms: now,
@@ -291,7 +205,7 @@ impl WebApp {
     /// Render at most once per frame interval. Returns whether the host should
     /// schedule another animation frame.
     fn tick(&mut self) -> bool {
-        if PAUSED.with(Cell::get) || !VISIBLE.with(Cell::get) {
+        if PAUSED.with(Cell::get) || !VISIBLE.with(Cell::get) || RECOVERING.with(Cell::get) {
             return false;
         }
 
@@ -309,7 +223,9 @@ impl WebApp {
 
         if now - self.last_resize_check_ms >= RESIZE_CHECK_INTERVAL_MS {
             self.last_resize_check_ms = now;
-            self.resize_if_needed();
+            if !self.resize_if_needed() {
+                return false;
+            }
         }
 
         if PAUSED.with(Cell::get) || !VISIBLE.with(Cell::get) {
@@ -318,88 +234,184 @@ impl WebApp {
 
         let dt = ((now - self.last_frame_ms) / 1000.0).clamp(0.0, 0.1);
         self.last_frame_ms = now;
-        self.scene.update(dt as f32);
+        if self.scene.update(dt as f32) {
+            self.revision = self.revision.saturating_add(1).max(1);
+        }
 
         let frame = self.scene.render_frame(
             &mut self.scene_renderer,
-            self.viewport.render[0],
-            self.viewport.render[1],
+            self.viewport.target[0],
+            self.viewport.target[1],
         );
-        let output = self.basic_device.execute_scene_frame(&frame);
-        let metrics = self.basic_device.last_frame_metrics();
-        let cpu_fallback = matches!(&output, SceneFrameOutput::CpuPixels(_));
-
-        let presented = match self.present_scene(&output) {
-            Ok(outcome) => outcome,
+        let composition = match self.builder.append_scene(&frame, self.revision) {
+            Ok(metrics) => metrics,
+            Err(cause) => {
+                report_fatal(&js_error(format!(
+                    "the scene composition was rejected: {cause}"
+                )));
+                return false;
+            }
+        };
+        let Some(device) = self.device.as_mut() else {
+            // The executor is being reopened by the recovery task.
+            return false;
+        };
+        let handle = match prepare_product_scene(device, &mut self.builder) {
+            Ok(handle) => handle,
+            Err(cause) => {
+                // The helper flattens `raf_agb::Error` into text, so budget and
+                // device failures both stop the page here.
+                report_fatal(&js_error(format!(
+                    "the AGB WebGPU device rejected the scene packet: {cause}"
+                )));
+                return false;
+            }
+        };
+        let drawn = device.draw(handle, &scene_frame_uniforms(&frame));
+        let metrics = match drawn {
+            Ok(metrics) => metrics,
             Err(error) => {
-                report_fatal(&js_error(error));
+                self.handle_graphics_failure(error, "presenting the demo scene");
                 return false;
             }
         };
 
-        let presented = presented == PresentOutcome::Presented;
-        if presented {
-            self.fps.record(now);
-        }
+        self.fps.record(now);
         diagnostics::record_frame(diagnostics::FrameSample {
             fps: self.fps.fps,
-            frame_ms: metrics.frame_cpu_ms,
-            gpu_ms: metrics.gpu_timing_sampled.then_some(metrics.gpu_frame_ms),
-            draw_calls: metrics.total_draw_calls(),
+            frame_ms: composition.frame_cpu_ms,
+            gpu_ms: metrics.gpu_ms.map(|milliseconds| milliseconds as f32),
+            draw_calls: metrics.draw_calls,
             triangles: frame.stats.triangles_rendered,
             entities: frame.stats.visible_entities,
-            cpu_fallback,
+            cpu_fallback: false,
             surface_rebuilds: self.surface_rebuilds,
-            presented,
+            presented: true,
         });
         true
     }
 
-    fn resize_if_needed(&mut self) {
+    /// Poll the CSS viewport and retarget the AGB device when it changed.
+    /// Returns `false` when the target could not be configured and the frame
+    /// loop must stop.
+    fn resize_if_needed(&mut self) -> bool {
         let next = measure_viewport(&self.window);
         if next == self.viewport {
-            return;
+            return true;
         }
 
-        self.canvas.set_width(next.canvas[0]);
-        self.canvas.set_height(next.canvas[1]);
-        self.surface_config.width = next.canvas[0];
-        self.surface_config.height = next.canvas[1];
-        self.surface.configure(&self.device, &self.surface_config);
+        let previous = self.viewport;
         self.viewport = next;
-        self.surface_rebuilds = self.surface_rebuilds.saturating_add(1);
-        diagnostics::set_viewport(next.canvas, next.render, next.pixel_ratio);
+        // Pixel-space commands and the configured extent are baked into the
+        // retained packet, so a resize always advances the revision.
+        self.revision = self.revision.saturating_add(1).max(1);
+
+        let Some(device) = self.device.as_mut() else {
+            return false;
+        };
+        let configured = device.configure(next.target, Output::Present);
+        match configured {
+            Ok(()) => {
+                self.surface_rebuilds = self.surface_rebuilds.saturating_add(1);
+                diagnostics::set_viewport(next.target, next.target, next.pixel_ratio);
+                true
+            }
+            Err(error) => {
+                self.viewport = previous;
+                self.handle_graphics_failure(error, "resizing the demo target");
+                false
+            }
+        }
     }
 
-    fn present_scene(&mut self, output: &SceneFrameOutput) -> Result<PresentOutcome, String> {
-        let surface_texture = match self.surface.get_current_texture() {
-            Ok(texture) => texture,
-            Err(wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated) => {
-                self.surface.configure(&self.device, &self.surface_config);
-                self.surface_rebuilds = self.surface_rebuilds.saturating_add(1);
-                return Ok(PresentOutcome::Skipped);
-            }
-            Err(wgpu::SurfaceError::Timeout) => return Ok(PresentOutcome::Skipped),
-            Err(wgpu::SurfaceError::OutOfMemory) => {
-                return Err(
-                    "the browser surface ran out of memory; reduce the window size and reload"
-                        .to_string(),
-                );
-            }
-        };
+    /// One reopen is allowed per page. Surface, outdated-target, and device
+    /// loss all rebuild the executor because the AGB WebGPU backend owns the
+    /// canvas context and its device together.
+    fn handle_graphics_failure(&mut self, error: GraphicsError, context: &str) {
+        match error {
+            GraphicsError::SurfaceLost
+            | GraphicsError::SurfaceOutdated
+            | GraphicsError::DeviceLost => self.request_device_reopen(context),
+            GraphicsError::Budget {
+                requested,
+                available,
+            } => report_fatal(&js_error(format!(
+                "the AGB WebGPU budget rejected the frame while {context}: \
+                 {requested} bytes requested, {available} available"
+            ))),
+            error => report_fatal(&js_error(format!(
+                "the AGB WebGPU device failed while {context}: {error}"
+            ))),
+        }
+    }
 
-        let target = surface_texture
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
-        self.blit.present(
-            &self.device,
-            &self.queue,
-            &target,
-            output,
-            self.viewport.render,
-        )?;
-        surface_texture.present();
-        Ok(PresentOutcome::Presented)
+    fn request_device_reopen(&mut self, context: &str) {
+        if RECOVERING.with(Cell::get) || self.reopen_requested {
+            report_fatal(&js_error(format!(
+                "the AGB WebGPU device failed again while {context} after one reopen; \
+                 reload the page"
+            )));
+            return;
+        }
+        self.reopen_requested = true;
+        RECOVERING.with(|flag| flag.set(true));
+        // Release the lost executor before the replacement opens. Its `Drop`
+        // unconfigures the shared canvas context, so it must not run after the
+        // new executor has configured that same context.
+        self.device = None;
+
+        let canvas = self.canvas.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            let backend = WebGpu::open(canvas).await;
+            let outcome = STATE.with(|slot| {
+                let mut slot = match slot.try_borrow_mut() {
+                    Ok(slot) => slot,
+                    // A re-entrant callback must never panic the page.
+                    Err(_) => return Err("the page state was busy during recovery".to_string()),
+                };
+                match slot.as_mut() {
+                    Some(app) => app.install_reopened(backend),
+                    None => Ok(()),
+                }
+            });
+            RECOVERING.with(|flag| flag.set(false));
+            match outcome {
+                Ok(()) => schedule_frame(),
+                Err(message) => report_fatal(&js_error(message)),
+            }
+        });
+    }
+
+    fn install_reopened(
+        &mut self,
+        backend: Result<WebGpu, JsValue>,
+    ) -> Result<(), String> {
+        let backend = backend.map_err(|error| {
+            format!(
+                "the AGB WebGPU executor could not reopen the canvas: {}",
+                describe_js(&error)
+            )
+        })?;
+        let mut device = ProductDevice::new(backend, GraphicsMemoryBudget::potato())
+            .map_err(|error| format!("the reopened AGB WebGPU device was rejected: {error}"))?;
+        device
+            .configure(self.viewport.target, Output::Present)
+            .map_err(|error| {
+                format!(
+                    "the reopened AGB WebGPU target rejected {}x{}: {error}",
+                    self.viewport.target[0], self.viewport.target[1]
+                )
+            })?;
+        self.device = Some(device);
+        // The builder keeps its retained source, so the next prepare rebuilds
+        // the packet on the new device without re-recording the scene.
+        self.surface_rebuilds = self.surface_rebuilds.saturating_add(1);
+        diagnostics::set_viewport(
+            self.viewport.target,
+            self.viewport.target,
+            self.viewport.pixel_ratio,
+        );
+        Ok(())
     }
 }
 
@@ -414,7 +426,9 @@ pub(crate) fn set_paused(paused: bool) {
 
 /// Report an unrecoverable initialization or present error.
 pub(crate) fn report_fatal(error: &JsValue) {
-    let message = error.as_string().unwrap_or_else(|| format!("{error:?}"));
+    let message = error
+        .as_string()
+        .unwrap_or_else(|| describe_js(error));
     web_sys::console::error_1(&JsValue::from_str(&message));
     PAUSED.with(|flag| flag.set(true));
     diagnostics::report_error(&message);
@@ -439,6 +453,9 @@ fn install_visibility_listener(document: &Document) -> Result<(), JsValue> {
 }
 
 fn schedule_frame() {
+    if RECOVERING.with(Cell::get) {
+        return;
+    }
     if SCHEDULED.with(|flag| flag.replace(true)) {
         return;
     }
@@ -470,7 +487,7 @@ fn schedule_frame() {
 
 fn on_animation_frame() {
     SCHEDULED.with(|flag| flag.set(false));
-    if PAUSED.with(Cell::get) || !VISIBLE.with(Cell::get) {
+    if PAUSED.with(Cell::get) || !VISIBLE.with(Cell::get) || RECOVERING.with(Cell::get) {
         return;
     }
 
@@ -526,12 +543,11 @@ fn measure_viewport(window: &Window) -> ViewportMetrics {
     } else {
         1.0
     };
-    let render_width = ((f64::from(canvas_width) * scale).round() as u32).clamp(1, canvas_width);
-    let render_height = ((f64::from(canvas_height) * scale).round() as u32).clamp(1, canvas_height);
+    let target_width = ((f64::from(canvas_width) * scale).round() as u32).clamp(1, canvas_width);
+    let target_height = ((f64::from(canvas_height) * scale).round() as u32).clamp(1, canvas_height);
 
     ViewportMetrics {
-        canvas: [canvas_width, canvas_height],
-        render: [render_width, render_height],
+        target: [target_width, target_height],
         pixel_ratio,
     }
 }
@@ -542,6 +558,14 @@ fn finite_positive(value: f64, fallback: f64) -> f64 {
     } else {
         fallback
     }
+}
+
+fn describe_js(error: &JsValue) -> String {
+    js_sys::Reflect::get(error, &JsValue::from_str("message"))
+        .ok()
+        .and_then(|message| message.as_string())
+        .or_else(|| error.as_string())
+        .unwrap_or_else(|| format!("{error:?}"))
 }
 
 fn js_error(message: impl AsRef<str>) -> JsValue {

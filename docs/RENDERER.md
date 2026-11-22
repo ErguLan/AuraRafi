@@ -77,7 +77,7 @@ without enabling advanced effects:
   by the potato/desktop memory budget. Vertex-edit overrides are transient;
 - culling/focus use world transform scale, and unnamed visible geometry is still
   renderable.
-- The startup shader is parsed by the wgpu 23/Naga test path; vector outputs are
+- The startup shader is parsed by the AGB/Naga test path; vector outputs are
   rebuilt explicitly instead of assigning WGSL swizzles, preventing a pre-project
   validation panic.
 
@@ -163,19 +163,18 @@ RafUI and imported assets use ApiGraphicBasic through Rafi-owned descriptors,
 commands, and handles. The retained document owns layout, interaction, and
 semantic paint data; the graphics layer owns text/image uploads, resource
 budgets, and presentation. `raf_assets` may decode content, but it cannot hand
-raw WGPU resources to a panel or document.
+raw graphics API resources to a panel or document.
 
-### ApiGraphicBasic Ownership Foundation
+### ApiGraphicBasic Ownership
 
-The first ApiGraphicBasic foundation is implemented while WGPU remains the
-active private executor. Backend-neutral generational handles, capabilities,
-adapter preference, memory budgets, `SharedGraphicsContext`, and
-`GpuTextureView` are now part of the runtime contract. Any WGPU escape hatch is
-contained below ApiGraphicBasic and does not define the upper-layer API.
+The product cut uses the native AGB executors. Backend-neutral generational
+handles, capabilities, adapter preference, memory budgets, the product packet
+and retained scene handoff are part of the runtime contract. No graphics API
+type escapes above ApiGraphicBasic.
 
-Resource registries with eviction, structural batching, complete DeviceHub
-ownership, frame graph, and native DX12/Vulkan/Metal backends are later
-capability additions. They must preserve this same scene/CAD/RafUI contract.
+Resource registries with eviction, structural batching, the product frame graph
+and the Vulkan/DX12/Metal/WebGPU executors are active. They preserve the same
+scene/CAD/RafUI contract.
 
 The complete graphics contract is [ApiGraphicBasic](APIGRAPHICBASIC.md). The
 RafUI surface and menu construction contract is
@@ -184,9 +183,10 @@ RafUI surface and menu construction contract is
 ## Native Canvas Composition
 
 `NativeEditorCompositor` is the presentation boundary for the scene, CAD and
-RafUI layers. It composes ApiGraphicBasic outputs directly into the Winit
-swapchain; there is no legacy texture bridge or legacy viewport host in the
-runtime path.
+RafUI layers. It converts them into one `ProductPacket`, prepares it by revision
+and draws through the `ProductDevice` owned by the native window host. There is
+no legacy texture bridge, blit chain or legacy viewport host in the runtime
+path.
 
 The plan exposes the short-term renderer roadmap without enabling heavy work
 by accident:
@@ -198,9 +198,9 @@ by accident:
 - prepared post-processing pass count
 - prepared PBR, particle, and skeletal animation budgets
 
-This makes the native canvas boundary the place where future direct-wgpu,
-post-processing, shadow maps, PBR, particles, and skeletal animation can attach
-without putting that policy into presentation panels.
+This makes the native canvas boundary the place where post-processing, shadow
+maps, PBR, particles, and skeletal animation can attach without putting that
+policy into presentation panels.
 
 ## Render Resource Profile
 

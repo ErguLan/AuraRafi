@@ -106,6 +106,7 @@ mod hierarchy_state;
 mod input;
 #[path = "native_workbench_interfaces.rs"]
 mod interfaces;
+mod animations;
 #[path = "native_workbench_performance.rs"]
 mod performance;
 #[path = "native_workbench_regions.rs"]
@@ -241,6 +242,7 @@ pub struct NativeGameWorkbench {
     project_catalog: ProjectCatalog,
     last_catalog_revision: u64,
     assets_surface: AssetsSurfaceHost,
+    animations: animations::AnimationPanel,
     assets_menu_motion: UiTween,
     assets_view_motion: UiTween,
     assets_highlight_motion: UiTween,

@@ -134,6 +134,9 @@ pub(super) fn append_asset_actions(bar: &mut UiNode, visual: &AssetVisual, palet
     use raf_assets::authoring_catalog::AssetClass;
     let entry = &visual.entry;
     let mut actions = Vec::new();
+    if entry.class == AssetClass::Animation {
+        actions.push(("animation.open", UiIconId::Play, format!("assets.open:{}", entry.path)));
+    }
     if entry.class == AssetClass::Image {
         actions.push(("ui.designer.use_image",UiIconId::Frame,format!("ui.designer.asset-image:{}",entry.path)));
     }

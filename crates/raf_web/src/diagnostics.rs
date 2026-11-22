@@ -1,8 +1,9 @@
 //! Diagnostics for the WebAssembly canvas host.
 //!
 //! The frame path publishes a small snapshot; the page overlay reads it at a
-//! bounded rate and `stats()` exposes the same data to browser tooling. This
-//! module never drives rendering and never allocates in the scene path.
+//! bounded rate and `stats()` exposes the same data to browser tooling. The
+//! backend and adapter names come from the AGB WebGPU executor. This module
+//! never drives rendering and never allocates in the scene path.
 
 use std::cell::{Cell, RefCell};
 
@@ -30,6 +31,7 @@ pub(crate) struct DiagnosticsSnapshot {
     pub draw_calls: u32,
     pub triangles: u32,
     pub entities: u32,
+    /// Always false: the canvas host has no CPU recovery renderer.
     pub cpu_fallback: bool,
     pub frames: u64,
     pub surface_rebuilds: u32,

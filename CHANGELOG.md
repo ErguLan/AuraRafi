@@ -5,6 +5,59 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.4] - 2026-11-21 - AGB Product Cut
+
+### Added
+
+- **AGB product composition**: `ProductFrameBuilder` converts a real
+  `SceneRenderFrame` into a retained `ProductPacket`; the editor, player,
+  streaming and web hosts draw it through `ProductDevice` with one native
+  executor per session.
+- **Scene viewport**: `FrameUniforms.viewport` renders the 3D canvas into a
+  sub-rectangle while RafUI/CAD overlays keep the full target.
+- **Scene background**: `Command::SceneBackground` paints a canvas backdrop only
+  inside the scene viewport.
+- **DX12 shadows and scene filter**: directional shadow map, scene-only spatial
+  filter, capability gates and resident-byte accounting, matching Vulkan.
+- **RafUI product paint**: `DirectUiSurfaceHost::append_product_paint` emits
+  `Paint`/`StyledPaint` with per-corner radii, per-side borders, gradients,
+  feather, nested rounded clips, nine-slice, atlas text and images.
+- **Native editor host**: `NativeUiWindowHost` owns the window, the AGB device,
+  resize, surface recovery and device reopen. `NativeEditorCompositor` composes
+  canvas and UI in one packet.
+- **Player on AGB**: windowed, headless and streaming paths; world-space UI is
+  rasterized on the CPU and composed as a textured overlay mesh.
+
+### Changed
+
+- `SceneFrameOutput` now carries `Scene(Arc<SceneRenderFrame>)` for the native
+  handoff or `CpuPixels` for recovery; the GPU texture bridge was removed.
+- `BasicDevice` no longer opens a graphics API. It selects the CPU recovery
+  rasterizer or returns the retained frame.
+- `raf_web` uses `WebGpu` and `ProductDevice<WebGpu>` directly; the WebGL2
+  fallback and the canvas blit were removed.
+- Documentation now describes AGB as the active product path and WGPU as an
+  optional reference only.
+
+### Fixed
+
+- A placed canvas no longer emits a scene background before the sky backdrop.
+- A swapchain acquisition timeout skips one frame instead of consuming the
+  bounded recovery budget and logging a presentation failure.
+- The DPI border fixture measures the ring against the fill instead of expecting
+  a vertex in the middle of a straight edge.
+
+### Included snapshot
+
+- This tree also contains the animation-preview work that was already present
+  in the v0.11.3 snapshot.
+
+### Known limitations
+
+- Metal and WebGPU do not implement the shadow map or the scene filter yet.
+- A frame whose retained UI changed rebuilds the whole product packet; partial
+  scene/UI layering is a follow-up.
+
 ## [0.11.2] - 2026-11-19 - Cloud Spine, Iron Ledger and Modular Forge
 
 ### Added

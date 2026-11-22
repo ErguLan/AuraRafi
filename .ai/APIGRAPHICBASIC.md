@@ -5,27 +5,27 @@
 
 The contributor-facing explanation is [docs/APIGRAPHICBASIC.md](../docs/APIGRAPHICBASIC.md).
 Use both documents for renderer, surface, RafUI, GPU asset, or backend work.
+The product migration cut is recorded in the [migration guide](../docs/AGB_MIGRATION.md).
+The [native probe](../docs/AGB_NATIVE_PROBE.md) records the independent execution paths and hardware evidence.
 
 ## 1. Final Direction
 
-`ApiGraphicBasic` is the graphics owner of AuraRafi. WGPU is the current GPU
-adapter and compatibility backend; it is not the permanent public API, resource
-owner, presentation owner, or architecture ceiling.
-
-The active engine path is one Rafi-owned graphics contract:
+`ApiGraphicBasic` is the graphics owner of AuraRafi. The native AGB executors
+run the product path. The target is one Rafi-owned graphics contract:
 
 ```text
 Viewport | CAD | RafUI | Assets
                 |
         ApiGraphicBasic
                 |
-   private WGPU executor | CPU recovery
-                |
- Future native DX12 | Vulkan | Metal backends
+   one native executor per product build
+      DX12 | Vulkan | Metal | WebGPU
 ```
 
 Backend variation exists only below `ApiGraphicBasic`. Editor surfaces,
 documents, and RafUI must never implement separate backend or renderer paths.
+WGPU survives only in the opt-in `reference` executor for A/B, never as a
+product fallback.
 
 ## 2. Migration Is Capability-Based, Not Level-Based
 
@@ -43,22 +43,22 @@ contract. The long-term capability backlog is:
 8. Synchronization, resource-state tracking, fences, and device-loss recovery.
 9. Frame graph and transient resources for shadows and post-processing.
 10. Asset ingress from engine formats into backend resources.
-11. Native DX12, Vulkan, and Metal implementations behind the same contract.
-12. WGPU downgrade to optional fallback, followed by removal when gates pass.
+11. Native DX12, Vulkan, Metal, and direct WebGPU under the same contract.
+12. Product cutover. WGPU is not part of a product build; the optional benchmark
+    reference stays separate.
 
 This list is a durable backlog, not a promise that all items enter the same
 release or stabilization cycle.
 
-## 3. Immediate Foundation When Programming Is Authorized
+## 3. Foundation
 
-The first implementation milestone is allowed to improve the contract while
-WGPU remains the executor. It must:
+The foundation is implemented in the product. Further work must:
 
-- stop exposing `wgpu::*` types above the backend boundary;
-- introduce Rafi-owned resource and surface handles;
-- define adapter capabilities and explicit memory/performance budgets;
-- define one canonical device owner shared by Scene, CAD, RafUI, and present;
-- define asset ingress through owned descriptors and handles: `raf_assets` may
+- keep `wgpu::*` and every graphics API type below the backend boundary;
+- preserve Rafi-owned resource and surface handles;
+- keep adapter capabilities and explicit memory/performance budgets;
+- keep one canonical device owner shared by Scene, CAD, RafUI, and present;
+- keep asset ingress through owned descriptors and handles: `raf_assets` may
   discover/decode files, but ApiGraphicBasic allocates, uploads, budgets, and
   releases graphics resources;
 - preserve GPU-first execution and CPU recovery;
@@ -68,54 +68,48 @@ WGPU remains the executor. It must:
 This foundation is not permission to begin a native backend automatically.
 Strong renderer programming still requires explicit user authorization.
 
-### Foundation 1 Status (2026-07-18)
+### Foundation 1 Baseline (2026-07-18, product cut 2026-11-21)
 
-The first foundation is implemented while WGPU remains the active executor. It
-currently provides generational handles, backend-neutral capabilities, adapter
-preference, potato/desktop budgets, a neutral shared host context, and a GPU
-output wrapper over the private WGPU executor.
+The foundation and the product cut are implemented. It provides generational
+handles, backend-neutral capabilities, adapter preference, potato/desktop
+budgets, retained product packets, native executors, and CPU recovery.
 
-It does not yet provide a complete resource registry, cross-surface structural
-batching, unified DeviceHub across every host, frame graph, or native
-DX12/Vulkan/Metal execution. The active scene viewport already has bounded
-persistent mesh reuse and contiguous line batching; this is a measured hot-path
-optimization, not a claim that every surface has a complete batch scheduler.
+The resource registry, structural batching, frame graph, native executors and
+live product surfaces are active. Metal and WebGPU still need shadow and scene
+filter passes; that is a capability gap, not a reason to reintroduce WGPU.
+
+### Independent native foundation (2026-11-20)
+
+`raf_agb` owns the extracted handles, scheduler, registries, ledger, frame graph
+and product executors. The editor, player, streaming and web hosts consume it
+directly.
 
 ## 4. Private Backend Evolution
 
-The engine may evolve these internal states without changing upper layers:
+Complete the product contract first. During integration, reuse the existing
+scene, RafUI, CAD, compositor, and host code to emit or consume it directly.
+Do not add an intermediate family of `Agb*Backend`, `AgbCompositor`, or
+`AgbWindowHost` wrappers.
 
-- **WGPU-backed ownership**: ApiGraphicBasic owns the public contract while
-  its private WGPU executor performs GPU work.
-- **Encapsulated compatibility**: WGPU exists only inside
-  `raf_backend_wgpu`; no editor or surface imports it.
-- **Native backend qualification**: a future native backend reaches parity
-  behind the same ApiGraphicBasic contract.
-- **Native selection**: the qualified backend becomes the selected executor
-  for a supported platform; upper layers remain unchanged.
-- **WGPU retired**: WGPU leaves the shipping graph only after all removal
-  gates pass.
+The build supplies its native executors. AGB may select one at startup based
+on the compiled APIs, target surface and available hardware. A request for an
+exact API either opens it or reports why it could not. Each frame owns
+resources from one device. Recovery rebuilds the same API. WGPU is never a
+startup or recovery fallback.
 
-Select one executor for a device/surface execution path. Do not mix private
-backend resources inside the same frame. Accidental cross-API copies are
-forbidden.
+## 5. WGPU Boundary
 
-## 5. WGPU Removal Gates
+The product cut is done. WGPU is not part of the editor, player, streaming or web
+build. The rules that keep it out:
 
-WGPU cannot be removed because a native backend merely opens a window. The
-candidate backend must pass:
-
-- Scene viewport, Schematic, PCB, and RafUI parity fixtures;
-- resize, suspend/resume, surface loss, and device-loss recovery;
-- integrated and dedicated GPU validation;
-- bounded RAM/VRAM and cache eviction tests;
-- frame pacing, idle-zero-work, and sustained-session measurements;
-- shader/pipeline cache compatibility and diagnostic coverage;
-- CPU recovery availability;
-- no WGPU types or assumptions in upper layers.
-
-Until then, WGPU remains the private executor. It is not an editor bridge or
-an alternative UI ownership path, and it must not be removed blindly.
+- No product crate declares `wgpu` or imports `wgpu::*`.
+- Native executors must pass the same Scene, CAD, RafUI, resize, surface-loss,
+  device-loss, budget and idle-work fixtures before expanding capability.
+- `reference` remains an explicit, separate-process A/B feature. It is never a
+  startup or recovery fallback.
+- A missing native capability is reported or implemented; it never silently
+  switches the frame to WGPU or CPU.
+- CPU software rendering stays the recovery, headless and testing path.
 
 ## 6. Potato-First Contract
 
@@ -152,9 +146,9 @@ an alternative UI ownership path, and it must not be removed blindly.
 ## 6A. RafUI And Canvas Boundary
 
 - RafUI documents remain serializable backend-neutral data. Layout/input
-  compilation produces one `UiSurfaceDrawList` for GPU presentation and CPU
-  recovery; it never creates a second scene command list, owns WGPU resources,
-  or creates a second renderer.
+  compilation produces one `UiSurfaceDrawList` for AGB presentation and CPU
+  recovery; it never creates a second scene command list, owns graphics API
+  resources, or creates a second renderer.
 - Viewport, Schematic, and PCB are renderer-owned center surfaces. RafUI owns
   chrome, menus, docks, inspectors, and bounded overlays around them.
 - A minimap, selection, wire/trace overlay, or status readout must consume the
@@ -207,8 +201,7 @@ tools must remain isolated and replaceable behind Rafi contracts.
 
 ## 8. Non-Negotiable Rules
 
-- No big-bang WGPU deletion.
-- No new WGPU type in editor-, document-, or surface-facing public APIs.
+- No WGPU dependency or type in a product crate. `reference` only.
 - No duplicate Scene, CAD, or RafUI renderer created for a native backend.
 - No feature claim without an active render path and validation.
 - No PBR, shadows, post-processing, particles, or skeletal expansion during a

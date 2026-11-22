@@ -1,101 +1,55 @@
-//! Native presentation of ApiGraphicBasic scene textures.
+//! Placement of canvas layers inside a native editor target.
 //!
-//! A viewport, schematic, or PCB surface may render off-screen and use this
-//! presenter to reach a native WGPU swapchain without becoming a foreign UI
-//! image.
+//! Scene and CPU canvases now reach the target through the AGB product packet.
+//! This module only owns the target geometry and the pixel-to-normalized
+//! conversion that every layer shares.
 
-mod blit;
-mod cpu;
 mod metrics;
 
 pub use metrics::CanvasTargetRect;
 
-use std::sync::Arc;
-
-use crate::api_graphic_basic::device::BasicDevice;
 use crate::api_graphic_basic::device::SceneFrameOutput;
-use crate::scene_renderer::SceneRenderFrame;
+use crate::api_graphic_basic::product_composition::append_cpu_canvas;
+use raf_agb::product::ProductPacket;
 
-/// Renderer-neutral host for any ApiGraphicBasic scene frame.
+impl CanvasTargetRect {
+    /// Rectangle in normalized top-left target coordinates.
+    pub fn normalized(self, target_size: [u32; 2]) -> [f32; 4] {
+        let width = target_size[0].max(1) as f32;
+        let height = target_size[1].max(1) as f32;
+        let clipped = self.clipped(target_size);
+        [
+            clipped.x as f32 / width,
+            clipped.y as f32 / height,
+            clipped.width as f32 / width,
+            clipped.height as f32 / height,
+        ]
+    }
+}
+
+impl SceneFrameOutput {
+    /// True when this output carries retained scene commands instead of pixels.
+    pub fn is_retained_scene(&self) -> bool {
+        matches!(self, Self::Scene(_))
+    }
+}
+
+/// Appends a CPU-rendered canvas as one image quad.
 ///
-/// The caller may use it for a 3D viewport, schematic, PCB canvas, or a
-/// future runtime canvas. In GPU mode the BasicDevice must share the same WGPU
-/// device as the presentation host; CPU output is uploaded only as fallback.
-pub struct DirectSceneSurfaceHost {
-    presenter: DirectCanvasPresenter,
-    clear_color: [u8; 4],
-}
-
-impl DirectSceneSurfaceHost {
-    pub fn new(
-        device: &wgpu::Device,
-        color_format: wgpu::TextureFormat,
-        clear_color: [u8; 4],
-    ) -> Self {
-        Self {
-            presenter: DirectCanvasPresenter::new(device, color_format),
-            clear_color,
-        }
+/// Returns `Ok(false)` for an empty frame so a host can keep the rest of the
+/// composition without inventing a texture.
+pub fn append_cpu_output(
+    packet: &mut ProductPacket,
+    rect: [f32; 4],
+    output: &SceneFrameOutput,
+    source_size: [u32; 2],
+) -> Result<bool, String> {
+    let SceneFrameOutput::CpuPixels(pixels) = output else {
+        return Ok(false);
+    };
+    if pixels.is_empty() {
+        return Ok(false);
     }
-
-    pub fn render_frame(
-        &mut self,
-        basic_device: &mut BasicDevice,
-        presentation_device: &wgpu::Device,
-        presentation_queue: &wgpu::Queue,
-        target: &wgpu::TextureView,
-        frame: &SceneRenderFrame,
-    ) {
-        let output = basic_device.execute_scene_frame(frame);
-        self.presenter.present(
-            presentation_device,
-            presentation_queue,
-            target,
-            output,
-            [frame.width, frame.height],
-            self.clear_color,
-        );
-    }
-
-    /// Presents an already-rendered ApiGraphicBasic output. Native editor
-    /// hosts use this when the shared `RenderRuntime` owns device selection
-    /// and frame scheduling, so CAD/Electronics does not need to reach into a
-    /// concrete `BasicDevice`.
-    pub fn present_output(
-        &mut self,
-        presentation_device: &wgpu::Device,
-        presentation_queue: &wgpu::Queue,
-        target: &wgpu::TextureView,
-        output: SceneFrameOutput,
-        source_size: [u32; 2],
-    ) {
-        self.presenter.present(
-            presentation_device,
-            presentation_queue,
-            target,
-            output,
-            source_size,
-            self.clear_color,
-        );
-    }
-
-    pub fn presenter_mut(&mut self) -> &mut DirectCanvasPresenter {
-        &mut self.presenter
-    }
-}
-
-pub struct DirectCanvasPresenter {
-    pipeline: wgpu::RenderPipeline,
-    bind_group_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-    cpu_texture: Option<wgpu::Texture>,
-    cpu_view: Option<Arc<wgpu::TextureView>>,
-    cpu_size: [u32; 2],
-    source_key: usize,
-    source_bind_group: Option<wgpu::BindGroup>,
-    last_cpu_source: Option<Arc<SceneFrameOutput>>,
-}
-
-pub(crate) struct PreparedCanvasSource {
-    view: Arc<wgpu::TextureView>,
+    append_cpu_canvas(packet, rect, pixels, source_size)?;
+    Ok(true)
 }

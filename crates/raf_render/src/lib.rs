@@ -29,10 +29,11 @@ pub mod shadow_frame;
 mod sky_stars;
 
 // --- Core renderer and compatibility exports ---
-// The active editor path is ApiGraphicBasic + SceneRenderer with GPU-first
-// execution and CPU recovery. The modules below include active math/picking
-// contracts plus prepared or compatibility APIs; see docs/RENDERER.md for the
-// current classification instead of treating every public export as active.
+// The active editor path is ApiGraphicBasic + SceneRenderer: retained scene
+// frames go to the AGB compositor and the CPU rasterizer remains the recovery
+// contract. The modules below include active math/picking contracts plus
+// prepared or compatibility APIs; see docs/RENDERER.md for the current
+// classification instead of treating every public export as active.
 #[path = "ApiGraphicBasic/mod.rs"]
 pub mod api_graphic_basic;
 pub mod backend;
@@ -47,13 +48,11 @@ pub mod picking;
 pub mod picking_id_buffer;
 pub mod pipeline;
 pub mod projection;
-pub mod renderer;
 
 // --- Prepared advanced rendering (opt-in, zero-cost when disabled) ---
 pub mod lighting;
 pub mod post_process;
 pub mod render_config;
-pub mod shaders;
 pub mod texture;
 pub mod uv_mapping;
 
@@ -84,7 +83,6 @@ pub use picking::{
 };
 pub use picking_id_buffer::{PickHit, PickObjectId, PickPixel, SelectionIdBuffer};
 pub use pipeline::RenderPipeline;
-pub use renderer::Renderer;
 
 // --- v0.7.0 re-exports ---
 pub use lighting::{apply_fog, bloom_factor, compute_lighting, Light, LightingEnv};

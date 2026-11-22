@@ -3,7 +3,22 @@ no leer ESTE ARCHIVO SON ANOTARIAS DEL ESTADO DE DESARROLLIO INTERNO Y SOLO PERD
 
 Fecha: 2026-08-23
 
-## Estado actual de la migracion (2026-08-23)
+## Corte AGB de producto (2026-11-21)
+
+El editor, el player, el streaming y el host web ya abren y componen por
+ApiGraphicBasic. `NativeUiWindowHost` posee un `ProductDevice<NativeBackend>`,
+`NativeEditorCompositor` compone escena, CAD y RafUI en un packet y lo dibuja.
+`SceneFrameOutput` transporta el frame retenido, sin textura GPU intermedia.
+`raf_render`, `raf_editor`, `raf_player` y `raf_web` ya no dependen de WGPU; solo
+la feature `reference` de `raf_agb` lo enlaza para A/B.
+
+Evidencia de la fecha: el engine abrió en Vulkan con 630 ms de inicialización
+gráfica y 1.07 s de arranque total; el player headless capturó dos frames a
+1280×720 por DX12; `cargo tree -p aura_rafi_editor -e normal` no mostró WGPU.
+Las secciones siguientes son historial previo al corte y pueden describir la
+ruta WGPU que ya no existe.
+
+## Estado de la migracion (2026-08-23, historico)
 
 Este documento conserva el historial de fases y hallazgos de estabilizacion.
 Sus marcas `DONE`, rutas y nombres de hosts describen el estado de la fecha en

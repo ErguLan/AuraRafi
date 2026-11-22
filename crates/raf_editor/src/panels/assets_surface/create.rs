@@ -16,6 +16,7 @@ pub fn build_assets_create_menu_surface(palette: StudioUiPalette) -> UiSurface {
     let mut root = overlay_menu_root(palette, "assets.create-menu", "app.assets_create");
     for (id, icon, label_key, command) in [
         ("interface",UiIconId::Frame,"ui.designer.title","assets.create-interface"),
+        ("animation",UiIconId::Play,"animation.tab","animations.open"),
         (
             "script",
             UiIconId::Script,

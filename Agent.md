@@ -52,8 +52,9 @@ inventory, not a one-time cleanup.
 ## Synaptic Directory Map
 * **Definitive Architectural Directory**: [.ai/SYSTEM_TRUTH.md](.ai/SYSTEM_TRUTH.md) — All crates, files, and logic paths detailed.
 * **Strict Quality & Localisation Policies**: [.ai/instructions.md](.ai/instructions.md) — Languages, modular layouts, commands consistency, and no-emoji mandates.
-* **ApiGraphicBasic Controlled Hybrid Rule**: [.ai/APIGRAPHICBASIC.md](.ai/APIGRAPHICBASIC.md) — WGPU containment, capability-by-capability migration, native backend gates, and potato-first graphics ownership.
+* **ApiGraphicBasic Native Ownership Rule** — Product contract, isolated startup, platform qualification, and potato-first graphics [rules](.ai/APIGRAPHICBASIC.md).
 * **ApiGraphicBasic Contributor Contract**: [docs/APIGRAPHICBASIC.md](docs/APIGRAPHICBASIC.md) — Surface ownership, resource ingress, GPU/CPU recovery, and asset boundaries.
+* **ApiGraphicBasic Product Migration**: [docs/AGB_MIGRATION.md](docs/AGB_MIGRATION.md) — Phase 5 entry points, first headless slice, runnable examples, and acceptance criteria.
 * **RafUI Technical Contract**: [docs/RAF_UI.md](docs/RAF_UI.md) — Retained documents, layout, rendering boundary, and core validation.
 * **Editor RafUI Contract**: [docs/EDITOR_RAFUI.md](docs/EDITOR_RAFUI.md) — Game/Electronics shell, panels, Inspector, Hierarchy, interaction, and UX rules.
 
@@ -85,8 +86,14 @@ Always load the specialized context files below based on your active development
 
 Any task touching `ApiGraphicBasic`, WGPU, renderer resources, viewport, CAD
 surfaces, RafUI presentation, shaders, GPU assets, or native backends must load
-`.ai/APIGRAPHICBASIC.md` before proposing or changing architecture. WGPU is a
-controlled compatibility backend under ApiGraphicBasic, never the public owner.
+`.ai/APIGRAPHICBASIC.md` before proposing or changing architecture. Before
+product migration, use the [AGB guide](docs/AGB_MIGRATION.md) to complete the
+contract, coverage matrix, and isolated startup. Reuse existing product hosts
+and producers directly. Native builds can select a native API for the target
+output at startup, then recover with the same API. WGPU stays in the current
+product until platform cutover,
+then leaves that default build. It remains available as an independent benchmark
+reference. Do not add a WGPU fallback.
 
 Any task touching a retained surface, editor chrome, menus, docks, scroll,
 inspector, hub, settings, or CAD/viewport overlays should consult the dual visual

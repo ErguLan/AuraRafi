@@ -962,7 +962,10 @@ impl NativeEditorApplication {
         let canvas_layer = if loading_active {
             None
         } else if project_open && runtime.project_type() == ProjectType::Game {
-            let Some(canvas_layer) = runtime.render_game_canvas(&self.scene) else {
+            let preview = self.workbench.as_ref().and_then(|workbench| {
+                workbench.animation_preview_scene(&self.scene, &runtime.game_viewport().selected)
+            });
+            let Some(canvas_layer) = runtime.render_game_canvas(&self.scene, preview) else {
                 runtime.cancel_frame();
                 self.input.begin_frame();
                 return;

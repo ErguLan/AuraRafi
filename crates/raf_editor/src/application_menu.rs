@@ -26,6 +26,7 @@ pub mod command {
     pub const VIEW_SCENE: &str = "editor.scene_view";
     pub const VIEW_HIERARCHY: &str = "editor.hierarchy_view";
     pub const VIEW_INSPECTOR: &str = "editor.inspector_view";
+    pub const VIEW_ANIMATIONS: &str = "animations.open";
     pub const VIEW_SCHEMATIC: &str = "electronics.mode.schematic";
     pub const VIEW_PCB: &str = "electronics.mode.pcb";
     pub const PROJECT_OPEN_FOLDER: &str = "project.open_folder";
@@ -82,7 +83,8 @@ pub fn build_application_menu(state: ApplicationMenuState) -> UiApplicationMenu 
                 "app.inspector",
                 true,
                 state.inspector_visible,
-            )),
+            ))
+            .with_item(command(command::VIEW_ANIMATIONS, "animation.tab")),
         ProjectType::Electronics => view_menu
             .with_item(UiMenuItem::Separator)
             .with_item(configured(

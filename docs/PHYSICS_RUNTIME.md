@@ -152,8 +152,19 @@ count, and SI readings for the first simulated dynamic body. `W` is its weight,
 sampled tick. Set an active camera to see the world overlay. Enter Play again
 after changing the settings so they take effect in the new runtime snapshot.
 
-A transform rig can be authored by Agent, attached CLI/MCP or the editor
-console through `game.update`. For example, given `Puppet` with a child `Head`:
+Open **View → Animations** or the **Animations** tab in the bottom dock.
+The panel can create an asset from the selected pose or publish an existing
+inline rig. In **Assets → Animations**, double-click a `.animation.json` file
+to open it. Select the target in Hierarchy and use **Link to selection**.
+The time slider previews on a disposable scene copy. Exit preview before
+posing an entity in the Inspector, then press **Capture key** to save the
+authored transforms at the playhead. Capture saves every addressed track in
+the selected non-additive layer. Play reads the currently saved asset, and
+multiple compatible entities can share it. Unlinking leaves the file in Assets.
+
+The command `game.update` takes `animation_asset` with the asset-relative file
+path, or `null` to unlink. An inline transform rig can still be authored by
+Agent, attached CLI/MCP or the editor console. For example, given `Puppet` with a child `Head`:
 
 ```json
 {

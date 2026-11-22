@@ -585,7 +585,7 @@ fn default_groups_for_type(project_type: ProjectType) -> Vec<DockTabGroup> {
         return vec![DockTabGroup::new("native.console", tabs)];
     }
     let left_ids = if project_type == ProjectType::Game {
-        ["console", "agent", "nodes", "project-settings"].as_slice()
+        ["console", "agent", "nodes", "project-settings", "animations"].as_slice()
     } else {
         ["console", "agent", "drc", "simulation"].as_slice()
     };
@@ -652,6 +652,7 @@ fn default_tabs_for_type(project_type: ProjectType) -> Vec<DockTab> {
             UiIconId::Frame,
         ));
         tabs.push(DockTab::new("nodes", "nodes.tab", UiIconId::Node));
+        tabs.push(DockTab::new("animations", "animation.tab", UiIconId::Play));
     } else {
         // The tab titles are localization keys. The previous literals "DRC" and
         // "Simulation" were not catalog keys, so the renderer fell back to the

@@ -1,8 +1,8 @@
 //! Software compositor for retained UI surfaces.
 //!
-//! The normal editor path presents through WGPU. This renderer is a compact
-//! recovery path for the same retained draw list, so low-end or incompatible
-//! systems do not need a separate UI implementation.
+//! The normal editor path presents through ApiGraphicBasic. This renderer is a
+//! compact recovery path for the same retained draw list, so low-end or
+//! incompatible systems do not need a separate UI implementation.
 
 use super::effects::{clip_coverage, rounded_distance, UiPaintEffects, UiPaintKey};
 use super::{

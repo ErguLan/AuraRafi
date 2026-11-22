@@ -1,9 +1,6 @@
 //! Opt-in, read-only A/B capture of real authored projects. No Play or script execution.
 use crate::{
-    api_graphic_basic::{
-        device::{BasicDevice, BasicDeviceConfig},
-        GraphicsBackendId,
-    },
+    api_graphic_basic::device::{BasicDevice, BasicDeviceConfig},
     camera::{Camera, CameraMode},
     scene_renderer::{RenderOptions, SceneRenderer, SCENE_BACKGROUND, SCENE_LIGHT_DIRECTION},
 };
@@ -70,20 +67,12 @@ fn optimized_project_ab_read_only_captures() {
         };
         eprintln!("A/B project={} session={} camera={} env={:?} shadow={}@{} distance={} soft={} resolution={:?} texture={:?}",project.name,session.name,camera_source,scene.environment().mode,scene.environment().shadows.enabled,scene.environment().shadows.resolution,scene.environment().shadows.distance,scene.environment().shadows.soft_filter,project.settings.viewport_resolution,project.settings.texture_quality);
         let saved = *scene.environment();
-        for gpu in [false, true] {
+        {
             let mut device = BasicDevice::new(BasicDeviceConfig {
-                allow_gpu: gpu,
-                force_cpu: !gpu,
+                allow_gpu: false,
+                force_cpu: true,
                 ..Default::default()
             });
-            if gpu && device.capabilities().backend != GraphicsBackendId::Wgpu {
-                assert!(
-                    std::env::var_os("RAF_REQUIRE_GPU_QA").is_none(),
-                    "GPU required but unavailable"
-                );
-                eprintln!("Project A/B GPU SKIPPED: no adapter");
-                continue;
-            }
             let mut renderer = SceneRenderer::new(720, 450);
             renderer.set_asset_root(Some(root.join("assets")));
             for (technology, label) in [
@@ -125,7 +114,7 @@ fn optimized_project_ab_read_only_captures() {
                         }
                     }
                     if sample == 11 {
-                        let backend = if gpu { "gpu" } else { "cpu" };
+                        let backend = "cpu";
                         image::save_buffer(
                             output.join(format!("project-{index}-{backend}-{label}.png")),
                             &capture.rgba8,
@@ -139,7 +128,7 @@ fn optimized_project_ab_read_only_captures() {
                 }
                 cpu_times.sort_by(f32::total_cmp);
                 gpu_times.sort_by(f32::total_cmp);
-                let backend = if gpu { "gpu" } else { "cpu" };
+                let backend = "cpu";
                 let metrics = device.last_frame_metrics();
                 let report = serde_json::json!({
                     "project":project.name,"session":session.name,"camera_source":camera_source,
@@ -159,7 +148,7 @@ fn optimized_project_ab_read_only_captures() {
                     serde_json::to_vec_pretty(&report).unwrap(),
                 )
                 .unwrap();
-                eprintln!("A/B {index} gpu={gpu} {label}: warm CPU median={:.3}ms P95={:.3}ms; GPU samples={gpu_times:?}. Debug offscreen only; not native/low-end acceptance.",cpu_times[cpu_times.len()/2],cpu_times[cpu_times.len()-1]);
+                eprintln!("A/B {index} {label}: warm CPU median={:.3}ms P95={:.3}ms. Debug offscreen CPU only; GPU A/B lives in the AGB probe.",cpu_times[cpu_times.len()/2],cpu_times[cpu_times.len()-1]);
             }
         }
         assert_eq!(

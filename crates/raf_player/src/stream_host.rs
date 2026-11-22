@@ -4,7 +4,8 @@
 //! authenticated stream server. The host renders only while a client is
 //! connected; with no peer it sleeps instead of burning cycles. Input frames
 //! are authoritative state, so the server derives press/release edges and a
-//! lost packet cannot leave a key stuck.
+//! lost packet cannot leave a key stuck. Each composed AGB frame is read back
+//! through `NativeUiWindowHost::capture`.
 
 use crate::{PlayerLaunch, PlayerSession, PlayerSource};
 use raf_core::InputSnapshot;
@@ -12,9 +13,9 @@ use raf_net::input::InputTracker;
 use raf_net::protocol::bye_reason;
 use raf_net::{epoch_millis, StreamConfig, StreamMessage, StreamPeer, StreamServer, VideoFrame};
 use raf_render::api_graphic_basic::ui_surface::{
-    NativeUiInputBridge, NativeUiWindowConfig, NativeUiWindowHost,
+    NativeUiInputBridge, NativeUiWindowHost,
 };
-use raf_render::api_graphic_basic::{GraphicsAdapterPreference, NativeEditorCompositor};
+use raf_render::api_graphic_basic::NativeEditorCompositor;
 use raf_runtime::manifest::RuntimeManifest;
 use serde::Serialize;
 use std::net::SocketAddr;
@@ -115,16 +116,7 @@ pub fn run(launch: PlayerLaunch, options: StreamHostOptions) -> Result<(), Strin
     manifest.project_settings.runtime.fixed_hz = options.fixed_hz;
 
     let settings = launch.settings.clone();
-    let config = NativeUiWindowConfig {
-        adapter_preference: if settings.render_execution_policy
-            == raf_core::config::RenderExecutionPolicy::GpuPreferred
-        {
-            GraphicsAdapterPreference::HighPerformance
-        } else {
-            GraphicsAdapterPreference::LowPower
-        },
-        ..NativeUiWindowConfig::default()
-    };
+    let config = crate::graphics::window_config(settings.render_execution_policy, options.size);
 
     let mut host = NativeUiWindowHost::create_headless(options.size, config)?;
     let mut compositor = NativeEditorCompositor::new(&host.graphics_context(), CLEAR_COLOR);
@@ -157,7 +149,6 @@ pub fn run(launch: PlayerLaunch, options: StreamHostOptions) -> Result<(), Strin
     let mut snapshot = InputSnapshot::default();
     let mut peer: Option<StreamPeer> = None;
     let mut next_frame = Instant::now();
-    let mut rgba = Vec::new();
     let mut diagnostics = Vec::new();
     let mut frames_rendered = 0u64;
     let mut tick_ms = 0.0_f64;
@@ -250,7 +241,8 @@ pub fn run(launch: PlayerLaunch, options: StreamHostOptions) -> Result<(), Strin
         tick_ms += (step_ms - frame_render_ms).max(0.0);
 
         let capture_started = Instant::now();
-        let (width, height) = host.capture_frame_rgba_into(&mut rgba)?;
+        let rgba = host.capture()?;
+        let [width, height] = host.size();
         capture_ms += capture_started.elapsed().as_secs_f64() * 1000.0;
 
         let video = VideoFrame::from_rgba(

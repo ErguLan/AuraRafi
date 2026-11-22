@@ -1,11 +1,11 @@
 //! WebAssembly canvas host for the AuraRafi renderer core.
 //!
 //! This crate is the browser platform boundary for `raf_render` and
-//! `ApiGraphicBasic`. It owns the canvas surface, the asynchronous adapter and
-//! device request, the bounded frame schedule, and the final present blit. The
-//! scene itself is still built and recorded by the same `raf_core::SceneGraph`
-//! and `raf_render::scene_renderer::SceneRenderer` used by the desktop
-//! viewport.
+//! `ApiGraphicBasic`. It owns the canvas element and one AGB
+//! `ProductDevice<WebGpu>`; canvas presentation happens inside that executor,
+//! not through a foreign presenter or a second blit path. The scene itself is
+//! still built and recorded by the same `raf_core::SceneGraph` and
+//! `raf_render::scene_renderer::SceneRenderer` used by the desktop viewport.
 //!
 //! It does not load projects, scripts, textures, or audio. Those systems still
 //! depend on `std::fs`, native threads, and the Windows audio backend; the
@@ -16,7 +16,6 @@
 
 mod app;
 mod diagnostics;
-mod present;
 mod scene;
 
 use wasm_bindgen::prelude::*;

@@ -282,12 +282,14 @@ impl PresentationRecovery {
 ///
 /// This stays crate-visible because it names a backend type; editor, document,
 /// and surface-facing contracts only see [`PresentationFault`].
-pub(crate) fn classify_surface_error(error: wgpu::SurfaceError) -> PresentationFault {
+pub(crate) fn classify_surface_error(error: &raf_agb::Error) -> PresentationFault {
     match error {
-        wgpu::SurfaceError::Lost => PresentationFault::Lost,
-        wgpu::SurfaceError::Outdated => PresentationFault::Outdated,
-        wgpu::SurfaceError::Timeout => PresentationFault::Timeout,
-        wgpu::SurfaceError::OutOfMemory => PresentationFault::OutOfMemory,
+        raf_agb::Error::SurfaceLost => PresentationFault::Lost,
+        raf_agb::Error::SurfaceOutdated => PresentationFault::Outdated,
+        raf_agb::Error::DeviceLost => PresentationFault::Lost,
+        raf_agb::Error::Busy => PresentationFault::Timeout,
+        raf_agb::Error::Budget { .. } => PresentationFault::OutOfMemory,
+        _ => PresentationFault::Other,
     }
 }
 
@@ -491,20 +493,31 @@ mod tests {
     #[test]
     fn classify_maps_every_surface_error() {
         assert_eq!(
-            classify_surface_error(wgpu::SurfaceError::Lost),
+            classify_surface_error(&raf_agb::Error::SurfaceLost),
             PresentationFault::Lost
         );
         assert_eq!(
-            classify_surface_error(wgpu::SurfaceError::Outdated),
+            classify_surface_error(&raf_agb::Error::SurfaceOutdated),
             PresentationFault::Outdated
         );
         assert_eq!(
-            classify_surface_error(wgpu::SurfaceError::Timeout),
+            classify_surface_error(&raf_agb::Error::DeviceLost),
+            PresentationFault::Lost
+        );
+        assert_eq!(
+            classify_surface_error(&raf_agb::Error::Busy),
             PresentationFault::Timeout
         );
         assert_eq!(
-            classify_surface_error(wgpu::SurfaceError::OutOfMemory),
+            classify_surface_error(&raf_agb::Error::Budget {
+                requested: 1,
+                available: 0
+            }),
             PresentationFault::OutOfMemory
+        );
+        assert_eq!(
+            classify_surface_error(&raf_agb::Error::Invalid("probe")),
+            PresentationFault::Other
         );
     }
 }

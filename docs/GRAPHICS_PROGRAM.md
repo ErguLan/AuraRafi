@@ -12,8 +12,8 @@ belong below it.
 
 The program has three outcomes:
 
-1. Keep one graphics owner while WGPU remains the active private executor.
-2. Add native backend lanes in v0.11.5 without changing Scene, CAD, RafUI, or
+1. Keep one graphics owner: ApiGraphicBasic over the native AGB executors.
+2. Native backend lanes already ship without changing Scene, CAD, RafUI, or
    asset-facing contracts.
 3. Add PBR, SSAO, point/spot lights, particles, and skeletal skinning in v0.12
    through the same frame graph and budget system.
@@ -32,7 +32,7 @@ Scene viewport | Schematic | PCB | RafUI | Asset ingress
                       ApiGraphicBasic
               (public contract, budgets, lifecycle)
                               |
-          private executor: WGPU today, native lanes later
+          private executor: Vulkan | DX12 | Metal | WebGPU
                               |
                   CPU recovery / headless fallback
 ```
@@ -49,17 +49,22 @@ Rules:
 
 - One executor is selected for a device and surface. A frame never mixes
   backend resources.
-- Upper layers never import WGPU types. The remaining `from_wgpu`/`as_wgpu`
-  seams in ApiGraphicBasic are private executor adapters, not a second public
-  API.
+- Upper layers never import graphics API types. WGPU survives only inside the
+  `reference` executor, not as a second public API.
 - A backend lane graduates capability by capability. It does not start with a
   big-bang renderer rewrite.
 - Disabled features have zero recurring frame cost.
 - A native lane that only opens a window is not a qualified backend.
 
-## 3. Current baseline (2026-11-19)
+## 3. Current baseline (2026-11-21)
 
-- WGPU 23 is the active GPU executor behind ApiGraphicBasic.
+The independent [native probe](AGB_NATIVE_PROBE.md) exercises the extracted
+ApiGraphicBasic contract and native executors. The editor, player and browser
+host now use the same contract in product.
+The [product migration guide](AGB_MIGRATION.md) covers integration and acceptance.
+
+- Vulkan, DX12, Metal and WebGPU are the product executors behind
+  ApiGraphicBasic; the optional `reference` feature keeps WGPU for A/B.
 - `BasicDevice` carries adapter preference, backend-neutral capabilities,
   generational handles, and `GraphicsMemoryBudget`.
 - CPU recovery produces RGBA frames without GPU access.
@@ -79,49 +84,41 @@ Rules:
 - The directional shadow pass is opt-in and budgeted. It is not a general
   shadow system.
 - A prepared backend-neutral frame graph exists in
-  `crates/raf_render/src/ApiGraphicBasic/frame_graph.rs`; see
+  `crates/raf_agb/src/frame_graph.rs`; see
   [FRAME_GRAPH.md](FRAME_GRAPH.md). It is not wired into `BasicDevice` yet, so
   the active scene path remains single-pass.
-- There is no native backend lane yet. That is v0.11.5 work.
+- Native executors run the product contract in the editor, player, streaming
+  and web hosts. Qualification on every platform is still tracked separately.
 
 ### Boundary status
 
-WGPU is still the only GPU executor, and the boundary is not sealed yet. The
-remaining direct `wgpu::` consumers are concentrated in:
+The product boundary is closed: no product crate depends on `wgpu`. The scene,
+RafUI, CAD, compositor and surface host emit AGB product commands directly. The
+only direct `wgpu` consumer is the opt-in reference executor.
 
-| File | Role |
-| --- | --- |
-| `ApiGraphicBasic/device.rs` | neutral device plus WGPU scene execution and pipelines |
-| `ui_surface/gpu_renderer.rs` | RafUI's WGPU renderer |
-| `canvas_presenter.rs` | WGPU surface blit |
-| `ui_surface/native_window.rs` | WGPU instance/adapter/device/surface creation |
-| `shadow_gpu.rs`, `environment_gpu.rs`, `optimized_filter_gpu.rs` | scene sub-passes inside the device |
-| `editor_compositor.rs` | WGPU layer composition |
-
-The target layout is:
+Current layout:
 
 ```text
-ApiGraphicBasic/
-  mod.rs                 public contract only
-  device.rs              neutral device + dispatch
-  frame_graph.rs
-  command_list.rs
-  asset_ingress.rs
-  memory_ledger.rs
-  handles.rs
-  capabilities.rs
-  backends/
-    wgpu/                the only place that imports wgpu
-    cpu/
-    null/
-    vulkan/              v0.11.5+
-    dx12/                v0.11.5+
-    metal/               v0.11.5+
+raf_agb/
+  product.rs             retained contract, packets and device
+  product/encode/        scene, paint, CAD and resource encoding
+  backends/native.rs     one native executor per device
+  backends/vulkan/       window, capture, shadows, filter
+  backends/dx12/         window, capture, shadows, filter
+  backends/metal.rs      window, capture
+  backends/webgpu.rs     browser canvas
+  backends/reference.rs  optional WGPU A/B executor
+
+raf_render/ApiGraphicBasic/
+  device.rs              CPU recovery + native scene handoff
+  product_composition.rs SceneRenderFrame -> ProductPacket
+  ui_surface/            retained RafUI -> ProductPacket paint
+  editor_compositor/     canvas viewport + UI composition
+  ui_surface/native_window/  window, resize, recovery
 ```
 
-The hard rule for the migration: no file outside `backends/` imports `wgpu`.
-Until that is true, adding a native backend would also require duplicating RafUI,
-the compositor and the surface host.
+The native product build runs without WGPU. The optional WGPU reference stays in
+the probe under the `reference` feature.
 
 Current budgets:
 
@@ -187,7 +184,7 @@ static or paused. That polling must not render, upload, or rebuild the scene.
 The frame graph is an ordered, backend-neutral description of passes and
 transient resources. The prepared contract is documented in
 [FRAME_GRAPH.md](FRAME_GRAPH.md) and implemented in
-`crates/raf_render/src/ApiGraphicBasic/frame_graph.rs`. It owns:
+`crates/raf_agb/src/frame_graph.rs`. It owns:
 
 - pass order and dependencies;
 - transient resource declarations and aliasing;
@@ -243,7 +240,7 @@ selected only after it passes the qualification gates below.
 Qualification gates:
 
 - Scene, Schematic, PCB, and RafUI parity on the committed fixtures.
-- CPU recovery remains available for the same session.
+- Explicit CPU paths retain their existing product behavior where used.
 - Resize, minimize, suspend/resume, surface loss, and device loss recovery.
 - Integrated and dedicated GPU runs.
 - Memory ledger, cache eviction, and upload budgets hold.
@@ -251,8 +248,11 @@ Qualification gates:
 - Shader/pipeline cache behavior is compatible.
 - No backend type or assumption leaks into upper layers.
 
-WGPU remains the default executor until every gate passes for a lane. A native
-lane may run in shadow mode for measurement before it becomes selectable.
+The product path already runs on the native executors. Qualification still
+happens per platform: test the native build and the optional WGPU reference in
+separate processes, and keep the native executor free of a WGPU runtime
+fallback. Follow the [product contract gates](AGB_MIGRATION.md) for any new
+surface.
 
 ## 6. v0.12 feature plug-in
 
@@ -354,27 +354,27 @@ well-behaved secondary process:
 - Record the reference machine and driver.
 - No renderer behavior change is claimed.
 
-### M1: Frame graph under WGPU
+### M1: Product frame graph contract
 
-- Wire the prepared backend-neutral pass and transient-resource contract into
-  `BasicDevice` without exposing backend types upward.
+- Complete the prepared pass and transient-resource contract in ApiGraphicBasic
+  and verify it in the native qualification build.
 - Port shadow, scene, post, and UI composition to the graph.
 - Prove parity against the M0 captures.
 - Prove aliasing saves memory without changing output.
 
-### M2: First native lane in shadow mode
+### M2: First isolated native lane
 
 - Implement one platform lane behind ApiGraphicBasic.
-- Run it in shadow mode beside WGPU on the same fixtures.
+- Measure it and the WGPU reference in separate processes on the same fixtures.
 - Report per-pass timing, memory, and parity.
-- WGPU remains the selected executor.
 
 ### M3: Native lane qualification
 
 - Pass device-loss, surface-loss, suspend/resume, integrated/dedicated, and
   soak gates.
 - Promote the lane for its platform only after all gates pass.
-- Keep the WGPU lane available until removal gates are satisfied.
+- The promoted platform already ships without WGPU; keep the benchmark
+  reference as a separate opt-in target.
 
 ### M4: v0.12 rendering features
 
@@ -409,7 +409,8 @@ claim. Missing values are reported as missing, never as zero.
 ## 9. Non-goals
 
 - No parity promise with any external engine.
-- No removal of WGPU before the qualification and removal gates pass.
+- No product crate re-introduces WGPU or any second executor; the reference
+  feature stays opt-in and separate.
 - No second renderer for editor panels, CAD, RafUI, or gameplay.
 - No frame graph feature that only works on one backend and leaks that backend
   into upper layers.

@@ -131,6 +131,7 @@ pub(super) fn asset_sidebar(
         ("audio", UiIconId::Play, "app.audio"),
         ("scripts", UiIconId::Script, "app.scripts_filter"),
         ("interfaces", UiIconId::Frame, "ui.designer.title"),
+        ("animations", UiIconId::Play, "animation.tab"),
     ] {
         sidebar = sidebar.with_child(asset_category_row(
             palette,
@@ -145,6 +146,7 @@ pub(super) fn asset_sidebar(
                     | ("audio", AssetFilter::Audio)
                     | ("scripts", AssetFilter::Scripts)
                     | ("interfaces", AssetFilter::Interfaces)
+                    | ("animations", AssetFilter::Animations)
             ),
         ));
     }

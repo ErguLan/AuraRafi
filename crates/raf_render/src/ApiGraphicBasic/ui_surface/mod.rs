@@ -2,8 +2,8 @@
 //!
 //! This is the retained UI contract for editor chrome and canvas
 //! overlays. It stores layout and text keys as data, compiles one retained
-//! paint list for CPU or GPU composition, and does not depend on the legacy
-//! editor shell.
+//! paint list, and produces shared ApiGraphicBasic paint commands for the
+//! native executors while the CPU recovery host consumes the same list.
 
 mod application_menu;
 mod authoring_gallery;
@@ -15,19 +15,21 @@ mod diagnostics;
 mod direct_host;
 mod effects;
 mod flow_sizing;
-mod gpu_renderer;
-mod headless;
+#[cfg(not(target_arch = "wasm32"))]
 mod host_frame_capture;
 mod image_layout;
 mod images;
 mod inspection;
 pub mod loading;
+#[cfg(feature = "agb-probe-fixtures")]
+pub mod native_workload;
 mod native_input;
+#[cfg(not(target_arch = "wasm32"))]
 mod native_window;
-mod offscreen;
 mod paint_motion;
 mod presentation;
 mod presentation_lifecycle;
+mod product_paint;
 mod quality;
 mod regional_layout;
 mod regional_paint;
@@ -38,7 +40,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-pub use application_menu::{NativeApplicationMenuAdapter, NativeWindowApplicationMenuAdapter};
+pub use application_menu::NativeWindowApplicationMenuAdapter;
 pub use authoring_gallery::component_gallery;
 pub use compilation::UiSurfaceCompileMetrics;
 pub use cpu_host::{CpuUiSurfaceHost, DirectUiSurfaceCpuFrame};
@@ -46,28 +48,34 @@ pub use cpu_renderer::{UiSurfaceCpuMetrics, UiSurfaceCpuRenderer};
 pub use diagnostics::UiSurfaceDiagnostics;
 pub use direct_host::{DirectUiSurfaceFrame, DirectUiSurfaceHost};
 pub use effects::{UiPaintEffects, UiPaintKey, UiRoundedClip, UiSurfaceEffects};
-pub(crate) use gpu_renderer::UiSurfaceGpuSharedResources;
-pub use gpu_renderer::{UiSurfaceGpuMetrics, UiSurfaceGpuRenderer};
 pub use images::{UiSurfaceImageData, UiSurfaceImageStore};
 pub use inspection::{
     inspect_surface, UiAuthoringIssue, UiAuthoringIssueKind, UiImageInspection, UiNodeInspection,
     UiSurfaceInspection,
 };
 pub use native_input::NativeUiInputBridge;
-pub use native_window::{
-    NativeCursorLease, NativeGraphicsContext, NativePresentMode, NativeUiWindowConfig,
-    NativeUiWindowHost, NativeWindowCommandResult,
-};
-pub use offscreen::UiOffscreenTarget;
+pub use product_paint::UiPaintMetrics;
 pub use presentation::{
     UiSurfaceDrawList, UiSurfaceImageQuad, UiSurfacePaintCommand, UiSurfaceQuad, UiSurfaceStroke,
     UiSurfaceTextQuad,
 };
+pub use quality::{cpu_quality_matrix, craftsmanship_gallery, UiSurfaceQualitySample};
+
+// Native presentation, application menus and surface recovery name the native
+// AuraRafi backend, which ApiGraphicBasic only compiles for non-web targets.
+// `raf_web` builds this crate for wasm and never consumes these types.
+#[cfg(not(target_arch = "wasm32"))]
+pub use application_menu::NativeApplicationMenuAdapter;
+#[cfg(not(target_arch = "wasm32"))]
+pub use native_window::{
+    NativeCursorLease, NativeGraphicsContext, NativePresentMode, NativeUiWindowConfig,
+    NativeUiWindowHost, NativeWindowCommandResult,
+};
+#[cfg(not(target_arch = "wasm32"))]
 pub use presentation_lifecycle::{
     PresentationDecision, PresentationFault, PresentationHealth, PresentationPolicy,
     PresentationRecovery,
 };
-pub use quality::{cpu_quality_matrix, craftsmanship_gallery, UiSurfaceQualitySample};
 pub use raf_ui::{
     BottomDockLayout, DockDropTarget, DockLayout, DockLayoutEntry, DockLayoutFrame, DockPanel,
     DockSide, DockTab, DockTabGroup, DockWorkspaceController, DockWorkspaceEvent, FloatingPanel,
@@ -614,8 +622,8 @@ fn apply_surface_materials(
 
 /// Applies the legacy experimental theme control as a small, global warmth
 /// pass. Keeping it in the shared frame stage makes the preview consistent in
-/// both the WGPU compositor and the CPU recovery path, while leaving semantic
-/// accents (orange, status colors, and world axes) intact.
+/// both ApiGraphicBasic composition and the CPU recovery path, while leaving
+/// semantic accents (orange, status colors, and world axes) intact.
 fn apply_experimental_tint(
     frame: &mut UiSurfaceFrame,
     palette: StudioUiPalette,
@@ -703,6 +711,13 @@ pub struct UiSurfaceSession {
 impl UiSurfaceSession {
     pub fn transient_motion_revision(&self) -> u32 {
         self.tooltip_motion.value().to_bits()
+    }
+
+    /// Monotonic revision of interpolated per-node paint state. Hosts use it in
+    /// their produced-paint fingerprint so a live transition keeps requesting
+    /// new commands while a settled surface stays reusable.
+    pub fn paint_motion_revision(&self) -> u64 {
+        self.paint_motion.revision()
     }
 
     /// True while RafUI still has a tooltip transition that needs another

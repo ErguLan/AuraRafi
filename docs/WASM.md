@@ -9,33 +9,29 @@ document still does not claim a full browser Player: project loading, scripts,
 audio and the editor remain out of scope.
 
 `raf_web` hosts an AuraRafi scene in a browser canvas. It reuses the same scene
-graph, command recording, `SceneRenderer`, `BasicDevice`, and
-`SceneFrameOutput` contract as the native viewport. The only browser-specific
-graphics code is the canvas surface lifecycle and the final present blit.
+graph, command recording and `SceneRenderer` as the native viewport, then draws
+the retained frame through `ApiGraphicBasic`: `WebGpu` is the browser executor,
+`ProductDevice<WebGpu>` owns the canvas and `ProductFrameBuilder` converts the
+scene. WGPU and the WebGL2 fallback are no longer part of this host.
 
 ## What This Target Does
 
-- Creates a `wgpu::Instance` with the browser WebGPU backend and the WebGL2
-  fallback (`Backends::BROWSER_WEBGPU | Backends::GL`).
-- Requests a low-power adapter against the real canvas surface.
-- Requests `Limits::downlevel_defaults()` on WebGPU and
-  `Limits::downlevel_webgl2_defaults()` on the WebGL2 fallback. The WebGPU
-  floor can exceed WebGL2's guaranteed buffer and texture limits, so using it
-  unconditionally would reject some WebGL2 drivers.
+- Opens `raf_agb::backends::webgpu::WebGpu` directly on the real canvas.
 - Builds a bounded, data-driven demo scene from an embedded RON recipe:
   a ground plane, four primitives with distinct colors, a sun, a gradient sky,
   and ambient light.
 - Records the scene with `raf_render::scene_renderer::SceneRenderer::build_frame`.
-- Executes that frame with `ApiGraphicBasic::BasicDevice` using a host-shared
-  `SharedGraphicsContext` and `GraphicsMemoryBudget::potato()`.
-- Presents `SceneFrameOutput::GpuTexture` to the canvas, with a CPU-pixel
-  fallback path when `BasicDevice` chooses its recovery renderer.
+- Converts the `SceneRenderFrame` with `ProductFrameBuilder::append_scene` and
+  prepares it with `ProductDevice::prepare`. The revision advances only when the
+  demo geometry changes, so idle frames reuse the packet without uploads.
+- Presents with `ProductDevice::draw` and `Output::Present` on the canvas.
 - Bounds the canvas to 1920x1080 physical pixels, the device pixel ratio to 2,
   and the scene render target to 1.44 million pixels (1600x900 equivalent).
 - Renders at most 30 frames per second for the demo.
 - Stops the animation-frame chain entirely when paused or when the page is
   hidden. A paused or hidden page performs no scene, GPU, or present work.
-- Reconfigures the surface on resize, surface loss, or outdated swap chains.
+- Reconfigures the canvas on resize and reopens the executor once after a
+  surface or device fault.
 - Exposes `set_paused(bool)` and `stats()` to browser hosts.
 - Shows a small diagnostics overlay with FPS, backend, resolution, frame time,
   draw calls, triangle count, and state.
@@ -108,7 +104,7 @@ Open `http://localhost:8000/index.html`. Press `P` to pause or resume.
   paused: boolean,
   hidden: boolean,
   error: string | null,
-  backend: { kind: "WebGPU" | "WebGL2" | string, adapter: string },
+  backend: { kind: "WebGPU" | string, adapter: string },
   canvas: { width, height },
   render: { width, height, pixel_ratio },
   frame: {
@@ -149,9 +145,9 @@ These are not implemented and must not be presented as working:
   progress slot, or runtime service host in the browser demo.
 - **Streaming.** The page does not expose the native `--stream` transport and no
   WebRTC media adapter is wired into `raf_web`.
-- **Device loss recovery.** A lost surface is reconfigured. A lost device is not
-  re-created, because that would discard the `BasicDevice` and scene state; the
-  page reports the failure instead.
+- **Device loss recovery.** A lost surface is reconfigured. A lost device reopens
+  the `WebGpu` executor once and replays the retained scene source; if the reopen
+  fails the page reports the failure instead.
 - **Unbounded resolution and FPS.** The demo intentionally caps both. A future
   Player needs the shared dynamic-resolution policy, not a per-page loop.
 
@@ -171,9 +167,8 @@ added later through `navigator.clipboard` without changing the module boundary.
 ### 2. Browser-safe clock
 
 `crates/raf_render/src/engine_time.rs` selects `std::time::Instant` on native and
-a small `js_sys::Date::now()` wrapper on wasm. `device.rs` and `shadow_gpu.rs`
-use that clock, so the active GPU path no longer panics on
-`wasm32-unknown-unknown`.
+a small `js_sys::Date::now()` wrapper on wasm. The retained compositor and the
+browser host use that clock, so `wasm32-unknown-unknown` does not panic.
 
 ### 3. UUID randomness
 
@@ -190,8 +185,8 @@ Do not call this a browser Player until all of the following are true:
 
 1. A clean clone builds with the documented commands on Windows and POSIX, with
    a pinned `wasm-bindgen-cli` version and no local patches.
-2. The same page renders on WebGPU and on WebGL2, with the reported backend and
-   no console validation errors.
+2. The same page renders on WebGPU with the reported backend, no console
+   validation errors, and no WGPU or WebGL2 dependency in the build graph.
 3. Pausing and hiding the tab stop all frame work; resuming restores the scene
    without a time jump or duplicate loop.
 4. Resize, DPR change, tab restore, and surface loss are exercised repeatedly

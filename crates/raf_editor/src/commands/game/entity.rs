@@ -757,7 +757,8 @@ pub(super) fn update_entity(command: &ParsedCommand, ctx: &mut GameCommandContex
     node.scripts = staged_components.scripts;
     node.variables = staged_components.variables;
     if let Some(animation) = animation {
-        node.animation = animation;
+        node.animation = animation.rig;
+        node.animation_asset = animation.asset;
     }
     select_ids(ctx, vec![id]);
     let node = ctx.scene.get(id).expect("updated node exists");

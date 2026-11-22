@@ -1,0 +1,55 @@
+[package]
+name = "raf_agb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ApiGraphicBasic resource ownership and graphics execution"
+
+[lints.rust]
+# Selector macros from objc 0.2 reference this legacy feature.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-clippy"))'] }
+
+[features]
+default = []
+vulkan = ["dep:ash", "dep:ash-window", "dep:raw-window-handle", "dep:naga", "naga/spv-out"]
+desktop = ["vulkan", "dep:winit", "dep:png", "dep:serde_json", "dep:windows-sys"]
+reference = ["desktop", "dep:wgpu", "dep:pollster"]
+dx12 = ["dep:windows", "dep:raw-window-handle", "dep:naga", "naga/hlsl-out"]
+metal = ["dep:metal", "dep:objc", "dep:core-graphics-types", "dep:raw-window-handle", "dep:naga", "naga/msl-out"]
+webgpu = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys", "dep:serde_json"]
+
+[dependencies]
+serde = { workspace = true }
+bytemuck = { version = "1", features = ["derive"] }
+glam = { workspace = true }
+serde_json = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+naga = { version = "23.1", features = ["wgsl-in"], optional = true }
+ash = { version = "0.38", optional = true, default-features = false, features = ["loaded", "std"] }
+ash-window = { version = "0.13", optional = true }
+raw-window-handle = { workspace = true, optional = true }
+winit = { workspace = true, optional = true }
+png = { version = "0.18", optional = true }
+wgpu = { workspace = true, optional = true }
+pollster = { version = "0.3", optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Threading", "Win32_Security"] }
+windows-sys = { version = "0.61", optional = true, features = ["Win32_System_Performance", "Win32_System_ProcessStatus", "Win32_System_Threading"] }
+
+[target.'cfg(target_vendor = "apple")'.dependencies]
+metal = { version = "0.29", optional = true }
+core-graphics-types = { version = "0.1", optional = true }
+objc = { version = "0.2", optional = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = { workspace = true, optional = true }
+wasm-bindgen-futures = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true, features = ["HtmlCanvasElement"] }
+
+[[bin]]
+name = "raf-agb-probe"
+path = "src/probe/main.rs"
+required-features = ["desktop"]

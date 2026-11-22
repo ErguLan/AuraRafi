@@ -1,10 +1,11 @@
-//! Native Winit and WGPU presentation host for retained UI.
+//! Native Winit and AGB presentation host for retained UI.
 //!
-//! This host owns a real surface and presents `raf_ui` directly.
+//! The host owns the window, one native executor and its `ProductDevice`.
+//! Scene, CAD and RafUI reach the target as product packets composed by
+//! `NativeEditorCompositor`; this type only opens, resizes, draws and reports
+//! presentation health.
 
-mod capture;
 mod headless;
-mod surface;
 mod window;
 
 pub use window::{
@@ -14,30 +15,37 @@ pub use window::{
 
 use std::sync::Arc;
 
+use raf_agb::backends::native::NativeApi;
+use raf_agb::backends::native::NativeBackend;
+use raf_agb::product::ProductDevice;
 use winit::window::Window;
 
-use super::headless::HeadlessSurface;
 use super::presentation_lifecycle::PresentationRecovery;
-use super::UiSurfaceGpuSharedResources;
 
 pub struct NativeUiWindowHost {
+    // The native executor owns the surface, so it must drop before the Winit
+    // window whose raw handle it holds.
+    pub(super) device: ProductDevice<NativeBackend>,
     window: Option<Arc<Window>>,
-    _instance: wgpu::Instance,
-    surface: Option<wgpu::Surface<'static>>,
-    adapter: wgpu::Adapter,
-    pub(super) device: Arc<wgpu::Device>,
-    pub(super) queue: Arc<wgpu::Queue>,
-    pub(super) configuration: wgpu::SurfaceConfiguration,
-    pub(super) headless: Option<HeadlessSurface>,
-    host_config: NativeUiWindowConfig,
-    ui_shared: Arc<UiSurfaceGpuSharedResources>,
-    presentation: PresentationRecovery,
+    pub(super) api: NativeApi,
+    pub(super) extent: [u32; 2],
+    pub(super) headless: bool,
+    pub(super) host_config: NativeUiWindowConfig,
+    pub(super) presentation: PresentationRecovery,
 }
 
 impl NativeUiWindowHost {
-    /// Presentation color format shared by the surface, UI compositor, and
-    /// headless render target. It stays below the ApiGraphicBasic boundary.
-    pub(super) fn format(&self) -> wgpu::TextureFormat {
-        self.configuration.format
+    /// Selected native executor. Reported to editor diagnostics and never
+    /// changed after the device opens.
+    pub fn api(&self) -> NativeApi {
+        self.api
+    }
+
+    pub fn api_label(&self) -> &'static str {
+        match self.api {
+            NativeApi::Vulkan => "vulkan",
+            NativeApi::Dx12 => "dx12",
+            NativeApi::Metal => "metal",
+        }
     }
 }

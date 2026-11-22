@@ -1,7 +1,7 @@
 //! CPU presentation host for retained UI surfaces.
 //!
-//! It has no WGPU dependency. A caller can upload its borrowed RGBA output
-//! through `DirectCanvasPresenter` only when a CPU fallback is active.
+//! It has no graphics API dependency. Its borrowed RGBA output is uploaded by
+//! the CPU recovery path only when that path is active.
 
 use super::compilation::{
     update_surface_node, UiSurfaceCompilationCache, UiSurfaceCompileMetrics, UiSurfaceUpdateImpact,
@@ -228,5 +228,46 @@ pub struct DirectUiSurfaceCpuFrame<'a> {
 impl DirectUiSurfaceCpuFrame<'_> {
     pub fn diagnostics(&self) -> UiSurfaceDiagnostics {
         UiSurfaceDiagnostics::from_frame(self.frame)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use raf_ui::{StudioUiPalette, UiFlow, UiLayout, UiNode, UiNodeKind, UiStyle};
+
+    /// Absolute game anchors use the parent content box and never consume flow
+    /// tracks. This stayed with the CPU recovery host when the direct host moved
+    /// to retained ApiGraphicBasic paint.
+    #[test]
+    fn game_ui_anchors_use_the_parent_content_and_do_not_consume_flow_tracks() {
+        let anchored = UiNode::new("anchored", UiNodeKind::Panel)
+            .with_layout(UiLayout {
+                anchored: Some(raf_ui::game_ui::UiAnchoredRect {
+                    anchor: [1.0, 0.0],
+                    pivot: [1.0, 0.0],
+                    relative_size: [0.0; 2],
+                    offset: [-12.0, 4.0],
+                    size: [80.0, 24.0],
+                }),
+                ..Default::default()
+            })
+            .with_style(UiStyle {
+                fill: [220, 40, 30, 255],
+                ..UiStyle::transparent()
+            });
+        let normal =
+            UiNode::new("normal", UiNodeKind::Panel).with_layout(UiLayout::fixed(20.0, 24.0));
+        let root =
+            UiNode::row("root", [normal, anchored]).with_layout(UiLayout::fill(UiFlow::Row));
+        let mut host = CpuUiSurfaceHost::new(
+            UiSurface::new("anchors", StudioUiPalette::IndustrialDark, root),
+            [0; 4],
+        );
+        host.render([320, 64], |key| key.into());
+        assert_eq!(host.layout_rect("anchored").unwrap().x, 228.0);
+        assert_eq!(host.layout_rect("normal").unwrap().x, 0.0);
+        host.render([480, 64], |key| key.into());
+        assert_eq!(host.layout_rect("anchored").unwrap().x, 388.0);
     }
 }

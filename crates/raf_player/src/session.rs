@@ -78,6 +78,8 @@ pub struct PlayerSession {
     cancellation: Arc<AtomicBool>,
     pub settings: RuntimeHostSettings,
     instance: Uuid,
+    /// Native API label the host presents with, reported by diagnostics.
+    api_label: &'static str,
     world: Option<RuntimeWorld>,
     ui: DirectUiSurfaceHost,
     game_ui: crate::game_ui::GameUiPresenter,
@@ -140,6 +142,7 @@ impl PlayerSession {
             audio: RuntimeAudio::new(false),
             settings,
             instance,
+            api_label: host.api_label(),
             world: None,
             ui,
             game_ui: Default::default(),
@@ -175,11 +178,16 @@ impl PlayerSession {
     pub fn status(&self) -> &RuntimeStatus {
         &self.status
     }
-    /// Active ApiGraphicBasic backend label for diagnostics and reports.
+    /// Active scene backend label for diagnostics and reports.
+    ///
+    /// A native handoff reports the API the compositor presents with; the
+    /// recovery path reports its software backend.
     pub fn backend_name(&self) -> &'static str {
         match self.device.as_ref().map(BasicDevice::backend) {
-            Some(BasicBackendType::GpuHardware) => "wgpu",
-            Some(BasicBackendType::CpuSoftware) => "cpu_software",
+            // Only the named CPU variant is matched; a native handoff is
+            // reported with the API label the host actually presents with.
+            Some(BasicBackendType::CpuSoftware) => BasicBackendType::CpuSoftware.label(),
+            Some(_) => self.api_label,
             None => "uninitialized",
         }
     }
@@ -395,14 +403,12 @@ impl PlayerSession {
                 let mut renderer = SceneRenderer::new(1, 1);
                 renderer.set_asset_root(Some(root.join("assets")));
                 self.renderer = Some(renderer);
-                let mut config = host.basic_device_config();
-                if self.settings.render_execution_policy
-                    == raf_core::config::RenderExecutionPolicy::CpuOnly
-                {
-                    config.force_cpu = true;
-                    config.allow_gpu = false;
-                }
-                self.device = Some(BasicDevice::new(config));
+                // A CpuOnly policy resolves to the CPU recovery rasterizer;
+                // the window itself still presents through the AGB host.
+                self.device = Some(BasicDevice::new(crate::graphics::device_config(
+                    self.settings.render_execution_policy,
+                    host.size(),
+                )));
                 self.game_ui.clear();
                 self.status = world.status().clone();
                 self.world = Some(*world);
@@ -989,16 +995,8 @@ impl PlayerSession {
             options,
             None,
         );
-        let cpu = self.device.as_ref()?.backend()
-            == raf_render::api_graphic_basic::device::BasicBackendType::CpuSoftware;
-        if let Err(error) =
-            self.game_ui
-                .world_commands(host, &mut frame, cpu, self.settings.language)
-        {
-            if self.last_diagnostics.len() < 256 {
-                self.last_diagnostics.push(error);
-            }
-        }
+        self.game_ui
+            .world_commands(&mut frame, self.settings.language);
         crate::physics_debug::append(&mut frame.commands, world);
         let output = self.device.as_mut()?.execute_scene_frame(&frame);
         let canvas = EditorCanvasLayer {

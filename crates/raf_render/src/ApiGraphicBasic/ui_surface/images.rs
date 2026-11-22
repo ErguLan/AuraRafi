@@ -35,6 +35,8 @@ pub struct UiSurfaceImageData {
 pub struct UiSurfaceImageStore {
     images: BTreeMap<String, UiSurfaceImageData>,
     next_revision: u64,
+    /// Monotonic identity of the whole store for paint fingerprints.
+    generation: u64,
     budget_bytes: u64,
     resident_bytes: u64,
     evictions: u64,
@@ -74,6 +76,7 @@ impl Clone for UiSurfaceImageStore {
         Self {
             images,
             next_revision: self.next_revision,
+            generation: self.generation,
             budget_bytes: self.budget_bytes,
             resident_bytes: self.resident_bytes,
             evictions: self.evictions,
@@ -97,6 +100,7 @@ impl Default for UiSurfaceImageStore {
         Self {
             images: BTreeMap::new(),
             next_revision: 0,
+            generation: 1,
             budget_bytes: DEFAULT_UI_IMAGE_BUDGET_BYTES,
             resident_bytes: 0,
             evictions: 0,
@@ -181,6 +185,7 @@ impl UiSurfaceImageStore {
                 .insert(key.clone(), UiImageResourceStatus::Ready);
         }
         self.touch(&key);
+        self.touch_generation();
         Ok(())
     }
 
@@ -205,6 +210,7 @@ impl UiSurfaceImageStore {
         if let Ok(mut last_used) = self.last_used.lock() {
             last_used.remove(key);
         }
+        self.touch_generation();
         Some(removed)
     }
 
@@ -226,6 +232,14 @@ impl UiSurfaceImageStore {
             }
         }
         None
+    }
+
+    /// Borrowed RGBA bytes, size and residency revision for one resolved image.
+    /// The bytes stay owned by the store; paint producers do not clone them just
+    /// to inspect or upload through a shared buffer.
+    pub fn resolved_pixels(&self, key: &str) -> Option<(&[u8], [u32; 2], u64)> {
+        let image = self.get(key)?;
+        Some((image.pixels.as_slice(), image.size, image.revision))
     }
 
     /// Returns the runtime state for an image key. The document itself keeps
@@ -430,6 +444,12 @@ impl UiSurfaceImageStore {
         self.resident_bytes
     }
 
+    /// Monotonic identity of the store contents. Paint fingerprints advance
+    /// whenever pixels are inserted, replaced, removed or evicted.
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+
     pub fn evictions(&self) -> u64 {
         self.evictions
     }
@@ -486,6 +506,7 @@ impl UiSurfaceImageStore {
         if let Ok(mut last_used) = self.last_used.lock() {
             last_used.remove(&key);
         }
+        self.touch_generation();
         Some(key)
     }
 
@@ -497,6 +518,10 @@ impl UiSurfaceImageStore {
         if let Ok(mut last_used) = self.last_used.lock() {
             last_used.insert(key.to_string(), sequence);
         }
+    }
+
+    fn touch_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1).max(1);
     }
 
     fn apply_project_completion(&mut self, completion: ProjectImageCompletion) {

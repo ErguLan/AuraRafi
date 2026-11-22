@@ -30,11 +30,10 @@ web-sys = { workspace = true, features = [
     "Node",
     "Window",
 ] }
-bytemuck = { version = "1", features = ["derive"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-# `webgl` keeps the default `webgpu` feature and adds the WebGL2 fallback.
-wgpu = { workspace = true, features = ["webgl"] }
+# The browser host executes the scene through the AGB WebGPU product device.
+raf_agb = { workspace = true, features = ["webgpu"] }
 
 # Release optimization belongs to the workspace root `[profile.release]`
 # section. Cargo ignores package-local profile sections inside a workspace, so

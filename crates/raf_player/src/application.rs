@@ -1,8 +1,8 @@
 use crate::{PlayerSession, PlayerSource};
 use raf_render::api_graphic_basic::ui_surface::{
-    NativeUiInputBridge, NativeUiWindowConfig, NativeUiWindowHost, PresentationHealth,
+    NativeUiInputBridge, NativeUiWindowHost, PresentationHealth,
 };
-use raf_render::api_graphic_basic::{GraphicsAdapterPreference, NativeEditorCompositor};
+use raf_render::api_graphic_basic::NativeEditorCompositor;
 use raf_runtime::manifest::RuntimeHostSettings;
 use raf_runtime::wire::{RuntimePacket, RuntimePeer};
 use raf_runtime::RuntimeControl;
@@ -178,15 +178,12 @@ impl ApplicationHandler for PlayerApplication {
                 position.y + (size.height as i32 - win.height as i32) / 2,
             ));
         }
-        let config = NativeUiWindowConfig {
-            adapter_preference: if self.launch.settings.render_execution_policy
-                == raf_core::config::RenderExecutionPolicy::GpuPreferred
-            {
-                GraphicsAdapterPreference::HighPerformance
-            } else {
-                GraphicsAdapterPreference::LowPower
-            },
-            ..NativeUiWindowConfig::default()
+        let config = {
+            let size = window.inner_size();
+            crate::graphics::window_config(
+                self.launch.settings.render_execution_policy,
+                [size.width.max(1), size.height.max(1)],
+            )
         };
         let mut host = match pollster::block_on(NativeUiWindowHost::create_with_config(
             window.clone(),

@@ -4,15 +4,20 @@ ApiGraphicBasic is AuraRafi's owned graphics contract. It gives Scene,
 Schematic, PCB, RafUI, and asset workflows one graphics vocabulary without
 making those upper layers depend on a particular GPU library.
 
-The current GPU executor is WGPU. It is an implementation detail below the
-ApiGraphicBasic boundary, not a type that UI documents, editor panels, CAD
-models, assets, or gameplay systems may expose as their public contract. CPU
-composition remains a recovery, headless, and correctness path; normal desktop
-work prefers an available GPU, including an integrated GPU.
+The current GPU executor is the native AGB backend selected at open time:
+Vulkan, DX12 or Metal on desktop and WebGPU in the browser. It is an
+implementation detail below the ApiGraphicBasic boundary, not a type that UI
+documents, editor panels, CAD models, assets, or gameplay systems may expose as
+their public contract. CPU composition remains a recovery, headless, and
+correctness path; normal desktop work prefers an available GPU, including an
+integrated GPU.
 
 The agent-specific non-negotiable rules are in
 [`.ai/APIGRAPHICBASIC.md`](../.ai/APIGRAPHICBASIC.md). This document explains
 the product and implementation boundary used by contributors.
+
+Use the [product migration guide](AGB_MIGRATION.md) for integration steps and
+the [native probe](AGB_NATIVE_PROBE.md) for standalone execution and evidence.
 
 ## Current Shape
 
@@ -23,33 +28,34 @@ SceneViewport | SchematicCanvas | PcbCanvas | RafUI surface | Asset upload
                                   |
                          ApiGraphicBasic
                                   |
-           BasicDevice + command lists + owned handles/budgets
+        BasicDevice command lists + ProductFrameBuilder + budgets
                                   |
-                    WGPU adapter | CPU recovery compositor
+          ProductDevice<NativeBackend> | CPU recovery rasterizer
 ```
 
 `RenderRuntime` selects the active execution policy and shares it across
-editor-owned surfaces. `ApiGraphicBasic::BasicDevice` owns the device-facing
-work. A surface receives either a GPU texture/presentation target or reusable
-CPU RGBA pixels; it never owns the device lifecycle itself.
+editor-owned surfaces. `BasicDevice` owns the backend-neutral scene work and
+hands retained frames to the compositor; it never opens a graphics API. The
+native window host owns one `ProductDevice`, configures the target and presents.
+A surface receives a retained `SceneRenderFrame` or reusable CPU RGBA pixels; it
+never owns the device lifecycle itself.
 
-## Foundation 1 Implemented
+## Foundation 1 Baseline
 
-The first ApiGraphicBasic ownership foundation landed on 2026-07-18 while WGPU
-remains the private active executor:
+The first ApiGraphicBasic ownership foundation landed on 2026-07-18. The
+product cut completed on 2026-11-21:
 
 - generational Rafi-owned handles exist for core GPU resource categories;
 - backend-neutral capabilities, adapter preference, and potato/desktop memory
   budgets are carried by `BasicDevice`;
 - `RenderRuntimeSnapshot` reports backend id, capabilities, and budget;
-- `SharedGraphicsContext` is the neutral runtime boundary for the current host;
-- GPU scene output is wrapped in `GpuTextureView` with a Rafi texture handle;
-- the remaining `from_wgpu`/`as_wgpu` methods are private executor adapters
-  contained below the native Winit/RafUI presentation boundary.
+- `SharedGraphicsContext` and `GpuTextureView` were removed with the WGPU path;
+- native scene output is a retained `SceneFrameOutput::Scene(Arc<SceneRenderFrame>)`
+  that the AGB compositor consumes without a texture copy;
+- no harness type escapes into editor, document, RafUI or web composition.
 
-This does not claim that the resource registry, cross-surface batching, frame graph,
-or native backends are complete. Those responsibilities migrate in later
-updates without changing upper-layer Scene, CAD, RafUI, or asset contracts.
+`raf_agb` owns the shared resource types, the product packet and the native
+executors. The migration guide records the cut and the remaining platform work.
 
 The scene viewport has already taken the first bounded hot-path step: adjacent
 lines are submitted as `DrawLineBatch`, CPU/GPU line widths share one contract,
@@ -61,11 +67,11 @@ cross-surface batch scheduler.
 
 | Layer | Owns | Must not own |
 | --- | --- | --- |
-| Domain model | scene, CAD document, UI document, asset metadata | GPU resources, queues, WGPU handles |
+| Domain model | scene, CAD document, UI document, asset metadata | GPU resources, queues, API handles |
 | Surface host | input boundary, size, typed actions, frame request | backend-specific resource lifetimes |
 | RenderRuntime | shared execution policy, surface registration, recovery choice | domain mutations |
-| ApiGraphicBasic | resources, command lists, device/frame lifecycle, composition | editor routing, scene/CAD business rules |
-| Backend adapter | WGPU or future platform API calls | public editor/document API |
+| ApiGraphicBasic | resources, command lists, packet composition, device/frame lifecycle | editor routing, scene/CAD business rules |
+| Backend adapter | native AGB executor (Vulkan/DX12/Metal/WebGPU) | public editor/document API |
 
 The rule applies equally to a small UI texture and a full 3D mesh. Creating a
 shortcut to a backend type in one panel makes later backend work harder for
@@ -106,24 +112,24 @@ UiDocument + UiSurfaceSession
 
 The compilation cache preserves that single paint payload across unchanged
 frames. It keys layout on document, control/focus state, size, and density;
-it keys paint on resolved text and atlas revision. The GPU compositor retains
-vertex buffers and batches only adjacent compatible paint work so stacking
-order remains correct. UI must not create a second command-list path or
-compatibility host.
+it keys paint on resolved text and atlas revision. The AGB compositor retains the
+product packet and batches only adjacent compatible paint work so stacking order
+remains correct. UI must not create a second command-list path or compatibility
+host.
 
 The alpha-only material beta is resolved here, not in backend-specific panel
 code. RafUI carries a `UiSurfaceMaterial` role on each authored node;
 ApiGraphicBasic converts that role to palette-aware fill and border alpha before
 the shared draw list is compiled. High contrast, Reduce transparency, and the
-Potato render budget use the opaque fallback. WGPU uses its existing alpha
-blend state and CPU recovery uses the same source-over colors, so the beta adds
-no persistent texture, framebuffer copy, or extra submit. GPU diagnostics expose
+Potato render budget use the opaque fallback. AGB uses straight-alpha blending
+and CPU recovery uses the same source-over colors, so the beta adds no persistent
+texture, framebuffer copy, or extra submit. GPU diagnostics expose
 translucent solid-quad count and estimated submitted pixel coverage; CPU
 diagnostics expose written translucent solid pixels. Frame-time p95 and visual
 parity remain promotion measurements, not reasons to add a second paint path.
 
-RafUI must not create a second GPU renderer, own WGPU textures, or draw a
-scene/CAD canvas as generic controls. The Viewport, Schematic, and PCB remain
+RafUI must not create a second GPU renderer, own graphics API textures, or draw
+a scene/CAD canvas as generic controls. The Viewport, Schematic, and PCB remain
 renderer-owned center surfaces; RafUI owns their docks, command rows, menus,
 inspectors, and overlays that derive from the same authoritative model.
 
@@ -144,8 +150,8 @@ An asset import path therefore has four phases:
 2. Decode or transcode into an engine-owned image, mesh, font, or shader
    descriptor.
 3. Ask ApiGraphicBasic to allocate/upload a bounded resource.
-4. Store the resulting engine handle in the project model and release it when
-   no document references it.
+4. Store stable asset identity in the project model. The renderer tracks the
+   device-local handle and retires the resource after its last submitted use.
 
 This leaves codec choice replaceable while keeping VRAM, cache residency, and
 resource destruction under one owner.
@@ -175,20 +181,23 @@ resource destruction under one owner.
 
 ## Backend Evolution
 
-ApiGraphicBasic may gain owned DX12, Vulkan, or Metal adapters when a complete
-responsibility has an owned contract and a measurable reason to move. Such a
-backend must keep the same upper-layer APIs and pass equivalent Scene, CAD,
-RafUI, asset, resize, loss-recovery, memory, pacing, and idle-work checks.
+DX12, Vulkan, Metal, and direct WebGPU execute the shared contract. The product
+cut is complete: editor, player and web use the native executors. Each executor
+must still pass equivalent Scene, CAD, RafUI, asset, resize, loss-recovery,
+memory, pacing, and idle-work checks for its platform.
 
-Do not create two editor implementations or two CAD renderers while moving a
-backend. One upper-layer contract, one selected backend for an execution path,
-and explicit diagnostics are mandatory.
+Existing producers and hosts use that contract directly. The platform build
+specifies the executor and recovery uses the same API. WGPU is not part of the
+product default build; it remains available through the `reference` feature for
+independent benchmark runs.
+See the [migration policy](AGB_MIGRATION.md#decisiones-de-arquitectura).
 
 ## Review Checklist
 
 Before changing this layer, confirm:
 
-- No new public `wgpu::*` type escapes into editor, domain, RafUI, or assets.
+- No public `wgpu::*` type escapes into editor, domain, RafUI, or assets, and no
+  product crate depends on `wgpu`.
 - The change has one named ownership boundary and does not duplicate domain
   logic in a backend adapter.
 - Resource allocation, upload, release, and recovery are budgeted.

@@ -39,6 +39,7 @@ pub fn scene_fingerprint(scene: &SceneGraph) -> BTreeMap<String, Value> {
                     "is_folder": node.is_folder,
                     "parent": node.parent.map(|parent| parent.0),
                     "source_asset": node.source_asset,
+                    "animation_asset": node.animation_asset,
                     "source_schema_version": node.source_schema_version,
                     "scripts": node.scripts,
                     "variables": node.variables,

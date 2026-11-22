@@ -199,3 +199,46 @@ fn animation_and_debug_consume_impacts_from_the_fixed_physics_step() {
     }
     panic!("expected the projectile to hit the rig's physical body");
 }
+
+#[test]
+fn animation_asset_links_resolve_the_current_file_for_each_play_snapshot() {
+    let (mut scene, owner, head) = rig();
+    let root = std::env::temp_dir().join(format!("raf-linked-animation-{}", Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let authored = scene.get_mut(owner).unwrap();
+    let original = authored.animation.take().unwrap();
+    let path = raf_assets::animation_asset::create(&root, "Puppet", &original).unwrap();
+    authored.animation_asset = Some(path.clone());
+    let persisted = ron::to_string(&scene).unwrap();
+    let play = || {
+        let scene = ron::from_str(&persisted).unwrap();
+        let settings = ProjectSettings {
+            enable_physics: false,
+            script_execution_mode: ScriptExecutionMode::Disabled,
+            ..ProjectSettings::default()
+        };
+        let mut world = crate::RuntimeWorld::prepare(
+            Uuid::new_v4(),
+            scene,
+            &root,
+            settings,
+            RuntimePreferences::default(),
+            Arc::new(AtomicBool::new(false)),
+            |_| {},
+        )
+        .unwrap();
+        world.start();
+        world.scene.get(head).unwrap().position
+    };
+    assert_eq!(play(), Vec3::Y);
+    let mut edited = original.clone();
+    edited.layers[0].tracks[0].keys[0].value.y = 3.0;
+    raf_assets::animation_asset::save(&root, &path, &original, &edited).unwrap();
+    assert!(raf_assets::animation_asset::save(&root, &path, &original, &original).is_err());
+    assert_eq!(play(), 3.0 * Vec3::Y);
+    assert!(scene.get(owner).unwrap().animation.is_none());
+    std::fs::remove_file(root.join("assets").join(&path)).unwrap();
+    std::fs::remove_file(root.join("assets").join(format!(".{path}.previous"))).unwrap();
+    std::fs::remove_dir(root.join("assets")).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}

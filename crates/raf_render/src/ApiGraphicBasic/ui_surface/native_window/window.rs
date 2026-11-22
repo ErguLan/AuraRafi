@@ -1,19 +1,25 @@
-//! Win32/Winit window creation, configuration, and OS window commands.
+//! Win32/Winit window creation, native device ownership, and OS window commands.
 
+use std::marker::PhantomData;
 use std::sync::Arc;
 
+use raf_agb::backends::native::{NativeBackend, NativeRequest};
+use raf_agb::product::ProductDevice;
+use raf_agb::Output;
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::{ResizeDirection, Window};
 
-use super::super::presentation_lifecycle::PresentationRecovery;
-use super::super::{
-    DirectUiSurfaceHost, NativeApplicationMenuAdapter, UiSurface, UiSurfaceGpuSharedResources,
-};
+use super::super::presentation_lifecycle::{PresentationDecision, PresentationFault, PresentationRecovery};
+use super::super::{DirectUiSurfaceHost, NativeApplicationMenuAdapter, UiSurface};
 use super::NativeUiWindowHost;
 use crate::api_graphic_basic::cad_surface_host::DirectCadSurfaceHost;
-use crate::api_graphic_basic::capabilities::{GraphicsAdapterPreference, GraphicsMemoryBudget};
-use crate::api_graphic_basic::device::{
-    wgpu_timestamp_features, BasicDeviceConfig, SharedGraphicsContext,
+use crate::api_graphic_basic::capabilities::{
+    GraphicsAdapterPreference, GraphicsMemoryBudget,
 };
+use crate::api_graphic_basic::editor_compositor::{
+    EditorCanvasLayer, EditorComposedFrame, EditorUiLayer, NativeEditorCompositor,
+};
+use crate::engine_time::Instant;
 use raf_ui::{UiApplicationMenu, UiResizeEdge, UiWindowCommand};
 
 /// Result of a window command that needs to cross from RafUI into the native
@@ -47,43 +53,30 @@ impl NativePresentMode {
 
 /// Opaque graphics construction context exposed to editor hosts.
 ///
-/// The concrete WGPU device and target format stay inside ApiGraphicBasic.
-/// Editor surfaces can request owned UI/CAD hosts without importing adapter
-/// types into their public constructors.
+/// The native device and target format stay inside ApiGraphicBasic. Editor
+/// surfaces request owned UI/CAD producers without importing adapter types.
 pub struct NativeGraphicsContext<'a> {
-    device: &'a wgpu::Device,
-    color_format: wgpu::TextureFormat,
-    ui_shared: &'a Arc<UiSurfaceGpuSharedResources>,
     memory_budget: GraphicsMemoryBudget,
+    _lifetime: PhantomData<&'a ()>,
 }
 
 impl NativeGraphicsContext<'_> {
     pub fn create_ui_host(&self, surface: UiSurface, clear_color: [u8; 4]) -> DirectUiSurfaceHost {
-        DirectUiSurfaceHost::with_shared_and_budget(
-            surface,
-            self.ui_shared.clone(),
-            clear_color,
-            self.memory_budget,
-        )
+        DirectUiSurfaceHost::with_budget(surface, clear_color, self.memory_budget)
     }
 
-    pub fn create_cad_host(&self, clear_color: [u8; 4]) -> DirectCadSurfaceHost {
-        DirectCadSurfaceHost::new(self.device, self.color_format, clear_color)
-    }
-
-    pub(crate) fn device(&self) -> &wgpu::Device {
-        self.device
-    }
-
-    pub(crate) fn color_format(&self) -> wgpu::TextureFormat {
-        self.color_format
+    pub fn create_cad_host(&self, _clear_color: [u8; 4]) -> DirectCadSurfaceHost {
+        DirectCadSurfaceHost::new()
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct NativeUiWindowConfig {
+    /// Retained for host configuration compatibility. The native executor
+    /// chooses its own adapter; AGB does not accept a power hint.
     pub adapter_preference: GraphicsAdapterPreference,
     pub memory_budget: GraphicsMemoryBudget,
+    /// Retained for compatibility. AGB owns swapchain latency.
     pub desired_maximum_frame_latency: u32,
 }
 
@@ -174,6 +167,12 @@ impl NativeUiWindowHost {
             effective: raf_core::runtime_config::CursorCapture::Free,
         }
     }
+
+    /// Opens the window on the compiled native executor chosen by AGB.
+    ///
+    /// Kept `async` for call-site compatibility; the native open path does not
+    /// await. There is no WGPU fallback: if no native executor can serve the
+    /// window, the host fails with the backend error.
     pub async fn create(window: Arc<Window>) -> Result<Self, String> {
         Self::create_with_config(window, NativeUiWindowConfig::default()).await
     }
@@ -182,94 +181,22 @@ impl NativeUiWindowHost {
         window: Arc<Window>,
         host_config: NativeUiWindowConfig,
     ) -> Result<Self, String> {
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends: wgpu::Backends::all(),
-            ..wgpu::InstanceDescriptor::default()
-        });
-        let surface = instance
-            .create_surface(window.clone())
-            .map_err(|error| format!("native UI surface: {error}"))?;
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: match host_config.adapter_preference {
-                    GraphicsAdapterPreference::LowPower => wgpu::PowerPreference::LowPower,
-                    GraphicsAdapterPreference::HighPerformance => {
-                        wgpu::PowerPreference::HighPerformance
-                    }
-                },
-                force_fallback_adapter: false,
-                compatible_surface: Some(&surface),
-            })
-            .await
-            .ok_or_else(|| "native UI adapter was not found".to_string())?;
-        let timestamp_features = wgpu_timestamp_features();
-        let optional_features = if adapter.features().contains(timestamp_features) {
-            timestamp_features
-        } else {
-            wgpu::Features::empty()
-        };
-        let (device, queue) = adapter
-            .request_device(
-                &wgpu::DeviceDescriptor {
-                    label: Some("ApiGraphicBasic.NativeUiDevice"),
-                    required_features: optional_features,
-                    required_limits: wgpu::Limits::downlevel_defaults(),
-                    memory_hints: match host_config.adapter_preference {
-                        GraphicsAdapterPreference::LowPower => wgpu::MemoryHints::MemoryUsage,
-                        GraphicsAdapterPreference::HighPerformance => {
-                            wgpu::MemoryHints::Performance
-                        }
-                    },
-                },
-                None,
-            )
-            .await
-            .map_err(|error| format!("native UI device: {error}"))?;
         let size = window.inner_size();
-        let capabilities = surface.get_capabilities(&adapter);
-        let format = capabilities
-            .formats
-            .iter()
-            .copied()
-            .find(wgpu::TextureFormat::is_srgb)
-            .or_else(|| capabilities.formats.first().copied())
-            .ok_or_else(|| "native UI surface has no supported format".to_string())?;
-        let present_mode = capabilities
-            .present_modes
-            .iter()
-            .copied()
-            .find(|mode| *mode == wgpu::PresentMode::Fifo)
-            .or_else(|| capabilities.present_modes.first().copied())
-            .ok_or_else(|| "native UI surface has no present mode".to_string())?;
-        let alpha_mode = capabilities
-            .alpha_modes
-            .first()
-            .copied()
-            .ok_or_else(|| "native UI surface has no alpha mode".to_string())?;
-        let configuration = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: size.width.max(1),
-            height: size.height.max(1),
-            present_mode,
-            alpha_mode,
-            view_formats: vec![],
-            desired_maximum_frame_latency: host_config.desired_maximum_frame_latency.clamp(1, 3),
-        };
-        surface.configure(&device, &configuration);
-        let ui_shared = Arc::new(UiSurfaceGpuSharedResources::new(&device, format));
-
+        let extent = [size.width.max(1), size.height.max(1)];
+        let backend = open_window_backend(&window)?;
+        let api = backend.api();
+        let mut device = ProductDevice::new(backend, host_config.memory_budget)
+            .map_err(|error| format!("native product device: {error}"))?;
+        device
+            .configure(extent, Output::Present)
+            .map_err(|error| format!("native window configure: {error}"))?;
         Ok(Self {
             window: Some(window),
-            _instance: instance,
-            surface: Some(surface),
-            adapter,
-            device: Arc::new(device),
-            queue: Arc::new(queue),
-            configuration,
-            headless: None,
+            device,
+            api,
+            extent,
+            headless: false,
             host_config,
-            ui_shared,
             presentation: PresentationRecovery::default(),
         })
     }
@@ -299,11 +226,6 @@ impl NativeUiWindowHost {
     }
 
     /// Executes the OS-owned part of RafUI's window contract.
-    ///
-    /// Dragging, resizing, minimizing and maximizing are safe to execute
-    /// immediately. Closing and opening the system menu remain event-loop
-    /// requests because Winit intentionally exposes those operations through
-    /// native events rather than a synthetic `Window` mutation.
     pub fn execute_window_command(
         &self,
         command: UiWindowCommand,
@@ -331,61 +253,34 @@ impl NativeUiWindowHost {
             UiWindowCommand::Close => Ok(NativeWindowCommandResult::RequestClose),
             UiWindowCommand::ShowSystemMenu => Ok(NativeWindowCommandResult::ShowSystemMenu),
         }?;
-
         Ok(result)
-    }
-
-    pub fn adapter(&self) -> &wgpu::Adapter {
-        &self.adapter
     }
 
     pub fn graphics_context(&self) -> NativeGraphicsContext<'_> {
         NativeGraphicsContext {
-            device: self.device.as_ref(),
-            color_format: self.format(),
-            ui_shared: &self.ui_shared,
             memory_budget: self.host_config.memory_budget,
-        }
-    }
-
-    pub fn shared_graphics_context(&self) -> SharedGraphicsContext {
-        SharedGraphicsContext::from_host(self.device.clone(), self.queue.clone())
-    }
-
-    pub fn basic_device_config(&self) -> BasicDeviceConfig {
-        BasicDeviceConfig {
-            allow_gpu: true,
-            force_cpu: false,
-            shared_graphics_context: Some(self.shared_graphics_context()),
-            memory_budget: self.host_config.memory_budget,
-            adapter_preference: self.host_config.adapter_preference,
+            _lifetime: PhantomData,
         }
     }
 
     pub fn size(&self) -> [u32; 2] {
-        [self.configuration.width, self.configuration.height]
+        self.extent
     }
 
     pub fn width(&self) -> u32 {
-        self.configuration.width
+        self.extent[0]
     }
 
     pub fn height(&self) -> u32 {
-        self.configuration.height
+        self.extent[1]
     }
 
+    /// AGB presents with FIFO, so the reported mode is always VSync.
     pub fn presentation_mode(&self) -> NativePresentMode {
         if self.is_headless() {
             return NativePresentMode::Other;
         }
-        match self.configuration.present_mode {
-            wgpu::PresentMode::Fifo | wgpu::PresentMode::AutoVsync => NativePresentMode::Vsync,
-            wgpu::PresentMode::Immediate | wgpu::PresentMode::AutoNoVsync => {
-                NativePresentMode::Immediate
-            }
-            wgpu::PresentMode::Mailbox => NativePresentMode::Mailbox,
-            _ => NativePresentMode::Other,
-        }
+        NativePresentMode::Vsync
     }
 
     /// Returns the refresh rate of the monitor currently carrying the
@@ -404,55 +299,19 @@ impl NativeUiWindowHost {
     }
 
     /// Returns the presentation cadence that should constrain CPU/GPU work.
-    /// Immediate mode deliberately returns `None`: there is no swapchain
-    /// refresh contract for the scheduler to mirror in that mode.
     pub fn effective_present_refresh_hz(&self) -> Option<u16> {
         matches!(self.presentation_mode(), NativePresentMode::Vsync)
             .then(|| self.display_refresh_hz())
             .flatten()
     }
 
-    /// Applies the editor's VSync preference to the native swapchain. The
-    /// surface capabilities remain authoritative because some platforms do
-    /// not expose an immediate present mode. A headless host has no
-    /// swapchain, so the request has no recurring cost.
-    pub fn set_vsync(&mut self, enabled: bool) {
-        let Some(surface) = self.surface.as_ref() else {
-            return;
-        };
-        let capabilities = surface.get_capabilities(&self.adapter);
-        let desired = if enabled {
-            wgpu::PresentMode::Fifo
-        } else {
-            wgpu::PresentMode::Immediate
-        };
-        let present_mode = capabilities
-            .present_modes
-            .iter()
-            .copied()
-            .find(|mode| *mode == desired)
-            .or_else(|| {
-                capabilities
-                    .present_modes
-                    .iter()
-                    .copied()
-                    .find(|mode| *mode == wgpu::PresentMode::Fifo)
-            })
-            .or_else(|| capabilities.present_modes.first().copied());
-        let Some(present_mode) = present_mode else {
-            return;
-        };
-        if self.configuration.present_mode == present_mode {
-            return;
-        }
-        self.configuration.present_mode = present_mode;
-        surface.configure(&self.device, &self.configuration);
-    }
+    /// AGB currently owns the swapchain present mode and uses FIFO. The
+    /// preference is retained for diagnostics; it does not silently claim a
+    /// mode the executor did not apply.
+    pub fn set_vsync(&mut self, _enabled: bool) {}
 
     /// Installs the shared application command tree through a platform-owned
-    /// menu adapter. The native event loop later drains stable command IDs and
-    /// dispatches them at the application boundary. Headless hosts expose no
-    /// OS menu surface and report that explicitly.
+    /// menu adapter.
     pub fn install_application_menu<A>(
         &self,
         adapter: &mut A,
@@ -481,6 +340,183 @@ impl NativeUiWindowHost {
         };
         adapter.install_localized(window.as_ref(), menu, resolve)
     }
+
+    pub fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 {
+            return;
+        }
+        if self.extent == [width, height] {
+            return;
+        }
+        self.extent = [width, height];
+        let output = if self.headless {
+            Output::Capture
+        } else {
+            Output::Present
+        };
+        let _ = self.device.configure(self.extent, output);
+    }
+
+    pub fn presentation_health(&self) -> super::super::presentation_lifecycle::PresentationHealth {
+        self.presentation.health()
+    }
+
+    pub fn last_presentation_fault(
+        &self,
+    ) -> Option<super::super::presentation_lifecycle::PresentationFault> {
+        self.presentation.last_fault()
+    }
+
+    /// Reconfigures the swapchain after an external surface change or a fault.
+    pub fn recover_surface(&mut self) -> Result<(), String> {
+        let output = if self.headless {
+            Output::Capture
+        } else {
+            Output::Present
+        };
+        self.device
+            .configure(self.extent, output)
+            .map_err(|error| format!("native surface reconfigure: {error}"))?;
+        self.presentation.record_success(Instant::now());
+        Ok(())
+    }
+
+    pub fn render_editor_frame<F>(
+        &mut self,
+        compositor: &mut NativeEditorCompositor,
+        canvas_layer: Option<EditorCanvasLayer>,
+        ui: &mut DirectUiSurfaceHost,
+        logical_size: [u32; 2],
+        raster_scale: f32,
+        resolve: F,
+    ) -> Result<EditorComposedFrame, String>
+    where
+        F: FnMut(&str) -> String,
+    {
+        let mut ui_layers = [EditorUiLayer {
+            host: ui,
+            target_rect: crate::api_graphic_basic::CanvasTargetRect::full(self.extent),
+            logical_size,
+            raster_scale,
+        }];
+        self.render_editor_layers(compositor, canvas_layer, &mut ui_layers, resolve)
+    }
+
+    pub fn render_editor_layers<F>(
+        &mut self,
+        compositor: &mut NativeEditorCompositor,
+        canvas_layer: Option<EditorCanvasLayer>,
+        ui_layers: &mut [EditorUiLayer<'_>],
+        mut resolve: F,
+    ) -> Result<EditorComposedFrame, String>
+    where
+        F: FnMut(&str) -> String,
+    {
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            let result = compositor.compose_layers(
+                &mut self.device,
+                self.extent,
+                canvas_layer.clone(),
+                ui_layers,
+                &mut resolve,
+            );
+            match result {
+                Ok(mut frame) => {
+                    self.presentation.record_success(Instant::now());
+                    frame.metrics.presents = if self.headless { 0 } else { 1 };
+                    return Ok(frame);
+                }
+                Err(error) => {
+                    let Some(fault) = self.device_fault(&error) else {
+                        tracing::error!(%error, "native editor composition failed");
+                        return Err(error);
+                    };
+                    let decision = self.presentation.record_fault(fault, Instant::now());
+                    if matches!(decision, PresentationDecision::Fatal) {
+                        tracing::error!(%error, fault = fault.label(), "native editor presentation failed");
+                        return Err(error);
+                    }
+                    if fault == PresentationFault::Timeout {
+                        // Swapchain acquisition timed out. Skipping the frame
+                        // is cheaper and more truthful than retrying inside the
+                        // same tick; the scheduler will call again.
+                        let mut metrics = compositor.metrics();
+                        metrics.presents = 0;
+                        return Ok(EditorComposedFrame {
+                            ui_layers: Vec::new(),
+                            metrics,
+                        });
+                    }
+                    if fault == PresentationFault::Lost {
+                        self.reopen_device()?;
+                        compositor.release_canvas();
+                    } else {
+                        self.recover_surface()?;
+                    }
+                    if attempt >= 2 {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Reopens the native executor after a device loss. The window handle is
+    /// still valid; the compositor replays its retained sources on the next
+    /// frame.
+    fn reopen_device(&mut self) -> Result<(), String> {
+        let output = if self.headless {
+            Output::Capture
+        } else {
+            Output::Present
+        };
+        let backend = match self.window.as_ref() {
+            Some(window) => open_window_backend(window)?,
+            None => NativeBackend::headless(NativeRequest::Auto)
+                .map_err(|error| format!("headless native executor: {error}"))?,
+        };
+        self.api = backend.api();
+        let mut device = ProductDevice::new(backend, self.host_config.memory_budget)
+            .map_err(|error| format!("native product device: {error}"))?;
+        device
+            .configure(self.extent, output)
+            .map_err(|error| format!("native target configure: {error}"))?;
+        self.device = device;
+        self.presentation.record_success(Instant::now());
+        Ok(())
+    }
+
+    fn device_fault(&self, error: &str) -> Option<PresentationFault> {
+        let lowered = error.to_ascii_lowercase();
+        if lowered.contains("surface lost") || lowered.contains("device lost") {
+            Some(PresentationFault::Lost)
+        } else if lowered.contains("surface must be reconfigured")
+            || lowered.contains("outdated")
+        {
+            Some(PresentationFault::Outdated)
+        } else if lowered.contains("queue is busy") {
+            Some(PresentationFault::Timeout)
+        } else {
+            None
+        }
+    }
+}
+
+fn open_window_backend(window: &Arc<Window>) -> Result<NativeBackend, String> {
+    let display = window
+        .display_handle()
+        .map_err(|error| format!("native display handle: {error}"))?
+        .as_raw();
+    let handle = window
+        .window_handle()
+        .map_err(|error| format!("native window handle: {error}"))?
+        .as_raw();
+    // SAFETY: the host keeps the Winit window alive for the whole lifetime of
+    // the backend and drops the backend before the window.
+    unsafe { NativeBackend::window(NativeRequest::Auto, display, handle) }
+        .map_err(|error| format!("native window executor: {error}"))
 }
 
 const fn resize_direction(edge: UiResizeEdge) -> ResizeDirection {

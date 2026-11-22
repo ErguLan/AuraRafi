@@ -970,6 +970,7 @@ pub(super) fn asset_matches(row: &str, query: &str, filter: AssetFilter) -> bool
     match filter {
         AssetFilter::All => true,
         AssetFilter::Interfaces => row.starts_with("builtin://interface/") || lower.ends_with(".ui.ron"),
+        AssetFilter::Animations => raf_assets::animation_asset::is_animation_asset(row),
         AssetFilter::Images => matches!(
             extension.as_deref(),
             Some("png")
@@ -1007,6 +1008,7 @@ pub(super) fn asset_matches(row: &str, query: &str, filter: AssetFilter) -> bool
 }
 
 pub(super) fn asset_icon(name: &str) -> UiIconId {
+    if raf_assets::animation_asset::is_animation_asset(name) { return UiIconId::Play; }
     if name.starts_with("builtin://interface/") || name.to_ascii_lowercase().ends_with(".ui.ron"){return UiIconId::Frame;}
     if name == "builtin://camera" {
         return UiIconId::Camera;

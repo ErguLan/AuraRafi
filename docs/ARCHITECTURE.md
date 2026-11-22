@@ -87,7 +87,7 @@ AuraRafi/
   crates/
     raf_core/         Core systems: ECS, scene graph, commands, events, config
     raf_ui/           Rust-native retained UI model, docking, style, events
-    raf_render/       ApiGraphicBasic runtime, WGPU adapter, CPU recovery, and native-backend direction
+    raf_render/       ApiGraphicBasic runtime, product composition, CPU recovery, and native executor selection
     raf_editor/       Native Winit + retained RafUI editor shell
     raf_assets/       Asset importing, browsing, JSON primitive manifests
     raf_electronics/  Electronic design: schematics, PCBs, simulation, DRC, export
@@ -341,50 +341,42 @@ Notes:
 
 ### ApiGraphicBasic Native Ownership Direction
 
-`ApiGraphicBasic` is the permanent graphics owner. WGPU is the current private
-GPU adapter and compatibility implementation below it. The migration does not
-create WGPU and native versions of the viewport, CAD, RafUI, scenes, or assets.
-Those consumers keep one Rafi-owned contract while backend implementations
-change underneath.
+`ApiGraphicBasic` is the permanent graphics owner. The native AGB executors are
+the product GPU adapters below it: Vulkan, DX12, Metal and WebGPU. The migration
+did not create WGPU and native versions of the viewport, CAD, RafUI, scenes, or
+assets. Those consumers keep one Rafi-owned contract while backend
+implementations change underneath.
 
-The migration is capability-based rather than a numbered renderer rewrite.
-Over long-lived updates, ApiGraphicBasic must progressively own public handles,
-adapter capabilities, device/queue/surface lifecycle, persistent resources,
-uploads, memory budgets, command encoding, pipelines, synchronization, frame
-graphs, asset residency, diagnostics, and device recovery. WGPU may execute any
-capability that has not yet moved behind a complete owned contract.
+The migration was capability-based rather than a numbered renderer rewrite.
+ApiGraphicBasic owns the public handles, adapter capabilities,
+device/queue/surface lifecycle, persistent resources, uploads, memory budgets,
+command encoding, pipelines, synchronization, frame graphs, asset residency,
+diagnostics, and device recovery. WGPU is retained only as the optional
+`reference` benchmark feature in `raf_agb`.
 
-The engine can evolve through several private backend states:
+Backend states:
 
-- **WGPU-backed ownership**: ApiGraphicBasic owns the public direction while
-  its private WGPU executor performs the active GPU path.
-- **Encapsulated WGPU**: no upper layer imports WGPU; it exists only as a
-  compatibility backend.
-- **Native backend qualification**: a native platform backend reaches parity
-  behind the same ApiGraphicBasic contract.
-- **Native selection**: a validated native backend becomes the selected
-  executor for its platform; upper layers remain unchanged.
-- **WGPU retired**: WGPU leaves the shipping dependency graph only after
-  parity, recovery, memory, pacing, idle, and hardware gates pass.
+- **Native selection (current)**: a validated native backend is the executor for
+  its platform; upper layers are unchanged.
+- **Reference A/B**: WGPU stays available only as an opt-in benchmark process.
 
 One backend is selected per device/surface execution path. Cross-API resource
 mixing inside a frame is forbidden unless an explicit and measured interop
 contract is designed. The complete rule and removal gates live in
 [ApiGraphicBasic Native Ownership Rule](../.ai/APIGRAPHICBASIC.md).
 
-#### Foundation 1 (implemented 2026-07-18)
-
-The first ownership foundation is active while WGPU still executes GPU work:
+#### Foundation 1 (implemented 2026-07-18, product cut 2026-11-21)
 
 - `ApiGraphicBasic` owns generational resource handles instead of exposing
   native resource pointers as the default vocabulary.
 - `BasicDevice` carries backend-neutral capabilities, adapter preference, and
   explicit potato/desktop memory budgets.
 - `RenderRuntimeSnapshot` reports backend identity and the active contract data.
-- The host context is named `SharedGraphicsContext`; the old WGPU name remains
-  only as a compatibility alias.
-- `SceneFrameOutput` wraps its GPU view in `GpuTextureView` for the native
-  ApiGraphicBasic compositor. No legacy texture bridge is required.
+- `SceneFrameOutput::Scene(Arc<SceneRenderFrame>)` carries the retained frame to
+  the AGB compositor with no texture copy. `SharedGraphicsContext` and
+  `GpuTextureView` were removed.
+- The editor, player, streaming and web hosts open the native executor and
+  compose through `ProductDevice`.
 
 The resource registry/eviction and adjacent structural batching foundations are
 active; complete DeviceHub unification, frame graph, and native
@@ -443,7 +435,7 @@ Architecture: `SceneGraph -> SceneRenderData -> RenderBackendTrait -> Backend`
 
 - `abstraction`: Core trait `RenderBackendTrait` - all backends implement this (init/render_frame/resize/shutdown)
 - `ActiveBackend`: legacy/prepared backend categorization. It must not be treated as the canonical active backend contract until consolidated under ApiGraphicBasic.
-- `ApiGraphicBasic`: Rafi-owned graphics contract for devices, command lists, resources, surfaces, Scene/CAD/RafUI presentation, and CPU recovery. WGPU is its current private GPU adapter, not its permanent public identity. Available GPU hardware remains the normal path, including integrated GPUs under potato budgets.
+- `ApiGraphicBasic`: Rafi-owned graphics contract for devices, command lists, resources, surfaces, Scene/CAD/RafUI presentation, and CPU recovery. Vulkan/DX12/Metal/WebGPU are its native executors. Available GPU hardware remains the normal path, including integrated GPUs under potato budgets.
 - `scene_data`: Bridge between SceneGraph and render backend
   - `SceneRenderData`: complete frame package (meshes, lights, camera, environment, stats)
   - `RenderMesh`: flat GPU-ready arrays (positions, normals, UVs, indices), shadow/instance flags

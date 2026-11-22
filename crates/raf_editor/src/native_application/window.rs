@@ -182,9 +182,6 @@ impl NativeEditorApplication {
             .is_some_and(|project| project.settings.allow_gpu_features);
         runtime.apply_engine_settings(&self.settings_state, allow_gpu_features);
         runtime.resize([size.width, size.height], scale_factor);
-        runtime
-            .graphics_mut()
-            .set_shared_graphics_context(Some(host.shared_graphics_context()));
         runtime.set_present_refresh_hz(host.effective_present_refresh_hz());
         runtime.set_node_graph(initial_node_graph(self.project.as_ref()));
 
@@ -199,6 +196,7 @@ impl NativeEditorApplication {
 
         self.input.set_scale_factor(window.scale_factor());
         self.window = Some(window.clone());
+        let backend_label = host.api_label();
         self.window_host = Some(host);
         self.compositor = Some(compositor);
         self.runtime = Some(runtime);
@@ -216,8 +214,9 @@ impl NativeEditorApplication {
         self.electronics_frame_key = None;
         tracing::info!(
             graphics_ready_ms,
+            backend = backend_label,
             project_open = self.project.is_some(),
-            "native ApiGraphicBasic loading surface ready"
+            "native AGB loading surface ready"
         );
         self.started_at = Instant::now();
         window.request_redraw();

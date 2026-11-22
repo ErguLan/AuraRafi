@@ -85,7 +85,7 @@ const MAX_DEBUG_LOADS: usize = 512;
 impl RuntimeWorld {
     pub fn prepare(
         instance: Uuid,
-        scene: SceneGraph,
+        mut scene: SceneGraph,
         root: &std::path::Path,
         settings: ProjectSettings,
         preferences: RuntimePreferences,
@@ -102,6 +102,7 @@ impl RuntimeWorld {
         if scene.len() > entity_limit {
             return Err(vec!["Scene exceeds the configured entity limit".into()]);
         }
+        raf_assets::animation_asset::resolve_scene(root, &mut scene).map_err(|error| vec![error])?;
         let animation = AnimationPlayback::prepare(&scene).map_err(|error| vec![error])?;
         let (scripts, report) = if settings.enable_scripting
             && settings.script_execution_mode != ScriptExecutionMode::Disabled

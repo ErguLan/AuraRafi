@@ -148,6 +148,7 @@ impl NativeGameWorkbench {
                 "audio" => AssetFilter::Audio,
                 "scripts" => AssetFilter::Scripts,
                 "interfaces" => AssetFilter::Interfaces,
+                "animations" => AssetFilter::Animations,
                 _ => AssetFilter::All,
             };
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -223,7 +224,9 @@ impl NativeGameWorkbench {
             return true;
         }
         if let Some(row) = name.strip_prefix("assets.open:") {
-            if row.starts_with("builtin://interface/") || row.to_ascii_lowercase().ends_with(".ui.ron") {
+            if raf_assets::animation_asset::is_animation_asset(row) {
+                self.open_animation_asset(row);
+            } else if row.starts_with("builtin://interface/") || row.to_ascii_lowercase().ends_with(".ui.ron") {
                 self.open_interface_asset(row);
                 self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
             } else if row == "builtin://camera" {

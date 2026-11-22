@@ -783,6 +783,7 @@
       "parameters": [
         {"name": "animation", "kind": "object", "required": false},
         {"name": "animation_clip", "kind": "object", "required": false},
+        {"name": "animation_asset", "kind": "string", "required": false},
         {"name": "size", "kind": "array", "required": false, "description_key": "commands.param.size"},
         {"name": "casts_shadows", "kind": "bool", "required": false},
         {"name": "receives_shadows", "kind": "bool", "required": false},

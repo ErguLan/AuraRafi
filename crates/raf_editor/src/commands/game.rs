@@ -18,7 +18,7 @@ use crate::commands::output::CommandOutput;
 use crate::commands::parser::ParsedCommand;
 
 mod build;
-mod animation;
+pub(crate) mod animation;
 mod camera;
 mod entity;
 mod material;

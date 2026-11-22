@@ -73,6 +73,7 @@ pub struct NativeEditorRuntime {
 #[derive(Clone)]
 struct CachedGameCanvas {
     device_generation: u64,
+    animation_preview: Option<u64>,
     layer: EditorCanvasLayer,
 }
 
@@ -1281,7 +1282,7 @@ impl NativeEditorRuntime {
         self.active_frame.is_some()
     }
 
-    pub fn render_game_canvas(&mut self, scene: &SceneGraph) -> Option<EditorCanvasLayer> {
+    pub fn render_game_canvas(&mut self, scene: &SceneGraph, preview: Option<&SceneGraph>) -> Option<EditorCanvasLayer> {
         self.active_frame?;
         self.graphics
             .activate_surface(GraphicsSurfaceKind::SceneViewport);
@@ -1301,12 +1302,14 @@ impl NativeEditorRuntime {
             ((canvas_target.height as f32) * scale).round().max(1.0) as u32,
         ];
         let device_generation = self.graphics.snapshot().device_generation;
+        let animation_preview = preview.map(SceneGraph::render_fingerprint);
         let must_render = self
             .active_frame
             .is_none_or(|permit| canvas_requires_render(permit.reasons));
         if !must_render {
             if let Some(cached) = self.cached_game_canvas.as_ref().filter(|cached| {
                 cached.device_generation == device_generation
+                    && cached.animation_preview == animation_preview
                     && cached.layer.source_size == source_size
                     && cached.layer.target_rect == canvas_target
             }) {
@@ -1321,7 +1324,7 @@ impl NativeEditorRuntime {
         );
         let output = self
             .game_viewport
-            .render(&mut self.graphics, scene, source_size);
+            .render(&mut self.graphics, preview.unwrap_or(scene), source_size);
         let layer = EditorCanvasLayer {
             output: Arc::new(output),
             source_size,
@@ -1329,6 +1332,7 @@ impl NativeEditorRuntime {
         };
         self.cached_game_canvas = Some(CachedGameCanvas {
             device_generation,
+            animation_preview,
             layer: layer.clone(),
         });
         Some(layer)

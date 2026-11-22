@@ -58,6 +58,7 @@ impl NativeGameWorkbench {
             project_catalog: ProjectCatalog::default(),
             last_catalog_revision: 0,
             assets_surface: AssetsSurfaceHost::default(),
+            animations: Default::default(),
             assets_menu_motion: UiTween::new(0.0, UiMotionSpec::dock()),
             assets_view_motion: UiTween::new(1.0, UiMotionSpec::dock()),
             assets_highlight_motion: UiTween::new(0.0, UiMotionSpec::dock()),

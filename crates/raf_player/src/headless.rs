@@ -3,15 +3,16 @@
 //! The runner owns one ApiGraphicBasic headless host, one `PlayerSession`, and
 //! one editor compositor. It never creates a Winit event loop, never sleeps
 //! between frames, and drives simulation with an exact fixed delta so captured
-//! frames are reproducible.
+//! frames are reproducible. Every frame is composed by the AGB host (scene plus
+//! retained RafUI) and read back through `NativeUiWindowHost::capture`.
 
 use crate::application::PlayerLaunch;
 use crate::session::{PlayerSession, PlayerSource};
 use raf_core::{InputKey, InputModifiers, InputSnapshot, PointerButton};
 use raf_render::api_graphic_basic::ui_surface::{
-    NativeUiInputBridge, NativeUiWindowConfig, NativeUiWindowHost,
+    NativeUiInputBridge, NativeUiWindowHost,
 };
-use raf_render::api_graphic_basic::{GraphicsAdapterPreference, NativeEditorCompositor};
+use raf_render::api_graphic_basic::NativeEditorCompositor;
 use raf_runtime::manifest::RuntimeManifest;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -81,16 +82,7 @@ pub fn run(launch: PlayerLaunch, options: HeadlessOptions) -> Result<(), String>
     // accumulator would drift from the requested deterministic cadence.
     manifest.project_settings.runtime.fixed_hz = fixed_hz;
     let settings = launch.settings.clone();
-    let config = NativeUiWindowConfig {
-        adapter_preference: if settings.render_execution_policy
-            == raf_core::config::RenderExecutionPolicy::GpuPreferred
-        {
-            GraphicsAdapterPreference::HighPerformance
-        } else {
-            GraphicsAdapterPreference::LowPower
-        },
-        ..NativeUiWindowConfig::default()
-    };
+    let config = crate::graphics::window_config(settings.render_execution_policy, size);
 
     let mut host = NativeUiWindowHost::create_headless(size, config)?;
     let mut compositor = NativeEditorCompositor::new(&host.graphics_context(), CLEAR_COLOR);
@@ -107,7 +99,6 @@ pub fn run(launch: PlayerLaunch, options: HeadlessOptions) -> Result<(), String>
     input.set_scale_factor(f64::from(host.scale_factor()));
     let mut frame_input = InputSnapshot::default();
     let mut input_state = FrameInputState::default();
-    let mut rgba = Vec::new();
     let mut frame_name = String::with_capacity(32);
     let mut diagnostics = Vec::new();
     for note in input_script.diagnostics() {
@@ -132,7 +123,8 @@ pub fn run(launch: PlayerLaunch, options: HeadlessOptions) -> Result<(), String>
         tick_ms += (step_ms - frame_render_ms).max(0.0);
 
         let capture_started = Instant::now();
-        let (width, height) = host.capture_frame_rgba_into(&mut rgba)?;
+        let rgba = host.capture()?;
+        let [width, height] = host.size();
         capture_ms += capture_started.elapsed().as_secs_f64() * 1000.0;
 
         let hash = fnv1a64(&rgba);

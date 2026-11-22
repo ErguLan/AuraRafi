@@ -19,7 +19,7 @@ pub enum ViewportHostMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ViewportPresentationBackend {
     CpuPixels,
-    GpuTexture,
+    NativeScene,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -179,7 +179,7 @@ impl ViewportSurfaceHost {
         }
         let backend = match output {
             SceneFrameOutput::CpuPixels(_) => ViewportPresentationBackend::CpuPixels,
-            SceneFrameOutput::GpuTexture { .. } => ViewportPresentationBackend::GpuTexture,
+            SceneFrameOutput::Scene(_) => ViewportPresentationBackend::NativeScene,
         };
         let stats = ViewportPresentationStats {
             mode: self.mode,

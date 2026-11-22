@@ -5,7 +5,6 @@ use raf_core::{
     CaptureMode, EngineSettings, InputKey, InputOwner, InputRegionId, InputRouter, InputSnapshot,
     PointerButton, Project, SceneGraph,
 };
-use raf_render::api_graphic_basic::device::SharedGraphicsContext;
 use raf_render::api_graphic_basic::{CanvasTargetRect, EditorCanvasLayer};
 use raf_render::{
     bridge::{GraphicsSurfaceKind, RenderRuntime},
@@ -219,7 +218,6 @@ impl AgentPreview {
         project: &Project,
         settings: &EngineSettings,
         target_rect: CanvasTargetRect,
-        context: impl FnOnce() -> Option<SharedGraphicsContext>,
     ) -> Option<EditorCanvasLayer> {
         if !self.visible {
             return None;
@@ -237,7 +235,6 @@ impl AgentPreview {
                 frame_upload_bytes: 2 * 1024 * 1024,
                 ..raf_render::api_graphic_basic::GraphicsMemoryBudget::potato()
             });
-            graphics.set_shared_graphics_context(context());
             graphics.activate_surface(GraphicsSurfaceKind::SceneViewport);
             self.resources = Some(PreviewResources {
                 renderer,

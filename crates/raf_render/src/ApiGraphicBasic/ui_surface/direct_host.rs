@@ -1,8 +1,10 @@
-//! Direct retained UI host.
+//! Retained RafUI host. It owns UI state and produces ApiGraphicBasic paint.
 //!
-//! The host owns retained UI state and the WGPU compositor but not a window.
-//! A platform shell supplies the target texture view, allowing the editor to
-//! keep UI documents and event logic independent from the native window host.
+//! The host has no graphics device and no presentation target of its own. A
+//! platform shell or compositor supplies the full target geometry, and the host
+//! appends normalized `Command::Paint` / `Command::StyledPaint` entries into a
+//! shared [`raf_agb::product::ProductPacket`]. The same retained document and
+//! draw list feed the CPU recovery host.
 
 use std::sync::Arc;
 
@@ -11,74 +13,74 @@ use raf_core::{CaptureMode, InputOwner, InputRouter, PointerButton};
 use super::compilation::{
     update_surface_node, UiSurfaceCompilationCache, UiSurfaceCompileMetrics, UiSurfaceUpdateImpact,
 };
+use super::product_paint::{append_paint, UiPaintMetrics, UiTextureCache};
 use super::{
-    NativeGraphicsContext, NativeUiInputBridge, UiDispatchedAction, UiDocumentUpdate,
-    UiDocumentUpdateError, UiInputState, UiSurface, UiSurfaceDiagnostics, UiSurfaceDrawList,
-    UiSurfaceFrame, UiSurfaceGpuMetrics, UiSurfaceGpuRenderer, UiSurfaceGpuSharedResources,
-    UiSurfaceImageStore, UiSurfaceSession,
+    NativeUiInputBridge, UiControlState, UiDispatchedAction, UiDocumentUpdate,
+    UiDocumentUpdateError, UiFocusState, UiInputState, UiSurface, UiSurfaceDiagnostics,
+    UiSurfaceDrawList, UiSurfaceFrame, UiSurfaceImageStore, UiSurfaceSession,
 };
 use raf_ui::UiEnvironment;
 
-use crate::api_graphic_basic::canvas_presenter::CanvasTargetRect;
 use crate::api_graphic_basic::capabilities::GraphicsMemoryBudget;
-use crate::api_graphic_basic::device::GpuTextureView;
 
 pub struct DirectUiSurfaceHost {
     surface: UiSurface,
     surface_revision: u64,
-    paint_revision: u64,
+    /// Source revision for paint-only document changes.
+    source_paint_revision: u64,
+    /// Monotonic revision of everything that can change the emitted paint.
+    paint_generation: u64,
     session: UiSurfaceSession,
-    compositor: UiSurfaceGpuRenderer,
     images: UiSurfaceImageStore,
     clear_color: [u8; 4],
     compilation: UiSurfaceCompilationCache,
-    last_gpu_metrics: UiSurfaceGpuMetrics,
+    textures: UiTextureCache,
+    last_paint_metrics: UiPaintMetrics,
+    last_produced_frame: Option<DirectUiSurfaceFrame>,
+    observed_atlas_generation: u64,
+    observed_image_generation: u64,
+    observed_motion_revision: u64,
+    observed_tooltip_revision: u32,
+    observed_focus: UiFocusState,
+    observed_controls: UiControlState,
     automation: Option<raf_ui::automation::UiAutomationInbox>,
 }
 
 impl DirectUiSurfaceHost {
-    pub fn new(
-        surface: UiSurface,
-        device: &wgpu::Device,
-        color_format: wgpu::TextureFormat,
-        clear_color: [u8; 4],
-    ) -> Self {
-        Self::with_shared(
-            surface,
-            Arc::new(UiSurfaceGpuSharedResources::new(device, color_format)),
-            clear_color,
-        )
+    /// No graphics device: retained UI is produced on the CPU.
+    pub fn new(surface: UiSurface, clear_color: [u8; 4]) -> Self {
+        Self::with_budget(surface, clear_color, GraphicsMemoryBudget::default())
     }
 
-    pub(crate) fn with_shared(
+    pub fn with_budget(
         surface: UiSurface,
-        shared: Arc<UiSurfaceGpuSharedResources>,
         clear_color: [u8; 4],
+        budget: GraphicsMemoryBudget,
     ) -> Self {
-        Self::with_shared_and_budget(
-            surface,
-            shared,
-            clear_color,
-            GraphicsMemoryBudget::default(),
-        )
-    }
-
-    pub(crate) fn with_shared_and_budget(
-        surface: UiSurface,
-        shared: Arc<UiSurfaceGpuSharedResources>,
-        clear_color: [u8; 4],
-        memory_budget: GraphicsMemoryBudget,
-    ) -> Self {
+        let session = UiSurfaceSession::default();
+        let images = UiSurfaceImageStore::default();
+        let observed_atlas_generation = session.text_atlas.revision();
+        let observed_image_generation = images.generation();
+        let observed_motion_revision = session.paint_motion_revision();
+        let observed_tooltip_revision = session.transient_motion_revision();
         Self {
             surface,
             surface_revision: 0,
-            paint_revision: 0,
-            session: UiSurfaceSession::default(),
-            compositor: UiSurfaceGpuRenderer::with_shared_and_budget(shared, memory_budget),
-            images: UiSurfaceImageStore::default(),
+            source_paint_revision: 0,
+            paint_generation: 1,
+            session,
+            images,
             clear_color,
             compilation: UiSurfaceCompilationCache::default(),
-            last_gpu_metrics: UiSurfaceGpuMetrics::default(),
+            textures: UiTextureCache::with_budget(budget),
+            last_paint_metrics: UiPaintMetrics::default(),
+            last_produced_frame: None,
+            observed_atlas_generation,
+            observed_image_generation,
+            observed_motion_revision,
+            observed_tooltip_revision,
+            observed_focus: UiFocusState::default(),
+            observed_controls: UiControlState::default(),
             automation: None,
         }
     }
@@ -89,16 +91,20 @@ impl DirectUiSurfaceHost {
 
     pub fn surface_mut(&mut self) -> &mut UiSurface {
         self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
-        self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
+        self.source_paint_revision = self.source_paint_revision.wrapping_add(1).max(1);
+        self.touch_paint();
         &mut self.surface
     }
 
     pub fn set_surface(&mut self, surface: UiSurface) {
         if self.surface != surface {
-            if let Some(inbox) = self.automation.take() { inbox.cancel(); }
+            if let Some(inbox) = self.automation.take() {
+                inbox.cancel();
+            }
             self.surface = surface;
             self.surface_revision = self.surface_revision.wrapping_add(1).max(1);
-            self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
+            self.source_paint_revision = self.source_paint_revision.wrapping_add(1).max(1);
+            self.touch_paint();
         }
     }
 
@@ -135,7 +141,8 @@ impl DirectUiSurfaceHost {
         } else {
             self.compilation.patch_text_value(id, &value);
         }
-        self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
+        self.source_paint_revision = self.source_paint_revision.wrapping_add(1).max(1);
+        self.touch_paint();
         true
     }
 
@@ -156,7 +163,8 @@ impl DirectUiSurfaceHost {
         } else {
             self.compilation.invalidate_paint_snapshot();
         }
-        self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
+        self.source_paint_revision = self.source_paint_revision.wrapping_add(1).max(1);
+        self.touch_paint();
         Ok(true)
     }
 
@@ -165,16 +173,23 @@ impl DirectUiSurfaceHost {
     }
 
     /// Reads already compiled geometry; never triggers layout or rendering.
-    pub fn accessibility_frame(&self) -> Option<Arc<UiSurfaceFrame>> { self.compilation.cached_frame() }
+    pub fn accessibility_frame(&self) -> Option<Arc<UiSurfaceFrame>> {
+        self.compilation.cached_frame()
+    }
 
     pub fn automation_inbox(&mut self) -> raf_ui::automation::UiAutomationInbox {
-        self.automation.get_or_insert_with(Default::default).clone()
+        self.automation
+            .get_or_insert_with(Default::default)
+            .clone()
     }
 
     /// Mutable access to transient focus, text, and scroll state. The retained
     /// document stays declarative while platform hosts can restore short-lived
     /// values after a renderer or surface transition.
     pub fn session_mut(&mut self) -> &mut UiSurfaceSession {
+        // Arbitrary session mutation can change paint without passing through a
+        // typed host mutator, so the produced revision advances conservatively.
+        self.touch_paint();
         &mut self.session
     }
 
@@ -224,6 +239,7 @@ impl DirectUiSurfaceHost {
 
     pub fn set_environment(&mut self, environment: UiEnvironment) {
         self.session.set_environment(environment);
+        self.touch_paint();
     }
 
     pub fn images(&self) -> &UiSurfaceImageStore {
@@ -231,39 +247,44 @@ impl DirectUiSurfaceHost {
     }
 
     pub fn images_mut(&mut self) -> &mut UiSurfaceImageStore {
+        self.touch_paint();
         &mut self.images
-    }
-
-    /// Registers a GPU-produced image for image nodes that reference `key`.
-    /// The public host surface stays typed and does not expose a WGPU device.
-    pub fn register_external_image(
-        &mut self,
-        graphics: &NativeGraphicsContext<'_>,
-        key: impl Into<String>,
-        view: GpuTextureView,
-        size: [u32; 2],
-        revision: u64,
-    ) -> Result<(), String> {
-        self.compositor
-            .register_external_image(graphics.device(), key, view, size, revision)?;
-        self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
-        Ok(())
     }
 
     pub fn compilation_metrics(&self) -> UiSurfaceCompileMetrics {
         self.compilation.metrics()
     }
 
-    pub fn remove_external_image(&mut self, key: &str) -> bool {
-        let removed = self.compositor.remove_external_image(key);
-        if removed {
-            self.paint_revision = self.paint_revision.wrapping_add(1).max(1);
-        }
-        removed
+    pub fn last_paint_metrics(&self) -> UiPaintMetrics {
+        self.last_paint_metrics
     }
 
-    pub fn last_gpu_metrics(&self) -> UiSurfaceGpuMetrics {
-        self.last_gpu_metrics
+    /// Number of source-to-RGBA texture conversions performed by this host.
+    /// Re-appending an unchanged atlas generation or image revision reuses the
+    /// cached bytes and leaves this counter unchanged.
+    pub fn texture_conversions(&self) -> u64 {
+        self.textures.conversions()
+    }
+
+    /// Revision of everything that can change the emitted paint.
+    ///
+    /// Compositors fingerprint it together with the layer rect and raster scale
+    /// so an idle frame keeps its prepared packet instead of re-uploading the
+    /// scene and atlas. Read it after `append_product_paint` for the exact
+    /// revision of the produced commands.
+    pub fn paint_revision(&self) -> u64 {
+        self.paint_generation
+    }
+
+    /// Revision of the retained text atlas pixels. A newly rasterized glyph
+    /// always advances it.
+    pub fn atlas_generation(&self) -> u64 {
+        self.session.text_atlas.revision()
+    }
+
+    /// Retained frame and draw list from the latest append, if any.
+    pub fn last_produced_frame(&self) -> Option<DirectUiSurfaceFrame> {
+        self.last_produced_frame.clone()
     }
 
     pub fn performance_snapshot(&self) -> raf_ui::UiPerformanceSnapshot {
@@ -313,13 +334,16 @@ impl DirectUiSurfaceHost {
         F: FnMut(&str) -> String,
     {
         self.compilation.invalidate();
-        self.session.build_frame_with_resolved_text(
+        let frame = self.session.build_frame_with_resolved_text(
             &self.surface,
             size[0].max(1),
             size[1].max(1),
             self.clear_color,
             resolve,
-        )
+        );
+        self.sync_observed_generations();
+        self.sync_observed_interaction();
+        frame
     }
 
     pub fn process_input<F>(
@@ -354,8 +378,13 @@ impl DirectUiSurfaceHost {
             raster_scale,
             self.clear_color,
         );
-        let mut actions = self.automation.as_ref().map(|inbox| inbox.drain(&self.surface.root, &mut self.session.interaction)).unwrap_or_default();
+        let mut actions = self
+            .automation
+            .as_ref()
+            .map(|inbox| inbox.drain(&self.surface.root, &mut self.session.interaction))
+            .unwrap_or_default();
         actions.extend(self.session.process_input(&self.surface, &frame, input));
+        self.sync_observed_interaction();
         actions
     }
 
@@ -427,138 +456,109 @@ impl DirectUiSurfaceHost {
         actions
     }
 
-    pub fn render<F>(
+    /// Compiles if needed, syncs the text atlas, uploads texture pixels into
+    /// `packet`, and appends paint commands in retained order.
+    ///
+    /// `target_size` is the full physical target, `target_rect` is the physical
+    /// pixel rectangle where this layer draws, and `raster_scale` is the density
+    /// used for glyph rasterization. The clear color belongs to the compositor;
+    /// this method never emits `Command::Clear`.
+    pub fn append_product_paint(
         &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        target: &wgpu::TextureView,
-        size: [u32; 2],
-        resolve: F,
-    ) -> DirectUiSurfaceFrame
-    where
-        F: FnMut(&str) -> String,
-    {
-        self.render_at_scale(device, queue, target, size, size, 1.0, resolve)
-    }
-
-    /// Renders a logical retained layout into a potentially denser physical
-    pub fn rasterize_cpu_texture<F>(&mut self, size: [u32; 2], renderer: &mut super::UiSurfaceCpuRenderer, mut resolve: F) -> Vec<u8>
-    where F: FnMut(&str) -> String {
-        let compiled = self.compilation.compile_with_paint_revision(&self.surface,&mut self.session,self.surface_revision,size,1.0,self.clear_color,self.paint_revision,|key|resolve(key));
-        for quad in &compiled.draw_list.images { self.images.ensure_builtin_key(&quad.source_key); }
-        renderer.render(&compiled.draw_list,&self.session.text_atlas,&self.images,size,self.clear_color);
-        renderer.pixels().to_vec()
-    }
-
-    /// Renders a logical retained layout into a potentially denser physical
-    /// texture. This removes the post-render upscale blur on HiDPI displays
-    /// without changing pointer coordinates or document layout values.
-    pub fn render_at_scale<F>(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        target: &wgpu::TextureView,
+        packet: &mut raf_agb::product::ProductPacket,
         target_size: [u32; 2],
+        target_rect: [f32; 4],
         logical_size: [u32; 2],
         raster_scale: f32,
-        mut resolve: F,
-    ) -> DirectUiSurfaceFrame
-    where
-        F: FnMut(&str) -> String,
-    {
-        let raster_scale = raster_scale.clamp(1.0, 4.0);
-        let compiled = self.compilation.compile_with_paint_revision(
-            &self.surface,
-            &mut self.session,
-            self.surface_revision,
-            logical_size,
-            raster_scale,
-            self.clear_color,
-            self.paint_revision,
-            |key| resolve(key),
-        );
-        for quad in &compiled.draw_list.images {
-            self.images.ensure_builtin_key(&quad.source_key);
-        }
-        let submission_started = std::time::Instant::now();
-        let metrics = self.compositor.render_at_scale_with_revision(
-            device,
-            queue,
-            target,
-            target_size,
-            logical_size,
-            compiled.draw_list_revision,
-            &compiled.draw_list,
-            &mut self.session.text_atlas,
-            &self.images,
-            self.clear_color,
-        );
-        super::cost_observation::observe(
-            &mut self.session.performance,
-            &self.surface.id,
-            raf_ui::UiWorkPhase::Submission,
-            raf_ui::UiWorkCause::Resources,
-            submission_started.elapsed(),
-            0,
-            metrics
-                .buffer_upload_bytes
-                .saturating_add(metrics.image_upload_bytes),
-            metrics.geometry_cache_hit,
-        );
-        self.last_gpu_metrics = metrics;
-        DirectUiSurfaceFrame {
-            frame: compiled.frame,
-            draw_list: compiled.draw_list,
-            metrics,
-            compilation: self.compilation.metrics(),
-        }
-    }
-
-    pub(crate) fn encode_in_rect<F>(
-        &mut self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        encoder: &mut wgpu::CommandEncoder,
-        target: &wgpu::TextureView,
-        target_size: [u32; 2],
-        target_rect: CanvasTargetRect,
-        logical_size: [u32; 2],
-        raster_scale: f32,
-        load: wgpu::LoadOp<wgpu::Color>,
-        mut resolve: F,
-    ) -> DirectUiSurfaceFrame
-    where
-        F: FnMut(&str) -> String,
-    {
-        let raster_scale = raster_scale.clamp(1.0, 4.0);
-        let compiled = self.compilation.compile_with_paint_revision(
-            &self.surface,
-            &mut self.session,
-            self.surface_revision,
-            logical_size,
-            raster_scale,
-            self.clear_color,
-            self.paint_revision,
-            |key| resolve(key),
-        );
-        for quad in &compiled.draw_list.images {
-            self.images.ensure_builtin_key(&quad.source_key);
-        }
-        let submission_started = std::time::Instant::now();
-        let metrics = self.compositor.encode_in_rect_with_revision(
-            device,
-            queue,
-            encoder,
-            target,
+        resolve: impl FnMut(&str) -> String,
+    ) -> Result<UiPaintMetrics, String> {
+        self.produce_paint(
+            packet,
             target_size,
             target_rect,
             logical_size,
-            compiled.draw_list_revision,
-            &compiled.draw_list,
-            &mut self.session.text_atlas,
-            &self.images,
-            load,
+            raster_scale,
+            resolve,
+        )
+        .map(|produced| produced.metrics)
+    }
+
+    /// [`Self::append_product_paint`] plus the retained frame it produced.
+    pub fn append_product_paint_frame(
+        &mut self,
+        packet: &mut raf_agb::product::ProductPacket,
+        target_size: [u32; 2],
+        target_rect: [f32; 4],
+        logical_size: [u32; 2],
+        raster_scale: f32,
+        resolve: impl FnMut(&str) -> String,
+    ) -> Result<DirectUiSurfaceFrame, String> {
+        self.produce_paint(
+            packet,
+            target_size,
+            target_rect,
+            logical_size,
+            raster_scale,
+            resolve,
+        )
+    }
+
+    fn produce_paint(
+        &mut self,
+        packet: &mut raf_agb::product::ProductPacket,
+        target_size: [u32; 2],
+        target_rect: [f32; 4],
+        logical_size: [u32; 2],
+        raster_scale: f32,
+        mut resolve: impl FnMut(&str) -> String,
+    ) -> Result<DirectUiSurfaceFrame, String> {
+        let raster_scale = raster_scale.clamp(1.0, 4.0);
+        if target_rect[2] <= 0.0 || target_rect[3] <= 0.0 {
+            // A collapsed layer paints nothing. Layout still has to stay
+            // current for hit testing and accessibility on the next frame.
+            let frame = self.compilation.layout(
+                &self.surface,
+                &mut self.session,
+                self.surface_revision,
+                logical_size,
+                raster_scale,
+                self.clear_color,
+            );
+            let produced = DirectUiSurfaceFrame {
+                frame,
+                draw_list: Arc::new(UiSurfaceDrawList::default()),
+                metrics: UiPaintMetrics::default(),
+                compilation: self.compilation.metrics(),
+            };
+            self.last_produced_frame = Some(produced.clone());
+            return Ok(produced);
+        }
+        let compiled = self.compilation.compile_with_paint_revision(
+            &self.surface,
+            &mut self.session,
+            self.surface_revision,
+            logical_size,
+            raster_scale,
+            self.clear_color,
+            self.source_paint_revision,
+            &mut resolve,
         );
+        for quad in &compiled.draw_list.images {
+            self.images.ensure_builtin_key(&quad.source_key);
+        }
+        let submission_started = std::time::Instant::now();
+        let metrics = append_paint(
+            packet,
+            &compiled.draw_list,
+            &self.session.text_atlas,
+            &self.images,
+            &mut self.textures,
+            &self.surface.id,
+            target_size,
+            target_rect,
+            logical_size,
+            raster_scale,
+        )?;
         super::cost_observation::observe(
             &mut self.session.performance,
             &self.surface.id,
@@ -566,17 +566,90 @@ impl DirectUiSurfaceHost {
             raf_ui::UiWorkCause::Resources,
             submission_started.elapsed(),
             0,
-            metrics
-                .buffer_upload_bytes
-                .saturating_add(metrics.image_upload_bytes),
-            metrics.geometry_cache_hit,
+            metrics.upload_bytes(),
+            self.compilation.metrics().paint_cache_hit,
         );
-        self.last_gpu_metrics = metrics;
-        DirectUiSurfaceFrame {
+        self.last_paint_metrics = metrics;
+        self.sync_observed_generations();
+        self.sync_observed_interaction();
+        let produced = DirectUiSurfaceFrame {
             frame: compiled.frame,
             draw_list: compiled.draw_list,
             metrics,
             compilation: self.compilation.metrics(),
+        };
+        self.last_produced_frame = Some(produced.clone());
+        Ok(produced)
+    }
+
+    /// Renders a logical retained layout into a CPU recovery texture.
+    pub fn rasterize_cpu_texture(
+        &mut self,
+        size: [u32; 2],
+        renderer: &mut super::UiSurfaceCpuRenderer,
+        mut resolve: impl FnMut(&str) -> String,
+    ) -> Vec<u8> {
+        let compiled = self.compilation.compile_with_paint_revision(
+            &self.surface,
+            &mut self.session,
+            self.surface_revision,
+            size,
+            1.0,
+            self.clear_color,
+            self.source_paint_revision,
+            &mut resolve,
+        );
+        for quad in &compiled.draw_list.images {
+            self.images.ensure_builtin_key(&quad.source_key);
+        }
+        renderer.render(
+            &compiled.draw_list,
+            &self.session.text_atlas,
+            &self.images,
+            size,
+            self.clear_color,
+        );
+        self.sync_observed_generations();
+        renderer.pixels().to_vec()
+    }
+
+    fn touch_paint(&mut self) {
+        self.paint_generation = self.paint_generation.wrapping_add(1).max(1);
+    }
+
+    /// Folds state that can change without a typed host mutator into the
+    /// produced revision: atlas growth and image residency changes.
+    fn sync_observed_generations(&mut self) {
+        let atlas = self.session.text_atlas.revision();
+        if atlas != self.observed_atlas_generation {
+            self.observed_atlas_generation = atlas;
+            self.touch_paint();
+        }
+        let images = self.images.generation();
+        if images != self.observed_image_generation {
+            self.observed_image_generation = images;
+            self.touch_paint();
+        }
+    }
+
+    /// Interaction updates focus, hover, control values and caret state. Only a
+    /// real change advances the produced revision, so an event-free frame keeps
+    /// its prepared packet.
+    fn sync_observed_interaction(&mut self) {
+        let focus_changed = self.observed_focus != self.session.interaction.focus;
+        let controls_changed = self.observed_controls != self.session.interaction.controls;
+        let motion = self.session.paint_motion_revision();
+        let tooltip = self.session.transient_motion_revision();
+        let motion_changed =
+            motion != self.observed_motion_revision || tooltip != self.observed_tooltip_revision;
+        if focus_changed || controls_changed || motion_changed {
+            if focus_changed || controls_changed {
+                self.observed_focus = self.session.interaction.focus.clone();
+                self.observed_controls = self.session.interaction.controls.clone();
+            }
+            self.observed_motion_revision = motion;
+            self.observed_tooltip_revision = tooltip;
+            self.touch_paint();
         }
     }
 }
@@ -585,7 +658,7 @@ impl DirectUiSurfaceHost {
 pub struct DirectUiSurfaceFrame {
     pub frame: Arc<UiSurfaceFrame>,
     pub draw_list: Arc<UiSurfaceDrawList>,
-    pub metrics: UiSurfaceGpuMetrics,
+    pub metrics: UiPaintMetrics,
     pub compilation: UiSurfaceCompileMetrics,
 }
 

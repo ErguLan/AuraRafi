@@ -537,6 +537,8 @@ target remains v0.12 and is specified in
   shared gait phase.
 - [x] Agent/attached CLI/MCP transform rig updates and read-only pose sampling.
   Embedded GLB transform clips can be mapped to existing rig nodes explicitly.
+- [x] Animations dock with project clip assets, durable entity links, isolated
+  playhead preview, and key capture for position, rotation and scale tracks.
 - [x] Development overlays in Play for transform rig links, collision geometry,
   velocity, gravitational weight, applied loads and contact impulses. Optional
   world-space impact offsets drive a bounded visual reaction on a rig child.
@@ -551,8 +553,8 @@ target remains v0.12 and is specified in
   `AnimCollider` set each animation step and dispatch the selected response.
 - [ ] Foot-placement and hand-grab integration on top of the bounded IK solvers
   in `raf_core::scene::ik`.
-- [ ] Animation workspace with native timeline, curve and graph editing, pose
-  preview, collision inspection and camera/audio sequencing. Export take images
+- [ ] Expanded animation timeline with curve and graph editing, collision
+  inspection and camera/audio sequencing. Export take images
   and video, preserve stepped poses through retargeting and bake to keys/cache.
 - [ ] Actions with resource ownership, synchronized gameplay markers and safe
   interruption. Verify held props, contact-aware root motion, shape casts for

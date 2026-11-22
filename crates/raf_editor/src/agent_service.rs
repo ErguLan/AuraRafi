@@ -1214,16 +1214,35 @@ mod tests {
                             wanted.height as u32,
                         );
                         let layer = preview
-                            .render_layer(scene, &workspace.project, &settings, target, || None)
+                            .render_layer(scene, &workspace.project, &settings, target)
                             .unwrap();
-                        if let raf_render::api_graphic_basic::device::SceneFrameOutput::CpuPixels(
-                            pixels,
-                        ) = layer.output.as_ref()
-                        {
+                        let cpu_pixels =
+                            match layer.output.as_ref() {
+                                raf_render::api_graphic_basic::device::SceneFrameOutput::CpuPixels(
+                                    pixels,
+                                ) => Some(pixels.clone()),
+                                raf_render::api_graphic_basic::device::SceneFrameOutput::Scene(
+                                    frame,
+                                ) => {
+                                    let mut cpu = raf_render::api_graphic_basic::device::BasicDevice::new(
+                                        raf_render::api_graphic_basic::device::BasicDeviceConfig {
+                                            allow_gpu: false,
+                                            force_cpu: true,
+                                            memory_budget: raf_render::api_graphic_basic::GraphicsMemoryBudget::potato(),
+                                            adapter_preference: raf_render::api_graphic_basic::GraphicsAdapterPreference::LowPower,
+                                        },
+                                    );
+                                    match cpu.execute_scene_frame(frame) {
+                                        raf_render::api_graphic_basic::device::SceneFrameOutput::CpuPixels(pixels) => Some(pixels),
+                                        _ => None,
+                                    }
+                                }
+                            };
+                        if let Some(pixels) = cpu_pixels {
                             let canvas = image::RgbaImage::from_raw(
                                 layer.source_size[0],
                                 layer.source_size[1],
-                                pixels.clone(),
+                                pixels,
                             )
                             .unwrap();
                             let canvas = image::imageops::resize(

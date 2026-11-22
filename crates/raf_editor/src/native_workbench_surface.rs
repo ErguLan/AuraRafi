@@ -709,6 +709,7 @@ impl NativeGameWorkbench {
                 content_rect.height,
             );
             match group.active_tab.as_str() {
+                "animations" => append(self.animations.surface(self.palette, scene, selected, content_rect.width), content_rect),
                 "interfaces" => append(
                     crate::panels::interface_surface::build_interface_surface(
                         self.palette,

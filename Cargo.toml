@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/raf_agb",
     "crates/raf_core",
     "crates/raf_ui",
     "crates/raf_render",
@@ -25,12 +26,13 @@ members = [
 default-members = ["editor"]
 
 [workspace.package]
-version = "0.11.2"
+version = "0.11.4"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/AuraRafi/AuraRafi"
 
 [workspace.dependencies]
+raf_agb = { path = "crates/raf_agb" }
 # ECS
 hecs = "0.10"
 

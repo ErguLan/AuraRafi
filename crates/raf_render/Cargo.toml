@@ -3,14 +3,22 @@ name = "raf_render"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "2D/3D rendering engine via wgpu for AuraRafi"
+description = "Retained 2D/3D scene, RafUI and CAD composition over ApiGraphicBasic"
+
+[features]
+agb-probe-fixtures = []
+
+[[example]]
+name = "agb_workload"
+path = "examples/agb_workload.rs"
+required-features = ["agb-probe-fixtures"]
 
 [dependencies]
+raf_agb = { workspace = true }
 raf_core = { workspace = true }
 raf_assets = { workspace = true }
 raf_electronics = { workspace = true }
 raf_ui = { workspace = true }
-wgpu = { workspace = true }
 winit = { workspace = true }
 raw-window-handle = { workspace = true }
 glam = { workspace = true }
@@ -19,13 +27,24 @@ tracing = { workspace = true }
 image = { workspace = true }
 ab_glyph = { workspace = true }
 epaint_default_fonts = { workspace = true }
-pollster = "0.3"
-bytemuck = { version = "1", features = ["derive"] }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 arboard = { workspace = true }
 
+# The product path opens a native executor directly through AGB. Each target
+# compiles the APIs it can actually present with; `NativeRequest::Auto` picks
+# one at open time and never falls back to WGPU.
+[target.'cfg(all(not(target_arch = "wasm32"), windows))'.dependencies]
+raf_agb = { workspace = true, features = ["vulkan", "dx12"] }
+
+[target.'cfg(all(not(target_arch = "wasm32"), target_vendor = "apple"))'.dependencies]
+raf_agb = { workspace = true, features = ["vulkan", "metal"] }
+
+[target.'cfg(all(not(target_arch = "wasm32"), not(windows), not(target_vendor = "apple")))'.dependencies]
+raf_agb = { workspace = true, features = ["vulkan"] }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+raf_agb = { workspace = true, features = ["webgpu"] }
 js-sys = { workspace = true }
 
 [dev-dependencies]
