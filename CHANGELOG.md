@@ -5,6 +5,75 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-11-22 - Engine Closure: Runtime, Lighting and Layers
+
+### Added
+
+- **Runtime loading timeline**: the local Play loading surface shows the
+  current stage, prepared/total count, asset path, elapsed time and the last
+  three stages; after 15 seconds it shows a slow-preparation warning with a
+  Cancel action.
+- **Failure surface**: a failed preparation shows the real error with Retry and
+  Cancel. Retry restarts the same source; Cancel closes cleanly.
+- **Runtime diagnostics**: `RuntimeDiagnostic`/`DiagnosticEvent` carry a stable
+  code, severity, source, message, detail and timestamp. The editor console
+  shows severity/source/time badges and the workbench shows a failure banner.
+- **Play preflight**: the editor runs `aurarafi-player --version` before
+  launching, redirects the child stdout/stderr to per-instance log files,
+  records the exit code, applies a 20-second preparation timeout and reports
+  the log tail.
+- **Editor file log**: the editor tees tracing to the terminal and
+  `AuraRafi/logs/editor.log`, rotates at 16 MiB and writes panic reports to
+  `crash.log`.
+- **Layered composition**: on the Vulkan window the scene and RafUI are two
+  retained packets drawn in one acquisition and one present. A UI-only change
+  no longer re-encodes or re-uploads the scene.
+
+### Changed
+
+- **Lighting uniforms**: `RasterUniforms` now has an explicit
+  `lighting = [authored, improved, toon_steps, toon_softness]`; `viewport`
+  carries only the scene pixel size and `eye` only the camera position.
+  `draw.wgsl`, Vulkan, DX12, Metal and WebGPU use the new field.
+- **DX12 frame constants** moved from root constants to a root CBV with a
+  256-byte upload buffer, keeping the root signature within 64 DWORDs.
+- **Full environment mapping**: sun color, ambient tint/fraction, exposure,
+  toon, halo, stars, sun disk and shadow bias/strength/filter taps reach the
+  product uniforms. Unsupported shadows/filter are dropped with a one-time
+  diagnostic, never silently.
+- **Editor settings/workbench surfaces** were adjusted around the new console
+  and runtime notices.
+
+### Fixed
+
+- **Play stuck on loading**: the editor was launching a stale v0.11.2 player.
+  The version preflight and the matching v0.12.0 build make Play reach
+  `Running`, show the authored sky and expose failures immediately.
+- **Authored sky**: the per-pixel sky now receives a consistent camera/lighting
+  contract, and the ambient term is multiplied by `light.w` once.
+- **Ambient/authored parity**: `ambient_tint * ambient_fraction` reconstructs
+  the authored ambient color without double exposure.
+- **Runtime console tail**: the console receives at most 24 lines of 200
+  characters with an explicit truncation marker instead of a raw 200-line
+  frame trace. The complete stdout/stderr pair stays on disk, and the bounded
+  block can no longer force the text atlas past the graphics upload budget.
+- **Editor UI budget**: the native editor uses the desktop graphics budget
+  (64 MiB staging) instead of the potato runtime preset, so a 2048² retained
+  text atlas is not rejected when Play stops. The runtime player keeps the
+  project render preset.
+
+### Known limitations
+
+- Layered scene/UI composition is implemented only for the Vulkan window.
+  DX12, Metal, WebGPU and all headless/capture hosts keep the single-packet
+  path.
+- Camera-only scene frames still bump the scene packet through the canvas Arc
+  identity; a dedicated content revision is the next performance step.
+- The broad 0.12 feature list (PBR, point/spot lights, SSAO, particles,
+  skeletal animation, WebRTC media, electronics catalog, ML/robotics) is
+  tracked for 0.12.x; this release closes the engine runtime, lighting and
+  composition contract first.
+
 ## [0.11.6] - 2026-11-22 - Sky, Lighting and Runtime Verification
 
 ### Added

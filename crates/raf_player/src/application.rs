@@ -281,6 +281,20 @@ impl ApplicationHandler for PlayerApplication {
                                 ));
                             }
                         }
+                        for diagnostic in session.drain_diagnostic_events().into_iter().take(16) {
+                            tracing::info!(
+                                code = %diagnostic.code,
+                                severity = ?diagnostic.severity,
+                                source = %diagnostic.source,
+                                detail = ?diagnostic.detail,
+                                at_ms = diagnostic.at_ms,
+                                "{}",
+                                diagnostic.message
+                            );
+                            if let Some(peer) = &mut self.peer {
+                                let _ = peer.send(RuntimePacket::DiagnosticEvent(diagnostic));
+                            }
+                        }
                         for message in session.drain_diagnostics().into_iter().take(16) {
                             tracing::info!(%message, "runtime");
                             if let Some(peer) = &mut self.peer {

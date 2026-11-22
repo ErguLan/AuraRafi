@@ -5,6 +5,8 @@ struct Frame {
     viewport: vec4<f32>,
     eye: vec4<f32>,
     environment: vec4<f32>,
+    // [authored, improved, toon_steps, toon_softness].
+    lighting: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -42,24 +44,26 @@ fn normal_paint(position: vec4<f32>, uv: vec2<f32>, rgba: vec4<f32>) -> Paint {
 }
 
 fn ambient_light(normal_y: f32) -> vec3<f32> {
-    if frame.viewport.z < 0.5 { return frame.environment.rgb * frame.light.w; }
-    let ambient = frame.environment.rgb;
-    if frame.viewport.w < 0.5 { return ambient; }
-    return mix(ambient * vec3<f32>(0.45, 0.50, 0.62), ambient, clamp(normal_y * 0.5 + 0.5, 0.0, 1.0));
+    // environment.rgb is the ambient tint and light.w the authored fraction.
+    // The product guarantees tint * fraction equals the authored ambient.
+    let ambient = frame.environment.rgb * frame.light.w;
+    if frame.lighting.x < 0.5 || frame.lighting.y < 0.5 { return ambient; }
+    let low = vec3<f32>(0.45, 0.50, 0.62);
+    return mix(ambient * low, ambient, clamp(normal_y * 0.5 + 0.5, 0.0, 1.0));
 }
 
 fn sun_band(diffuse: f32) -> f32 {
-    let steps = frame.light_color.w;
+    let steps = frame.lighting.z;
     if steps < 2.0 { return diffuse; }
     let value = diffuse * steps;
-    let softness = frame.eye.w;
+    let softness = frame.lighting.w;
     if softness <= 0.0 { return floor(value + 0.5) / steps; }
     return (floor(value) + smoothstep(0.5 - softness * 0.5, 0.5 + softness * 0.5, fract(value))) / steps;
 }
 
 fn expose_scene(color: vec3<f32>) -> vec3<f32> {
     let v = color * frame.environment.w;
-    if frame.viewport.w < 0.5 { return v; }
+    if frame.lighting.y < 0.5 { return v; }
     return select(vec3<f32>(0.8) + 0.2 * (v - 0.8) / max(v - 0.6, vec3<f32>(0.00001)), v, v <= vec3<f32>(0.8));
 }
 
@@ -91,7 +95,7 @@ fn scene_paint(vertex: Vertex) -> Paint {
     if dot(vertex.normal, vertex.normal) > 0.0 {
         let n = mesh_normal(vertex);
         let diffuse = max(dot(n, frame.light.xyz), 0.0);
-        let solar_weight = select(1.0 - frame.light.w, 1.0, frame.viewport.z > 0.5);
+        let solar_weight = select(1.0 - frame.light.w, 1.0, frame.lighting.x > 0.5);
         let shade = ambient_light(n.y) + frame.light_color.xyz * (sun_band(diffuse) * solar_weight);
         rgba = vec4<f32>(rgba.rgb * shade, rgba.a);
     }
@@ -187,7 +191,7 @@ fn sky_stars(ray: vec3<f32>, density: f32) -> vec3<f32> {
     let arms = max(vec2<f32>(0.0), vec2<f32>(1.0) - d / (radius * 1.7));
     let brightness = max(core, 0.7 * max(bars.x * arms.y, bars.y * arms.x)) * min(ray.y * 5.0, 1.0);
     var tint = vec3<f32>(0.72, 0.86, 1.0);
-    if frame.viewport.w > 0.5 {
+    if frame.lighting.y > 0.5 {
         tint = mix(vec3<f32>(1.0, 0.88, 0.72), vec3<f32>(0.68, 0.80, 1.0), star_hash(seed ^ 0x25cc5f23u));
     }
     return tint * brightness;
@@ -215,7 +219,7 @@ fn shade_sky(input: Paint) -> vec4<f32> {
     }
     if alignment > input.atmosphere.y && input.atmosphere.y < 1.0 {
         var disk = clamp((alignment - input.atmosphere.y) / max(1.0 - input.atmosphere.y, 0.0000001), 0.0, 1.0);
-        if frame.viewport.w > 0.5 { disk = smoothstep(0.0, 1.0, disk); }
+        if frame.lighting.y > 0.5 { disk = smoothstep(0.0, 1.0, disk); }
         color = mix(color, frame.light_color.xyz, disk);
     }
     return vec4<f32>(expose_scene(color), 1.0);

@@ -210,6 +210,7 @@ impl NativeEditorApplication {
                     .is_some_and(|workbench| workbench.captures_keyboard_input())
             };
             if let Some(workbench) = self.workbench.as_mut() {
+                workbench.set_runtime_notice(self.runtime_notice.clone());
                 workbench.set_inspector_transform_drag_active(
                     runtime.project_type() == ProjectType::Game
                         && runtime.game_viewport().transform_drag_active(),
@@ -493,6 +494,11 @@ impl NativeEditorApplication {
                                             changed: false,
                                         });
                                     }
+                                } else if command == "runtime.notice.retry" {
+                                    self.runtime_notice = None;
+                                    self.pending_runtime_command = Some(command);
+                                } else if command == "runtime.notice.dismiss" {
+                                    self.runtime_notice = None;
                                 } else if command.starts_with("runtime.") {
                                     self.pending_runtime_command = Some(command);
                                 } else if command == "sessions.reload" {

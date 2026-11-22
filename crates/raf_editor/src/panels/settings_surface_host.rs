@@ -11,7 +11,8 @@ use raf_render::api_graphic_basic::EditorUiLayer;
 
 use crate::editor_layout::EditorRect;
 use crate::settings_surface::{
-    account_controls, account_welcome, build_settings_surface_with_state_and_api_keys, provider_id, SettingsSection,
+    account_controls, account_welcome, build_settings_surface_with_state_and_api_keys, provider_id,
+    SettingsSection,
 };
 use raf_ui::numeric::{UiNumericDraftIssue, UiNumericEditAction, UiNumericEditBank, UiNumericUnit};
 
@@ -130,6 +131,7 @@ impl SettingsSurfaceHost {
                     None,
                     &[],
                     "",
+                    false,
                 ),
                 [0, 0, 0, 0],
             ),
@@ -249,13 +251,21 @@ impl SettingsSurfaceHost {
 
     pub fn account_command(&mut self, name: &str) -> bool {
         let activates_plan = name == "settings.account.connect"
-            || name.starts_with("settings.account.reconnect:") || name.starts_with("settings.account.select:");
+            || name.starts_with("settings.account.reconnect:")
+            || name.starts_with("settings.account.select:");
         let result = if name == "settings.account.connect" {
             raf_ai::chatgpt_auth::begin_sign_in(None, self.draft.language)
-        } else if let Some(index) = name.strip_prefix("settings.account.reconnect:").and_then(|v| v.parse::<usize>().ok()) {
+        } else if let Some(index) = name
+            .strip_prefix("settings.account.reconnect:")
+            .and_then(|v| v.parse::<usize>().ok())
+        {
             raf_ai::chatgpt_auth::begin_sign_in(Some(index), self.draft.language)
-        } else if let Some(index) = name.strip_prefix("settings.account.select:").and_then(|v| v.parse::<usize>().ok()) {
-            raf_ai::chatgpt_auth::select_account(index).and_then(|()| raf_ai::chatgpt_auth::begin_model_refresh())
+        } else if let Some(index) = name
+            .strip_prefix("settings.account.select:")
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            raf_ai::chatgpt_auth::select_account(index)
+                .and_then(|()| raf_ai::chatgpt_auth::begin_model_refresh())
         } else if name == "settings.account.refresh" {
             raf_ai::chatgpt_auth::begin_model_refresh()
         } else if name == "settings.account.signout" {
@@ -263,12 +273,23 @@ impl SettingsSurfaceHost {
         } else if name == "settings.account.welcome_ack" {
             raf_ai::chatgpt_auth::acknowledge_welcome()
         } else if name == "settings.account.usage" {
-            if crate::script_support::open_url("https://chatgpt.com/settings/usage") { Ok(()) }
-            else { Err("Could not open account usage settings.".into()) }
-        } else { return false; };
-        if result.is_ok() && activates_plan { self.activate_plan_after_auth = Some(self.account_view.generation); }
-        if let Some(view) = raf_ai::chatgpt_auth::snapshot() { self.account_view = view; }
-        if let Err(error) = result { self.account_view.message = Some(error); }
+            if crate::script_support::open_url("https://chatgpt.com/settings/usage") {
+                Ok(())
+            } else {
+                Err("Could not open account usage settings.".into())
+            }
+        } else {
+            return false;
+        };
+        if result.is_ok() && activates_plan {
+            self.activate_plan_after_auth = Some(self.account_view.generation);
+        }
+        if let Some(view) = raf_ai::chatgpt_auth::snapshot() {
+            self.account_view = view;
+        }
+        if let Err(error) = result {
+            self.account_view.message = Some(error);
+        }
         self.surface_dirty = true;
         true
     }
@@ -377,6 +398,27 @@ impl SettingsSurfaceHost {
         self.numeric_edits.binding_for_text_key(key).is_some()
     }
 
+    /// Draft used for presentation only. Pending numeric edits are previewed
+    /// live on the label and slider while the user types, without committing
+    /// them to the saved settings draft.
+    fn preview_draft(&self) -> EngineSettings {
+        let Ok(values) = self.numeric_edits.pending_values() else {
+            return self.draft.clone();
+        };
+        if values.is_empty() {
+            return self.draft.clone();
+        }
+        let mut preview = self.draft.clone();
+        for value in &values {
+            let _ = crate::native_workbench::apply_settings_range(
+                &mut preview,
+                &value.key,
+                value.value,
+            );
+        }
+        preview
+    }
+
     fn mark_numeric_issues(&mut self, issues: &[UiNumericDraftIssue]) {
         for issue in issues {
             self.numeric_edits.mark_rejected(&issue.key);
@@ -396,6 +438,7 @@ impl SettingsSurfaceHost {
                 None,
                 &self.revealed_api_keys,
                 &self.ai_model_filter,
+                false,
             );
             self.numeric_edits.merge_tree(&surface.root);
         }
@@ -505,17 +548,32 @@ impl SettingsSurfaceHost {
     ) {
         self.catalog_loading = false;
         if section == SettingsSection::Ai {
-            if self.draft.agent_openai_use_plan { raf_ai::chatgpt_auth::ensure_models_requested(); }
+            if self.draft.agent_openai_use_plan {
+                raf_ai::chatgpt_auth::ensure_models_requested();
+            }
             if let Some(view) = raf_ai::chatgpt_auth::snapshot() {
                 if view != self.account_view {
-                    if self.activate_plan_after_auth.is_some_and(|generation| generation != view.generation)
-                        && !view.busy && view.accounts.iter().any(|a| a.active && a.connected) {
+                    if self
+                        .activate_plan_after_auth
+                        .is_some_and(|generation| generation != view.generation)
+                        && !view.busy
+                        && view.accounts.iter().any(|a| a.active && a.connected)
+                    {
                         self.draft.agent_openai_use_plan = true;
                         self.draft.default_ai_provider = AiProvider::OpenAI;
-                        if let Some(provider) = self.draft.ai_providers.iter_mut().find(|p| p.provider == AiProvider::OpenAI) { provider.enabled = true; }
+                        if let Some(provider) = self
+                            .draft
+                            .ai_providers
+                            .iter_mut()
+                            .find(|p| p.provider == AiProvider::OpenAI)
+                        {
+                            provider.enabled = true;
+                        }
                         self.draft_dirty = true;
                     }
-                    if !view.busy { self.activate_plan_after_auth = None; }
+                    if !view.busy {
+                        self.activate_plan_after_auth = None;
+                    }
                     // Discovery never silently changes a user's selected model.
                     self.account_view = view;
                     self.surface_dirty = true;
@@ -524,31 +582,47 @@ impl SettingsSurfaceHost {
             // The displayed provider card refreshes its model catalog on
             // demand; the fingerprint turns a finished fetch into a surface
             // rebuild so rows appear without reopening the picker.
-            if let Some(provider) =
-                self.draft
-                    .ai_providers
-                    .iter()
-                    .find(|config| config.provider == self.draft.default_ai_provider)
-                    .cloned()
+            if let Some(provider) = self
+                .draft
+                .ai_providers
+                .iter()
+                .find(|config| config.provider == self.draft.default_ai_provider)
+                .cloned()
             {
-                if !(provider.provider == AiProvider::OpenAI && self.draft.agent_openai_use_plan) && matches!(
-                    provider.provider,
-                    AiProvider::OpenRouter
-                        | AiProvider::OpenAI
-                        | AiProvider::OpenCode
-                        | AiProvider::OpenCodeGo
-                ) {
+                if !(provider.provider == AiProvider::OpenAI && self.draft.agent_openai_use_plan)
+                    && matches!(
+                        provider.provider,
+                        AiProvider::OpenRouter
+                            | AiProvider::OpenAI
+                            | AiProvider::OpenCode
+                            | AiProvider::OpenCodeGo
+                    )
+                {
                     let base_url = match provider.provider {
                         AiProvider::OpenRouter | AiProvider::OpenAI => provider.base_url.clone(),
                         _ => String::new(),
                     };
-                    let trigger = format!("settings.ai-provider.{}.model.trigger", provider_id(provider.provider));
+                    let trigger = format!(
+                        "settings.ai-provider.{}.model.trigger",
+                        provider_id(provider.provider)
+                    );
                     if self.open_select.as_deref() == Some(trigger.as_str()) {
-                        raf_ai::provider_catalog::ensure_requested(provider.provider, &base_url, &provider.api_key);
+                        raf_ai::provider_catalog::ensure_requested(
+                            provider.provider,
+                            &base_url,
+                            &provider.api_key,
+                        );
                     }
-                    let view = raf_ai::provider_catalog::snapshot_for(provider.provider, &base_url, &provider.api_key);
+                    let view = raf_ai::provider_catalog::snapshot_for(
+                        provider.provider,
+                        &base_url,
+                        &provider.api_key,
+                    );
                     self.catalog_loading = view.loading;
-                    let fingerprint = format!("{:?}{:?}{}{}", view.models, view.error, view.loading, view.fetched);
+                    let fingerprint = format!(
+                        "{:?}{:?}{}{}",
+                        view.models, view.error, view.loading, view.fetched
+                    );
                     if fingerprint != self.catalog_fingerprint {
                         self.catalog_fingerprint = fingerprint;
                         self.surface_dirty = true;
@@ -571,15 +645,17 @@ impl SettingsSurfaceHost {
         }
         self.rect = rect;
         if self.surface_dirty {
+            let preview = self.preview_draft();
             let mut surface = build_settings_surface_with_state_and_api_keys(
                 palette,
-                &self.draft,
+                &preview,
                 self.section,
                 self.modal_rect,
                 &self.search_query,
                 self.open_select.as_deref(),
                 &self.revealed_api_keys,
                 &self.ai_model_filter,
+                self.draft_dirty,
             );
             if self.section == SettingsSection::Ai {
                 // The ChatGPT account block is reachable as soon as the AI
@@ -599,7 +675,10 @@ impl SettingsSurfaceHost {
                         .insert(3.min(section_card.children.len()), account);
                 }
                 if self.account_view.needs_welcome {
-                    surface.root.children.push(account_welcome(palette, self.modal_rect));
+                    surface
+                        .root
+                        .children
+                        .push(account_welcome(palette, self.modal_rect));
                 }
             }
             self.numeric_edits.merge_tree(&surface.root);
@@ -612,9 +691,14 @@ impl SettingsSurfaceHost {
     }
 
     fn seed_numeric_inputs(&mut self) {
+        // Never rewrite the text control that is actively being edited: the
+        // live preview rebuilds the surface on every keystroke and re-seeding
+        // would move the caret.
+        let focused = self.host.session().interaction.focus.active.clone();
         let numeric_values = self
             .numeric_edits
             .bindings()
+            .filter(|binding| focused.as_deref() != Some(binding.node_id.as_str()))
             .filter_map(|binding| {
                 self.numeric_edits
                     .draft_text(&binding.key)
@@ -713,9 +797,7 @@ impl SettingsSurfaceHost {
             match &dispatched.action {
                 // The model picker search box is host-owned presentation
                 // state; it never reaches the settings draft.
-                UiAction::SetText { key, value }
-                    if key == "settings.ai.model.filter" =>
-                {
+                UiAction::SetText { key, value } if key == "settings.ai.model.filter" => {
                     let value = value.clone();
                     if self.ai_model_filter != value {
                         self.ai_model_filter = value;
@@ -734,6 +816,7 @@ impl SettingsSurfaceHost {
                     self.draft_dirty = true;
                     let invalid = self.numeric_edits.is_invalid(&numeric_key);
                     self.set_numeric_invalid(&numeric_key, invalid);
+                    self.surface_dirty = true;
                     returned_actions.push(dispatched);
                 }
                 UiAction::SetRange { key, value }
@@ -793,6 +876,7 @@ impl SettingsSurfaceHost {
                                     .set_text(text_key, text, 32);
                             }
                             self.set_numeric_invalid(&key, false);
+                            self.surface_dirty = true;
                             returned_actions.push(UiDispatchedAction {
                                 target_id: dispatched.target_id.clone(),
                                 event: dispatched.event.clone(),
@@ -827,6 +911,7 @@ impl SettingsSurfaceHost {
                                 );
                             }
                             self.set_numeric_invalid(&numeric_key, false);
+                            self.surface_dirty = true;
                             returned_actions.push(UiDispatchedAction {
                                 target_id: dispatched.target_id.clone(),
                                 event: dispatched.event.clone(),

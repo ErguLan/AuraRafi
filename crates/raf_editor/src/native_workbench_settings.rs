@@ -5,7 +5,7 @@
 //! lifecycle coordinator so editor composition does not own settings policy.
 
 use raf_core::ai::AiProvider;
-use raf_core::config::EngineSettings;
+use raf_core::config::{EngineSettings, Language, Theme};
 
 pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, value: bool) -> bool {
     match key {
@@ -26,11 +26,17 @@ pub(crate) fn apply_settings_toggle(settings: &mut EngineSettings, key: &str, va
         "settings.command_console_enabled" => settings.command_console_enabled = value,
         "settings.ai_persist_credentials" => settings.ai_persist_credentials = value,
         "settings.agent_openai_use_plan" => {
-            if settings.agent_openai_use_plan != value { settings.agent_reasoning_effort.clear(); }
+            if settings.agent_openai_use_plan != value {
+                settings.agent_reasoning_effort.clear();
+            }
             settings.agent_openai_use_plan = value;
             if value {
                 settings.default_ai_provider = AiProvider::OpenAI;
-                if let Some(config) = settings.ai_providers.iter_mut().find(|p| p.provider == AiProvider::OpenAI) {
+                if let Some(config) = settings
+                    .ai_providers
+                    .iter_mut()
+                    .find(|p| p.provider == AiProvider::OpenAI)
+                {
                     config.enabled = true;
                 }
             }
@@ -228,9 +234,9 @@ pub(crate) fn apply_settings_command(settings: &mut EngineSettings, key: &str) -
                 return false;
             }
             if provider == AiProvider::OpenAI && value.starts_with("account:") {
-                if !raf_ai::chatgpt_auth::snapshot().is_some_and(|view| {
-                    view.models.iter().any(|model| model.slug == model_id)
-                }) {
+                if !raf_ai::chatgpt_auth::snapshot()
+                    .is_some_and(|view| view.models.iter().any(|model| model.slug == model_id))
+                {
                     return false;
                 }
                 if let Some(config) = settings
@@ -248,7 +254,8 @@ pub(crate) fn apply_settings_command(settings: &mut EngineSettings, key: &str) -
                 settings.default_ai_provider = AiProvider::OpenAI;
                 return true;
             }
-            let known = crate::panels::ai_model_options::selection_allowed(settings, provider, model_id);
+            let known =
+                crate::panels::ai_model_options::selection_allowed(settings, provider, model_id);
             if !known {
                 // Custom ids typed in the advanced field remain the direct
                 // escape hatch; picker rows only activate known ids.
@@ -298,9 +305,9 @@ pub(crate) fn apply_settings_command(settings: &mut EngineSettings, key: &str) -
             true
         }
         key if key.starts_with("settings.ai_provider.refresh_catalog.") => {
-            let Some(provider) =
-                ai_provider_from_id(key.trim_start_matches("settings.ai_provider.refresh_catalog."))
-            else {
+            let Some(provider) = ai_provider_from_id(
+                key.trim_start_matches("settings.ai_provider.refresh_catalog."),
+            ) else {
                 return false;
             };
             if provider == AiProvider::OpenAI && settings.agent_openai_use_plan {
@@ -324,17 +331,57 @@ pub(crate) fn apply_settings_command(settings: &mut EngineSettings, key: &str) -
     }
 }
 
+pub(crate) fn apply_settings_reset(settings: &mut EngineSettings, key: &str) -> bool {
+    let defaults = EngineSettings::default();
+    match key {
+        "settings.theme" => settings.theme = defaults.theme,
+        "settings.font_size" => settings.font_size = defaults.font_size,
+        "settings.auto-ui-scale" => settings.auto_ui_scale = defaults.auto_ui_scale,
+        "settings.ui_scale" => settings.ui_scale = defaults.ui_scale,
+        "settings.theme-experimental" => settings.theme_experimental = defaults.theme_experimental,
+        "settings.native-accessibility" => {
+            settings.native_accessibility_enabled = defaults.native_accessibility_enabled
+        }
+        "settings.prefers-reduced-motion" => {
+            settings.prefers_reduced_motion = defaults.prefers_reduced_motion
+        }
+        "settings.high-contrast" => settings.high_contrast = defaults.high_contrast,
+        "settings.reduce-transparency" => {
+            settings.reduce_transparency = defaults.reduce_transparency
+        }
+        "settings.language" => settings.language = defaults.language,
+        "settings.simple-mode" => settings.simple_mode = defaults.simple_mode,
+        _ => return false,
+    }
+    true
+}
+
 pub(crate) fn apply_settings_select(settings: &mut EngineSettings, key: &str, value: &str) -> bool {
     match key {
+        "settings.theme" => {
+            settings.theme = match value {
+                "dark" => Theme::Dark,
+                "light" => Theme::Light,
+                "system" => Theme::System,
+                _ => return false,
+            }
+        }
+        "settings.language" => {
+            settings.language = match value {
+                "english" => Language::English,
+                "spanish" => Language::Spanish,
+                _ => return false,
+            }
+        }
         "settings.ai.model" => {
             let model_id = value.trim_start_matches("account:").trim();
             if model_id.is_empty() || model_id.len() > 160 {
                 return false;
             }
             if value.starts_with("account:") {
-                if !raf_ai::chatgpt_auth::snapshot().is_some_and(|view| {
-                    view.models.iter().any(|model| model.slug == model_id)
-                }) {
+                if !raf_ai::chatgpt_auth::snapshot()
+                    .is_some_and(|view| view.models.iter().any(|model| model.slug == model_id))
+                {
                     return false;
                 }
                 if let Some(config) = settings
@@ -352,7 +399,11 @@ pub(crate) fn apply_settings_select(settings: &mut EngineSettings, key: &str, va
                 settings.default_ai_provider = AiProvider::OpenAI;
                 return true;
             }
-            let known = crate::panels::ai_model_options::selection_allowed(settings, settings.default_ai_provider, model_id);
+            let known = crate::panels::ai_model_options::selection_allowed(
+                settings,
+                settings.default_ai_provider,
+                model_id,
+            );
             if !known {
                 return false;
             }
@@ -370,10 +421,16 @@ pub(crate) fn apply_settings_select(settings: &mut EngineSettings, key: &str, va
             }
         }
         "settings.openai.plan_model" => {
-            return apply_settings_select(settings, "settings.ai.model", &format!("account:{value}"));
+            return apply_settings_select(
+                settings,
+                "settings.ai.model",
+                &format!("account:{value}"),
+            );
         }
         "settings.agent_reasoning_effort" => {
-            if !matches!(value, "" | "none" | "low" | "medium" | "high" | "max") { return false; }
+            if !matches!(value, "" | "none" | "low" | "medium" | "high" | "max") {
+                return false;
+            }
             settings.agent_reasoning_effort = value.into();
         }
         "settings.runtime.launch_mode" => {
@@ -609,7 +666,8 @@ pub(crate) fn apply_settings_text(settings: &mut EngineSettings, key: &str, valu
         return false;
     };
     let model_changed = provider == settings.default_ai_provider
-        && ((field == "base_url" && config.base_url != value) || (field == "model" && config.model != value));
+        && ((field == "base_url" && config.base_url != value)
+            || (field == "model" && config.model != value));
     match field {
         "base_url" => config.base_url = value.to_string(),
         "model" => config.model = value.to_string(),
@@ -645,13 +703,28 @@ mod tests {
     #[test]
     fn provider_redesign_explicit_plan_toggle_selects_route_without_replacing_model() {
         let mut settings = super::EngineSettings::default();
-        let old_model = settings.ai_providers.iter().find(|p| p.provider == super::AiProvider::OpenAI).unwrap().model.clone();
+        let old_model = settings
+            .ai_providers
+            .iter()
+            .find(|p| p.provider == super::AiProvider::OpenAI)
+            .unwrap()
+            .model
+            .clone();
         settings.agent_reasoning_effort = "high".into();
-        assert!(super::apply_settings_toggle(&mut settings, "settings.agent_openai_use_plan", true));
+        assert!(super::apply_settings_toggle(
+            &mut settings,
+            "settings.agent_openai_use_plan",
+            true
+        ));
         assert_eq!(settings.default_ai_provider, super::AiProvider::OpenAI);
         assert!(settings.agent_reasoning_effort.is_empty());
-        let config = settings.ai_providers.iter().find(|p| p.provider == super::AiProvider::OpenAI).unwrap();
-        assert!(config.enabled); assert_eq!(config.model, old_model);
+        let config = settings
+            .ai_providers
+            .iter()
+            .find(|p| p.provider == super::AiProvider::OpenAI)
+            .unwrap();
+        assert!(config.enabled);
+        assert_eq!(config.model, old_model);
     }
     use super::*;
     use raf_core::config::{Language, Theme};
@@ -662,14 +735,34 @@ mod tests {
         let mut settings = EngineSettings::default();
         settings.agent_vision_enabled = true;
         settings.agent_reasoning_effort = "high".into();
-        let next = if settings.default_ai_provider == AiProvider::OpenAI { "openrouter" } else { "openai" };
-        assert!(apply_settings_select(&mut settings, "settings.default_ai_provider", next));
+        let next = if settings.default_ai_provider == AiProvider::OpenAI {
+            "openrouter"
+        } else {
+            "openai"
+        };
+        assert!(apply_settings_select(
+            &mut settings,
+            "settings.default_ai_provider",
+            next
+        ));
         assert!(!settings.agent_vision_enabled);
         assert!(settings.agent_reasoning_effort.is_empty());
-        assert!(!apply_settings_select(&mut settings, "settings.agent_reasoning_effort", "unlimited"));
-        assert!(apply_settings_select(&mut settings, "settings.agent_reasoning_effort", "medium"));
+        assert!(!apply_settings_select(
+            &mut settings,
+            "settings.agent_reasoning_effort",
+            "unlimited"
+        ));
+        assert!(apply_settings_select(
+            &mut settings,
+            "settings.agent_reasoning_effort",
+            "medium"
+        ));
         assert_eq!(settings.agent_reasoning_effort, "medium");
-        assert!(apply_settings_toggle(&mut settings, "settings.agent_response_limit_enabled", true));
+        assert!(apply_settings_toggle(
+            &mut settings,
+            "settings.agent_response_limit_enabled",
+            true
+        ));
         assert!(settings.agent_response_limit_enabled);
     }
 
@@ -800,9 +893,21 @@ mod tests {
     fn external_studio_settings_do_not_change_the_conversation_model() {
         let mut settings = EngineSettings::default();
         let providers = settings.ai_providers.clone();
-        assert!(apply_settings_toggle(&mut settings, "settings.external_studio.enabled", true));
-        assert!(apply_settings_text(&mut settings, "settings.external_studio.directory", "D:/Tools/Studio"));
-        assert!(apply_settings_text(&mut settings, "settings.external_studio.entry_point", "cli/asset-worker.js"));
+        assert!(apply_settings_toggle(
+            &mut settings,
+            "settings.external_studio.enabled",
+            true
+        ));
+        assert!(apply_settings_text(
+            &mut settings,
+            "settings.external_studio.directory",
+            "D:/Tools/Studio"
+        ));
+        assert!(apply_settings_text(
+            &mut settings,
+            "settings.external_studio.entry_point",
+            "cli/asset-worker.js"
+        ));
         assert!(settings.external_asset_studio.enabled);
         assert_eq!(settings.external_asset_studio.directory, "D:/Tools/Studio");
         assert_eq!(settings.ai_providers, providers);
@@ -862,5 +967,32 @@ mod tests {
         );
         assert_eq!(policy.runtime.fps_limit, 30);
         assert!(!policy.runtime.hot_reload);
+    }
+
+    #[test]
+    fn reset_row_restores_the_default_value() {
+        let mut settings = super::EngineSettings::default();
+        settings.font_size = 16.0;
+        settings.theme = super::Theme::Light;
+        settings.language = super::Language::Spanish;
+
+        assert!(super::apply_settings_reset(
+            &mut settings,
+            "settings.font_size"
+        ));
+        assert!(super::apply_settings_reset(&mut settings, "settings.theme"));
+        assert!(super::apply_settings_reset(
+            &mut settings,
+            "settings.language"
+        ));
+
+        let defaults = super::EngineSettings::default();
+        assert_eq!(settings.font_size, defaults.font_size);
+        assert_eq!(settings.theme, defaults.theme);
+        assert_eq!(settings.language, defaults.language);
+        assert!(!super::apply_settings_reset(
+            &mut settings,
+            "settings.unknown"
+        ));
     }
 }

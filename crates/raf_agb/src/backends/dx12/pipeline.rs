@@ -17,13 +17,12 @@ use windows::{
 };
 
 use super::{dx_error, Resident, COLOR, DEPTH};
-use crate::{DrawMode, Error, Instance, RasterUniforms, Result, ShadowFrame, Vertex};
+use crate::{DrawMode, Error, Instance, Result, ShadowFrame, Vertex};
 
-pub(super) const ROOT_FRAME_CONSTANTS: u32 = 0;
+pub(super) const ROOT_FRAME_CBV: u32 = 0;
 pub(super) const ROOT_MATERIAL_TABLE: u32 = 1;
 pub(super) const ROOT_SHADOW_CONSTANTS: u32 = 2;
 pub(super) const ROOT_SHADOW_TABLE: u32 = 3;
-pub(super) const ROOT_UNIFORM_WORDS: u32 = (size_of::<RasterUniforms>() / size_of::<u32>()) as u32;
 pub(super) const SHADOW_UNIFORM_WORDS: u32 = (size_of::<ShadowFrame>() / size_of::<u32>()) as u32;
 
 /// Pipeline family selected for one batch. Only scene batches are shadow receivers.
@@ -136,7 +135,7 @@ fn root_signature(device: &ID3D12Device) -> Result<ID3D12RootSignature> {
     let material = descriptor_range(1, 0);
     let shadow = descriptor_range(0, 1);
     let parameters = [
-        constants(0, 0, ROOT_UNIFORM_WORDS, D3D12_SHADER_VISIBILITY_ALL),
+        root_cbv(0, 0),
         descriptor_table(&material),
         constants(1, 1, SHADOW_UNIFORM_WORDS, D3D12_SHADER_VISIBILITY_ALL),
         descriptor_table(&shadow),
@@ -171,6 +170,19 @@ fn descriptor_range(register: u32, space: u32) -> D3D12_DESCRIPTOR_RANGE {
         BaseShaderRegister: register,
         RegisterSpace: space,
         OffsetInDescriptorsFromTableStart: 0,
+    }
+}
+
+fn root_cbv(register: u32, space: u32) -> D3D12_ROOT_PARAMETER {
+    D3D12_ROOT_PARAMETER {
+        ParameterType: D3D12_ROOT_PARAMETER_TYPE_CBV,
+        ShaderVisibility: D3D12_SHADER_VISIBILITY_ALL,
+        Anonymous: D3D12_ROOT_PARAMETER_0 {
+            Descriptor: D3D12_ROOT_DESCRIPTOR {
+                ShaderRegister: register,
+                RegisterSpace: space,
+            },
+        },
     }
 }
 
@@ -502,10 +514,11 @@ mod tests {
     }
 
     #[test]
-    fn root_constants_fit_the_direct3d_limit() {
-        assert!(ROOT_UNIFORM_WORDS > 0 && ROOT_UNIFORM_WORDS <= 64);
-        assert!(SHADOW_UNIFORM_WORDS > 0 && SHADOW_UNIFORM_WORDS <= 64);
+    fn root_parameters_fit_the_direct3d_budget() {
+        // Frame CBV (2) + material table (1) + shadow constants + shadow table (1).
+        let words = 2 + 1 + SHADOW_UNIFORM_WORDS + 1;
+        assert!(words <= D3D12_MAX_ROOT_COST);
+        assert_eq!(SHADOW_UNIFORM_WORDS, 24);
         assert_eq!(size_of::<ShadowFrame>() % size_of::<u32>(), 0);
-        assert_eq!(size_of::<RasterUniforms>() % size_of::<u32>(), 0);
     }
 }

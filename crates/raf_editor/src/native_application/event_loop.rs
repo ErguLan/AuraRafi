@@ -66,14 +66,47 @@ impl NativeEditorApplication {
         if let Some(command) = self.pending_runtime_command.take() {
             self.apply_runtime_command(&command);
         }
-        let diagnostics = self.game_runtime.poll();
+        let report = self.game_runtime.poll();
+        let notice = report.notice;
+        let clear_notice = report.clear_notice && notice.is_none();
+        if let Some(notice) = notice {
+            if let Some(workbench) = &mut self.workbench {
+                workbench.set_runtime_notice(Some(notice.clone()));
+            }
+            self.runtime_notice = Some(notice);
+            if let Some(runtime) = &mut self.runtime {
+                runtime.request_ui_frame();
+            }
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+        }
+        if clear_notice {
+            let mut changed = self.runtime_notice.take().is_some();
+            if let Some(workbench) = &mut self.workbench {
+                changed |= workbench.set_runtime_notice(None);
+            }
+            if changed {
+                if let Some(runtime) = &mut self.runtime {
+                    runtime.request_ui_frame();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
+            }
+        }
         if let Some(workbench) = &mut self.workbench {
-            for message in diagnostics {
-                workbench.log_console_output(crate::commands::CommandOutput::info(
-                    "Runtime",
-                    vec![message],
-                    serde_json::json!({ "source": "local-runtime" }),
-                ));
+            let had_entries = !report.entries.is_empty();
+            for entry in report.entries {
+                workbench.log_runtime_entry(entry);
+            }
+            if had_entries {
+                if let Some(runtime) = &mut self.runtime {
+                    runtime.request_ui_frame();
+                }
+                if let Some(window) = &self.window {
+                    window.request_redraw();
+                }
             }
             if workbench.set_runtime_toolbar(self.game_runtime.toolbar_state(&self.settings_state))
             {

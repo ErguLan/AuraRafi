@@ -523,7 +523,8 @@ impl NativeGameWorkbench {
                     }
                 }
                 UiAction::SetRange { key, value }
-                    if key == "inspector.audio.volume" || key == "inspector.physics.damping" => {
+                    if key == "inspector.audio.volume" || key == "inspector.physics.damping" =>
+                {
                     if let Some(target) = selected.first().copied() {
                         intents.push(NativeWorkbenchIntent::Command(format!(
                             "inspector.range:{key}:{value}:{}",
@@ -548,9 +549,12 @@ impl NativeGameWorkbench {
                 UiAction::ScrollTo { id, offset } if id == ASSETS_GRID_ID => {
                     let next = offset[1].max(0.0);
                     if (next - self.assets_scroll_offset).abs() > f32::EPSILON {
-                        let projection_changed = crate::panels::assets_surface::asset_scroll_projection_changed(
-                            self.assets_scroll_offset, next, self.assets_surface.view,
-                        );
+                        let projection_changed =
+                            crate::panels::assets_surface::asset_scroll_projection_changed(
+                                self.assets_scroll_offset,
+                                next,
+                                self.assets_surface.view,
+                            );
                         self.assets_scroll_offset = next;
                         if projection_changed {
                             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -572,7 +576,8 @@ impl NativeGameWorkbench {
                     if self.handle_project_save_command(name) {
                         continue;
                     }
-                    if self.handle_electronics_project_command(name, project, router, &mut intents) {
+                    if self.handle_electronics_project_command(name, project, router, &mut intents)
+                    {
                         continue;
                     }
                     if self.handle_ui_performance_command(name) {
@@ -583,7 +588,20 @@ impl NativeGameWorkbench {
                         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         continue;
                     }
-                    if self.handle_hierarchy_structure_command(name, scene, selected, &mut intents) {
+                    if name == "runtime.notice.retry" || name == "runtime.notice.dismiss" {
+                        self.runtime_notice = None;
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                        intents.push(NativeWorkbenchIntent::Command(
+                            if name == "runtime.notice.retry" {
+                                "runtime.play".to_string()
+                            } else {
+                                name.clone()
+                            },
+                        ));
+                        continue;
+                    }
+                    if self.handle_hierarchy_structure_command(name, scene, selected, &mut intents)
+                    {
                         continue;
                     }
                     if self.handle_app_command(name, dispatched, &mut intents) {
@@ -643,7 +661,12 @@ impl NativeGameWorkbench {
                     if self.handle_assets_command(name, scene, native_input, &mut intents) {
                         continue;
                     }
-                    if self.handle_hierarchy_menu_pick_command(name, native_input, selected, &mut intents) {
+                    if self.handle_hierarchy_menu_pick_command(
+                        name,
+                        native_input,
+                        selected,
+                        &mut intents,
+                    ) {
                         continue;
                     }
                     if self.handle_settings_section_command(name, &mut intents) {
@@ -652,7 +675,13 @@ impl NativeGameWorkbench {
                     if self.handle_hierarchy_script_link_command(name) {
                         continue;
                     }
-                    if self.handle_hierarchy_row_command(name, native_input, scene, selected, &mut intents) {
+                    if self.handle_hierarchy_row_command(
+                        name,
+                        native_input,
+                        scene,
+                        selected,
+                        &mut intents,
+                    ) {
                         continue;
                     }
                     if self.handle_dock_command(name, native_input, router) {
@@ -719,13 +748,7 @@ impl NativeGameWorkbench {
         self.handle_nodes_pointer_and_keyboard(native_input, &mut intents);
         self.handle_pointer_cancel(native_input, router);
         self.handle_escape_dismissals(native_input);
-        self.handle_primary_press_dismissals(
-            native_input,
-            &actions,
-            scene,
-            selected,
-            &mut intents,
-        );
+        self.handle_primary_press_dismissals(native_input, &actions, scene, selected, &mut intents);
         self.handle_toolbar_popup_dismissals(native_input);
         (intents, actions)
     }
@@ -733,10 +756,14 @@ impl NativeGameWorkbench {
 
 impl NativeGameWorkbench {
     pub(super) fn handle_project_save_command(&mut self, name: &String) -> bool {
-        if name==crate::application_menu::command::PROJECT_SAVE {
-            if let Err(error)=self.flush_interface_document(){self.interface.diagnostic=Some(error);self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);return true;}
+        if name == crate::application_menu::command::PROJECT_SAVE {
+            if let Err(error) = self.flush_interface_document() {
+                self.interface.diagnostic = Some(error);
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+                return true;
+            }
         }
-        if name=="assets.create-interface" {
+        if name == "assets.create-interface" {
             self.create_interface_asset();
             return true;
         }

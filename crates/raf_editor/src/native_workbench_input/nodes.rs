@@ -1,7 +1,12 @@
 use super::*;
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_nodes_command(&mut self, name: &String, native_input: &NativeUiInputBridge, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_nodes_command(
+        &mut self,
+        name: &String,
+        native_input: &NativeUiInputBridge,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if let Some(slug) = name.strip_prefix("nodes.toggle_category.") {
             self.nodes_host.toggle_category(slug);
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -36,8 +41,7 @@ impl NativeGameWorkbench {
                             .interaction
                             .focus
                             .request_focus("nodes.palette-popup.search");
-                        self.toolbar_revision =
-                            self.toolbar_revision.wrapping_add(1).max(1);
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                 }
             }
@@ -124,9 +128,7 @@ impl NativeGameWorkbench {
                 return true;
             };
             if let Some(drag) = self.nodes_host.wire_drag() {
-                if drag.from_node != raf_nodes::NodeId(node_id)
-                    || drag.from_pin != pin_id
-                {
+                if drag.from_node != raf_nodes::NodeId(node_id) || drag.from_pin != pin_id {
                     intents.push(NativeWorkbenchIntent::Command(format!(
                         "nodes.connect:{}:{}:{}:{}",
                         drag.from_node.0, drag.from_pin, node_id, pin_id,
@@ -251,7 +253,11 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_nodes_zoom_command(&mut self, name: &String, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_nodes_zoom_command(
+        &mut self,
+        name: &String,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         match name.as_str() {
             "nodes.zoom.in" => {
                 let size = self.nodes_canvas_size();
@@ -271,12 +277,10 @@ impl NativeGameWorkbench {
             }
             "nodes.undo" | "nodes.redo" | "nodes.clear-selection" => {
                 if self.nodes_host.close_context_menu() {
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
                 if self.nodes_host.close_palette_popup() {
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
                 intents.push(NativeWorkbenchIntent::Command(name.clone()));
                 return true;
@@ -288,7 +292,12 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_nodes_open_menu(&mut self, id: &String, native_input: &NativeUiInputBridge, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_nodes_open_menu(
+        &mut self,
+        id: &String,
+        native_input: &NativeUiInputBridge,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if let Some(raw_id) = id.strip_prefix("nodes.context.") {
             if let Ok(parsed) = uuid::Uuid::parse_str(raw_id) {
                 self.open_menu = None;
@@ -318,7 +327,11 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_nodes_pointer_and_keyboard(&mut self, native_input: &NativeUiInputBridge, intents: &mut Vec<NativeWorkbenchIntent>) {
+    pub(super) fn handle_nodes_pointer_and_keyboard(
+        &mut self,
+        native_input: &NativeUiInputBridge,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) {
         let snapshot = native_input.snapshot();
         let nodes_text_input_focused = self
             .host

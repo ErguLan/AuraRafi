@@ -50,16 +50,14 @@ impl NativeGameWorkbench {
                 let menus = self.assets_surface.close_menus();
                 let modals = self.assets_surface.close_modals();
                 if menus || modals {
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
                 return true;
             }
             "assets.rename.cancel" | "assets.delete.cancel" => {
                 let changed = self.assets_surface.close_modals();
                 if changed {
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
                 return true;
             }
@@ -70,7 +68,11 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_assets_create_menu_command(&mut self, name: &String, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_assets_create_menu_command(
+        &mut self,
+        name: &String,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         match name.as_str() {
             "assets.create-script" => {
                 self.assets_surface.close_menus();
@@ -121,7 +123,12 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_assets_create_primitive_command(&mut self, name: &String, scene: &SceneGraph, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_assets_create_primitive_command(
+        &mut self,
+        name: &String,
+        scene: &SceneGraph,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if let Some(slug) = name.strip_prefix("assets.create-primitive:") {
             self.assets_surface.primitive_menu_open = false;
             if let Some(parent) = self.insertion_parent(scene) {
@@ -140,7 +147,13 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_assets_command(&mut self, name: &String, scene: &SceneGraph, native_input: &NativeUiInputBridge, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_assets_command(
+        &mut self,
+        name: &String,
+        scene: &SceneGraph,
+        native_input: &NativeUiInputBridge,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if let Some(filter) = name.strip_prefix("assets.filter.") {
             self.assets_surface.filter = match filter {
                 "images" => AssetFilter::Images,
@@ -171,7 +184,10 @@ impl NativeGameWorkbench {
         {
             let entry = raf_assets::authoring_catalog::AuthoringAsset::from_path(row);
             if entry.class == raf_assets::authoring_catalog::AssetClass::Interface {
-                self.interface.diagnostic=self.interface.insert_asset(row,self.agent_settings.language).err();
+                self.interface.diagnostic = self
+                    .interface
+                    .insert_asset(row, self.agent_settings.language)
+                    .err();
                 self.activate_interface_authoring();
             } else if entry.class == raf_assets::authoring_catalog::AssetClass::Camera {
                 let parent = self
@@ -186,11 +202,10 @@ impl NativeGameWorkbench {
                 intents.push(NativeWorkbenchIntent::Command(format!(
                     "authoring.asset:{args}"
                 )));
-                self.assets_surface.status =
-                    Some(AssetsStatus::pending(raf_core::i18n::t(
-                        "assets.placement_hint",
-                        self.agent_settings.language,
-                    )));
+                self.assets_surface.status = Some(AssetsStatus::pending(raf_core::i18n::t(
+                    "assets.placement_hint",
+                    self.agent_settings.language,
+                )));
             }
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             return true;
@@ -226,18 +241,27 @@ impl NativeGameWorkbench {
         if let Some(row) = name.strip_prefix("assets.open:") {
             if raf_assets::animation_asset::is_animation_asset(row) {
                 self.open_animation_asset(row);
-            } else if row.starts_with("builtin://interface/") || row.to_ascii_lowercase().ends_with(".ui.ron") {
+            } else if row.starts_with("builtin://interface/")
+                || row.to_ascii_lowercase().ends_with(".ui.ron")
+            {
                 self.open_interface_asset(row);
-                self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             } else if row == "builtin://camera" {
                 self.assets_surface.close_menus();
-                let parent=self.insertion_parent(scene).map(|id|id.0.to_string()).unwrap_or_else(||"root".into());
-                intents.push(NativeWorkbenchIntent::Command(format!("hierarchy.create-camera:{parent}")));
+                let parent = self
+                    .insertion_parent(scene)
+                    .map(|id| id.0.to_string())
+                    .unwrap_or_else(|| "root".into());
+                intents.push(NativeWorkbenchIntent::Command(format!(
+                    "hierarchy.create-camera:{parent}"
+                )));
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             } else if let Some(slug) = row.strip_prefix("builtin://primitive/") {
-                let command=if let Some(parent)=self.insertion_parent(scene) {
-                    format!("hierarchy.create-primitive:{}:{slug}",parent.0)
-                } else {format!("assets.create-primitive:{slug}")};
+                let command = if let Some(parent) = self.insertion_parent(scene) {
+                    format!("hierarchy.create-primitive:{}:{slug}", parent.0)
+                } else {
+                    format!("assets.create-primitive:{slug}")
+                };
                 intents.push(NativeWorkbenchIntent::Command(command));
             } else {
                 self.assets_surface.close_menus();
@@ -262,8 +286,7 @@ impl NativeGameWorkbench {
                         .interaction
                         .focus
                         .request_focus("assets.rename-value");
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     true
                 }
                 "assets.rename.confirm" => {
@@ -280,8 +303,7 @@ impl NativeGameWorkbench {
                         )));
                     }
                     self.assets_surface.rename_asset = None;
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     true
                 }
                 "assets.delete.begin" => {
@@ -289,8 +311,7 @@ impl NativeGameWorkbench {
                     self.assets_surface.close_modals();
                     self.assets_surface.selected_asset = Some(row.clone());
                     self.assets_surface.delete_asset = Some(row);
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     true
                 }
                 "assets.delete.confirm" => {
@@ -304,8 +325,7 @@ impl NativeGameWorkbench {
                     intents.push(NativeWorkbenchIntent::Command(format!(
                         "assets.delete:{row}"
                     )));
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     true
                 }
                 "assets.duplicate" => {
@@ -319,8 +339,7 @@ impl NativeGameWorkbench {
                     intents.push(NativeWorkbenchIntent::Command(format!(
                         "assets.duplicate:{row}"
                     )));
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     true
                 }
                 "assets.reveal"
@@ -331,8 +350,7 @@ impl NativeGameWorkbench {
                     self.assets_surface.close_menus();
                     self.assets_surface.close_modals();
                     intents.push(NativeWorkbenchIntent::Command(name.clone()));
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     true
                 }
                 _ => false,

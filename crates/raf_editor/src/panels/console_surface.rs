@@ -466,10 +466,30 @@ fn console_entry(
     expanded: bool,
 ) -> UiNode {
     let tokens = palette.tokens();
-    let (level_icon, color) = match entry.level {
-        LogLevel::Info => (UiIconId::Console, tokens.text),
-        LogLevel::Warning => (UiIconId::Warning, tokens.warning),
-        LogLevel::Error => (UiIconId::Error, tokens.danger),
+    let (level_icon, color, level_key, severity_class) = match entry.level {
+        LogLevel::Info => (
+            UiIconId::Console,
+            tokens.text,
+            "console.severity.info",
+            "console-severity-info",
+        ),
+        LogLevel::Warning => (
+            UiIconId::Warning,
+            tokens.warning,
+            "console.severity.warning",
+            "console-severity-warning",
+        ),
+        LogLevel::Error => (
+            UiIconId::Error,
+            tokens.danger,
+            "console.severity.error",
+            "console-severity-error",
+        ),
+    };
+    let source_color = match entry.level {
+        LogLevel::Info => tokens.accent_hot,
+        LogLevel::Warning => tokens.warning,
+        LogLevel::Error => tokens.danger,
     };
     let row_extra_class = match (&entry.level, entry.block.is_some(), entry.sender.is_some()) {
         (LogLevel::Error, _, _) => Some("console-entry-error"),
@@ -506,12 +526,8 @@ fn console_entry(
         })
         .with_child(
             UiNode::new(format!("console.entry.{id}.level"), UiNodeKind::Label)
-                .with_class("console-level-icon")
-                .with_text_key(match entry.level {
-                    LogLevel::Info => "app.info",
-                    LogLevel::Warning => "app.warn",
-                    LogLevel::Error => "app.error",
-                })
+                .with_class(format!("console-level-icon console-severity-badge {severity_class}"))
+                .with_text_key(level_key)
                 .with_text_style(UiTextStyle {
                     size_px: 12.0,
                     line_height_px: 18.0,
@@ -540,9 +556,10 @@ fn console_entry(
     if let Some(sender) = &entry.sender {
         header = header.with_child(
             UiNode::new(format!("console.entry.{id}.sender"), UiNodeKind::Label)
+                .with_class("console-source")
                 .with_text_value(sender.clone())
                 .with_layout(UiLayout::fixed(88.0, 22.0).with_text_safe_area(false))
-                .with_text_style(UiTextStyle::button(tokens.accent_hot)),
+                .with_text_style(UiTextStyle::button(source_color)),
         );
     } else {
         header = header.with_child(
@@ -778,6 +795,7 @@ mod tests {
             message: "Result".to_string(),
             timestamp: "12:00:00".to_string(),
             sender: None,
+            code: Some("console.runtime".to_string()),
             block: Some(ConsoleBlock {
                 title: "Result".to_string(),
                 lines: vec!["ok".to_string()],
@@ -856,6 +874,7 @@ mod tests {
             message: "Console".to_string(),
             timestamp: "12:00:00".to_string(),
             sender: None,
+            code: Some("console.runtime".to_string()),
             block: Some(ConsoleBlock {
                 title: "Console".to_string(),
                 lines: vec!["xd".to_string()],
@@ -867,5 +886,34 @@ mod tests {
             build_console_surface(StudioUiPalette::IndustrialDark, &console, false, &[], None);
 
         assert!(find_node(&surface.root, "console.entry.7.json").is_some());
+    }
+
+    #[test]
+    fn runtime_entries_render_severity_and_source_badges() {
+        let mut console = ConsolePanel::default();
+        console.log_structured(
+            LogLevel::Error,
+            "runtime",
+            "The runtime did not become ready in time.",
+            Some("console.runtime_timeout".to_string()),
+            None,
+        );
+        let surface =
+            build_console_surface(StudioUiPalette::IndustrialDark, &console, false, &[], None);
+        let log_scroll = child(&surface.root, "console.log-scroll");
+        let entry = log_scroll.children.last().expect("runtime entry present");
+        let level = child(entry, "console.entry.1.level");
+        let source = child(entry, "console.entry.1.sender");
+
+        assert!(level
+            .classes
+            .iter()
+            .any(|class| class == "console-severity-badge"));
+        assert!(level
+            .classes
+            .iter()
+            .any(|class| class == "console-severity-error"));
+        assert_eq!(level.text_key.as_deref(), Some("console.severity.error"));
+        assert!(source.classes.iter().any(|class| class == "console-source"));
     }
 }

@@ -288,6 +288,16 @@ impl NativeEditorApplication {
                         }
                         self.close_settings_input();
                         changed = true;
+                    } else if let Some(key) = name.strip_prefix("settings.reset:") {
+                        if let Some(settings_surface) = self.settings_surface.as_mut() {
+                            if crate::native_workbench::apply_settings_reset(
+                                &mut settings_surface.draft,
+                                key,
+                            ) {
+                                settings_surface.mark_dirty();
+                                changed = true;
+                            }
+                        }
                     } else if name == "settings.reset_defaults" {
                         if let Some(settings_surface) = self.settings_surface.as_mut() {
                             settings_surface.restore_defaults();
@@ -370,4 +380,3 @@ impl NativeEditorApplication {
         }
     }
 }
-

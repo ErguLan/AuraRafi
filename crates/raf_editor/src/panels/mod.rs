@@ -48,6 +48,7 @@ pub mod project_settings_surface_host;
 pub mod project_surface;
 pub mod raf_ui_surface_bridge;
 pub mod raf_ui_tooltip;
+pub mod runtime_notice_surface;
 pub mod search_surface;
 pub mod search_surface_host;
 pub mod settings_surface_host;

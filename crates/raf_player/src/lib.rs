@@ -4,6 +4,7 @@ mod audio;
 mod game_ui;
 mod graphics;
 pub mod headless;
+mod loading;
 mod physics_debug;
 pub mod session;
 pub mod stream_host;

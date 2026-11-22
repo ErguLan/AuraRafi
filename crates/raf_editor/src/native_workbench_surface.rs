@@ -709,7 +709,11 @@ impl NativeGameWorkbench {
                 content_rect.height,
             );
             match group.active_tab.as_str() {
-                "animations" => append(self.animations.surface(self.palette, scene, selected, content_rect.width), content_rect),
+                "animations" => append(
+                    self.animations
+                        .surface(self.palette, scene, selected, content_rect.width),
+                    content_rect,
+                ),
                 "interfaces" => append(
                     crate::panels::interface_surface::build_interface_surface(
                         self.palette,
@@ -1169,6 +1173,23 @@ impl NativeGameWorkbench {
                     52.0,
                 ),
             );
+        }
+        if let Some(notice) = &self.runtime_notice {
+            if self.project_type == ProjectType::Game {
+                append(
+                    crate::panels::runtime_notice_surface::build_runtime_notice_surface(
+                        self.palette,
+                        notice,
+                        self.agent_panel.borrow().language,
+                    ),
+                    EditorRect::new(
+                        layout.canvas.x + 12.0,
+                        layout.canvas.y + 8.0,
+                        (layout.canvas.width - 24.0).clamp(320.0, 760.0),
+                        crate::panels::runtime_notice_surface::RUNTIME_NOTICE_HEIGHT,
+                    ),
+                );
+            }
         }
         if self.project_type == ProjectType::Electronics {
             if let (Some(menu), Some(editor)) = (

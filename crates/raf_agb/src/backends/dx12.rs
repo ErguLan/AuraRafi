@@ -6,7 +6,7 @@ mod shadow;
 mod viewport;
 mod window;
 
-use std::{mem::size_of, ptr};
+use std::mem::size_of;
 
 use windows::core::Interface;
 use windows::Win32::{
@@ -30,6 +30,8 @@ use pipeline::{Pipelines, Stage};
 const COLOR: DXGI_FORMAT = DXGI_FORMAT_R8G8B8A8_UNORM;
 const DEPTH: DXGI_FORMAT = DXGI_FORMAT_D32_FLOAT;
 const LIST: D3D12_COMMAND_LIST_TYPE = D3D12_COMMAND_LIST_TYPE_DIRECT;
+// Constant buffers must be 256-byte aligned and sized; the shader frame is 160 bytes.
+const CAMERA_BYTES: u64 = ((size_of::<RasterUniforms>() as u64 + 255) / 256) * 256;
 const GEOMETRY_STATE: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATES(
     D3D12_RESOURCE_STATE_VERTEX_AND_CONSTANT_BUFFER.0 | D3D12_RESOURCE_STATE_INDEX_BUFFER.0,
 );
@@ -73,6 +75,7 @@ pub struct Dx12 {
     shadow: Option<shadow::ShadowPass>,
     filter: Option<filter::FilterPass>,
     pipelines: Pipelines,
+    camera: ID3D12Resource,
     shadow_capability: EffectSupport,
     filter_capability: EffectSupport,
 }
@@ -168,6 +171,12 @@ impl Dx12 {
                     .map_err(dx_error)?,
             );
             let pipelines = Pipelines::new(&device)?;
+            let camera = buffer(
+                &device,
+                CAMERA_BYTES,
+                D3D12_HEAP_TYPE_UPLOAD,
+                D3D12_RESOURCE_STATE_GENERIC_READ,
+            )?;
             let shadow_capability = shadow::capability(&device);
             let filter_capability = filter::capability(&device);
             let info = AdapterInfo {
@@ -190,6 +199,7 @@ impl Dx12 {
                 submitted: 0,
                 completed: 0,
                 pipelines,
+                camera,
                 info,
                 target: None,
                 window: None,
@@ -537,6 +547,14 @@ impl Backend for Dx12 {
         let shadow = self.shadow.as_ref();
         let filter = self.filter.as_ref();
         let uniforms = frame.uniforms(plan.extent);
+        write(
+            &self.camera,
+            |mapped| {
+                mapped[..size_of::<RasterUniforms>()].copy_from_slice(bytemuck::bytes_of(&uniforms));
+            },
+            size_of::<RasterUniforms>(),
+        )?;
+        let camera = unsafe { self.camera.GetGPUVirtualAddress() };
         let scene_end = resident
             .batches
             .partition_point(|batch| batch.mode.is_scene());
@@ -571,7 +589,7 @@ impl Backend for Dx12 {
                 set_view(list, full);
                 list.ClearRenderTargetView(filter.rtv(), &frame.clear, None);
                 list.ClearDepthStencilView(target.dsv, D3D12_CLEAR_FLAG_DEPTH, 1., 0, &[]);
-                bind_scene(list, pipelines, resident, &uniforms, shadow);
+                bind_scene(list, pipelines, resident, camera, shadow);
                 set_view(list, scene);
                 draw_batches(
                     list,
@@ -592,9 +610,9 @@ impl Backend for Dx12 {
                 set_view(list, full);
                 list.ClearRenderTargetView(rtv, &frame.clear, None);
                 list.ClearDepthStencilView(target.dsv, D3D12_CLEAR_FLAG_DEPTH, 1., 0, &[]);
-                bind_scene(list, pipelines, resident, &uniforms, shadow);
+                bind_scene(list, pipelines, resident, camera, shadow);
                 filter.draw(list);
-                bind_scene(list, pipelines, resident, &uniforms, shadow);
+                bind_scene(list, pipelines, resident, camera, shadow);
                 set_view(list, full);
                 draw_batches(
                     list,
@@ -608,7 +626,7 @@ impl Backend for Dx12 {
                 set_view(list, full);
                 list.ClearRenderTargetView(rtv, &frame.clear, None);
                 list.ClearDepthStencilView(target.dsv, D3D12_CLEAR_FLAG_DEPTH, 1., 0, &[]);
-                bind_scene(list, pipelines, resident, &uniforms, shadow);
+                bind_scene(list, pipelines, resident, camera, shadow);
                 for pass in &plan.graph.order {
                     let (batches, rect) = match pass {
                         0 => (&resident.batches[..scene_end], scene),
@@ -728,7 +746,7 @@ unsafe fn bind_scene(
     list: &ID3D12GraphicsCommandList,
     pipelines: &Pipelines,
     resident: &Resident,
-    uniforms: &RasterUniforms,
+    camera: u64,
     shadow: Option<&shadow::ShadowPass>,
 ) {
     let shadow_slot = D3D12_GPU_DESCRIPTOR_HANDLE {
@@ -737,12 +755,7 @@ unsafe fn bind_scene(
     unsafe {
         list.SetGraphicsRootSignature(pipelines.root());
         list.SetDescriptorHeaps(&resident.heaps);
-        list.SetGraphicsRoot32BitConstants(
-            pipeline::ROOT_FRAME_CONSTANTS,
-            pipeline::ROOT_UNIFORM_WORDS,
-            ptr::from_ref(uniforms).cast(),
-            0,
-        );
+        list.SetGraphicsRootConstantBufferView(pipeline::ROOT_FRAME_CBV, camera);
         list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
         pipeline::bind_geometry(list, resident);
         if let Some(shadow) = shadow {

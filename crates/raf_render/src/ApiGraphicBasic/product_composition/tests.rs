@@ -1,7 +1,8 @@
 use std::{path::PathBuf, sync::Arc};
 
 use glam::{Mat4, Vec3};
-use raf_agb::product::{Command, Pipeline};
+use raf_agb::product::{Command, Pipeline, SkyBackdrop};
+use raf_core::environment::{EnvironmentMode, EnvironmentSettings, LightingTechnology, SkyMode};
 
 use super::*;
 use crate::api_graphic_basic::command_list::{BasicCommandList, BasicScreenTriangle};
@@ -70,6 +71,42 @@ fn close(actual: f32, expected: f32) {
         (actual - expected).abs() < 1e-5,
         "expected {expected}, got {actual}"
     );
+}
+
+fn environment_frame(settings: EnvironmentSettings) -> SceneRenderFrame {
+    let environment = crate::environment_frame::EnvironmentFrame::new(settings, Mat4::IDENTITY)
+        .expect("scene mode must resolve an environment frame");
+    let mut commands = BasicCommandList::new();
+    commands.clear([0; 4]);
+    commands.environment = Some(environment);
+    frame(64, 64, commands)
+}
+
+fn packet_sky(frame: &SceneRenderFrame, revision: u64) -> SkyBackdrop {
+    let mut builder = ProductFrameBuilder::default();
+    builder.append_scene(frame, revision).unwrap();
+    let mut skies = builder
+        .packet()
+        .commands
+        .iter()
+        .filter_map(|command| match command {
+            Command::DrawSky(sky) => Some(*sky),
+            _ => None,
+        });
+    let sky = skies.next().expect("an authored scene must emit a sky");
+    assert!(skies.next().is_none(), "the sky must be emitted exactly once");
+    sky
+}
+
+fn assert_ambient(uniforms: &FrameUniforms, expected: Vec3) {
+    let fraction = (0.2126 * expected.x + 0.7152 * expected.y + 0.0722 * expected.z)
+        .clamp(0.0, 1.0);
+    close(uniforms.environment.ambient, fraction);
+    let tint = Vec3::from_array(uniforms.environment.ambient_tint);
+    let reconstructed = tint * uniforms.environment.ambient;
+    for channel in 0..3 {
+        close(reconstructed[channel], expected[channel]);
+    }
 }
 
 #[test]
@@ -548,6 +585,215 @@ fn camera_uniforms_preserve_the_authored_perspective_eye() {
     close(uniforms.camera.world_position.y, 1.0);
     close(uniforms.camera.world_position.z, 4.0);
     close(uniforms.light.toward_light.y, 1.0);
+}
+
+#[test]
+fn neutral_environment_emits_no_sky_and_keeps_neutral_uniforms() {
+    let mut commands = BasicCommandList::new();
+    commands.clear([10, 20, 30, 255]);
+    let scene = frame(64, 64, commands);
+
+    let mut builder = ProductFrameBuilder::default();
+    builder.append_scene(&scene, 1).unwrap();
+    assert!(
+        !builder.packet().commands.iter().any(|command| matches!(
+            command,
+            Command::DrawSky(_) | Command::SceneBackground(_)
+        )),
+        "neutral lighting must not synthesize a sky or scene background"
+    );
+
+    let uniforms = scene_frame_uniforms(&scene);
+    assert!(!uniforms.environment.authored);
+    assert!(!uniforms.environment.improved);
+    close(uniforms.environment.exposure_ev, 0.0);
+    close(uniforms.environment.ambient, 0.35);
+    assert_eq!(uniforms.environment.ambient_tint, [1.0; 3]);
+    close(uniforms.environment.toon_steps, 0.0);
+    close(uniforms.environment.toon_softness, 0.0);
+    assert!(uniforms.shadows.is_none());
+    assert!(!uniforms.scene_filter);
+}
+
+#[test]
+fn solid_sky_collapses_horizon_and_ground_to_the_zenith() {
+    let mut settings = EnvironmentSettings::default();
+    settings.mode = EnvironmentMode::Scene;
+    settings.sky.mode = SkyMode::Solid;
+    settings.sky.top_color = [30, 90, 220];
+    settings.sky.horizon_color = [200, 221, 240];
+    settings.sky.ground_color = [40, 50, 60];
+    let scene = environment_frame(settings);
+    let environment = scene.commands.environment.unwrap();
+    let sky = packet_sky(&scene, 1);
+    for channel in 0..3 {
+        close(sky.zenith[channel], environment.sky_top[channel]);
+        close(sky.horizon[channel], environment.sky_top[channel]);
+        close(sky.ground[channel], environment.sky_top[channel]);
+    }
+    close(sky.zenith[3], 1.0);
+}
+
+#[test]
+fn current_environment_preserves_sky_sun_and_toon_fields() {
+    let mut settings = EnvironmentSettings::default();
+    settings.mode = EnvironmentMode::Scene;
+    settings.technology = LightingTechnology::OptimizedCurrent;
+    settings.exposure = 2.0;
+    settings.sky.top_color = [30, 90, 220];
+    settings.sky.horizon_color = [200, 221, 240];
+    settings.sky.ground_color = [40, 50, 60];
+    settings.sky.haze = 0.8;
+    settings.sky.stars_enabled = true;
+    settings.sky.stars_density = 0.3;
+    settings.sky.stars_intensity = 1.7;
+    settings.sun.color = [255, 200, 100];
+    settings.sun.intensity = 1.25;
+    settings.sun.angular_radius = 0.01;
+    settings.sun.halo = 0.9;
+    settings.sun.toon_enabled = true;
+    settings.sun.toon_steps = 4.0;
+    settings.sun.toon_softness = 0.5;
+    settings.ambient_color = [255, 128, 64];
+    settings.ambient_intensity = 0.4;
+    let scene = environment_frame(settings);
+    let environment = scene.commands.environment.unwrap();
+
+    let sky = packet_sky(&scene, 1);
+    for channel in 0..3 {
+        close(sky.zenith[channel], environment.sky_top[channel]);
+        close(sky.horizon[channel], environment.sky_horizon[channel]);
+        close(sky.ground[channel], environment.sky_ground[channel]);
+    }
+    close(sky.haze, 0.0);
+    close(sky.sun_disk_cos, settings.sun.angular_radius.cos());
+    close(sky.halo, 0.0);
+    close(sky.halo_cos, environment.halo_cos);
+    close(sky.stars_density, settings.sky.stars_density);
+    close(sky.stars_intensity, settings.sky.stars_intensity);
+
+    let uniforms = scene_frame_uniforms(&scene);
+    assert!(uniforms.environment.authored);
+    assert!(!uniforms.environment.improved);
+    close(uniforms.environment.exposure_ev, 0.0);
+    for channel in 0..3 {
+        close(uniforms.light.color[channel], environment.sun[channel]);
+    }
+    close(
+        uniforms.light.toward_light.dot(environment.sun_direction),
+        1.0,
+    );
+    close(uniforms.environment.toon_steps, 4.0);
+    close(uniforms.environment.toon_softness, 0.0);
+    assert_ambient(&uniforms, environment.ambient);
+}
+
+#[test]
+fn improved_environment_maps_exposure_toon_and_bounded_sky_without_double_exposure() {
+    let mut settings = EnvironmentSettings::default();
+    settings.mode = EnvironmentMode::Scene;
+    settings.technology = LightingTechnology::OptimizedImproved;
+    settings.exposure = 4.0;
+    settings.sky.top_color = [30, 90, 220];
+    settings.sky.horizon_color = [200, 221, 240];
+    settings.sky.ground_color = [40, 50, 60];
+    settings.sky.haze = 0.6;
+    settings.sky.stars_enabled = true;
+    settings.sky.stars_density = 0.5;
+    settings.sky.stars_intensity = 2.5;
+    settings.sun.halo = 0.45;
+    settings.sun.angular_radius = 0.012;
+    settings.sun.toon_enabled = true;
+    settings.sun.toon_steps = 5.0;
+    settings.sun.toon_softness = 0.7;
+    settings.ambient_color = [255, 128, 64];
+    settings.ambient_intensity = 0.4;
+    let scene = environment_frame(settings);
+    let environment = scene.commands.environment.unwrap();
+
+    let sky = packet_sky(&scene, 1);
+    close(sky.haze, 0.6);
+    close(sky.halo, settings.sun.halo);
+    close(sky.halo_cos, environment.halo_cos);
+    close(sky.stars_density, 0.5);
+    close(sky.stars_intensity, 2.5);
+    for channel in 0..3 {
+        close(sky.zenith[channel], environment.sky_top[channel]);
+        close(sky.horizon[channel], environment.sky_horizon[channel]);
+        close(sky.ground[channel], environment.sky_ground[channel]);
+    }
+
+    // Changing exposure must not alter the packet sky colors: exposure is
+    // applied once by the shader from `environment.exposure_ev`.
+    let mut dim = settings;
+    dim.exposure = 1.0;
+    let dim_scene = environment_frame(dim);
+    let dim_sky = packet_sky(&dim_scene, 1);
+    assert_eq!(sky.zenith, dim_sky.zenith);
+    assert_eq!(sky.horizon, dim_sky.horizon);
+    assert_eq!(sky.ground, dim_sky.ground);
+
+    let uniforms = scene_frame_uniforms(&scene);
+    assert!(uniforms.environment.authored);
+    assert!(uniforms.environment.improved);
+    close(uniforms.environment.exposure_ev, 2.0);
+    close(uniforms.environment.toon_steps, 5.0);
+    close(uniforms.environment.toon_softness, 0.7);
+    assert_ambient(&uniforms, environment.ambient);
+
+    let dim_uniforms = scene_frame_uniforms(&dim_scene);
+    close(dim_uniforms.environment.exposure_ev, 0.0);
+}
+
+#[test]
+fn shadow_contract_mapping_follows_enabled_state_and_filter_quality() {
+    let (mut scene, _floor, _cube) = crate::shadow_frame::tests::fixture();
+    let mut renderer = crate::scene_renderer::SceneRenderer::new(128, 128);
+
+    let scene_frame = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+    let source = scene_frame
+        .commands
+        .shadows
+        .as_ref()
+        .expect("the fixture enables shadows");
+    assert!(source.settings.enabled);
+    let mapped = scene_frame_uniforms(&scene_frame)
+        .shadows
+        .expect("enabled shadows must map");
+    assert_eq!(mapped.light_view_projection, source.geometry.view_projection);
+    assert_eq!(mapped.resolution, source.geometry.resolution);
+    assert_eq!(mapped.depth_key, source.geometry.key);
+    close(
+        mapped.bias,
+        source.settings.bias / (8.0 * source.settings.distance),
+    );
+    close(mapped.distance, source.settings.distance);
+    close(mapped.strength, source.settings.strength);
+    assert!(mapped.slope_bias_per_texel > 0.0);
+    assert_eq!(mapped.filter_taps, 1);
+
+    let mut env = *scene.environment();
+    env.shadows.soft_filter = true;
+    scene.set_environment(env);
+    let soft = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+    assert_eq!(scene_frame_uniforms(&soft).shadows.unwrap().filter_taps, 4);
+
+    env.technology = LightingTechnology::OptimizedImproved;
+    scene.set_environment(env);
+    let improved_soft = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+    assert_eq!(
+        scene_frame_uniforms(&improved_soft)
+            .shadows
+            .unwrap()
+            .filter_taps,
+        9
+    );
+
+    env.shadows.enabled = false;
+    scene.set_environment(env);
+    let disabled = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+    assert!(disabled.commands.shadows.is_none());
+    assert!(scene_frame_uniforms(&disabled).shadows.is_none());
 }
 
 #[cfg(windows)]

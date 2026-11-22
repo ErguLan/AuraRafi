@@ -3,7 +3,13 @@ use super::*;
 use crate::console::LogLevel;
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_set_toggle(&mut self, key: &String, value: &bool, selected: &[SceneNodeId], intents: &mut Vec<NativeWorkbenchIntent>) {
+    pub(super) fn handle_set_toggle(
+        &mut self,
+        key: &String,
+        value: &bool,
+        selected: &[SceneNodeId],
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) {
         if key.starts_with("inspector.") {
             if let Some(target) = selected.first().copied() {
                 intents.push(NativeWorkbenchIntent::Command(format!(
@@ -29,7 +35,11 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_settings_command(&mut self, name: &String, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_settings_command(
+        &mut self,
+        name: &String,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if let Some(key) = name.strip_prefix("project-settings.commit_text:") {
             let value_key = format!("project-settings.{key}");
             let value = self
@@ -56,40 +66,44 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_console_command(&mut self, name: &String, project: Option<&Project>, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
-        if name=="console.filters.toggle" || name=="console.filters.close" {
-            self.console.filters_open=name=="console.filters.toggle" && !self.console.filters_open;
-            self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);return true;
+    pub(super) fn handle_console_command(
+        &mut self,
+        name: &String,
+        project: Option<&Project>,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
+        if name == "console.filters.toggle" || name == "console.filters.close" {
+            self.console.filters_open =
+                name == "console.filters.toggle" && !self.console.filters_open;
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+            return true;
         }
         if name.starts_with("console.filter.") {
-            self.console.filters_open=false;self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+            self.console.filters_open = false;
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
         }
         match name.as_str() {
             "console.filter.all" => {
                 if self.console.set_filter_level(None) {
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
                 return true;
             }
             "console.filter.info" => {
                 if self.console.set_filter_level(Some(LogLevel::Info)) {
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
                 return true;
             }
             "console.filter.warning" => {
                 if self.console.set_filter_level(Some(LogLevel::Warning)) {
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
                 return true;
             }
             "console.filter.error" => {
                 if self.console.set_filter_level(Some(LogLevel::Error)) {
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
                 return true;
             }
@@ -103,7 +117,9 @@ impl NativeGameWorkbench {
                         4096,
                     );
                     if !self.performance_console_submission(&text, project) {
-                        intents.push(NativeWorkbenchIntent::Command(format!("console.submit:{text}")));
+                        intents.push(NativeWorkbenchIntent::Command(format!(
+                            "console.submit:{text}"
+                        )));
                     }
                 }
                 return true;
@@ -112,8 +128,7 @@ impl NativeGameWorkbench {
                 if let Some(raw_id) = name.strip_prefix("console.block.toggle:") {
                     if let Ok(id) = raw_id.parse::<u64>() {
                         if self.console.toggle_json_disclosure(id) {
-                            self.toolbar_revision =
-                                self.toolbar_revision.wrapping_add(1).max(1);
+                            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                         }
                     }
                 }
@@ -127,21 +142,21 @@ impl NativeGameWorkbench {
             "console.history.previous" => {
                 self.console.select_previous_history();
                 let input = self.console.input().to_string();
-                self.host.session_mut().interaction.controls.set_text(
-                    "console.input",
-                    input,
-                    4096,
-                );
+                self.host
+                    .session_mut()
+                    .interaction
+                    .controls
+                    .set_text("console.input", input, 4096);
                 return true;
             }
             "console.history.next" => {
                 self.console.select_next_history();
                 let input = self.console.input().to_string();
-                self.host.session_mut().interaction.controls.set_text(
-                    "console.input",
-                    input,
-                    4096,
-                );
+                self.host
+                    .session_mut()
+                    .interaction
+                    .controls
+                    .set_text("console.input", input, 4096);
                 return true;
             }
             "console.autocomplete" => {
@@ -153,11 +168,11 @@ impl NativeGameWorkbench {
                     .collect::<Vec<_>>();
                 self.console.autocomplete_command(&names);
                 let input = self.console.input().to_string();
-                self.host.session_mut().interaction.controls.set_text(
-                    "console.input",
-                    input,
-                    4096,
-                );
+                self.host
+                    .session_mut()
+                    .interaction
+                    .controls
+                    .set_text("console.input", input, 4096);
                 return true;
             }
             _ => {}
@@ -167,7 +182,12 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_project_command(&mut self, name: &String, router: &mut InputRouter, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_project_command(
+        &mut self,
+        name: &String,
+        router: &mut InputRouter,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         match name.as_str() {
             "editor.settings" => {
                 intents.push(NativeWorkbenchIntent::OpenSettings {
@@ -178,8 +198,7 @@ impl NativeGameWorkbench {
             "project.settings" => {
                 if self.bottom_dock.select("project-settings") {
                     self.reset_input_state(router);
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
                 return true;
             }
@@ -202,7 +221,11 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_settings_section_command(&mut self, name: &String, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_settings_section_command(
+        &mut self,
+        name: &String,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if let Some(section) = SettingsSection::from_command(name) {
             let section_changed = self.settings_section != section;
             self.settings_section = section;
@@ -217,7 +240,12 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_session_command(&mut self, name: &String, project: Option<&Project>, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_session_command(
+        &mut self,
+        name: &String,
+        project: Option<&Project>,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if let Some(intent) = self.process_session_command(&name, project) {
             intents.push(intent);
             return true;

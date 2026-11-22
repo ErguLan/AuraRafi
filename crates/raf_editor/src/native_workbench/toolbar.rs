@@ -12,6 +12,16 @@ impl NativeGameWorkbench {
         true
     }
 
+    /// Presents or clears the local Play failure banner.
+    pub fn set_runtime_notice(&mut self, notice: Option<RuntimeNotice>) -> bool {
+        if self.runtime_notice == notice {
+            return false;
+        }
+        self.runtime_notice = notice;
+        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+        true
+    }
+
     pub(super) fn apply_toolbar_action(&mut self, action: ViewportToolbarAction) -> bool {
         let state = &mut self.toolbar_state;
         match action {

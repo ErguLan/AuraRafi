@@ -288,6 +288,107 @@ fn open_probe(extent: [u32; 2]) -> (ProductDevice<FrameProbe>, FrameProbe) {
     (device, probe)
 }
 
+#[derive(Default)]
+struct LayeredState {
+    next: u32,
+    layers: Vec<u32>,
+    clear: Option<[f32; 4]>,
+}
+
+/// Records the translated layer list and the one clear the product device
+/// selected, without a GPU.
+#[derive(Clone)]
+struct LayeredProbe {
+    info: AdapterInfo,
+    state: Rc<RefCell<LayeredState>>,
+}
+
+impl LayeredProbe {
+    fn new() -> Self {
+        Self {
+            info: AdapterInfo {
+                backend: "layered-probe",
+                name: "CPU".into(),
+                driver: String::new(),
+                hardware: false,
+                max_texture: 16384,
+                max_buffer: u32::MAX.into(),
+                gpu_timestamps: false,
+            },
+            state: Rc::new(RefCell::new(LayeredState::default())),
+        }
+    }
+
+    fn state(&self) -> std::cell::Ref<'_, LayeredState> {
+        self.state.borrow()
+    }
+}
+
+impl Backend for LayeredProbe {
+    type Resident = u32;
+
+    fn info(&self) -> &AdapterInfo {
+        &self.info
+    }
+
+    fn supports_layers(&self) -> bool {
+        true
+    }
+
+    fn configure(&mut self, _: &FramePlan) -> AgbResult<()> {
+        Ok(())
+    }
+
+    fn upload(&mut self, _: &Workload) -> AgbResult<u32> {
+        let mut state = self.state.borrow_mut();
+        state.next += 1;
+        Ok(state.next)
+    }
+
+    fn draw(&mut self, resident: &u32, plan: &FramePlan, frame: &Frame) -> AgbResult<FrameMetrics> {
+        self.draw_layers(&[Layer { resident, scene: true }], plan, frame)
+    }
+
+    fn draw_layers(
+        &mut self,
+        layers: &[Layer<'_, u32>],
+        _: &FramePlan,
+        frame: &Frame,
+    ) -> AgbResult<FrameMetrics> {
+        let mut state = self.state.borrow_mut();
+        state.layers = layers.iter().map(|layer| *layer.resident).collect();
+        state.clear = Some(frame.clear);
+        Ok(FrameMetrics {
+            draw_calls: state.layers.len() as u32,
+            submits: 1,
+            ..Default::default()
+        })
+    }
+
+    fn wait(&mut self) -> AgbResult<()> {
+        Ok(())
+    }
+
+    fn capture(&mut self) -> AgbResult<Vec<u8>> {
+        Err(AgbError::Invalid("the layered probe has no pixels"))
+    }
+}
+
+fn open_layered(extent: [u32; 2]) -> (ProductDevice<LayeredProbe>, LayeredProbe) {
+    let probe = LayeredProbe::new();
+    let mut device =
+        ProductDevice::new(probe.clone(), GraphicsMemoryBudget::potato()).unwrap();
+    device.configure(extent, Output::Capture).unwrap();
+    (device, probe)
+}
+
+fn clear_packet(clear: [f32; 4]) -> ProductPacket {
+    ProductPacket {
+        commands: vec![Command::Clear(clear)],
+        ..ProductPacket::default()
+    }
+}
+
 fn paint_packet() -> ProductPacket {
     let mut input = packet();
     input.commands.push(Command::Paint(Paint::Solid(PaintQuad {
@@ -405,4 +506,49 @@ fn invalid_scene_viewport_is_rejected_before_the_backend_draws() {
         ));
     }
     assert!(probe.state().frame.is_none());
+}
+
+#[test]
+fn layered_product_draw_uses_the_first_clear_and_validates_every_handle() {
+    let (mut device, probe) = open_layered([64, 64]);
+    assert!(device.supports_layers());
+    let scene_clear = [0.1, 0.2, 0.3, 1.];
+    let ui_clear = [0.4, 0.5, 0.6, 1.];
+    let scene = device
+        .prepare(PacketKey(1), 1, || clear_packet(scene_clear))
+        .unwrap();
+    let ui = device
+        .prepare(PacketKey(2), 1, || clear_packet(ui_clear))
+        .unwrap();
+
+    let metrics = device
+        .draw_layers(&[scene, ui], &FrameUniforms::default())
+        .unwrap();
+    assert_eq!(metrics.submits, 1);
+    assert_eq!(metrics.draw_calls, 2);
+    assert_eq!(probe.state().layers.len(), 2);
+    assert_eq!(probe.state().clear, Some(scene_clear));
+
+    let metrics = device
+        .draw_layers(&[ui], &FrameUniforms::default())
+        .unwrap();
+    assert_eq!(metrics.draw_calls, 1);
+    assert_eq!(
+        probe.state().clear,
+        Some(ui_clear),
+        "a UI-only frame owns the target clear"
+    );
+
+    assert!(matches!(
+        device.draw_layers(&[], &FrameUniforms::default()),
+        Err(Error::Invalid(_))
+    ));
+    let (mut foreign_device, _) = open_layered([64, 64]);
+    let foreign = foreign_device
+        .prepare(PacketKey(1), 1, || clear_packet([0.; 4]))
+        .unwrap();
+    assert!(matches!(
+        device.draw_layers(&[foreign], &FrameUniforms::default()),
+        Err(Error::Invalid(_))
+    ));
 }

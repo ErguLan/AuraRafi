@@ -1,5 +1,5 @@
-use super::*;
 use super::hierarchy::hierarchy_context_selection_intent;
+use super::*;
 
 #[cfg(test)]
 mod hierarchy_context_selection_tests {

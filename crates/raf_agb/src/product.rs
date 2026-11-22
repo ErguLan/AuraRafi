@@ -15,6 +15,9 @@ pub use paint_style::{
     MAX_DECLARED_CLIPS, MAX_ROUNDED_CLIPS,
 };
 pub use paint_updates::TexturePatch;
+/// One resident in a layered composition. Re-exported here because `device` is
+/// an implementation module; backends and hosts compose through `product`.
+pub use crate::device::Layer;
 
 use std::{
     collections::HashMap,
@@ -92,6 +95,12 @@ impl<B: Backend> ProductDevice<B> {
 
     pub fn supports_scene_filter(&self) -> bool {
         self.device.supports_scene_filter()
+    }
+
+    /// True when this device can draw the scene and UI packets in one pass.
+    /// Hosts keep the single-packet composition when this returns false.
+    pub fn supports_layers(&self) -> bool {
+        self.device.supports_layers()
     }
 
     pub fn ledger(&self) -> crate::memory_ledger::GraphicsLedgerSnapshot {
@@ -181,6 +190,29 @@ impl<B: Backend> ProductDevice<B> {
         let clear = self.entry(handle)?.clear;
         self.device
             .draw_product(handle.native, uniforms.raster(clear)?)
+    }
+
+    /// Draws ordered packets in one target acquisition and one submit.
+    ///
+    /// The first packet supplies the target clear, which is the scene packet
+    /// when a scene layer exists and the UI packet otherwise. Every handle must
+    /// belong to this device. Executors without layered support reject more
+    /// than one handle.
+    pub fn draw_layers(
+        &mut self,
+        handles: &[PacketHandle],
+        uniforms: &FrameUniforms,
+    ) -> Result<FrameMetrics> {
+        let first = handles
+            .first()
+            .ok_or(Error::Invalid("layered draw needs at least one packet"))?;
+        let clear = self.entry(*first)?.clear;
+        let mut natives = Vec::with_capacity(handles.len());
+        for handle in handles {
+            natives.push(self.entry(*handle)?.native);
+        }
+        self.device
+            .draw_product_layers(&natives, uniforms.raster(clear)?)
     }
 
     pub fn release(&mut self, handle: PacketHandle) -> Result<()> {

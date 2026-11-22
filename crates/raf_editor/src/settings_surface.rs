@@ -4,10 +4,11 @@
 //! persistence stay in SettingsSurfaceHost.
 
 use raf_core::ai::AiProvider;
-use raf_core::config::EngineSettings;
+use raf_core::config::{EngineSettings, Language};
+use raf_core::i18n::t;
 use raf_render::api_graphic_basic::ui_surface::{
-    StudioUiPalette, UiAccessibilityRole, UiCompactMode, UiEventBinding, UiEventKind, UiFlow,
-    UiLayout, UiNode, UiNodeKind, UiOverflow, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle,
+    StudioUiPalette, UiAccessibilityRole, UiAlign, UiCompactMode, UiEventBinding, UiEventKind,
+    UiFlow, UiLayout, UiNode, UiNodeKind, UiOverflow, UiScrollAxis, UiSizeMode, UiSpacing, UiStyle,
     UiSurface, UiSurfaceMaterial, UiTextOverflow, UiTextStyle,
 };
 use raf_ui::UiRect;
@@ -31,15 +32,16 @@ use sections::{
 };
 use style::settings_style_sheet;
 
-const CONTROL_WIDTH: f32 = 360.0;
+const CONTROL_WIDTH: f32 = 320.0;
 const SETTINGS_NAV_WIDTH: f32 = 236.0;
 const SETTINGS_CONTROL_MIN_WIDTH: f32 = 220.0;
-const SETTINGS_RANGE_MIN_WIDTH: f32 = 180.0;
+const SETTINGS_RANGE_MIN_WIDTH: f32 = 150.0;
 const SETTINGS_COMPACT_BREAKPOINT: f32 = 360.0;
 const SETTINGS_WORKSPACE_BREAKPOINT: f32 = 440.0;
+const SETTINGS_CONTENT_MAX_WIDTH: f32 = 900.0;
 const SEGMENT_MIN_WIDTH: f32 = 68.0;
-const SETTINGS_ROW_HEIGHT: f32 = 64.0;
-const SETTINGS_STACKED_ROW_HEIGHT: f32 = 92.0;
+const SETTINGS_ROW_HEIGHT: f32 = 58.0;
+const SETTINGS_STACKED_ROW_HEIGHT: f32 = 84.0;
 const DEFAULT_MODAL_RECT: UiRect = UiRect::new(48.0, 48.0, 1080.0, 720.0);
 
 pub fn build_settings_surface(
@@ -56,6 +58,7 @@ pub fn build_settings_surface(
         None,
         &[],
         "",
+        false,
     )
 }
 
@@ -76,6 +79,7 @@ pub fn build_settings_surface_with_api_keys(
         None,
         revealed_api_keys,
         "",
+        false,
     )
 }
 
@@ -96,6 +100,7 @@ pub fn build_settings_surface_with_state(
         open_select,
         &[],
         "",
+        false,
     )
 }
 
@@ -108,6 +113,7 @@ pub(crate) fn build_settings_surface_with_state_and_api_keys(
     open_select: Option<&str>,
     revealed_api_keys: &[AiProvider],
     model_filter: &str,
+    draft_dirty: bool,
 ) -> UiSurface {
     let tokens = palette.tokens();
     let root = UiNode::new("settings.root", UiNodeKind::Root)
@@ -130,21 +136,117 @@ pub(crate) fn build_settings_surface_with_state_and_api_keys(
                     UiEventKind::Click,
                     "settings.dismiss",
                 )),
-        )
-        .with_child(modal(
-            palette,
-            settings,
-            section,
-            modal_rect,
-            search_query,
-            open_select,
-            revealed_api_keys,
-            model_filter,
-        ));
+        );
+    let mut modal_node = modal(
+        palette,
+        settings,
+        section,
+        modal_rect,
+        search_query,
+        open_select,
+        revealed_api_keys,
+        model_filter,
+        draft_dirty,
+    );
+    apply_search_filter(&mut modal_node, search_query, settings.language, palette);
+    let root = root.with_child(modal_node);
 
     let mut surface = UiSurface::new("editor.engine-settings", palette, root);
     surface.style_sheet = settings_style_sheet(palette);
     surface
+}
+
+/// Hides rows that do not match the active search and removes empty groups.
+/// Matching happens against the same localized copy the user sees, so it
+/// follows the current language automatically.
+fn apply_search_filter(
+    modal: &mut UiNode,
+    query: &str,
+    language: Language,
+    palette: StudioUiPalette,
+) {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return;
+    }
+    let Some(scroll) = modal.find_mut("settings.workspace.scroll") else {
+        return;
+    };
+    let Some(card) = scroll.children.first_mut() else {
+        return;
+    };
+    let visible = filter_settings_rows(card, &query, language);
+    hide_empty_groups(card);
+    if visible == 0 {
+        let tokens = palette.tokens();
+        card.children.push(
+            UiNode::new("settings.no-results", UiNodeKind::Label)
+                .with_text_key("settings.no_results")
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fixed(0.0, 40.0)),
+        );
+    }
+}
+
+fn filter_settings_rows(node: &mut UiNode, query: &str, language: Language) -> usize {
+    if node.classes.iter().any(|class| class == "settings-row") {
+        let matched = node_matches_query(node, query, language);
+        node.hidden = !matched;
+        return usize::from(matched);
+    }
+    let mut visible = 0;
+    for child in &mut node.children {
+        visible += filter_settings_rows(child, query, language);
+    }
+    visible
+}
+
+fn node_matches_query(node: &UiNode, query: &str, language: Language) -> bool {
+    let mut text = String::new();
+    collect_node_text(node, &mut text, language);
+    text.to_lowercase().contains(query)
+}
+
+fn collect_node_text(node: &UiNode, out: &mut String, language: Language) {
+    if let Some(key) = &node.text_key {
+        out.push_str(&t(key, language));
+        out.push(' ');
+    }
+    if let Some(value) = &node.text_value {
+        out.push_str(value);
+        out.push(' ');
+    }
+    for child in &node.children {
+        collect_node_text(child, out, language);
+    }
+}
+
+fn hide_empty_groups(card: &mut UiNode) {
+    let mut index = 0;
+    while index < card.children.len() {
+        let is_group = card.children[index]
+            .classes
+            .iter()
+            .any(|class| class == "settings-group-label");
+        if !is_group {
+            index += 1;
+            continue;
+        }
+        let start = index + 1;
+        let mut end = start;
+        while end < card.children.len()
+            && !card.children[end]
+                .classes
+                .iter()
+                .any(|class| class == "settings-group-label")
+        {
+            end += 1;
+        }
+        if !card.children[start..end].iter().any(|child| !child.hidden) {
+            card.children[index].hidden = true;
+        }
+        index = end;
+    }
 }
 
 fn modal(
@@ -156,6 +258,7 @@ fn modal(
     open_select: Option<&str>,
     revealed_api_keys: &[AiProvider],
     model_filter: &str,
+    draft_dirty: bool,
 ) -> UiNode {
     let tokens = palette.tokens();
     UiNode::new("settings.modal", UiNodeKind::FloatingPanel)
@@ -196,7 +299,7 @@ fn modal(
                     model_filter,
                 )),
         )
-        .with_child(modal_footer(palette))
+        .with_child(modal_footer(palette, draft_dirty))
         .with_child(settings_modal_resize_handle(palette, modal_rect))
 }
 
@@ -216,39 +319,51 @@ fn workspace(
             UiNode::new("settings.workspace.header", UiNodeKind::Toolbar)
                 .with_layout(UiLayout {
                     flow: UiFlow::Column,
-                    gap: 3.0,
-                    padding: UiSpacing::xy(28.0, 15.0),
+                    align_items: UiAlign::Center,
+                    gap: 0.0,
                     responsive: vec![raf_ui::UiResponsiveRule {
                         max_width: SETTINGS_WORKSPACE_BREAKPOINT,
                         flow: Some(UiFlow::Column),
                         basis: Some([0.0, 76.0]),
-                        padding: Some(UiSpacing::xy(12.0, 12.0)),
-                        gap: Some(3.0),
+                        padding: Some(UiSpacing::xy(0.0, 12.0)),
+                        gap: Some(0.0),
                         compact: Some(UiCompactMode::Stack),
                         grid_columns: None,
                     }],
                     ..UiLayout::fixed(0.0, 76.0).with_width_mode(UiSizeMode::Fill)
                 })
                 .with_child(
-                    UiNode::new("settings.workspace.title", UiNodeKind::Label)
-                        .with_text_key(section.key())
-                        .with_text_style(UiTextStyle::panel_title(tokens.text))
-                        .with_layout(UiLayout::fixed(0.0, 22.0))
-                        .with_text_overflow(UiTextOverflow::Ellipsis),
-                )
-                .with_child(
-                    UiNode::new("settings.workspace.help", UiNodeKind::Label)
-                        .with_text_key(section.help_key())
-                        .with_text_style(UiTextStyle::body(tokens.text_muted))
-                        .with_layout(UiLayout::fixed(0.0, 18.0)),
+                    UiNode::new("settings.workspace.header-content", UiNodeKind::Panel)
+                        .with_layout(UiLayout {
+                            flow: UiFlow::Column,
+                            gap: 3.0,
+                            padding: UiSpacing::xy(0.0, 15.0),
+                            max_size: [SETTINGS_CONTENT_MAX_WIDTH, 0.0],
+                            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+                        })
+                        .with_style(UiStyle::transparent())
+                        .with_child(
+                            UiNode::new("settings.workspace.title", UiNodeKind::Label)
+                                .with_text_key(section.key())
+                                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                                .with_layout(UiLayout::fixed(0.0, 22.0))
+                                .with_text_overflow(UiTextOverflow::Ellipsis),
+                        )
+                        .with_child(
+                            UiNode::new("settings.workspace.help", UiNodeKind::Label)
+                                .with_text_key(section.help_key())
+                                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                                .with_layout(UiLayout::fixed(0.0, 18.0)),
+                        ),
                 ),
         )
         .with_child(
             UiNode::scroll_view("settings.workspace.scroll", UiScrollAxis::Vertical)
                 .with_layout(UiLayout {
                     flow: UiFlow::Column,
+                    align_items: UiAlign::Center,
                     grow: 1.0,
-                    padding: UiSpacing::xy(28.0, 22.0),
+                    padding: UiSpacing::xy(24.0, 16.0),
                     overflow: UiOverflow::ScrollY,
                     responsive: vec![raf_ui::UiResponsiveRule {
                         max_width: SETTINGS_WORKSPACE_BREAKPOINT,

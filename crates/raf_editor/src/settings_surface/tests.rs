@@ -21,7 +21,13 @@ fn provider_redesign_plan_hides_api_fields_and_picker_scrolls() {
     settings.default_ai_provider = AiProvider::OpenAI;
     settings.agent_openai_use_plan = true;
     let palette = StudioUiPalette::IndustrialDark;
-    let plan = ai(palette, &settings, Some("settings.ai-provider.openai.model.trigger"), &[], "");
+    let plan = ai(
+        palette,
+        &settings,
+        Some("settings.ai-provider.openai.model.trigger"),
+        &[],
+        "",
+    );
     assert!(find_node(&plan, "settings.ai-provider.openai.api-fields").is_none());
     assert!(find_node(&plan, "settings.ai-provider.openai.plan-note").is_some());
     assert!(find_node(&plan, "settings.ai-provider.openai.model.scroll").is_some());
@@ -29,8 +35,14 @@ fn provider_redesign_plan_hides_api_fields_and_picker_scrolls() {
     let api = ai(palette, &settings, None, &[], "");
     assert!(find_node(&api, "settings.ai-provider.openai.api-fields").is_some());
     fn unique(node: &UiNode, ids: &mut std::collections::HashSet<String>) {
-        assert!(ids.insert(node.id.clone()), "duplicate node id: {}", node.id);
-        for child in &node.children { unique(child, ids); }
+        assert!(
+            ids.insert(node.id.clone()),
+            "duplicate node id: {}",
+            node.id
+        );
+        for child in &node.children {
+            unique(child, ids);
+        }
     }
     unique(&api, &mut std::collections::HashSet::new());
 }
@@ -270,8 +282,7 @@ fn every_settings_section_keeps_rows_separated_and_labels_localized() {
                 && !key.starts_with("settings.electronics_show_")));
 
         let mut session = UiSurfaceSession::default();
-        let frame =
-            session.build_layout_frame_at_scale(&surface, 1600, 2400, [0, 0, 0, 255], 1.0);
+        let frame = session.build_layout_frame_at_scale(&surface, 1600, 2400, [0, 0, 0, 255], 1.0);
         let mut rects = rows
             .iter()
             .map(|row| {
@@ -490,4 +501,77 @@ fn viewport_render_settings_expose_only_lit() {
         "settings.viewport-render-mode.option.preview"
     )
     .is_none());
+}
+
+#[test]
+fn changed_appearance_rows_expose_a_reset_action() {
+    let defaults = EngineSettings::default();
+    let surface = build_settings_surface(
+        StudioUiPalette::IndustrialDark,
+        &defaults,
+        SettingsSection::Appearance,
+    );
+    assert!(find_node(&surface.root, "settings.font_size.reset").is_none());
+
+    let mut changed = EngineSettings::default();
+    changed.font_size = 16.0;
+    let surface = build_settings_surface(
+        StudioUiPalette::IndustrialDark,
+        &changed,
+        SettingsSection::Appearance,
+    );
+    assert!(find_node(&surface.root, "settings.font_size.reset").is_some());
+}
+
+#[test]
+fn settings_search_hides_rows_that_do_not_match() {
+    let surface = build_settings_surface_with_state(
+        StudioUiPalette::IndustrialDark,
+        &EngineSettings::default(),
+        SettingsSection::Appearance,
+        UiRect::new(0.0, 0.0, 1080.0, 720.0),
+        "font",
+        None,
+    );
+    let font = find_node(&surface.root, "settings.font_size.row").expect("font row");
+    assert!(!font.hidden);
+    let language = find_node(&surface.root, "settings.language.row").expect("language row");
+    assert!(language.hidden);
+}
+
+#[test]
+fn settings_footer_reports_dirty_and_clean_states() {
+    let rect = UiRect::new(0.0, 0.0, 1080.0, 720.0);
+    let clean = super::build_settings_surface_with_state_and_api_keys(
+        StudioUiPalette::IndustrialDark,
+        &EngineSettings::default(),
+        SettingsSection::Appearance,
+        rect,
+        "",
+        None,
+        &[],
+        "",
+        false,
+    );
+    let dirty = super::build_settings_surface_with_state_and_api_keys(
+        StudioUiPalette::IndustrialDark,
+        &EngineSettings::default(),
+        SettingsSection::Appearance,
+        rect,
+        "",
+        None,
+        &[],
+        "",
+        true,
+    );
+    assert_eq!(
+        find_node(&clean.root, "settings.footer.status-label")
+            .and_then(|node| node.text_key.as_deref()),
+        Some("settings.all_saved")
+    );
+    assert_eq!(
+        find_node(&dirty.root, "settings.footer.status-label")
+            .and_then(|node| node.text_key.as_deref()),
+        Some("app.unsaved_changes_title")
+    );
 }

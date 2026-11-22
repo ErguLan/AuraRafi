@@ -1,4 +1,5 @@
 use std::fmt;
+use std::rc::Rc;
 
 use crate::capabilities::GraphicsMemoryBudget;
 use crate::frame_graph::{
@@ -141,9 +142,11 @@ pub struct Frame {
     pub clear: [f32; 4],
     /// Direction toward the light (xyz) and neutral ambient fraction (w).
     pub light: [f32; 4],
+    /// RGBA light color. `w` carries color only; it is never a lighting flag.
     pub light_color: [f32; 4],
     pub environment: [f32; 4],
     /// Authored environment, improved technology, toon steps, toon softness.
+    /// `Frame::uniforms` packs this verbatim into `RasterUniforms::lighting`.
     pub lighting_style: [f32; 4],
     /// Top-left normalized scene viewport `[x, y, width, height]` inside the
     /// full target. Overlay batches always cover the whole target.
@@ -174,35 +177,35 @@ pub struct ShadowFrame {
 pub struct RasterUniforms {
     pub view_projection: [[f32; 4]; 4],
     pub light: [f32; 4],
+    /// Linear RGBA light color. No channel is reused for another control.
     pub light_color: [f32; 4],
-    /// Pixel size of the scene viewport. World-space line widths use it so
-    /// lines keep their authored pixel width inside the canvas rectangle.
+    /// Pixel size of the scene viewport `[width, height, 0, 0]`. World-space
+    /// line widths use `xy` so lines keep their authored pixel width inside the
+    /// canvas rectangle.
     pub viewport: [f32; 4],
+    /// World-space camera position `[x, y, z, 0]`.
     pub eye: [f32; 4],
     pub environment: [f32; 4],
+    /// `[authored, improved, toon_steps, toon_softness]`. The two flags are 0 or
+    /// 1, steps are in 0..=6 and softness in 0..=1. This field owns every
+    /// lighting-style control so other vectors keep their original meaning.
+    pub lighting: [f32; 4],
 }
 
 impl Frame {
+    /// Packs the frame for every executor. `lighting` owns the style flags and
+    /// toon controls; `viewport` and `eye` keep only their geometric meaning.
     pub fn uniforms(&self, extent: [u32; 2]) -> RasterUniforms {
         let [x, y, z] = self.eye;
         let scene = self.viewport_rect(extent);
         RasterUniforms {
             view_projection: self.view_projection,
             light: self.light,
-            light_color: [
-                self.light_color[0],
-                self.light_color[1],
-                self.light_color[2],
-                self.lighting_style[2],
-            ],
-            viewport: [
-                scene.width,
-                scene.height,
-                self.lighting_style[0],
-                self.lighting_style[1],
-            ],
-            eye: [x, y, z, self.lighting_style[3]],
+            light_color: self.light_color,
+            viewport: [scene.width, scene.height, 0., 0.],
+            eye: [x, y, z, 0.],
             environment: self.environment,
+            lighting: self.lighting_style,
         }
     }
 
@@ -225,6 +228,17 @@ pub struct FrameMetrics {
     pub shadow_budget_denied: bool,
 }
 
+/// One retained resident inside a layered composition.
+///
+/// Layers draw in slice order in a single target pass. The first layer owns the
+/// target clear; the first scene layer owns the depth pass, the shadow casters
+/// and the scene filter. Overlay layers draw after it and never clear. A backend
+/// that does not support layers accepts exactly one layer.
+pub struct Layer<'a, R> {
+    pub resident: &'a R,
+    pub scene: bool,
+}
+
 /// Backend objects stay private to the selected executor. A prepared resource
 /// owns its native allocation and must remain valid until its last submit ends.
 pub trait Backend {
@@ -245,6 +259,12 @@ pub trait Backend {
     }
     fn extra_target_bytes(&self) -> u64 {
         self.shadow_bytes() + self.filter_bytes()
+    }
+    /// True when the host should compose more than one resident through
+    /// `draw_layers` for this device. Only executors with a real multi-layer
+    /// target path return true; every other device keeps the single packet.
+    fn supports_layers(&self) -> bool {
+        false
     }
     fn configure(&mut self, plan: &FramePlan) -> Result<()>;
     fn upload(&mut self, workload: &Workload) -> Result<Self::Resident>;
@@ -269,16 +289,36 @@ pub trait Backend {
         plan: &FramePlan,
         frame: &Frame,
     ) -> Result<FrameMetrics>;
+    /// Draws ordered layers in one target acquisition.
+    ///
+    /// The default executor accepts a single layer and delegates to `draw`.
+    /// Layered composition requires an executor that overrides this method and
+    /// reports `supports_layers()`.
+    fn draw_layers(
+        &mut self,
+        layers: &[Layer<'_, Self::Resident>],
+        plan: &FramePlan,
+        frame: &Frame,
+    ) -> Result<FrameMetrics> {
+        match layers {
+            [layer] => self.draw(layer.resident, plan, frame),
+            _ => Err(Error::Unsupported("layered composition")),
+        }
+    }
     fn wait(&mut self) -> Result<()>;
     fn capture(&mut self) -> Result<Vec<u8>>;
 }
 
 struct Resident<R> {
-    native: R,
+    native: Rc<R>,
     charge: LedgerAdmission,
     vertices: usize,
     instances: usize,
     textures: Vec<[u32; 2]>,
+    /// True when the prepared streams contain a scene-group batch. A packet
+    /// with only retained paint (for example a CPU canvas) is still a valid
+    /// layer but never owns the scene depth pass.
+    scene_batches: bool,
 }
 
 impl<R> Resident<R> {
@@ -314,6 +354,13 @@ impl<R> Resident<R> {
         }
         Ok(())
     }
+}
+
+struct ProductEffects {
+    side: u32,
+    resident_shadow_bytes: u64,
+    unsupported: bool,
+    denied: bool,
 }
 
 pub struct Device<B: Backend> {
@@ -353,6 +400,12 @@ impl<B: Backend> Device<B> {
 
     pub fn supports_shadows(&self) -> bool {
         self.backend.supports_shadows()
+    }
+
+    /// True when the active executor can draw ordered layers in one target
+    /// acquisition. A false value keeps the single-packet composition path.
+    pub fn supports_layers(&self) -> bool {
+        self.backend.supports_layers()
     }
 
     /// The target must be configured before querying its filter support.
@@ -414,7 +467,7 @@ impl<B: Backend> Device<B> {
         self.resources
             .insert(
                 Resident {
-                    native,
+                    native: Rc::new(native),
                     charge,
                     vertices: workload.vertices.len(),
                     instances: workload.instances.len(),
@@ -423,6 +476,7 @@ impl<B: Backend> Device<B> {
                         .iter()
                         .map(|texture| texture.size)
                         .collect(),
+                    scene_batches: workload.batches.iter().any(|batch| batch.mode.is_scene()),
                 },
                 ResourceAdmission::pinned(bytes, self.frame),
             )
@@ -501,16 +555,14 @@ impl<B: Backend> Device<B> {
             });
         }
         // The registry owns the allocation and check_patch validated the ranges.
-        unsafe { self.backend.patch(&mut resident.native, patch) }?;
+        let native = Rc::get_mut(&mut resident.native)
+            .ok_or(Error::Invalid("resident packet is shared"))?;
+        unsafe { self.backend.patch(native, patch) }?;
         self.patched_bytes += bytes;
         Ok(())
     }
 
-    pub fn draw(&mut self, handle: MeshHandle, frame: &Frame) -> Result<FrameMetrics> {
-        let plan = self
-            .plan
-            .as_ref()
-            .ok_or(Error::Invalid("configure an output before drawing"))?;
+    fn check_effects(&self, plan: &FramePlan, frame: &Frame) -> Result<()> {
         let mut effect_bytes = 0;
         if frame.shadow.is_some() {
             if !self.backend.supports_shadows() {
@@ -539,17 +591,11 @@ impl<B: Backend> Device<B> {
                 available,
             });
         }
-        let resident = self
-            .resources
-            .get(handle, self.frame)
-            .ok_or(Error::Invalid("stale workload handle"))?;
-        let before = self.backend.extra_target_bytes();
-        let draw = self.backend.draw(&resident.native, plan, frame);
-        let after = self.backend.extra_target_bytes();
-        if before != after {
-            self.ledger
-                .sync_resident(GraphicsResourceFamily::Transient, plan.target_bytes + after);
-        }
+        Ok(())
+    }
+
+    /// Commits the frame counters after the executor accepted the submit.
+    fn commit_draw(&mut self, draw: Result<FrameMetrics>) -> Result<FrameMetrics> {
         let mut metrics = draw?;
         metrics.upload_bytes = metrics
             .upload_bytes
@@ -560,16 +606,77 @@ impl<B: Backend> Device<B> {
         Ok(metrics)
     }
 
-    /// A product frame may omit a quality effect while still presenting its scene.
-    pub(crate) fn draw_product(
-        &mut self,
-        handle: MeshHandle,
-        mut frame: Frame,
-    ) -> Result<FrameMetrics> {
+    pub fn draw(&mut self, handle: MeshHandle, frame: &Frame) -> Result<FrameMetrics> {
         let plan = self
             .plan
             .as_ref()
             .ok_or(Error::Invalid("configure an output before drawing"))?;
+        self.check_effects(plan, frame)?;
+        let resident = self
+            .resources
+            .get(handle, self.frame)
+            .ok_or(Error::Invalid("stale workload handle"))?;
+        let before = self.backend.extra_target_bytes();
+        let draw = self.backend.draw(&*resident.native, plan, frame);
+        let after = self.backend.extra_target_bytes();
+        if before != after {
+            self.ledger
+                .sync_resident(GraphicsResourceFamily::Transient, plan.target_bytes + after);
+        }
+        self.commit_draw(draw)
+    }
+
+    /// Draws ordered retained packets in one target acquisition and one submit.
+    ///
+    /// The handles are scene first, then overlay layers. The first resident
+    /// owns the target clear; the executor is responsible for drawing the rest
+    /// without clearing. An executor that does not support layers rejects more
+    /// than one handle with `Error::Unsupported`.
+    pub fn draw_layers(
+        &mut self,
+        handles: &[MeshHandle],
+        frame: &Frame,
+    ) -> Result<FrameMetrics> {
+        if handles.is_empty() {
+            return Err(Error::Invalid("layered draw needs at least one packet"));
+        }
+        let plan = self
+            .plan
+            .as_ref()
+            .ok_or(Error::Invalid("configure an output before drawing"))?;
+        self.check_effects(plan, frame)?;
+        // `MeshRegistry::get` takes `&mut self` so it can stamp the frame touch,
+        // so several residents cannot be borrowed at once. Clone their `Rc`
+        // handles first and lend stable references to the executor.
+        let frame_index = self.frame;
+        let mut residents = Vec::with_capacity(handles.len());
+        for handle in handles {
+            let resident = self
+                .resources
+                .get(*handle, frame_index)
+                .ok_or(Error::Invalid("stale workload handle"))?;
+            residents.push((Rc::clone(&resident.native), resident.scene_batches));
+        }
+        let layers: Vec<Layer<'_, B::Resident>> = residents
+            .iter()
+            .map(|(native, scene)| Layer {
+                resident: &**native,
+                scene: *scene,
+            })
+            .collect();
+        let before = self.backend.extra_target_bytes();
+        let draw = self.backend.draw_layers(&layers, plan, frame);
+        let after = self.backend.extra_target_bytes();
+        if before != after {
+            self.ledger
+                .sync_resident(GraphicsResourceFamily::Transient, plan.target_bytes + after);
+        }
+        self.commit_draw(draw)
+    }
+
+    /// Removes quality effects the product frame may omit. The metrics keep the
+    /// reason so a frame never pretends the effect ran.
+    fn apply_product_effects(&self, plan: &FramePlan, frame: &mut Frame) -> ProductEffects {
         let available = self
             .budget
             .gpu_bytes
@@ -593,11 +700,70 @@ impl<B: Backend> Device<B> {
         {
             frame.scene_filter = false;
         }
+        ProductEffects {
+            side,
+            resident_shadow_bytes,
+            unsupported,
+            denied,
+        }
+    }
+
+    /// A product frame may omit a quality effect while still presenting its scene.
+    pub(crate) fn draw_product(
+        &mut self,
+        handle: MeshHandle,
+        mut frame: Frame,
+    ) -> Result<FrameMetrics> {
+        let plan = self
+            .plan
+            .as_ref()
+            .ok_or(Error::Invalid("configure an output before drawing"))?;
+        let effects = self.apply_product_effects(plan, &mut frame);
         let mut metrics = self.draw(handle, &frame)?;
-        metrics.shadow_resolution = if resident_shadow_bytes == 0 { 0 } else { side };
-        metrics.shadow_resident_bytes = resident_shadow_bytes;
-        metrics.shadows_unsupported = unsupported;
-        metrics.shadow_budget_denied = denied;
+        metrics.shadow_resolution = if effects.resident_shadow_bytes == 0 {
+            0
+        } else {
+            effects.side
+        };
+        metrics.shadow_resident_bytes = effects.resident_shadow_bytes;
+        metrics.shadows_unsupported = effects.unsupported;
+        metrics.shadow_budget_denied = effects.denied;
+        Ok(metrics)
+    }
+
+    /// Layered product draw. The first packet's clear becomes the single target
+    /// clear; every other packet overlays it without clearing.
+    pub(crate) fn draw_product_layers(
+        &mut self,
+        handles: &[MeshHandle],
+        mut frame: Frame,
+    ) -> Result<FrameMetrics> {
+        let frame_index = self.frame;
+        let has_scene = handles.iter().any(|handle| {
+            self.resources
+                .get(*handle, frame_index)
+                .is_some_and(|resident| resident.scene_batches)
+        });
+        if !has_scene {
+            // Nothing to depth-test, shadow or spatially filter: a UI-only
+            // composition keeps the clear and paints the overlays.
+            frame.shadow = None;
+            frame.scene_filter = false;
+        }
+        let plan = self
+            .plan
+            .as_ref()
+            .ok_or(Error::Invalid("configure an output before drawing"))?;
+        let effects = self.apply_product_effects(plan, &mut frame);
+        let mut metrics = self.draw_layers(handles, &frame)?;
+        metrics.shadow_resolution = if effects.resident_shadow_bytes == 0 {
+            0
+        } else {
+            effects.side
+        };
+        metrics.shadow_resident_bytes = effects.resident_shadow_bytes;
+        metrics.shadows_unsupported = effects.unsupported;
+        metrics.shadow_budget_denied = effects.denied;
         Ok(metrics)
     }
 

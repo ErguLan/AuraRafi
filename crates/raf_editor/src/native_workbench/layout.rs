@@ -67,6 +67,7 @@ impl NativeGameWorkbench {
             assets_scroll_offset: 0.0,
             asset_previews: Default::default(),
             authoring_notice: None,
+            runtime_notice: None,
             console: ConsolePanel::default(),
             palette,
             project_name: DEFAULT_PROJECT_NAME.to_string(),

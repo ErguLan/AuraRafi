@@ -5,130 +5,187 @@ use raf_render::api_graphic_basic::ui_surface::{StudioUiPalette, UiNode, UiSelec
 
 use super::controls::{
     card, group_label, range_row, range_row_disabled, range_row_disabled_with_description,
-    range_row_with_description, select_row, select_row_with_description, segment_row,
-    segment_row_with_description, text_row, toggle_row, toggle_row_with_description,
+    range_row_with_description, row_with_reset, segment_row, select_row,
+    select_row_with_description, text_row, toggle_row, toggle_row_with_description,
     toggle_row_with_key,
 };
 
-pub(super) fn appearance(palette: StudioUiPalette, settings: &EngineSettings) -> UiNode {
+pub(super) fn appearance(
+    palette: StudioUiPalette,
+    settings: &EngineSettings,
+    open_select: Option<&str>,
+) -> UiNode {
+    let defaults = EngineSettings::default();
     let mut node = card(palette, "settings.appearance");
     node = node.with_child(group_label(palette, "settings.group.display"));
-    node = node.with_child(segment_row_with_description(
+    node = node.with_child(row_with_reset(
         palette,
+        select_row_with_description(
+            palette,
+            "settings.theme",
+            "settings.theme",
+            "settings.theme",
+            vec![
+                UiSelectOption::new("dark", "settings.value.dark"),
+                UiSelectOption::new("light", "settings.value.light"),
+                UiSelectOption::new("system", "settings.value.system"),
+            ],
+            match settings.theme {
+                Theme::Dark => 0,
+                Theme::Light => 1,
+                Theme::System => 2,
+            },
+            open_select,
+            "settings.theme_desc",
+        ),
+        settings.theme != defaults.theme,
         "settings.theme",
-        "settings.theme",
-        &[
-            (
-                "settings.value.dark",
-                "settings.theme.dark",
-                settings.theme == Theme::Dark,
-            ),
-            (
-                "settings.value.light",
-                "settings.theme.light",
-                settings.theme == Theme::Light,
-            ),
-            (
-                "settings.value.system",
-                "settings.theme.system",
-                settings.theme == Theme::System,
-            ),
-        ],
-        "settings.theme_desc",
     ));
-    node = node.with_child(range_row_with_description(
+    node = node.with_child(row_with_reset(
         palette,
+        range_row_with_description(
+            palette,
+            "settings.font_size",
+            "settings.font_size",
+            settings.font_size,
+            10.0,
+            24.0,
+            1.0,
+            format!("{:.0} px", settings.font_size),
+            "settings.font_size_desc",
+        ),
+        settings.font_size != defaults.font_size,
         "settings.font_size",
-        "settings.font_size",
-        settings.font_size,
-        10.0,
-        24.0,
-        1.0,
-        format!("{:.0} px", settings.font_size),
-        "settings.font_size_desc",
     ));
-    node = node.with_child(toggle_row_with_description(
+    node = node.with_child(row_with_reset(
         palette,
+        toggle_row_with_description(
+            palette,
+            "settings.auto-ui-scale",
+            "settings.auto_ui_scale",
+            settings.auto_ui_scale,
+            "settings.auto_ui_scale_desc",
+        ),
+        settings.auto_ui_scale != defaults.auto_ui_scale,
         "settings.auto-ui-scale",
-        "settings.auto_ui_scale",
-        settings.auto_ui_scale,
-        "settings.auto_ui_scale_desc",
     ));
-    node = node.with_child(range_row_disabled_with_description(
+    node = node.with_child(row_with_reset(
         palette,
+        range_row_disabled_with_description(
+            palette,
+            "settings.ui_scale",
+            "settings.ui_scale",
+            settings.ui_scale,
+            0.5,
+            3.0,
+            0.1,
+            format!("{:.1}x", settings.ui_scale),
+            settings.auto_ui_scale,
+            "settings.ui_scale_desc",
+        ),
+        settings.ui_scale != defaults.ui_scale,
         "settings.ui_scale",
-        "settings.ui_scale",
-        settings.ui_scale,
-        0.5,
-        3.0,
-        0.1,
-        format!("{:.1}x", settings.ui_scale),
-        settings.auto_ui_scale,
-        "settings.ui_scale_desc",
     ));
-    node = node.with_child(range_row(
+    node = node.with_child(row_with_reset(
         palette,
+        range_row_with_description(
+            palette,
+            "settings.theme-experimental",
+            "settings.theme_experimental",
+            settings.theme_experimental,
+            0.0,
+            100.0,
+            1.0,
+            format!("{:.0}%", settings.theme_experimental),
+            "settings.theme_experimental_desc",
+        ),
+        settings.theme_experimental != defaults.theme_experimental,
         "settings.theme-experimental",
-        "settings.theme_experimental",
-        settings.theme_experimental,
-        0.0,
-        100.0,
-        1.0,
-        format!("{:.0}%", settings.theme_experimental),
     ));
 
     node = node.with_child(group_label(palette, "settings.group.accessibility"));
-    node = node.with_child(toggle_row_with_description(
-        palette, "settings.native-accessibility", "settings.native_accessibility_enabled",
-        settings.native_accessibility_enabled, "settings.native_accessibility_desc",
-    ));
-    node = node.with_child(toggle_row_with_description(
+    node = node.with_child(row_with_reset(
         palette,
+        toggle_row_with_description(
+            palette,
+            "settings.native-accessibility",
+            "settings.native_accessibility_enabled",
+            settings.native_accessibility_enabled,
+            "settings.native_accessibility_desc",
+        ),
+        settings.native_accessibility_enabled != defaults.native_accessibility_enabled,
+        "settings.native-accessibility",
+    ));
+    node = node.with_child(row_with_reset(
+        palette,
+        toggle_row_with_description(
+            palette,
+            "settings.prefers-reduced-motion",
+            "settings.prefers_reduced_motion",
+            settings.prefers_reduced_motion,
+            "settings.prefers_reduced_motion_desc",
+        ),
+        settings.prefers_reduced_motion != defaults.prefers_reduced_motion,
         "settings.prefers-reduced-motion",
-        "settings.prefers_reduced_motion",
-        settings.prefers_reduced_motion,
-        "settings.prefers_reduced_motion_desc",
     ));
-    node = node.with_child(toggle_row_with_description(
+    node = node.with_child(row_with_reset(
         palette,
+        toggle_row_with_description(
+            palette,
+            "settings.high-contrast",
+            "settings.high_contrast",
+            settings.high_contrast,
+            "settings.high_contrast_desc",
+        ),
+        settings.high_contrast != defaults.high_contrast,
         "settings.high-contrast",
-        "settings.high_contrast",
-        settings.high_contrast,
-        "settings.high_contrast_desc",
     ));
-    node = node.with_child(toggle_row_with_description(
+    node = node.with_child(row_with_reset(
         palette,
+        toggle_row_with_description(
+            palette,
+            "settings.reduce-transparency",
+            "settings.reduce_transparency",
+            settings.reduce_transparency,
+            "settings.reduce_transparency_desc",
+        ),
+        settings.reduce_transparency != defaults.reduce_transparency,
         "settings.reduce-transparency",
-        "settings.reduce_transparency",
-        settings.reduce_transparency,
-        "settings.reduce_transparency_desc",
     ));
 
-    node = node.with_child(segment_row_with_description(
+    node = node.with_child(row_with_reset(
         palette,
+        select_row_with_description(
+            palette,
+            "settings.language",
+            "settings.language",
+            "settings.language",
+            vec![
+                UiSelectOption::new("english", "settings.language.english"),
+                UiSelectOption::new("spanish", "settings.language.spanish"),
+            ],
+            match settings.language {
+                Language::English => 0,
+                Language::Spanish => 1,
+            },
+            open_select,
+            "settings.language_desc",
+        ),
+        settings.language != defaults.language,
         "settings.language",
-        "settings.language",
-        &[
-            (
-                "settings.value.english",
-                "settings.language.english",
-                settings.language == Language::English,
-            ),
-            (
-                "settings.value.spanish",
-                "settings.language.spanish",
-                settings.language == Language::Spanish,
-            ),
-        ],
-        "settings.language_desc",
     ));
 
-    node.with_child(toggle_row_with_description(
+    node.with_child(row_with_reset(
         palette,
+        toggle_row_with_description(
+            palette,
+            "settings.simple-mode",
+            "settings.simple_mode",
+            settings.simple_mode,
+            "settings.simple_mode_desc",
+        ),
+        settings.simple_mode != defaults.simple_mode,
         "settings.simple-mode",
-        "settings.simple_mode",
-        settings.simple_mode,
-        "settings.simple_mode_desc",
     ))
 }
 

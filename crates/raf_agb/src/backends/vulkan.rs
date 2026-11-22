@@ -12,8 +12,8 @@ use ash::vk;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::{
-    AdapterInfo, Backend, Batch, Error, Frame, FrameMetrics, FramePlan, Instance, Output,
-    RasterUniforms, ResourcePatch, Result, Vertex, Workload,
+    product::Layer, AdapterInfo, Backend, Batch, Error, Frame, FrameMetrics, FramePlan, Instance,
+    Output, RasterUniforms, ResourcePatch, Result, Vertex, Workload,
 };
 
 use context::{Gpu, Surface};
@@ -275,12 +275,38 @@ impl Backend for Vulkan {
         patch::update(self, resident, patch)
     }
 
+    fn supports_layers(&self) -> bool {
+        // Layered composition is a windowed editor path. Headless capture keeps
+        // the single combined packet so its output stays byte-for-byte on the
+        // previous path.
+        self.surface.is_some()
+    }
+
     fn draw(
         &mut self,
         resident: &Resident,
         plan: &FramePlan,
         frame: &Frame,
     ) -> Result<FrameMetrics> {
+        self.draw_layers(
+            &[Layer {
+                resident,
+                scene: true,
+            }],
+            plan,
+            frame,
+        )
+    }
+
+    fn draw_layers(
+        &mut self,
+        layers: &[Layer<'_, Resident>],
+        plan: &FramePlan,
+        frame: &Frame,
+    ) -> Result<FrameMetrics> {
+        if layers.is_empty() {
+            return Err(Error::Invalid("layered draw needs at least one layer"));
+        }
         self.complete_render(if plan.output == Output::Present {
             0
         } else {
@@ -288,7 +314,14 @@ impl Backend for Vulkan {
         })?;
         let target = self.target.as_ref().ok_or(Error::SurfaceOutdated)?;
         let pipelines = self.pipelines.as_ref().ok_or(Error::SurfaceOutdated)?;
-        if frame.scene_filter {
+        // Only a layer with real scene batches owns the depth pass, the shadow
+        // casters, and the spatial filter. A UI-only frame never clears depth.
+        let scene_resident = layers
+            .iter()
+            .find(|layer| layer.scene)
+            .map(|layer| layer.resident);
+        let scene_filter = frame.scene_filter && scene_resident.is_some();
+        if scene_filter {
             if self.filter.is_none() {
                 self.filter = Some(filter::FilterPass::new(
                     &self.gpu,
@@ -305,7 +338,7 @@ impl Backend for Vulkan {
             .map_or((crate::device::SHADOW_MAP_SIDE, None), |(side, key)| {
                 (side, Some(key))
             });
-        let shadow_upload = if let Some(parameters) = frame.shadow {
+        let shadow_upload = if let (Some(parameters), Some(_)) = (frame.shadow, scene_resident) {
             if self
                 .shadow
                 .as_ref()
@@ -339,19 +372,21 @@ impl Backend for Vulkan {
                     0,
                 );
             }
-            if let Some(shadow) = &self.shadow {
+            if let (Some(shadow), Some(resident)) = (&self.shadow, scene_resident) {
                 if depth_key.is_none() || shadow.depth_key != depth_key {
                     shadow_draws = shadow.record(cmd, resident, depth_key.is_some());
                 }
             }
             if let Some(filter) = &self.filter {
-                pipelines.draw(
+                // The filtered scene resolves into its own target first. Only
+                // the scene layers participate; UI overlays stay sharp.
+                pipelines.draw_layers(
                     gpu,
                     cmd,
                     filter.input,
                     target.extent,
                     frame,
-                    resident,
+                    layers,
                     &[0],
                     self.shadow.as_ref(),
                     None,
@@ -363,14 +398,16 @@ impl Backend for Vulkan {
                     memory::LayoutTransition::FilterSample,
                 );
             }
-            pipelines.draw(
+            pipelines.draw_layers(
                 gpu,
                 cmd,
                 target.framebuffers[index],
                 target.extent,
                 frame,
-                resident,
+                layers,
                 if self.filter.is_some() {
+                    // Scene content already resolved through the filter; the
+                    // target pass records only overlay groups.
                     &[1]
                 } else {
                     &plan.graph.order
@@ -405,8 +442,11 @@ impl Backend for Vulkan {
         }
         self.has_timestamp_sample = self.submit.timestamps != vk::QueryPool::null();
         target.present(index, signal)?;
+        let draws = layers.iter().fold(0u32, |draws, layer| {
+            draws.saturating_add(layer.resident.batches.len().min(u32::MAX as usize) as u32)
+        });
         Ok(FrameMetrics {
-            draw_calls: (resident.batches.len() as u32)
+            draw_calls: draws
                 .saturating_add(shadow_draws)
                 .saturating_add(u32::from(self.filter.is_some())),
             submits: 1,

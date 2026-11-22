@@ -1,6 +1,7 @@
 //! Workbench status line, console projection and assets operation receipts.
 
 use super::*;
+use crate::console::LogLevel;
 
 impl NativeGameWorkbench {
     pub(crate) fn authoring_status(&mut self, key: &str) {
@@ -31,6 +32,63 @@ impl NativeGameWorkbench {
             self.authoring_notice = Some(output.title.clone());
         }
         self.console.log_command_output(output);
+        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
+    }
+
+    /// Appends a structured runtime event with severity, source, code and time.
+    ///
+    /// The console block keeps the bounded player log tail and the machine
+    /// fields in JSON while the row itself shows the human message.
+    pub fn log_runtime_entry(&mut self, entry: crate::native_game_runtime::RuntimeConsoleEntry) {
+        let crate::native_game_runtime::RuntimeConsoleEntry {
+            level,
+            code,
+            source,
+            message,
+            detail,
+            at_ms,
+            lines,
+        } = entry;
+        let language = self.agent_settings.language;
+        let message = crate::native_runtime_log::localized_runtime_text(&message, language);
+        let mut block_lines = Vec::new();
+        if !code.is_empty() {
+            block_lines.push(format!("code: {code}"));
+        }
+        if let Some(detail) = detail.as_deref() {
+            block_lines.push(crate::native_runtime_log::localized_runtime_text(
+                detail, language,
+            ));
+        }
+        if !lines.is_empty() {
+            block_lines.push(crate::native_runtime_log::localized_runtime_text(
+                "console.runtime_log",
+                language,
+            ));
+            block_lines.extend(lines);
+        }
+        let json = serde_json::json!({
+            "code": code.as_str(),
+            "severity": match level {
+                LogLevel::Info => "info",
+                LogLevel::Warning => "warning",
+                LogLevel::Error => "error",
+            },
+            "source": source.as_str(),
+            "at_ms": at_ms,
+        })
+        .to_string();
+        self.console.log_structured(
+            level,
+            source,
+            message.clone(),
+            Some(code),
+            Some(crate::console::ConsoleBlock {
+                title: message,
+                lines: block_lines,
+                json,
+            }),
+        );
         self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
     }
 

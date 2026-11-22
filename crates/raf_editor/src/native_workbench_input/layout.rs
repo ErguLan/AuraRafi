@@ -1,7 +1,12 @@
 use super::*;
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_layout_command(&mut self, name: &String, native_input: &NativeUiInputBridge, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_layout_command(
+        &mut self,
+        name: &String,
+        native_input: &NativeUiInputBridge,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if let Some(raw_target) = name.strip_prefix("layout.resize.start.") {
             let kind = match raw_target {
                 "layout.left" => WorkbenchResizeKind::LeftPanel,
@@ -76,13 +81,11 @@ impl NativeGameWorkbench {
         if let Some(raw_target) = name.strip_prefix("bottom.resize.start.") {
             if let Some((left_group_id, right_group_id)) = raw_target.split_once('|') {
                 if let Some([pointer_x, _]) = native_input.snapshot().pointer_position {
-                    if self.bottom_dock.begin_resize(
-                        left_group_id,
-                        right_group_id,
-                        pointer_x,
-                    ) {
-                        self.toolbar_revision =
-                            self.toolbar_revision.wrapping_add(1).max(1);
+                    if self
+                        .bottom_dock
+                        .begin_resize(left_group_id, right_group_id, pointer_x)
+                    {
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                 }
             }
@@ -123,8 +126,7 @@ impl NativeGameWorkbench {
                     if self.bottom_dock.begin_drag(group_id, tab_id, pointer) {
                         self.drag_motion.set_immediate(0.0);
                         self.drag_motion.set_target(1.0);
-                        self.toolbar_revision =
-                            self.toolbar_revision.wrapping_add(1).max(1);
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                 }
             }
@@ -180,7 +182,12 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_dock_command(&mut self, name: &String, native_input: &NativeUiInputBridge, router: &mut InputRouter) -> bool {
+    pub(super) fn handle_dock_command(
+        &mut self,
+        name: &String,
+        native_input: &NativeUiInputBridge,
+        router: &mut InputRouter,
+    ) -> bool {
         if name == "bottom.toggle-collapsed" {
             self.bottom_dock.toggle_collapsed();
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -193,8 +200,7 @@ impl NativeGameWorkbench {
             if let Some((group_id, tab_id)) = raw_tab.split_once('|') {
                 if self.bottom_dock.select_in_group(group_id, tab_id) {
                     self.reset_input_state(router);
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                 }
             }
             return true;
@@ -211,8 +217,7 @@ impl NativeGameWorkbench {
                 );
                 if self.bottom_dock.split_context(true) {
                     self.reset_input_state(router);
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     self.bottom_dock.persist_project_layout();
                 }
             }
@@ -230,8 +235,7 @@ impl NativeGameWorkbench {
                 );
                 if self.bottom_dock.split_context(false) {
                     self.reset_input_state(router);
-                    self.toolbar_revision =
-                        self.toolbar_revision.wrapping_add(1).max(1);
+                    self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     self.bottom_dock.persist_project_layout();
                 }
             }
@@ -253,7 +257,11 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_pointer_cancel(&mut self, native_input: &NativeUiInputBridge, router: &mut InputRouter) {
+    pub(super) fn handle_pointer_cancel(
+        &mut self,
+        native_input: &NativeUiInputBridge,
+        router: &mut InputRouter,
+    ) {
         let snapshot = native_input.snapshot();
         // Pointer capture can be interrupted by a retained-surface rebuild,
         // focus loss, or a platform release that RafUI did not route back to

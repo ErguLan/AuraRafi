@@ -199,8 +199,10 @@ pub fn set_thumbnail_image(
     fit: UiImageFit,
     corner_radius: f32,
 ) {
-    UiImageView::new(source_key).fit(fit)
-        .shape(UiImageViewShape::Rounded(corner_radius)).apply_to(node);
+    UiImageView::new(source_key)
+        .fit(fit)
+        .shape(UiImageViewShape::Rounded(corner_radius))
+        .apply_to(node);
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -591,9 +593,9 @@ pub fn select_trigger(id: impl Into<String>, select: UiSelect, palette: StudioUi
         .with_layout(UiLayout {
             flow: UiFlow::Row,
             align_items: UiAlign::Center,
-            gap: 5.0,
-            padding: UiSpacing::xy(8.0, 0.0),
-            ..UiLayout::fixed(0.0, 29.0).with_width_mode(UiSizeMode::Fill)
+            gap: 10.0,
+            padding: UiSpacing::xy(12.0, 0.0),
+            ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill)
         })
         .focusable()
         .with_accessibility_role(UiAccessibilityRole::Combobox)
@@ -602,24 +604,23 @@ pub fn select_trigger(id: impl Into<String>, select: UiSelect, palette: StudioUi
             UiNode::new(format!("{id}.value"), UiNodeKind::Label)
                 .with_text_key(selected_label)
                 .with_text_style(UiTextStyle::body(tokens.text))
-                .with_layout(
-                    UiLayout::fit_content()
-                        .with_width_mode(UiSizeMode::Fill)
-                        .with_text_safe_area(true),
-                ),
+                .with_text_overflow(crate::UiTextOverflow::Ellipsis)
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    basis: [0.0, 18.0],
+                    width_mode: UiSizeMode::Fill,
+                    height_mode: UiSizeMode::Fixed,
+                    ..UiLayout::default()
+                }),
         )
         .with_child(
             UiNode::new(format!("{id}.chevron"), UiNodeKind::Label)
                 .with_icon(
-                    UiIcon::new(if is_open {
-                        UiIconId::ChevronDown
-                    } else {
-                        UiIconId::ChevronRight
-                    })
-                    .with_size(UiIconSize::Small)
-                    .with_tint(tokens.text_muted),
+                    UiIcon::new(UiIconId::ChevronDown)
+                        .with_size(UiIconSize::Small)
+                        .with_tint(tokens.text_muted),
                 )
-                .with_layout(UiLayout::fixed(16.0, 18.0)),
+                .with_layout(UiLayout::fixed(16.0, 16.0)),
         )
 }
 
@@ -871,6 +872,26 @@ mod tests {
         assert_eq!(tooltip.layout.basis, [0.0, 0.0]);
     }
 
+    #[test]
+    fn select_trigger_keeps_the_value_and_chevron_apart() {
+        let select = UiSelect::new(
+            "quality",
+            vec![crate::controls::UiSelectOption::new("high", "quality.high")],
+            0,
+        );
+        let trigger = select_trigger("quality", select, StudioUiPalette::IndustrialDark);
+        let value = trigger.find("quality.value").expect("value label");
+        let chevron = trigger.find("quality.chevron").expect("chevron");
+
+        assert_eq!(value.layout.grow, 1.0);
+        assert_eq!(value.layout.width_mode, UiSizeMode::Fill);
+        assert_eq!(
+            chevron.icon.map(|icon| icon.id),
+            Some(UiIconId::ChevronDown)
+        );
+        assert_eq!(trigger.layout.gap, 10.0);
+        assert_eq!(trigger.layout.padding.left, 12.0);
+    }
     #[test]
     fn literal_tooltip_value_is_kept_out_of_translation_keys() {
         let node = UiNode::new("metadata", UiNodeKind::Label).with_tooltip_value("World_Rafi");

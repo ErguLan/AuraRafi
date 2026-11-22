@@ -1,29 +1,51 @@
 use super::*;
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_electronics_commit_command(&mut self, name: &String, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_electronics_commit_command(
+        &mut self,
+        name: &String,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if let Some(target) = name.strip_prefix("electronics.pcb.rule.commit:") {
             let key = format!("electronics.pcb.rule.{target}");
-            let raw = self.host.session().interaction.controls.text(&key).trim().replace(',', ".");
+            let raw = self
+                .host
+                .session()
+                .interaction
+                .controls
+                .text(&key)
+                .trim()
+                .replace(',', ".");
             if let Ok(value) = raw.parse::<f32>() {
                 if value.is_finite() && value > 0.0 && value <= 10.0 {
-                    intents.push(NativeWorkbenchIntent::Command(format!("electronics.pcb.rule:{target}:{value}")));
+                    intents.push(NativeWorkbenchIntent::Command(format!(
+                        "electronics.pcb.rule:{target}:{value}"
+                    )));
                     self.host.session_mut().interaction.focus.clear_focus();
                 }
             }
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             return true;
         }
-        if let Some(target)=name.strip_prefix("electronics.inspector.transform.commit:") {
-            let key=format!("electronics.inspector.transform.{target}");
-            let raw=self.host.session().interaction.controls.text(&key).trim().replace(',',".");
-            if let Ok(value)=raw.parse::<f32>() {
-                if value.is_finite() && value.abs()<=1_000_000.0 {
-                    intents.push(NativeWorkbenchIntent::Command(format!("electronics.transform:{target}:{value}")));
+        if let Some(target) = name.strip_prefix("electronics.inspector.transform.commit:") {
+            let key = format!("electronics.inspector.transform.{target}");
+            let raw = self
+                .host
+                .session()
+                .interaction
+                .controls
+                .text(&key)
+                .trim()
+                .replace(',', ".");
+            if let Ok(value) = raw.parse::<f32>() {
+                if value.is_finite() && value.abs() <= 1_000_000.0 {
+                    intents.push(NativeWorkbenchIntent::Command(format!(
+                        "electronics.transform:{target}:{value}"
+                    )));
                     self.host.session_mut().interaction.focus.clear_focus();
                 }
             }
-            self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+            self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             return true;
         }
         false
@@ -31,11 +53,30 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_electronics_project_command(&mut self, name: &String, project: Option<&Project>, router: &mut InputRouter, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_electronics_project_command(
+        &mut self,
+        name: &String,
+        project: Option<&Project>,
+        router: &mut InputRouter,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if self.project_type == ProjectType::Electronics {
-            if matches!(name.as_str(), "electronics.analysis.drc" | "electronics.analysis.simulation" | "electronics.fabrication.export" | "electronics.fabrication.deliver") {
-                crate::native_workbench::electronics_model::reveal_analysis(&mut self.bottom_dock, name);
-                self.host.session_mut().interaction.controls.reset_scroll("electronics.analysis.lines");
+            if matches!(
+                name.as_str(),
+                "electronics.analysis.drc"
+                    | "electronics.analysis.simulation"
+                    | "electronics.fabrication.export"
+                    | "electronics.fabrication.deliver"
+            ) {
+                crate::native_workbench::electronics_model::reveal_analysis(
+                    &mut self.bottom_dock,
+                    name,
+                );
+                self.host
+                    .session_mut()
+                    .interaction
+                    .controls
+                    .reset_scroll("electronics.analysis.lines");
                 self.reset_input_state(router);
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
@@ -43,8 +84,12 @@ impl NativeGameWorkbench {
                 Some("electronics.workspace.library.toggle")
             } else if name == crate::application_menu::command::VIEW_INSPECTOR {
                 Some("electronics.workspace.inspector.toggle")
-            } else { None };
-            if workspace_command.is_some_and(|command| self.handle_electronics_workspace_command(command)) {
+            } else {
+                None
+            };
+            if workspace_command
+                .is_some_and(|command| self.handle_electronics_workspace_command(command))
+            {
                 return true;
             }
         }
@@ -65,9 +110,14 @@ impl NativeGameWorkbench {
                 tab,
                 "project" | "library" | "components" | "wires" | "objects" | "layers"
             ) {
-                if self.footprint_chooser.is_open() {self.footprint_chooser.close();}
+                if self.footprint_chooser.is_open() {
+                    self.footprint_chooser.close();
+                }
                 self.electronics_navigator_tab = tab.to_string();
-                if self.last_layout.is_some_and(|layout| layout.window.width < 980.0) {
+                if self
+                    .last_layout
+                    .is_some_and(|layout| layout.window.width < 980.0)
+                {
                     self.electronics_workspace.inspector_hidden = true;
                 }
                 if self.electronics_workspace.pcb_active {
@@ -84,7 +134,11 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_electronics_value_commit_command(&mut self, name: &String, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_electronics_value_commit_command(
+        &mut self,
+        name: &String,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         match name.as_str() {
             "electronics.inspector.value.commit" => {
                 let value = self
@@ -96,10 +150,8 @@ impl NativeGameWorkbench {
                     .to_string();
                 if let Some(mut draft) = self.electronics_value_draft.take() {
                     draft.value = value;
-                    if let electronics_model::InspectorValueEditEnd::Apply {
-                        source_id,
-                        value,
-                    } = draft.finish()
+                    if let electronics_model::InspectorValueEditEnd::Apply { source_id, value } =
+                        draft.finish()
                     {
                         intents.push(NativeWorkbenchIntent::Command(
                             crate::electronics_action::ElectronicsAction::CommitInspectorValueFor {

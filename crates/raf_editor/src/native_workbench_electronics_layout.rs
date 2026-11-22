@@ -258,14 +258,26 @@ pub(crate) fn compact_application_bar(mut surface: UiSurface, width: f32) -> UiS
             ),
         );
     }
-    if let Some(index) = children.iter().position(|node| node.id == "application-bar.agents") {
+    if let Some(index) = children
+        .iter()
+        .position(|node| node.id == "application-bar.agents")
+    {
         children[index] = crate::agent_workspace_surface::button(
-            "application-bar.agents", "lab.open", "agent.lab.open.simulation", &tokens,
+            "application-bar.agents",
+            "lab.open",
+            "agent.lab.open.simulation",
+            &tokens,
         );
         if width >= 1280.0 {
-            children.insert(index + 1, crate::agent_workspace_surface::button(
-                "application-bar.lab.device", "lab.open_device", "agent.lab.open.device", &tokens,
-            ));
+            children.insert(
+                index + 1,
+                crate::agent_workspace_surface::button(
+                    "application-bar.lab.device",
+                    "lab.open_device",
+                    "agent.lab.open.device",
+                    &tokens,
+                ),
+            );
         }
     }
     children.retain(|node| {

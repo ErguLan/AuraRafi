@@ -307,6 +307,7 @@ impl NativeEditorApplication {
         self.exit_confirmation_open = false;
         self.pending_return_to_hub = None;
         self.settings_restore_focus = None;
+        self.runtime_notice = None;
 
         // The Hub and the editor share the same native input router. A click
         // that opens a project can leave the Hub's focused control owning the
@@ -338,6 +339,7 @@ impl NativeEditorApplication {
         }
         self.ensure_workbench();
         if let Some(workbench) = self.workbench.as_mut() {
+            workbench.set_runtime_notice(None);
             workbench.bind_agent_workspace(panel, asset_tools, save);
             workbench.set_agent_sessions(&project, sessions);
             workbench.set_engine_settings(self.settings_state.clone());
@@ -423,6 +425,10 @@ impl NativeEditorApplication {
         }
         self.agents_open = false;
         self.game_runtime.stop_all();
+        self.runtime_notice = None;
+        if let Some(workbench) = &mut self.workbench {
+            workbench.set_runtime_notice(None);
+        }
         self.settings_open = false;
         self.settings_restore_focus = None;
         self.pending_settings_open = None;

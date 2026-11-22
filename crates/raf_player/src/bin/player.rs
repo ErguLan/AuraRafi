@@ -19,6 +19,10 @@ fn main() {
     }
 }
 
+fn version_text() -> String {
+    format!("aurarafi-player {}", env!("CARGO_PKG_VERSION"))
+}
+
 fn launch() -> Result<(), String> {
     let arguments = std::env::args_os()
         .skip(1)
@@ -28,6 +32,10 @@ fn launch() -> Result<(), String> {
                 .map_err(|_| "player arguments must be valid Unicode".to_string())
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if arguments.iter().any(|argument| argument == "--version") {
+        println!("{}", version_text());
+        return Ok(());
+    }
     if arguments.iter().any(|argument| argument == "--headless") {
         return launch_headless(&arguments);
     }
@@ -258,5 +266,25 @@ fn parse_size(value: &str) -> Result<[u32; 2], String> {
 }
 
 fn usage() -> String {
-    "Usage:\n  aurarafi-player --manifest <runtime.ron>\n  aurarafi-player --runtime <launch-json>\n  aurarafi-player --headless --manifest <runtime.ron> [--frames N] [--size WxH] [--out DIR] [--input FILE] [--report FILE] [--fixed-hz N]\n  aurarafi-player --stream ADDR:PORT --manifest <runtime.ron> [--stream-token UUID] [--size WxH] [--stream-fps N] [--stream-max-frames N] [--idle-timeout SECONDS] [--fixed-hz N] [--report FILE]".into()
+    "Usage:\n  aurarafi-player --version\n  aurarafi-player --manifest <runtime.ron>\n  aurarafi-player --runtime <launch-json>\n  aurarafi-player --headless --manifest <runtime.ron> [--frames N] [--size WxH] [--out DIR] [--input FILE] [--report FILE] [--fixed-hz N]\n  aurarafi-player --stream ADDR:PORT --manifest <runtime.ron> [--stream-token UUID] [--size WxH] [--stream-fps N] [--stream-max-frames N] [--idle-timeout SECONDS] [--fixed-hz N] [--report FILE]".into()
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn version_line_names_the_player_and_package_version() {
+        assert_eq!(
+            super::version_text(),
+            format!("aurarafi-player {}", env!("CARGO_PKG_VERSION"))
+        );
+    }
+
+    #[test]
+    fn usage_documents_version_without_changing_the_other_entries() {
+        let usage = super::usage();
+        assert!(usage.contains("--version"));
+        assert!(usage.contains("--manifest <runtime.ron>"));
+        assert!(usage.contains("--headless --manifest"));
+        assert!(usage.contains("--stream ADDR:PORT"));
+    }
 }

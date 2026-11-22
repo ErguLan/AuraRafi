@@ -7,12 +7,91 @@ use std::net::TcpStream;
 use uuid::Uuid;
 const FRAME_LIMIT: usize = 16 * 1024;
 const QUEUE_LIMIT: usize = 32;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeDiagnosticSeverity {
+    Info,
+    Warning,
+    Error,
+}
+
+/// Structured runtime event for the editor console and logs.
+///
+/// `code` is stable for filtering and localization fallback; `message` is the
+/// human-readable text; `detail` carries a path, OS error or short diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeDiagnostic {
+    pub code: String,
+    pub severity: RuntimeDiagnosticSeverity,
+    pub source: String,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    #[serde(default)]
+    pub at_ms: u64,
+}
+
+impl RuntimeDiagnostic {
+    pub fn new(
+        code: impl Into<String>,
+        severity: RuntimeDiagnosticSeverity,
+        source: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            code: code.into(),
+            severity,
+            source: source.into(),
+            message: message.into(),
+            detail: None,
+            at_ms: 0,
+        }
+    }
+
+    pub fn detail(mut self, detail: impl Into<String>) -> Self {
+        self.detail = Some(detail.into());
+        self
+    }
+
+    pub fn at_ms(mut self, at_ms: u64) -> Self {
+        self.at_ms = at_ms;
+        self
+    }
+
+    pub fn error(
+        code: impl Into<String>,
+        source: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(code, RuntimeDiagnosticSeverity::Error, source, message)
+    }
+
+    pub fn warning(
+        code: impl Into<String>,
+        source: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(code, RuntimeDiagnosticSeverity::Warning, source, message)
+    }
+
+    pub fn info(
+        code: impl Into<String>,
+        source: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self::new(code, RuntimeDiagnosticSeverity::Info, source, message)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RuntimePacket {
     Hello { token: Uuid, instance: Uuid },
     Control(RuntimeControl),
     Status(RuntimeStatus),
+    /// Legacy plain-text diagnostic. Kept so an older peer still parses.
     Diagnostic(String),
+    /// Structured diagnostic for the editor console and the runtime log.
+    DiagnosticEvent(RuntimeDiagnostic),
 }
 pub struct RuntimePeer {
     stream: TcpStream,
@@ -114,6 +193,27 @@ impl RuntimePeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn diagnostic_event_round_trips_with_severity_and_detail() {
+        let event = RuntimeDiagnostic::error(
+            "runtime.prepare.failed",
+            "runtime",
+            "Runtime preparation failed",
+        )
+        .detail("assets/level.ron")
+        .at_ms(42);
+        let packet = RuntimePacket::DiagnosticEvent(event.clone());
+        let bytes = serde_json::to_vec(&packet).unwrap();
+        let decoded: RuntimePacket = serde_json::from_slice(&bytes).unwrap();
+        match decoded {
+            RuntimePacket::DiagnosticEvent(decoded) => {
+                assert_eq!(decoded, event);
+                assert_eq!(decoded.severity, RuntimeDiagnosticSeverity::Error);
+            }
+            _ => panic!("diagnostic event did not round-trip"),
+        }
+    }
+
     #[test]
     fn loopback_preserves_packets_and_rejects_floods_and_oversized_frames() {
         let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();

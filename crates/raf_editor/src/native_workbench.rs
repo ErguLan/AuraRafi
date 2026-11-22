@@ -42,6 +42,7 @@ use crate::console::ConsolePanel;
 use crate::editor_layout::{EditorFrameLayout, EditorRect};
 use crate::electronics_controller::{ElectronicsTool, NativeElectronicsEditor};
 use crate::electronics_minimap;
+use crate::native_game_runtime::RuntimeNotice;
 use crate::panels::ai_chat::{AgentAction, AgentPanel, AgentReadiness, SharedAgentPanel};
 use crate::panels::assets_surface::{
     asset_absolute_path, asset_rows_with_builtins, asset_visible_range,
@@ -92,6 +93,7 @@ use crate::project_catalog::ProjectCatalog;
 use crate::settings_surface::SettingsSection;
 use raf_core::project::BuildingStyle;
 
+mod animations;
 #[path = "native_workbench_electronics_layout.rs"]
 pub(crate) mod electronics_layout;
 #[path = "native_workbench_electronics.rs"]
@@ -106,7 +108,6 @@ mod hierarchy_state;
 mod input;
 #[path = "native_workbench_interfaces.rs"]
 mod interfaces;
-mod animations;
 #[path = "native_workbench_performance.rs"]
 mod performance;
 #[path = "native_workbench_regions.rs"]
@@ -132,8 +133,9 @@ pub(crate) use helpers::{
     inspector_section_from_slug, numeric_commit_field, set_inspector_section, unique_session_name,
 };
 pub(crate) use settings::{
-    ai_provider_from_id, apply_settings_command, apply_settings_range, apply_settings_select,
-    apply_settings_text, apply_settings_toggle, is_settings_numeric_text_key,
+    ai_provider_from_id, apply_settings_command, apply_settings_range, apply_settings_reset,
+    apply_settings_select, apply_settings_text, apply_settings_toggle,
+    is_settings_numeric_text_key,
 };
 pub(crate) use sync::nodes_graph_bounds;
 use sync::sync_hierarchy_scroll_state;
@@ -251,6 +253,7 @@ pub struct NativeGameWorkbench {
     assets_scroll_offset: f32,
     asset_previews: crate::asset_previews::AssetPreviews,
     authoring_notice: Option<String>,
+    runtime_notice: Option<RuntimeNotice>,
     console: ConsolePanel,
     palette: StudioUiPalette,
     project_name: String,
@@ -863,4 +866,3 @@ impl NativeGameWorkbench {
 
 #[cfg(test)]
 mod tests;
-

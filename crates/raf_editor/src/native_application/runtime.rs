@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use super::shortcuts::electronics_input_edge_pending;
 use super::NativeEditorApplication;
+use crate::native_game_runtime::{RuntimeConsoleEntry, RuntimeLaunchFailure};
 
 impl NativeEditorApplication {
     pub(super) fn begin_frame_gate(&mut self) -> Option<f64> {
@@ -33,49 +34,90 @@ impl NativeEditorApplication {
     }
 
     pub(super) fn apply_runtime_command(&mut self, command: &str) {
-        if matches!(command,"runtime.play"|"runtime.reload") {
-            if let Some(workbench)=&mut self.workbench {
-                if let Err(error)=workbench.flush_interface_document(){
-                    workbench.log_console_output(crate::commands::CommandOutput::error(raf_core::i18n::t("ui.commands.title",self.settings_state.language),raf_core::i18n::t(&error,self.settings_state.language)));
+        if matches!(command, "runtime.play" | "runtime.reload") {
+            if let Some(workbench) = &mut self.workbench {
+                if let Err(error) = workbench.flush_interface_document() {
+                    let failure = RuntimeLaunchFailure::from(error);
+                    workbench.log_runtime_entry(failure.console_entry());
+                    let notice = failure.notice();
+                    workbench.set_runtime_notice(Some(notice.clone()));
+                    self.runtime_notice = Some(notice);
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
                     return;
                 }
             }
         }
-        let result = match command {
-            "runtime.play" => match (self.project.as_ref(), self.window_host.as_ref()) {
-                (Some(project), Some(host)) => self
-                    .game_runtime
-                    .launch(
-                        project,
-                        &self.scene,
-                        self.runtime.as_ref().map(|runtime| runtime.node_graph()),
-                        &self.settings_state,
-                        host,
-                    )
-                    .map(|_| ()),
-                _ => Err("open a Game project before starting runtime".into()),
-            },
-            "runtime.pause" => self
-                .game_runtime
-                .control(raf_runtime::RuntimeControl::Pause),
-            "runtime.resume" => self
-                .game_runtime
-                .control(raf_runtime::RuntimeControl::Resume),
-            "runtime.step" => self.game_runtime.control(raf_runtime::RuntimeControl::Step),
-            "runtime.stop" => self.game_runtime.control(raf_runtime::RuntimeControl::Stop),
-            "runtime.reload" => self
-                .game_runtime
-                .control(raf_runtime::RuntimeControl::Reload),
-            "runtime.next" => {
-                self.game_runtime.select_next();
-                Ok(())
+        if command == "runtime.play" {
+            let result = match (self.project.as_ref(), self.window_host.as_ref()) {
+                (Some(project), Some(host)) => self.game_runtime.launch(
+                    project,
+                    &self.scene,
+                    self.runtime.as_ref().map(|runtime| runtime.node_graph()),
+                    &self.settings_state,
+                    host,
+                ),
+                _ => Err(RuntimeLaunchFailure::from(
+                    "open a Game project before starting runtime",
+                )),
+            };
+            match result {
+                Ok(launch) => {
+                    self.runtime_notice = None;
+                    if let Some(workbench) = &mut self.workbench {
+                        workbench.set_runtime_notice(None);
+                        workbench.log_runtime_entry(RuntimeConsoleEntry::info(
+                            "console.runtime",
+                            "editor",
+                            "console.runtime",
+                            Some(format!(
+                                "instance={} player={}",
+                                launch.instance, launch.player_version
+                            )),
+                        ));
+                    }
+                }
+                Err(failure) => {
+                    let notice = failure.notice();
+                    if let Some(workbench) = &mut self.workbench {
+                        workbench.log_runtime_entry(failure.console_entry());
+                        workbench.set_runtime_notice(Some(notice.clone()));
+                    }
+                    self.runtime_notice = Some(notice);
+                }
             }
-            _ => Err(format!("unknown local runtime command: {command}")),
-        };
-        if let Err(error) = result {
-            if let Some(workbench) = &mut self.workbench {
-                workbench
-                    .log_console_output(crate::commands::CommandOutput::error("Runtime", error));
+        } else {
+            let result = match command {
+                "runtime.notice.dismiss" => {
+                    self.runtime_notice = None;
+                    if let Some(workbench) = &mut self.workbench {
+                        workbench.set_runtime_notice(None);
+                    }
+                    Ok(())
+                }
+                "runtime.pause" => self
+                    .game_runtime
+                    .control(raf_runtime::RuntimeControl::Pause),
+                "runtime.resume" => self
+                    .game_runtime
+                    .control(raf_runtime::RuntimeControl::Resume),
+                "runtime.step" => self.game_runtime.control(raf_runtime::RuntimeControl::Step),
+                "runtime.stop" => self.game_runtime.control(raf_runtime::RuntimeControl::Stop),
+                "runtime.reload" => self
+                    .game_runtime
+                    .control(raf_runtime::RuntimeControl::Reload),
+                "runtime.next" => {
+                    self.game_runtime.select_next();
+                    Ok(())
+                }
+                _ => Err(format!("unknown local runtime command: {command}")),
+            };
+            if let Err(error) = result {
+                if let Some(workbench) = &mut self.workbench {
+                    workbench
+                        .log_console_output(crate::commands::CommandOutput::error("Runtime", error));
+                }
             }
         }
         if let Some(runtime) = &mut self.runtime {
@@ -101,15 +143,6 @@ impl NativeEditorApplication {
                 player.control(raf_runtime::RuntimeControl::Stop);
             }
             finished = player.should_close();
-            if let Some(workbench) = &mut self.workbench {
-                for message in player.drain_diagnostics() {
-                    workbench.log_console_output(crate::commands::CommandOutput::info(
-                        "Runtime",
-                        vec![message],
-                        serde_json::json!({ "source": "local-runtime" }),
-                    ));
-                }
-            }
             self.next_runtime_frame = Instant::now() + player.frame_interval();
         }
         self.input.begin_frame();
@@ -124,4 +157,3 @@ impl NativeEditorApplication {
         }
     }
 }
-

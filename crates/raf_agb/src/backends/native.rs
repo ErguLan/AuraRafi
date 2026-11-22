@@ -3,8 +3,8 @@
 use std::{fmt, str::FromStr};
 
 use crate::{
-    AdapterInfo, Backend, Error, Frame, FrameMetrics, FramePlan, Output, ResourcePatch, Result,
-    Workload,
+    product::Layer, AdapterInfo, Backend, Error, Frame, FrameMetrics, FramePlan, Output,
+    ResourcePatch, Result, Workload,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -118,6 +118,10 @@ macro_rules! native_executors {
                 match &self.0 { $($(#[$cfg])* Executor::$api(backend) => backend.supports_scene_filter(),)+ }
             }
 
+            fn supports_layers(&self) -> bool {
+                match &self.0 { $($(#[$cfg])* Executor::$api(backend) => backend.supports_layers(),)+ }
+            }
+
             fn filter_bytes(&self) -> u64 {
                 match &self.0 { $($(#[$cfg])* Executor::$api(backend) => backend.filter_bytes(),)+ }
             }
@@ -149,6 +153,30 @@ macro_rules! native_executors {
                     $($(#[$cfg])* (Executor::$api(backend), Resident::$api(resource)) => backend.draw(resource, plan, frame),)+
                     #[allow(unreachable_patterns)]
                     _ => Err(Error::Invalid("resident packet belongs to another API")),
+                }
+            }
+
+            fn draw_layers(
+                &mut self,
+                layers: &[Layer<'_, NativeResident>],
+                plan: &FramePlan,
+                frame: &Frame,
+            ) -> Result<FrameMetrics> {
+                match &mut self.0 {
+                    $($(#[$cfg])* Executor::$api(backend) => {
+                        let mut translated = Vec::with_capacity(layers.len());
+                        for layer in layers {
+                            match &layer.resident.0 {
+                                Resident::$api(resident) => translated.push(Layer {
+                                    resident,
+                                    scene: layer.scene,
+                                }),
+                                #[allow(unreachable_patterns)]
+                                _ => return Err(Error::Invalid("resident packet belongs to another API")),
+                            }
+                        }
+                        backend.draw_layers(&translated, plan, frame)
+                    })+
                 }
             }
 

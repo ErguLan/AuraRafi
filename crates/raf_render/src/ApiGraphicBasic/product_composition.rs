@@ -27,9 +27,9 @@ use crate::api_graphic_basic::pipeline::BasicPipelineKind;
 use crate::engine_time::Instant;
 use crate::scene_renderer::SceneRenderFrame;
 
-/// Packet key reserved for the scene-led composition. CAD and RafUI append
-/// their commands to the same packet so a device prepares one retained
-/// revision per frame.
+/// Packet key reserved for the scene half. The single-packet path uses it for
+/// the combined scene/CAD/RafUI packet; the layered path keeps the scene here
+/// and prepares the RafUI half under its own key.
 pub const PRODUCT_SCENE_PACKET_KEY: PacketKey = PacketKey(1);
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -494,10 +494,22 @@ impl ProductFrameBuilder {
     /// The environment frame is scene state, not a recorded command. The
     /// product contract draws the camera-relative sky before scene geometry,
     /// so it lands right after the clear.
+    ///
+    /// The three sky colors are linear radiance and are *not* exposed here; the
+    /// shader applies `environment.exposure_ev` once at the end of the sky
+    /// pass. Haze, solar-disk cosine, halo, halo cosine, and stars each travel
+    /// on exactly one `DrawSky` command.
     fn append_environment(&mut self, frame: &SceneRenderFrame) {
         let Some(environment) = frame.commands.environment else {
+            // Neutral mode keeps the clear color and exposes no environment,
+            // so there is no sky pass to emit.
             return;
         };
+        if environment.settings.mode != raf_core::environment::EnvironmentMode::Scene {
+            // A neutral environment never owns a sky, even if a caller hands
+            // one in explicitly.
+            return;
+        }
         let improved = environment.improved();
         let map = |color: Vec3| -> [f32; 4] {
             let [red, green, blue] = color.to_array();
@@ -510,6 +522,13 @@ impl ProductFrameBuilder {
         } else {
             (map(environment.sky_horizon), map(environment.sky_ground))
         };
+        let sun = environment.settings.sun;
+        let sun_disk_cos = if sun.enabled && sun.disk_visible && environment.sun_direction.y > 0.0 {
+            sun.angular_radius.cos()
+        } else {
+            1.0
+        };
+        let stars = environment.settings.sky;
         self.packet.commands.push(Command::DrawSky(SkyBackdrop {
             zenith,
             horizon,
@@ -520,26 +539,23 @@ impl ProductFrameBuilder {
                 0.0
             },
             texture: None,
-            sun_disk_cos: if environment.settings.sun.disk_visible
-                && environment.sun_direction.y > 0.0
-                && environment.settings.sun.enabled
-            {
-                environment.settings.sun.angular_radius.cos()
-            } else {
-                1.0
-            },
+            sun_disk_cos,
             halo: if improved {
-                environment.halo_strength
+                environment.halo_strength.clamp(0.0, 1.0)
             } else {
                 0.0
             },
             halo_cos: environment.halo_cos,
-            stars_density: if environment.settings.sky.stars_enabled {
-                environment.settings.sky.stars_density
+            stars_density: if stars.stars_enabled {
+                stars.stars_density.clamp(0.0, 1.0)
             } else {
                 0.0
             },
-            stars_intensity: environment.settings.sky.stars_intensity,
+            stars_intensity: if stars.stars_enabled {
+                stars.stars_intensity.clamp(0.0, 4.0)
+            } else {
+                0.0
+            },
         }));
     }
 
@@ -781,10 +797,19 @@ pub fn append_cpu_canvas(
     Ok(texture)
 }
 
-/// Camera and light direction for the scene half of the frame.
+/// Camera, lighting, sky, and shadow state for the scene half of the frame.
 ///
-/// Environment color, exposure, and shadows stay with the composing host
-/// because they depend on passes this producer does not own.
+/// The product encoder folds `environment.ambient` into `light.w` and
+/// `environment.exposure_ev` into the `.exp2()` scale of the environment
+/// uniform. Colors handed over here are linear and are never pre-exposed: the
+/// shader applies exposure exactly once.
+///
+/// Authored ambient travels as `ambient_tint * light.w`. The shader stores the
+/// scalar fraction in `light.w`, so the authored ambient color is split into
+/// its Rec.709 luminance (clamped to the contract's 0..1 range) and a tint
+/// normalized by that fraction. When the luminance exceeds one, the fraction
+/// saturates and the normalized tint carries the excess radiance, so the
+/// product still reconstructs the authored ambient.
 pub fn scene_frame_uniforms(frame: &SceneRenderFrame) -> FrameUniforms {
     let mut uniforms = FrameUniforms::default();
     uniforms.camera = Camera {
@@ -792,7 +817,9 @@ pub fn scene_frame_uniforms(frame: &SceneRenderFrame) -> FrameUniforms {
         world_position: frame.commands.camera_eye,
     };
     uniforms.light.toward_light = frame.light_dir.try_normalize().unwrap_or(Vec3::Y);
-    if let Some(environment) = frame.commands.environment {
+    if let Some(environment) = frame.commands.environment.filter(|environment| {
+        environment.settings.mode == raf_core::environment::EnvironmentMode::Scene
+    }) {
         uniforms.light.toward_light = environment
             .sun_direction
             .try_normalize()
@@ -801,46 +828,90 @@ pub fn scene_frame_uniforms(frame: &SceneRenderFrame) -> FrameUniforms {
         if sun.is_finite() && sun.min_element() >= 0.0 {
             uniforms.light.color = sun.to_array();
         }
-        uniforms.environment.ambient_tint = environment.ambient.to_array();
-        uniforms.environment.authored = true;
-        uniforms.environment.toon_steps = environment.settings.sun.shading_steps();
-        if environment.improved() {
-            uniforms.environment.improved = true;
-            uniforms.environment.toon_softness = environment.softness();
-            let exposure = environment.exposure();
+        let ambient = environment.ambient;
+        if ambient.is_finite() && ambient.min_element() >= 0.0 {
+            let fraction = ambient_luminance(ambient).clamp(0.0, 1.0);
+            uniforms.environment.ambient = fraction;
+            let tint = if fraction > 0.0 {
+                ambient / fraction
+            } else {
+                Vec3::ZERO
+            };
+            uniforms.environment.ambient_tint = if tint.is_finite() && tint.min_element() >= 0.0 {
+                tint.to_array()
+            } else {
+                [0.0; 3]
+            };
+        } else {
+            // Keep malformed authored ambient out of the shader entirely.
+            uniforms.environment.ambient = 0.0;
+            uniforms.environment.ambient_tint = [0.0; 3];
+        }
+        uniforms.environment.authored =
+            environment.settings.mode == raf_core::environment::EnvironmentMode::Scene;
+        uniforms.environment.improved = environment.improved();
+        if environment.settings.sun.toon_enabled {
+            let steps = environment.settings.sun.toon_steps;
+            if steps.is_finite() {
+                uniforms.environment.toon_steps = steps.clamp(0.0, 6.0);
+            }
+            // Soft transitions are an improved-only control. Current keeps its
+            // hard quantization, matching the CPU raster path.
+            let softness = environment.settings.sun.toon_softness;
+            uniforms.environment.toon_softness =
+                if uniforms.environment.improved && softness.is_finite() {
+                    softness.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+        }
+        if uniforms.environment.improved {
+            let exposure = environment.settings.exposure;
             if exposure.is_finite() && exposure > 0.0 {
                 uniforms.environment.exposure_ev = exposure.log2().clamp(-16.0, 16.0);
             }
         }
     }
-    if let Some(shadow) = frame.commands.shadows.as_ref() {
-        if shadow.settings.enabled {
-            uniforms.shadows = Some(raf_agb::product::ShadowUniforms {
-                light_view_projection: shadow.geometry.view_projection,
-                bias: shadow.settings.bias / (8.0 * shadow.settings.distance),
-                resolution: shadow.geometry.resolution,
-                depth_key: shadow.geometry.key,
-                distance: shadow.settings.distance,
-                strength: shadow.settings.strength,
-                slope_bias_per_texel: shadow
-                    .geometry
-                    .normalized_texel_bias(shadow.geometry.resolution)
-                    * if shadow.settings.soft_filter {
-                        1.5
-                    } else {
-                        0.85
-                    },
-                filter_taps: if !shadow.settings.soft_filter {
-                    1
-                } else if shadow.improved {
-                    9
+    if let Some(shadow) = frame
+        .commands
+        .shadows
+        .as_ref()
+        .filter(|shadow| shadow.settings.enabled)
+    {
+        uniforms.shadows = Some(raf_agb::product::ShadowUniforms {
+            light_view_projection: shadow.geometry.view_projection,
+            bias: shadow.settings.bias / (8.0 * shadow.settings.distance),
+            resolution: shadow.geometry.resolution,
+            depth_key: shadow.geometry.key,
+            distance: shadow.settings.distance,
+            strength: shadow.settings.strength,
+            slope_bias_per_texel: shadow
+                .geometry
+                .normalized_texel_bias(shadow.geometry.resolution)
+                * if shadow.settings.soft_filter {
+                    1.5
                 } else {
-                    4
+                    0.85
                 },
-            });
-        }
+            filter_taps: if !shadow.settings.soft_filter {
+                1
+            } else if shadow.improved {
+                9
+            } else {
+                4
+            },
+        });
     }
+    // `scene_filter` has no authored environment toggle; the composing host
+    // owns it and the device gate owns capability removal.
+    uniforms.scene_filter = false;
     uniforms
+}
+
+/// Rec.709 relative luminance, used only to split an authored ambient color
+/// into the product contract's scalar fraction and a normalized tint.
+fn ambient_luminance(color: Vec3) -> f32 {
+    color.dot(Vec3::new(0.2126, 0.7152, 0.0722))
 }
 
 /// Hand the scene-led packet to the product device. The caller owns the
@@ -850,6 +921,16 @@ pub fn scene_frame_uniforms(frame: &SceneRenderFrame) -> FrameUniforms {
 pub fn prepare_product_scene<B: Backend>(
     device: &mut ProductDevice<B>,
     builder: &mut ProductFrameBuilder,
+) -> Result<PacketHandle, String> {
+    prepare_product_packet(device, builder, "scene")
+}
+
+/// Generic retained-packet handoff for any builder key. Layered compositors use
+/// it for the scene and UI halves so each role reports its own failure.
+pub fn prepare_product_packet<B: Backend>(
+    device: &mut ProductDevice<B>,
+    builder: &mut ProductFrameBuilder,
+    role: &str,
 ) -> Result<PacketHandle, String> {
     let key = builder.key();
     let revision = builder.revision();
@@ -870,10 +951,8 @@ pub fn prepare_product_scene<B: Backend>(
                 Ok(handle)
             }
         }
-        Err(error) => {
-            Err(failure
-                .unwrap_or_else(|| format!("product device rejected the scene packet: {error}")))
-        }
+        Err(error) => Err(failure
+            .unwrap_or_else(|| format!("product device rejected the {role} packet: {error}"))),
     }
 }
 

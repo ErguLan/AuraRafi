@@ -30,8 +30,9 @@ El contrato retenido, su matriz de cobertura y el arranque nativo viven en `raf_
 
 ### Uso del contrato implementado
 
-- Construir un `ProductPacket` con comandos en orden, recursos y materiales. `ProductDevice::prepare` recibe una clave y revisión del origen. La clausura se ejecuta solo cuando cambia la revisión. Mantener una sola composición por dispositivo. Conservar las fuentes para reconstrucción.
+- Construir un `ProductPacket` con comandos en orden, recursos y materiales. `ProductDevice::prepare` recibe una clave y revisión del origen. La clausura se ejecuta solo cuando cambia la revisión. Mantener una sola composición por dispositivo, salvo la pareja escena/UI de la ruta por capas descrita abajo. Conservar las fuentes para reconstrucción.
 - Pasar `FrameUniforms` al dibujar. Contiene cámara, luz, ambiente RGB, exposición, sombras, filtro y el viewport del canvas. Para el fondo usar `DrawSky` o `SceneBackground` antes de la geometría. Sombras y filtro están implementados en Vulkan y DX12 y se consultan mediante `supports_shadows` y `supports_scene_filter`; el compositor las desactiva si el ejecutor no las soporta.
+- El paquete interno del frame separa los controles. `RasterUniforms.viewport` lleva solo el tamaño en píxeles del canvas, `eye` solo la posición de cámara y `lighting` lleva `[authored, improved, toon_steps, toon_softness]`; `light_color` conserva RGBA puro. Los ejecutores y `draw.wgsl` no reutilizan componentes `z` o `w` como flags. El layout resultante es de 160 bytes en Vulkan, DX12, Metal y WebGPU.
 - Usar `mesh_span` y `instance_span` para localizar rangos de vertex/instance en el paquete preparado. El tint de instancia en GPU incluye el multiplicador del material. Para modificar un atlas o imagen, usar `ResourcePatch::Texture` con rectángulo y RGBA ajustado al ancho del rectángulo. `patch` acepta la revisión esperada y avanza la revisión solo si la operación se acepta. Los cambios de topología o tamaño pasan por `prepare`.
 - Conservar el mismo `PacketHandle` al actualizar parcialmente y renovar el handle al reemplazar el paquete. Mantener un presupuesto suficiente para admitir ambas revisiones durante el reemplazo. Vulkan y DX12 esperan el fence de la copia parcial, Metal espera el blit o escribe en almacenamiento compartido al terminar el trabajo anterior, y WebGPU encola la escritura. Una cola de staging asíncrona y captura de producto quedan pendientes.
 - `Output::Present` y `Output::Capture` usan el mismo contrato. `capture` sigue siendo una lectura bloqueante para herramientas. Instanciar un dispositivo nuevo invalida los handles anteriores. El arranque Vulkan vuelve a preparar su pequeña pantalla al reconstruir.
@@ -116,6 +117,14 @@ Vulkan es el ejecutor principal de ventana en Linux y Windows. DX12 cubre ventan
 
 [Estilos retenidos](../crates/raf_agb/src/product/paint_style.rs) · [Shadow map](../crates/raf_agb/src/backends/vulkan/shadow.rs) · [Filtro](../crates/raf_agb/src/backends/vulkan/filter.rs)
 
+### Composición en dos paquetes
+
+Vulkan en ventana es el único ejecutor que implementa composición por capas. El editor mantiene dos paquetes retenidos en el mismo `ProductDevice`, con claves distintas: escena (`PacketKey(1)`) y RafUI (`PacketKey(2)`). La escena incluye el canvas, sus comandos y el entorno; la UI contiene solo la pintura retenida. Cada mitad tiene su propia huella y su propia revisión: un cambio de texto, menú o hover reconstruye únicamente el paquete de UI, y un canvas nuevo reconstruye únicamente el de escena. La cámara viaja en `FrameUniforms` y no reescribe geometría.
+
+`ProductDevice::draw_layers` recibe `[escena, ui]` y usa el clear del primer paquete; sin canvas dibuja solo `[ui]`, cuyo clear es el fondo del editor. `Backend::supports_layers` decide la ruta: si es falso se conserva el paquete único anterior sin cambios. Vulkan adquiere el destino una vez, graba un solo command buffer y presenta o captura una vez. El pase de sombras y el filtro espacial consumen solo la capa de escena; el pase final limpia una vez con el frame de escena y dibuja la geometría de escena antes de la pintura de UI. Las métricas exponen las revisiones y reconstrucciones de ambos paquetes, el número de capas, `command_submits` y `presents`. `RAF_AGB_TRACE_FRAME` imprime el paquete de escena, el de UI y la ruta elegida.
+
+DX12, Metal, WebGPU y los hosts headless, incluida la captura offscreen de Vulkan, no fingen soporte por capas: `supports_layers` devuelve falso y siguen usando el paquete único con exactamente el mismo comportamiento y orden que antes.
+
 ## P1. Arranque nativo aislado
 
 El banco presenta una pantalla pequeña con un fondo, tarjeta, atlas e imagen mediante el contrato nuevo. El código de arranque ofrece Vulkan, DX12 con Win32 y Metal con AppKit/UIKit para ventana, además de captura offscreen y el canvas WebGPU del banco. En Windows la selección automática prioriza Vulkan para ventana y DX12 para captura. Una build con DX12 puede pedir `--startup --window --backend dx12`.
@@ -167,7 +176,7 @@ En la verificación de este corte, el editor abrió en Vulkan en 630 ms de inici
 ### Pendientes reales
 
 - Metal y WebGPU no tienen todavía shadow map ni filtro de escena.
-- El recoste de un frame con UI cambiada reconstruye el paquete completo. Un perfil con UI animada debe medir el upload y, si hace falta, separar escena y UI en dos capas con actualizaciones parciales.
+- Vulkan separa escena y UI en dos paquetes retenidos, así que un cambio de UI no re-sube la escena. DX12, Metal, WebGPU y headless conservan el paquete único: un perfil con UI animada en esos ejecutores debe medir el recoste completo antes de decidir si necesita la misma separación.
 - La preferencia VSync del editor se conserva, pero AGB presenta con FIFO; el modo inmediato requiere una API de presentación por dispositivo.
 - La codificación sRGB de la presentación WebGPU y la captura de canvas siguen pendientes.
 

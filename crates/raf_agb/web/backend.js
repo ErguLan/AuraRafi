@@ -1,4 +1,5 @@
-const CAMERA_BYTES = 144;
+// Matches RasterUniforms: mat4 view_projection plus six vec4 fields.
+const CAMERA_BYTES = 160;
 // Pipeline, texture, first, count, first instance, instances, indexed, scene.
 const DRAW_WORDS = 8;
 const DEPTH = "depth32float";

@@ -70,7 +70,10 @@ pub(super) fn ai(
         let card_id = format!("settings.ai-provider.{id}");
         let has_catalog = matches!(
             provider,
-            AiProvider::OpenRouter | AiProvider::OpenAI | AiProvider::OpenCode | AiProvider::OpenCodeGo
+            AiProvider::OpenRouter
+                | AiProvider::OpenAI
+                | AiProvider::OpenCode
+                | AiProvider::OpenCodeGo
         );
         root = root.with_child(
             UiNode::new(card_id.clone(), UiNodeKind::Panel)
@@ -94,7 +97,11 @@ pub(super) fn ai(
                                 "settings.account.plan_selected"
                             } else if !matches!(
                                 provider,
-                                AiProvider::OpenAI | AiProvider::OpenRouter | AiProvider::OpenCode | AiProvider::OpenCodeGo | AiProvider::Puerto
+                                AiProvider::OpenAI
+                                    | AiProvider::OpenRouter
+                                    | AiProvider::OpenCode
+                                    | AiProvider::OpenCodeGo
+                                    | AiProvider::Puerto
                             ) {
                                 "settings.ai_provider_status_unsupported"
                             } else if !config.enabled {
@@ -129,15 +136,17 @@ pub(super) fn ai(
                     open_select,
                     model_filter,
                 ))
-                .with_child(if provider == AiProvider::OpenAI && settings.agent_openai_use_plan {
-                    UiNode::new(format!("{card_id}.plan-note"), UiNodeKind::Label)
-                        .with_text_key("ai_models.plan_only")
-                        .with_text_overflow(UiTextOverflow::Wrap)
-                        .with_text_style(UiTextStyle::body(tokens.text_muted))
-                        .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill))
-                } else {
-                    ai_api_credentials(palette, config, revealed_api_keys)
-                }),
+                .with_child(
+                    if provider == AiProvider::OpenAI && settings.agent_openai_use_plan {
+                        UiNode::new(format!("{card_id}.plan-note"), UiNodeKind::Label)
+                            .with_text_key("ai_models.plan_only")
+                            .with_text_overflow(UiTextOverflow::Wrap)
+                            .with_text_style(UiTextStyle::body(tokens.text_muted))
+                            .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill))
+                    } else {
+                        ai_api_credentials(palette, config, revealed_api_keys)
+                    },
+                ),
         );
     }
 
@@ -281,20 +290,36 @@ pub(super) fn ai(
 /// The provider card model picker: a trigger with the active model id and a
 /// searchable popup built from the shared picker data. Сustom ids stay in the
 /// advanced text row beneath it.
-fn ai_api_credentials(palette: StudioUiPalette, config: &raf_core::ai::AiProviderConfig, revealed: &[AiProvider]) -> UiNode {
+fn ai_api_credentials(
+    palette: StudioUiPalette,
+    config: &raf_core::ai::AiProviderConfig,
+    revealed: &[AiProvider],
+) -> UiNode {
     let provider = config.provider;
     let id = provider_id(provider);
     let card = format!("settings.ai-provider.{id}");
     let mut root = UiNode::new(format!("{card}.api-fields"), UiNodeKind::Panel)
-        .with_layout(UiLayout { flow: UiFlow::Column, gap: 6.0, ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill) })
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 6.0,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
         .with_child(group_label(palette, "settings.ai_advanced"));
-    for (field, key) in [("base-url", "base_url"), ("custom-model", "model"), ("api-key", "api_key")] {
+    for (field, key) in [
+        ("base-url", "base_url"),
+        ("custom-model", "model"),
+        ("api-key", "api_key"),
+    ] {
         let secret = key == "api_key";
-        root = root.with_child(ai_provider_text_row(palette, &format!("{card}.{field}"),
-            &format!("settings.ai_provider_{key}"), &format!("settings.ai_provider.{id}.{key}"),
+        root = root.with_child(ai_provider_text_row(
+            palette,
+            &format!("{card}.{field}"),
+            &format!("settings.ai_provider_{key}"),
+            &format!("settings.ai_provider.{id}.{key}"),
             secret && !revealed.contains(&provider),
             secret.then(|| format!("settings.ai_provider.reveal.{id}")),
-            secret.then(|| format!("settings.ai_provider.clear.{id}"))));
+            secret.then(|| format!("settings.ai_provider.clear.{id}")),
+        ));
     }
     root
 }
@@ -333,7 +358,10 @@ fn ai_model_picker_row(
                 max_size: [CONTROL_WIDTH, 32.0],
                 ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill)
             })
-            .with_icon(raf_ui::UiIcon::new(raf_ui::UiIconId::ChevronDown).with_size(raf_ui::UiIconSize::Small))
+            .with_icon(
+                raf_ui::UiIcon::new(raf_ui::UiIconId::ChevronDown)
+                    .with_size(raf_ui::UiIconSize::Small),
+            )
             .with_accessibility_label_key("settings.ai_provider_model")
             .with_accessibility_role(raf_ui::UiAccessibilityRole::Combobox)
             .with_accessibility_expanded(false)
@@ -351,7 +379,13 @@ fn ai_model_picker_row(
             trigger = trigger.with_text_value(current.clone());
         }
         trigger = trigger.with_text_overflow(UiTextOverflow::Ellipsis);
-        return row(palette, format!("{card_id}.model"), "settings.ai_provider_model".to_string(), None, trigger);
+        return row(
+            palette,
+            format!("{card_id}.model"),
+            "settings.ai_provider_model".to_string(),
+            None,
+            trigger,
+        );
     }
 
     let (state, items) =
@@ -361,23 +395,28 @@ fn ai_model_picker_row(
         rows.push(
             UiNode::new(format!("{card_id}.model.refresh"), UiNodeKind::Button)
                 .with_class("settings-select-option settings-model-refresh")
-                .with_layout(
-                    UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill),
-                )
+                .with_layout(UiLayout::fixed(0.0, 30.0).with_width_mode(UiSizeMode::Fill))
                 .with_text_key("settings.ai_provider_refresh_models")
                 .with_text_style(UiTextStyle::button(tokens.accent_hot))
                 .with_accessibility_role(raf_ui::UiAccessibilityRole::MenuItem)
                 .focusable()
                 .with_event(UiEventBinding::command(
                     UiEventKind::Click,
-                    format!("settings.ai_provider.refresh_catalog.{}", provider_id(config.provider)),
+                    format!(
+                        "settings.ai_provider.refresh_catalog.{}",
+                        provider_id(config.provider)
+                    ),
                 )),
         );
         let status = crate::panels::ai_model_options::model_status_text(&state, language);
         if !status.is_empty() {
             rows.push(
                 UiNode::new(format!("{card_id}.model.status"), UiNodeKind::Label)
-                    .with_layout(UiLayout::fixed(0.0, 28.0).with_width_mode(UiSizeMode::Fill).padding_xy(10.0, 4.0))
+                    .with_layout(
+                        UiLayout::fixed(0.0, 28.0)
+                            .with_width_mode(UiSizeMode::Fill)
+                            .padding_xy(10.0, 4.0),
+                    )
                     .with_text_value(status)
                     .with_text_overflow(UiTextOverflow::Ellipsis)
                     .with_text_style(UiTextStyle::button(tokens.text_muted)),
@@ -402,11 +441,13 @@ fn ai_model_picker_row(
     );
     let mut last_lane = 0u8;
     if items.is_empty() {
-        rows.push(UiNode::new(format!("{card_id}.model.empty"), UiNodeKind::Label)
-            .with_text_key("ai_models.empty")
-            .with_text_overflow(UiTextOverflow::Wrap)
-            .with_text_style(UiTextStyle::body(tokens.text_muted))
-            .with_layout(UiLayout::fixed(0.0, 48.0).with_width_mode(UiSizeMode::Fill)));
+        rows.push(
+            UiNode::new(format!("{card_id}.model.empty"), UiNodeKind::Label)
+                .with_text_key("ai_models.empty")
+                .with_text_overflow(UiTextOverflow::Wrap)
+                .with_text_style(UiTextStyle::body(tokens.text_muted))
+                .with_layout(UiLayout::fixed(0.0, 48.0).with_width_mode(UiSizeMode::Fill)),
+        );
     }
     for item in &items {
         let lane = if item.value.starts_with("account:") {
@@ -426,9 +467,7 @@ fn ai_model_picker_row(
                 _ => "ai_models.custom",
             };
             rows.push(crate::panels::ai_model_options::model_header_row(
-                &paint,
-                header_key,
-                language,
+                &paint, header_key, language,
             ));
             last_lane = lane;
         }
@@ -458,7 +497,9 @@ fn ai_model_picker_row(
         });
     let mut scroll = UiNode::scroll_view(format!("{card_id}.model.scroll"), UiScrollAxis::Vertical)
         .with_layout(UiLayout::fill(UiFlow::Column));
-    for row_node in rows { scroll = scroll.with_child(row_node); }
+    for row_node in rows {
+        scroll = scroll.with_child(row_node);
+    }
     menu = menu.with_child(scroll);
     let trigger = UiNode::new(trigger_id.clone(), UiNodeKind::Button)
         .with_class("settings-select-trigger settings-model-trigger")
@@ -468,7 +509,9 @@ fn ai_model_picker_row(
             max_size: [CONTROL_WIDTH, 32.0],
             ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill)
         })
-        .with_icon(raf_ui::UiIcon::new(raf_ui::UiIconId::ChevronDown).with_size(raf_ui::UiIconSize::Small))
+        .with_icon(
+            raf_ui::UiIcon::new(raf_ui::UiIconId::ChevronDown).with_size(raf_ui::UiIconSize::Small),
+        )
         .with_accessibility_label_key("settings.ai_provider_model")
         .with_accessibility_role(raf_ui::UiAccessibilityRole::Combobox)
         .with_accessibility_expanded(true)
@@ -514,43 +557,146 @@ pub(crate) fn account_controls(
 ) -> UiNode {
     let tokens = palette.tokens();
     let mut root = UiNode::new("settings.account.controls", UiNodeKind::Panel)
-        .with_layout(UiLayout { flow: UiFlow::Column, gap: 6.0, ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill) })
-        .with_child(toggle_row_with_description(palette, "settings.account.plan", "settings.agent_openai_use_plan",
-            settings.agent_openai_use_plan, "settings.account.plan_description"));
-    let active = view.accounts.iter().any(|account| account.active && account.connected);
-    root = root.with_child(UiNode::new("settings.account.status", UiNodeKind::Label)
-        .with_text_key(if view.busy { "settings.account.connecting" } else if active { "settings.account.connected" } else { "settings.account.disconnected" })
-        .with_text_style(UiTextStyle::body(tokens.text_muted))
-        .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)));
+        .with_layout(UiLayout {
+            flow: UiFlow::Column,
+            gap: 6.0,
+            ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+        })
+        .with_child(toggle_row_with_description(
+            palette,
+            "settings.account.plan",
+            "settings.agent_openai_use_plan",
+            settings.agent_openai_use_plan,
+            "settings.account.plan_description",
+        ));
+    let active = view
+        .accounts
+        .iter()
+        .any(|account| account.active && account.connected);
+    root = root.with_child(
+        UiNode::new("settings.account.status", UiNodeKind::Label)
+            .with_text_key(if view.busy {
+                "settings.account.connecting"
+            } else if active {
+                "settings.account.connected"
+            } else {
+                "settings.account.disconnected"
+            })
+            .with_text_style(UiTextStyle::body(tokens.text_muted))
+            .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+    );
     for (index, account) in view.accounts.iter().enumerate() {
         let label = format!("{} · {}", account.label, index + 1);
-        root = root.with_child(UiNode::new(format!("settings.account.profile.{index}"), UiNodeKind::Toolbar)
-            .with_layout(UiLayout { flow: UiFlow::Row, align_items: UiAlign::Center, gap: 6.0,
-                ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill) })
-            .with_child(UiNode::new(format!("settings.account.profile.{index}.label"), UiNodeKind::Label)
-                .with_text_value(label).with_text_overflow(UiTextOverflow::Ellipsis)
-                .with_text_style(UiTextStyle::body(if account.active { tokens.accent } else { tokens.text_muted }))
-                .with_layout(UiLayout { grow: 1.0, ..UiLayout::fit_content() }))
-            .with_child(command_button(palette, &format!("settings.account.profile.{index}.action"),
-                if account.connected { "settings.account.select" } else { "settings.account.reconnect" },
-                &format!("settings.account.{}:{index}", if account.connected { "select" } else { "reconnect" }),
-                "settings-secondary-button", 105.0).disabled(view.busy)));
+        root = root.with_child(
+            UiNode::new(
+                format!("settings.account.profile.{index}"),
+                UiNodeKind::Toolbar,
+            )
+            .with_layout(UiLayout {
+                flow: UiFlow::Row,
+                align_items: UiAlign::Center,
+                gap: 6.0,
+                ..UiLayout::fixed(0.0, 32.0).with_width_mode(UiSizeMode::Fill)
+            })
+            .with_child(
+                UiNode::new(
+                    format!("settings.account.profile.{index}.label"),
+                    UiNodeKind::Label,
+                )
+                .with_text_value(label)
+                .with_text_overflow(UiTextOverflow::Ellipsis)
+                .with_text_style(UiTextStyle::body(if account.active {
+                    tokens.accent
+                } else {
+                    tokens.text_muted
+                }))
+                .with_layout(UiLayout {
+                    grow: 1.0,
+                    ..UiLayout::fit_content()
+                }),
+            )
+            .with_child(
+                command_button(
+                    palette,
+                    &format!("settings.account.profile.{index}.action"),
+                    if account.connected {
+                        "settings.account.select"
+                    } else {
+                        "settings.account.reconnect"
+                    },
+                    &format!(
+                        "settings.account.{}:{index}",
+                        if account.connected {
+                            "select"
+                        } else {
+                            "reconnect"
+                        }
+                    ),
+                    "settings-secondary-button",
+                    105.0,
+                )
+                .disabled(view.busy),
+            ),
+        );
     }
-    root = root.with_child(UiNode::new("settings.account.actions", UiNodeKind::Toolbar)
-        .with_layout(UiLayout { flow: UiFlow::RowWrap, gap: 6.0, ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill) })
-        .with_child(command_button(palette, "settings.account.connect", "settings.account.connect",
-            "settings.account.connect", "settings-secondary-button", 184.0).disabled(view.busy))
-        .with_child(command_button(palette, "settings.account.refresh", "settings.account.refresh",
-            "settings.account.refresh", "settings-secondary-button", 124.0).disabled(view.busy || !active))
-        .with_child(command_button(palette, "settings.account.signout", "settings.account.signout",
-            "settings.account.signout", "settings-secondary-button", 124.0).disabled(view.busy || !active))
-        .with_child(command_button(palette, "settings.account.usage", "settings.account.usage",
-            "settings.account.usage", "settings-secondary-button", 135.0)));
+    root = root.with_child(
+        UiNode::new("settings.account.actions", UiNodeKind::Toolbar)
+            .with_layout(UiLayout {
+                flow: UiFlow::RowWrap,
+                gap: 6.0,
+                ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
+            })
+            .with_child(
+                command_button(
+                    palette,
+                    "settings.account.connect",
+                    "settings.account.connect",
+                    "settings.account.connect",
+                    "settings-secondary-button",
+                    184.0,
+                )
+                .disabled(view.busy),
+            )
+            .with_child(
+                command_button(
+                    palette,
+                    "settings.account.refresh",
+                    "settings.account.refresh",
+                    "settings.account.refresh",
+                    "settings-secondary-button",
+                    124.0,
+                )
+                .disabled(view.busy || !active),
+            )
+            .with_child(
+                command_button(
+                    palette,
+                    "settings.account.signout",
+                    "settings.account.signout",
+                    "settings.account.signout",
+                    "settings-secondary-button",
+                    124.0,
+                )
+                .disabled(view.busy || !active),
+            )
+            .with_child(command_button(
+                palette,
+                "settings.account.usage",
+                "settings.account.usage",
+                "settings.account.usage",
+                "settings-secondary-button",
+                135.0,
+            )),
+    );
     if let Some(message) = &view.message {
-        root = root.with_child(UiNode::new("settings.account.error", UiNodeKind::Label)
-            .with_text_key("settings.account.error_summary").with_tooltip_value(message.clone()).with_text_overflow(UiTextOverflow::Wrap)
-            .with_text_style(UiTextStyle::body(tokens.warning))
-            .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)));
+        root = root.with_child(
+            UiNode::new("settings.account.error", UiNodeKind::Label)
+                .with_text_key("settings.account.error_summary")
+                .with_tooltip_value(message.clone())
+                .with_text_overflow(UiTextOverflow::Wrap)
+                .with_text_style(UiTextStyle::body(tokens.warning))
+                .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+        );
     }
     root
 }
@@ -559,8 +705,12 @@ pub(crate) fn account_welcome(palette: StudioUiPalette, rect: UiRect) -> UiNode 
     let tokens = palette.tokens();
     let width = 430.0_f32.min((rect.width - 32.0).max(1.0));
     let height = 170.0_f32.min((rect.height - 32.0).max(1.0));
-    let mut layout = UiLayout::absolute(UiRect::new(rect.x + (rect.width - width) * 0.5,
-        rect.y + (rect.height - height) * 0.5, width, height));
+    let mut layout = UiLayout::absolute(UiRect::new(
+        rect.x + (rect.width - width) * 0.5,
+        rect.y + (rect.height - height) * 0.5,
+        width,
+        height,
+    ));
     layout.flow = UiFlow::Column;
     layout.gap = 10.0;
     layout.padding = UiSpacing::same(18.0);
@@ -570,14 +720,27 @@ pub(crate) fn account_welcome(palette: StudioUiPalette, rect: UiRect) -> UiNode 
         .with_layout(layout.with_z_index(120))
         .with_accessibility_role(UiAccessibilityRole::Dialog)
         .with_accessibility_label_key("settings.account.welcome_title")
-        .with_child(UiNode::new("settings.account.welcome.title", UiNodeKind::Label)
-            .with_text_key("settings.account.welcome_title").with_text_style(UiTextStyle::panel_title(tokens.text))
-            .with_layout(UiLayout::fit_content()))
-        .with_child(UiNode::new("settings.account.welcome.body", UiNodeKind::Label)
-            .with_text_key("settings.account.welcome_body").with_text_overflow(UiTextOverflow::Wrap)
-            .with_text_style(UiTextStyle::body(tokens.text)).with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)))
-        .with_child(command_button(palette, "settings.account.welcome.ok", "settings.account.welcome_ok",
-            "settings.account.welcome_ack", "settings-primary-button", 112.0))
+        .with_child(
+            UiNode::new("settings.account.welcome.title", UiNodeKind::Label)
+                .with_text_key("settings.account.welcome_title")
+                .with_text_style(UiTextStyle::panel_title(tokens.text))
+                .with_layout(UiLayout::fit_content()),
+        )
+        .with_child(
+            UiNode::new("settings.account.welcome.body", UiNodeKind::Label)
+                .with_text_key("settings.account.welcome_body")
+                .with_text_overflow(UiTextOverflow::Wrap)
+                .with_text_style(UiTextStyle::body(tokens.text))
+                .with_layout(UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)),
+        )
+        .with_child(command_button(
+            palette,
+            "settings.account.welcome.ok",
+            "settings.account.welcome_ok",
+            "settings.account.welcome_ack",
+            "settings-primary-button",
+            112.0,
+        ))
 }
 
 fn ai_provider_text_row(

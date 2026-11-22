@@ -57,6 +57,7 @@ pub mod native_electronics;
 pub mod native_game_runtime;
 pub mod native_input;
 pub(crate) mod native_project_controller;
+pub mod native_runtime_log;
 pub mod native_studio;
 pub mod native_surface;
 pub mod native_workbench;

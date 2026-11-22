@@ -324,6 +324,48 @@ pub(super) fn settings_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             )
             .when(UiStyleRuleState::Always),
             UiStyleRule::new(
+                UiStyleSelector::Class("settings-quiet-button".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    text: Some(tokens.text_muted),
+                    radius: Some(3.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-quiet-button".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.canvas),
+                    text: Some(tokens.text),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-row-reset".to_string()),
+                UiStylePatch {
+                    fill: Some([0, 0, 0, 0]),
+                    border: Some([0, 0, 0, 0]),
+                    border_width: Some(0.0),
+                    radius: Some(11.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Always),
+            UiStyleRule::new(
+                UiStyleSelector::Class("settings-row-reset".to_string()),
+                UiStylePatch {
+                    fill: Some(tokens.canvas),
+                    border: Some(tokens.border),
+                    border_width: Some(1.0),
+                    ..UiStylePatch::default()
+                },
+            )
+            .when(UiStyleRuleState::Hovered),
+            UiStyleRule::new(
                 UiStyleSelector::Class("settings-text-input".to_string()),
                 UiStylePatch {
                     fill: Some(tokens.surface_alt),

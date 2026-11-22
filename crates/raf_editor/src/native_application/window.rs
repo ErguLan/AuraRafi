@@ -145,6 +145,12 @@ impl NativeEditorApplication {
             } else {
                 GraphicsAdapterPreference::LowPower
             },
+            // The editor retains a full workbench plus console around the
+            // scene. Its text atlas is allowed to reach 2048², which is 16 MiB
+            // on its own and cannot fit the 16 MiB potato staging budget. The
+            // runtime keeps the project render preset; the desktop editor uses
+            // the desktop budget so a large UI frame is not rejected.
+            memory_budget: raf_render::api_graphic_basic::GraphicsMemoryBudget::desktop(),
             ..NativeUiWindowConfig::default()
         };
         let mut host = match pollster::block_on(

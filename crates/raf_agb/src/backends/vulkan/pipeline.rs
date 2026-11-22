@@ -3,6 +3,7 @@ use std::rc::Rc;
 use ash::vk;
 
 use crate::device::ViewportRect;
+use crate::product::Layer;
 use crate::{DrawMode, Error, Frame, Instance, Result, Vertex};
 
 use super::{
@@ -383,14 +384,20 @@ impl Pipelines {
         }
     }
 
-    pub unsafe fn draw(
+    /// Records ordered residents in one render pass.
+    ///
+    /// One clear is taken from the frame before the first layer. Scene layers
+    /// contribute their scene group on pass 0 and overlays on pass 1; overlay
+    /// layers only contribute their overlay group. Each resident binds its own
+    /// geometry and descriptors before its batches.
+    pub unsafe fn draw_layers(
         &self,
         device: &ash::Device,
         cmd: vk::CommandBuffer,
         framebuffer: vk::Framebuffer,
         extent: vk::Extent2D,
         frame: &Frame,
-        resident: &Resident,
+        layers: &[Layer<'_, Resident>],
         passes: &[u32],
         shadow: Option<&super::shadow::ShadowPass>,
         filter: Option<&super::filter::FilterPass>,
@@ -433,7 +440,6 @@ impl Pipelines {
                 device.cmd_set_scissor(cmd, 0, &[scissor(scene)]);
                 filter.draw(cmd);
             }
-            bind_geometry(device, cmd, resident);
             if let Some(shadow) = shadow {
                 device.cmd_bind_descriptor_sets(
                     cmd,
@@ -444,42 +450,58 @@ impl Pipelines {
                     &[],
                 );
             }
-            let scene_end = resident
-                .batches
-                .partition_point(|batch| batch.mode.is_scene());
-            let mut texture = u32::MAX;
             for pass in passes {
-                let batches = match pass {
-                    0 => &resident.batches[..scene_end],
-                    1 => &resident.batches[scene_end..],
-                    _ => break,
-                };
+                if *pass > 1 {
+                    break;
+                }
                 let mut bound = None;
-                for batch in batches {
-                    if bound != Some(batch.mode) {
-                        bound = Some(batch.mode);
-                        let pipeline = match batch.mode {
-                            DrawMode::Scene => shadow.map_or(self.scene, |shadow| shadow.scene),
-                            DrawMode::DepthReadOnly => self.read_depth,
-                            DrawMode::Overlay | DrawMode::SceneNoDepth => self.overlay,
-                        };
-                        device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                        let target = ViewportRect::for_mode(scene, batch.mode, size);
-                        device.cmd_set_viewport(cmd, 0, &[viewport(target)]);
-                        device.cmd_set_scissor(cmd, 0, &[scissor(target)]);
+                for layer in layers {
+                    if *pass == 0 && !layer.scene {
+                        continue;
                     }
-                    if batch.texture != texture {
-                        texture = batch.texture;
-                        device.cmd_bind_descriptor_sets(
-                            cmd,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            shadow.map_or(self.bindings.layout, |shadow| shadow.layout),
-                            0,
-                            &[resident.descriptors.sets[texture as usize]],
-                            &[],
-                        );
+                    let resident = layer.resident;
+                    let scene_end = resident
+                        .batches
+                        .partition_point(|batch| batch.mode.is_scene());
+                    let batches = match pass {
+                        0 => &resident.batches[..scene_end],
+                        _ => &resident.batches[scene_end..],
+                    };
+                    if batches.is_empty() {
+                        continue;
                     }
-                    draw_batch(device, cmd, batch);
+                    bind_geometry(device, cmd, resident);
+                    let mut texture = u32::MAX;
+                    for batch in batches {
+                        if bound != Some(batch.mode) {
+                            bound = Some(batch.mode);
+                            let pipeline = match batch.mode {
+                                DrawMode::Scene => shadow.map_or(self.scene, |shadow| shadow.scene),
+                                DrawMode::DepthReadOnly => self.read_depth,
+                                DrawMode::Overlay | DrawMode::SceneNoDepth => self.overlay,
+                            };
+                            device.cmd_bind_pipeline(
+                                cmd,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                pipeline,
+                            );
+                            let target = ViewportRect::for_mode(scene, batch.mode, size);
+                            device.cmd_set_viewport(cmd, 0, &[viewport(target)]);
+                            device.cmd_set_scissor(cmd, 0, &[scissor(target)]);
+                        }
+                        if batch.texture != texture {
+                            texture = batch.texture;
+                            device.cmd_bind_descriptor_sets(
+                                cmd,
+                                vk::PipelineBindPoint::GRAPHICS,
+                                shadow.map_or(self.bindings.layout, |shadow| shadow.layout),
+                                0,
+                                &[resident.descriptors.sets[texture as usize]],
+                                &[],
+                            );
+                        }
+                        draw_batch(device, cmd, batch);
+                    }
                 }
             }
             device.cmd_end_render_pass(cmd);

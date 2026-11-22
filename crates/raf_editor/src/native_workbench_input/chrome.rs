@@ -1,7 +1,12 @@
 use super::*;
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_app_command(&mut self, name: &String, dispatched: &UiDispatchedAction, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_app_command(
+        &mut self,
+        name: &String,
+        dispatched: &UiDispatchedAction,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if name.starts_with("runtime.") || name.starts_with("agent.lab.open.") {
             intents.push(NativeWorkbenchIntent::Command(name.clone()));
             return true;
@@ -32,8 +37,8 @@ impl NativeGameWorkbench {
             return true;
         }
         if let Some(menu_id) = name.strip_prefix("application.menu.") {
-            self.open_menu = (self.open_menu.as_deref() != Some(menu_id))
-                .then(|| menu_id.to_string());
+            self.open_menu =
+                (self.open_menu.as_deref() != Some(menu_id)).then(|| menu_id.to_string());
             self.open_submenu = None;
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             return true;
@@ -59,8 +64,7 @@ impl NativeGameWorkbench {
                 return true;
             }
             "viewport.dropdown.shading.toggle" => {
-                self.toolbar_state.shading_menu_open =
-                    !self.toolbar_state.shading_menu_open;
+                self.toolbar_state.shading_menu_open = !self.toolbar_state.shading_menu_open;
                 self.toolbar_state.view_menu_open = false;
                 self.toolbar_state.primitive_menu_open = false;
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -72,8 +76,7 @@ impl NativeGameWorkbench {
                 return true;
             }
             "viewport.create-primitive.toggle" => {
-                self.toolbar_state.primitive_menu_open =
-                    !self.toolbar_state.primitive_menu_open;
+                self.toolbar_state.primitive_menu_open = !self.toolbar_state.primitive_menu_open;
                 self.toolbar_state.view_menu_open = false;
                 self.toolbar_state.shading_menu_open = false;
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -85,8 +88,7 @@ impl NativeGameWorkbench {
                 return true;
             }
             "viewport.dropdown.building.toggle" => {
-                self.toolbar_state.building_menu_open =
-                    !self.toolbar_state.building_menu_open;
+                self.toolbar_state.building_menu_open = !self.toolbar_state.building_menu_open;
                 self.toolbar_state.view_menu_open = false;
                 self.toolbar_state.shading_menu_open = false;
                 self.toolbar_state.primitive_menu_open = false;
@@ -104,9 +106,7 @@ impl NativeGameWorkbench {
                 } else {
                     BuildingStyle::Organized
                 };
-                self.apply_toolbar_action(ViewportToolbarAction::SetBuildingStyle(
-                    style,
-                ));
+                self.apply_toolbar_action(ViewportToolbarAction::SetBuildingStyle(style));
                 intents.push(NativeWorkbenchIntent::ProjectSettingToggle {
                     key: format!("project-settings.building-style.{}", style.slug()),
                     value: true,
@@ -120,7 +120,11 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_window_command(&mut self, name: &String, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_window_command(
+        &mut self,
+        name: &String,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         match name.as_str() {
             "window.drag" => {
                 intents.push(NativeWorkbenchIntent::Window(UiWindowCommand::BeginDrag));
@@ -189,7 +193,14 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_primary_press_dismissals(&mut self, native_input: &NativeUiInputBridge, actions: &[UiDispatchedAction], scene: &SceneGraph, selected: &[SceneNodeId], intents: &mut Vec<NativeWorkbenchIntent>) {
+    pub(super) fn handle_primary_press_dismissals(
+        &mut self,
+        native_input: &NativeUiInputBridge,
+        actions: &[UiDispatchedAction],
+        scene: &SceneGraph,
+        selected: &[SceneNodeId],
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) {
         let snapshot = native_input.snapshot();
         if snapshot.button_pressed(raf_core::PointerButton::Primary) {
             if self.agent_panel.borrow_mut().has_open_menu()

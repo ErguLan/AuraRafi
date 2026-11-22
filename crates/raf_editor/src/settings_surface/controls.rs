@@ -2,16 +2,17 @@
 
 use raf_render::api_graphic_basic::ui_surface::{
     StudioUiPalette, UiAccessibilityRole, UiAction, UiAlign, UiCompactMode, UiEventBinding,
-    UiEventKind, UiFlow, UiLayout, UiNode, UiNodeKind, UiOverflow, UiRange, UiSelect, UiSelectOption,
-    UiSizeMode, UiSpacing, UiStyle, UiSurfaceMaterial, UiTextInput, UiTextOverflow, UiTextStyle,
-    UiToggle,
+    UiEventKind, UiFlow, UiLayout, UiNode, UiNodeKind, UiOverflow, UiRange, UiSelect,
+    UiSelectOption, UiSizeMode, UiSpacing, UiStyle, UiSurfaceMaterial, UiTextInput, UiTextOverflow,
+    UiTextStyle, UiToggle,
 };
 use raf_ui::components::select_trigger;
 use raf_ui::{UiFontWeight, UiRect, UiTextRole};
 
 use super::{
-    CONTROL_WIDTH, SEGMENT_MIN_WIDTH, SETTINGS_COMPACT_BREAKPOINT, SETTINGS_CONTROL_MIN_WIDTH,
-    SETTINGS_RANGE_MIN_WIDTH, SETTINGS_ROW_HEIGHT, SETTINGS_STACKED_ROW_HEIGHT,
+    CONTROL_WIDTH, SEGMENT_MIN_WIDTH, SETTINGS_COMPACT_BREAKPOINT, SETTINGS_CONTENT_MAX_WIDTH,
+    SETTINGS_CONTROL_MIN_WIDTH, SETTINGS_RANGE_MIN_WIDTH, SETTINGS_ROW_HEIGHT,
+    SETTINGS_STACKED_ROW_HEIGHT,
 };
 
 pub(super) fn group_label(palette: StudioUiPalette, text_key: &str) -> UiNode {
@@ -69,6 +70,10 @@ pub(super) fn select_row_with_description(
     let trigger = select_trigger(trigger_id, select, palette)
         .with_class("settings-select-trigger")
         .with_layout(UiLayout {
+            flow: UiFlow::Row,
+            align_items: UiAlign::Center,
+            gap: 10.0,
+            padding: UiSpacing::xy(12.0, 0.0),
             grow: 1.0,
             min_size: [SETTINGS_CONTROL_MIN_WIDTH, 32.0],
             max_size: [CONTROL_WIDTH, 32.0],
@@ -152,30 +157,16 @@ pub(super) fn select_row_with_description(
     }
 }
 
-pub(super) fn card(palette: StudioUiPalette, title_key: &str) -> UiNode {
-    let tokens = palette.tokens();
+pub(super) fn card(_palette: StudioUiPalette, title_key: &str) -> UiNode {
     UiNode::new(title_key, UiNodeKind::Panel)
         .with_class("settings-card")
         .with_layout(UiLayout {
             flow: UiFlow::Column,
-            gap: 10.0,
-            padding: UiSpacing::same(20.0),
+            gap: 2.0,
+            max_size: [SETTINGS_CONTENT_MAX_WIDTH, 0.0],
             ..UiLayout::fit_content().with_width_mode(UiSizeMode::Fill)
         })
-        .with_style(UiStyle {
-            fill: tokens.surface,
-            border: tokens.border,
-            text: tokens.text,
-            border_width: 1.0,
-            radius: 6.0,
-            opacity: 1.0,
-        })
-        .with_child(
-            UiNode::new(format!("{title_key}.title"), UiNodeKind::Label)
-                .with_text_key(title_key)
-                .with_text_style(UiTextStyle::panel_title(tokens.text))
-                .with_layout(UiLayout::fixed(0.0, 24.0)),
-        )
+        .with_style(UiStyle::transparent())
 }
 
 pub(super) fn toggle_row(
@@ -564,12 +555,12 @@ pub(super) fn row_with_breakpoint(
             compact: UiCompactMode::None,
             align_items: UiAlign::Center,
             gap: 14.0,
-            padding: UiSpacing::xy(4.0, 4.0),
+            padding: UiSpacing::xy(12.0, 4.0),
             responsive: vec![raf_ui::UiResponsiveRule {
                 max_width: compact_breakpoint,
                 flow: Some(UiFlow::Column),
                 basis: Some([0.0, SETTINGS_STACKED_ROW_HEIGHT]),
-                padding: Some(UiSpacing::xy(4.0, 6.0)),
+                padding: Some(UiSpacing::xy(8.0, 6.0)),
                 gap: Some(6.0),
                 compact: Some(UiCompactMode::Stack),
                 grid_columns: None,
@@ -578,6 +569,62 @@ pub(super) fn row_with_breakpoint(
         })
         .with_child(copy)
         .with_child(control)
+}
+
+pub(super) fn row_with_reset(
+    palette: StudioUiPalette,
+    row: UiNode,
+    changed: bool,
+    reset_key: &str,
+) -> UiNode {
+    if !changed {
+        return row;
+    }
+    let tokens = palette.tokens();
+    row.with_child(
+        UiNode::new(format!("{reset_key}.reset"), UiNodeKind::Button)
+            .with_class("settings-row-reset")
+            .with_layout(UiLayout::fixed(22.0, 22.0))
+            .with_tooltip_key("settings.reset_row")
+            .with_accessibility_label_key("settings.reset_row")
+            .with_accessibility_role(UiAccessibilityRole::Button)
+            .focusable()
+            .with_event(UiEventBinding::command(
+                UiEventKind::Click,
+                format!("settings.reset:{reset_key}"),
+            ))
+            .with_child(
+                UiNode::new(format!("{reset_key}.reset-icon"), UiNodeKind::Label)
+                    .with_icon(
+                        raf_ui::UiIcon::new(raf_ui::UiIconId::Refresh)
+                            .with_size(raf_ui::UiIconSize::Small)
+                            .with_tint(tokens.text_muted),
+                    )
+                    .with_layout(UiLayout::fixed(14.0, 14.0)),
+            ),
+    )
+}
+
+pub(super) fn quiet_button(
+    palette: StudioUiPalette,
+    id: &str,
+    label_key: &str,
+    command: &str,
+    width: f32,
+) -> UiNode {
+    let tokens = palette.tokens();
+    UiNode::new(id, UiNodeKind::Button)
+        .with_class("settings-quiet-button")
+        .with_layout(UiLayout::fixed(width, 30.0))
+        .with_text_key(label_key)
+        .with_text_style(UiTextStyle {
+            inherit_color: true,
+            ..UiTextStyle::button(tokens.text_muted)
+        })
+        .with_accessibility_label_key(label_key)
+        .with_accessibility_role(UiAccessibilityRole::Button)
+        .focusable()
+        .with_event(UiEventBinding::command(UiEventKind::Click, command))
 }
 
 pub(super) fn action_button(

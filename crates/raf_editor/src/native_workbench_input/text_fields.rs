@@ -1,7 +1,13 @@
 use super::*;
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_set_text(&mut self, key: &String, value: &String, selected: &[SceneNodeId], intents: &mut Vec<NativeWorkbenchIntent>) {
+    pub(super) fn handle_set_text(
+        &mut self,
+        key: &String,
+        value: &String,
+        selected: &[SceneNodeId],
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) {
         match key.as_str() {
             "electronics.footprint.query" => {
                 self.footprint_chooser.set_query(value.clone());
@@ -28,8 +34,12 @@ impl NativeGameWorkbench {
                 self.electronics_library_query = value.clone();
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
-            key if crate::electronics_controller::ComponentCreatorField::from_value_key(key).is_some() => {
-                if let Some(field) = crate::electronics_controller::ComponentCreatorField::from_value_key(key) {
+            key if crate::electronics_controller::ComponentCreatorField::from_value_key(key)
+                .is_some() =>
+            {
+                if let Some(field) =
+                    crate::electronics_controller::ComponentCreatorField::from_value_key(key)
+                {
                     intents.insert(
                         0,
                         NativeWorkbenchIntent::Command(format!(
@@ -55,8 +65,10 @@ impl NativeGameWorkbench {
                     .set_property_draft(key.to_string(), value.clone());
                 self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
-            key if key.starts_with("electronics.inspector.transform.") || key.starts_with("electronics.pcb.rule.") => {
-                self.toolbar_revision=self.toolbar_revision.wrapping_add(1).max(1);
+            key if key.starts_with("electronics.inspector.transform.")
+                || key.starts_with("electronics.pcb.rule.") =>
+            {
+                self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             }
             "electronics.inspector.value" => {
                 if let Some(draft) = self.electronics_value_draft.as_mut() {
@@ -109,8 +121,7 @@ impl NativeGameWorkbench {
                     let expected = format!("hierarchy.rename.{}", id.0);
                     if key == &expected {
                         *current = value.clone();
-                        self.toolbar_revision =
-                            self.toolbar_revision.wrapping_add(1).max(1);
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                 }
             }
@@ -177,7 +188,13 @@ impl NativeGameWorkbench {
 }
 
 impl NativeGameWorkbench {
-    pub(super) fn handle_inspector_color_command(&mut self, name: &String, selected: &[SceneNodeId], scene: &SceneGraph, intents: &mut Vec<NativeWorkbenchIntent>) -> bool {
+    pub(super) fn handle_inspector_color_command(
+        &mut self,
+        name: &String,
+        selected: &[SceneNodeId],
+        scene: &SceneGraph,
+        intents: &mut Vec<NativeWorkbenchIntent>,
+    ) -> bool {
         if name == "inspector.color.toggle" {
             self.inspector_view.color_picker = !self.inspector_view.color_picker;
             self.inspector_view.dropdown = None;
@@ -218,8 +235,7 @@ impl NativeGameWorkbench {
                             intents.push(NativeWorkbenchIntent::Command(command));
                             self.inspector_view.dropdown = None;
                         }
-                        self.toolbar_revision =
-                            self.toolbar_revision.wrapping_add(1).max(1);
+                        self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
                     }
                     return true;
                 }
@@ -256,25 +272,21 @@ impl NativeGameWorkbench {
             .and_then(|index| index.parse::<usize>().ok())
         {
             self.inspector_view.behavior_parameters =
-                (self.inspector_view.behavior_parameters != Some(index))
-                    .then_some(index);
+                (self.inspector_view.behavior_parameters != Some(index)).then_some(index);
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
             return true;
         }
         if let Some(raw) = name.strip_prefix("inspector.parameter.") {
-            if let Some(command) = crate::native_behavior_authoring::parameter_action(
-                scene,
-                selected,
-                raw,
-                |key| {
+            if let Some(command) =
+                crate::native_behavior_authoring::parameter_action(scene, selected, raw, |key| {
                     self.host
                         .session()
                         .interaction
                         .controls
                         .text(key)
                         .to_string()
-                },
-            ) {
+                })
+            {
                 intents.push(NativeWorkbenchIntent::Command(command));
             }
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -290,19 +302,16 @@ impl NativeGameWorkbench {
             return true;
         }
         if let Some(raw) = name.strip_prefix("inspector.prefab.capture:") {
-            if let Some(command) = crate::native_behavior_authoring::capture_action(
-                scene,
-                selected,
-                raw,
-                |key| {
+            if let Some(command) =
+                crate::native_behavior_authoring::capture_action(scene, selected, raw, |key| {
                     self.host
                         .session()
                         .interaction
                         .controls
                         .text(key)
                         .to_string()
-                },
-            ) {
+                })
+            {
                 intents.push(NativeWorkbenchIntent::Command(command));
             }
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -398,7 +407,8 @@ impl NativeGameWorkbench {
         if let Some(kind) = name.strip_prefix("inspector.physics.add-joint:") {
             if let [owner, target, ..] = selected {
                 intents.push(NativeWorkbenchIntent::Command(format!(
-                    "inspector.physics.joint.add:{}:{}:{kind}", owner.0, target.0
+                    "inspector.physics.joint.add:{}:{}:{kind}",
+                    owner.0, target.0
                 )));
             }
             self.toolbar_revision = self.toolbar_revision.wrapping_add(1).max(1);
@@ -406,7 +416,11 @@ impl NativeGameWorkbench {
         }
         if let Some(field) = name.strip_prefix("inspector.physics.commit:") {
             if let Some(target) = selected.first().copied() {
-                let value = self.host.session().interaction.controls
+                let value = self
+                    .host
+                    .session()
+                    .interaction
+                    .controls
                     .text(&format!("inspector.physics.{field}.text"))
                     .to_string();
                 intents.push(NativeWorkbenchIntent::InspectorCommit {

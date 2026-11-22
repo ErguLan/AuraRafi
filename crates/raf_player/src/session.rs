@@ -1,5 +1,6 @@
 //! Shared native host lifecycle for separate-window and in-place Play.
 use crate::audio::RuntimeAudio;
+use crate::loading::{failure_diagnostic, stage_diagnostic, PreparationLoading};
 use crate::surface::player_surface;
 use raf_core::{i18n::t, InputKey, InputOwner, InputRegionId, InputRouter, InputSnapshot};
 use raf_render::api_graphic_basic::device::{BasicBackendType, BasicDevice};
@@ -7,7 +8,8 @@ use raf_render::api_graphic_basic::frame_scheduler::{
     DynamicResolutionController, FrameActivity, FramePacingBudget,
 };
 use raf_render::api_graphic_basic::ui_surface::loading::{
-    build_loading_surface, insert_loading_brand,
+    build_loading_surface, build_runtime_loading_surface_with_options, insert_loading_brand,
+    RuntimeLoadingView,
 };
 use raf_render::api_graphic_basic::ui_surface::{
     DirectUiSurfaceHost, NativeUiInputBridge, NativeUiWindowHost, StudioUiPalette, UiAction,
@@ -20,6 +22,7 @@ use raf_render::{
     scene_renderer::{RenderOptions, SceneRenderer},
 };
 use raf_runtime::manifest::{RuntimeHostSettings, RuntimeManifest};
+use raf_runtime::wire::RuntimeDiagnostic;
 use raf_runtime::{RuntimeControl, RuntimePhase, RuntimeStatus, RuntimeWorld};
 use raf_ui::{UiColorMode, UiDocument, UiEnvironment, UiRect};
 use std::path::PathBuf;
@@ -35,6 +38,7 @@ use uuid::Uuid;
 /// Preparation itself is a real worker; this is a channel wait, not a frame
 /// pacing sleep.
 const PREPARATION_WAIT_SLICE: Duration = Duration::from_millis(100);
+#[derive(Clone)]
 pub enum PlayerSource {
     Snapshot(Box<RuntimeManifest>),
     File(PathBuf),
@@ -60,6 +64,20 @@ struct SurfaceKey {
     error: Option<String>,
     debug_interval: u64,
     debug_text: Option<String>,
+}
+/// Retained loading document changes only when one of these facts changes.
+#[derive(Clone, PartialEq)]
+struct LoadingSurfaceKey {
+    status: String,
+    detail: String,
+    count: String,
+    progress: u32,
+    elapsed_secs: u64,
+    history: Vec<String>,
+    slow: bool,
+    failed: bool,
+    error: Option<String>,
+    can_retry: bool,
 }
 /// Physical and logical frame geometry resolved once per presented frame.
 struct FramePresentation {
@@ -90,7 +108,6 @@ pub struct PlayerSession {
     root: Option<PathBuf>,
     status: RuntimeStatus,
     surface_key: Option<SurfaceKey>,
-    loading_key: String,
     cached_canvas: Option<(
         u64,
         [u32; 4],
@@ -102,12 +119,12 @@ pub struct PlayerSession {
     last_frame: Instant,
     last_render_ms: f64,
     last_diagnostics: Vec<String>,
+    last_diagnostic_events: Vec<RuntimeDiagnostic>,
     startup_presented: bool,
     has_entered_game: bool,
-    loading_progress: f32,
-    loading_count: String,
-    loading_detail: String,
-    loading_surface_key: Option<(String, String, String, u32)>,
+    retry_source: Option<PlayerSource>,
+    loading: PreparationLoading,
+    loading_surface_key: Option<LoadingSurfaceKey>,
 }
 impl PlayerSession {
     pub fn new(
@@ -118,7 +135,8 @@ impl PlayerSession {
     ) -> Self {
         let palette = palette(settings.theme);
         let language = settings.language;
-        let status = t("runtime.loading_snapshot", language);
+        let loading = PreparationLoading::new("runtime.loading_snapshot", language);
+        let status = t(&loading.stage_key, language);
         let mut ui = host.graphics_context().create_ui_host(
             build_loading_surface(
                 palette,
@@ -160,18 +178,17 @@ impl PlayerSession {
                 last_error: None,
             },
             surface_key: None,
-            loading_key: "runtime.loading_snapshot".into(),
             cached_canvas: None,
             resolution: DynamicResolutionController::default(),
             focused: true,
             last_frame: Instant::now(),
             last_render_ms: 0.0,
             last_diagnostics: Vec::new(),
+            last_diagnostic_events: Vec::new(),
             startup_presented: false,
             has_entered_game: false,
-            loading_progress: 0.0,
-            loading_count: String::new(),
-            loading_detail: t("runtime.cancel_hint", language),
+            retry_source: None,
+            loading,
             loading_surface_key: None,
         }
     }
@@ -197,6 +214,9 @@ impl PlayerSession {
     }
     pub fn is_preparing(&self) -> bool {
         self.status.phase == RuntimePhase::Preparing
+    }
+    fn is_loading_failed(&self) -> bool {
+        self.loading.failed || self.status.phase == RuntimePhase::Failed
     }
     pub fn should_close(&self) -> bool {
         self.status.phase == RuntimePhase::Stopped
@@ -229,8 +249,11 @@ impl PlayerSession {
             self.cursor_suspended = true;
         }
         if control == RuntimeControl::Stop {
+            let failed = self.loading.failed || self.status.phase == RuntimePhase::Failed;
+            let already_stopped = self.status.phase == RuntimePhase::Stopped;
             self.receiver = None;
             self.source = None;
+            self.retry_source = None;
             self.game_ui.clear();
             if let Some(world) = &mut self.world {
                 world.stop();
@@ -241,6 +264,15 @@ impl PlayerSession {
                 .world
                 .as_ref()
                 .map_or(RuntimePhase::Stopped, |world| world.status().phase);
+            // Cancel on the failure surface is a close request even when the
+            // previous world is still shutting down its storage worker. A
+            // session that already closed for the host must stay closed.
+            if failed || already_stopped {
+                self.status.phase = RuntimePhase::Stopped;
+            }
+            self.loading.failed = false;
+            self.loading.slow = false;
+            self.loading_surface_key = None;
             self.audio.stop();
             self.cached_canvas = None;
             return;
@@ -256,8 +288,17 @@ impl PlayerSession {
     pub fn drain_diagnostics(&mut self) -> Vec<String> {
         std::mem::take(&mut self.last_diagnostics)
     }
+    /// Structured preparation events for the editor console and runtime log.
+    pub fn drain_diagnostic_events(&mut self) -> Vec<RuntimeDiagnostic> {
+        std::mem::take(&mut self.last_diagnostic_events)
+    }
+    fn push_diagnostic_event(&mut self, diagnostic: RuntimeDiagnostic) {
+        if self.last_diagnostic_events.len() < 256 {
+            self.last_diagnostic_events.push(diagnostic);
+        }
+    }
     pub fn frame_interval(&self) -> std::time::Duration {
-        std::time::Duration::from_secs_f64(if self.is_preparing() {
+        std::time::Duration::from_secs_f64(if self.is_preparing() || self.is_loading_failed() {
             1.0 / 30.0
         } else if self
             .world
@@ -274,6 +315,21 @@ impl PlayerSession {
         let Some(source) = self.source.take() else {
             return;
         };
+        // Keep one source description for Retry. The worker owns the prepared
+        // copy; this clone is dropped as soon as preparation succeeds.
+        self.retry_source = Some(source.clone());
+        let language = self.settings.language;
+        let origin = self.loading.origin_key;
+        self.loading.begin(origin, language);
+        let stage_message = t(origin, language);
+        self.push_diagnostic_event(stage_diagnostic(&stage_message, origin, 0));
+        tracing::info!(
+            stage = %origin,
+            progress = 0.0_f64,
+            path = %self.loading.detail,
+            "runtime preparation started"
+        );
+        self.loading_surface_key = None;
         let (sender, receiver) = mpsc::sync_channel(32);
         self.receiver = Some(receiver);
         let cancellation = self.cancellation.clone();
@@ -346,24 +402,54 @@ impl PlayerSession {
     fn apply_preparation(&mut self, message: Preparation, host: &NativeUiWindowHost) {
         match message {
             Preparation::Stage(key) => {
-                self.loading_key = key.into();
-                self.loading_progress = 0.0;
-                self.loading_count.clear();
-                self.loading_detail = t("runtime.cancel_hint", self.settings.language);
+                let language = self.settings.language;
+                let previous = self.loading.stage_key.clone();
+                self.loading.stage(key, language);
+                if previous != key {
+                    let message = t(key, language);
+                    let at_ms = self.loading.started.elapsed().as_millis() as u64;
+                    tracing::info!(
+                        stage = %key,
+                        progress = self.loading.progress as f64,
+                        path = %self.loading.detail,
+                        "runtime preparation stage"
+                    );
+                    self.push_diagnostic_event(stage_diagnostic(&message, key, at_ms));
+                }
+                self.loading_surface_key = None;
             }
             Preparation::Compile(progress) => {
-                self.loading_key = "runtime.compiling".into();
-                self.loading_progress = if progress.total > 0 {
-                    progress.completed as f32 / progress.total as f32
-                } else {
-                    0.0
-                };
-                self.loading_count = format!("{}/{}", progress.completed, progress.total);
-                self.loading_detail = format!(
-                    "{}\n{}",
-                    progress.path,
-                    t("runtime.cancel_hint", self.settings.language)
+                let language = self.settings.language;
+                let entering = self.loading.stage_key != "runtime.compiling";
+                self.loading.compile(
+                    &progress.path,
+                    progress.completed,
+                    progress.total,
+                    language,
                 );
+                if entering {
+                    let message = t("runtime.compiling", language);
+                    let at_ms = self.loading.started.elapsed().as_millis() as u64;
+                    tracing::info!(
+                        stage = "runtime.compiling",
+                        progress = self.loading.progress as f64,
+                        path = %self.loading.detail,
+                        "runtime preparation stage"
+                    );
+                    self.push_diagnostic_event(stage_diagnostic(
+                        &message,
+                        "runtime.compiling",
+                        at_ms,
+                    ));
+                } else {
+                    tracing::debug!(
+                        stage = "runtime.compiling",
+                        progress = self.loading.progress as f64,
+                        path = %self.loading.detail,
+                        "runtime preparation progress"
+                    );
+                }
+                self.loading_surface_key = None;
             }
             Preparation::Ready(mut world, document, root, audio, context) => {
                 if let Some(document) = &document {
@@ -416,6 +502,9 @@ impl PlayerSession {
                 self.audio = RuntimeAudio::new(audio && !host.is_headless());
                 self.root = Some(root);
                 self.receiver = None;
+                self.retry_source = None;
+                self.loading.finish(self.settings.language);
+                self.loading_surface_key = None;
                 self.last_frame = Instant::now();
             }
             Preparation::Failed(errors) => {
@@ -457,14 +546,36 @@ impl PlayerSession {
         Ok(())
     }
     fn fail_preparation(&mut self, errors: Vec<String>) {
+        let message = errors
+            .iter()
+            .find(|error| !error.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| "Runtime preparation failed".to_string());
+        let surface_message = {
+            let joined = errors
+                .iter()
+                .filter(|error| !error.trim().is_empty())
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            if joined.is_empty() {
+                message.clone()
+            } else {
+                joined
+            }
+        };
+        let stage = self.loading.stage_key.clone();
+        let path = if self.loading.detail == t("runtime.cancel_hint", self.settings.language) {
+            String::new()
+        } else {
+            self.loading.detail.clone()
+        };
+        let at_ms = self.loading.started.elapsed().as_millis() as u64;
+        self.loading.fail(surface_message);
+
         if let Some(phase) = self.transition_previous.take() {
             if let Some(world) = &mut self.world {
-                world.transition_failed(
-                    errors
-                        .first()
-                        .cloned()
-                        .unwrap_or_else(|| "runtime.session_failed".into()),
-                );
+                world.transition_failed(message.clone());
                 if phase == RuntimePhase::Running {
                     world.control(RuntimeControl::Resume);
                 }
@@ -473,15 +584,26 @@ impl PlayerSession {
             }
         } else {
             self.status.phase = RuntimePhase::Failed;
-            self.status.last_error = errors.first().cloned();
         }
+        self.status.last_error = Some(message.clone());
         self.last_diagnostics.extend(
             errors
                 .into_iter()
                 .take(256usize.saturating_sub(self.last_diagnostics.len())),
         );
+        tracing::error!(
+            stage = %stage,
+            progress = self.loading.progress as f64,
+            path = %path,
+            error = %message,
+            "runtime preparation failed"
+        );
+        self.push_diagnostic_event(failure_diagnostic(&message, &stage, &path, at_ms));
         self.receiver = None;
+        self.source = None;
+        self.router.cancel_all();
         self.surface_key = None;
+        self.loading_surface_key = None;
         self.last_frame = Instant::now();
     }
     fn begin_transition(&mut self, id: Uuid) {
@@ -506,13 +628,13 @@ impl PlayerSession {
         world.services_mut().transition_status = "loading";
         self.audio.set_paused(true);
         self.cursor.release();
+        let language = self.settings.language;
         self.source = Some(PlayerSource::Session(Box::new(context), id));
         self.status.phase = RuntimePhase::Preparing;
-        self.loading_key = "runtime.loading_session".into();
-        self.loading_progress = 0.0;
-        self.loading_count.clear();
-        self.loading_detail = t("runtime.cancel_hint", self.settings.language);
+        self.status.last_error = None;
+        self.loading.begin("runtime.loading_session", language);
         self.startup_presented = false;
+        self.surface_key = None;
         self.loading_surface_key = None;
     }
     /// Advances one event-driven frame. Delta time comes from the host clock.
@@ -523,10 +645,17 @@ impl PlayerSession {
         input: &NativeUiInputBridge,
     ) -> Result<(), String> {
         self.poll_preparation(host);
+        if self.is_loading_failed() {
+            let view = self.frame_view(host, input.snapshot());
+            if self.should_close() {
+                return Ok(());
+            }
+            return self.present_failure(host, compositor, input, &view);
+        }
         if self.is_preparing() {
-            // Loading keeps its existing surface and worker start-up behavior.
-            // The shared step owns that presentation so deterministic hosts
-            // that call it directly keep identical behavior.
+            // The shared step owns preparation presentation and worker
+            // start-up so deterministic hosts that call it directly keep
+            // identical behavior.
             return self.step_with_snapshot(host, compositor, input, input.snapshot(), 0.0);
         }
         if self.should_close() {
@@ -563,12 +692,19 @@ impl PlayerSession {
         dt: f64,
     ) -> Result<(), String> {
         self.poll_preparation(host);
+        if self.is_loading_failed() {
+            let view = self.frame_view(host, snapshot);
+            if self.should_close() {
+                return Ok(());
+            }
+            return self.present_failure(host, compositor, input, &view);
+        }
         if self.is_preparing() {
             let view = self.frame_view(host, snapshot);
             if self.should_close() {
                 return Ok(());
             }
-            return self.present_loading(host, compositor, &view);
+            return self.present_loading(host, compositor, input, &view);
         }
         let view = self.frame_view(host, snapshot);
         if self.should_close() {
@@ -601,7 +737,7 @@ impl PlayerSession {
         };
         self.ui.set_environment(environment);
         if snapshot.key_pressed(InputKey::Escape) {
-            if self.is_preparing() || snapshot.modifiers.shift {
+            if self.is_preparing() || self.is_loading_failed() || snapshot.modifiers.shift {
                 self.control(RuntimeControl::Stop);
             } else {
                 self.cursor.release();
@@ -621,31 +757,80 @@ impl PlayerSession {
         }
     }
 
-    /// Presents the shared startup document while preparation is in flight.
+    /// Presents preparation progress with stage, count, path and elapsed time.
     fn present_loading(
         &mut self,
         host: &mut NativeUiWindowHost,
         compositor: &mut NativeEditorCompositor,
+        input: &NativeUiInputBridge,
         view: &FramePresentation,
     ) -> Result<(), String> {
         let language = self.settings.language;
         let palette = palette(self.settings.theme);
-        let loading_key = (
-            self.loading_key.clone(),
-            self.loading_detail.clone(),
-            self.loading_count.clone(),
-            self.loading_progress.to_bits(),
-        );
-        if self.loading_surface_key.as_ref() != Some(&loading_key) {
-            self.ui.set_surface(build_loading_surface(
-                palette,
-                self.loading_progress,
-                language,
-                &self.loading_detail,
-                &t(&self.loading_key, language),
-                &self.loading_count,
+        let now = Instant::now();
+        let elapsed_secs = self.loading.elapsed_secs(now);
+        if self.loading.update_slow(now) {
+            tracing::warn!(
+                stage = %self.loading.stage_key,
+                progress = self.loading.progress as f64,
+                path = %self.loading.detail,
+                "runtime preparation is slow"
+            );
+            self.loading_surface_key = None;
+        }
+        let status = t(&self.loading.stage_key, language);
+        let key = LoadingSurfaceKey {
+            status: status.clone(),
+            detail: self.loading.detail.clone(),
+            count: self.loading.count.clone(),
+            progress: self.loading.progress.to_bits(),
+            elapsed_secs,
+            history: self.loading.history.clone(),
+            slow: self.loading.slow,
+            failed: false,
+            error: None,
+            can_retry: false,
+        };
+        if self.loading_surface_key.as_ref() != Some(&key) {
+            self.ui.set_surface(build_runtime_loading_surface_with_options(
+                RuntimeLoadingView {
+                    palette,
+                    progress: self.loading.progress,
+                    language,
+                    detail: &self.loading.detail,
+                    status: &status,
+                    count: &self.loading.count,
+                    elapsed_secs,
+                    history: &self.loading.history,
+                    slow: self.loading.slow,
+                    failed: false,
+                    error: None,
+                    can_retry: false,
+                },
             ));
-            self.loading_surface_key = Some(loading_key);
+            self.loading_surface_key = Some(key);
+        }
+        let actions = self.ui.process_routed_input(
+            view.logical,
+            view.scale.max(1.0),
+            |key| t(key, language),
+            input,
+            &mut self.router,
+            InputOwner::RetainedUi(InputRegionId(0x6c6f6164)),
+            UiRect::new(
+                0.0,
+                0.0,
+                view.logical[0] as f32,
+                view.logical[1] as f32,
+            ),
+        );
+        if actions.iter().any(|action| {
+            matches!(&action.action, UiAction::Command { name } if name == "runtime.cancel")
+        }) {
+            self.control(RuntimeControl::Stop);
+        }
+        if self.should_close() || self.loading.failed {
+            return Ok(());
         }
         let render_started = Instant::now();
         host.render_editor_frame(
@@ -663,6 +848,135 @@ impl PlayerSession {
             self.start_worker();
         }
         Ok(())
+    }
+
+    /// Presents a terminal preparation failure until Retry or Cancel is chosen.
+    fn present_failure(
+        &mut self,
+        host: &mut NativeUiWindowHost,
+        compositor: &mut NativeEditorCompositor,
+        input: &NativeUiInputBridge,
+        view: &FramePresentation,
+    ) -> Result<(), String> {
+        let language = self.settings.language;
+        let palette = palette(self.settings.theme);
+        let elapsed_secs = self.loading.elapsed_secs(Instant::now());
+        let status = t(&self.loading.stage_key, language);
+        let cancel_hint = t("runtime.cancel_hint", language);
+        let detail = if self.loading.detail == cancel_hint {
+            String::new()
+        } else {
+            self.loading.detail.clone()
+        };
+        let error = self
+            .loading
+            .error
+            .clone()
+            .or_else(|| self.status.last_error.clone());
+        let can_retry = self.retry_source.is_some();
+        let key = LoadingSurfaceKey {
+            status: status.clone(),
+            detail: detail.clone(),
+            count: self.loading.count.clone(),
+            progress: self.loading.progress.to_bits(),
+            elapsed_secs,
+            history: self.loading.history.clone(),
+            slow: false,
+            failed: true,
+            error: error.clone(),
+            can_retry,
+        };
+        if self.loading_surface_key.as_ref() != Some(&key) {
+            self.ui.set_surface(build_runtime_loading_surface_with_options(
+                RuntimeLoadingView {
+                    palette,
+                    progress: self.loading.progress,
+                    language,
+                    detail: &detail,
+                    status: &status,
+                    count: &self.loading.count,
+                    elapsed_secs,
+                    history: &self.loading.history,
+                    slow: false,
+                    failed: true,
+                    error: error.as_deref(),
+                    can_retry,
+                },
+            ));
+            self.loading_surface_key = Some(key);
+        }
+        self.last_render_ms = 0.0;
+        let actions = self.ui.process_routed_input(
+            view.logical,
+            view.scale.max(1.0),
+            |key| t(key, language),
+            input,
+            &mut self.router,
+            InputOwner::RetainedUi(InputRegionId(0x6c6f6164)),
+            UiRect::new(
+                0.0,
+                0.0,
+                view.logical[0] as f32,
+                view.logical[1] as f32,
+            ),
+        );
+        for action in actions {
+            if let UiAction::Command { name } = action.action {
+                match name.as_str() {
+                    "runtime.retry" => self.retry_preparation(),
+                    "runtime.cancel" => self.control(RuntimeControl::Stop),
+                    _ => {}
+                }
+            }
+        }
+        if self.should_close() || self.status.phase == RuntimePhase::Preparing {
+            return Ok(());
+        }
+        let render_started = Instant::now();
+        host.render_editor_frame(
+            compositor,
+            None,
+            &mut self.ui,
+            view.logical,
+            view.scale.max(1.0),
+            |key| t(key, language),
+        )
+        .map_err(|e| format!("runtime failure presentation: {e}"))?;
+        self.last_render_ms = render_started.elapsed().as_secs_f64() * 1000.0;
+        Ok(())
+    }
+
+    fn retry_preparation(&mut self) {
+        let Some(source) = self.retry_source.take() else {
+            return;
+        };
+        let language = self.settings.language;
+        let origin = self.loading.origin_key;
+        // A new attempt must not inherit the previous worker's cancellation
+        // flag or preparation facts.
+        self.cancellation = Arc::new(AtomicBool::new(false));
+        self.source = Some(source);
+        self.receiver = None;
+        self.status = RuntimeStatus {
+            instance: self.instance,
+            phase: RuntimePhase::Preparing,
+            fixed_ticks: 0,
+            elapsed_seconds: 0.0,
+            script_instances: 0,
+            camera_ready: false,
+            last_error: None,
+        };
+        self.loading.begin(origin, language);
+        self.router.cancel_all();
+        self.loading_surface_key = None;
+        self.surface_key = None;
+        self.cached_canvas = None;
+        self.startup_presented = false;
+        self.last_frame = Instant::now();
+        tracing::info!(
+            stage = %self.loading.stage_key,
+            "runtime preparation retry requested"
+        );
     }
 
     fn step_inner(

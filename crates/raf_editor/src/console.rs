@@ -5,11 +5,12 @@
 //! and the application boundary performs command execution.
 
 use crate::commands::{CommandLevel, CommandOutput};
+use raf_runtime::wire::RuntimeDiagnosticSeverity;
 use std::collections::BTreeSet;
 
 pub type ConsoleEntryId = u64;
 
-pub const MAX_ENTRIES: usize = 500;
+pub const MAX_ENTRIES: usize = 512;
 
 const MAX_HISTORY_ENTRIES: usize = 100;
 const MAX_HISTORY_LINES: usize = 40;
@@ -21,6 +22,17 @@ pub enum LogLevel {
     Error,
 }
 
+impl LogLevel {
+    /// Structured runtime diagnostics use the same three severities.
+    pub fn from_runtime_severity(severity: RuntimeDiagnosticSeverity) -> Self {
+        match severity {
+            RuntimeDiagnosticSeverity::Info => Self::Info,
+            RuntimeDiagnosticSeverity::Warning => Self::Warning,
+            RuntimeDiagnosticSeverity::Error => Self::Error,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LogEntry {
     pub id: ConsoleEntryId,
@@ -28,6 +40,8 @@ pub struct LogEntry {
     pub message: String,
     pub timestamp: String,
     pub sender: Option<String>,
+    /// Stable diagnostic code for machine filtering and localization fallback.
+    pub code: Option<String>,
     pub block: Option<ConsoleBlock>,
 }
 
@@ -66,6 +80,7 @@ impl Default for ConsolePanel {
                 message: "AuraRafi Engine initialized".to_string(),
                 timestamp: now_timestamp(),
                 sender: None,
+                code: None,
                 block: None,
             }],
             auto_scroll: true,
@@ -94,6 +109,7 @@ impl ConsolePanel {
             message: message.into(),
             timestamp: now_timestamp(),
             sender: None,
+            code: None,
             block: None,
         })
     }
@@ -115,6 +131,7 @@ impl ConsolePanel {
             message: message.clone(),
             timestamp: now_timestamp(),
             sender: Some(sender.into()),
+            code: None,
             block: None,
         });
         if message.trim_start().starts_with('/') {
@@ -146,11 +163,37 @@ impl ConsolePanel {
             message: output.title.clone(),
             timestamp: now_timestamp(),
             sender: None,
+            code: None,
             block: Some(ConsoleBlock {
                 title: output.title,
                 lines: output.lines,
                 json,
             }),
+        })
+    }
+
+    /// Appends an entry that already knows its severity, source and code.
+    ///
+    /// Runtime diagnostics use this path so the console keeps the stable code
+    /// alongside the human message without changing [`CommandOutput`].
+    pub fn log_structured(
+        &mut self,
+        level: LogLevel,
+        source: impl Into<String>,
+        message: impl Into<String>,
+        code: Option<String>,
+        block: Option<ConsoleBlock>,
+    ) -> ConsoleEntryId {
+        let id = self.allocate_entry_id();
+        let source = source.into();
+        self.append_entry(LogEntry {
+            id,
+            level,
+            message: message.into(),
+            timestamp: now_timestamp(),
+            sender: (!source.is_empty()).then_some(source),
+            code,
+            block,
         })
     }
 
@@ -377,5 +420,47 @@ mod tests {
         assert!(console.set_filter_level(Some(LogLevel::Info)));
         assert!(!console.set_filter_level(Some(LogLevel::Info)));
         assert!(console.revision() > initial_revision);
+    }
+
+    #[test]
+    fn runtime_severity_maps_to_console_levels() {
+        assert_eq!(
+            LogLevel::from_runtime_severity(RuntimeDiagnosticSeverity::Info),
+            LogLevel::Info
+        );
+        assert_eq!(
+            LogLevel::from_runtime_severity(RuntimeDiagnosticSeverity::Warning),
+            LogLevel::Warning
+        );
+        assert_eq!(
+            LogLevel::from_runtime_severity(RuntimeDiagnosticSeverity::Error),
+            LogLevel::Error
+        );
+    }
+
+    #[test]
+    fn structured_entries_keep_source_and_code() {
+        let mut console = ConsolePanel::default();
+        let id = console.log_structured(
+            LogLevel::Error,
+            "runtime",
+            "boom",
+            Some("console.runtime_timeout".to_string()),
+            None,
+        );
+        let entry = console.entry(id).expect("structured entry");
+        assert_eq!(entry.sender.as_deref(), Some("runtime"));
+        assert_eq!(entry.code.as_deref(), Some("console.runtime_timeout"));
+        assert_eq!(entry.timestamp.len(), 8);
+    }
+
+    #[test]
+    fn console_ring_stays_bounded() {
+        let mut console = ConsolePanel::default();
+        for index in 0..MAX_ENTRIES + 16 {
+            console.log(LogLevel::Info, format!("entry {index}"));
+        }
+        assert_eq!(console.entries.len(), MAX_ENTRIES);
+        assert!(console.entries.first().is_some_and(|entry| entry.id > 0));
     }
 }
