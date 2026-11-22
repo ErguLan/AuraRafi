@@ -251,6 +251,7 @@ impl Backend for WebGpu {
             submits: 1,
             upload_bytes: std::mem::size_of_val(view) as u64,
             gpu_ms: None,
+            ..Default::default()
         })
     }
 

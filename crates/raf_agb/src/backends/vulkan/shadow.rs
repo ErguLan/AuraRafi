@@ -2,7 +2,6 @@ use std::rc::Rc;
 
 use ash::vk;
 
-use crate::device::SHADOW_MAP_SIDE;
 use crate::{DrawMode, Result, ShadowFrame};
 
 use super::context::Gpu;
@@ -16,6 +15,8 @@ const SHADER: &str = concat!(
 );
 
 pub(super) struct ShadowPass {
+    pub side: u32,
+    pub depth_key: Option<u64>,
     gpu: Rc<Gpu>,
     image: Image,
     uniform: Buffer,
@@ -31,12 +32,14 @@ pub(super) struct ShadowPass {
 }
 
 impl ShadowPass {
-    pub fn new(gpu: &Rc<Gpu>, pipelines: &Pipelines) -> Result<Self> {
+    pub fn new(gpu: &Rc<Gpu>, pipelines: &Pipelines, side: u32) -> Result<Self> {
         let mut shadow = Self {
+            side,
+            depth_key: None,
             gpu: Rc::clone(gpu),
             image: Image::new(
                 gpu,
-                [SHADOW_MAP_SIDE; 2],
+                [side; 2],
                 DEPTH_FORMAT,
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED,
                 vk::ImageAspectFlags::DEPTH,
@@ -63,8 +66,8 @@ impl ShadowPass {
                 &vk::FramebufferCreateInfo::default()
                     .render_pass(shadow.pass)
                     .attachments(&[shadow.image.view])
-                    .width(SHADOW_MAP_SIDE)
-                    .height(SHADOW_MAP_SIDE)
+                    .width(side)
+                    .height(side)
                     .layers(1),
                 None,
             )
@@ -198,15 +201,20 @@ impl ShadowPass {
         size_of::<ShadowFrame>() as u64
     }
 
-    pub unsafe fn record(&self, cmd: vk::CommandBuffer, resident: &Resident) -> u32 {
+    pub unsafe fn record(
+        &self,
+        cmd: vk::CommandBuffer,
+        resident: &Resident,
+        authored: bool,
+    ) -> u32 {
         let device = &self.gpu.device;
         let rect = vk::Rect2D::default().extent(vk::Extent2D {
-            width: SHADOW_MAP_SIDE,
-            height: SHADOW_MAP_SIDE,
+            width: self.side,
+            height: self.side,
         });
         let viewport = vk::Viewport {
-            width: SHADOW_MAP_SIDE as f32,
-            height: SHADOW_MAP_SIDE as f32,
+            width: self.side as f32,
+            height: self.side as f32,
             max_depth: 1.,
             ..Default::default()
         };
@@ -234,11 +242,12 @@ impl ShadowPass {
             device.cmd_bind_descriptor_sets(cmd, bind, self.layout, 1, &[self.set], &[]);
             bind_geometry(device, cmd, resident);
             let mut texture = None;
-            for batch in resident
-                .batches
-                .iter()
-                .filter(|batch| batch.mode == DrawMode::Scene)
-            {
+            let batches = if authored {
+                &resident.shadow_batches
+            } else {
+                &resident.batches
+            };
+            for batch in batches.iter().filter(|batch| batch.mode == DrawMode::Scene) {
                 if texture != Some(batch.texture) {
                     texture = Some(batch.texture);
                     device.cmd_bind_descriptor_sets(

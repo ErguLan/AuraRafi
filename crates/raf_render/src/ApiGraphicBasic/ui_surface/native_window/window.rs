@@ -9,13 +9,13 @@ use raf_agb::Output;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use winit::window::{ResizeDirection, Window};
 
-use super::super::presentation_lifecycle::{PresentationDecision, PresentationFault, PresentationRecovery};
+use super::super::presentation_lifecycle::{
+    PresentationDecision, PresentationFault, PresentationRecovery,
+};
 use super::super::{DirectUiSurfaceHost, NativeApplicationMenuAdapter, UiSurface};
 use super::NativeUiWindowHost;
 use crate::api_graphic_basic::cad_surface_host::DirectCadSurfaceHost;
-use crate::api_graphic_basic::capabilities::{
-    GraphicsAdapterPreference, GraphicsMemoryBudget,
-};
+use crate::api_graphic_basic::capabilities::{GraphicsAdapterPreference, GraphicsMemoryBudget};
 use crate::api_graphic_basic::editor_compositor::{
     EditorCanvasLayer, EditorComposedFrame, EditorUiLayer, NativeEditorCompositor,
 };
@@ -433,21 +433,23 @@ impl NativeUiWindowHost {
                         tracing::error!(%error, "native editor composition failed");
                         return Err(error);
                     };
-                    let decision = self.presentation.record_fault(fault, Instant::now());
-                    if matches!(decision, PresentationDecision::Fatal) {
-                        tracing::error!(%error, fault = fault.label(), "native editor presentation failed");
-                        return Err(error);
-                    }
                     if fault == PresentationFault::Timeout {
                         // Swapchain acquisition timed out. Skipping the frame
                         // is cheaper and more truthful than retrying inside the
                         // same tick; the scheduler will call again.
                         let mut metrics = compositor.metrics();
                         metrics.presents = 0;
+                        metrics.command_submits = 0;
+                        metrics.shadow_draw_calls = 0;
                         return Ok(EditorComposedFrame {
                             ui_layers: Vec::new(),
                             metrics,
                         });
+                    }
+                    let decision = self.presentation.record_fault(fault, Instant::now());
+                    if matches!(decision, PresentationDecision::Fatal) {
+                        tracing::error!(%error, fault = fault.label(), "native editor presentation failed");
+                        return Err(error);
                     }
                     if fault == PresentationFault::Lost {
                         self.reopen_device()?;
@@ -492,9 +494,7 @@ impl NativeUiWindowHost {
         let lowered = error.to_ascii_lowercase();
         if lowered.contains("surface lost") || lowered.contains("device lost") {
             Some(PresentationFault::Lost)
-        } else if lowered.contains("surface must be reconfigured")
-            || lowered.contains("outdated")
-        {
+        } else if lowered.contains("surface must be reconfigured") || lowered.contains("outdated") {
             Some(PresentationFault::Outdated)
         } else if lowered.contains("queue is busy") {
             Some(PresentationFault::Timeout)

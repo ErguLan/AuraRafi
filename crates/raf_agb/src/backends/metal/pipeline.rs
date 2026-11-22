@@ -59,7 +59,7 @@ impl Pipelines {
             per_entry_point_map: [
                 ("scene".into(), resources(&[0])),
                 ("overlay".into(), resources(&[0])),
-                ("paint".into(), resources(&[1, 2])),
+                ("paint".into(), resources(&[0, 1, 2])),
             ]
             .into(),
             ..Default::default()

@@ -136,7 +136,7 @@ fn root_signature(device: &ID3D12Device) -> Result<ID3D12RootSignature> {
     let material = descriptor_range(1, 0);
     let shadow = descriptor_range(0, 1);
     let parameters = [
-        constants(0, 0, ROOT_UNIFORM_WORDS, D3D12_SHADER_VISIBILITY_VERTEX),
+        constants(0, 0, ROOT_UNIFORM_WORDS, D3D12_SHADER_VISIBILITY_ALL),
         descriptor_table(&material),
         constants(1, 1, SHADOW_UNIFORM_WORDS, D3D12_SHADER_VISIBILITY_ALL),
         descriptor_table(&shadow),
@@ -234,10 +234,7 @@ pub(super) struct ShaderSource {
 }
 
 impl ShaderSource {
-    pub fn new(
-        source: &str,
-        shader_model: naga::back::hlsl::ShaderModel,
-    ) -> Result<Self> {
+    pub fn new(source: &str, shader_model: naga::back::hlsl::ShaderModel) -> Result<Self> {
         let (module, info) = super::super::shaders::parse(source)?;
         let options = naga::back::hlsl::Options {
             shader_model,
@@ -435,10 +432,7 @@ pub(super) fn raster_pipeline(
     unsafe { device.CreateGraphicsPipelineState(&desc) }.map_err(dx_error)
 }
 
-pub(super) unsafe fn bind_geometry(
-    list: &ID3D12GraphicsCommandList,
-    resident: &Resident,
-) {
+pub(super) unsafe fn bind_geometry(list: &ID3D12GraphicsCommandList, resident: &Resident) {
     unsafe {
         list.IASetVertexBuffers(0, Some(&resident.vertices));
         if let Some(indices) = &resident.indices {
@@ -503,10 +497,7 @@ mod tests {
             Stage::select(DrawMode::DepthReadOnly, true),
             Stage::ReadDepth
         );
-        assert_eq!(
-            Stage::select(DrawMode::SceneNoDepth, true),
-            Stage::Overlay
-        );
+        assert_eq!(Stage::select(DrawMode::SceneNoDepth, true), Stage::Overlay);
         assert_eq!(Stage::select(DrawMode::Overlay, true), Stage::Overlay);
     }
 

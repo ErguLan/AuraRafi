@@ -45,6 +45,7 @@ pub struct Resident {
     instance_offset: u64,
     index_offset: Option<u64>,
     batches: Vec<Batch>,
+    shadow_batches: Vec<Batch>,
 }
 
 impl Vulkan {
@@ -127,11 +128,9 @@ impl Backend for Vulkan {
     }
 
     fn shadow_bytes(&self) -> u64 {
-        if self.shadow.is_some() {
-            crate::device::SHADOW_MAP_BYTES
-        } else {
-            0
-        }
+        self.shadow
+            .as_ref()
+            .map_or(0, |shadow| crate::device::shadow_map_bytes(shadow.side))
     }
 
     fn supports_scene_filter(&self) -> bool {
@@ -268,6 +267,7 @@ impl Backend for Vulkan {
             instance_offset,
             index_offset: (!indices.is_empty()).then_some(index_offset),
             batches: workload.batches.clone(),
+            shadow_batches: workload.shadow_batches.clone(),
         })
     }
 
@@ -300,9 +300,19 @@ impl Backend for Vulkan {
         } else {
             self.filter = None;
         }
+        let (side, depth_key) = frame
+            .shadow_map
+            .map_or((crate::device::SHADOW_MAP_SIDE, None), |(side, key)| {
+                (side, Some(key))
+            });
         let shadow_upload = if let Some(parameters) = frame.shadow {
-            if self.shadow.is_none() {
-                self.shadow = Some(shadow::ShadowPass::new(&self.gpu, pipelines)?);
+            if self
+                .shadow
+                .as_ref()
+                .is_none_or(|shadow| shadow.side != side)
+            {
+                self.shadow = None;
+                self.shadow = Some(shadow::ShadowPass::new(&self.gpu, pipelines, side)?);
             }
             self.shadow.as_mut().unwrap().prepare(parameters)
         } else {
@@ -330,7 +340,9 @@ impl Backend for Vulkan {
                 );
             }
             if let Some(shadow) = &self.shadow {
-                shadow_draws = shadow.record(cmd, resident);
+                if depth_key.is_none() || shadow.depth_key != depth_key {
+                    shadow_draws = shadow.record(cmd, resident, depth_key.is_some());
+                }
             }
             if let Some(filter) = &self.filter {
                 pipelines.draw(
@@ -388,6 +400,9 @@ impl Backend for Vulkan {
             }
         }
         self.submit.submit(signal)?;
+        if let Some(shadow) = self.shadow.as_mut() {
+            shadow.depth_key = depth_key;
+        }
         self.has_timestamp_sample = self.submit.timestamps != vk::QueryPool::null();
         target.present(index, signal)?;
         Ok(FrameMetrics {
@@ -397,6 +412,8 @@ impl Backend for Vulkan {
             submits: 1,
             upload_bytes: (if changed { CAMERA_BYTES as u64 } else { 0 }) + shadow_upload,
             gpu_ms: self.completed_gpu_ms,
+            shadow_draw_calls: shadow_draws,
+            ..Default::default()
         })
     }
 

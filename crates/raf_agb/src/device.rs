@@ -143,15 +143,21 @@ pub struct Frame {
     pub light: [f32; 4],
     pub light_color: [f32; 4],
     pub environment: [f32; 4],
+    /// Authored environment, improved technology, toon steps, toon softness.
+    pub lighting_style: [f32; 4],
     /// Top-left normalized scene viewport `[x, y, width, height]` inside the
     /// full target. Overlay batches always cover the whole target.
     pub viewport: [f32; 4],
     pub shadow: Option<ShadowFrame>,
+    /// Effective map side and a key for its light projection and casters.
+    pub shadow_map: Option<(u32, u64)>,
     pub scene_filter: bool,
 }
 
 pub(crate) const SHADOW_MAP_SIDE: u32 = 1024;
-pub(crate) const SHADOW_MAP_BYTES: u64 = SHADOW_MAP_SIDE as u64 * SHADOW_MAP_SIDE as u64 * 4;
+pub(crate) fn shadow_map_bytes(side: u32) -> u64 {
+    u64::from(side) * u64::from(side) * 4
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -159,6 +165,8 @@ pub struct ShadowFrame {
     pub light_view_projection: [[f32; 4]; 4],
     /// x stores the comparison bias in normalized light depth coordinates.
     pub parameters: [f32; 4],
+    /// x is the normalized light depth spanned by the filter footprint.
+    pub sampling: [f32; 4],
 }
 
 #[repr(C)]
@@ -181,9 +189,19 @@ impl Frame {
         RasterUniforms {
             view_projection: self.view_projection,
             light: self.light,
-            light_color: self.light_color,
-            viewport: [scene.width, scene.height, 0., 0.],
-            eye: [x, y, z, 0.],
+            light_color: [
+                self.light_color[0],
+                self.light_color[1],
+                self.light_color[2],
+                self.lighting_style[2],
+            ],
+            viewport: [
+                scene.width,
+                scene.height,
+                self.lighting_style[0],
+                self.lighting_style[1],
+            ],
+            eye: [x, y, z, self.lighting_style[3]],
             environment: self.environment,
         }
     }
@@ -200,6 +218,11 @@ pub struct FrameMetrics {
     pub submits: u32,
     pub upload_bytes: u64,
     pub gpu_ms: Option<f64>,
+    pub shadow_draw_calls: u32,
+    pub shadow_resolution: u32,
+    pub shadow_resident_bytes: u64,
+    pub shadows_unsupported: bool,
+    pub shadow_budget_denied: bool,
 }
 
 /// Backend objects stay private to the selected executor. A prepared resource
@@ -493,7 +516,11 @@ impl<B: Backend> Device<B> {
             if !self.backend.supports_shadows() {
                 return Err(Error::Unsupported("shadow map on this executor"));
             }
-            effect_bytes += SHADOW_MAP_BYTES;
+            let side = frame.shadow_map.map_or(SHADOW_MAP_SIDE, |(side, _)| side);
+            if ![256, 512, 1024].contains(&side) || side > self.backend.info().max_texture {
+                return Err(Error::Invalid("invalid shadow map resolution"));
+            }
+            effect_bytes += shadow_map_bytes(side);
         }
         if frame.scene_filter {
             if !self.backend.supports_scene_filter() {
@@ -530,6 +557,47 @@ impl<B: Backend> Device<B> {
         self.frame = self.frame.saturating_add(1);
         self.ledger.begin_frame(self.frame);
         self.rendered_target = true;
+        Ok(metrics)
+    }
+
+    /// A product frame may omit a quality effect while still presenting its scene.
+    pub(crate) fn draw_product(
+        &mut self,
+        handle: MeshHandle,
+        mut frame: Frame,
+    ) -> Result<FrameMetrics> {
+        let plan = self
+            .plan
+            .as_ref()
+            .ok_or(Error::Invalid("configure an output before drawing"))?;
+        let available = self
+            .budget
+            .gpu_bytes
+            .saturating_sub(plan.target_bytes)
+            .saturating_sub(self.resources.metrics().resident_bytes);
+        let side = frame.shadow_map.map_or(SHADOW_MAP_SIDE, |(side, _)| side);
+        let requested = frame.shadow.is_some();
+        let unsupported = requested && (!self.supports_shadows() || side > self.info().max_texture);
+        let denied = requested && !unsupported && shadow_map_bytes(side) > available;
+        if unsupported || denied {
+            frame.shadow = None;
+        }
+        let resident_shadow_bytes = if frame.shadow.is_some() {
+            shadow_map_bytes(side)
+        } else {
+            0
+        };
+        if frame.scene_filter
+            && (!self.supports_scene_filter()
+                || filter_bytes(plan.extent) > available.saturating_sub(resident_shadow_bytes))
+        {
+            frame.scene_filter = false;
+        }
+        let mut metrics = self.draw(handle, &frame)?;
+        metrics.shadow_resolution = if resident_shadow_bytes == 0 { 0 } else { side };
+        metrics.shadow_resident_bytes = resident_shadow_bytes;
+        metrics.shadows_unsupported = unsupported;
+        metrics.shadow_budget_denied = denied;
         Ok(metrics)
     }
 

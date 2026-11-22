@@ -230,6 +230,18 @@ impl NativeEditorApplication {
                 }
                 let graphics_snapshot = runtime.graphics().snapshot();
                 let performance = graphics_snapshot.scheduler_metrics;
+                let mut scene_metrics = graphics_snapshot.last_frame_metrics;
+                if graphics_snapshot.is_gpu_active() {
+                    if let Some(compositor) = self.compositor.as_ref() {
+                        let draw = compositor.metrics();
+                        scene_metrics.shadow_active = draw.shadow_resolution != 0;
+                        scene_metrics.shadow_resolution = draw.shadow_resolution;
+                        scene_metrics.shadow_draw_calls = draw.shadow_draw_calls;
+                        scene_metrics.shadow_map_rebuilds = u32::from(draw.shadow_draw_calls > 0);
+                        scene_metrics.shadow_resident_bytes = draw.shadow_resident_bytes;
+                        scene_metrics.shadow_budget_exceeded |= draw.shadow_budget_denied;
+                    }
+                }
                 workbench.set_performance_metrics(
                     performance.presented_fps,
                     runtime.viewport_fps(now),
@@ -239,7 +251,7 @@ impl NativeEditorApplication {
                     performance.requested_target_fps,
                     performance.p95_frame_time_ms,
                     performance.hitch_count,
-                    graphics_snapshot.last_frame_metrics,
+                    scene_metrics,
                     presentation_label,
                     runtime.active_frame_activity().label(),
                     runtime.active_frame_reason_label(),
@@ -990,6 +1002,7 @@ impl NativeEditorApplication {
         } else {
             None
         };
+        let frame_was_deferred;
         if loading_active {
             let Some(loading) = self.loading.as_mut() else {
                 runtime.cancel_frame();
@@ -1014,6 +1027,7 @@ impl NativeEditorApplication {
                 |key| raf_core::i18n::t(key, self.settings_state.language),
             );
             observe_editor_presentation(host, &rendered);
+            frame_was_deferred = rendered.as_ref().is_ok_and(|frame| frame.metrics.presents == 0);
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
                 accessibility.publish(window, std::slice::from_mut(&mut layer), false, ui_language,
@@ -1060,6 +1074,7 @@ impl NativeEditorApplication {
                     raf_core::i18n::t(key, ui_language)
                 });
             observe_editor_presentation(host, &rendered);
+            frame_was_deferred = rendered.as_ref().is_ok_and(|frame| frame.metrics.presents == 0);
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
                 accessibility.publish(window, &mut layers, self.settings_open || self.exit_confirmation_open, ui_language,
@@ -1115,6 +1130,7 @@ impl NativeEditorApplication {
                         .unwrap_or_else(|| raf_core::i18n::t(key, ui_language))
                 });
             observe_editor_presentation(host, &rendered);
+            frame_was_deferred = rendered.as_ref().is_ok_and(|frame| frame.metrics.presents == 0);
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
                 accessibility.publish(window, &mut layers, self.settings_open || self.exit_confirmation_open, ui_language,
@@ -1151,6 +1167,7 @@ impl NativeEditorApplication {
                         .unwrap_or_else(|| raf_core::i18n::t(key, ui_language))
                 });
             observe_editor_presentation(host, &rendered);
+            frame_was_deferred = rendered.as_ref().is_ok_and(|frame| frame.metrics.presents == 0);
             #[cfg(windows)]
             if let (Some(accessibility), Some(window)) = (&mut self.accessibility, &self.window) {
                 accessibility.publish(window, &mut layers, self.settings_open || self.exit_confirmation_open, ui_language, |key| {
@@ -1158,6 +1175,14 @@ impl NativeEditorApplication {
                         .unwrap_or_else(|| raf_core::i18n::t(key, ui_language))
                 });
             }
+        }
+        if frame_was_deferred {
+            runtime.cancel_frame();
+            if queue_hierarchy_refresh {
+                runtime.request_ui_frame();
+            }
+            self.input.begin_frame();
+            return;
         }
         let scene_rendered_this_frame = runtime.scene_rendered_this_frame();
         let scene_metrics = runtime.graphics().snapshot().last_frame_metrics;

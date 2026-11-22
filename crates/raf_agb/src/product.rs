@@ -179,7 +179,8 @@ impl<B: Backend> ProductDevice<B> {
 
     pub fn draw(&mut self, handle: PacketHandle, uniforms: &FrameUniforms) -> Result<FrameMetrics> {
         let clear = self.entry(handle)?.clear;
-        self.device.draw(handle.native, &uniforms.raster(clear)?)
+        self.device
+            .draw_product(handle.native, uniforms.raster(clear)?)
     }
 
     pub fn release(&mut self, handle: PacketHandle) -> Result<()> {

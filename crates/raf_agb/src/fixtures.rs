@@ -16,8 +16,10 @@ pub fn camera(extent: [u32; 2], orbit: f32) -> Frame {
         light: [0.0, 1.0, 0.0, 1.0],
         light_color: [1.0; 4],
         environment: [1.; 4],
+        lighting_style: [0.; 4],
         viewport: [0., 0., 1., 1.],
         shadow: None,
+        shadow_map: None,
         scene_filter: false,
     }
 }

@@ -76,6 +76,8 @@ pub struct Workload {
     pub instances: Vec<Instance>,
     pub textures: Vec<Texture>,
     pub batches: Vec<Batch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shadow_batches: Vec<Batch>,
 }
 
 /// Patch existing data. RGBA rows are tightly packed, with a top-left origin.
@@ -161,7 +163,12 @@ impl Workload {
             }
         }
         let mut overlay = false;
-        for batch in &self.batches {
+        for batch in &self.shadow_batches {
+            if batch.mode != DrawMode::Scene {
+                return Err(Error::Invalid("invalid shadow batch"));
+            }
+        }
+        for batch in self.shadow_batches.iter().chain(&self.batches) {
             let count = match &batch.indices {
                 Some(range) => {
                     let indices = self

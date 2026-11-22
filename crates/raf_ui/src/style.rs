@@ -432,8 +432,14 @@ impl UiStyleSheet {
                 && state.is_focused(&node.id)
                 && !self.has_state_rule(node, state, UiStyleRuleState::Focused)
             {
-                resolved.border = lift_focus_color(resolved.border);
-                resolved.border_width = resolved.border_width.max(1.0);
+                // A transparent authored border already belongs to a pill or
+                // surface-level focus treatment. Painting a bright inner
+                // rectangle around the control read as a misaligned second
+                // border, so only lift borders that actually exist.
+                if resolved.border[3] != 0 {
+                    resolved.border = lift_focus_color(resolved.border);
+                    resolved.border_width = resolved.border_width.max(1.0);
+                }
             }
             if node.disabled && !self.has_state_rule(node, state, UiStyleRuleState::Disabled) {
                 resolved.opacity = resolved.opacity.min(0.56);

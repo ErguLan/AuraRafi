@@ -302,6 +302,11 @@ impl Backend for Metal {
                 size_of_val(&uniforms) as u64,
                 ptr::from_ref(&uniforms).cast(),
             );
+            render.set_fragment_bytes(
+                CAMERA_SLOT.into(),
+                size_of_val(&uniforms) as u64,
+                ptr::from_ref(&uniforms).cast(),
+            );
             render.set_fragment_sampler_state(0, Some(&self.sampler));
             let full = ViewportRect::full(plan.extent);
             let scene = frame.viewport_rect(plan.extent);

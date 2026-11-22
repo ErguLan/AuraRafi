@@ -5,6 +5,47 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.6] - 2026-11-22 - Sky, Lighting and Runtime Verification
+
+### Added
+
+- **Per-pixel sky**: the AGB sky pass now reconstructs a ray per fragment and
+  shades zenith/horizon/ground, haze, a solar disk, a bounded halo and
+  procedural stars. Solid and gradient sky modes share the same contract.
+- **Toon and improved lighting controls**: banded solar response, toon
+  softness/steps, improved ambient falloff and the highlight shoulder are
+  exposed through the product uniforms and the Lighting inspector.
+- **Shadow detail**: receiver masking, soft filtering and strength reach the
+  Vulkan and DX12 shadow shaders through the shared product contract; Metal and
+  WebGPU keep the same uniform shape and gates.
+- **Environment mapping**: `ProductFrameBuilder` carries the full environment
+  (sun disk, halo, stars, toon, improved/authored flags) into `FrameUniforms`,
+  with focused composition tests.
+
+### Changed
+
+- Editor runtime presentation and loading surfaces were updated alongside the
+  lighting contract; the Studio and RafUI styles received matching polish.
+- The editor now reports a bounded AGB compose trace when
+  `RAF_AGB_TRACE_FRAME=1`, covering the packet background, sky colors, camera,
+  viewport and shadow state.
+
+### Fixed
+
+- **Local Play**: the editor was launching a stale `aurarafi-player.exe`
+  (v0.11.2) and the loading screen never advanced. Rebuilding the player with
+  the editor at v0.11.6 makes Play reach `Running` with the authored sky.
+- The engine opens the project viewport with the authored blue sky; the neutral
+  preview toggle intentionally switches to the neutral backdrop.
+
+### Known limitations
+
+- The runtime loading screen still needs explicit stage history, elapsed time,
+  error/retry state and a preparation watchdog.
+- The other engineer's sky/lighting work in this tree is included as-is; the
+  remaining uniform-flag cleanup (`viewport` vs `authored`/`improved`) is a
+  follow-up.
+
 ## [0.11.5] - 2026-11-21 - WGPU Removed
 
 ### Removed

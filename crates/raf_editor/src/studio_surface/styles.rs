@@ -1,8 +1,7 @@
 //! Retained Hub stylesheet recipes.
 
 use raf_render::api_graphic_basic::ui_surface::{
-    StudioUiPalette, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector,
-    UiStyleSheet,
+    StudioUiPalette, UiStylePatch, UiStyleRule, UiStyleRuleState, UiStyleSelector, UiStyleSheet,
 };
 
 use super::*;
@@ -636,8 +635,11 @@ pub(crate) fn hub_style_sheet(palette: StudioUiPalette) -> UiStyleSheet {
             UiStyleRule::new(
                 UiStyleSelector::Class("hub-create-name-focused".to_string()),
                 UiStylePatch {
-                    border: Some(tokens.focus),
-                    border_width: Some(2.0),
+                    // Keep the resting border width: a thicker focus border
+                    // nudges the sparkle and the typed text by 1px while
+                    // writing, which reads as a glitchy jump.
+                    border: Some(tokens.accent),
+                    border_width: Some(1.0),
                     ..UiStylePatch::default()
                 },
             ),

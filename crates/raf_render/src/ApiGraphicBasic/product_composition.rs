@@ -433,7 +433,9 @@ impl ProductFrameBuilder {
                     // Product encoding requires the same explicit state.
                     let current = product_pipeline(pipeline)?;
                     if current != Pipeline::OVERLAY {
-                        self.packet.commands.push(Command::SetPipeline(Pipeline::OVERLAY));
+                        self.packet
+                            .commands
+                            .push(Command::SetPipeline(Pipeline::OVERLAY));
                     }
                     self.push_screen_triangles(
                         triangles,
@@ -460,6 +462,7 @@ impl ProductFrameBuilder {
             }
         }
 
+        self.append_shadow_casters(frame)?;
         self.source = Some(frame.clone());
         self.materialized = true;
         Ok(())
@@ -496,14 +499,8 @@ impl ProductFrameBuilder {
             return;
         };
         let improved = environment.improved();
-        let exposure = environment.settings.exposure;
         let map = |color: Vec3| -> [f32; 4] {
-            let color = if improved {
-                crate::optimized_lighting::expose(color, exposure)
-            } else {
-                color
-            };
-            let [red, green, blue] = color.to_array().map(|channel| channel.clamp(0.0, 1.0));
+            let [red, green, blue] = color.to_array();
             [red, green, blue, 1.0]
         };
         let solid = environment.settings.sky.mode == raf_core::environment::SkyMode::Solid;
@@ -523,18 +520,42 @@ impl ProductFrameBuilder {
                 0.0
             },
             texture: None,
+            sun_disk_cos: if environment.settings.sun.disk_visible
+                && environment.sun_direction.y > 0.0
+                && environment.settings.sun.enabled
+            {
+                environment.settings.sun.angular_radius.cos()
+            } else {
+                1.0
+            },
+            halo: if improved {
+                environment.halo_strength
+            } else {
+                0.0
+            },
+            halo_cos: environment.halo_cos,
+            stars_density: if environment.settings.sky.stars_enabled {
+                environment.settings.sky.stars_density
+            } else {
+                0.0
+            },
+            stars_intensity: environment.settings.sky.stars_intensity,
         }));
     }
 
-    fn mesh_index(
-        &mut self,
-        frame: &SceneRenderFrame,
-        mesh_id: usize,
-    ) -> Result<u32, String> {
+    fn mesh_index(&mut self, frame: &SceneRenderFrame, mesh_id: usize) -> Result<u32, String> {
         let mesh = frame
             .commands
             .mesh_arc(mesh_id)
             .ok_or_else(|| format!("scene mesh {mesh_id} is not registered"))?;
+        self.register_mesh(mesh, mesh_id)
+    }
+
+    fn register_mesh(
+        &mut self,
+        mesh: &Arc<crate::api_graphic_basic::mesh::BasicMesh>,
+        mesh_id: usize,
+    ) -> Result<u32, String> {
         let key = MeshKey {
             identity: Arc::as_ptr(mesh) as usize,
             vertices: mesh.vertices.len(),
@@ -572,6 +593,32 @@ impl ProductFrameBuilder {
         });
         self.mesh_ids.insert(key, index);
         Ok(index)
+    }
+
+    fn append_shadow_casters(&mut self, frame: &SceneRenderFrame) -> Result<(), String> {
+        let Some(shadow) = &frame.commands.shadows else {
+            return Ok(());
+        };
+        let material = self.material_index(None)?;
+        let mut batches = Vec::<(u32, Vec<Instance>)>::new();
+        let mut batch_by_mesh = HashMap::new();
+        for caster in &shadow.geometry.casters {
+            let mesh = self.register_mesh(&caster.mesh, self.packet.meshes.len())?;
+            let batch = *batch_by_mesh.entry(mesh).or_insert_with(|| {
+                let index = batches.len();
+                batches.push((mesh, Vec::new()));
+                index
+            });
+            batches[batch].1.push(Instance::new(caster.model, [1.; 4]));
+        }
+        for (mesh, instances) in batches {
+            self.packet.commands.push(Command::DrawShadowBatch {
+                mesh,
+                material,
+                instances,
+            });
+        }
+        Ok(())
     }
 
     fn texture_index(
@@ -667,7 +714,11 @@ impl ProductFrameBuilder {
                 vertices.push(Vertex {
                     // Screen triangles are a scene-group batch, so the scene
                     // viewport maps their clip space into the canvas rectangle.
-                    position: [2.0 * x / width as f32 - 1.0, 1.0 - 2.0 * y / height as f32, 0.0],
+                    position: [
+                        2.0 * x / width as f32 - 1.0,
+                        1.0 - 2.0 * y / height as f32,
+                        0.0,
+                    ],
                     uv: [0.0; 2],
                     rgba,
                     normal: [0.0; 3],
@@ -708,10 +759,7 @@ pub fn append_cpu_canvas(
             size[1]
         ));
     }
-    if !rect.iter().all(|value| value.is_finite())
-        || rect[2] <= 0.0
-        || rect[3] <= 0.0
-    {
+    if !rect.iter().all(|value| value.is_finite()) || rect[2] <= 0.0 || rect[3] <= 0.0 {
         return Err("CPU canvas target rect is invalid".to_string());
     }
     let texture = count_u32(packet.textures.len(), "texture")?;
@@ -719,15 +767,17 @@ pub fn append_cpu_canvas(
         size,
         rgba: pixels.to_vec(),
     });
-    packet.commands.push(Command::Paint(raf_agb::product::Paint::Image {
-        quad: raf_agb::product::PaintQuad {
-            rect,
-            clip: [0.0, 0.0, 1.0, 1.0],
-            uv_rect: [0.0, 0.0, 1.0, 1.0],
-            color: [1.0; 4],
-        },
-        texture,
-    }));
+    packet
+        .commands
+        .push(Command::Paint(raf_agb::product::Paint::Image {
+            quad: raf_agb::product::PaintQuad {
+                rect,
+                clip: [0.0, 0.0, 1.0, 1.0],
+                uv_rect: [0.0, 0.0, 1.0, 1.0],
+                color: [1.0; 4],
+            },
+            texture,
+        }));
     Ok(texture)
 }
 
@@ -739,7 +789,7 @@ pub fn scene_frame_uniforms(frame: &SceneRenderFrame) -> FrameUniforms {
     let mut uniforms = FrameUniforms::default();
     uniforms.camera = Camera {
         view_projection: frame.view_proj,
-        world_position: camera_position(frame.view_proj),
+        world_position: frame.commands.camera_eye,
     };
     uniforms.light.toward_light = frame.light_dir.try_normalize().unwrap_or(Vec3::Y);
     if let Some(environment) = frame.commands.environment {
@@ -751,16 +801,12 @@ pub fn scene_frame_uniforms(frame: &SceneRenderFrame) -> FrameUniforms {
         if sun.is_finite() && sun.min_element() >= 0.0 {
             uniforms.light.color = sun.to_array();
         }
+        uniforms.environment.ambient_tint = environment.ambient.to_array();
+        uniforms.environment.authored = true;
+        uniforms.environment.toon_steps = environment.settings.sun.shading_steps();
         if environment.improved() {
-            // The product shader splits lighting into an ambient fraction and
-            // a directional remainder. The environment carries an ambient
-            // color, so use its luminance as the fraction and keep the sun
-            // color for the directional term.
-            let ambient = environment.ambient;
-            if ambient.is_finite() && ambient.min_element() >= 0.0 {
-                let luma = ambient.dot(Vec3::new(0.2126, 0.7152, 0.0722));
-                uniforms.environment.ambient = luma.clamp(0.0, 0.9);
-            }
+            uniforms.environment.improved = true;
+            uniforms.environment.toon_softness = environment.softness();
             let exposure = environment.exposure();
             if exposure.is_finite() && exposure > 0.0 {
                 uniforms.environment.exposure_ev = exposure.log2().clamp(-16.0, 16.0);
@@ -771,7 +817,26 @@ pub fn scene_frame_uniforms(frame: &SceneRenderFrame) -> FrameUniforms {
         if shadow.settings.enabled {
             uniforms.shadows = Some(raf_agb::product::ShadowUniforms {
                 light_view_projection: shadow.geometry.view_projection,
-                bias: shadow.settings.bias.clamp(0.0, 1.0),
+                bias: shadow.settings.bias / (8.0 * shadow.settings.distance),
+                resolution: shadow.geometry.resolution,
+                depth_key: shadow.geometry.key,
+                distance: shadow.settings.distance,
+                strength: shadow.settings.strength,
+                slope_bias_per_texel: shadow
+                    .geometry
+                    .normalized_texel_bias(shadow.geometry.resolution)
+                    * if shadow.settings.soft_filter {
+                        1.5
+                    } else {
+                        0.85
+                    },
+                filter_taps: if !shadow.settings.soft_filter {
+                    1
+                } else if shadow.improved {
+                    9
+                } else {
+                    4
+                },
             });
         }
     }
@@ -805,9 +870,10 @@ pub fn prepare_product_scene<B: Backend>(
                 Ok(handle)
             }
         }
-        Err(error) => Err(failure.unwrap_or_else(|| {
-            format!("product device rejected the scene packet: {error}")
-        })),
+        Err(error) => {
+            Err(failure
+                .unwrap_or_else(|| format!("product device rejected the scene packet: {error}")))
+        }
     }
 }
 
@@ -820,15 +886,6 @@ pub(crate) fn linear_rgba(color: [u8; 4]) -> [f32; 4] {
         crate::post_process::srgb_to_linear(color[2] as f32 / 255.0),
         color[3] as f32 / 255.0,
     ]
-}
-
-fn camera_position(view_projection: Mat4) -> Vec3 {
-    let inverse = view_projection.inverse();
-    if inverse.is_finite() {
-        inverse.transform_point3(Vec3::ZERO)
-    } else {
-        Vec3::ZERO
-    }
 }
 
 fn product_pipeline(kind: BasicPipelineKind) -> Result<Pipeline, String> {
@@ -900,12 +957,7 @@ fn product_line(line: &BasicLine, no_depth_test: bool, command: usize) -> Result
     })
 }
 
-fn product_grid(
-    y: f32,
-    spacing: f32,
-    no_depth_test: bool,
-    command: usize,
-) -> Result<Grid, String> {
+fn product_grid(y: f32, spacing: f32, no_depth_test: bool, command: usize) -> Result<Grid, String> {
     if !y.is_finite() || !spacing.is_finite() || spacing <= 0.0 {
         return Err(format!(
             "scene frame command {command}: grid position or spacing is invalid"

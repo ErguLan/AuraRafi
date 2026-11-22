@@ -1,12 +1,8 @@
-use glam::Vec3;
-
 use crate::product::SkyBackdrop;
 use crate::{Batch, DrawMode, Error, Result, Vertex};
 
-use super::{stream_range, validate_color, Encoder};
+use super::Encoder;
 
-const MERIDIANS: u32 = 32;
-const PARALLELS: u32 = 16;
 const SKY_KIND: u32 = 3;
 
 impl Encoder<'_> {
@@ -14,65 +10,51 @@ impl Encoder<'_> {
         if !self.workload.batches.is_empty() {
             return Err(Error::Invalid("draw sky before scene geometry and paint"));
         }
-        for color in [sky.zenith, sky.horizon, sky.ground] {
-            validate_color(color)?;
+        if [sky.zenith, sky.horizon, sky.ground]
+            .into_iter()
+            .any(|color| {
+                color[..3].iter().any(|value| !(0. ..=4.).contains(value)) || color[3] != 1.0
+            })
+            || !(0. ..=1.).contains(&sky.haze)
+            || !(-1. ..=1.).contains(&sky.sun_disk_cos)
+            || !(-1. ..=1.).contains(&sky.halo_cos)
+            || !(0. ..=1.).contains(&sky.halo)
+            || !(0. ..=1.).contains(&sky.stars_density)
+            || !(0. ..=4.).contains(&sky.stars_intensity)
+        {
+            return Err(Error::Invalid("invalid sky lighting parameters"));
         }
-        if !sky.haze.is_finite() || !(0. ..=1.).contains(&sky.haze) {
-            return Err(Error::Invalid("invalid environment haze"));
-        }
-        let tex = sky
-            .texture
-            .map(|texture| self.texture(texture))
-            .transpose()?;
-        let pad = tex.map_or(0., |texture| {
-            0.5 / self.workload.textures[texture as usize].size[1].max(1) as f32
+        let texture = sky.texture.map(|index| self.texture(index)).transpose()?;
+        let triangle = [[-1., -1.], [3., -1.], [-1., 3.]].map(|[x, y]| Vertex {
+            position: [x, y, 0.],
+            uv: [0.; 2],
+            rgba: [1.; 4],
+            normal: [0.; 3],
         });
-        let rows = PARALLELS + 1;
-        let cols = MERIDIANS + 1;
-        let vertices = self.vertex_range((rows * cols) as usize)?;
-        let indices = stream_range(
-            self.workload.indices.len(),
-            (PARALLELS * MERIDIANS * 6) as usize,
+        let vertices = self.add_vertices(&triangle)?;
+        // The sky batch reuses the instance stream. The columns are payload
+        // rather than a transform when the shader sees SKY_KIND.
+        let index = self.raster_instance(
+            SKY_KIND,
+            [
+                sky.stars_density,
+                sky.stars_intensity,
+                f32::from(texture.is_some()),
+                0.0,
+            ],
         )?;
-        self.reserve(indices.len() as u64 * size_of::<u32>() as u64)?;
-        for y in 0..rows {
-            let v = y as f32 / PARALLELS as f32;
-            let (ring, vertical) = (std::f32::consts::PI * v).sin_cos();
-            let target = if vertical >= 0. {
-                sky.zenith
-            } else {
-                sky.ground
-            };
-            let blend = vertical.abs().powf(1. + 2. * sky.haze);
-            let rgba = if tex.is_some() {
-                [1.; 4]
-            } else {
-                std::array::from_fn(|i| sky.horizon[i] + (target[i] - sky.horizon[i]) * blend)
-            };
-            for x in 0..cols {
-                let u = x as f32 / MERIDIANS as f32;
-                let (sin, cos) = (std::f32::consts::TAU * u).sin_cos();
-                let position = Vec3::new(cos * ring, vertical, sin * ring);
-                self.workload.vertices.push(Vertex {
-                    position: position.to_array(),
-                    uv: [u, v.clamp(pad, 1. - pad)],
-                    rgba,
-                    normal: [0.; 3],
-                });
-                if x < MERIDIANS && y < PARALLELS {
-                    let a = vertices.start + y * cols + x;
-                    let b = a + cols;
-                    self.workload.indices.extend([a, b, a + 1, a + 1, b, b + 1]);
-                }
-            }
-        }
-        let instance = self.raster_instance(SKY_KIND, [1.; 4])?;
+        self.workload.instances[index as usize].transform = [
+            sky.zenith,
+            sky.horizon,
+            sky.ground,
+            [sky.haze, sky.sun_disk_cos, sky.halo, sky.halo_cos],
+        ];
         self.batch(Batch {
             mode: DrawMode::SceneNoDepth,
             vertices,
-            indices: Some(indices),
-            instances: instance..instance + 1,
-            texture: tex.unwrap_or(self.white),
+            indices: None,
+            instances: index..index + 1,
+            texture: texture.unwrap_or(self.white),
         })
     }
 }

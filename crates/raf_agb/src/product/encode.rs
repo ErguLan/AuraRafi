@@ -107,12 +107,25 @@ impl Encoder<'_> {
                 mesh,
                 material,
                 instance,
-            } => self.mesh(index, mesh, material, std::slice::from_ref(&instance))?,
+            } => self.mesh(
+                index,
+                mesh,
+                material,
+                std::slice::from_ref(&instance),
+                false,
+            )?,
             Command::DrawMeshBatch {
                 mesh,
                 material,
                 instances,
-            } => self.mesh(index, mesh, material, &instances)?,
+            } => self.mesh(index, mesh, material, &instances, false)?,
+            Command::DrawShadowBatch {
+                mesh,
+                material,
+                instances,
+            } => {
+                self.mesh(index, mesh, material, &instances, true)?;
+            }
             Command::DrawLine(line) => self.line(line)?,
             Command::DrawLineBatch(lines) => {
                 for line in lines {
@@ -179,8 +192,9 @@ impl Encoder<'_> {
         mesh: u32,
         material: u32,
         instances: &[Instance],
+        caster: bool,
     ) -> Result<()> {
-        if self.overlay || self.pipeline == Pipeline::OVERLAY {
+        if !caster && (self.overlay || self.pipeline == Pipeline::OVERLAY) {
             return Err(Error::Unsupported(
                 "depth-tested meshes must precede overlays",
             ));
@@ -189,7 +203,7 @@ impl Encoder<'_> {
             return Err(Error::Invalid("empty instance batch"));
         }
         let (texture, tint) = self.material(material)?;
-        let key = (mesh, self.pipeline.lit);
+        let key = (mesh, caster || self.pipeline.lit);
         let ranges = if let Some(range) = self.mesh_cache.get(&key) {
             range.clone()
         } else {
@@ -264,13 +278,19 @@ impl Encoder<'_> {
                 instance
             }));
         self.instance_ranges.insert(command, instance_range.clone());
-        self.batch(Batch {
+        let batch = Batch {
             mode: DrawMode::Scene,
             vertices: ranges.vertices,
             indices: ranges.indices,
             instances: instance_range,
             texture,
-        })
+        };
+        if caster {
+            self.workload.shadow_batches.push(batch);
+            Ok(())
+        } else {
+            self.batch(batch)
+        }
     }
 
     fn overlay_triangles(&mut self, vertices: &[Vertex], texture: u32) -> Result<()> {

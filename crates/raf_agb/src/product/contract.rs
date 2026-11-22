@@ -170,6 +170,11 @@ pub enum Command {
         material: u32,
         instances: Vec<Instance>,
     },
+    DrawShadowBatch {
+        mesh: u32,
+        material: u32,
+        instances: Vec<Instance>,
+    },
     DrawLine(Line),
     DrawLineBatch(Vec<Line>),
     /// Positions are clip-space, and consume z in [0, 1].
@@ -240,6 +245,12 @@ pub struct DirectionalLight {
 pub struct ShadowUniforms {
     pub light_view_projection: Mat4,
     pub bias: f32,
+    pub resolution: u32,
+    pub depth_key: u64,
+    pub distance: f32,
+    pub strength: f32,
+    pub filter_taps: u32,
+    pub slope_bias_per_texel: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -248,6 +259,10 @@ pub struct Environment {
     pub ambient: f32,
     pub ambient_tint: [f32; 3],
     pub exposure_ev: f32,
+    pub authored: bool,
+    pub improved: bool,
+    pub toon_steps: f32,
+    pub toon_softness: f32,
     /// Optional environment map in the prepared packet's texture table.
     pub radiance_map: Option<u32>,
 }
@@ -260,6 +275,12 @@ pub struct SkyBackdrop {
     pub haze: f32,
     /// Optional equirectangular texture, indexed within the packet.
     pub texture: Option<u32>,
+    /// A cosine of one disables the solar disk.
+    pub sun_disk_cos: f32,
+    pub halo: f32,
+    pub halo_cos: f32,
+    pub stars_density: f32,
+    pub stars_intensity: f32,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -292,6 +313,10 @@ impl Default for FrameUniforms {
                 ambient: 0.35,
                 ambient_tint: [1.; 3],
                 exposure_ev: 0.,
+                authored: false,
+                improved: false,
+                toon_steps: 0.,
+                toon_softness: 0.,
                 radiance_map: None,
             },
             shadows: None,
@@ -313,6 +338,8 @@ impl FrameUniforms {
             || !self.time_seconds.is_finite()
             || !(0. ..=1.).contains(&ambient)
             || !(-16. ..=16.).contains(&self.environment.exposure_ev)
+            || !(0. ..=6.).contains(&self.environment.toon_steps)
+            || !(0. ..=1.).contains(&self.environment.toon_softness)
             || self
                 .environment
                 .ambient_tint
@@ -340,12 +367,24 @@ impl FrameUniforms {
                 if !shadow.light_view_projection.is_finite()
                     || !shadow.bias.is_finite()
                     || shadow.bias < 0.
+                    || ![256, 512, 1024].contains(&shadow.resolution)
+                    || !(2. ..=256.).contains(&shadow.distance)
+                    || !(0. ..=1.).contains(&shadow.strength)
+                    || ![1, 4, 9].contains(&shadow.filter_taps)
+                    || !shadow.slope_bias_per_texel.is_finite()
+                    || shadow.slope_bias_per_texel < 0.0
                 {
                     return Err(Error::Invalid("invalid directional shadow parameters"));
                 }
                 Ok(crate::ShadowFrame {
                     light_view_projection: shadow.light_view_projection.to_cols_array_2d(),
-                    parameters: [shadow.bias, 0., 0., 0.],
+                    parameters: [
+                        shadow.bias,
+                        shadow.distance,
+                        shadow.strength,
+                        shadow.filter_taps as f32,
+                    ],
+                    sampling: [shadow.slope_bias_per_texel, 0.0, 0.0, 0.0],
                 })
             })
             .transpose()?;
@@ -356,8 +395,17 @@ impl FrameUniforms {
             light: [light.x, light.y, light.z, ambient],
             light_color: [r, g, b, 1.],
             environment: [ar, ag, ab, self.environment.exposure_ev.exp2()],
+            lighting_style: [
+                f32::from(self.environment.authored),
+                f32::from(self.environment.improved),
+                self.environment.toon_steps,
+                self.environment.toon_softness,
+            ],
             viewport,
             shadow,
+            shadow_map: self
+                .shadows
+                .map(|shadow| (shadow.resolution, shadow.depth_key)),
             scene_filter: self.scene_filter,
         })
     }

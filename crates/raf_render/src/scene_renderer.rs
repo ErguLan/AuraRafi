@@ -806,6 +806,7 @@ impl SceneRenderer {
             4 + usize::from(override_basic_mesh.is_some()),
         );
         commands.clear(bg_color);
+        commands.camera_eye = cam_eye;
         commands.environment = environment;
         commands.optimized_improved = options
             .environment_override
@@ -1421,8 +1422,13 @@ fn rasterize_mesh_command(
     let mvp = *view_proj * *model;
     let normal_mat = transform::normal_matrix(model);
     let shaded = pipeline.is_lit();
-    let authored_ui = matches!(pipeline, BasicPipelineKind::UiSurface | BasicPipelineKind::UiSurfaceOverlay);
-    if authored_ui { fb.set_depth_policy(pipeline != BasicPipelineKind::UiSurfaceOverlay, false); }
+    let authored_ui = matches!(
+        pipeline,
+        BasicPipelineKind::UiSurface | BasicPipelineKind::UiSurfaceOverlay
+    );
+    if authored_ui {
+        fb.set_depth_policy(pipeline != BasicPipelineKind::UiSurfaceOverlay, false);
+    }
 
     for tri_idx in (0..mesh.indices.len()).step_by(3) {
         let i0 = mesh.indices[tri_idx] as usize;
@@ -1513,7 +1519,9 @@ fn rasterize_mesh_command(
             shadows.filter(|_| shaded),
         );
     }
-    if authored_ui { fb.set_depth_policy(true, true); }
+    if authored_ui {
+        fb.set_depth_policy(true, true);
+    }
 }
 
 fn rasterize_world_line_command(

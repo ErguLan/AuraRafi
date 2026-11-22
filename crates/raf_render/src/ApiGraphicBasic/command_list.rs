@@ -120,6 +120,8 @@ pub struct BasicCommandStats {
 /// Accumulator of drawing commands that represents a single frame's rendering pipeline instructions.
 #[derive(Debug, Clone)]
 pub struct BasicCommandList {
+    /// World-space camera position supplied by the scene producer.
+    pub camera_eye: glam::Vec3,
     /// Scene-only presentation; independent from Neutral lighting and never applied to RafUI/CAD.
     pub optimized_improved: bool,
     /// Small frame state shared by GPU and CPU executors; absent in neutral mode.
@@ -152,6 +154,7 @@ impl BasicCommandList {
     /// renderer's visible-set projection.
     pub fn with_capacity(command_capacity: usize, mesh_capacity: usize) -> Self {
         Self {
+            camera_eye: glam::Vec3::ZERO,
             optimized_improved: false,
             environment: None,
             shadows: None,

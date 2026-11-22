@@ -33,7 +33,7 @@ impl Bindings {
             binding(
                 0,
                 vk::DescriptorType::UNIFORM_BUFFER,
-                vk::ShaderStageFlags::VERTEX,
+                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
             ),
             binding(
                 1,

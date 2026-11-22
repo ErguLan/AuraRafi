@@ -86,6 +86,7 @@ pub struct Resident {
     descriptor_step: u64,
     descriptor_start: u64,
     batches: Vec<Batch>,
+    shadow_batches: Vec<Batch>,
 }
 
 struct Target {
@@ -244,12 +245,13 @@ impl Backend for Dx12 {
     }
 
     fn supports_shadows(&self) -> bool {
-        self.shadow_capability.available
-            && self.info.max_texture >= crate::device::SHADOW_MAP_SIDE
+        self.shadow_capability.available && self.info.max_texture >= crate::device::SHADOW_MAP_SIDE
     }
 
     fn shadow_bytes(&self) -> u64 {
-        shadow::bytes(self.shadow.is_some())
+        self.shadow
+            .as_ref()
+            .map_or(0, |shadow| crate::device::shadow_map_bytes(shadow.side))
     }
 
     fn supports_scene_filter(&self) -> bool {
@@ -457,6 +459,7 @@ impl Backend for Dx12 {
             descriptor_step,
             descriptor_start,
             batches: workload.batches.clone(),
+            shadow_batches: workload.shadow_batches.clone(),
         })
     }
 
@@ -502,11 +505,22 @@ impl Backend for Dx12 {
         } else {
             self.filter = None;
         }
+        let (side, depth_key) = frame
+            .shadow_map
+            .map_or((crate::device::SHADOW_MAP_SIDE, None), |(side, key)| {
+                (side, Some(key))
+            });
         let shadow_upload = if let Some(parameters) = frame.shadow {
-            if self.shadow.is_none() {
+            if self
+                .shadow
+                .as_ref()
+                .is_none_or(|shadow| shadow.side != side)
+            {
+                self.shadow = None;
                 self.shadow = Some(shadow::ShadowPass::new(
                     &self.device,
                     self.pipelines.root(),
+                    side,
                 )?);
             }
             self.shadow.as_mut().unwrap().prepare(parameters)
@@ -539,7 +553,11 @@ impl Backend for Dx12 {
                 );
             }
             if let Some(shadow) = shadow {
-                shadow_draws = shadow.record(&self.device, list, pipelines.root(), resident);
+                shadow.write_view(&self.device, resident);
+                if depth_key.is_none() || shadow.depth_key != depth_key {
+                    shadow_draws =
+                        shadow.record(list, pipelines.root(), resident, depth_key.is_some());
+                }
             }
             if let Some(filter) = filter {
                 filter_draws = 1;
@@ -611,6 +629,9 @@ impl Backend for Dx12 {
             }
         }
         self.submit()?;
+        if let Some(shadow) = self.shadow.as_mut() {
+            shadow.depth_key = depth_key;
+        }
         if let Some(window) = &self.window {
             window.present()?;
         }
@@ -620,6 +641,7 @@ impl Backend for Dx12 {
                 .saturating_add(filter_draws),
             submits: 1,
             upload_bytes: shadow_upload,
+            shadow_draw_calls: shadow_draws,
             ..Default::default()
         })
     }
@@ -710,8 +732,7 @@ unsafe fn bind_scene(
     shadow: Option<&shadow::ShadowPass>,
 ) {
     let shadow_slot = D3D12_GPU_DESCRIPTOR_HANDLE {
-        ptr: resident.descriptor_start
-            + resident.textures.len() as u64 * resident.descriptor_step,
+        ptr: resident.descriptor_start + resident.textures.len() as u64 * resident.descriptor_step,
     };
     unsafe {
         list.SetGraphicsRootSignature(pipelines.root());

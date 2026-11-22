@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use raf_agb::backends::native::NativeBackend;
-use raf_agb::product::{FrameUniforms, PacketHandle, ProductDevice};
+use raf_agb::product::{Command, FrameUniforms, PacketHandle, ProductDevice};
 
 use crate::api_graphic_basic::canvas_presenter::{append_cpu_output, CanvasTargetRect};
 use crate::api_graphic_basic::device::SceneFrameOutput;
@@ -73,13 +73,7 @@ impl NativeEditorCompositor {
             logical_size,
             raster_scale,
         }];
-        self.compose_layers(
-            device,
-            target_size,
-            canvas_layer,
-            &mut ui_layers,
-            resolve,
-        )
+        self.compose_layers(device, target_size, canvas_layer, &mut ui_layers, resolve)
     }
 
     pub(crate) fn compose_layers<F>(
@@ -107,12 +101,6 @@ impl NativeEditorCompositor {
                 uniforms = scene_frame_uniforms(frame);
                 uniforms.viewport = layer.target_rect.normalized(target_size);
             }
-        }
-        if uniforms.shadows.is_some() && !device.supports_shadows() {
-            uniforms.shadows = None;
-        }
-        if uniforms.scene_filter && !device.supports_scene_filter() {
-            uniforms.scene_filter = false;
         }
         let mut canvas_layers = 0;
 
@@ -174,16 +162,19 @@ impl NativeEditorCompositor {
             let handle = prepare_product_scene(device, &mut self.builder)?;
             self.handle = Some(handle);
             self.fingerprint = Some(fingerprint);
+            if std::env::var_os("RAF_AGB_TRACE_FRAME").is_some() {
+                trace_product_frame(self.builder.packet(), &uniforms, ui_layers.len());
+            }
             let mut metrics = EditorCompositorMetrics::default();
-            metrics.command_submits = 1;
             metrics.canvas_layers = canvas_layers;
             metrics.ui_layers = ui_frames.len() as u32;
             self.metrics = metrics;
 
             let handle = self.handle.expect("product handle was just prepared");
-            device
+            let draw = device
                 .draw(handle, &uniforms)
                 .map_err(|error| format!("product draw failed: {error}"))?;
+            self.metrics.record_draw(draw);
 
             return Ok(EditorComposedFrame {
                 ui_layers: ui_frames,
@@ -194,9 +185,10 @@ impl NativeEditorCompositor {
         let handle = self
             .handle
             .ok_or_else(|| "compositor has no prepared product packet".to_string())?;
-        device
+        let draw = device
             .draw(handle, &uniforms)
             .map_err(|error| format!("product draw failed: {error}"))?;
+        self.metrics.record_draw(draw);
 
         Ok(EditorComposedFrame {
             ui_layers: Vec::new(),
@@ -207,6 +199,48 @@ impl NativeEditorCompositor {
 
 fn linear_clear(color: [u8; 4]) -> [f32; 4] {
     linear_rgba(color)
+}
+
+/// Bounded composition trace for the live native host.
+///
+/// Enable with `RAF_AGB_TRACE_FRAME=1`. It reports the packet background and
+/// sky commands plus the camera/viewport the shaders receive, which is the
+/// first thing to check when the editor and a headless capture disagree.
+fn trace_product_frame(
+    packet: &raf_agb::product::ProductPacket,
+    uniforms: &FrameUniforms,
+    ui_layers: usize,
+) {
+    let mut clear = None;
+    let mut sky = None;
+    let mut background = 0;
+    let mut paints = 0;
+    for command in &packet.commands {
+        match command {
+            Command::Clear(color) => clear = Some(*color),
+            Command::SceneBackground(_) => background += 1,
+            Command::DrawSky(backdrop) => sky = Some(*backdrop),
+            Command::Paint(_) | Command::StyledPaint { .. } => paints += 1,
+            _ => {}
+        }
+    }
+    tracing::info!(
+        commands = packet.commands.len(),
+        meshes = packet.meshes.len(),
+        textures = packet.textures.len(),
+        ui_layers,
+        paints,
+        background,
+        ?clear,
+        sky = ?sky.map(|sky| (sky.zenith, sky.horizon, sky.ground, sky.haze, sky.halo)),
+        viewport = ?uniforms.viewport,
+        eye = ?uniforms.camera.world_position,
+        view_projection = ?uniforms.camera.view_projection,
+        exposure_ev = uniforms.environment.exposure_ev,
+        ambient = uniforms.environment.ambient,
+        shadows = uniforms.shadows.is_some(),
+        "agb.compose.trace"
+    );
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -80,7 +80,12 @@ fn scene_commands_keep_painter_order_and_state() {
     let texture_id = commands.register_texture(texture("albedo", [200, 100, 50, 255]));
     commands.set_pipeline(BasicPipelineKind::PbrLit);
     commands.set_shadow_receiver(false);
-    commands.draw_mesh_with_texture(mesh_id, Mat4::IDENTITY, [255, 128, 64, 255], Some(texture_id));
+    commands.draw_mesh_with_texture(
+        mesh_id,
+        Mat4::IDENTITY,
+        [255, 128, 64, 255],
+        Some(texture_id),
+    );
     commands.draw_line(Vec3::ZERO, Vec3::X, [255, 0, 0, 255], 2.0, false, 0.0);
     commands.draw_grid(0.25, 1.5, false);
 
@@ -157,9 +162,7 @@ fn supported_pipelines_map_and_unsupported_states_keep_their_name() {
         commands.set_pipeline(kind);
         commands.draw_line(Vec3::ZERO, Vec3::X, [255; 4], 1.0, true, 0.0);
         let mut builder = ProductFrameBuilder::default();
-        builder
-            .append_scene(&frame(64, 64, commands), 1)
-            .unwrap();
+        builder.append_scene(&frame(64, 64, commands), 1).unwrap();
         let mapped = builder
             .packet()
             .commands
@@ -204,9 +207,7 @@ fn line_and_grid_mapping_preserves_depth_flags_and_color() {
     commands.draw_grid(0.5, 2.0, true);
 
     let mut builder = ProductFrameBuilder::default();
-    builder
-        .append_scene(&frame(100, 50, commands), 1)
-        .unwrap();
+    builder.append_scene(&frame(100, 50, commands), 1).unwrap();
     let packet = builder.packet();
 
     let Command::DrawLineBatch(depth_tested) = &packet.commands[2] else {
@@ -257,9 +258,7 @@ fn textures_and_materials_deduplicate_by_identity() {
     );
 
     let mut builder = ProductFrameBuilder::default();
-    builder
-        .append_scene(&frame(64, 64, commands), 1)
-        .unwrap();
+    builder.append_scene(&frame(64, 64, commands), 1).unwrap();
     let packet = builder.packet();
     assert_eq!(packet.meshes.len(), 1);
     assert_eq!(packet.textures.len(), 2);
@@ -293,7 +292,9 @@ fn camera_only_revisions_reuse_the_packet_without_rebuilding() {
         (1, 1)
     );
 
-    let second = builder.append_scene(&frame(128, 96, commands.clone()), 7).unwrap();
+    let second = builder
+        .append_scene(&frame(128, 96, commands.clone()), 7)
+        .unwrap();
     assert_eq!(second.product_packet_rebuilds, 0);
     assert_eq!(second.product_packet_revision, 7);
     assert_eq!(second.product_command_count, first.product_command_count);
@@ -314,7 +315,9 @@ fn older_revisions_are_rejected() {
     builder
         .append_scene(&frame(64, 64, commands.clone()), 4)
         .unwrap();
-    let error = builder.append_scene(&frame(64, 64, commands), 3).unwrap_err();
+    let error = builder
+        .append_scene(&frame(64, 64, commands), 3)
+        .unwrap_err();
     assert!(error.contains("older"), "{error}");
     assert_eq!(builder.revision(), 4);
 }
@@ -340,7 +343,10 @@ fn screen_triangles_convert_pixels_and_restore_the_scene_pipeline() {
     };
     assert_eq!(*material, 0);
     assert_eq!(vertices.len(), 3);
-    let points = vertices.iter().map(|vertex| vertex.position).collect::<Vec<_>>();
+    let points = vertices
+        .iter()
+        .map(|vertex| vertex.position)
+        .collect::<Vec<_>>();
     close(points[0][0], -1.0);
     close(points[0][1], 1.0);
     close(points[1][0], 1.0);
@@ -461,9 +467,7 @@ fn scene_environment_becomes_a_sky_backdrop_before_geometry() {
     commands.draw_line(Vec3::ZERO, Vec3::X, [255; 4], 1.0, false, 0.0);
 
     let mut builder = ProductFrameBuilder::default();
-    builder
-        .append_scene(&frame(64, 64, commands), 1)
-        .unwrap();
+    builder.append_scene(&frame(64, 64, commands), 1).unwrap();
     let packet = builder.packet();
     let Command::DrawSky(sky) = &packet.commands[1] else {
         panic!("the sky must follow the clear");
@@ -530,11 +534,13 @@ fn placed_scene_without_environment_uses_a_scene_background() {
 }
 
 #[test]
-fn camera_uniforms_derive_the_eye_and_light_direction() {
+fn camera_uniforms_preserve_the_authored_perspective_eye() {
     let mut commands = BasicCommandList::new();
     commands.clear([0; 4]);
+    commands.camera_eye = Vec3::new(0.0, 1.0, 4.0);
     let mut scene = frame(64, 64, commands);
-    scene.view_proj = Mat4::from_translation(Vec3::new(0.0, 1.0, 4.0)).inverse();
+    scene.view_proj = Mat4::perspective_rh(1.0, 1.0, 0.1, 100.0)
+        * Mat4::from_translation(-scene.commands.camera_eye);
     scene.light_dir = Vec3::new(0.0, 2.0, 0.0);
     let uniforms = scene_frame_uniforms(&scene);
     assert_eq!(uniforms.camera.view_projection, scene.view_proj);
@@ -542,4 +548,269 @@ fn camera_uniforms_derive_the_eye_and_light_direction() {
     close(uniforms.camera.world_position.y, 1.0);
     close(uniforms.camera.world_position.z, 4.0);
     close(uniforms.light.toward_light.y, 1.0);
+}
+
+#[cfg(windows)]
+#[test]
+#[ignore = "requires Vulkan and DX12 hardware"]
+fn native_lighting_sky_and_shadow_contract_reaches_gpu_pixels() {
+    use crate::{
+        camera::{Camera, CameraMode},
+        scene_renderer::{RenderOptions, SceneRenderer},
+    };
+    use raf_agb::{
+        backends::native::{NativeApi, NativeBackend, NativeRequest},
+        capabilities::GraphicsMemoryBudget,
+        Output,
+    };
+    use raf_core::{environment::EnvironmentMode, SceneGraph};
+
+    for api in [NativeApi::Vulkan, NativeApi::Dx12] {
+        let backend = NativeBackend::headless(NativeRequest::Exact(api)).unwrap();
+        let mut device = ProductDevice::new(backend, GraphicsMemoryBudget::potato()).unwrap();
+        assert!(device.info().hardware && device.supports_shadows(), "{api}");
+        device.configure([128, 128], Output::Capture).unwrap();
+        let mut builder = ProductFrameBuilder::default();
+        let mut renderer = SceneRenderer::new(128, 128);
+        let mut scene = SceneGraph::new();
+        let mut env = *scene.environment();
+        env.mode = EnvironmentMode::Scene;
+        env.sky.top_color = [38, 110, 221];
+        env.sky.horizon_color = [38, 110, 221];
+        env.sky.ground_color = [38, 110, 221];
+        env.sun.enabled = false;
+        scene.set_environment(env);
+        let eye = Vec3::new(1000.0, 40.0, -2000.0);
+        for (revision, mode) in [(1, CameraMode::Perspective), (2, CameraMode::Orthographic)] {
+            let camera = Camera {
+                position: eye,
+                target: eye - Vec3::Z,
+                mode,
+                ..Camera::default()
+            };
+            let frame = renderer.build_frame(
+                &scene,
+                &camera,
+                64.0,
+                64.0,
+                &[],
+                [0, 0, 0, 255],
+                Vec3::Y,
+                RenderOptions {
+                    show_grid_3d: false,
+                    ..RenderOptions::default()
+                },
+                None,
+            );
+            builder
+                .append_scene_placed(
+                    &frame,
+                    revision,
+                    Some([0., 0., 0., 1.]),
+                    Some([0.25, 0.25, 0.5, 0.5]),
+                )
+                .unwrap();
+            let handle = prepare_product_scene(&mut device, &mut builder).unwrap();
+            let mut uniforms = scene_frame_uniforms(&frame);
+            uniforms.viewport = [0.25, 0.25, 0.5, 0.5];
+            let metrics = device.draw(handle, &uniforms).unwrap();
+            assert_eq!(metrics.draw_calls, 1, "{api} {mode:?}");
+            let rgba = device.capture().unwrap();
+            for (x, y) in [(32, 32), (64, 64), (95, 95)] {
+                let offset = (y * 128 + x) * 4;
+                assert!(
+                    (181..=187).contains(&rgba[offset + 2])
+                        && (37..=43).contains(&rgba[offset + 1]),
+                    "{api} {mode:?} {:?}",
+                    &rgba[offset..offset + 4]
+                );
+            }
+            assert_eq!(
+                &rgba[..4],
+                &[0, 0, 0, 255],
+                "{api} sky must remain inside canvas"
+            );
+        }
+        let (mut scene, floor, caster) = crate::shadow_frame::tests::fixture();
+        let mut env = *scene.environment();
+        env.shadows.resolution = 512.0;
+        scene.set_environment(env);
+        let mut before = Vec::new();
+        let mut timings = Vec::new();
+        for revision in 3..=7 {
+            if revision == 4 {
+                env.sky.top_color = [30, 90, 220];
+                scene.set_environment(env);
+            } else if revision == 5 {
+                scene.get_mut(caster).unwrap().position.x += 0.25;
+            } else if revision == 6 {
+                env.shadows.soft_filter = true;
+                scene.set_environment(env);
+            } else if revision == 7 {
+                env.shadows.enabled = false;
+                scene.set_environment(env);
+            }
+            let frame = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+            builder.append_scene(&frame, revision).unwrap();
+            let handle = prepare_product_scene(&mut device, &mut builder).unwrap();
+            let uniforms = scene_frame_uniforms(&frame);
+            let metrics = device.draw(handle, &uniforms).unwrap();
+            let rgba = device.capture().unwrap();
+            assert_eq!(
+                metrics.shadow_resolution,
+                if revision == 7 { 0 } else { 512 }
+            );
+            assert_eq!(
+                metrics.shadow_resident_bytes,
+                if revision == 7 { 0 } else { 1024 * 1024 }
+            );
+            assert_eq!(
+                metrics.shadow_draw_calls,
+                u32::from(revision == 3 || revision == 5)
+            );
+            if revision == 6 {
+                before = rgba;
+            } else if revision == 7 {
+                let lit = before
+                    .chunks_exact(4)
+                    .zip(rgba.chunks_exact(4))
+                    .filter(|(a, b)| {
+                        b[0] > a[0].saturating_add(15) && b[1] > a[1].saturating_add(15)
+                    })
+                    .count();
+                assert!(lit > 8, "{api}: {lit} shadowed pixels");
+                eprintln!("{api}: {lit} shadowed pixels at 512²");
+            }
+            timings.push((metrics.draw_calls, metrics.gpu_ms));
+        }
+        assert_eq!(
+            timings[0].0,
+            timings[1].0 + 1,
+            "{api}: sky must reuse the depth map"
+        );
+        assert_eq!(
+            timings[2].0,
+            timings[3].0 + 1,
+            "{api}: moving caster must rebuild, Soft must reuse"
+        );
+        env.shadows.enabled = true;
+        scene.set_environment(env);
+        scene.get_mut(floor).unwrap().casts_shadows = true;
+        let frame = crate::shadow_frame::tests::frame(&mut renderer, &scene);
+        builder.append_scene(&frame, 8).unwrap();
+        let handle = prepare_product_scene(&mut device, &mut builder).unwrap();
+        device.draw(handle, &scene_frame_uniforms(&frame)).unwrap();
+        let self_shadowed = device.capture().unwrap();
+        let acne = before
+            .chunks_exact(4)
+            .zip(self_shadowed.chunks_exact(4))
+            .filter(|(a, b)| a[0] > b[0].saturating_add(15) && a[1] > b[1].saturating_add(15))
+            .count();
+        assert!(
+            acne < 25,
+            "{api}: the floor adds {acne} self-shadowed pixels"
+        );
+        eprintln!("{api}: draws and GPU milliseconds {:?}", timings);
+        if let Some(root) = std::env::var_os("RAF_NATIVE_LIGHTING_PROJECT") {
+            capture_authored_project(&mut device, std::path::Path::new(&root), api);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn capture_authored_project<B: Backend>(
+    device: &mut ProductDevice<B>,
+    root: &std::path::Path,
+    api: raf_agb::backends::native::NativeApi,
+) {
+    use crate::{
+        camera::{Camera, CameraMode},
+        scene_renderer::{RenderOptions, SceneRenderer},
+    };
+    use raf_core::{project::Project, session::ProjectSessionRegistry, SceneGraph};
+    let project = Project::load(root).unwrap();
+    let registry = ProjectSessionRegistry::load_or_legacy(root, project.project_type);
+    let session = registry.active().unwrap();
+    let path = session.path(root, &session.scene_file);
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let scene: SceneGraph = ron::from_str(&raw).unwrap();
+    let (id, node) = scene
+        .iter()
+        .find(|(_, node)| Some(node.uuid) == project.settings.runtime.active_camera)
+        .unwrap();
+    let lens = node.game_camera.as_ref().unwrap();
+    let world = scene.world_matrix(id);
+    let position = world.transform_point3(Vec3::ZERO);
+    let camera = Camera {
+        position,
+        target: position - world.transform_vector3(Vec3::Z).normalize(),
+        up: world.transform_vector3(Vec3::Y).normalize(),
+        mode: if lens.orthographic {
+            CameraMode::Orthographic
+        } else {
+            CameraMode::Perspective
+        },
+        fov: lens.fov_degrees,
+        near: lens.near,
+        far: lens.far,
+        ortho_scale: lens.ortho_scale,
+    };
+    let [width, height] = [640, 360];
+    device
+        .configure([width, height], raf_agb::Output::Capture)
+        .unwrap();
+    let mut renderer = SceneRenderer::new(width, height);
+    renderer.set_asset_root(Some(root.join("assets")));
+    let frame = renderer.build_frame(
+        &scene,
+        &camera,
+        width as f32,
+        height as f32,
+        &[],
+        [0, 0, 0, 255],
+        Vec3::Y,
+        RenderOptions {
+            show_grid_3d: false,
+            ..RenderOptions::default()
+        },
+        None,
+    );
+    let mut builder = ProductFrameBuilder::new(PacketKey(2));
+    builder.append_scene(&frame, 1).unwrap();
+    let handle = prepare_product_scene(device, &mut builder).unwrap();
+    let uniforms = scene_frame_uniforms(&frame);
+    let cold = device.draw(handle, &uniforms).unwrap();
+    let warm = device.draw(handle, &uniforms).unwrap();
+    let mut rgba = device.capture().unwrap();
+    // The two capture targets are linear UNORM. PNG viewers expect sRGB.
+    for pixel in rgba.chunks_exact_mut(4) {
+        for channel in &mut pixel[..3] {
+            *channel = crate::texture::linear_to_srgb(f32::from(*channel) / 255.0);
+        }
+    }
+    let sky_pixels = rgba
+        .chunks_exact(4)
+        .filter(|p| p[2] > 140 && p[2] > p[0].saturating_add(35))
+        .count();
+    assert!(
+        sky_pixels > (width * height / 8) as usize,
+        "{api}: missing configured blue sky"
+    );
+    eprintln!(
+        "{api} {}: {sky_pixels} blue pixels; first {cold:?}; retained {warm:?}",
+        project.name
+    );
+    if let Some(output) = std::env::var_os("RAF_NATIVE_LIGHTING_QA") {
+        let output = std::path::PathBuf::from(output);
+        std::fs::create_dir_all(&output).unwrap();
+        image::save_buffer(
+            output.join(format!("nowgpu-{api}.png")),
+            &rgba,
+            width,
+            height,
+            image::ColorType::Rgba8,
+        )
+        .unwrap();
+    }
+    assert_eq!(std::fs::read_to_string(path).unwrap(), raw);
 }

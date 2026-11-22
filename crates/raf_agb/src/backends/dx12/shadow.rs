@@ -11,9 +11,7 @@ use std::{mem::size_of, ptr};
 use bytemuck::Zeroable;
 use windows::Win32::{
     Foundation::RECT,
-    Graphics::{
-        Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, Direct3D12::*, Dxgi::Common::*,
-    },
+    Graphics::{Direct3D::D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST, Direct3D12::*, Dxgi::Common::*},
 };
 
 use super::{
@@ -21,10 +19,7 @@ use super::{
     pipeline::{self, RasterFormats, RasterState, ShaderSource},
     EffectSupport, Resident, COLOR, DEPTH,
 };
-use crate::{
-    device::{SHADOW_MAP_BYTES, SHADOW_MAP_SIDE},
-    DrawMode, Result, ShadowFrame,
-};
+use crate::{DrawMode, Result, ShadowFrame};
 
 const SHADOW_SOURCE: &str = concat!(
     include_str!("../../shaders/draw.wgsl"),
@@ -36,10 +31,7 @@ const MAP_SAMPLE_FORMAT: DXGI_FORMAT = DXGI_FORMAT_R32_FLOAT;
 const MAP_STATE: D3D12_RESOURCE_STATES = D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE;
 const MAP_CLEAR_DEPTH: f32 = 1.;
 
-pub(super) fn supported(
-    sample: D3D12_FORMAT_SUPPORT1,
-    depth: D3D12_FORMAT_SUPPORT1,
-) -> bool {
+pub(super) fn supported(sample: D3D12_FORMAT_SUPPORT1, depth: D3D12_FORMAT_SUPPORT1) -> bool {
     sample.contains(D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_SHADER_LOAD)
         && depth.contains(D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL)
 }
@@ -54,15 +46,9 @@ pub(super) fn capability(device: &ID3D12Device) -> EffectSupport {
     }
 }
 
-pub(super) fn bytes(resident: bool) -> u64 {
-    if resident {
-        SHADOW_MAP_BYTES
-    } else {
-        0
-    }
-}
-
 pub(super) struct ShadowPass {
+    pub side: u32,
+    pub depth_key: Option<u64>,
     map: ID3D12Resource,
     _dsv_heap: ID3D12DescriptorHeap,
     dsv: D3D12_CPU_DESCRIPTOR_HANDLE,
@@ -73,10 +59,10 @@ pub(super) struct ShadowPass {
 }
 
 impl ShadowPass {
-    pub fn new(device: &ID3D12Device, root: &ID3D12RootSignature) -> Result<Self> {
+    pub fn new(device: &ID3D12Device, root: &ID3D12RootSignature, side: u32) -> Result<Self> {
         let map = depth_image(
             device,
-            [SHADOW_MAP_SIDE; 2],
+            [side; 2],
             MAP_RESOURCE_FORMAT,
             MAP_DEPTH_FORMAT,
             MAP_STATE,
@@ -97,8 +83,7 @@ impl ShadowPass {
             },
         };
         unsafe { device.CreateDepthStencilView(&map, Some(&dsv_desc), dsv) };
-        let source =
-            ShaderSource::new(SHADOW_SOURCE, naga::back::hlsl::ShaderModel::V5_1)?;
+        let source = ShaderSource::new(SHADOW_SOURCE, naga::back::hlsl::ShaderModel::V5_1)?;
         let formats = RasterFormats {
             color: COLOR,
             depth: DEPTH,
@@ -132,6 +117,8 @@ impl ShadowPass {
             },
         )?;
         Ok(Self {
+            side,
+            depth_key: None,
             map,
             dsv,
             _dsv_heap: dsv_heap,
@@ -149,17 +136,12 @@ impl ShadowPass {
     /// Writes the map view into the resident material heap. Direct3D 12 allows
     /// one shader-visible view heap per list, so the shadow map shares the
     /// resident heap instead of binding a second one.
-    pub(super) unsafe fn write_view(
-        &self,
-        device: &ID3D12Device,
-        resident: &Resident,
-    ) {
+    pub(super) unsafe fn write_view(&self, device: &ID3D12Device, resident: &Resident) {
         let Some(heap) = resident.heaps[0].as_ref() else {
             return;
         };
         let start = unsafe { heap.GetCPUDescriptorHandleForHeapStart() }.ptr;
-        let slot = start
-            + (resident.textures.len() as u64 * resident.descriptor_step) as usize;
+        let slot = start + (resident.textures.len() as u64 * resident.descriptor_step) as usize;
         unsafe {
             device.CreateShaderResourceView(
                 &self.map,
@@ -192,15 +174,15 @@ impl ShadowPass {
 
     pub(super) unsafe fn record(
         &self,
-        device: &ID3D12Device,
         list: &ID3D12GraphicsCommandList,
         root: &ID3D12RootSignature,
         resident: &Resident,
+        authored: bool,
     ) -> u32 {
-        let extent = [SHADOW_MAP_SIDE; 2];
+        let extent = [self.side; 2];
         let viewport = D3D12_VIEWPORT {
-            Width: SHADOW_MAP_SIDE as f32,
-            Height: SHADOW_MAP_SIDE as f32,
+            Width: self.side as f32,
+            Height: self.side as f32,
             MaxDepth: 1.,
             ..Default::default()
         };
@@ -212,23 +194,11 @@ impl ShadowPass {
         };
         let mut draws = 0;
         unsafe {
-            self.write_view(device, resident);
-            transition(
-                list,
-                &self.map,
-                MAP_STATE,
-                D3D12_RESOURCE_STATE_DEPTH_WRITE,
-            );
+            transition(list, &self.map, MAP_STATE, D3D12_RESOURCE_STATE_DEPTH_WRITE);
             list.RSSetViewports(&[viewport]);
             list.RSSetScissorRects(&[scissor]);
             list.OMSetRenderTargets(0, None, false, Some(&self.dsv));
-            list.ClearDepthStencilView(
-                self.dsv,
-                D3D12_CLEAR_FLAG_DEPTH,
-                MAP_CLEAR_DEPTH,
-                0,
-                &[],
-            );
+            list.ClearDepthStencilView(self.dsv, D3D12_CLEAR_FLAG_DEPTH, MAP_CLEAR_DEPTH, 0, &[]);
             list.SetGraphicsRootSignature(root);
             self.bind(list);
             list.SetDescriptorHeaps(&resident.heaps);
@@ -236,11 +206,12 @@ impl ShadowPass {
             list.IASetPrimitiveTopology(D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
             pipeline::bind_geometry(list, resident);
             let mut texture = u32::MAX;
-            for batch in resident
-                .batches
-                .iter()
-                .filter(|batch| batch.mode == DrawMode::Scene)
-            {
+            let batches = if authored {
+                &resident.shadow_batches
+            } else {
+                &resident.batches
+            };
+            for batch in batches.iter().filter(|batch| batch.mode == DrawMode::Scene) {
                 if batch.texture != texture {
                     texture = batch.texture;
                     list.SetGraphicsRootDescriptorTable(
@@ -254,12 +225,7 @@ impl ShadowPass {
                 pipeline::draw_batch(list, batch);
                 draws += 1;
             }
-            transition(
-                list,
-                &self.map,
-                D3D12_RESOURCE_STATE_DEPTH_WRITE,
-                MAP_STATE,
-            );
+            transition(list, &self.map, D3D12_RESOURCE_STATE_DEPTH_WRITE, MAP_STATE);
         }
         draws
     }
@@ -287,27 +253,23 @@ mod tests {
 
     #[test]
     fn gating_requires_a_depth_attachment_and_a_readable_depth_view() {
-        let readable =
-            D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_SHADER_LOAD;
-        assert!(!supported(D3D12_FORMAT_SUPPORT1(0), D3D12_FORMAT_SUPPORT1(0)));
+        let readable = D3D12_FORMAT_SUPPORT1_TEXTURE2D | D3D12_FORMAT_SUPPORT1_SHADER_LOAD;
+        assert!(!supported(
+            D3D12_FORMAT_SUPPORT1(0),
+            D3D12_FORMAT_SUPPORT1(0)
+        ));
         assert!(!supported(readable, D3D12_FORMAT_SUPPORT1(0)));
         assert!(!supported(
             D3D12_FORMAT_SUPPORT1_TEXTURE2D,
             D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL
         ));
-        assert!(supported(
-            readable,
-            D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL
-        ));
+        assert!(supported(readable, D3D12_FORMAT_SUPPORT1_DEPTH_STENCIL));
     }
 
     #[test]
     fn budget_matches_the_resident_depth_map() {
-        assert_eq!(bytes(false), 0);
-        assert_eq!(bytes(true), SHADOW_MAP_BYTES);
-        assert_eq!(
-            SHADOW_MAP_BYTES,
-            u64::from(SHADOW_MAP_SIDE) * u64::from(SHADOW_MAP_SIDE) * 4
-        );
+        assert_eq!(crate::device::shadow_map_bytes(256), 256 * 1024);
+        assert_eq!(crate::device::shadow_map_bytes(512), 1024 * 1024);
+        assert_eq!(crate::device::shadow_map_bytes(1024), 4 * 1024 * 1024);
     }
 }
