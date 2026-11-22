@@ -49,8 +49,8 @@ Rules:
 
 - One executor is selected for a device and surface. A frame never mixes
   backend resources.
-- Upper layers never import graphics API types. WGPU survives only inside the
-  `reference` executor, not as a second public API.
+- Upper layers never import graphics API types. WGPU was removed from the
+  workspace; A/B runs compare native executors.
 - A backend lane graduates capability by capability. It does not start with a
   big-bang renderer rewrite.
 - Disabled features have zero recurring frame cost.
@@ -64,7 +64,7 @@ host now use the same contract in product.
 The [product migration guide](AGB_MIGRATION.md) covers integration and acceptance.
 
 - Vulkan, DX12, Metal and WebGPU are the product executors behind
-  ApiGraphicBasic; the optional `reference` feature keeps WGPU for A/B.
+  ApiGraphicBasic; WGPU is not part of the workspace.
 - `BasicDevice` carries adapter preference, backend-neutral capabilities,
   generational handles, and `GraphicsMemoryBudget`.
 - CPU recovery produces RGBA frames without GPU access.
@@ -107,7 +107,6 @@ raf_agb/
   backends/dx12/         window, capture, shadows, filter
   backends/metal.rs      window, capture
   backends/webgpu.rs     browser canvas
-  backends/reference.rs  optional WGPU A/B executor
 
 raf_render/ApiGraphicBasic/
   device.rs              CPU recovery + native scene handoff
@@ -117,8 +116,8 @@ raf_render/ApiGraphicBasic/
   ui_surface/native_window/  window, resize, recovery
 ```
 
-The native product build runs without WGPU. The optional WGPU reference stays in
-the probe under the `reference` feature.
+The native product build runs without WGPU. WGPU is no longer a dependency of
+any crate; the A/B compares Vulkan, DX12, Metal or WebGPU.
 
 Current budgets:
 
@@ -249,10 +248,9 @@ Qualification gates:
 - No backend type or assumption leaks into upper layers.
 
 The product path already runs on the native executors. Qualification still
-happens per platform: test the native build and the optional WGPU reference in
-separate processes, and keep the native executor free of a WGPU runtime
-fallback. Follow the [product contract gates](AGB_MIGRATION.md) for any new
-surface.
+happens per platform: compare native executors in separate processes and keep
+the build free of any WGPU runtime fallback. Follow the
+[product contract gates](AGB_MIGRATION.md) for any new surface.
 
 ## 6. v0.12 feature plug-in
 
@@ -365,7 +363,7 @@ well-behaved secondary process:
 ### M2: First isolated native lane
 
 - Implement one platform lane behind ApiGraphicBasic.
-- Measure it and the WGPU reference in separate processes on the same fixtures.
+- Measure it against another native executor in separate processes on the same fixtures.
 - Report per-pass timing, memory, and parity.
 
 ### M3: Native lane qualification
@@ -373,8 +371,8 @@ well-behaved secondary process:
 - Pass device-loss, surface-loss, suspend/resume, integrated/dedicated, and
   soak gates.
 - Promote the lane for its platform only after all gates pass.
-- The promoted platform already ships without WGPU; keep the benchmark
-  reference as a separate opt-in target.
+- The promoted platform already ships without WGPU; the native A/B remains a
+  separate opt-in run.
 
 ### M4: v0.12 rendering features
 

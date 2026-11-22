@@ -17,8 +17,6 @@ mod shaders;
 pub mod dx12;
 #[cfg(all(feature = "metal", target_vendor = "apple"))]
 pub mod metal;
-#[cfg(all(feature = "reference", not(target_arch = "wasm32")))]
-pub mod reference;
 #[cfg(all(feature = "vulkan", not(target_arch = "wasm32")))]
 pub mod vulkan;
 #[cfg(all(feature = "webgpu", target_arch = "wasm32"))]

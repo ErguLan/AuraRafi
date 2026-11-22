@@ -185,8 +185,8 @@ expansion in both GPU and CPU paths, using the same homogeneous 0..1 depth
 volume and bounded screen margins. Depth bias is clamped after geometry
 clipping. CPU mesh/line depth and shadow world reconstruction now use that same
 0..1 convention; GPU line width expansion matches the recorded full pixel
-width rather than doubling it. No editor-side WGPU type or alternate backend
-was introduced, and WGPU remains the private GPU executor.
+width rather than doubling it. No editor-side API type or alternate backend
+was introduced; the native AGB executors own presentation.
 
 Source and regression fixtures are written; no Cargo execution, native-window
 orbit/DPI QA or performance acceptance was performed in this pass. These fixes

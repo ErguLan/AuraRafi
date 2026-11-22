@@ -193,10 +193,10 @@ domain modules validate, mutate, persist, and report confirmed state. Follow
 the active technical contracts for layout, input, overlays, menus, and
 ownership.
 
-ApiGraphicBasic is the public graphics owner. WGPU is a private execution
-adapter, and CPU is recovery, testing, headless, or incompatibility support.
-This guide does not authorize a second renderer, a second scene/CAD model, or
-backend-specific types above the graphics boundary.
+ApiGraphicBasic is the public graphics owner. Vulkan, DX12, Metal and WebGPU
+are its native executors, and CPU is recovery, testing, headless, or
+incompatibility support. This guide does not authorize a second renderer, a
+second scene/CAD model, or backend-specific types above the graphics boundary.
 
 ## Accessibility and performance quality bar
 

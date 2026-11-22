@@ -187,17 +187,17 @@ must still pass equivalent Scene, CAD, RafUI, asset, resize, loss-recovery,
 memory, pacing, and idle-work checks for its platform.
 
 Existing producers and hosts use that contract directly. The platform build
-specifies the executor and recovery uses the same API. WGPU is not part of the
-product default build; it remains available through the `reference` feature for
-independent benchmark runs.
+specifies the executor and recovery uses the same API. WGPU was removed from the
+workspace in 0.11.5, including the optional reference executor; A/B runs compare
+two native APIs instead.
 See the [migration policy](AGB_MIGRATION.md#decisiones-de-arquitectura).
 
 ## Review Checklist
 
 Before changing this layer, confirm:
 
-- No public `wgpu::*` type escapes into editor, domain, RafUI, or assets, and no
-  product crate depends on `wgpu`.
+- No graphics API type escapes into editor, domain, RafUI, or assets, and no
+  crate in the workspace depends on `wgpu`.
 - The change has one named ownership boundary and does not duplicate domain
   logic in a backend adapter.
 - Resource allocation, upload, release, and recovery are budgeted.

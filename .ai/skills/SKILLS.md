@@ -93,7 +93,7 @@ viewport de escena o CAD.
 **Reglas**:
 
 - Mantener ApiGraphicBasic como dueño público de gráficos.
-- GPU/WGPU privado es el camino normal cuando está disponible; CPU es
+- GPU nativa es el camino normal cuando está disponible; CPU es
   recuperación, headless, pruebas o incompatibilidad.
 - Proyección y contratos compartidos deben servir al viewport de juego y al
   CAD. No crear un segundo renderer.

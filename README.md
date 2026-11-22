@@ -111,7 +111,7 @@ Documentation note:
 ## Technology
 
 - **Language**: Rust (2021 edition)
-- **Rendering**: shared graphics runtime via `RenderRuntime` + `ApiGraphicBasic`, using GPU hardware execution when available and CPU software fallback when not; WGPU remains a private adapter below the graphics boundary
+- **Rendering**: shared graphics runtime via `RenderRuntime` + `ApiGraphicBasic`, using native Vulkan/DX12/Metal on desktop and WebGPU in the browser, with CPU software fallback when no adapter is available
 - **UI**: RafUI retained surfaces under a native Winit host
 - **ECS**: hecs
 - **Math**: glam (SIMD-optimized)

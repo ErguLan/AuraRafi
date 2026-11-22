@@ -351,14 +351,15 @@ The migration was capability-based rather than a numbered renderer rewrite.
 ApiGraphicBasic owns the public handles, adapter capabilities,
 device/queue/surface lifecycle, persistent resources, uploads, memory budgets,
 command encoding, pipelines, synchronization, frame graphs, asset residency,
-diagnostics, and device recovery. WGPU is retained only as the optional
-`reference` benchmark feature in `raf_agb`.
+diagnostics, and device recovery. WGPU was removed in 0.11.5; the workspace has
+no WGPU dependency or reference executor.
 
 Backend states:
 
 - **Native selection (current)**: a validated native backend is the executor for
   its platform; upper layers are unchanged.
-- **Reference A/B**: WGPU stays available only as an opt-in benchmark process.
+- **Native A/B**: Vulkan, DX12, Metal and WebGPU are compared against each other
+  in separate processes.
 
 One backend is selected per device/surface execution path. Cross-API resource
 mixing inside a frame is forbidden unless an explicit and measured interop

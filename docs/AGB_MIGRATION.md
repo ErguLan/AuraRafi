@@ -1,13 +1,13 @@
 # ApiGraphicBasic: corte de producto
 
-El contrato retenido, su matriz de cobertura y el arranque nativo viven en `raf_agb`. El editor, el player, el streaming y el host web ya abren y componen por AGB; WGPU no forma parte de sus dependencias de ejecución. La feature `reference` queda solo para A/B en un proceso separado.
+El contrato retenido, su matriz de cobertura y el arranque nativo viven en `raf_agb`. El editor, el player, el streaming y el host web ya abren y componen por AGB. WGPU fue retirado por completo en 0.11.5: no hay feature `reference`, ni dependencia, ni ejecutor de referencia.
 
 ## Decisiones de arquitectura
 
 - ApiGraphicBasic posee los comandos, los recursos, la planificación y el ciclo de presentación. Los ejecutores de Vulkan, DX12, Metal y WebGPU implementan ese contrato bajo AGB. Cada dispositivo y sus superficies usan un solo ejecutor.
 - Reusar los productores y hosts que existen. En el corte, escena, RafUI y CAD emiten o consumen el contrato común directamente. No introducir las capas intermedias `AgbSceneBackend`, `AgbUiBackend`, `AgbCadBackend`, `AgbCompositor` o `AgbWindowHost`, ni mantener dos renderers por superficie. La lógica por API queda en los ejecutores nativos.
 - `NativeRequest::Auto` elige una API nativa compilada y capaz de servir la salida solicitada. Cada API detecta su GPU. `NativeRequest::Exact` exige la API elegida. Se resuelve una vez al abrir y una recuperación conserva la API activa. Sin fallback a WGPU. `RAF_GRAPHICS_BACKEND` sigue siendo una opción del banco.
-- El producto compila los ejecutores nativos directamente: Vulkan en todas las plataformas de escritorio, DX12 en Windows y Metal en Apple. En Windows, `Auto` prioriza Vulkan para ventana y DX12 para captura offscreen. La feature `reference` es la única que enlaza WGPU y nunca entra en la build de producto.
+- El producto compila los ejecutores nativos directamente: Vulkan en todas las plataformas de escritorio, DX12 en Windows y Metal en Apple. En Windows, `Auto` prioriza Vulkan para ventana y DX12 para captura offscreen. WGPU no existe en la build: el A/B se hace entre ejecutores nativos (Vulkan contra DX12).
 
 ## P0. Contrato de producto
 
@@ -101,7 +101,7 @@ Mantener IDs, coordenadas, ancho físico y orden del frame. Comprobar que un mis
 | Metal | Presentación por CAMetalLayer en AppKit/UIKit, captura offscreen y sub-viewport. | Integrar el producto Apple y portar shadow map y filtro. |
 | WebGPU | Host web de producto sobre canvas y `ProductDevice<WebGpu>` con sub-viewport. | Portar shadow map y filtro; el host ya dibuja el juego exportado. |
 | Player, captura y streaming | Headless y ventana de producto por AGB; captura RGBA después del draw. | Repetir la evidencia de simulación e input con el proyecto real y medir readback fuera del hilo interactivo. |
-| Recorder y referencia | Validación de comandos y A/B del banco. | Recorder cubre el contrato y sus errores sin GPU. La referencia WGPU mide en un proceso separado. |
+| Recorder y referencia | Validación de comandos y A/B del banco. | Recorder cubre el contrato y sus errores sin GPU. El A/B compara Vulkan contra DX12 en procesos separados. |
 
 Vulkan es el ejecutor principal de ventana en Linux y Windows. DX12 cubre ventana y captura en Windows; `Auto` prefiere Vulkan para presentar y DX12 para capturar. Metal cubre Apple y WebGPU el navegador. El contrato separa capacidades y presentación para poder incorporar otros targets. Las consolas quedan fuera de la cobertura verificada.
 
@@ -141,7 +141,7 @@ En la revisión anterior a esta ampliación, el banco se verificó en Windows co
 - **Cobertura y calidad.** Validar las filas de la matriz con resolución, perfil, exposición, DPI y formato de color equivalentes. Capturar diferencias y verificar interacción y escalado en ventana o canvas. Antialiasing, normales, LOD, sombras y perfiles altos tienen presupuestos y pruebas propios. Priorizar contornos legibles y tipografía nítida en el perfil ligero.
 - **Rendimiento primero.** Comparar producto contra producto en builds release y procesos separados con la misma máquina, driver, proyecto, cámara, input, FPS objetivo y calidad. Medir tiempo al primer frame, p95/p99, RAM, memoria gráfica compartida/dedicada donde se exponga, uploads, draws, submits, reposo y presión de memoria. Repetir para conocer la variación. La candidata debe igualar o mejorar consumo y tiempos a calidad equivalente dentro del ruido medido. Probar primero en equipo modesto y repetir en dedicada donde aplique. Comprobar reposo sin envíos ni uploads recurrentes y una sesión sostenida de al menos diez minutos. [Métricas del programa gráfico](GRAPHICS_PROGRAM.md#4-quality-target)
 - **Evidencia por etapa.** `cargo check` valida compilación. Recorder valida protocolo y errores. Captura offscreen valida imagen. Ventana o canvas en hardware valida presentación. El A/B del probe solo mide su carga aislada. La promoción depende de las pruebas de producto por plataforma.
-- **Corte completado.** El contrato, la matriz y el arranque nativo están conectados. El editor abre `NativeUiWindowHost` con `NativeRequest::Auto`, compone escena/CAD/RafUI en un `ProductFrameBuilder` y dibuja con `ProductDevice<NativeBackend>`. El player usa el mismo host para ventana, headless y streaming. El host web usa `ProductDevice<WebGpu>`. `cargo tree -e normal -p aura_rafi_editor` no muestra WGPU; `reference` queda fuera de la build de producto.
+- **Corte completado.** El contrato, la matriz y el arranque nativo están conectados. El editor abre `NativeUiWindowHost` con `NativeRequest::Auto`, compone escena/CAD/RafUI en un `ProductFrameBuilder` y dibuja con `ProductDevice<NativeBackend>`. El player usa el mismo host para ventana, headless y streaming. El host web usa `ProductDevice<WebGpu>`. `cargo tree -e normal -p aura_rafi_editor` no muestra WGPU.
 
 ## P3. Corte de producto completado
 
@@ -150,7 +150,7 @@ En la revisión anterior a esta ampliación, el banco se verificó en Windows co
 - **CAD.** `CadSurfaceFrame` sigue siendo un `SceneRenderFrame`; el compositor lo dibuja por la misma ruta y el picking permanece en el dominio.
 - **Ventana y composición.** `NativeUiWindowHost` abre el ejecutor nativo, configura el target, recompone tras resize y recupera superficie o dispositivo. `NativeEditorCompositor` compone el canvas en un sub-viewport y la UI a target completo.
 - **Player y web.** El player headless captura después del draw; la ventana y el streaming presentan por AGB. `raf_web` abre `WebGpu` directamente y no enlaza WGPU.
-- **WGPU.** `raf_render`, `raf_editor`, `raf_player` y `raf_web` ya no declaran `wgpu`. Solo `raf_agb/reference` lo enlaza, bajo feature y en un proceso separado.
+- **WGPU.** `raf_render`, `raf_editor`, `raf_player` y `raf_web` ya no declaran `wgpu`. En 0.11.5 se retiró también el ejecutor `reference`, la variante `GraphicsBackendId::Wgpu` y los carriles `wgpu` del probe: el workspace completo compila sin WGPU.
 
 ### Evidencia del corte
 
@@ -178,7 +178,7 @@ El comando del player captura la referencia del producto. Los demás reproducen 
 New-Item -ItemType Directory -Force artifacts/agb-migration | Out-Null
 cargo run -p raf_player --release --bin aurarafi-player -- --headless --manifest examples/headless/project/runtime.ron --frames 3 --size 1280x720 --fixed-hz 60 --out artifacts/agb-migration/player-current --report artifacts/agb-migration/player-current.json
 cargo run -p raf_render --features agb-probe-fixtures --example agb_workload -- artifacts/agb-migration/retained.json 1280x720 es 100
-cargo build -p raf_agb --release --features desktop,dx12,reference
+cargo build -p raf_agb --release --features desktop,dx12
 $probe = 'target_gnu/x86_64-pc-windows-gnu/release/raf-agb-probe.exe'
 & $probe --backend vulkan --workload artifacts/agb-migration/retained.json --smoke
 ./tools/agb_compare.ps1 -Probe $probe -Output artifacts/agb-migration/ab-vulkan -Workload artifacts/agb-migration/retained.json

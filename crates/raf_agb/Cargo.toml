@@ -13,7 +13,6 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(feature, values("cargo-cli
 default = []
 vulkan = ["dep:ash", "dep:ash-window", "dep:raw-window-handle", "dep:naga", "naga/spv-out"]
 desktop = ["vulkan", "dep:winit", "dep:png", "dep:serde_json", "dep:windows-sys"]
-reference = ["desktop", "dep:wgpu", "dep:pollster"]
 dx12 = ["dep:windows", "dep:raw-window-handle", "dep:naga", "naga/hlsl-out"]
 metal = ["dep:metal", "dep:objc", "dep:core-graphics-types", "dep:raw-window-handle", "dep:naga", "naga/msl-out"]
 webgpu = ["dep:wasm-bindgen", "dep:wasm-bindgen-futures", "dep:js-sys", "dep:web-sys", "dep:serde_json"]
@@ -31,8 +30,6 @@ ash-window = { version = "0.13", optional = true }
 raw-window-handle = { workspace = true, optional = true }
 winit = { workspace = true, optional = true }
 png = { version = "0.18", optional = true }
-wgpu = { workspace = true, optional = true }
-pollster = { version = "0.3", optional = true }
 
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58", optional = true, features = ["Win32_Foundation", "Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D_Fxc", "Win32_Graphics_Direct3D12", "Win32_Graphics_Dxgi", "Win32_Graphics_Dxgi_Common", "Win32_System_Threading", "Win32_Security"] }

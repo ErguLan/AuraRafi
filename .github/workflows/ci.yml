@@ -166,7 +166,7 @@ jobs:
           assert report['camera_ready'] is True, report
           assert report['fixed_ticks'] == 3, report
           assert report['diagnostics'] == [], report
-          assert report['backend'] in ('wgpu', 'cpu'), report
+          assert report['backend'] in ('vulkan', 'dx12', 'metal', 'cpu_software'), report
           PY
 
   wasm:

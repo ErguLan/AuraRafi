@@ -11,7 +11,7 @@
 //! Instead, it sends parameters (wind direction, bone matrices)
 //! and the GPU compute shader handles all vertex movement.
 //!
-//! Zero cost: just data types. No GPU work until a wgpu backend is active
+//! Zero cost: just data types. No GPU work until a native executor is active
 //! and a deformer is attached to a mesh.
 
 use glam::Vec3;

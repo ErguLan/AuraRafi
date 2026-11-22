@@ -3,21 +3,22 @@ param(
     [Parameter(Mandatory)][string]$Probe,
     [Parameter(Mandatory)][string]$Output,
     [string]$Workload,
-    [ValidateSet('vulkan', 'dx12')][string]$Backend = 'vulkan',
+    [ValidateSet('vulkan', 'dx12', 'metal', 'auto')][string]$Left = 'vulkan',
+    [ValidateSet('vulkan', 'dx12', 'metal', 'auto')][string]$Right = 'dx12',
     [ValidatePattern('^[0-9]+x[0-9]+$')][string]$Size = '1280x720',
     [ValidateRange(1, 10)][int]$Trials = 3,
     [ValidateRange(1, 1000000)][int]$Frames = 480
 )
 
 $ErrorActionPreference = 'Stop'
+if ($Left -eq $Right) { throw 'Left and Right must be different native backends.' }
 $exe = (Resolve-Path -LiteralPath $Probe).Path
 $outputDir = (New-Item -Path $Output -ItemType Directory -Force).FullName
-$reference = if ($Backend -eq 'dx12') { 'wgpu-dx12' } else { 'wgpu' }
 [string[]]$workloadArgs = if ($Workload) { @('--workload', (Resolve-Path -LiteralPath $Workload).Path) } else { @() }
 
 foreach ($case in 'static', 'orbit', 'assets') {
     foreach ($trial in 1..$Trials) {
-        $order = if ($trial % 2 -eq 0) { @($reference, $Backend) } else { @($Backend, $reference) }
+        $order = if ($trial % 2 -eq 0) { @($Right, $Left) } else { @($Left, $Right) }
         foreach ($lane in $order) {
             [string[]]$capture = if ($trial -eq 1) { @('--capture', (Join-Path $outputDir "$case-$lane.png")) } else { @() }
             [string[]]$source = if ($case -eq 'assets') { @('--shadows') } else { $workloadArgs }

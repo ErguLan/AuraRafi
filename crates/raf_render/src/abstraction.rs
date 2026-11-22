@@ -2,7 +2,7 @@
 //!
 //! The trait that separates "what to render" from "how to render".
 //! Today: CpuPainter implements it with zero GPU allocation.
-//! Tomorrow: WgpuPipeline implements it (vertex buffers, shaders).
+//! Tomorrow: NativePipeline implements it (vertex buffers, shaders).
 //! Future: RayTracePipeline implements it (ray tracing, GI).
 //!
 //! The SceneGraph does NOT know which backend is active.
@@ -17,7 +17,7 @@ use crate::scene_data::{RenderOutput, SceneRenderData};
 // ---------------------------------------------------------------------------
 
 /// The central abstraction: any render backend implements this.
-/// CpuPainter, WgpuPipeline, RayTracePipeline - all share this interface.
+/// CpuPainter, NativePipeline, RayTracePipeline - all share this interface.
 ///
 /// This is the "plug" that lets Rafi scale from potato to 4K RT
 /// without changing a single line in the scene graph or editor.
@@ -147,8 +147,8 @@ impl std::fmt::Display for RenderError {
 pub enum ActiveBackend {
     /// CPU painter (zero GPU, potato-friendly).
     CpuPainter,
-    /// GPU rendering via wgpu (opt-in, requires GPU).
-    Wgpu,
+    /// Native AGB rendering (opt-in, requires GPU).
+    Native,
     /// Software ray tracing (very future, CPU-heavy).
     SoftwareRT,
     /// Hardware ray tracing via Vulkan RT / DXR (very future, requires RTX).
@@ -157,7 +157,7 @@ pub enum ActiveBackend {
 
 impl Default for ActiveBackend {
     fn default() -> Self {
-        Self::Wgpu
+        Self::Native
     }
 }
 
@@ -166,7 +166,7 @@ impl ActiveBackend {
     pub fn label(&self) -> &'static str {
         match self {
             Self::CpuPainter => "CPU Painter (Lightweight)",
-            Self::Wgpu => "GPU (wgpu)",
+            Self::Native => "GPU (native)",
             Self::SoftwareRT => "Software Ray Tracing",
             Self::HardwareRT => "Hardware Ray Tracing (RTX)",
         }
@@ -176,7 +176,7 @@ impl ActiveBackend {
     pub fn label_es(&self) -> &'static str {
         match self {
             Self::CpuPainter => "CPU Painter (Ligero)",
-            Self::Wgpu => "GPU (wgpu)",
+            Self::Native => "GPU (nativo)",
             Self::SoftwareRT => "Trazado de rayos por software",
             Self::HardwareRT => "Trazado de rayos por hardware (RTX)",
         }
@@ -191,7 +191,7 @@ impl ActiveBackend {
     pub fn all() -> &'static [ActiveBackend] {
         &[
             Self::CpuPainter,
-            Self::Wgpu,
+            Self::Native,
             Self::SoftwareRT,
             Self::HardwareRT,
         ]
@@ -208,13 +208,13 @@ mod tests {
 
     #[test]
     fn default_is_gpu_first() {
-        assert_eq!(ActiveBackend::default(), ActiveBackend::Wgpu);
+        assert_eq!(ActiveBackend::default(), ActiveBackend::Native);
         assert!(ActiveBackend::default().requires_gpu());
     }
 
     #[test]
     fn gpu_backends_require_gpu() {
-        assert!(ActiveBackend::Wgpu.requires_gpu());
+        assert!(ActiveBackend::Native.requires_gpu());
         assert!(ActiveBackend::HardwareRT.requires_gpu());
     }
 }

@@ -24,8 +24,7 @@ Viewport | CAD | RafUI | Assets
 
 Backend variation exists only below `ApiGraphicBasic`. Editor surfaces,
 documents, and RafUI must never implement separate backend or renderer paths.
-WGPU survives only in the opt-in `reference` executor for A/B, never as a
-product fallback.
+WGPU is not part of the workspace; A/B compares native executors.
 
 ## 2. Migration Is Capability-Based, Not Level-Based
 
@@ -44,8 +43,8 @@ contract. The long-term capability backlog is:
 9. Frame graph and transient resources for shadows and post-processing.
 10. Asset ingress from engine formats into backend resources.
 11. Native DX12, Vulkan, Metal, and direct WebGPU under the same contract.
-12. Product cutover. WGPU is not part of a product build; the optional benchmark
-    reference stays separate.
+12. Product cutover. WGPU is not part of the workspace; A/B compares native
+    executors.
 
 This list is a durable backlog, not a promise that all items enter the same
 release or stabilization cycle.
@@ -99,17 +98,15 @@ startup or recovery fallback.
 
 ## 5. WGPU Boundary
 
-The product cut is done. WGPU is not part of the editor, player, streaming or web
-build. The rules that keep it out:
+WGPU was removed in 0.11.5. The rules that keep it out:
 
-- No product crate declares `wgpu` or imports `wgpu::*`.
+- No crate declares `wgpu` or imports `wgpu::*`.
 - Native executors must pass the same Scene, CAD, RafUI, resize, surface-loss,
   device-loss, budget and idle-work fixtures before expanding capability.
-- `reference` remains an explicit, separate-process A/B feature. It is never a
-  startup or recovery fallback.
 - A missing native capability is reported or implemented; it never silently
-  switches the frame to WGPU or CPU.
+  switches the frame to another API or CPU.
 - CPU software rendering stays the recovery, headless and testing path.
+- A/B runs compare two native executors in separate processes.
 
 ## 6. Potato-First Contract
 
@@ -201,7 +198,7 @@ tools must remain isolated and replaceable behind Rafi contracts.
 
 ## 8. Non-Negotiable Rules
 
-- No WGPU dependency or type in a product crate. `reference` only.
+- No WGPU dependency or type anywhere in the workspace.
 - No duplicate Scene, CAD, or RafUI renderer created for a native backend.
 - No feature claim without an active render path and validation.
 - No PBR, shadows, post-processing, particles, or skeletal expansion during a

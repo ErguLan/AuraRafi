@@ -28,11 +28,11 @@ verification record.
   lore, branding, and commercial terms belong to their authors unless those
   authors explicitly publish them under a different license.
 - **The current mandate through 0.12.0 is stabilization.** Fix editor bugs,
-  strengthen RAFUI, and reduce WGPU coupling behind ApiGraphicBasic before
-  expanding scope for a game.
-- **ApiGraphicBasic owns the graphics contract.** WGPU is the current adapter,
-  not the final public engine identity. Keep new renderer code backend-neutral
-  and preserve GPU hardware plus CPU fallback.
+  strengthen RAFUI, and keep the native AGB path lean before expanding scope
+  for a game.
+- **ApiGraphicBasic owns the graphics contract.** Vulkan, DX12, Metal and WebGPU
+  are the native executors; WGPU was removed in 0.11.5. Keep new renderer code
+  backend-neutral and preserve GPU hardware plus CPU fallback.
 - **RafUI is the active UI runtime.** The native Winit host composes retained
   RafUI surfaces and ApiGraphicBasic canvas layers. The retired widget toolkit
   is historical migration evidence only and is not a runtime dependency.
@@ -48,7 +48,7 @@ verification record.
 
 | If the change affects... | Start here | Then verify |
 | --- | --- | --- |
-| Renderer, viewport, WGPU, CPU fallback | `docs/APIGRAPHICBASIC.md` | `docs/RENDERER.md`, renderer tests |
+| Renderer, viewport, native executors, CPU fallback | `docs/APIGRAPHICBASIC.md` | `docs/RENDERER.md`, renderer tests |
 | RAFUI core or editor shell | `.ai/STUDIO_GRADE_UI.md` and `docs/RAF_UI.md` | `docs/EDITOR_RAFUI.md`, focused UI/editor checks |
 | Project status or scope | `docs/STABILIZATION_STATUS.md` | `docs/ROADMAP.md` |
 | Cross-domain behavior | `docs/ARCHITECTURE.md` | update every contradicted domain document |

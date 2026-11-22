@@ -11,12 +11,11 @@ The probe uploads immutable geometry, instances and textures once, submits the s
 | Metal | Offscreen RGBA capture on Apple targets |
 | WebGPU | Canvas presentation from WASM with browser device and queue |
 | Recorder | CPU validation of resource admission, generations and pass order |
-| Reference | Offscreen capture on Vulkan or Direct3D 12 using the same inputs and shader source |
 
 ## Windows and desktop commands
 
 ```powershell
-cargo build -p raf_agb --release --features desktop,dx12,reference
+cargo build -p raf_agb --release --features desktop,dx12
 $probe = 'target_gnu/x86_64-pc-windows-gnu/release/raf-agb-probe.exe'
 $env:RAF_GRAPHICS_BACKEND = 'vulkan'
 & $probe --window --shadows
@@ -24,7 +23,7 @@ $env:RAF_GRAPHICS_BACKEND = 'vulkan'
 & $probe --backend dx12 --capture artifacts/dx12-scene.png --shadows
 ```
 
-Omit `reference` to build the standalone native executable without WGPU. Pass `--backend` to override the environment. Use `desktop,metal` with `--backend metal` for the Apple offscreen probe. The workspace defaults to a Windows GNU target, so pass the target explicitly on other platforms.
+The standalone executable has no WGPU dependency. Pass `--backend` to override the environment. Use `desktop,metal` with `--backend metal` for the Apple offscreen probe. The workspace defaults to a Windows GNU target, so pass the target explicitly on other platforms.
 
 Export the retained fixtures through the same RafUI compilation and CAD commands used by the product. The export step is separate from execution.
 
@@ -58,16 +57,16 @@ The current shader package covers instanced textured geometry, depth, planar fix
 
 ### Retained static workload at 1280 × 720
 
-The figures are medians across three Vulkan trials or five Direct3D 12 trials. Each trial measured 480 frames after warmup.
+The figures are medians across three Vulkan trials or five Direct3D 12 trials. Each trial measured 480 frames after warmup. The WGPU rows are historical evidence from before 0.11.5; the reference executor is no longer part of the workspace.
 
 | Executor | Process working set | Shared graphics memory | Frame completion p95 |
 | --- | ---: | ---: | ---: |
 | Vulkan | 52.39 MiB | 23.73 MiB | 0.58 ms |
-| WGPU/Vulkan | 78.93 MiB | 47.84 MiB | 1.11 ms |
+| WGPU/Vulkan (historical) | 78.93 MiB | 47.84 MiB | 1.11 ms |
 | Direct3D 12 | 45.20 MiB | 15.06 MiB | 0.91 ms |
-| WGPU/Direct3D 12 | 120.02 MiB | 88.26 MiB | 1.11 ms |
+| WGPU/Direct3D 12 (historical) | 120.02 MiB | 88.26 MiB | 1.11 ms |
 
-Direct3D 12 completed the orbit and repeated-mesh fixtures with a lower median p95 after caching command interfaces and configuring an optimized depth clear. Vulkan finished the repeated-mesh fixture at 1.15 ms p95 versus 1.12 ms for the reference. Both native executors used less process RAM and shared graphics memory in all three fixtures.
+Direct3D 12 completed the orbit and repeated-mesh fixtures with a lower median p95 after caching command interfaces and configuring an optimized depth clear. Vulkan finished the repeated-mesh fixture at 1.15 ms p95. Both native executors used less process RAM and shared graphics memory in all three fixtures than the historical WGPU lanes.
 
 In a separate Vulkan run, a 600-second orbit delivered 17,855 frames against a 30 FPS target. Shared GPU memory stayed at 23.74 MiB across 61 samples. Process working set ranged from 67.14 to 67.56 MiB. Captures, raw comparisons and the soak report are under `artifacts/agb-foundation/` in the measured checkout.
 

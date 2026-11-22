@@ -7,7 +7,7 @@
 //! No loading screens. No pop-in (with proper LOD). Zero cost when the
 //! world is small enough to fit entirely in memory (editor mode).
 //!
-//! This works with any render backend (CPU painter or wgpu).
+//! This works with any render backend (CPU painter or native AGB).
 
 use glam::Vec3;
 use raf_core::project::ProjectSettings;

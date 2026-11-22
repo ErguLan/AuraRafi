@@ -2,7 +2,7 @@
 //!
 //! Allows the engine to switch between:
 //! - CPU rasterizer (zero GPU, runs on anything)
-//! - GPU pipeline (wgpu, for when scenes get heavy)
+//! - Native AGB executor (Vulkan, DX12, Metal or WebGPU)
 //!
 //! Default policy is GPU-first with fallback available through the global
 //! render execution policy. The switch is cheap: just a flag + different code
@@ -24,10 +24,10 @@ pub enum RenderBackend {
     /// Default for potato PCs and low-resource mode.
     CpuPainter,
 
-    /// GPU-based rendering via wgpu (vertex buffers, shaders, proper pipeline).
+    /// Native AGB rendering (vertex buffers, shaders, explicit pipeline).
     /// Uses VRAM but handles large scenes (500+ entities) without CPU bottleneck.
     /// Only activates when user explicitly selects it or entity count is high.
-    GpuWgpu,
+    GpuNative,
 }
 
 impl Default for RenderBackend {
@@ -35,7 +35,7 @@ impl Default for RenderBackend {
         // GPU-first by default. Callers that need maximum compatibility should
         // derive from RenderExecutionPolicy::CpuOnly instead of relying on the
         // enum default.
-        Self::GpuWgpu
+        Self::GpuNative
     }
 }
 
@@ -44,7 +44,7 @@ impl RenderBackend {
     pub fn from_execution_policy(policy: RenderExecutionPolicy) -> Self {
         match policy {
             RenderExecutionPolicy::CpuOnly => Self::CpuPainter,
-            RenderExecutionPolicy::Auto | RenderExecutionPolicy::GpuPreferred => Self::GpuWgpu,
+            RenderExecutionPolicy::Auto | RenderExecutionPolicy::GpuPreferred => Self::GpuNative,
         }
     }
 
@@ -52,13 +52,13 @@ impl RenderBackend {
     pub fn label(&self, lang: Language) -> String {
         match self {
             Self::CpuPainter => t("render.backend.cpu", lang),
-            Self::GpuWgpu => t("render.backend.gpu", lang),
+            Self::GpuNative => t("render.backend.gpu", lang),
         }
     }
 
     /// Whether this backend uses GPU resources.
     pub fn uses_gpu(&self) -> bool {
-        matches!(self, Self::GpuWgpu)
+        matches!(self, Self::GpuNative)
     }
 }
 
@@ -124,7 +124,7 @@ impl BackendConfig {
     pub fn effective_max_tris(&self) -> usize {
         match self.backend {
             RenderBackend::CpuPainter => self.cpu_max_triangles,
-            RenderBackend::GpuWgpu => self.cpu_max_triangles * 20, // GPU can handle 20x more
+            RenderBackend::GpuNative => self.cpu_max_triangles * 20, // GPU can handle 20x more
         }
     }
 
@@ -136,7 +136,7 @@ impl BackendConfig {
             RenderBackend::CpuPainter => self.cpu_max_triangles * 64,
             // GPU: vertex buffer + index buffer + uniform buffer.
             // ~48 bytes/vertex, ~12 bytes/index, ~256 bytes uniforms.
-            RenderBackend::GpuWgpu => {
+            RenderBackend::GpuNative => {
                 let verts = self.cpu_max_triangles * 3; // 3 verts per tri
                 verts * 48 + self.cpu_max_triangles * 12 + 256
             }
@@ -205,7 +205,7 @@ mod tests {
     #[test]
     fn default_is_gpu_first() {
         let config = BackendConfig::default();
-        assert_eq!(config.backend, RenderBackend::GpuWgpu);
+        assert_eq!(config.backend, RenderBackend::GpuNative);
         assert!(config.backend.uses_gpu());
     }
 
@@ -222,7 +222,7 @@ mod tests {
         let config = BackendConfig::potato();
         assert_eq!(config.cpu_max_triangles, 2000);
         assert!(!config.show_selector);
-        assert_eq!(config.backend, RenderBackend::GpuWgpu);
+        assert_eq!(config.backend, RenderBackend::GpuNative);
         assert!(config.backend.uses_gpu());
     }
 
@@ -231,7 +231,7 @@ mod tests {
         let mut config = BackendConfig::default();
         config.backend = RenderBackend::CpuPainter;
         let cpu_tris = config.effective_max_tris();
-        config.backend = RenderBackend::GpuWgpu;
+        config.backend = RenderBackend::GpuNative;
         let gpu_tris = config.effective_max_tris();
         assert!(gpu_tris > cpu_tris);
     }

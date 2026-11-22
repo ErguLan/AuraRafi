@@ -137,7 +137,7 @@ impl ViewportSurfaceHost {
         self.mode
     }
 
-    pub fn prepare_native_wgpu_mode(&mut self) {
+    pub fn prepare_native_mode(&mut self) {
         self.mode = ViewportHostMode::NativeApiGraphicBasic;
     }
 

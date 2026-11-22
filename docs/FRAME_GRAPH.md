@@ -63,8 +63,8 @@ Formats: `Rgba8Unorm`, `Rgba8UnormSrgb`, `Bgra8Unorm`, `Bgra8UnormSrgb`,
 States: `Undefined`, `ColorAttachment`, `DepthAttachment`, `ShaderRead`,
 `ShaderWrite`, `CopySrc`, `CopyDst`, `Present`.
 
-No `wgpu::*` type appears in the public contract. WGPU remains the private
-executor.
+No graphics API type appears in the public contract. Vulkan, DX12, Metal and
+WebGPU execute it through AGB.
 
 ## Integration order (when authorized)
 

@@ -9,7 +9,6 @@ use super::memory_ledger::GraphicsResourceFamily;
 /// Identifies the implementation behind an ApiGraphicBasic device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GraphicsBackendId {
-    Wgpu,
     CpuSoftware,
     DirectX12,
     Vulkan,
@@ -38,26 +37,6 @@ impl GraphicsCapabilities {
             timestamp_queries: false,
             max_texture_dimension: 16_384,
             max_buffer_size: 0,
-        }
-    }
-
-    pub const fn wgpu(max_texture_dimension: u32, max_buffer_size: u64) -> Self {
-        Self::wgpu_with_timestamp_queries(max_texture_dimension, max_buffer_size, false)
-    }
-
-    pub const fn wgpu_with_timestamp_queries(
-        max_texture_dimension: u32,
-        max_buffer_size: u64,
-        timestamp_queries: bool,
-    ) -> Self {
-        Self {
-            backend: GraphicsBackendId::Wgpu,
-            gpu_hardware: true,
-            compute: true,
-            indirect_draw: true,
-            timestamp_queries,
-            max_texture_dimension,
-            max_buffer_size,
         }
     }
 }

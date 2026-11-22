@@ -26,7 +26,7 @@ members = [
 default-members = ["editor"]
 
 [workspace.package]
-version = "0.11.4"
+version = "0.11.5"
 edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/AuraRafi/AuraRafi"
@@ -37,7 +37,6 @@ raf_agb = { path = "crates/raf_agb" }
 hecs = "0.10"
 
 # Rendering
-wgpu = "23"
 winit = "0.30"
 raw-window-handle = "0.6"
 

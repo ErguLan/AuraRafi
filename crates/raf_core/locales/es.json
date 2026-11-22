@@ -1264,7 +1264,7 @@
   "app.error": "Error",
   "app.this_provider_is_not_implemented_yet_use_openclaw": "Este proveedor aun no esta implementado. Usa OpenClaw.",
   "render.backend.cpu": "CPU (Ligero)",
-  "render.backend.gpu": "GPU (wgpu)",
+  "render.backend.gpu": "GPU (nativo)",
   "settings.render_execution_policy": "Politica de render",
   "settings.render_execution_policy.auto": "Auto (GPU primero)",
   "settings.render_execution_policy.cpu_only": "Solo CPU",

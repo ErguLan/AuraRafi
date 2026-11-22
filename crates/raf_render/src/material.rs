@@ -4,7 +4,7 @@
 //! Uses the metallic/roughness PBR workflow
 //!
 //! Today: CpuPainter ignores most of this - just uses base_color.
-//! Tomorrow: wgpu backend uses full PBR with textures and normal maps.
+//! Tomorrow: the AGB executors use full PBR with textures and normal maps.
 //! Future: RT backend uses this + subsurface scattering, anisotropy.
 //!
 //! Zero cost: just structs. No texture loading happens until a GPU backend is active.

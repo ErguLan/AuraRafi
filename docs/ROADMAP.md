@@ -441,8 +441,8 @@ the frame graph moved to v0.11.5.
 ### Graphics ownership (ApiGraphicBasic)
 
 - [x] ApiGraphicBasic contract foundation: backend-neutral generational handles,
-  capabilities, adapter preference, memory budgets, neutral shared context, and
-  GPU output encapsulation while WGPU remains the active adapter.
+  capabilities, adapter preference, memory budgets, retained product packets and
+  native AGB executors.
 - [x] RafUI retained compilation: one cacheable layout/input frame and one
   shared CPU/GPU paint list, retained GPU buffers, deduplicated image uploads,
   adjacent paint-run batching, and a native application-menu adapter boundary.
@@ -465,8 +465,8 @@ the frame graph moved to v0.11.5.
   LRU eviction and bounded thumbnails. GPU upload remains in `device.rs`.
 - [x] Presentation surface recovery: Lost/Outdated/Timeout reconfigure and retry
   once; OutOfMemory is fatal; health is observable by the Player and editor.
-- [ ] Device-loss recreation: a lost `wgpu::Device` is not re-created yet; the
-  surface path reports the failure instead of reloading the runtime.
+- [ ] Device-loss soak validation: the native host reopens the executor and
+  replays the retained sources; a long sustained recovery run is still open.
 
 ### Cloud and streaming
 
@@ -499,25 +499,26 @@ device-loss recreation and the first remote CI run remain open.
 
 ### Deferred inside the 0.11 line
 
-- Native graphics backend lanes and the frame graph are owned by v0.11.5.
+- Native graphics backend lanes and the frame graph are owned by v0.11.5; the
+  native lanes and WGPU removal already landed.
 - Skeletal animation, animation collision and foot/hand IK are owned by v0.12.
 - The transistor/IC/connector catalog is owned by v0.12.
 
 ## v0.11.5 - Graphics Backend Program
 
-This release owns the renderer work that must not block cloud delivery. WGPU
-remains the active executor until every removal gate passes.
+This release owns the renderer work that must not block cloud delivery. The
+product cut landed in v0.11.4 and WGPU was removed in v0.11.5.
 
+- [x] Native graphics backend lanes: Vulkan, DX12, Metal and WebGPU execute
+  ApiGraphicBasic in the editor, player, streaming and web hosts.
+- [x] WGPU removal: the executor, dependency, capability variant and probe lanes
+  are gone; A/B compares native APIs.
 - [ ] Frame graph and transient resource aliasing for shadows, post-processing
   and future passes, with backend-neutral resource states and explicit
-  synchronization. The backend-neutral compiler, aliasing and barrier tests are
-  in place; `BasicDevice` integration remains open.
-- [ ] Native graphics backend lanes: add direct backend implementations under
-  ApiGraphicBasic for the platforms Rafi targets. WGPU remains available as an
-  adapter during the build-out, but it is not the permanent owner of Rafi's
-  graphics architecture.
+  synchronization. The compiler, aliasing and barrier tests are in place;
+  product pass integration is still open.
 - [ ] Device-loss, surface-loss and suspend/resume recovery validated on
-  integrated and dedicated GPUs.
+  integrated and dedicated GPUs beyond the startup exercise.
 - [ ] Performance evidence program: frame time, uploads, draws, resident
   memory, idle work and load time measured against the same fixtures.
 

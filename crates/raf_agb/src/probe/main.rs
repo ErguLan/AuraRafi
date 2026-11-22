@@ -80,7 +80,7 @@ impl Options {
                 "--workload" => options.workload = Some(value(&mut args)?.into()),
                 "--capture" => options.capture = Some(value(&mut args)?.into()),
                 "--help" | "-h" => {
-                    println!("raf-agb-probe [--backend auto|vulkan|wgpu|dx12|wgpu-dx12|metal] [--startup] [--window|--smoke] [--size WIDTHxHEIGHT] [--scale N] [--frames N] [--warmup N] [--soak-seconds N] [--fixture static|orbit|assets] [--shadows] [--workload FILE] [--capture PNG]");
+                    println!("raf-agb-probe [--backend auto|vulkan|dx12|metal] [--startup] [--window|--smoke] [--size WIDTHxHEIGHT] [--scale N] [--frames N] [--warmup N] [--soak-seconds N] [--fixture static|orbit|assets] [--shadows] [--workload FILE] [--capture PNG]");
                     return Ok(None);
                 }
                 _ => return Err(format!("unknown option: {arg}").into()),
@@ -147,28 +147,12 @@ fn run() -> ProbeResult<()> {
     }
     let workload = options.workload()?;
     let init = Instant::now();
-    match options.backend.as_str() {
-        #[cfg(feature = "reference")]
-        "wgpu" => benchmark(
-            raf_agb::backends::reference::Reference::headless()?,
-            &options,
-            workload,
-            init,
-        ),
-        #[cfg(all(windows, feature = "reference"))]
-        "wgpu-dx12" => benchmark(
-            raf_agb::backends::reference::Reference::headless_dx12()?,
-            &options,
-            workload,
-            init,
-        ),
-        backend => benchmark(
-            NativeBackend::headless(backend.parse()?)?,
-            &options,
-            workload,
-            init,
-        ),
-    }
+    benchmark(
+        NativeBackend::headless(options.backend.parse()?)?,
+        &options,
+        workload,
+        init,
+    )
 }
 
 fn benchmark<B: Backend>(

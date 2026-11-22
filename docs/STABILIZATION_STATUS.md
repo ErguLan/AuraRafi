@@ -9,11 +9,13 @@ El editor, el player, el streaming y el host web ya abren y componen por
 ApiGraphicBasic. `NativeUiWindowHost` posee un `ProductDevice<NativeBackend>`,
 `NativeEditorCompositor` compone escena, CAD y RafUI en un packet y lo dibuja.
 `SceneFrameOutput` transporta el frame retenido, sin textura GPU intermedia.
-`raf_render`, `raf_editor`, `raf_player` y `raf_web` ya no dependen de WGPU; solo
-la feature `reference` de `raf_agb` lo enlaza para A/B.
 
-Evidencia de la fecha: el engine abrió en Vulkan con 630 ms de inicialización
-gráfica y 1.07 s de arranque total; el player headless capturó dos frames a
+En v0.11.5 se retiró WGPU por completo: el ejecutor `reference`, la dependencia,
+la variante `GraphicsBackendId::Wgpu` y los carriles `wgpu` del probe. El
+workspace compila con Vulkan, DX12, Metal y WebGPU.
+
+Evidencia de la fecha: el engine abrió en Vulkan con ~350 ms de inicialización
+gráfica y ~800 ms de arranque total; el player headless capturó dos frames a
 1280×720 por DX12; `cargo tree -p aura_rafi_editor -e normal` no mostró WGPU.
 Las secciones siguientes son historial previo al corte y pueden describir la
 ruta WGPU que ya no existe.

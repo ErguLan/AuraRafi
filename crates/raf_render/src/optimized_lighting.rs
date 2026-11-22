@@ -49,23 +49,6 @@ impl SurfaceLighting {
     }
 }
 
-pub(crate) const WGSL: &str = r#"
-fn improved_direct(shade: f32, steps: f32, softness: f32) -> f32 {
-    if steps < 2.0 { return shade; }
-    let x = shade*steps; let band = floor(x); let half_width = clamp(softness,0.0,1.0)*0.5;
-    if half_width <= 0.0 { return floor(x+0.5)/steps; }
-    let t = clamp((x-band-0.5+half_width)/(2.0*half_width),0.0,1.0);
-    return clamp((band+t*t*(3.0-2.0*t))/steps,0.0,1.0);
-}
-fn improved_ambient(color: vec3<f32>, normal_y: f32) -> vec3<f32> {
-    return mix(color*vec3<f32>(0.45,0.50,0.62),color,clamp(normal_y,-1.0,1.0)*0.5+0.5);
-}
-fn improved_expose(color: vec3<f32>, exposure: f32) -> vec3<f32> {
-    let v = max(color*exposure,vec3<f32>(0.0));
-    return select(vec3<f32>(0.8)+0.2*(v-0.8)/max(v-0.6,vec3<f32>(0.00001)),v,v<=vec3<f32>(0.8));
-}
-"#;
-
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -5,6 +5,23 @@ All notable changes to Rafi will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.11.5] - 2026-11-21 - WGPU Removed
+
+### Removed
+
+- **WGPU**: the optional `raf_agb/reference` executor, the `wgpu` dependency,
+  `pollster` from `raf_agb`, the `GraphicsBackendId::Wgpu` capability variant,
+  the probe `wgpu`/`wgpu-dx12` lanes and the unused WGSL constants are gone.
+  No crate in the workspace depends on WGPU.
+- The legacy backend labels `GpuWgpu` and `ActiveBackend::Wgpu` were renamed to
+  `GpuNative` and `ActiveBackend::Native`; the localized label is now
+  "GPU (native)" / "GPU (nativo)".
+
+### Changed
+
+- `tools/agb_compare.ps1` now compares two native AGB executors (default
+  Vulkan vs DX12) instead of a native lane against WGPU.
+
 ## [0.11.4] - 2026-11-21 - AGB Product Cut
 
 ### Added

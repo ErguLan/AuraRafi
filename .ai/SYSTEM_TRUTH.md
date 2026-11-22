@@ -123,7 +123,7 @@ no longer depends on billboard-origin visibility or a -0.99 x-ray depth offset.
 `ApiGraphicBasic::line_projection` owns allocation-free homogeneous clipping
 shared by GPU and CPU line execution. Biased depth is clamped inside 0..1;
 CPU mesh/line/shadow reconstruction uses the same normalized depth convention.
-WGPU remains the private executor, not the owner of editor helper policy.
+Native AGB executors own presentation through ApiGraphicBasic, not editor helper policy.
 
 Lighting and Runtime presentation follow the explicitly requested Creative
 Instrument Craftsmanship guide, with generated semantic SVG/PNG icons and
@@ -284,9 +284,9 @@ active code map below, this document and the live code win.
 ## 1. Core Architectural Pillars
 AuraRafi is a unified sandbox engine. It handles both standard Game ECS Scene Graphs and CAD PCB Design Topologies inside a lightweight structural core.
 
-* **ApiGraphicBasic Graphics Ownership**: `ApiGraphicBasic` is the sole public graphics owner. WGPU is the current private adapter/compatibility backend while owned DX12, Vulkan, and Metal backends mature behind the same contract. The authoritative migration rule is `.ai/APIGRAPHICBASIC.md`.
+* **ApiGraphicBasic Graphics Ownership**: `ApiGraphicBasic` is the sole public graphics owner. Vulkan, DX12, Metal and WebGPU are its native executors; WGPU was removed in 0.11.5. The authoritative migration rule is `.ai/APIGRAPHICBASIC.md`.
 * **GPU Hardware Driver Priority**: Uses available GPU hardware as the normal execution path, including integrated GPUs for potato profiles. CPU software rasterization is recovery, headless, testing, or incompatibility; it is not the automatic definition of low-spec mode.
-* **Native Graphics Ownership**: Responsibilities move into Rafi-owned ApiGraphicBasic contracts capability by capability. Upper layers never fork into separate WGPU/native versions; WGPU remains private until a validated executor replacement exists.
+* **Native Graphics Ownership**: Responsibilities move into Rafi-owned ApiGraphicBasic contracts capability by capability. Upper layers never fork into separate backend versions.
 * **Viewport Integrity Baseline (2026-07-19)**: View2D is an orthographic view of the shared 3D scene. The active scene path batches adjacent lines, bounds persistent mesh reuse, renders physical pixels for high-DPI targets, and uses world-transform scale for culling/focus. `Sprite2D` is a legacy alias to `Plane`, not an active primitive.
 * **Unified Event & Mutator Layers**: `CommandBus` supplies transactional
   history; the editor `CommandGateway` and shared command protocol are the
@@ -424,7 +424,7 @@ recoverable through version history and the stabilization archive.
   It also exposes a backend-neutral readback of the last rendered scene frame
   for Agent evidence; it does not initiate a second render.
 * `src/render_config.rs`: Houses quality configuration structures and GPU capabilities tags.
-* `src/ApiGraphicBasic/`: Rafi-owned graphics contract, devices, command lists, resources, Scene/CAD/RafUI surface presentation, WGPU adapter implementation, and CPU recovery. It must not expose WGPU types to upper layers long-term.
+* `src/ApiGraphicBasic/`: Rafi-owned graphics contract, devices, command lists, resources, Scene/CAD/RafUI surface presentation, native AGB composition, and CPU recovery. No graphics API type escapes to upper layers.
   * `handles.rs`: Generational backend-neutral resource and surface handles.
   * `capabilities.rs`: Backend identity, adapter preference, and potato/desktop budgets.
   * `command_list.rs`: Backend-neutral meshes and `DrawLineBatch`; adjacent line

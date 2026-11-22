@@ -15,8 +15,8 @@ The repository currently contains:
 - a windowless ApiGraphicBasic presentation path (`create_headless`) and a
   reusable tightly packed RGBA8 capture, bounded to 3840x2160;
 - the binary streaming envelope and session bounds in `raf_net`;
-- a prepared backend-neutral frame graph in `raf_render` for v0.11.5;
-- one graphics owner, ApiGraphicBasic, with a private WGPU executor and a CPU
+- a prepared backend-neutral frame graph in `raf_render`;
+- one graphics owner, ApiGraphicBasic, with native AGB executors and a CPU
   recovery path;
 - the container deployment assets in this change.
 
@@ -90,7 +90,7 @@ session logic.
 All rendering continues through ApiGraphicBasic:
 
 - one selected backend per session;
-- WGPU is the private executor today;
+- native Vulkan, DX12, Metal or WebGPU executor;
 - CPU recovery remains available when no adapter is present;
 - memory and frame-upload budgets come from `GraphicsMemoryBudget`;
 - `SceneFrameMetrics` remains the diagnostics source for draw calls, uploads,

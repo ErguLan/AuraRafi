@@ -76,14 +76,13 @@ All renderer, viewport, CAD, RafUI presentation, shader, GPU asset, and backend
 work must load and follow `.ai/APIGRAPHICBASIC.md`.
 
 * **ONE GRAPHICS OWNER**: `ApiGraphicBasic` owns the public graphics contract.
-  WGPU is the current adapter/compatibility backend, not an API exposed to
-  editor surfaces or documents.
+  Vulkan, DX12, Metal and WebGPU are its native executors; WGPU is not part of
+  the workspace.
 * **CAPABILITY-BY-CAPABILITY OWNERSHIP**: Move complete responsibilities behind
-  Rafi-owned contracts over time. Do not schedule a blind numbered rewrite or a
-  big-bang backend deletion.
+  Rafi-owned contracts over time. Do not schedule a blind numbered rewrite.
 * **ONE PRIVATE EXECUTION PATH**: ApiGraphicBasic selects and owns the executor
-  for a surface. Upper layers never mix WGPU/native resources or maintain a
-  second renderer path.
+  for a surface. Upper layers never mix API resources or maintain a second
+  renderer path.
 * **PRESERVE UPPER LAYERS**: Native backends must not duplicate viewport, CAD,
   RafUI, scene, document, or command logic.
 * **MEASURE BEFORE BACKEND CHANGES**: A backend change requires parity, memory,
